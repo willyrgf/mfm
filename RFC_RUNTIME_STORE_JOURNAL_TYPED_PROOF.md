@@ -1,2756 +1,1907 @@
 # RFC: establish the core Runtime, Journal, and Store proof path
 
-Status: selected first implementation target; product and proof-capacity ratifications below remain pending
+Status: selected implementation target; the material validation artifacts below remain required
+before implementation planning
 
-Relationship: this is the first core cutover after `RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`. It is
-the sole owner of Runtime reduction, typed execution entry and progression, acknowledgement-owner
-fate, `RunView`, Journal qualification, mechanical Store persistence, fact append correlation,
-configuration persistence, and replay inspection. It incorporates and supersedes former Sections 5.2--5.8
-and 10.2--10.3 of `RFC_FOLLOWUPS_FROM_REFACT_RUNTIME.md`; that RFC remains responsible for later
-Operation authoring, deterministic authoring/composition-time capability injection, domain naming,
-Application entry-point registration, and transport work and must consume this core contract rather
-than restate it. Runtime capability drivers, fact/evidence qualification, and occurrence-specific
-adapter association belong exclusively to this core RFC.
+This RFC is the clean-slate target for the MFM core proof path. It replaces the conflicting runtime,
+storage, replay, configuration, fact, tenant, scope, and writer-epoch contracts in
+RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md, docs/design.md, and docs/architecture.md. Implementation must
+update those authoritative documents in the same cutover so the repository ends with one current
+contract.
 
-When implemented, this RFC deliberately replaces the conflicting Runtime/Store/Journal ownership,
-erased-value flow, Store identity model, fact-publication protocol, configuration persistence
-boundary, and replay layering in `RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`, `docs/design.md`, and
-`docs/architecture.md`. Until then, the authoritative documents continue to describe the current
-implementation. Each implementation commit must update its affected authoritative contracts in the
-same cutover. The result leaves one current design, with no compatibility facade, legacy decoder,
-dual schema, fallback identity, parallel reducer, or second Runtime progression path.
-
----
+There is no compatibility period, legacy decoder, dual schema, or fallback execution path.
 
 ## Decision
 
-MFM will use strong Rust types as process-local proof that a value has already crossed its trust
-boundary. A fact is checked where it first becomes untrusted, represented by a type with private
-fields, and then carried without erasing and reconstructing that proof at every crate boundary.
-
-The execution and persistence path has four owners:
+The target has four semantic owners:
 
 | Owner | Sole responsibility |
 | --- | --- |
-| Program | The immutable, deterministic State-or-Match graph and its declared contracts |
-| Runtime | Program reduction, next-State selection, exact registered State entry, typed State/capability execution, bounded process-facing progression, acknowledgement-owner fate, `RunView`, typed configuration, fact selection, hot advancement, cold resume, and semantic replay |
-| Journal | Canonical durable representation and one-time structural qualification of retained bytes |
-| Store/PostgreSQL | Mechanical load, exact-head compare-and-append, idempotency, atomicity, durability, and database-wide sequence allocation |
+| Program | The immutable State-or-Match graph and its exact persisted value, State, capability, and binding associations |
+| Runtime | Program association, the sole semantic reducer, exact registered State entry, typed execution, bounded caller-driven progression, configuration qualification, and RunView |
+| Journal | Exact canonical run/configuration/portable wire formats, content addressing, structural qualification, recursive heads, and fixed format limits |
+| Store | Mechanical complete loads, exact-head compare-and-append, idempotent physical equality, durable reservation arithmetic, and atomic PostgreSQL or Memory persistence |
 
-The proof flow is:
+Application and transports parse requests, supply explicit identities, call Runtime, and render
+reviewed outputs. They own no execution session, pending append, recovery token, reducer, or retained
+frame interpretation.
 
-```text
-retained bytes
-  -> Journal structurally qualifies bytes once
-  -> Runtime reifies and semantically folds them once
-  -> Runtime owns a typed execution cursor
-  -> Runtime projects one typed transition into a Journal frame once
-  -> Store/PostgreSQL mechanically appends it
-```
+One PostgreSQL database is one MFM authority. RunId is the complete durable run namespace. The core
+contains no tenant, Store scope, writer epoch, active deployment identity, identity rotation, or
+replacement incarnation concept.
 
-PostgreSQL is one global authority for the MFM platform. Multiple processes and multiple `RunId`s
-may execute concurrently against it. There is no MFM tenant namespace, Store scope, writer epoch,
-active-identity row, or identity rotation protocol. `RunId` is the complete durable run namespace;
-database compare-and-append linearizes concurrent writers.
+Facts are not part of this target. No current admitted capability consumes prior-run facts, so the
+fact selection/publication/proof system is deleted rather than rebuilt speculatively.
 
-Store does not reduce a Program and does not return `SelectedRun`, `RunAction`, or any equivalent
-answer about what executes next. Runtime owns the fixed sequential state machine, so Runtime alone
-derives the next action and the callback-free public view of retained progress.
-
-There is exactly one unavoidable execution-layer erasure boundary: Runtime's private heterogeneous
-State registry. A retained Program selects implementations at runtime, while different States have
-different `Input`, `Output`, `Failure`, capability `Intent`, and capability `Evidence` types. Rust
-cannot represent that data-selected heterogeneous graph as one static generic chain. The erased
-value therefore exists only long enough for one exact `RegisteredState.start` function to recover
-its concrete State proof. The registration is keyed by the complete persisted execution
-association, never by implementation identity alone. The erased value never crosses into Store,
-Journal, PostgreSQL, App, replay inspection, or an adapter.
-
-Runtime exposes one high-level start/resume/read contract. Start and resume share one bounded
-`advance_until_stable` implementation and return the same Runtime-derived `RunView` as read when a
-qualified durable view exists. App and transports never coordinate `ExecutionCursor`, typed step
-owners, pending append owners, or State-by-State lifecycle variants.
-
-This is not a claim that all runtime validation can disappear. Persisted bytes, provider responses,
-transport input, and concurrent database state are untrusted. They must still be checked. The rule
-is narrower and enforceable:
-
-> Validate when trust changes; preserve the resulting proof; do not erase it merely to validate the
-> same proposition again in another internal layer.
+Durable history is the only recovery authority. Runtime retains no process-local append or
+conclusion custody after a caller future is cancelled. Cancellation and process death may lose
+volatile work or a real provider result. Read may use a bounded fresh replacement; Effect parks.
+This availability cost is deliberate and is what permits the cancellation design to remain small
+and honest.
 
 ## Material uncertainties
 
-The layer ownership, one private erasure boundary, Store selection deletion, global PostgreSQL
-authority, removal of scope/epoch/tenant, private Runtime acknowledgement custody, and requirement
-for compatible semantic registrations during inspection are not uncertain. Five product semantics
-and one persisted proof-capacity ceiling must be ratified before implementation begins. The target
-sections below use the recommended product choices so the RFC remains one concrete design rather
-than a menu.
+No material architecture choice remains open. These concrete validation artifacts are still
+required before implementation planning:
 
-1. **Durable Access preparation recovery.** Recommended choice: a retained preparation never
-   recreates its original `CommittedCall`. A Read may append a fresh direct-new replacement only
-   within its declared replacement bound; an entry-once Effect parks after process-owner loss unless
-   a separately proven absorption contract permits a new attempt. It is uncertain whether the
-   product instead requires automatic recovery of the original attempt. If so, a durable
-   outbox/lease/claim protocol is required and materially changes Runtime and PostgreSQL. Resolve
-   by documenting each current Read/Effect availability guarantee and proving any recoverable
-   Effect's absorption/idempotency contract.
-2. **Configuration currentness.** Recommended choice: bind admission to the exact immutable
-   revision used to construct `C0`, without requiring it to remain latest at commit. It is uncertain
-   whether an entry point has a business rule requiring latest-at-admission. If it does,
-   configuration-head CAS must join a genuinely new admission transaction, while a retry of an
-   already admitted `RunId` still needs its original immutable revision. Resolve by auditing the
-   current entry-point contracts and recording whether either promises latest-at-commit semantics
-   and how retries recover the admitted revision.
-3. **Fact-selection freshness.** Recommended choice: bind selection to the complete immutable
-   snapshot Runtime captured; later publications do not invalidate preparation. It is uncertain
-   whether a capability requires every fact committed before its preparation append. If it does, a
-   fact-head CAS and preparation retry remain necessary, although Store still performs no semantic
-   selection. Resolve by documenting every current fact consumer's freshness contract and adding a
-   concurrent-publication fixture.
-4. **Global `RunId` creation and repetition.** Recommended choice: `RunId` is the database-global
-   semantic admission/idempotency identity and every independent repetition uses a new `RunId`.
-   It is uncertain whether current entry points rely on deriving the same run from only entry point
-   plus application selector, and whether a retry after configuration/authoring change must reuse
-   the exact admitted genesis rather than conflict with it. If they do, removing tenant may collapse
-   intended independent runs or make ordinary retries conflict. Resolve by inventorying current
-   derivation/caller retry behavior and choosing explicit `RunId` plus exact retry inputs, an
-   authenticated existing-admission lookup, or one explicit domain idempotency key—never another
-   ambient namespace.
-5. **Fact dependency proof ceilings.** Ownership and immutability of
-   `MAX_FACT_DEPENDENCY_NODES`, `MAX_FACT_DEPENDENCY_DEPTH`, and
-   `MAX_FACT_DEPENDENCY_BYTES` are settled, but their numeric values are not yet supported by
-   representative nested-producer measurements. Values that are too small reject legitimate
-   histories; values that are too large make the replay resource guarantee impractical. Resolve by
-   building the maximum current and adversarial nested-producer fixtures during implementation
-   planning, recording their proof sizes, and freezing reviewed values in the clean-slate persisted
-   format before code implementation begins.
-6. **Configuration instance namespace.** Recommended choice: latest configuration is partitioned
-   by one explicit stable `ConfigurationInstanceId` plus exact contract/schema, never by ambient
-   tenant or by Rust type alone. It is uncertain whether the product intentionally permits only one
-   database-global series for each configuration contract. If that assumption is wrong, networks,
-   accounts, or entry points using the same `C` would overwrite one another's notion of latest.
-   Resolve by inventorying current EVM/Portfolio configuration cardinality and assigning each
-   independently current series an explicit stable instance identity before freezing its codec.
+1. **Adapter cancellation audit.** The selected contract assumes dropping adapter ingress destroys
+   every MFM retry authority even though external IO may continue. Current adapters have not yet
+   been proven not to clone CommittedCall authority, start autonomous Effect retries, or retain an
+   unbounded background task. If the assumption is wrong, the at-most-one provider-entry proof
+   fails. Resolve by auditing each current adapter and adding cancellation fixtures before planning.
+2. **Configuration instance inventory.** ConfigurationKey uses one explicit stable instance id for
+   every independently current configuration series. The mechanism is settled, but the exact EVM
+   and Portfolio instance ids and cardinalities are not yet recorded. An overly broad id makes
+   unrelated publishers overwrite latest; an overly narrow id makes intended consumers miss
+   updates. Resolve by checking in the complete instance inventory before codec goldens are frozen.
+3. **Transport retry inventory.** Runtime retains nothing after indeterminate admission or
+   configuration publication. Callers must reproduce the same explicit RunId or configuration
+   instance, expected ConfigurationPosition, and canonical typed inputs. Current CLI and REST retry
+   behavior has not yet been inventoried against that rule. If callers cannot reproduce those
+   inputs, an indeterminate request cannot be retried honestly. Resolve by freezing request,
+   response, and retry behavior for every current transport.
 
-Two consequences of settled architecture are explicit: PostgreSQL's global dense
-fact-publication sequence is physical index metadata rather than conclusion content, and an
-in-place database restore requires every old Runtime/Store peer to stop before the restored
-authority starts because epoch fencing is removed.
+The following are settled contracts, not uncertainties:
+
+- an Effect may park even when cancellation happened before provider entry;
+- an Effect may park after the external effect succeeded but its evidence or conclusion was lost;
+- blocking State/codec callbacks are trusted, bounded-input, pure, and terminating;
+- facts, tenant, scope, epoch, identity rotation, and database incarnation are absent;
+- trace and access-audit DTOs are not core Runtime APIs;
+- independent execution uses a fresh caller-supplied RunId.
 
 ## 1. Problem situation
 
-### 1.1 The system discards its own proof
+### 1.1 Internal layers discard typed proof
 
-The domain APIs begin with strong associations:
+The domain surface begins with exact associations:
 
-- `State::Input`, `State::Output`, and `State::Failure`;
-- `AccessCapabilityContract::Intent`, `Evidence`, `Facts`, and `Mode`;
-- `ProposedStateOutcome<O, F>`;
-- typed access owners such as `CommittedCall<S, C>`; and
-- `QualifiedTypedValue<T>` after canonical qualification.
+- State input, output, and failure types;
+- capability intent, evidence, Read-or-Effect mode, and attempt bound;
+- typed ProposedStateOutcome;
+- affine PreparedAccess and CommittedCall owners; and
+- typed values that already passed canonical qualification.
 
-The current implementation then erases these associations into contract references, canonical
-bytes, `TypeId`, `Box<dyn Any>`, option bags, catalog brands, and Store-branded wrappers. Later
-layers re-establish the same association with catalog lookups, contract comparisons, validation,
-and downcasts. This creates a recurring pattern:
+The current implementation repeatedly turns those associations into contract references, canonical
+strings, TypeId, Box of Any, option bags, catalog brands, Store brands, and backend DTOs. Later
+layers compare the same pieces and downcast them again.
 
-```text
-typed value
-  -> qualify
-  -> erase type
-  -> split value, contract, bytes, and catalog identity
-  -> pass through a coordination DTO
-  -> compare the pieces again
-  -> downcast/reify
-  -> wrap in another qualified owner
-```
-
-Most of the repeated validation is not protecting a new trust boundary. It compensates for an
-earlier internal layer having discarded the proof.
+That is useful only at a real trust or heterogeneous dispatch boundary. Inside one trusted process
+it creates more invalid combinations, validators, translations, public types, and future change
+sites than the proof requires.
 
 ### 1.2 Store became the semantic state machine
 
-Store currently does substantially more than persistence. It:
+Store currently opens under identity brands, qualifies Journal history, retains and reifies the
+Program, reduces State-or-Match, selects the next action, qualifies configuration and facts,
+constructs semantic owners, and then maps those owners onto a second backend vocabulary.
 
-- opens under a scope/epoch/tenant identity and brands every later owner;
-- loads and validates raw Journal prefixes;
-- retains and reifies the Program;
-- validates typed admission, intent, evidence, outcomes, fact selections, and object closure;
-- reduces `State | Match`;
-- decides whether a run is ready, waiting, terminal, or failed;
-- constructs `SelectedRun` and `RunAction`;
-- prepares admission, preparation, and conclusion owners;
-- allocates and rebinds fact-publication coordinates;
-- exposes separate history, configuration, mutation, and audit ports; and
-- maps all of that onto a second backend command/result vocabulary.
+The resulting cold path is backwards:
 
-This is why `crates/kernel/store/src/backend.rs` is roughly four thousand lines and
-`crates/kernel/store/src/single_trust.rs` is roughly twenty-six hundred lines in the current tree.
-The problem is not primarily that one file needs to be split. The files contain responsibilities
-from Runtime, Journal, configuration, facts, replay, authorization-like branding, and physical
-storage. Splitting those responsibilities into more files without deleting them would preserve the
-same conceptual and LOC cost.
+~~~text
+PostgreSQL rows
+  -> backend DTOs
+  -> Store qualification
+  -> Store Program reduction and next-action selection
+  -> Runtime reconstruction
+  -> State execution
+~~~
 
-### 1.3 Journal DTOs are treated as both wire data and semantic proof
+Persistence should return retained bytes. Runtime should interpret those bytes under the retained
+Program and decide what runs next.
 
-Journal's durable types are necessary: a run must have a canonical, append-only representation.
-The problem is that open DTO construction and repeated `validate()` calls make every downstream
-consumer responsible for determining whether the same frame is trustworthy.
+### 1.3 Journal mixes wire data with process-local proof
 
-For example, a frame may be checked while being constructed, checked again before Store append,
-wrapped as `RawFrameBytes`, checked again when loaded as a `RawRunPrefix`, and checked again while
-Store qualifies and reduces the run. Portable replay adds another decode/validate/qualify path.
+Journal records must be canonical and append-only, but open DTO constructors and repeated validate
+methods make every consumer re-decide whether the same bytes are structurally valid. Construction,
+Store append, Store load, replay, and Runtime each repeat parts of the same validation.
 
-A wire type and a process-local semantic proof are not the same thing. Journal should construct an
-opaque valid frame when encoding trusted input and an opaque qualified history when decoding
-untrusted bytes. Store should not reopen either proof.
+Journal needs two opaque directions instead:
 
-### 1.4 PostgreSQL identity is modeling authorities that do not exist
+~~~text
+trusted typed inputs -> Journal encoding -> EncodedRunFrame
+untrusted retained bytes -> Journal decoding -> JournalHistory
+~~~
 
-`StoreScopeId`, `StoreEpoch`, `TenantScopeId`, and `StructuredStoreIdentity` currently flow through
-Run admission, every frame, Store opening, backend commands, SQL keys and predicates, facts,
-configuration, portable replay, application facades, and EVM nonce authority.
+Store must not reopen either proof.
 
-Those values imply three distinctions:
+### 1.4 Duplicate registries describe one association
 
-- multiple logical platform authorities in one database;
-- a tenant partition inside an authority; and
-- a writer generation that makes older runs read-only.
+Program currently owns value/capability reifiers and TypeId associations while Runtime owns State
+and adapter registrations. Store uses the first registry before Runtime uses the second.
 
-They are not part of the intended product model. One PostgreSQL instance is the authority. Its
-many processes are peers, and its many runs are distinguished by `RunId`. Exact-head CAS already
-provides writer concurrency control. Persisted Program and binding content identities already pin
-the implementation contract needed to resume a run. Scope, epoch, and tenant therefore add fields,
-hash inputs, indexes, validation branches, error variants, and lifecycle rules without proving a
-required property.
+Only two representations are necessary:
 
-### 1.5 The current reverse flow puts Store after PostgreSQL semantically
+- stable contract and implementation associations in the persisted Program; and
+- one trusted RuntimeAssembly associating them with concrete Rust implementations.
 
-The current cold path is effectively:
+### 1.5 Runtime lifecycle leaks into Application
 
-```text
-PostgreSQL
-  -> backend rows
-  -> RawRunPrefix
-  -> Store structural validation
-  -> Store Program lookup/reification
-  -> Store reducer
-  -> QualifiedRun + RunSelection + RunAction
-  -> SelectedRun
-  -> Runtime dynamic reconstruction
-  -> execute the Store-selected State
-```
+Application currently drives one State at a time and retains suspended Runtime/Store owners. It
+infers status from frames and participates in acknowledgement recovery.
 
-That makes PostgreSQL the source, Store the state-machine selector, and Runtime an executor of
-Store's decision. This reverses ownership. Persistence should return retained data; Runtime should
-interpret that data under the admitted Program and decide what runs next.
+Runtime already owns all information needed to advance or inspect a run. Application should see
+only start, resume, read, export, portable inspection, configuration operations, RunView, and
+reviewed errors.
 
-### 1.6 Several registries describe the same association
+### 1.6 Unused protocols dominate the core
 
-Program's catalog currently records type IDs, schemas, reifiers, and erased capability binding
-callbacks. Runtime separately records State and adapter implementations in its process registry.
-Store then uses Program's catalog to qualify retained values before Runtime uses its own registry to
-recover concrete implementations.
+The current fact surface and the proposed authenticated fact redesign introduce selection modes,
+proposal sets, publication coordinates, global heads, Merkle structures, dependency DAGs, proof
+limits, global serialization, and portable dependency material. Every reachable production
+capability uses no prior facts and every current success proposes an empty set.
 
-The same association is therefore represented as:
+The target removes that protocol. A future consumer-driven fact RFC may introduce a new clean
+format only after defining its real key, multiplicity, freshness, retention, threat model, and
+operational envelope.
 
-```text
-stable persisted contract ref
-  <-> ProgramCatalog ValueAssociation / CapabilityAssociation
-  <-> catalog Arc identity
-  <-> Store qualification
-  <-> Runtime RegisteredState / RegisteredAdapter
-  <-> TypeId / Any downcast
-```
+### 1.7 Persisted identities model authorities outside the product
 
-Only two things are required: stable contract identities in the persisted Program, and one trusted
-Runtime assembly that associates those identities with concrete Rust implementations. The middle
-catalog/reifier route is duplicated authority.
+StoreScopeId, StoreEpoch, TenantScopeId, and StructuredStoreIdentity flow through frames, hashes,
+SQL, facts, configuration, App, replay, and EVM nonce authority even though the selected product
+has one database authority and no in-core tenant isolation model.
 
-### 1.7 Runtime lifecycle leaks into Application
+Their removal is a semantic deletion, not a rename. Database restore while an old process remains
+able to write is unsupported operator behavior; the core does not pretend to fence it.
 
-Runtime currently exposes parallel `SpawnStep`, `ResumeStep`, and `RuntimeStep` algebras plus
-`RunSession`, `SuspendedRun`, and Store-selected owners. Application consequently acts as a process
-supervisor: it drives one State at a time, retains suspended owners, resolves acknowledgement
-boundaries, inspects frames to infer status, and translates internal lifecycle distinctions into
-public results.
+## 2. Architecture and dependency direction
 
-That is not an Application responsibility. Runtime already owns the typed input, adapter entry,
-append candidate, retained Program, and recovery classification needed to advance safely. The core
-must therefore expose one bounded process-facing progression path and one callback-free durable
-view while keeping every affine execution and acknowledgement owner private. Generic entry-point
-registration and transport rendering remain later Application work; the core API they consume is
-settled here.
+### 2.1 Target dependency graph
 
-## 2. Current erasure and indirection inventory
-
-This section is intentionally explicit. The cutover is incomplete if the named concepts merely
-move to another module or are renamed one-for-one.
-
-### 2.1 Program erasure
-
-| Current concept | Current role | Target disposition |
-| --- | --- | --- |
-| `ReifyValue` | Function pointer returning `Box<dyn Any + Send + Sync>` | Delete from Program's supported API; reification belongs to a private Runtime registration |
-| `ValueAssociation` | Stores `TypeId`, schema, and erased reifier | Delete; stable contract metadata remains in Program, concrete type association moves to Runtime assembly |
-| `CapabilityAssociation` | Stores `TypeId` and `bind_evidence(&dyn Any, &dyn Any)` | Delete erased callbacks; registered typed Runtime driver invokes `C` directly |
-| `ProgramCatalogInner` | Maps stable references to the erased associations | Delete as execution authority |
-| `ProgramCatalog` process-local `Arc` identity | Brands values and proves they came from the same catalog instance | Delete as a cross-layer proof; validate one `ExecutableProgram` against one Runtime assembly |
-| `ProgramCatalogBuilder` | Builds the duplicate value/capability execution association registry | Delete as a separate registry; typed registrations belong to `RuntimeAssemblyBuilder` |
-| `ProgramIngress` bound to `ProgramCatalog` | Couples hostile Program decoding to process-local execution associations | Replace with a strict catalog-independent Program decoder; Runtime separately creates `ExecutableProgram` |
-| `qualify_retained_erased` | Turns retained bytes into a generic value before later downcast | Delete from public flow; the selected Runtime driver reifies its exact input once |
-| `QualifiedTypedValue<T>::erase` | Discards `T` while retaining bytes and catalog | Remove from supported API |
-| `QualifiedValue` | Public erased value containing refs, bytes, `Any`, and catalog | Delete from Store/Journal/App/replay APIs; at most retain a sealed Runtime-internal existential payload |
-| `QualifiedValue::try_downcast` | Reconstructs a typed value after internal erasure | Replace with the one private registry handoff |
-| caller-supplied contract ref plus erased value | Allows correlated facts to travel independently | Replace with one proof object whose private fields cannot disagree |
-
-Program construction still validates graph shape and adjacent stable contracts. Persisted Program
-decoding still validates its canonical document. Neither operation needs an erased process-local
-value catalog.
-
-### 2.2 Runtime erasure and dynamic middlemen
-
-| Current concept | Why it exists now | Target disposition |
-| --- | --- | --- |
-| `ErasedValue = QualifiedValue` | Common currency between Runtime and Store | Delete as a cross-layer currency |
-| `DynamicOutcome` | Erased success/failure values | Delete; retain `ProposedStateOutcome<S::Output, S::Failure>` until Journal encoding |
-| `DynamicPreparationFailure` | Optional erased failure plus coordination error | Replace with the registered State's typed failure/result |
-| `DynamicStateRegistration` | Erased State dispatch and qualification callbacks | Replace with one exact-key `RegisteredState` and monomorphic `StateStart` whose concrete implementation immediately enters `S`/`C` typed code |
-| `DynamicPrepared` | Erased prepared execution | Replace with `PreparedAccess<S, C>` behind the private cursor existential |
-| `DynamicCommit` | Combines erased call/prepared owners with `SelectedRun` | Delete; Runtime's affine cursor already owns the correlated values |
-| `DynamicCall` | Erased provider-call authority | Delete; retain typed `CommittedCall<S, C>` |
-| `DynamicPure<S>` / `DynamicAccess<S, C>` | Adapters from typed implementations to erased lifecycle | Replace with private `ReadyPure<S>` / `ReadyAccess<S, C>` proof states |
-| `TypedPrepared<S, C>` / `TypedCall<S, C>` | Typed islands inside an erased outer protocol | Collapse into the Runtime cursor's typed lifecycle |
-| `DynamicResolution` | Correlated `input`, `evidence`, `outcome`, `classification`, and fact continuation stored as independent `Option`s | Delete the option bag; a concrete typed conclusion owner carries only a valid combination |
-| `RunSession.latest: ErasedValue` | Keeps the current context after Store selection | Replace with a private current-context proof owned by `ExecutionCursor` |
-| `RunSession.selected: SelectedRun` | Carries Store's semantic decision | Delete; cursor state is derived by Runtime |
-| duplicate Program catalog and Runtime process registry | Separates contract reification from implementation dispatch | Keep one Runtime assembly for concrete dispatch; Program retains only stable declarations |
-
-`Box<dyn Any>` is not forbidden as an implementation technique. Its spread is. If the cross-crate
-boundary forces a sealed erased payload to live in `mfm-program`, it is an implementation-only type
-usable solely by `mfm-runtime`, not a supported public data model. It may not be stored, cloned into
-DTOs, inspected by Store, or supplied with an independently forgeable contract reference.
-
-The current public lifecycle vocabulary is also wider than the process-facing contract requires:
-
-| Current lifecycle concept | Target disposition |
+| Crate/layer | May depend on |
 | --- | --- |
-| `AdmissionInput<T>` | Collapse to the one typed Runtime start request; qualification immediately yields the cursor's admitted `ProvenValue<T>` |
-| `RunSession` | Replace as a public coordination object with Runtime's private `ExecutionCursor` |
-| `PendingConclusion` | Retain only as one private typed pending-append variant until the physical and semantic append fate is exhaustive |
-| `SuspendedRun` | Delete as a public coordination object; private acknowledgement custody is an implementation state in Runtime's bounded pending-owner table |
-| `ParkedRun` / `ParkReason` | Project to one read-only process-facing status, not a Store-selected owner |
-| `TerminalRun` | Project the typed durable result/failure; do not carry Store selection internals |
-| `SpawnStep` / `ResumeStep` / `RuntimeStep` | Collapse to one high-level Runtime progression result; start and resume do not expose parallel lifecycle algebras |
-| `AdmissionFailure` / `AdmissionConflict` / `ResumeFailure` | Collapse overlapping transport-shaped classifications into one typed Runtime error/progress contract |
-| `RuntimeLimits` | Retain Runtime work/concurrency policy, including nonzero State-start and pending-owner bounds; do not duplicate Journal format or Store physical limits |
+| Values/ids | foundational parsing, schema, and canonical primitives only |
+| Program | Values/ids and capability contracts |
+| Capabilities | Values/ids |
+| Journal | Values/ids canonical primitives and its own record types |
+| Store trait | ids and opaque Journal representations |
+| Memory/PostgreSQL | Store trait and storage-driver primitives |
+| Runtime | Values, Program, Capabilities, Journal, and Store trait |
+| Domain operations/States | Values, Program, and Capabilities; never Store |
+| Adapters | Capability/Runtime ingress plus reusable transports/signers |
+| App/transports | Runtime plus explicitly composed domains/adapters |
 
-App asks Runtime to start, resume, or inspect a run and receives `RunView` or one reviewed Runtime
-error. Runtime internally drains immediately actionable sequential States until a stable external
-boundary. App does not hold `RunSession`, match `SpawnStep` versus `ResumeStep`, or shuttle Store
-owners back into Runtime. Unknown acknowledgement authority is retained, resolved, and bounded
-inside Runtime; it never becomes an Application token.
+Program does not depend on Runtime or Store. Journal depends only on stable ids, canonical/value
+representation, and its own record types. Store depends on stable ids and opaque Journal
+representations, never on Program, State, capabilities, domains, or Runtime selection types.
+Portable bytes enter Journal structural decoding and then RuntimeAssembly semantic inspection.
 
-### 2.3 Store semantic middlemen
+### 2.2 Validation ownership
 
-| Current concept | Target disposition |
+Validation remains where trust changes:
+
+| Proposition | Owner and result |
 | --- | --- |
-| `StoreBrand` | Delete; it proves only that callers passed through one Store facade |
-| `StructuredStoreIdentity` | Delete with scope/epoch/tenant |
-| `StructuredStore` / `OpenedStructuredStore` / `OpenedStoreInner` | Replace with one configured mechanical `Store` implementation |
-| `StoreParts` | Delete the port-splitting ceremony |
-| `QualifiedHistoryPort` / `HistoryReader` / `StoreAuditPort` | Collapse to mechanical load/list methods plus Runtime inspection |
-| `QualifiedRun` | Delete; Journal owns structural qualification and Runtime owns semantic qualification |
-| `RunReducer` / `advance_selected` | Move the one reducer to Runtime, then delete Store's implementation |
-| `RunSelection` | Delete |
-| `RunAction` / `AccessActionMode` | Delete from Store; Runtime-private cursor variants express the action |
-| `SelectedRun` | Delete; Store never selects execution |
-| `PreparedAdmission` / `AdmissionOutcome` | Move admission ownership and classification to Runtime; do not reproduce Store-branded wrappers |
-| `PreparationAppend` / `AccessPreparationCandidate` | Replace with typed `PreparedAccess<S, C>` owned by Runtime |
-| `AccessPreparationOutcome` | Replace with mechanical append outcome plus Runtime promotion |
-| `PreparedConclusion` | Replace with a typed Runtime conclusion owner and direct Journal encoding |
-| `SelectedConclusion` and `SelectedConclusionOutcome` | Delete; Runtime classifies a conclusion race by folding the reloaded history |
-| `SelectedConclusionPreparationOutcome` | Delete |
-| `FactContinuation` | Delete Store-branded continuation; typed Runtime preparation retains the selection it used |
-| fact publication bind/rebind ordinal | Delete by moving coordinate allocation out of the Journal frame |
-| `SemanticStore` or equivalent semantic facade | Delete rather than rename |
-| `retained_program` | Move retained Program decoding/association to Runtime's cold fold |
-| `replay_terminality` | Replace with Runtime's one callback-free reducer/inspection path |
-| `validate_prefix` | Replace with Journal structural qualification followed by Runtime semantic fold |
+| Transport request is bounded and syntactically valid | App/transport typed request |
+| A value is canonical, float-free, contract-bound, and content-addressed | Runtime value registration yields ProvenValue of T |
+| A Program document is canonical and structurally valid | Program decoder yields Program |
+| A Program is completely supported by one process assembly | Runtime yields ExecutableProgram |
+| A frame/configuration/bundle is exact canonical target wire | Journal yields an opaque qualified type |
+| A retained run is a complete structurally valid hash chain | Journal yields JournalHistory |
+| A history is semantically valid under its retained Program | Runtime fold yields a private reduced state or RunView |
+| Provider evidence matches the exact call | Typed adapter/capability ingress |
+| The expected durable head remains current | Store transaction |
+| A persisted row set matches its canonical bytes and physical metadata | Store load plus Journal qualification |
 
-These types are the primary reason Store appears after PostgreSQL and before Runtime in the
-semantic flow. Removing them is the architectural change; placing them in a `selection.rs` file is
-not.
+The following repeated validations disappear:
 
-### 2.4 Store backend DTO and port inventory
+- Store reifying Program values before Runtime does so again;
+- Store reducing the Program before Runtime reconstructs the selected State;
+- backend DTO layers reopening Journal frames;
+- replay maintaining another reducer;
+- catalog and Store brands standing in for exact type association;
+- process-local identity fields rechecked in every owner;
+- fact completeness and publication checks for an unused protocol; and
+- App inspecting frames to recover Runtime status.
 
-Some storage command/result data is necessary. The target is one DTO per real database operation,
-private implementation row structs, and no duplicated semantic wrapper.
+### 2.3 Concepts that remain intentionally private
 
-| Current exported concept | Target disposition |
-| --- | --- |
-| `StructuredStoreBackend` | Replace with the small `Store` trait |
-| `MemoryStructuredBackend` | Replace with `MemoryStore` implementing the same contract as PostgreSQL |
-| `BackendFuture` / `BackendResult` | Delete public aliases; use ordinary async trait methods and one typed error |
-| `BackendError` / `StoreOpenError` / overlapping `StoreError` classifications | Collapse to errors at the mechanical Store boundary; Runtime owns semantic failures |
-| `StoreWorkLimits` | Delete duplicated limit ownership; Journal owns format limits and PostgreSQL enforces matching physical ceilings |
-| `RawHistoryLoadLimit` | Delete the special wrapper; use the protocol limit owned by Journal/load policy |
-| `RawFrameBytes` | Replace with a private loaded-row byte type handed directly to Journal decoding |
-| `RawRunPrefix` | Replace with one `StoredRunBytes` load result; it carries bytes, not semantic validity |
-| `BackendAppendCommand` | Replace with `RunAppend` |
-| `BackendAppendOutcome` | Replace with `AppendOutcome` and `AppendReceipt` |
-| `AppendDisposition` | Fold its mechanical variants into `AppendOutcome`; keep no second result enum |
-| `BackendConfigurationOutcome` | Collapse into the one configuration append result |
-| `ConfigurationAppendCommand` | Replace with a minimal mechanical configuration append command |
-| `ConfigurationCommitOutcome<C>` | Remove the generic Store proof; Runtime reifies the exact committed revision when needed |
-| `ConfigurationAppendDisposition` | Fold into the one mechanical configuration append result |
-| `RawConfigurationRevision` | Keep only a private/opaque stored-byte row at the Store boundary |
-| `RawFactPublication` / `RawFactSnapshot` | Replace with one bounded authenticated route-index proof; Runtime owns completeness correlation and `FactSelection` semantics |
+Runtime may use small private enums or local variables for fold state and one active State driver.
+Their exact names are not architecture. They must not become public lifecycle algebras, persisted
+owners, Store inputs, App tokens, or another erasure protocol.
 
-The replacement is intentionally small:
+There is no Runtime pending-owner table of any kind.
 
-```text
-Store
-  load_run(run_id, target: Current | Exact { sequence, digest }, limits)
-    -> Result<Absent | Present(StoredRunBytes), StoreError>
-  append_run(run_id, &RunAppend) -> Result<AppendOutcome, StoreError>
-  list_run_ids(&PageRequest)
-    -> Result<BoundedRunIdPage, StoreError>
-  load_fact_snapshot(&FactSnapshotQuery)
-    -> Result<FactIndexProof, StoreError>
-  load_fact_log_consistency(earlier: FactHead, later: FactHead)
-    -> Result<FactLogConsistencyProof, StoreError>
-  load_configuration_head
-    -> Result<Absent | Present(ConfigurationHead), StoreError>
-  load_latest_configuration(routing_key, through: Absent | Present(ConfigurationHead))
-    -> Result<Absent | Present(ConfigurationRef), StoreError>
-  load_configuration(ConfigurationRef)
-    -> Result<StoredConfigurationRevision, StoreError>
-  append_configuration(&ConfigurationAppend)
-    -> Result<ConfigurationAppendOutcome, StoreError>
-  check_ready -> Result<(), StoreError>
-```
+## 3. Program, values, and Runtime assembly
 
-The normative command/result shape is:
+### 3.1 State failure contract and Never
 
-```text
-RunAppend {
-  expected_head: Absent | Present { sequence, digest },
-  append_request_id,
-  frame: EncodedRunFrame,
-  reservation_instruction: None | Open | Replace | Consume,
+The core State contract is:
+
+~~~text
+State {
+  Input: MfmValue
+  Output: MfmValue
+  Failure: MfmValue
+  stable State implementation identity
 }
+~~~
 
-EncodedRunFrame = opaque Journal-owned frame/object bytes
-                + None | NonEmptyFactPublicationAttachment
+Failure no longer implements a framework FailureValue constructor.
 
-AppendOutcome {
-  Inserted(AppendReceipt),
-  Existing(AppendReceipt),
-  Stale { actual_head },
-  AcknowledgementUnknown,
-}
+The framework owns one uninhabited Never type with the reserved semantic contract mfm.never. It has
+no valid canonical value. RuntimeAssembly installs its value registration automatically.
 
-AppendReceipt {
-  run_sequence,
-  run_head,
-  optional_fact_publication: None | Present {
-    publication_sequence,
-    resulting_fact_head,
-  },
-}
+- Pure States may use Never as their exact failure contract.
+- Access registration must provide a pure BlockedIntegrityProjection for its exact State and
+  capability association.
+- Its exact shape is `(&S::Input, &C::Evidence) -> S::Failure`; it performs no IO and cannot choose
+  a successor, retry, or alternate evidence. Using the State input lets failures retain public
+  correlation such as EVM stage and collection ordinal.
+- RuntimeAssembly rejects Access registration when the State failure contract is Never.
+- A retained failure outcome for a Pure State whose failure contract is Never is invalid history.
 
-FactHead {
-  publication_sequence,
-  index_root_digest,
-  log_root_digest,
-}
+This separates ordinary State fallibility from the Access requirement to represent an accepted
+integrity block.
 
-FactPublicationHeader {
-  publication_sequence,
-  previous_fact_head,
-  producer_run_id,
-  producer_run_sequence,
-  producer_run_head,
-  proposal_set_ref,
-  route_update_set_digest,
-  resulting_index_root_digest,
-  descriptor_digest,
-  resulting_fact_head,
-}
+### 3.2 Persisted Program associations
 
-FactRouteKey {
-  source_ref,
-  subject_ref,
-  digest: H(fact-route-domain, canonical(source_ref, subject_ref)),
-}
+Program retains one strict immutable State-or-Match document. Every State declaration persists:
 
-FactSnapshotQuery {
-  bounded_sorted_unique_route_keys,
-  through: CaptureCurrent | Exact(FactHead),
-}
+- stable State implementation reference;
+- exact input, output, and non-optional failure contracts;
+- Pure or Access kind;
+- for Access, the exact capability contract, intent contract, evidence contract, Read-or-Effect
+  mode, a total attempt bound for Read (Effect is exactly one), adapter/binding association, and
+  physical public target identity; and
+- the next control edge or terminal contract.
 
-FactIndexLeaf {
-  route_key,
-  publication_sequence,
-  producer_run_id,
-  producer_run_sequence,
-  producer_run_head,
-  proposal_set_ref,
-  proposal_ordinal,
-  value_ref,
-}
+The Program also persists its one entry point, exact admitted-context contract, and exact
+configuration contract. `C0` means that domain-owned typed admitted-context value. It is the first
+complete State context, not configuration `C` and not a transport request wrapper.
 
-FactIndexProof {
-  through: FactHead,
-  ordered_results: Absent(route_key) | Present(FactIndexLeaf),
-  canonical_sparse_merkle_multiproof,
-  frontier_header_witness: Genesis | Published { header, log_inclusion_witness },
-  deduplicated_publication_header_inclusion_witnesses,
-}
+Program validates graph shape, reachable declarations, stable contract continuity, Match tag and
+payload continuity, and fixed graph/size limits. It performs no State execution, provider IO,
+configuration lookup, Store access, TypeId lookup, or erased value reification.
 
-FactLogConsistencyProof {
-  earlier: FactHead,
-  later: FactHead,
-  canonical_append_only_log_consistency_witness,
-}
+ProgramCatalog, catalog branding, public value reifiers, erased capability callbacks, and
+process-local catalog identity are deleted.
 
-ConfigurationInstanceId = explicit stable domain/composition identity
+### 3.3 One Runtime assembly
 
-ConfigurationRoutingKey {
-  instance_id: ConfigurationInstanceId,
-  contract_ref,
-  schema_ref,
-  digest,
-}
+RuntimeAssemblyBuilder owns:
 
-ConfigurationHead {
-  revision_sequence,
-  head_digest,
-}
+- one exact value codec per stable value contract, schema, and Rust type association;
+- one exact State registration per complete persisted State execution association;
+- one exact adapter/capability registration per complete Access association;
+- one pure schema-derived Match projection for each registered closed-sum value; and
+- one configuration validation hook on a value slot when that type is also MfmConfig.
 
-ConfigurationRevisionHeader {
-  revision_sequence,
-  previous_head_digest,
-  envelope_ref,
-  routing_key,
-  head_digest,
-}
+Assembly finalization rejects duplicate or inconsistent registrations. Associating a retained
+Program produces ExecutableProgram only when every reachable declaration has one exact compatible
+registration.
 
-ConfigurationRef {
-  revision_sequence,
-  envelope_ref,
-  revision_head_digest,
-}
+The lookup key is the complete persisted association, with no implementation-only or
+capability-only fallback:
 
-ConfigurationAppend {
-  expected_head: Absent | Present(ConfigurationHead),
-  append_request_id,
-  envelope: EncodedConfigurationEnvelope,
-}
-
-ConfigurationAppendOutcome {
-  Inserted(ConfigurationAppendReceipt),
-  Existing(ConfigurationAppendReceipt),
-  Stale { actual_head },
-  AcknowledgementUnknown,
-}
-
-ConfigurationAppendReceipt {
-  configuration_head: ConfigurationHead,
-  configuration_ref: ConfigurationRef,
-}
-
-StoreError = InvalidPhysicalCommand
-           | IdempotencyConflict
-           | Capacity
-           | CorruptPhysicalState
-           | UnavailableBeforeSubmission
-```
-
-Exact Rust spelling and async-trait mechanics are not normative. The operations, correlations,
-outcomes, and error fates above are normative. Append commands are borrowed so Runtime retains the
-affine owner required for post-ack promotion. `EncodedRunFrame` has private fields and belongs to
-Journal. Its sealed publication attachment contains the all-and-only route-update templates derived
-from the same proposal-set object: exact route key, proposal ordinal, and value reference, with the
-producer and publication coordinates left for the transaction. A proposal set may contain at most
-one fact for a `(source_ref, subject_ref)` route. Thus no caller can pair frame bytes with independent
-fact metadata. `RunAppend` is Store's physical command and adds Runtime's reservation instruction
-beside, not inside, the Journal proof. Store consumes both mechanically and interprets no Program,
-State, capability, contract, evidence, reservation-key, routing-key, or fact meaning.
-
-`EncodedConfigurationEnvelope` likewise belongs to Journal. It exposes only the bounded opaque
-instance/contract/schema routing key and physical references Store needs to index and correlate its rows;
-Store never decodes `C` or constructs a semantic configuration proof.
-
-The routing key also commits to an explicit `ConfigurationInstanceId`. Composition supplies that
-stable identity for the independently current network/account/entry-point series; it is not inferred
-from process configuration, tenant, or Rust `TypeId`. Runtime derives and checks the complete key
-under the exact `C` registration, Journal seals it into the envelope/revision header, and Store
-compares/indexes it opaquely.
-
-Every `FactPublicationHeader` is canonical physical proof material. Its descriptor digest commits
-to its sequence, complete previous `FactHead`, producer run/frame/head, proposal-set reference, the
-complete sealed route-update-set digest, and the resulting authenticated index root. That descriptor
-is one leaf in a domain-separated append-only Merkle log; `resulting_fact_head` contains the new log
-root and index root without creating a hash cycle. The empty fact stream has one specified log root
-and one specified sparse-tree root. Journal owns the route-key, leaf, node, header, inclusion/
-consistency/multiproof codecs, and both pure transition algorithms; Store supplies only
-transaction-assigned coordinates and persists the resulting opaque structures. The append-only log
-remains available for ordering/audit and logarithmic branch-consistency proof, but fact selection
-never scans it.
-
-The route index is a versioned 256-level sparse Merkle map using the current format's SHA-256. A
-domain-separated `FactRouteKey`
-commits to the complete canonical `(source_ref, subject_ref)`, and its leaf names the latest
-publication for that exact route. The path consumes digest bits most-significant first. Journal
-fixes domain-separated leaf/branch hashes (including branch depth), one empty-subtree hash per depth,
-and a sorted minimal multiproof with no duplicate, unused, or alternative-default node encoding.
-The append-only log uses the Certificate-Transparency largest-power-of-two split rule with separate
-empty/leaf/branch domains and canonical minimal inclusion/consistency witnesses. These are Journal
-format constants. A
-membership or non-membership multiproof against the retained `FactHead.index_root_digest`, plus
-inclusion witnesses for its frontier header and every returned publication, detects an omitted,
-substituted, or cross-branch requested route without work proportional to database age. Log
-consistency witnesses prove that an earlier dependency frontier is a prefix of the later producer
-frontier rather than merely having a smaller sequence. These proofs establish consistency with the
-retained MFM roots; they do not add an external signature or Byzantine database-authorship claim.
-
-The hash recurrence is normative. `H` is SHA-256 and `JCS` is the repository's canonical,
-float-free object encoding. Every object below includes the shown literal domain before its fields:
-
-```text
-route_digest = H(JCS { domain: "mfm.fact.route.v1", source_ref, subject_ref })
-
-E[256] = H(JCS { domain: "mfm.fact.index.empty.v1" })
-E[d]   = H(JCS { domain: "mfm.fact.index.branch.v1", depth: d,
-                  left: E[d + 1], right: E[d + 1] })
-leaf    = H(JCS { domain: "mfm.fact.index.leaf.v1", depth: 256,
-                  route_digest, canonical_leaf })
-branch  = H(JCS { domain: "mfm.fact.index.branch.v1", depth, left, right })
-
-route_update_set_digest = H(JCS {
-  domain: "mfm.fact.route-updates.v1",
-  updates: sorted-unique-by-route-digest [
-    { route_key: { source_ref, subject_ref, digest }, proposal_ordinal, value_ref }
-  ]
-})
-descriptor_digest = H(JCS {
-  domain: "mfm.fact.publication.v1",
-  publication_sequence,
-  previous_fact_head,
-  producer_run_id,
-  producer_run_sequence,
-  producer_run_head,
-  proposal_set_ref,
-  route_update_set_digest,
-  resulting_index_root_digest
-})
-log_empty = H(JCS { domain: "mfm.fact.log.empty.v1" })
-log_leaf  = H(JCS { domain: "mfm.fact.log.leaf.v1", descriptor_digest })
-log_node  = H(JCS { domain: "mfm.fact.log.branch.v1", left, right })
-```
-
-The zero head is exactly `{ publication_sequence: 0, index_root_digest: E[0],
-log_root_digest: log_empty }`. At nonzero sequence the CT split recurrence over `log_leaf` values
-produces `log_root_digest`; sparse batch replacement produces `index_root_digest`; and the header's
-`resulting_fact_head` contains exactly those roots and sequence. The genesis
-`frontier_header_witness` is valid only for that zero head and every result must be `Absent` under
-the empty-root multiproof. A nonzero head requires the exact last publication header and its log
-inclusion witness. Golden fixtures freeze the integer/string representation and proof-node order;
-no implementation-defined concatenation is permitted.
-
-`Stale` and every `StoreError` prove that this call did not commit. Once a backend may have
-submitted the transaction, every transport loss, cancellation, timeout, or indeterminate driver
-error is `AcknowledgementUnknown`; it must never be downgraded to `UnavailableBeforeSubmission`.
-`Inserted` and `Existing` contain an immutable receipt. `Existing` requires exact command identity.
-All loads, lists, and proofs have explicit nonzero row/byte/proof bounds and return capacity rather
-than truncating a value that their result type labels complete.
-
-Runtime derives reservation bounds from `ExecutableProgram` before Access provider entry. An
-`Open` instruction reserves the maximum conclusion charge under an opaque preparation key; a Read
-`Replace` atomically transfers an old key to a new key; and `Consume` requires the exact active key,
-checks the sealed conclusion charge against that key's reservation, and releases it with the
-conclusion append.
-
-`MAX_RUN_BYTES` is an immutable constant of the current Journal/storage format. It is identical in
-Memory and PostgreSQL, survives restart unchanged, and can change only in another clean-slate
-persisted-contract cutover; it is not a mutable Store-opening option. Under the same run-head CAS,
-Store charges every frame byte plus each object on its first reference by that run and enforces:
-
-```text
-new_total_bytes    = old_total_bytes + newly_charged_bytes
-new_reserved_bytes = old_reserved_bytes - released_reservation + opened_reservation
-new_total_bytes + new_reserved_bytes <= MAX_RUN_BYTES
-```
-
-Charging is logical and per-run. Global physical blob deduplication may save disk but never changes
-which bytes count against a run: `(run_id, object_ref)` membership determines first-reference
-charging. Active reservation rows and their aggregate are durable run metadata, so restart cannot
-forget liability created by `Open` or `Replace`.
-
-Reservation keys are recoverable physical identities, not random process tokens:
-
-```text
-ReservationKey = H(JCS {
-  domain: "mfm.run.conclusion-reservation.v1",
-  run_id,
-  preparation_sequence
-})
-```
-
-Runtime knows a new preparation's sequence as `expected_head.sequence + 1`; cold history supplies
-the prior preparation sequence named by a replacement or conclusion. `Open` uses the new sequence,
-`Replace` uses the retained old and deterministic new keys, and `Consume` uses the exact preparation
-sequence referenced by the conclusion. Thus cold Read replacement can name the durable liability
-without loading semantic reservation rows or persisting a random key in Journal history. Store
-validates only this target/sequence/key correlation and its active-row arithmetic; it still
-interprets no occurrence or capability meaning. Canonical goldens freeze the derivation.
-
-| Instruction | Required atomic transition |
-| --- | --- |
-| `None` | Charge the admission/Pure frame and objects; change no reservation |
-| `Open { key, maximum }` | Require absent key, charge preparation, and add `maximum` |
-| `Replace { old, new, maximum }` | Require active `old`, charge replacement, release `old`, and add `new` |
-| `Consume { key }` | Require active key, require actual conclusion charge not greater than its maximum, charge conclusion, and release key |
-
-Stale or definite-error attempts mutate neither accounting value nor reservation rows. An exact
-retry returns its original receipt without applying the transition twice. A late old conclusion
-cannot consume a replacement key. Store treats keys and arithmetic mechanically; only Runtime
-knows what occurrence they represent.
-
-For idempotency, Store first looks up `(run_id, append_request_id)`. An existing row returns its
-original receipt only when expected head, complete frame bytes and object closure, reservation
-instruction, and sealed publication attachment are identical; conflicting reuse fails. Only a new
-request proceeds to the exact-head comparison. This ordering makes an identical retry succeed even
-after its original append advanced the head.
-
-That ordering is serialized, not a racy read-before-lock optimization. Before the first lookup,
-Store acquires transaction-scoped serialization for the complete request key; after it waits, it
-looks up the request row again. A new request then acquires transaction-scoped serialization for
-the target run-head key, including an absent head, before comparing the expected head. PostgreSQL
-may implement these two keyed critical sections with transaction advisory locks or an equivalent
-unique-claim protocol; Memory uses an equivalent keyed lock. The choice is private, but two
-overlapping identical request IDs must end as `Inserted` then `Existing`, never `Inserted` then
-`Stale`. A conflicting reuse that waited for the winner must observe the committed row and return
-`IdempotencyConflict`. No incomplete request row may become visible or survive rollback.
-
-The append-request row atomically persists a canonical command digest that commits to the target,
-expected head, complete encoded frame/object closure and publication attachment, reservation
-instruction, plus the immutable receipt. Configuration append-request rows likewise commit to
-expected configuration head and the complete sealed envelope plus their receipt. Store recomputes
-and compares that digest before returning `Existing`; the unique request ID alone is insufficient.
-A structurally valid stored command with a different digest is `IdempotencyConflict`; an internally
-inconsistent digest, receipt, or referenced row is `CorruptPhysicalState` and never masquerades as
-caller conflict.
-
-These identities are not interchangeable. `RunId` is the semantic admission identity: the same
-`RunId` with byte-identical genesis is idempotent even under another physical append request, while
-a different genesis is `AdmissionConflict`. `append_request_id` identifies one physical CAS and
-acknowledgement attempt; reusing it requires complete command equality. A new independent domain
-repetition always uses a new `RunId`.
-
-The borrowed command lets Runtime retain every affine semantic owner while Store performs IO.
-`load_run(Current)` atomically captures one real run head; `load_run(Exact { sequence, digest })`
-verifies that historical head and captures exactly through it. Either form returns every frame and
-referenced object through its captured head. It returns `Capacity`, never a truncated object
-labeled as a complete run, when the configured nonzero frame/byte bounds are insufficient. The
-bytes carry no semantic validity.
-A run append is accepted only when the opaque Journal projection's `run_id`, next sequence, and
-`previous_head` agree with the command target and expected head; this is mechanical correlation,
-not Program reduction. Bounded run-ID pages use stable keyset continuation and report whether that
-page's statement snapshot contains another greater key. This is an operational weak listing, not a
-transaction-spanning snapshot: a concurrent insertion may appear on a later page or, if its key
-sorts behind the cursor, be absent from that enumeration. No semantic proof, replay, or recovery
-decision relies on list completeness.
-
-Runtime derives a bounded sorted/unique `FactSnapshotQuery` containing one exact `FactRouteKey` for
-each admitted source and requested subject. Its frontier is either `CaptureCurrent` for a new
-selection or the complete retained `FactHead` when validating history. `load_fact_snapshot`
-captures or verifies that immutable head and returns exactly one ordered membership/non-membership
-result per query key, one canonical sparse-tree multiproof, the frontier-header inclusion witness,
-and deduplicated inclusion witnesses for the present leaves' publications. The proof size is bounded
-by `MAX_FACT_SOURCES` times the fixed index/log depths (the log sequence is a bounded integer),
-independent of global publication count; a response
-is complete or fails, never paged/truncated or silently substituted with an older leaf. Newer
-publications create a new immutable root and do not disturb a captured proof. Historical roots and
-the immutable nodes reachable from them remain retained for the lifetime of this clean-slate format;
-missing reachable nodes are corruption, not absence. Portable inspection carries the same bounded
-head/proof bytes. Dependency bundles additionally carry canonical logarithmic log-consistency
-witnesses for every distinct earlier-frontier to later-frontier edge.
-
-Store validates SQL/Memory row ranges, ordering, dense physical heads, exact head/query/result
-correlation, duplicate keys, reservation-row transitions, configuration routing indexes, command
-digests, and receipt identity for non-Journal rows. The Journal-sealed publication attachment
-projects the opaque route updates from the same proposal objects so Store can persist/query the
-authenticated index without interpreting them. Journal validates canonical
-run/configuration/object and proof bytes, and Runtime validates
-all Program, source-manifest, fact, capability, and typed configuration meaning.
-
-`ConfigurationHead` is physical global-CAS state. `ConfigurationRevisionHeader` is the immutable
-Journal-qualified structural link between one assigned sequence, predecessor digest, opaque routing
-key, envelope reference, and revision head digest. `ConfigurationRef` identifies that exact
-revision by sequence, envelope reference, and revision head digest and is the only configuration
-identity retained by admission. Load by the full `ConfigurationRef` returns its header plus canonical
-revision-envelope bytes and rejects any sequence, head-digest, routing, or envelope-reference
-mismatch. Latest-by-instance-and-contract lookup takes an opaque Journal-projected routing key and
-a captured global head, and returns the greatest matching revision at or below that head. Its
-append outcome mirrors run idempotency: inserted or
-exact existing returns one immutable receipt, a stale head returns the actual physical head,
-acknowledgement may be unknown, and conflicting append-ID reuse is a typed Store error. Store never
-returns a decoded `C`.
-
-### 2.5 Configuration middlemen
-
-| Current concept | Target disposition |
-| --- | --- |
-| `ConfigurationStore` | Delete the separate semantic Store facade |
-| `ResolvedConfigurationHead` | Split physical `ConfigurationHead` CAS state from immutable typed `ConfigurationRef` |
-| `ResolvedConfiguration<C>` | Replace with one Runtime-owned typed proof carrying `C` and its immutable `ConfigurationRef` |
-| `ConfigurationWriteSession<C>` | Replace with one Runtime-owned precommit `PendingConfiguration<C>` |
-| `PreparedConfigurationAppend<C>` | Collapse into that pending owner |
-| `SuspendedConfigurationAppend<C>` | Retain unknown-ack ownership only as a state of that pending owner, not another Store layer |
-| Store brand/global-head fields in configuration proofs | Delete |
-
-Configuration persistence is global. A revision has one global sequence and content reference.
-Admission records the exact immutable revision it used. Store handles bytes and configuration-head
-CAS; Journal owns the canonical revision-envelope codec; Runtime is the sole typed configuration
-ingress and decodes or constructs `C` once. Trusted application composition may retain and borrow
-the Runtime-issued proof but cannot decode retained configuration bytes, fabricate a reference, or
-create a second configuration registry.
-
-### 2.6 Journal DTO inventory
-
-The following are genuine durable representation concepts and are not deleted merely because they
-are DTO-shaped:
-
-- `ValueRef` and `ImmutableObject`;
-- `RunAdmitted`, `StatePrepared`, and `StateConcluded`;
-- `StateOutcome`;
-- `FactSelection`, fact provenance, and fact proposal-set references; and
-- `RunFrame` and its recursive head.
-
-They change in two ways. First, their fields become private and their constructors/decoders return
-valid-by-construction Journal types. Second, fields that duplicate the surrounding frame, admitted
-Program, or physical Store protocol are deleted.
-
-| Current Journal concept/field | Target disposition |
-| --- | --- |
-| `ValueRef` | Retain as persisted identity; consider the clearer name `PersistedValueRef` |
-| `ImmutableObject` | Retain as durable object closure; consider `JournalObject` |
-| `RunAdmitted.scope`, `.epoch`, `.tenant`, duplicated `.run_id` | Delete |
-| `RunAdmitted` entry point, Program ref, admitted context, configuration ref, and source refs | Retain |
-| `ConfigurationHeadProjection` | Replace with physical `ConfigurationHead` for CAS plus immutable `ConfigurationRef { revision_sequence, envelope_ref, revision_head_digest }` for admission |
-| `PreparationMode` | Delete; mode is declared by the admitted State/capability |
-| duplicated prepared input | Delete; Runtime derives it from the predecessor context |
-| preparation ordinal/replacement ref | Delete; one frame has one record and its sequence is the preparation identity |
-| duplicated execution-binding ref | Delete; the admitted Program pins it |
-| duplicated fact request | Delete; retain the exact selected facts used by the attempt |
-| persisted maximum-conclusion bytes | Remove from semantic Journal bytes; keep any required reservation as physical append metadata |
-| `PreparationRef { run_id, run_sequence, record_ordinal }` | Reduce to preparation frame sequence; containing run supplies `RunId` |
-| duplicated fact selection in `StateConcluded` | Delete; Access conclusion refers to its preparation |
-| `FactPublication` in `StateConcluded` | Delete; PostgreSQL publication index owns the coordinate |
-| `FactSelectionFrontier.stream_ref` / proposal `.head_ref` | Delete the redundant stream ID; retain the exact complete global `FactHead` in `FactSelection` |
-| `FactCompleteness { through_sequence, complete }` | Delete the always-true validity flag; a valid `FactSelection` carries its authenticated `FactHead` and exact aligned facts/provenance |
-| `RecordLogicalKey` | Delete from public/persisted vocabulary; Runtime derives occurrence identity while folding |
-| `RunFrame.scope`, `.epoch`, and append-request ID | Delete; append ID is Store protocol metadata, not semantic content |
-| public `validate()` choreography | Delete; construction or strict decode yields an opaque valid frame/history |
-
-Journal decoding must still reject malformed or non-canonical data, floats in hashed structures,
-invalid content references, object collisions, missing object closure, sequence gaps, wrong
-recursive heads, protocol-limit violations, and invalid intrinsic record shape. Those are byte-
-ingress checks. Journal does not validate State transitions or capability meaning; Runtime does so
-while folding the qualified history.
-
-### 2.7 Typed owners that carry real proof
-
-The cutover does not delete types simply to reduce a count. A type remains when possession of it is
-the enforcement mechanism for a meaningful state transition.
-
-| Typed concept | Disposition |
-| --- | --- |
-| `ProposedStateOutcome<O, F>` | Retain; it preserves the State's success/failure association |
-| `CommittedCall<S, C>` | Retain as an affine provider-entry authority, without scope/epoch/tenant fields |
-| `AcceptedOutcomeAccess<S, C>` / `AcceptedIntegrityAccess<S, C>` | Retain: they distinguish conclusive typed outcome evidence from a non-success integrity block |
-| `UnresolvedAccess<S, C>` / `AccessResolution<S, C>` | Retain: they keep unresolved provider results from becoming conclusive evidence or retry authority |
-| `QualifiedRecordedEvidence<C>` | Delete; its currently unused wrapper duplicates the preparation/evidence binding owned by Runtime's cold typed fold |
-| `PreparedExecution<S, C>` / `OpenedPreparationCommit<S, C>` | Consolidate into `PreparedAccess<S, C>` plus the append result that promotes it |
-| `PendingConclusion` | Keep a typed Runtime owner; do not erase its evidence/outcome before encoding |
-| `QualifiedTypedValue<T>` | Replace or seal as a private-field `ProvenValue<T>`; no public erase/downcast protocol |
-| `QualifiedAdapter<S, C>` | Retain the minimal typed inert gate used by monomorphic Access `StateStart` to bind one registered implementation to `CommittedCall<S, C>`; remove forwarding-only catalog/Store identity checks |
-| `RuntimeAssembly` / `RuntimeAssemblyBuilder` | Retain as the sole concrete State/capability/adapter registry and the owner of any private process-local assembly proof |
-
-Public surface reduction is not the goal by itself. The goal is fewer forgeable combinations and
-fewer translations. An affine owner that makes a forbidden operation impossible is useful; a DTO
-that copies the same fields between owners is not.
-
-### 2.8 Replay and portable middlemen
-
-`mfm-replay` currently uses Store qualification and Store's reducer, while its `PortableRun` /
-`PortableEnvelope` adds scope, epoch, and tenant to another representation of the same history.
-
-The target deletes the `mfm-replay` middle layer:
-
-- move portable structural encoding/decoding to Journal;
-- remove scope, epoch, and tenant from portable history;
-- include every externally referenced configuration revision header and envelope, authenticated
-  fact-index proof, and dependency-closed producer history needed to prove the consumer history;
-- expose callback-free semantic inspection from Runtime's one reducer; and
-- have App's replay/status surface call that inspection path.
-
-The portable bundle does not put a conclusion-assigned fact-publication coordinate into
-`StateConcluded`. When a retained `FactSelection` exists, however, its exact `FactHead`, canonical
-route-index multiproof, and dependency-closed Journal-qualified producer histories are semantic
-dependencies: omitting or substituting them means Runtime cannot return a proven `RunView`.
-Publication headers beyond those exact dependencies may accompany an audit export as explicitly
-physical audit metadata.
-
-## 3. Proposed solution
-
-This is a breaking replacement of the current responsibility chain, not an adapter around it. The
-solution has seven coupled moves:
-
-1. keep values typed from their first trusted construction until Journal encoding;
-2. confine heterogeneous erasure to one private Runtime registry handoff;
-3. move the sole Program reducer and next-State selection from Store to Runtime;
-4. make Journal construction/decoding the only structural frame/history validation boundary;
-5. replace semantic Store/backend layers with one mechanical persistence contract;
-6. collapse public State-by-State lifecycle coordination into one bounded Runtime progression and
-   inspection contract; and
-7. make one PostgreSQL authority global by deleting tenant, scope, epoch, and identity rotation.
-
-The following validation split is the test for whether those moves were implemented rather than
-renamed.
-
-### 3.1 Validations that are necessary
-
-Strong typing cannot prove facts about bytes or concurrent external state before those inputs are
-observed. These checks remain:
-
-| Proposition | Checked by | Proof/result |
-| --- | --- | --- |
-| Transport input is bounded and conforms to its request schema | CLI/REST/application ingress | Typed request |
-| A domain value obeys `MfmValue`, canonical encoding, size, and no-float persisted rules | Its first typed persistence/ingress constructor | `ProvenValue<T>` |
-| Provider bytes are authentic enough for the capability and bind to the exact intent | Adapter/capability ingress | Typed accepted evidence |
-| Retained Program bytes are canonical and graph/contract structure is valid | Program decoder | Validated Program document |
-| Retained Journal bytes, hashes, object closure, sequence, and recursive head are valid | Journal decoder | `JournalHistory` |
-| Retained values match the exact State contracts selected by the Program | Runtime's typed registry during one cold fold | `ExecutionCursor` or terminal inspection |
-| Retained State-or-Match transitions are legal | Runtime reducer during one cold fold | Reduced semantic history |
-| External configuration and retained fact selections match their exact refs, authenticated index/log frontiers, and producer histories | Journal structural qualification plus Runtime semantic correlation | `QualifiedRunDependencies` |
-| Expected run head is still current | PostgreSQL transaction | Inserted/existing/stale append outcome |
-| Append request is new or an identical retry | PostgreSQL unique key and transaction | Append receipt |
-| Frame, object, fact-index, reservation, and head writes are atomic | PostgreSQL transaction / Memory conformance | Durable receipt |
-| Fact and configuration global sequences are dense/current where required | PostgreSQL singleton heads and CAS | Mechanical snapshot/receipt |
-
-Cold resume necessarily repeats semantic work performed by a process that no longer exists. That
-is not duplicate validation inside one proof lifetime; it is creation of a new process-local proof
-from untrusted retained bytes.
-
-### 3.2 Validations that disappear
-
-The following checks are redundant once their input is a private-field proof type:
-
-- Store revalidating a typed admission value just qualified by Runtime;
-- Store revalidating Runtime-produced intent, evidence, output, or failure against the same Program
-  catalog;
-- Runtime revalidating the `SelectedRun` that Store just derived from that same Program;
-- catalog-`Arc` equality checks at each internal handoff;
-- `RunFrame::new(...).validate()` followed by Store frame validation;
-- `RawFrameBytes` rechecking canonical bytes and digest produced by Journal encoding in the same
-  process;
-- `RawRunPrefix`, `QualifiedRun`, and replay independently checking the same loaded prefix;
-- contract refs carried separately from a typed value and compared again downstream;
-- Store fact-publication coordinate binding, frame rebuilding, and coordinate revalidation;
-- scope/epoch/tenant equality checks in every open, load, append, hash, and query; and
-- Store replay terminality checks duplicated by Runtime's execution reducer.
-
-The implementation should inventory each `validate`, `qualify`, `reify`, `try_downcast`, contract
-comparison, and catalog-brand comparison. Every remaining call must name the trust transition it
-protects. “Another crate called us” is not a trust transition.
-
-### 3.3 Absorbed Followups scope
-
-The moved sections are represented once in this RFC:
-
-| Former Followups section | Normative home here |
-| --- | --- |
-| 5.2 correlated value and registered start | Sections 4.2 and 12.1 |
-| 5.3 typed lifecycle and 5.4 hot/cold convergence | Sections 4.1--4.4 and 7.2--7.4 |
-| 5.5 bounded progression | Sections 4.6, 4.8, and 7.6 |
-| 5.6 acknowledgement/custody | Section 4.7, preserving this RFC's private-owner policy rather than the superseded discard policy |
-| 5.7 durable public view | Section 4.8, owned by Runtime rather than Store |
-| 5.8 Runtime/App deletions | Sections 9.2, 9.6, and 10 |
-| 10.2 Store placement | Sections 2.4, 6, and 9.4 |
-| 10.3 Runtime placement | Sections 4, 7, and 9.2 |
-
-The deferred Followups RFC points to these contracts and adds no parallel implementation.
-
-## 4. Target Runtime design
-
-### 4.1 One affine execution cursor
-
-Runtime owns one internal `ExecutionCursor`. It retains:
-
-- the Journal-qualified history;
-- the retained Program qualified against the current Runtime assembly;
-- current Program address;
-- exact current run head;
-- latest typed context proof; and
-- exactly one private typed step owner.
-
-Its conceptual states are:
-
-```text
-ReadyPure<S> {
-  input: ProvenValue<S::Input>,
-}
-
-ReadyAccess<S, C> {
-  input: ProvenValue<S::Input>,
-}
-
-PreparedAccess<S, C> {
-  input: ProvenValue<S::Input>,
-  intent: ProvenValue<C::Intent>,
-  binding,
-  fact_selection,
-}
-
-CommittedCall<S, C> {
-  exact preparation identity and typed call authority,
-}
-
-TypedConclusion<S, C> {
-  evidence: ProvenValue<C::Evidence>,
-  outcome: ProposedStateOutcome<S::Output, S::Failure>,
-  fact_proposals,
-}
-```
-
-These names are explanatory, not a requirement to expose five new public structs. They may be
-private variants implemented by concrete generic drivers. The normative property is that input,
-intent, evidence, outcome, Program occurrence, and preparation identity remain correlated by a
-single owner.
-
-### 4.2 One private heterogeneous dispatch
-
-Runtime assembly is the sole concrete association between persisted contracts and Rust execution
-types. It registers one exact value codec per stable contract, schema identity, and Rust `TypeId`
-association, one exact capability driver per complete capability association, and one
-`RegisteredState` per complete State execution association. Program keeps
-stable declarations and schema identities, but no Program-owned reifier, `TypeId` registry,
-execution callback, or process-local catalog brand remains.
-
-`RuntimeAssemblyBuilder::register_value<T>()` is the one trusted way to install an exact value
-registration in that same assembly. Pure/Access State registration resolves its input, output, and
-failure slots from the table; capability registration resolves intent/evidence slots and the exact
-Read/Effect, attempt-bound, and fact-selection behavior.
-Explicit registration also covers root admission/result values in a zero-State Program and values
-used only by Match declarations. Assembly finalization rejects duplicate or inconsistent slots;
-later `ExecutableProgram` association fails if that Program needs an exact slot that is absent.
-This is one internal assembly table, not a second public value registry.
-
-Every persisted State declaration carries an exact failure contract. An infallible State uses the
-reserved closed `mfm.never` contract rather than absence, so a complete execution key is always
-derivable from retained Program bytes. Access declarations also persist the complete capability
-association needed below; intent/evidence types are never recovered from an
-implementation-reference-only or capability-reference-only fallback.
-
-A value registration whose contract is a closed sum also contains one pure
-`MatchProjection` derived from that exact schema descriptor. It strictly projects the canonical
-selector into its stable tag and canonical payload, and declares the exhaustive tag-to-payload
-contract table. It performs no domain callback, State execution, adapter lookup, provider IO, or
-authoring. `ExecutableProgram` association proves that each `MatchDeclaration` has exactly that
-tag set, the declared payload contract for each tag, a registered payload codec, and the common
-continuation contract. The reducer then projects and qualifies the selected payload through those
-registrations; it never parses an ad hoc `serde_json::Value` or asks Program/Store for a callback.
-
-The correlated value family is conceptual rather than a required public API:
-
-```text
-ProvenValue<T> {
-  private exact Runtime value registration,
-  value: T,
-  canonical,
-  value_ref,
-}
-
-ErasedProvenValue {
-  private exact Runtime value registration,
-  canonical,
-  value_ref,
-  value: Box<dyn Any + Send + Sync>,
-}
-```
-
-`ProvenValue<T>` is constructed only by the exact typed Runtime registration after strict
-canonicalization/validation of a trusted `T`, or after that registration strictly decodes retained
-canonical bytes. `ErasedProvenValue` is non-Clone, non-Serde, and private to Runtime. It exists only
-across the data-selected State registry handoff; it is never a Store, Journal, App, replay-report,
-or adapter currency. A contract reference cannot be supplied separately from either proof.
-
-The registry key is the complete persisted execution association:
-
-```text
+~~~text
 StateExecutionKey {
   implementation_ref,
   input_contract_ref,
   output_contract_ref,
   failure_contract_ref,
-  capability: None | Some {
-    capability_contract_ref,
-    intent_contract_ref,
-    evidence_contract_ref,
-    mode: Read {
-      total_attempt_bound,
-      fact_selection_required,
-    } | Effect {
-      fact_selection_required,
-    },
-  },
+  kind:
+      Pure
+    | Access {
+        capability_contract_ref,
+        intent_contract_ref,
+        evidence_contract_ref,
+        mode: Read { total_attempt_bound } | Effect,
+        binding_ref,
+        physical_target_ref
+      }
 }
+~~~
 
-RegisteredState {
-  key: StateExecutionKey,
-  private exact input/output/failure registrations,
-  private optional exact capability registration,
-  start: StateStart,
+`binding_ref` selects the compiled adapter association. `physical_target_ref` commits to the exact
+secret-free public target descriptor consumed by that adapter. Credentials and clients remain
+process-local and are never key material.
+
+### 3.4 One private heterogeneous driver boundary
+
+The retained Program selects a concrete Rust State at runtime, so one private object-safe dispatch
+is unavoidable. RuntimeAssembly stores one private `RegisteredState` driver per exact execution
+key. That single driver boundary owns the whole selected State attempt:
+
+- decode or downcast the exact input;
+- prepare or evaluate `S`;
+- for Access, retain `PreparedAccess<S, C>` through preparation append and retain
+  `CommittedCall<S, C>` through provider ingress;
+- interpret and qualify the exact typed outcome;
+- encode and append the resulting Journal frame; and
+- return only a small non-generic durable disposition to the outer progression loop.
+
+`PreparedAccess`, `CommittedCall`, accepted evidence, and typed conclusions never cross that
+boundary. They live only in the active caller-owned monomorphic driver future. Dropping that future
+drops those owners; no existential owner table or second dynamic lifecycle protocol exists.
+
+One private `HotValue` wrapper may carry a just-qualified value across a successfully durable
+append into the next selected driver:
+
+~~~text
+ProvenValue of T
+  -> private short-lived HotValue
+  -> exact RegisteredState.start
+  -> ProvenValue of S::Input inside monomorphic S/C code
+~~~
+
+Cold values are decoded directly by the selected monomorphic RegisteredState.start from their
+Journal-qualified canonical object. `HotValue` is usable only when the subsequent fold proves that
+its contract and content reference are the exact selected input at the exact durable head;
+otherwise Runtime discards it and uses the cold path. It is never stored, cloned into a DTO, passed
+to Journal or Store, exposed to App, or retained across an await outside the active progression
+future.
+
+Box of Any is not prohibited inside this one private driver boundary. Any second supported
+erase/downcast workflow is prohibited.
+
+### 3.5 Configuration is a value contract
+
+MfmConfig extends MfmValue and adds only deterministic semantic validation:
+
+~~~text
+MfmConfig: MfmValue {
+  validate(config) -> Result
 }
+~~~
 
-StateStart = Arc<
-  dyn Fn(StartContext, ErasedProvenValue) -> StateFuture
-    + Send
-    + Sync
-    + 'static,
->
-```
+Configuration registration enriches the same Runtime value slot. There is no second configuration
+codec registry, Rust-type-only routing, or duplicated schema reference.
 
-Pure uses no capability key. Access uses its complete exact capability association. Duplicate
-complete keys, or one complete key resolving to different codec/type metadata, fail assembly.
-Sharing `implementation_ref` across distinct complete keys is allowed. Lookup never uses a partial
-prefix and never falls back to implementation reference alone. Missing registrations and
-incompatible schema/type registrations fail association before execution.
+## 4. Runtime design
 
-`effect_domain`, the immutable binding reference, and the maximum conclusion reservation are
-occurrence data rather than State-driver identity. Runtime still validates them exactly against
-the selected Access registration and retained occurrence before work.
+### 4.1 Sole semantic reducer
 
-Adapter selection remains occurrence-specific. After the State key matches, Runtime validates the
-declaration's exact immutable binding reference under the already-selected State/capability
-driver. The monomorphic Access `StateStart` captures that driver's typed adapter table;
-`StartContext` supplies the validated occurrence and `binding_ref`, and the start resolves a
-`QualifiedAdapter<S, C>` directly without another `Any`, erased adapter, or downcast. Registering
-several bindings does not duplicate the semantic State driver. `StartContext` carries only Runtime
-authority for that exact occurrence; it is not an ambient domain context map.
+Runtime owns one pure fold over:
 
-Registering concrete `S` installs one monomorphic start function. An Access registration is
-conceptually:
+- an ExecutableProgram;
+- one JournalHistory;
+- the exact qualified ConfigurationRevision referenced by admission; and
+- the compatible RuntimeAssembly.
 
-```text
-register_access<S, C>(assembly, implementation):
-  input_registration = assembly.registered_value::<S::Input>()?
-  output = assembly.registered_value::<S::Output>()?
-  failure = assembly.registered_value::<S::Failure>()?
-  capability = assembly.registered_capability::<C>()?
-  adapters = assembly.registered_adapters::<S, C>()?
+The fold yields one private state:
 
-  RegisteredState {
-    key: exact key derived from S and C,
-    exact registrations,
-    start: move |context, erased_input| {
-      start_typed::<S>(context, erased_input, input_registration, |context, typed_input| {
-        adapter = adapters.resolve(context.occurrence, context.binding_ref)?
-        run_typed_access::<S, C>(context, typed_input, implementation, adapter)
-      })
-    },
-  }
-```
+- Runnable with occurrence, StateExecutionKey, and current retained value;
+- Waiting on an unresolved Access preparation;
+- Succeeded with the exact retained terminal value;
+- Failed with the exact retained declared failure; or
+- an explicit semantic inconsistency.
 
-Exact Rust spelling is intentionally non-normative. Pure registration supplies its typed Pure
-runner to the same `start_typed` implementation and introduces no fake capability. `StateFuture`
-is private and does not create a second public cursor or lifecycle algebra.
+The reducer validates:
 
-`start_typed` contains the only dynamically selected State-context downcast. It checks the private
-registration identity, stable contract, schema identity, assembly identity, and `TypeId` before
-moving the value into `ProvenValue<S::Input>`. A mismatch is a redaction-safe internal
-Program/assembly inconsistency and stops before State, adapter, provider, or append work. There is
-no alternate decoder or fallback key.
+- genesis/entry point/Program/context/configuration association;
+- State-or-Match occurrence order;
+- input/output/failure contract continuity;
+- exact Access preparation and conclusion relationship;
+- Read replacement count and Effect one-entry discipline;
+- evidence and outcome contracts;
+- Match selector/payload continuity; and
+- terminality.
 
-The proof wrapper remains Runtime-private. State and capability callbacks receive only their
-ordinary typed domain inputs (`S::Input`, `C::Intent`, `C::Evidence`, or borrows thereof); they
-cannot observe or alter canonical bytes, content references, registration witnesses, or cursor
-ownership. Runtime retains that correlated metadata around the callback and qualifies the returned
-typed value once.
+It does not execute State preparation/evaluation/interpretation, call an adapter, perform provider
+IO, re-author a Program, or select current configuration.
 
-Capability intent and evidence stay typed inside the selected Access driver. The driver strictly
-decodes retained `C::Intent` and `C::Evidence`, verifies exact request/call/evidence binding, and
-derives fact requests through `C`; it does not route those values through the State-context
-existential. Runtime qualifies a typed `ProposedStateOutcome<S::Output, S::Failure>` into the exact
-output or failure `ProvenValue` and a correlated fact-proposal proof before Journal encoding or hot
-promotion.
+Execution, resume, read, and portable inspection all use this reducer. There is no Store reducer or
+replay reducer.
 
-Lookup is dynamic; execution after lookup is typed:
+### 4.2 Direct-new provider-entry proof
 
-```text
-Program declaration
-  -> exact StateExecutionKey
-  -> RegisteredState.start
-  -> start_typed::<S>
-  -> ReadyPure<S> or ReadyAccess<S, C>
-  -> typed State/capability methods
-```
+Only this transition grants provider-entry authority:
 
-Runtime first associates the complete supplied Program with this assembly: every State execution
-key, Match projector, capability, value/schema contract, binding contract, and entry point must
-resolve semantically. Before admission, Runtime additionally requires every Access binding in that
-Program to resolve to its exact live adapter. Admission then retains exactly one canonical Program
-object in the genesis closure. On cold resume, Journal proves that object is present and
-content-addressed, Program strictly decodes it and verifies the recorded reference, and Runtime
-compares its entry point with `RunAdmitted` before repeating semantic association and folding. A
-live adapter is required on new-run admission and when cold execution is about to enter the
-selected Access occurrence. Inspection never requires or invokes one. No current-code planner may
-substitute a Program.
+~~~text
+local PreparedAccess of S/C
+  + Store returned Inserted for that exact preparation append
+  -> local affine CommittedCall of S/C
+~~~
 
-The resulting private `ExecutableProgram` is the process-local proof that every retained
-declaration has one exact `RegisteredState`, every Access occurrence's immutable binding reference
-is compatible with that State/capability key, every Match projector is exhaustive and exact, and
-the root admission contract matches the selected entry point. It caches stable occurrence and
-binding references plus semantic compatibility, never an erased adapter handle. Missing,
-ambiguous, or mismatched semantic association fails before `RunAdmitted`; cold resume and semantic
-inspection report assembly incompatibility and perform no write. Missing live adapter availability
-prevents only admission or actual Access entry. The proof is derived from the retained Program on
-cold paths and never serialized.
+The following never mint CommittedCall:
 
-On the hot path, Runtime promotes the typed output it already owns into the next cursor state. It
-does not serialize, ask Store to requalify, and deserialize its own output. Journal bytes are built
-for durability while Runtime retains the correlated proof. When the next State is data-selected,
-the value crosses the one private erased handoff and immediately re-enters typed execution.
+- Existing;
+- Stale;
+- Indeterminate;
+- retained history;
+- caller cancellation;
+- process restart; or
+- finding the same preparation during cold fold.
 
-On cold resume, the exact selected driver decodes retained current context into its concrete type
-once while the reducer establishes the new process-local cursor. Historical semantic validation
-uses the same registered codecs without invoking State, adapter, or provider callbacks. Once the
-cursor exists, hot execution uses the retained proof.
+Store can return Inserted at most once for one exact preparation position. PreparedAccess is
+affine, and promotion consumes it. Therefore MFM grants at most one provider-entry authority for
+each preparation.
 
-### 4.3 Runtime owns selection
+Read may append a bounded new preparation after an unresolved earlier attempt. An Unresolved result
+or loss of the hot Read owner ends the current top-level call as Waiting; a later resume may create
+at most one replacement for that occurrence in that call while the total attempt bound remains.
+Effect and a Read at its bound remain Waiting and never replace their preparation.
 
-There is one callback-free reducer for execution, cold resume, status, and replay. It consumes an
-`ExecutableProgram`, the consumer `JournalHistory`, and exact `QualifiedRunDependencies` and yields
-one private `ReducedRun` containing either:
+### 4.3 One bounded caller-driven progression loop
 
-- a runnable selection `{ occurrence, StateExecutionKey, current value proof }`;
-- a waiting preparation/conclusion condition;
-- terminal typed success;
-- declared typed failure; or
-- a redaction-safe inconsistency error.
+start and resume call one private advance_until_stable loop. It repeatedly:
 
-`QualifiedRunDependencies` is a process-local proof bundle, not a second history or reducer. Its
-root contains the Journal-qualified configuration revision header and envelope matching the
-consumer admission's
-immutable `ConfigurationRef` and one `ProvenFactSnapshot` for every retained preparation that
-carries a `FactSelection`. Each snapshot binds the retained request and frontier to authenticated
-physical index coverage and the exact qualified producer nodes named by its provenance. Missing,
-extra, conflicting, or insufficient dependency material is a typed
-`MissingDependencies`/invalid-history result; Runtime never treats a consumer run alone as proof of
-external facts.
+1. loads and qualifies the current durable run;
+2. folds it under the retained Program;
+3. enters at most one selected RegisteredState at a time;
+4. appends its preparation or conclusion mechanically; and
+5. folds the resulting durable state before continuing.
 
-The bundle is a bounded, deduplicated dependency DAG. Each producer node contains its
-Journal-qualified run prefix through the referenced producer frame, that prefix's retained Program
-associated into its own `ExecutableProgram` under the same `RuntimeAssembly`, its admission's exact
-Journal-qualified configuration revision header and envelope, and the fact snapshots for any
-selections retained by that prefix. Configuration revision headers/envelopes are deduplicated by
-full immutable `ConfigurationRef`; Program association proofs remain node-specific and
-process-local. Producer nodes are semantically folded only through the referenced frame.
-Append-only-log consistency proofs and strictly earlier publication frontiers make the graph
-acyclic; Runtime rejects cycles, non-prefix/forward/self dependencies, and node/depth/byte limits
-plus one.
+Runtime stops at:
 
-Store-backed resume/read constructs the root and every producer node by loading each exact
-configuration reference, obtaining the authenticated fact-index proof at each recorded frontier,
-and loading each producer run through the recorded producer head. Journal structurally qualifies
-all envelopes, histories, and index proofs; Program decodes every retained Program; and Runtime
-performs every Program association and cross-history semantic correlation. Journal's portable codec
-carries the equivalent bounded dependency bytes. Therefore portable semantic inspection can return
-a proven `RunView` only from a complete portable bundle; a run-only export remains useful as
-structural data but is not semantic inspection input when external dependencies are referenced.
+- terminal success or declared failure;
+- an unresolved preparation with no immediately permitted action;
+- the nonzero per-call State-start bound;
+- an indeterminate append;
+- semantic conflict or invalid history;
+- incompatible assembly;
+- capacity; or
+- infrastructure failure.
 
-The reducer never reads Runtime's process-local pending-owner table. The acknowledgement
-coordinator joins a `ReducedRun` with an exact pending append only after the durable fold, and live
-cursor materialization happens only after that classification. A runnable `ReducedRun` is not a
-typed State step and contains no `StateFuture`; only `start`/`resume` may pass its selected value to
-the exact `RegisteredState.start`. `read`, status, replay, trace, and audit map the same selection to
-`RunView::Runnable` without starting it. Semantic inspection therefore requires compatible
-semantic codec/contract registrations from one `RuntimeAssembly`, but no live adapter;
-incompatibility is a typed result, not a reason to fall back to a second reducer or current
-authoring code.
+Runtime uses bounded semaphores for active progression, blocking CPU work, and provider ingress.
+They are resource controls, not recovery owners.
 
-There is no public Store-level `RunAction` algebra. Process-facing Runtime APIs expose only the
-durable view and reviewed Runtime errors described below, not Store selection internals.
+There is no scheduler, timer, background run progression, process-wide writer lease, process-local
+per-run lock, pending append table, resolver queue, or retained recovery token.
 
-### 4.4 Direct-new provider-entry proof
+### 4.4 Cancellation and process loss
 
-Direct-new gating remains because it proves a real safety property:
+Durable history is the only recovery authority. Runtime does not preserve volatile work when a
+caller future is dropped.
 
-```text
-PreparedAccess<S, C>
-  -> Journal encodes StatePrepared
-  -> Store append
-       Inserted  -> consume PreparedAccess -> CommittedCall<S, C> -> provider entry
-       Existing  -> do not mint call; fold durable history
-       Stale     -> do not mint call; reload and fold
-       AcknowledgementUnknown -> preserve exact pending owner; do not mint call
-```
+#### Deterministic work
 
-Only Runtime can perform the promotion because Runtime owns the typed preparation. Store returns a
-mechanical result; it does not construct `AccessPreparationOutcome` or another semantic owner.
+Cancellation before an append may discard Program association, State preparation, Pure evaluation,
+Access interpretation, canonical qualification, or frame encoding. That work may be recomputed
+from durable history.
 
-### 4.5 Admission and conclusion races
+#### Preparation append
 
-Admission uses expected head `Absent`. Store's exact-ID `Existing` yields `CommittedExact` only
-after command-digest equality. If another append identity already created the run, Runtime loads and
-qualifies its genesis and classifies `AlreadyAdmittedSame` only when entry point, exact retained
-Program/object closure, admitted context, configuration reference, and sources are identical.
-Different genesis under the same `RunId` is `AdmissionConflict`. An unknown acknowledgement is
-resolved only by reissuing the identical command through Store's idempotency-first transaction;
-that transaction returns `Inserted`, exact `Existing`, `Stale`, a definite no-commit error, or
-another unknown. Missing/corrupt/non-genesis-first history is `InvalidHistory`. Concurrent starts
-therefore converge on the existing semantic admission or one distinct conflict and never expose an
-unqualified head.
+A cancelled preparation append may have committed or rolled back. Because the caller did not
+observe Inserted, it mints no CommittedCall.
 
-Runtime encodes its typed conclusion against an exact expected head. `Stale` keeps the owner leased
-while Runtime reloads retained bytes, Journal qualifies them, and the same Runtime reducer
-classifies the result below. `AcknowledgementUnknown` first reissues the identical command through
-the idempotency-first Store path; another unknown returns `Indeterminate`, exact
-`Inserted`/`Existing` proves the command durable, and only a resulting `Stale` enters reload
-classification:
+On a later load:
 
-1. `CommittedExact`: the same append identity contains the byte-identical frame and physical
-   attachment;
-2. `AlreadyConcludedSame`: another append identity durably recorded the same semantic conclusion
-   for the occurrence;
-3. `NoLongerSelected`: a permitted Access replacement superseded the preparation;
-4. `Conflict`: another valid non-identical conclusion owns the occurrence;
-5. `InvalidHistory`: structural or semantic qualification fails; or
-6. a typed permanent rejection when the exact pending append is not admissible.
+- absence permits deterministic recomputation;
+- a durable Read preparation may permit a bounded replacement; and
+- a durable Effect preparation parks.
 
-Store does not return `SelectedConclusion`. PostgreSQL's append receipt and retained rows contain
-all mechanical evidence needed for Runtime to decide.
+An Effect may therefore park even when cancellation occurred after preparation commit but before
+provider entry. This is accepted availability loss.
 
-`CommittedExact` and `AlreadyConcludedSame` release the durable result without callback re-entry.
-`NoLongerSelected` discards the local result and continues from retained history. `Conflict` is a
-distinct operational error. `InvalidHistory` and permanent rejection fail closed. Reusing an
-append identity with different expected head, bytes, closure, reservation, or sealed publication
-attachment is `IdempotencyConflict`, never `Existing`; `Stale` remains mechanical evidence that
-Runtime must classify semantically. Finding a preparation in history, including the exact one,
-never recreates provider-entry authority.
+#### Provider ingress
 
-An exact-ID `Existing` receipt is intentionally returned before current-head comparison and may be
-historical after later appends. It proves only that its exact candidate committed. Before returning
-a current `RunView` or starting further work, Runtime authoritatively loads and folds `Current`
-unless that same authority separately proves the receipt head is still current. This rule applies to
-admission and Pure/Access conclusions; configuration `Existing` differs because its result is one
-immutable revision proof rather than a run-progression cursor.
+Once provider ingress is polled, cancellation may mean the provider did nothing, remains in flight,
+or performed the Effect. Runtime does not infer which. The affine call authority is lost.
 
-Retrying the same owner means Runtime reissues the byte-identical borrowed `RunAppend` to the same
-primary Store authority. Store's mandatory idempotency-first transaction either finds the durable
-command, inserts it only if the head is still the exact predecessor, returns stale, proves a
-definite no-commit error, or remains unknown. `UnavailableBeforeSubmission` retains the owner for a
-later identical retry; only permanent command rejection (`InvalidPhysicalCommand`,
-`IdempotencyConflict`, or immutable append-capacity failure) consumes it. Corruption before
-exhaustive classification retains custody and fails closed. There is no
-replica/cache lookup or snapshot miss that authorizes retry, and no retry uses a new append identity.
-Another unknown result leaves Runtime `Indeterminate` with the same owner.
+Read may later replace. Effect parks and never recreates the call.
 
-None of these branches re-enters a State, adapter, provider, fact selector, or authoring callback.
+#### Accepted provider result
 
-### 4.6 One bounded process-facing progression path
+Cancellation may discard accepted evidence, the interpreted outcome, or an encoded conclusion.
+No conclusion is promised until Store durably reports Inserted or exact Existing.
 
-Runtime exposes typed start and resume methods that delegate to one private
-`advance_until_stable`. Read/inspect uses the same reducer without executing work. Start and resume
-drain immediately actionable sequential States until the first stable external boundary:
+If conclusion append acknowledgement is lost, a later complete load reveals either the conclusion
+or the unresolved preparation. Read may replace only in the latter case; Effect parks.
 
-- terminal success or declared terminal failure whose exact retained value is durable;
-- a durable preparation or unresolved provider result that permits no immediate action;
-- the nonzero per-call State-start bound reached at a durable runnable head;
-- an acknowledgement owner still indeterminate after its bounded resolution attempt;
-- a same-run conflict or invalid history;
-- absence, assembly incompatibility, or a redaction-safe capacity/infrastructure failure.
+#### Process death
 
-`RuntimeLimits` owns nonzero bounds for active progression calls, deterministic CPU work, provider
-ingress, `max_state_starts_per_call`, and retained pending append owners. The State-start bound is
-checked only at a durable boundary before entering another `RegisteredState.start` and counts each
-start once. Runtime never interrupts an active State or provider future merely to manufacture a
-yield. Reaching the bound returns a `Runnable` durable view; a later resume continues from that
-head without replaying a durable conclusion.
+Process death has the same semantic result as losing every local future. No in-memory owner or
+command survives. The design provides no false claim that spawn_blocking or process-local custody
+can make process death recoverable.
 
-This remains caller-driven execution, not scheduling. Runtime creates no background worker, timer,
-queue, general per-run execution lock, or process-wide writer lease. Concurrent callers and
-processes may fold the same head and race one mechanical compare-and-append. App requests progress;
-it never requests one raw State step.
+### 4.5 Blocking work contract
 
-### 4.7 Private acknowledgement-owner fate
+State preparation, Pure evaluation, Access interpretation, integrity projection, value
+qualification, and substantial canonical work run through bounded spawn_blocking jobs when they
+may block the async executor.
 
-Runtime, not App or Store, owns one bounded process-local table of affine admission, preparation,
-conclusion, and configuration append owners whose physical or semantic append fate is not yet
-exhaustive. That includes in-flight/unknown acknowledgement, retryable definite no-commit failure,
-and stale-result classification. The table is keyed by complete physical append identity, permits
-several concurrent owners for one `RunId`, and is bounded before submission. Capacity failure
-occurs before append or provider work.
+Dropping the awaiting future does not necessarily stop the blocking closure. A detached closure:
 
-Conceptually, its key and value families are:
+- may finish its pure deterministic CPU work;
+- has its result discarded;
+- owns no Store or provider handle;
+- performs no ambient IO;
+- performs no append;
+- invokes no subsequent State; and
+- cannot publish a successful RunView.
 
-```text
-PendingKey = Run { run_id, append_request_id }
-           | Configuration { append_request_id }
+The blocking-work permit is moved into the closure, so caller cancellation does not free capacity
+while detached CPU work is still running. Registered callbacks are trusted, bounded-input, pure,
+and terminating. Runtime bounds concurrency, not CPU time.
 
-PendingAppend = Admission { proven_c0, executable_program, run_append }
-              | Preparation { prepared_access, run_append }
-              | Conclusion { typed_conclusion, successor, run_append }
-              | Configuration { pending_configuration, configuration_append }
-```
+### 4.6 Admission and conclusion races
 
-Run progression indexes only `Run` entries. Repeated high-level configuration publication indexes
-only `Configuration` entries and returns its separate typed configuration result/error contract.
+Admission uses expected position Absent.
 
-The capacity permit is acquired before work that can create the corresponding append authority and
-travels with that authority. For Access it follows
-`PreparedAccess -> CommittedCall -> TypedConclusion -> PendingAppend`, so a provider result can
-always enter acknowledgement custody without a post-provider capacity failure. Admission,
-configuration, and Pure conclusion paths likewise reserve before the operation that can produce an
-append candidate. An inserted preparation transfers, rather than releases, its same permit into
-`CommittedCall` and then `TypedConclusion`; it is released only after that conclusion is durably
-qualified or reaches an exhaustive terminal fate. Admission, Pure conclusion, and configuration
-permits release after exact durable qualification, definite rejection, or explicit trusted-process
-discard. Stale/reload classification either transfers the permit into the next named owner or
-releases it; no branch silently loses or duplicates capacity liability.
+- Inserted commits the exact genesis.
+- Existing proves the exact same physical admission command is already durable.
+- Stale causes Runtime to load genesis. Exact semantic admission is accepted; a different genesis
+  under the same RunId is AdmissionConflict.
+- Indeterminate retains nothing. The caller repeats exact start inputs or later reads the RunId.
 
-Ownership transfers into the table before the append await. An in-flight resolution uses a
-cancellation-safe lease that returns the exact owner to the table if the caller future is dropped.
-The lease stays live until all Store loading, Journal/dependency qualification, and Runtime folding
-needed for the branch has completed:
+Conclusion uses the exact selected head. After Stale, Runtime may reload while the caller remains
+present and classify:
 
-| Observation | Affine owner fate |
-| --- | --- |
-| `Inserted` | Verify receipt/command correlation and the already Journal-sealed candidate, then transfer/promote/release into the exact durable fate. |
-| run command-identical `Existing` | The candidate is durable, but its immutable receipt may name a historical head. Keep the lease through an authoritative current-head load, dependency qualification, and fold unless that load separately proves the receipt still current. Never hot-promote from an old receipt; `Existing` preparation never mints a call. Configuration `Existing` instead promotes its exact immutable revision after header/envelope qualification. |
-| run `Stale` | Keep the lease through current-run/dependency load and semantic classification. Cancellation, capacity, corruption, or infrastructure failure before classification returns it to the table. |
-| configuration `Stale` | The exact expected global configuration head is no longer current, so this is an exhaustive typed configuration conflict; consume the candidate without loading a run. |
-| `AcknowledgementUnknown` | Return the same owner to the table and report `Indeterminate` after the bounded identical retry. |
-| `UnavailableBeforeSubmission` | Return the owner to the table; the exact command remains retryable. |
-| `CorruptPhysicalState` before exhaustive classification | Return the owner to the table and fail closed; operator repair or process loss decides its later fate. |
-| append-time `InvalidPhysicalCommand`, `IdempotencyConflict`, or immutable `MAX_RUN_BYTES`/reservation `Capacity` | Consume the owner into a permanent typed rejection because the identical command can never become valid. |
-| completed stale classification (`Already*`, `NoLongerSelected`, `Conflict`, semantic `InvalidHistory`, or permanent rejection) | Transfer or consume according to that exhaustive semantic fate. |
+- AlreadyConcludedSame when the exact semantic conclusion record already owns the occurrence;
+- NoLongerSelected when a permitted Read replacement superseded the preparation;
+- Conflict when a different valid conclusion owns it; or
+- InvalidHistory.
 
-Load-time capacity is not append-time capacity: if it prevents stale classification, the owner
-remains retained. Exact synchronization and container spelling are implementation details, but an
-unbounded map, post-await insertion window, cloneable retry token, or owner exposed above Runtime
-is forbidden.
+If that load or the caller is cancelled, no owner is retained. The next request starts from a fresh
+complete load.
 
-Cancellation safety also covers the work around append awaits. The phases are exhaustive:
+### 4.7 RunView and public Runtime surface
 
-1. Before the preparation append commits, cancellation during deterministic State preparation,
-   fact loading, or submission discards only the uncommitted candidate and releases its unused
-   permit; no provider call exists.
-2. Once an inserted preparation mints `CommittedCall`, cancellation before provider ingress or
-   while its future is in flight consumes that call authority, releases the permit, and leaves only
-   the already durable preparation. There is no retained-call table or inferred re-entry; later
-   progress follows the ratified cold-recovery rule.
-3. Once provider ingress returns accepted Outcome or BlockedIntegrity, Runtime performs bounded
-   synchronous interpretation/qualification and installs `TypedConclusion` in acknowledgement
-   custody before the next cancellation point. Cancellation after that handoff returns the exact
-   conclusion lease and its still-transferred permit to the table. An Unresolved result instead
-   consumes call authority, releases the permit, and leaves only the durable preparation.
+RunView is a private-field, non-Serde trusted-core type:
 
-Start or resume first resolves every pending owner relevant to that run before selecting new work.
-One bounded resolution attempt reissues the exact borrowed append through Store's
-idempotency-first transaction, reloads stored bytes when classification requires it, asks Journal
-to qualify them, and folds them with the same Runtime reducer. If the result remains
-unknown, Runtime returns `RunError::Indeterminate { run_id }` and retains the owner; it does not
-fabricate a head or execute new State/provider work. Read remains callback-free and may report only
-the currently durable `RunView`; it neither resolves nor exposes pending ownership.
-
-Owner-specific promotion remains strict:
-
-- an inserted preparation consumes `PreparedAccess<S, C>` into `CommittedCall<S, C>`;
-- a preparation later found after acknowledgement loss never recreates direct-new provider-entry
-  authority and folds as a durable preparation, allowing only the declared Read replacement or
-  Effect parking rules;
-- an inserted conclusion releases the retained typed successor only after its durable frame is
-  qualified; a command-identical `Existing` also proves that frame durable, but Runtime folds the
-  current head before further execution and uses the retained successor hot only if an authoritative
-  current-head load proves the receipt is still current;
-- an inserted admission releases its retained typed `C0` only after the exact genesis and Program
-  closure are qualified; command-identical `Existing` follows the same current-head rule rather than
-  treating an old genesis receipt as the current run; and
-- an inserted or found-identical configuration append promotes the retained typed revision under
-  its exact Runtime registration from `PendingConfiguration<C>` into
-  `ProvenConfiguration<C> { value, canonical envelope, ConfigurationRef }`.
-
-Process death discards process-local owners. Cold recovery derives no provider-entry authority from
-history: Pure may be recomputed, Read may replace only within its declared bound, and an unresolved
-entry-once Effect remains parked. A trusted process shutdown may explicitly discard its entire
-private table; there is no per-owner Application or transport disposal endpoint.
-
-### 4.8 One Runtime-owned durable run view
-
-Runtime's callback-free reducer projects every qualified durable history into one
-transport-independent contract:
-
-```text
+~~~text
 RunView {
   run_id,
   head_sequence,
   head_digest,
-  state: Runnable | Waiting | Succeeded(RetainedValueView) | Failed(RetainedValueView),
+  state:
+      Runnable
+    | Waiting
+    | Succeeded(RetainedValueView)
+    | Failed(RetainedValueView)
 }
 
 RetainedValueView {
   contract_ref,
   value_ref,
-  canonical,
+  canonical
 }
-```
+~~~
 
-Every `RunView` has a real qualified genesis and head. `Runnable` means the durable Program head
-permits another State, including a work-bound stop. `Waiting` means retained history currently
-permits no immediate action. `Succeeded` and `Failed` carry only the exact terminal value and
-contract proven by the retained Program and history; a nonterminal Match or recoverable path is
-still `Runnable`.
+Every RunView names one real qualified durable head. It is a snapshot: a transaction whose
+acknowledgement was previously indeterminate may commit after an earlier view was captured.
 
-Start, resume, and read return this same view whenever a qualified durable view is the result.
-Absence, indeterminate acknowledgement, conflict, invalid history, assembly incompatibility,
-missing semantic dependencies, capacity, and infrastructure failure remain distinct redaction-safe
-errors rather than view variants. App does not inspect `RunFrame`, infer status, or install a
-terminal projector.
+The core process-facing surface is:
 
-Status, terminal result, trace, audit, replay, and export are callback-free projections over the
-same Journal-qualified history and Runtime reducer. Inspection projections may use Runtime's exact
-value/capability codecs and structural Match metadata, but it invokes no State implementation,
-adapter, provider, configuration authoring, or other ambient IO.
+~~~text
+publish_configuration<C>(instance_id, expected: Absent | ConfigurationPosition, C)
+  -> ProvenConfiguration<C>
+load_configuration<C>(ConfigurationRef) -> ProvenConfiguration<C>
+load_latest_configuration<C>(instance_id) -> ProvenConfiguration<C>
 
-## 5. Target Journal design
+start(run_id, Program, ProvenConfiguration<C>, typed_c0) -> RunView
+resume(run_id) -> RunView
+read(run_id) -> RunView
+export(run_id) -> PortableRunBundle
+RuntimeAssembly.inspect(PortableRunBundle) -> RunView
+~~~
 
-### 5.1 One valid-by-construction codec boundary
+The operation/domain layer deterministically constructs Program and `C0`; Runtime does not own an
+entry-point planner registry. start verifies the Program entry point and exact `C0`/configuration
+contracts before admission. start and resume may execute State/provider work. read, export, and
+inspect do not.
 
-Journal exposes two conceptual directions:
+Absence, AdmissionConflict, semantic Conflict, Indeterminate, InvalidHistory,
+IncompatibleAssembly, Capacity, Unavailable, and redaction-safe Internal failure remain distinct
+errors rather than RunView states.
 
-```text
-trusted Runtime projection
-  -> Journal structural encoder
-  -> EncodedRunFrame { private canonical frame/object bytes, sealed publication attachment }
-stored run bytes -> strict decode/qualification -> JournalHistory
-```
+Trace, access audit, raw frame inspection, and a separate replay response are not core APIs. A
+future required trace or audit must be a pure Runtime-owned projection over the same qualified
+history, never another reducer or Store port.
 
-`EncodedRunFrame` and `JournalHistory` have private fields. `RunFrame` below is the canonical wire
-record inside that codec, not a second public construction DTO. There is no workflow in which callers
-construct a partially checked public DTO, call `validate`, add more fields, and ask Store to check
-it again.
+## 5. Journal design
 
-Journal owns only intrinsic durable rules:
+### 5.1 Canonical wire rules
 
-- canonical JSON and content hashing;
-- float-free hashed structures;
-- frame/object/per-run bounds;
-- record-family shape;
-- exact content-addressed object closure: every referenced closure-local object is present and no
-  unreferenced object is admitted;
-- run ID and dense frame sequence;
-- recursive run head;
-- configuration-revision and fact-index/log proof structure; and
-- strict portable encoding/decoding.
+All hashed structured data uses the repository canonical JSON implementation with JCS-style
+semantics:
 
-Runtime owns all meaning that requires the admitted Program: current context, occurrence
-reachability, State/capability contract association, preparation-to-conclusion legality, Match
-selection, and terminality.
+- UTF-8 canonical JSON only;
+- no floats;
+- no duplicate or unknown object fields;
+- exact tagged variants;
+- no serializer-dependent optional-field omission;
+- arrays in their specified canonical order;
+- bounded strings, arrays, maps, and nesting;
+- canonical bytes must equal strict decode and re-encode; and
+- secrets are rejected before Journal construction.
 
-Genesis qualification is split without duplication. Journal proves that sequence one is the
-unique `RunAdmitted`, its closure contains exactly one canonical `mfm.program` object, the recorded
-`program_ref` names that object, and every closure-local reference is present and content-correct.
-The configuration reference is an external durable dependency, not an object Journal pretends
-belongs to the genesis closure. Source references are intrinsic opaque members of the admitted
-allow-list: Journal proves their bounded sorted/unique representation, while Runtime correlates
-fact requests and selected provenance against them; they do not imply another object-loading
-protocol. Program strictly decodes the retained Program object and proves its graph. Runtime
-compares the Program entry point with `RunAdmitted`, proves the admitted context contract and
-complete Program/assembly association, and validates the external configuration through
-`QualifiedRunDependencies`. Hot admission persists that exact already-validated Program; cold
-resume and portable inspection never rebuild it from current authoring code.
+Protocol counters are non-negative JSON integers bounded by the fixed limits below. Domain values
+retain the canonical representation fixed by their MfmValue schemas.
 
-### 5.2 Lean record shapes
+Journal public construction and strict decoding produce opaque valid types. Open public DTO
+construction followed by validate choreography is deleted.
 
-The target semantic shapes are:
+### 5.2 Run frame wire
 
-```text
+The exact target shape is:
+
+~~~text
+RunFrameV1 {
+  domain: "mfm.run.frame.v1",
+  run_id,
+  run_sequence,
+  previous_head_digest: null | digest,
+  record,
+  objects: sorted-unique [
+    {
+      content_ref,
+      canonical: raw canonical no-float JSON value
+    }
+  ]
+}
+~~~
+
+Exact record tags and fields are:
+
+~~~text
 RunAdmitted {
+  kind: "run_admitted",
   entry_point,
-  program_ref,
-  admitted_context_ref,
-  configuration_ref,
-  source_refs,
+  program_ref: content_ref,
+  admitted_context: content_ref,
+  configuration_ref
 }
 
 StatePrepared {
+  kind: "state_prepared",
   occurrence,
-  intent_ref,
-  fact_selection,
+  intent: content_ref
 }
 
-StateConcluded::Pure {
+StateConcludedPure {
+  kind: "state_concluded_pure",
   occurrence,
-  outcome,
-  fact_proposal_set_ref,
+  outcome
 }
 
-StateConcluded::Access {
+StateConcludedAccess {
+  kind: "state_concluded_access",
   occurrence,
   preparation_sequence,
-  evidence_ref,
-  outcome,
-  fact_proposal_set_ref,
+  evidence: content_ref,
+  outcome
 }
 
-RunFrame {
-  run_id,
+Outcome =
+    { kind: "success", value: content_ref }
+  | { kind: "failure", value: content_ref }
+~~~
+
+Program supplies preparation mode, attempt bound, input/output/failure contracts, execution
+binding, and replacement semantics. ExecutableProgram deterministically derives the maximum
+complete conclusion-frame size from those bounded contracts and fixed frame overhead. None of that
+material is duplicated in the semantic frame.
+
+An accepted integrity block is an Access conclusion with its accepted evidence and the exact
+registered failure outcome. It never invokes the ordinary Access interpreter.
+
+### 5.3 Exact first-reference object closure
+
+Let:
+
+- R_i be the set of data-object content references directly named by record i;
+- K_i be the cumulative object map after frame i; and
+- C_i be the frame i object map.
+
+The recurrence is:
+
+~~~text
+K_0       = empty
+keys(C_i) = R_i minus keys(K_(i-1))
+K_i       = K_(i-1) union C_i
+~~~
+
+Direct data-object references are:
+
+- Program and admitted-context objects for RunAdmitted;
+- intent object for StatePrepared;
+- outcome object for StateConcludedPure; and
+- evidence and outcome objects for StateConcludedAccess.
+
+ConfigurationRef and stable contract/implementation references are external identities, not run
+closure objects. There is no implicit transitive object graph.
+
+Each new content reference has exactly one object whose nested canonical value hashes to that
+reference. A previously known object must not be embedded again. Missing, duplicate, conflicting,
+out-of-order, or unreferenced objects are invalid.
+
+The objects array is sorted by complete content reference. Journal exposes only the qualified
+cumulative object lookup needed by Runtime value registrations.
+
+### 5.4 Recursive run head and semantic record equality
+
+The frame head is:
+
+~~~text
+run_head_digest = SHA-256(JCS(RunFrameV1))
+~~~
+
+The domain field prevents cross-format reuse. The frame does not contain its own digest.
+
+Genesis requires:
+
+- sequence one;
+- previous_head_digest null; and
+- RunAdmitted.
+
+Every later frame requires the exact previous sequence plus one and the previous frame digest.
+
+The Store-facing positions are exact derived values, not additional wire fields:
+
+~~~text
+RunPosition {
   run_sequence,
-  previous_head,
-  record,
-  object_closure,
+  head_digest
 }
-```
 
-Exact field names and whether an absent optional reference is omitted from canonical JSON remain
-codec details. No scope, epoch, tenant, append request ID, conclusion-assigned fact-publication
-sequence, record ordinal, or duplicated Program-derived metadata is part of the semantic frame.
-`FactSelection.frontier: FactHead` remains canonical as the immutable global fact snapshot observed
-by a preparation; none of its fields is the conclusion's database-assigned publication coordinate.
-Genesis has no predecessor; every later frame records the exact previous recursive head.
+ConfigurationPosition {
+  revision_sequence,
+  head_digest
+}
+~~~
 
-`RunAdmitted.source_refs` is a bounded, sorted, unique vector. Every source in a capability's fact
-request must be a member of that admitted vector. A selected fact must match the exact requested
-source and subject and must retain producer run, producer frame sequence/head, Program/proposal-set
-reference, value reference, and canonical value evidence. Runtime rejects subsets, duplicates,
-unadmitted sources, or provenance that merely names a plausible value without its producer proof.
+For Runtime race classification:
 
-## 6. Target Store and PostgreSQL design
+~~~text
+record_digest = SHA-256(JCS {
+  domain: "mfm.run.record.v1",
+  record
+})
+~~~
 
-### 6.1 Store is a mechanical port
+Value references already commit to exact canonical objects, so equal record digests define the
+exact semantic equality used by AlreadyConcludedSame and identical admission classification.
 
-Store accepts the sealed encoded append projection from Journal and returns retained bytes,
-bounded physical snapshots, or mechanical receipts. It does not recanonicalize or reopen Journal
-proofs. It may enforce physical byte ceilings, SQL-safe integer ranges, row ordering, key/head
-correlation, and transaction completeness, but it does not inspect the Program or reconstruct
-domain values.
+### 5.5 Fixed run limits
 
-The target dependency direction is:
+The clean format freezes:
 
-```text
-Program ----\
-Capabilities --\
-Facts ---------> Runtime -> Journal representation -> Store trait
-Values --------/                                  -> PostgreSQL / Memory
+| Resource | Exact limit |
+| --- | ---: |
+| One canonical frame | 33,554,432 bytes |
+| Frames per run | 65,536 |
+| First-reference objects per run | 1,048,576 |
+| Canonical frame bytes per run | 536,870,912 bytes |
 
-Journal -> ids + canonical/value representation
-Store   -> ids + Journal frame/storage representation
-Replay/status -> Runtime's pure inspection path
-```
+The last three per-run ceilings are MAX_RUN_FRAMES, MAX_RUN_OBJECTS, and MAX_RUN_BYTES in table
+order. Frame bytes already contain first-reference object values, so objects are never charged a
+second time.
 
-In particular, `mfm-store` must stop depending on Program's runtime catalog, State semantics,
-capability semantics, and Runtime selection types.
+Changing a limit requires another deliberate persisted-format cutover.
 
-### 6.2 Global schema
+### 5.6 Configuration revision wire
 
-The baseline PostgreSQL schema is replaced, not migrated through a dual model. Its logical keys are:
+ConfigurationKeyMaterial is:
 
-| Data | Key/constraint |
-| --- | --- |
-| run frames | primary key `(run_id, run_sequence)` |
-| content-addressed objects | primary key `object_ref`; exact bytes are immutable |
-| per-run object membership/charge | primary key `(run_id, object_ref)`; immutable logical byte charge |
-| run append requests | primary key `(run_id, append_request_id)`; immutable command digest and receipt |
-| run heads | primary key `run_id` |
-| active conclusion reservations | primary key `(run_id, reservation_key)`; exact maximum and aggregate agree with run head |
-| fact publication headers | primary key global `publication_sequence`; unique `(run_id, run_sequence)`; complete previous/resulting heads, descriptor/update-set digests, and producer locator |
-| immutable fact-index nodes | primary key `node_digest`; exact canonical sparse-Merkle leaf/branch bytes are immutable and historical roots remain reachable |
-| immutable fact-log nodes | primary key `node_digest`; exact canonical append-only-Merkle leaf/branch bytes are immutable and historical roots remain provable |
-| fact head | one singleton `FactHead { publication_sequence, index_root_digest, log_root_digest }` row |
-| configuration revisions | primary key global `revision_sequence`; immutable envelope/routing key plus previous/head digest; secondary index `(routing_key, revision_sequence DESC)` |
-| configuration append requests | primary key `append_request_id`; immutable command digest and receipt |
-| configuration head | one singleton `ConfigurationHead { revision_sequence, head_digest }` row |
-| EVM nonce domains | `(sender_id, nonce_domain_id)` |
-| EVM nonce operations | `(sender_id, nonce_domain_id, operation_key)` |
+~~~text
+{
+  instance_id,
+  contract_ref
+}
+~~~
 
-Run heads retain the exact recursive head/current sequence plus cumulative `total_bytes` and
-`reserved_bytes`, so append does not rescan history. Active reservation and per-run object-membership
-rows are mandatory physical metadata and change under the same append transaction. None of this
-metadata changes Program semantics.
+`instance_id` is the existing checked StableId string. It names one independently current logical
+series and carries no tenant, deployment, Store, or process identity.
 
-Fact log and sparse-index hashes use the fixed recurrences specified in Section 2.4. The
-singleton names both latest digests; historical publication headers and immutable nodes remain
-available for exact old-root proofs and are not garbage-collected while this format is supported.
-Configuration revisions similarly persist `previous_head_digest` and compute
-the following SHA-256/JCS recurrence:
+The key is:
 
-```text
-configuration_routing_digest = H(JCS {
-  domain: "mfm.configuration.route.v1",
+~~~text
+configuration_key = SHA-256(JCS {
+  domain: "mfm.configuration.key.v1",
+  instance_id,
+  contract_ref
+})
+~~~
+
+The contract reference already commits to its schema.
+
+One revision is:
+
+~~~text
+ConfigurationRevisionV1 {
+  domain: "mfm.configuration.revision.v1",
   instance_id,
   contract_ref,
-  schema_ref
-})
-configuration_genesis_digest = H(JCS {
-  domain: "mfm.configuration.head.empty.v1"
-})
-head_digest = H(JCS {
-  domain: "mfm.configuration.revision.v1",
   revision_sequence,
-  previous_head_digest,
-  envelope_ref,
-  routing_key
+  previous_head_digest: null | digest,
+  value_ref,
+  canonical: raw canonical no-float configuration value
+}
+
+revision_head_digest = SHA-256(JCS(ConfigurationRevisionV1))
+~~~
+
+ConfigurationRef is:
+
+~~~text
+{
+  configuration_key,
+  revision_sequence,
+  revision_head_digest
+}
+~~~
+
+Sequence one uses null predecessor. Every later revision uses the exact preceding per-key head.
+There is no global configuration sequence, singleton head, separate envelope reference, duplicated
+schema reference, or through-global-head snapshot.
+
+The fixed per-key limits remain:
+
+| Resource | Exact limit |
+| --- | ---: |
+| One configuration revision | 16,777,216 bytes |
+| Revisions per ConfigurationKey | 1,024 |
+| Canonical revision bytes per ConfigurationKey | 67,108,864 bytes |
+
+### 5.7 Portable bundle
+
+The exact portable shape is:
+
+~~~text
+PortableRunBundleV1 {
+  domain: "mfm.portable-run-bundle.v1",
+  configuration_revision: ConfigurationRevisionV1,
+  run_frames: [complete ordered RunFrameV1 sequence through the exported head]
+}
+~~~
+
+The configuration revision must be the exact revision named by admission. Bundle decoding applies
+the configuration, per-frame, per-run, and total decode limits before allocation. The exact maximum
+canonical bundle length is 553,713,744 bytes: MAX_RUN_BYTES + the 16,777,216-byte configuration
+revision ceiling + at most 65,535 frame separators + 81 fixed wrapper bytes. That integer is
+MAX_PORTABLE_BUNDLE_BYTES, a format limit rather than a caller-selected budget.
+
+Journal strictly decodes and structurally qualifies it. RuntimeAssembly associates the retained
+Program and folds it through the same inspection path as Store-backed read.
+
+There is no run-only semantic bundle, fact proof, producer dependency DAG, Store brand, current
+authoring fallback, or second replay format.
+
+## 6. Store and PostgreSQL design
+
+### 6.1 Mechanical Store surface
+
+The target Store operations are:
+
+~~~text
+load_run(run_id, Current | Exact(RunPosition))
+  -> Absent | StoredRunBytes
+
+append_run(&RunAppend)
+  -> AppendResult
+
+list_run_ids(PageRequest)
+  -> BoundedRunIdPage
+
+load_latest_configuration(ConfigurationKey)
+  -> Absent | StoredConfigurationRevision
+
+load_configuration(ConfigurationRef)
+  -> Absent | StoredConfigurationRevision
+
+append_configuration(&ConfigurationAppend)
+  -> ConfigurationAppendResult
+
+check_ready()
+  -> Result
+~~~
+
+StoredRunBytes contains one atomically captured complete prefix and its captured RunPosition. It
+does not claim semantic validity. Store returns a complete value or Capacity, never truncation.
+
+PostgreSQL performs Current and Exact loads in one database snapshot. It captures the requested
+head row, returns Absent when the requested Exact position is not present, reads every frame from
+sequence one through a present position, and mechanically checks contiguity, stored
+head/predecessor columns, byte lengths, and cumulative physical accounting. A gap, duplicate, or
+internal metadata inconsistency is CorruptPhysicalState. Only then does it return the complete
+ordered canonical frame bytes for Journal qualification. A concurrent append is therefore wholly
+before or wholly after the captured prefix, never a truncated mix.
+
+Store implementations have a non-persisted read budget no larger than the format ceilings. A valid
+run larger than the configured process budget produces load Capacity, not InvalidHistory.
+
+Store does not decode Program, reduce State-or-Match, select facts, reify domain values, qualify
+configuration as C, or construct provider authority.
+
+### 6.2 Run append command
+
+RunAppend is one private-field physical command:
+
+~~~text
+RunAppend {
+  expected_position: Absent | RunPosition,
+  frame: EncodedRunFrame,
+  reservation_instruction:
+      None
+    | Open { preparation_sequence, maximum_bytes }
+    | Replace { old_preparation_sequence, new_preparation_sequence, maximum_bytes }
+    | Consume { preparation_sequence }
+}
+~~~
+
+Runtime derives the reservation instruction from ExecutableProgram and the selected durable
+history. Store checks only sealed frame kind/position correlation and physical arithmetic.
+
+The physical command digest is:
+
+~~~text
+command_digest = SHA-256(JCS {
+  domain: "mfm.run.append-command.v1",
+  run_id,
+  expected_position,
+  frame_head_digest,
+  frame_byte_length,
+  reservation_instruction
 })
-```
-
-The first revision is sequence one and uses exactly `configuration_genesis_digest` as predecessor;
-an absent configuration stream has no singleton head row. The singleton points at the latest row;
-any historical `ConfigurationHead` is
-verified against its exact revision row before latest-by-instance-and-contract lookup. A forged sequence/digest
-pair is corruption, never an alternate snapshot. Canonical goldens freeze the routing-key and
-reference representation.
-
-Existing databases and portable histories are deliberately incompatible. Rewrite the pre-release
-baseline migrations and fixtures. Do not ship an online legacy adapter, identity fallback, old
-hash reader, or both key layouts.
-
-### 6.3 Concurrency
-
-Multiple Runtime processes may load and attempt the same next State. They race one exact run head:
-
-1. Runtime folds the same retained prefix.
-2. Each builds a candidate append against that head.
-3. PostgreSQL locks/checks the head and unique append identity.
-4. At most one non-identical successor is inserted.
-5. Losers reload and Runtime folds the winning history.
-
-No epoch elects a writer and no scope rotation invalidates old runs. A process can resume a run
-only if its trusted Runtime assembly matches the Program and binding identities retained by that
-run; otherwise it reports a typed incompatibility and does not write.
-
-Exact-head CAS does not fence an old process across an in-place database rollback that recreates a
-previously observed head. Such restore is therefore an explicit operational stop-the-world event:
-operators stop every Runtime/Store peer, restore the database, and start fresh processes against
-the restored authority. Crash/restart against an unrolled-back database remains supported. No API
-may imply that removing epoch rotation preserves live-peer restore fencing.
-
-### 6.4 Fact publication without frame rebinding
-
-The current conclusion protocol asks Store to obtain a fact publication coordinate, insert that
-coordinate into the conclusion, rebuild the hashed frame, rotate/rebind append metadata, and retry
-if the global fact frontier changed. This gives Store semantic mutation authority and makes global
-concurrency alter canonical run bytes.
-
-The target conclusion contains only the content-addressed fact proposal-set reference. PostgreSQL
-allocates publication order in the same transaction:
-
-```text
-1. serialize `(run_id, append_request_id)`, then look it up after any waiter completes
-2. return its original receipt only if the complete append is identical; reject conflicting reuse
-3. for a new request, serialize the `run_id` head key even when absent, then lock/read and compare
-   the run head
-4. for a non-empty proposal set, lock the singleton fact head
-5. allocate publication_sequence = current + 1; Journal mechanically batch-applies every sealed
-   route update to the previous index root, encodes the publication descriptor, appends its leaf to
-   the prior Merkle log, and returns the new immutable nodes, header, and exact resulting `FactHead`
-6. compute per-run first-reference charge and validate/apply None/Open/Replace/Consume accounting
-7. insert the immutable run frame, objects, per-run object membership, sparse-index/log nodes, and
-   publication header
-8. update active reservation rows and advance run/fact heads and byte/reservation aggregates
-9. insert the append-request command digest with the final immutable AppendReceipt
-10. commit and return that receipt
-```
-
-An idempotent retry uses the same `(run_id, append_request_id)`, finds the same frame and fact root,
-and returns the same receipt. Frame and publication either both commit or both roll back.
-For a frame without a proposal set, steps 4--5 and the publication/index writes are absent, but
-the reservation, run, object-membership, head, and append-request writes remain one transaction.
-
-This deletes:
-
-- `PreparedConclusion::bind_fact_publication` and rebind logic;
-- fact-rebind ordinals and rotated append IDs;
-- `FactFrontierChanged` conclusion retries;
-- fact publication coordinates from Journal hashing;
-- Store-side coordinate validation; and
-- `fact_frontier` as an append precondition.
-
-Runtime reads a structural fact snapshot and performs semantic fact selection. The selection records
-the complete exact `FactHead`--publication sequence, append-only log root, and authenticated
-index root--through which it was made and the exact provenance of selected values. Later
-publications do not invalidate it. With one database authority,
-`FactSelectionFrontier.stream_ref` disappears; the retained `FactHead` is the one snapshot anchor.
-
-The Journal encoder seals `None | NonEmptyFactPublicationAttachment` into `EncodedRunFrame`. A
-non-empty attachment can be constructed only when the conclusion names the same proposal-set
-reference and that object is present and structurally non-empty in the frame closure. It cannot be
-replaced independently after encoding. Its bounded all-and-only update templates are derived from
-those same proposal objects, reject duplicate `(source_ref, subject_ref)` routes, and are covered by
-the encoded-frame identity. Store consumes this correlation mechanically; it never derives fact
-meaning or decides whether a proposal is usable.
-
-Store returns the one bounded membership/non-membership multiproof for Runtime's exact route query
-at either the newly captured head or a retained selection's recorded `FactHead`. Journal verifies
-the head/query/result correlation, complete fixed-depth sparse-Merkle proof, key preimages, canonical
-node hashes/root, frontier-header inclusion, and each deduplicated publication-header inclusion.
-For every producer dependency edge, Journal also verifies the canonical append-only-log consistency
-witness from the older retained frontier to the producer publication's previous `FactHead`. Runtime
-then loads every present leaf's producer prefix through its recorded
-head; it never falls back to an older leaf when the latest one is absent, malformed, or semantically
-invalid. Journal qualifies those frames and referenced canonical objects. Runtime creates one
-private `ProvenFactSnapshot`: it correlates the request, captured head, leaves, proof, and producer
-histories and verifies the admitted sorted/unique source manifest, request-source membership, exact
-source and subject, producer `RunId`, producer frame sequence/head, Program/proposal-set ordinal/value
-references, canonical value bytes, request compatibility, and the capability's exact fact behavior
-before selecting values. An authenticated absent route is `NotActionable`, not permission to scan
-the publication log.
-
-Producer proof is dependency-closed. If a producer prefix itself retained prior-fact selections,
-the portable/Store-backed proof bundle includes their exact dependencies recursively through the
-needed producer frame. Every dependency edge has a proven earlier prefix of the same global fact log,
-and every publication sequence strictly dominates all fact frontiers on which its producer prefix
-depends, so Runtime rejects cycles, non-prefix/non-decreasing edges, and deduplicates the bounded
-run/head DAG. Structural
-producer evidence alone is insufficient when semantic validity of that producer conclusion depends
-on an earlier selection.
-
-`MAX_FACT_DEPENDENCY_NODES`, `MAX_FACT_DEPENDENCY_DEPTH`, and
-`MAX_FACT_DEPENDENCY_BYTES` are immutable Journal/protocol constants, not mutable Runtime tuning.
-Runtime enforces both each selection closure and the accumulated dependency closure of the consumer
-run before appending `StatePrepared`; cold/portable qualification applies the same constants. A
-history produced by the current format therefore cannot become invalid merely because a restarted
-process chose smaller operational limits. Runtime construction must provision at least the protocol
-proof ceiling; per-call concurrency/provider/State-start limits remain separate.
-
-`PreparedAccess<S, C>` retains that snapshot proof and the selected values. The selection's complete
-`FactHead` is an immutable observed frontier; it is distinct from, and does not reintroduce, the
-database-assigned publication coordinate into a canonical conclusion.
-
-### 6.5 Configuration
-
-Configuration uses one global append-only revision stream and singleton head. Runtime is its sole
-typed owner, Journal owns the opaque canonical revision-envelope codec, and Store loads/appends that
-envelope mechanically.
-
-The hot publication path is:
-
-```text
-ConfigurationInstanceId + typed C
-  -> Runtime exact codec canonicalizes/validates C
-  -> PendingConfiguration<C> { instance, value, value_ref, exact registration }
-  -> Journal encodes ConfigurationEnvelope {
-       instance/contract/schema routing key, value_ref, exact object closure
-     }
-  -> Store.append_configuration
-  -> Inserted or exact Existing ConfigurationAppendReceipt {
-       ConfigurationHead, ConfigurationRef
-     }
-  -> Store exact-loads the assigned ConfigurationRef
-  -> Journal qualifies its revision header, envelope, and exact closure
-  -> ProvenConfiguration<C> { value, envelope, ConfigurationRef }
-```
-
-The database-assigned revision sequence is not available in `PendingConfiguration<C>` and is not
-part of the content-addressed envelope. `ConfigurationHead { revision_sequence, head_digest }` is
-the physical global CAS state. `ConfigurationRef { revision_sequence, envelope_ref,
-revision_head_digest }` identifies one immutable typed revision and is created only from an inserted
-or exact-existing receipt. Its Journal-qualified `ConfigurationRevisionHeader` binds those fields
-to the opaque routing key and predecessor digest; `envelope_ref` names the complete canonical
-revision envelope. These types are not interchangeable.
-
-On exact load, Store retrieves by the full `ConfigurationRef`, Journal qualifies its exact revision
-header, envelope, and object closure once, and Runtime's exact registration decodes/validates `C`
-into a new process-local `ProvenConfiguration<C>`. The same header accompanies an offline portable
-bundle, so Store-backed and portable inspection prove the identical sequence-to-envelope binding.
-For latest-by-instance-and-type load, Runtime captures a `ConfigurationHead`, derives the opaque
-instance/contract/schema routing key from the supplied `ConfigurationInstanceId` and exact `C`
-registration, asks Store for the greatest matching `ConfigurationRef` at or below that head, and
-then performs the same exact load. A later revision of another instance or configuration contract
-cannot masquerade as the requested latest `C`. Completeness of that online greatest-matching-row
-query is a trusted mechanical Store/backend obligation covered by Memory/PostgreSQL parity tests;
-the current threat model does not claim a cryptographic non-omission proof against a Byzantine
-backend. Portable inspection proves exact retained revisions and never claims that one was latest.
-
-Configuration append is one analogous idempotency-first transaction: serialize the append-request
-ID, then look up and compare the complete request digest after any waiter; serialize the global
-`ConfigurationHead` key even when its row is absent; lock/read and compare that head; insert the
-envelope/object closure; have Journal structurally encode the assigned
-`ConfigurationRevisionHeader`; insert that header/revision row (whose secondary index serves
-latest-by-instance-and-contract lookup); insert the append-request digest and immutable receipt; advance the
-singleton head; and commit. Envelope, objects, revision header, request receipt, and head all
-commit or all roll back. The same-ID loser observes the winner's committed receipt or conflicting
-digest rather than misclassifying the advanced head as `Stale`; two distinct first publications
-also serialize against the absent-head key.
-
-The conceptual high-level Runtime API is:
-
-```text
-publish_configuration<C>(instance_id, expected: Absent | Present(ConfigurationHead), append_request_id, C)
-  -> Result<ProvenConfiguration<C>, ConfigurationError>
-load_configuration<C>(ConfigurationRef)
-  -> Result<ProvenConfiguration<C>, ConfigurationError>
-load_latest_configuration<C>(instance_id, through: Absent | Present(ConfigurationHead))
-  -> Result<Absent | Present(ProvenConfiguration<C>), ConfigurationError>
-```
-
-`publish` reserves pending-owner capacity before encoding/submission. `Inserted` and exact
-`Existing` retain the lease while Store exact-loads the assigned revision and Journal qualifies
-the header, envelope, and complete closure; only then may Runtime mint `ProvenConfiguration<C>`.
-Load, capacity, corruption, or infrastructure failure before that qualification returns the owner
-to custody. Unknown acknowledgement or
-caller cancellation retains the exact `PendingConfiguration<C>` under the configuration append
-identity. A repeated high-level `publish` with the same append ID, expected physical head, exact
-instance/contract, and canonical `C` first resolves that private owner by reissuing its same
-borrowed command through Store's idempotency-first path; it never constructs a second owner.
-Different caller arguments return a pending-request mismatch without consuming or replacing the
-resident owner. A structurally valid stored command with the same ID but a different digest is
-`IdempotencyConflict`; a malformed digest/receipt correlation is `CorruptPhysicalState`, not a
-conflict. Inserted/exact-existing promotes only after the exact qualification above; stale returns a typed configuration
-conflict, pre-submission unavailability or corruption before exhaustive classification retains it,
-and repeated unknown retains it. The Section 4.7 custody table, including its configuration-specific
-`Existing` and `Stale` rows, applies: cancellation and transient load/qualification failures return
-the lease, while append-time invalid command,
-idempotency conflict, or immutable envelope/format capacity consumes it into a permanent typed
-rejection. Thus retry is caller-driven without exposing an owner token or a second resolution
-endpoint. After process loss, an identical
-high-level retry may qualify Store's exact existing envelope into a fresh proof; it cannot recover
-or fabricate the lost affine owner. App may select and borrow an already-proven configuration for
-an entry point but cannot decode retained bytes or append a revision directly.
-
-Admission persists the immutable `ConfigurationRef`. A newer global revision does not invalidate an
-admitted revision and does not require Store to requalify it, subject to the unresolved currentness
-choice above.
-
-## 7. Target execution flows
-
-### 7.1 New run
-
-```text
-typed domain C0
-  -> Runtime constructs/retains ProvenValue<C0>
-  -> Runtime validates the exact Program into ExecutableProgram
-  -> genesis closure retains exactly that canonical mfm.program object
-  -> Runtime reserves acknowledgement-custody capacity
-  -> Journal encodes RunAdmitted
-  -> Store.append_run
-       Inserted
-         -> qualify exact receipt/encoded genesis -> promote retained C0
-       Existing for the byte-identical command
-         -> qualify exact receipt/encoded genesis
-         -> load/qualify/fold Current before execution or view
-       Stale
-         -> load/qualify/fold -> AlreadyAdmittedSame | AdmissionConflict | InvalidHistory
-       AcknowledgementUnknown
-         -> retain PendingAdmission; bounded identical retry or return Indeterminate
-       UnavailableBeforeSubmission or CorruptPhysicalState
-         -> retain PendingAdmission; return fail-closed retryable/corruption error
-       permanent append StoreError
-         -> consume PendingAdmission into typed rejection
-  -> durable-success classification only
-       -> advance_until_stable chooses and starts immediately actionable States
-       -> Runtime returns the durable RunView
-```
-
-Only an exact durable qualification releases the admission successor. `Inserted` may continue from
-its newly linearized head. `Existing` returns the original immutable receipt before head comparison,
-so Runtime must obtain and fold `Current` unless an authoritative load separately proves that receipt
-still current; it cannot re-enter callbacks from an old genesis receipt. A stale same-genesis race
-likewise continues from the qualified durable fold, not an assumed local head. Conflict or invalid
-history does not promote. Store never interprets `C0`, substitutes a Program, or selects the first
-State.
-
-### 7.2 Hot Pure State
-
-```text
-ExecutionCursor::ReadyPure<S>
-  -> Runtime reserves acknowledgement-custody capacity
-  -> Runtime invokes S with only S::Input (or a borrow)
-  -> ProposedStateOutcome<S::Output, S::Failure>
-  -> Runtime qualifies and retains the exact output/failure ProvenValue
-  -> Journal encodes StateConcluded::Pure
-  -> Store.append_run
-       Inserted
-         -> qualify exact durable frame -> promote retained typed successor
-       byte-identical Existing
-         -> qualify the exact durable frame
-         -> load/qualify/fold Current before further execution or view
-       Stale
-         -> load/qualify/fold -> AlreadyConcludedSame | Conflict | InvalidHistory
-       AcknowledgementUnknown
-         -> retain PendingConclusion; bounded identical retry or return Indeterminate
-       UnavailableBeforeSubmission or CorruptPhysicalState
-         -> retain PendingConclusion; return fail-closed retryable/corruption error
-       permanent append StoreError
-         -> consume PendingConclusion into typed rejection
-  -> durable-success classification only
-       -> Runtime reducer chooses the next State or terminal result
-```
-
-No result is public and no successor is promoted before an exact durable-success branch. An
-`Existing` receipt proves its candidate durable but not current; Runtime never invokes another State
-from that historical receipt. There is no erase -> Store qualify -> `SelectedRun` -> Runtime
-downcast loop.
-
-### 7.3 Hot Access State
-
-```text
-ExecutionCursor::ReadyAccess<S, C>
-  -> Runtime reserves one custody permit that can survive provider return
-  -> Runtime invokes typed preparation with only S::Input (or a borrow)
-       PreparationError
-         -> release unused permit; return reviewed RunError with durable head unchanged
-       success
-         -> typed preparation produces C::Intent and fact request
-  -> Runtime selects facts from one complete immutable authenticated Store snapshot
-       authenticated required route absent / NotActionable
-         -> release unused permit; return unchanged durable RunView::Runnable
-       invalid or incomplete proof
-         -> release unused permit; fail closed without append or provider entry
-       actionable selection
-         -> continue
-  -> PreparedAccess<S, C>
-  -> Journal encodes StatePrepared
-  -> Store.append_run preparation
-       Inserted
-         -> transfer the permit and mint CommittedCall<S, C>
-       Existing or Stale
-         -> no call; load/qualify/fold durable history into waiting/replacement/conflict fate
-       AcknowledgementUnknown
-         -> retain PreparedAccess; no call; bounded identical retry or return Indeterminate
-       UnavailableBeforeSubmission or CorruptPhysicalState
-         -> retain PreparedAccess; no call; return fail-closed retryable/corruption error
-       permanent append StoreError
-         -> consume PreparedAccess into typed rejection; no call
-  -> only the Inserted preparation branch continues
-       -> typed adapter/capability ingress consumes CommittedCall<S, C>
-       -> AccessResolution<S, C>
-            Outcome(accepted evidence)
-              -> ordinary typed State interpretation
-              -> ProposedStateOutcome<S::Output, S::Failure>
-              -> build typed conclusion
-            BlockedIntegrity(accepted integrity evidence)
-              -> do not invoke the ordinary State interpreter
-              -> build the registered contract-fixed S::Failure conclusion
-            Unresolved(classification)
-              -> consume call authority; append no conclusion; release permit
-              -> Effect: durable Waiting under ratified recovery policy
-              -> Read: Runnable only for a permitted bounded replacement, otherwise Waiting
-       -> for Outcome or BlockedIntegrity only
-            -> Runtime qualifies one typed conclusion and correlated fact-proposal owner
-            -> install it in acknowledgement custody before any further await
-            -> Journal encodes coordinate-free StateConcluded::Access
-            -> Store.append_run conclusion
-                 Inserted
-                   -> qualify exact durable frame/publication receipt
-                   -> promote retained typed successor
-                 byte-identical Existing
-                   -> qualify the exact durable frame/publication receipt
-                   -> load/qualify/fold Current before further execution or view
-                 Stale
-                   -> load/qualify/fold -> AlreadyConcludedSame | NoLongerSelected | Conflict |
-                      InvalidHistory
-                 AcknowledgementUnknown
-                   -> retain TypedConclusion; bounded identical retry or return Indeterminate
-                 UnavailableBeforeSubmission or CorruptPhysicalState
-                   -> retain TypedConclusion; return fail-closed retryable/corruption error
-                 permanent append StoreError
-                   -> consume TypedConclusion into typed rejection
-```
-
-The flow does not fall through from any non-`Inserted` preparation outcome to provider entry. A
-durable preparation found after acknowledgement loss supplies history, never the original
-`CommittedCall`. The provider-to-conclusion interval transfers the same custody permit, so an
-unknown conclusion acknowledgement cannot encounter a new table-capacity failure. Cancellation
-before the preparation commit discards only the uncommitted candidate. Cancellation after an
-inserted preparation but before/during provider ingress consumes call authority and releases the
-permit while leaving that durable preparation. After accepted Outcome/BlockedIntegrity is
-synchronously secured as `TypedConclusion`, cancellation returns its lease and permit to custody;
-Unresolved instead releases both without a conclusion. No unresolved or integrity-blocked result
-is silently treated as ordinary evidence.
-
-### 7.4 Cold resume
-
-```text
-Runtime.resume(run_id)
-  -> resolve relevant private pending owner once, or return Indeterminate
-  -> Store.load_run(run_id, Current)
-  -> PostgreSQL returns complete stored rows/bytes through one captured head
-  -> Journal strictly decodes one JournalHistory
-  -> Program decoder validates retained Program
-  -> Runtime assembly associates stable declarations with concrete drivers
-  -> Store/Journal/Runtime build exact configuration and fact/producer dependencies
-  -> Runtime reducer folds the history and QualifiedRunDependencies once
-  -> if execution is requested, RegisteredState.start reifies the selected input once
-  -> ExecutionCursor::Ready* / waiting / parked / terminal
-```
-
-Store returns no semantic selection. PostgreSQL knows no State types.
-
-### 7.5 Callback-free replay/status
-
-```text
-portable bundle or Store-loaded consumer/dependency bytes
-  -> Journal qualification of consumer, configuration, and producer histories
-  -> Runtime dependency correlation and pure reducer/inspection
-  -> status, trace, terminal result, or inconsistency
-```
-
-The inspection path never invokes State or provider callbacks. It is the same inherently
-callback-free semantic fold used by cold resume; live cursor materialization happens afterward,
-not through a second reducer or an inspection-mode branch.
-
-Semantic inspection requires the retained Program plus compatible semantic registrations from a
-`RuntimeAssembly` because that assembly owns the exact value/capability codecs; it requires no
-live adapter. Journal's portable semantic bundle contains the consumer history, genesis Program,
-each exact configuration revision header and envelope, and, when facts were selected, the
-authenticated index proof at the recorded `FactHead` plus the dependency-closed producer histories
-required by `QualifiedRunDependencies`. Those physical proof artifacts establish the retained
-selection snapshot but never become a conclusion-assigned field or alter semantic run hashing. A
-run-only bundle with missing
-dependencies produces `MissingDependencies`, not a best-effort `RunView`.
-
-### 7.6 One process-facing contract
-
-The conceptual public surface is:
-
-```text
-Runtime.start<T>(...)            -> Result<RunView, RunError>
-Runtime.resume(run_id)           -> Result<RunView, RunError>
-Runtime.read(run_id)             -> Result<RunView, RunError>
-RuntimeAssembly.inspect(portable_bundle) -> Result<RunView, RunError>
-```
-
-Exact Rust naming is non-normative. `start` and `resume` share `advance_until_stable`; `read` and
-`inspect` execute no State or provider work. A durable result returns `RunView`. Absence,
-acknowledgement indeterminacy, conflict, invalid history, missing dependencies, incompatible
-assembly, capacity, and infrastructure failure remain distinct errors. No method exposes a
-one-State step, cursor, append owner, resolver token, or Store-selected action.
-
-## 8. Identity deletion scope
-
-The cutover removes `StoreScopeId`, `StoreEpoch`, and `TenantScopeId` completely from core and
-persisted vocabulary:
-
-- ID newtypes, parsers, serde, grammar variants, generators, fixtures, and tests;
-- `StructuredStoreIdentity` and Store open/rotate APIs;
-- Runtime sessions, `CommittedCall`, prepared/conclusion owners, and errors;
-- `RunAdmitted`, `RunFrame`, hashes, logical keys, and portable envelopes;
-- backend command/result DTOs and Memory keys;
-- PostgreSQL constructors, active identity table, `rotate_identity`, transaction checks, columns,
-  predicates, indexes, and composite keys;
-- fact stream references and tenant/scope/epoch configuration partitioning; the only retained
-  configuration partition is the explicit domain/composition `ConfigurationInstanceId`;
-- App's fixed-tenant facade and CLI/REST request or output fields;
-- Program derivation/catalog inputs that include tenant identity; and
-- tenant/scope/epoch inputs, columns, predicates, and hash components in EVM nonce/effect identity.
-
-Global EVM sender/domain/operation identities, nonce-domain rows, operation rows, uniqueness, and
-atomic nonce semantics remain. This cutover rekeys them away from removed authority namespaces; it
-does not delete the nonce subsystem or weaken its replay/idempotency contract.
-
-The generic English word “scope” may remain where it describes a lexical or domain concept, but no
-Store authority namespace or `StoreScopeId` equivalent may survive under a new name.
-
-Removing tenant does not permit secrets or private user data to become cross-run facts. Secret-free
-persisted-surface rules remain unchanged. Product isolation, if ever required, must be designed as
-an explicit deployment/access-control boundary rather than smuggled back as an identifier in every
-core type.
-
-## 9. Package and API cutover
-
-### 9.1 `mfm-program`
-
-- retain the immutable `State | Match` document and compile-time typed State contracts;
-- persist one exact failure contract for every State, using the reserved Never contract for
-  infallible States, and persist the complete Access association needed by `StateExecutionKey`;
-- strictly decode retained Program bytes and validate graph shape and stable contract continuity;
-- remove erased value/capability execution callbacks and catalog branding;
-- leave Match tag/payload projection to Runtime's pure schema-derived value registrations;
-- expose no general public erase/downcast workflow; and
-- leave concrete implementation association to Runtime assembly.
-
-### 9.2 `mfm-runtime`
-
-- own the sole reducer after moving it out of Store;
-- own `ExecutableProgram`, hot execution, cold resume, semantic inspection, typed configuration,
-  and fact selection;
-- derive exact instance/contract/schema configuration routing from an explicit
-  `ConfigurationInstanceId`, never ambient Store identity;
-- replace erased option bags with affine typed cursor states;
-- own the sole private heterogeneous registry, complete `StateExecutionKey`,
-  `RegisteredState.start`, and one `start_typed` downcast;
-- own pure schema-derived Match projection and exact dependency-qualified folding;
-- retain direct-new `CommittedCall` gating;
-- own bounded `advance_until_stable`, the private pending-append table, and Runtime-derived
-  `RunView`; expose typed configuration publish/exact-load/latest-load and same-request retry; and
-- return no cursor/step/owner protocol to App.
-
-### 9.3 `mfm-journal`
-
-- own strict canonical frame/history and portable codecs;
-- own sealed run-frame and configuration-envelope codecs plus portable semantic dependency bundles;
-- make constructed/decoded frames valid by construction;
-- remove identity and redundant record fields;
-- remove `FactPublication` from conclusions; and
-- expose persisted representations, not semantic Runtime selections.
-
-### 9.4 `mfm-store`
-
-- reduce to the mechanical Store contract and Memory implementation;
-- remove Program/capability/catalog/reducer dependencies;
-- remove open brands, port splits, semantic owner types, and duplicated validators;
-- return complete-through-head bytes, authenticated fact-index proofs, exact/latest configuration bytes,
-  and mechanical receipts only; and
-- keep backend conformance focused on physical row validity, atomicity, CAS, idempotency, limits,
-  and unknown acknowledgement.
-
-### 9.5 PostgreSQL adapters
-
-- implement Store directly rather than a second broad backend SPI;
-- use the global schema and no active identity;
-- allocate fact/configuration sequences transactionally;
-- keep SQL row structs private; and
-- perform no Program or capability validation.
-
-### 9.6 App and transports
-
-- remove tenant-scoped construction and request fields;
-- generate or accept one global `RunId` for admission/retry;
-- call Runtime for start, resume, read, and inspection and consume only `RunView`/reviewed errors;
-- delete App's suspended map, one-State drive and resolution methods, frame-derived status, and
-  matches over public Runtime lifecycle variants; and
-- expose no Runtime lifecycle internals to current or future transports.
-
-App is lifecycle-thin composition/dispatch: it may choose a registered entry point and retain or
-borrow a Runtime-issued proven configuration, but it never constructs/decodes semantic proof or
-owns execution, append, or lifecycle authority. CLI and HTTP are transport-only: they parse, call
-the App/Runtime facade, and render the core-owned view/error contract.
-
-This core cutover does not introduce the generic `ApplicationBuilder::entry_point` DSL or remove
-the current EVM/Portfolio dispatch by itself. App may temporarily retain that domain composition
-while its execution side moves entirely to Runtime's high-level contract. The deferred Followups
-RFC owns generic registration, domain-dependency removal, and functional thin transports after
-this core is complete.
-
-## 10. Complete deletion checklist
-
-The implementation is not complete until the following are absent, except where this RFC explicitly
-retains a sealed/private Runtime implementation detail:
-
-```text
+~~~
+
+It is physical metadata, not a public authority or semantic frame field. There is no
+AppendRequestId, caller-supplied command id, retry token, append-request table, or receipt table.
+
+### 6.3 Append results and errors
+
+~~~text
+AppendResult =
+    Inserted(RunPosition)
+  | Existing(RunPosition)
+  | Stale { actual_position: Absent | RunPosition }
+
+StoreError =
+    InvalidPhysicalCommand
+  | Capacity
+  | CorruptPhysicalState
+  | UnavailableBeforeSubmission
+  | Indeterminate
+~~~
+
+Meanings are normative:
+
+- Inserted proves this exact command committed.
+- Existing proves the exact command is already represented by one immutable frame row.
+- Stale proves this invocation wrote nothing.
+- InvalidPhysicalCommand and Capacity prove this invocation wrote nothing.
+- CorruptPhysicalState means retained rows or metadata violate the physical contract and fails
+  closed; an append may return it only before candidate mutation or after proven rollback, so this
+  invocation wrote nothing.
+- UnavailableBeforeSubmission is allowed only when Store proves no transaction was submitted.
+- Indeterminate means the candidate mutation may have committed. Every failure or cancellation
+  observed after that point is classified only as Indeterminate when a result can still be returned.
+
+AcknowledgementUnknown is not an AppendResult. Runtime retains no command after Indeterminate.
+Caller-future cancellation returns no result and is semantically lost acknowledgement.
+
+### 6.4 Idempotency and transaction order
+
+PostgreSQL serializes all appends for one RunId, including absent genesis, with one transaction
+advisory key or equivalent protocol. Under that serialization it:
+
+1. computes and validates target sequence, frame position, byte length, and command digest;
+2. looks up the matching per-run command-digest index;
+3. when that digest exists, compares stored frame bytes, head, expected predecessor, reservation
+   instruction, length, and digest, returning Existing only when all material is exact;
+4. treats an existing digest with different material, or internally inconsistent retained physical
+   metadata, as CorruptPhysicalState;
+5. otherwise reads the current run head and compares expected_position;
+6. returns Stale without mutation when it differs, including when a different valid successor
+   already occupies the candidate sequence;
+7. treats an occupied candidate sequence while expected_position is still current as
+   CorruptPhysicalState;
+8. validates fixed physical limits and reservation arithmetic;
+9. inserts the immutable frame row;
+10. applies the reservation transition;
+11. updates the run head/accounting row; and
+12. commits those changes atomically.
+
+The frame row is its own immutable idempotency receipt. Exact retry remains Existing after later
+frames advance the run. A different candidate for the same predecessor races head CAS and becomes
+Stale.
+
+Memory implements the same ordering and outcomes. At most one caller observes Inserted for one
+exact preparation.
+
+### 6.5 Run capacity and reservations
+
+Run head metadata contains:
+
+~~~text
+{
+  sequence,
+  head_digest,
+  total_bytes,
+  object_count,
+  reserved_bytes,
+  reserved_frames,
+  reserved_objects
+}
+~~~
+
+Because object values are embedded:
+
+~~~text
+new_total_bytes = old_total_bytes + frame_byte_length
+new_object_count = old_object_count + frame_first_reference_object_count
+~~~
+
+Reservation arithmetic under the same head transition is:
+
+~~~text
+new_reserved_bytes =
+    old_reserved_bytes
+    - released_reservation_bytes
+    + opened_reservation_bytes
+
+new_reserved_frames =
+    old_reserved_frames
+    - released_reservation_frames
+    + opened_reservation_frames
+
+new_reserved_objects =
+    old_reserved_objects
+    - released_reservation_objects
+    + opened_reservation_objects
+
+new_total_bytes + new_reserved_bytes <= MAX_RUN_BYTES
+new_sequence + new_reserved_frames <= MAX_RUN_FRAMES
+new_object_count + new_reserved_objects <= MAX_RUN_OBJECTS
+~~~
+
+maximum_bytes means the maximum complete canonical conclusion-frame length, including its object
+closure. Every active Access reservation also reserves exactly one conclusion frame and two
+first-reference object slots, the maximum directly named by StateConcludedAccess. Those fixed
+liabilities are not caller-supplied command fields.
+
+ReservationKey is mechanically derived from RunId and preparation sequence:
+
+~~~text
+SHA-256(JCS {
+  domain: "mfm.run.conclusion-reservation.v1",
+  run_id,
+  preparation_sequence
+})
+~~~
+
+Open accompanies an Access preparation and creates one active row. Replace atomically removes the
+old Read row and creates the new row. Consume removes the exact active row and requires a conclusion
+frame no larger than its byte maximum and with no more than two first-reference objects. The three
+liabilities move in the same transaction; underflow, duplicate open, missing old row, or immutable
+limit failure rejects without mutation. Exact Existing never reapplies a transition.
+
+### 6.6 PostgreSQL run schema
+
+The logical schema contains:
+
+| Table | Key and retained material |
+| --- | --- |
+| run_frames | primary key (run_id, run_sequence); canonical bytes, head/predecessor, command digest, reservation instruction, byte/object deltas |
+| run_heads | primary key run_id; current position and cumulative byte/object plus active byte/frame/object reservation accounting |
+| run_reservations | primary key (run_id, preparation_sequence); active immutable maximum conclusion bytes |
+
+A unique per-run command-digest index supports exact historical Existing lookup. No separate
+command or receipt row exists.
+
+### 6.7 Configuration persistence
+
+Configuration streams are independent per ConfigurationKey. There is no global configuration
+head.
+
+ConfigurationAppend contains:
+
+~~~text
+{
+  expected_position: Absent | ConfigurationPosition,
+  revision: EncodedConfigurationRevision
+}
+~~~
+
+Its exact physical digest is:
+
+~~~text
+configuration_command_digest = SHA-256(JCS {
+  domain: "mfm.configuration.append-command.v1",
+  configuration_key,
+  expected_position,
+  revision_head_digest,
+  revision_byte_length
+})
+~~~
+
+PostgreSQL serializes the complete ConfigurationKey, including an absent first revision, then uses
+the same idempotency-first transaction ordering and exact material comparison as run append. It
+provides Inserted, Existing, Stale, and Indeterminate. ConfigurationAppendResult has the same three
+success variants over ConfigurationPosition, and the same StoreError contract. Exact revision rows
+retain their command digest and are their own receipts.
+
+The logical schema is:
+
+| Table | Key and retained material |
+| --- | --- |
+| configuration_revisions | primary key (configuration_key, revision_sequence); canonical bytes, predecessor/head, command digest, byte length |
+| configuration_heads | primary key configuration_key; current position and cumulative bytes |
+
+A unique per-key command-digest index supports exact historical Existing lookup.
+
+Latest load captures the key head and its exact revision row in one database snapshot. Exact load
+requires the complete ConfigurationRef to match one immutable row. Missing requested material is
+Absent; disagreement between a head and its retained row or internal length/accounting metadata is
+CorruptPhysicalState. Journal then strictly qualifies the returned canonical revision.
+
+Different keys do not contend. Same-key publication uses exact-head CAS. Admission binds an exact
+immutable ConfigurationRef and never requires it to remain latest.
+
+After indeterminate publication Runtime retains nothing. The caller either repeats the exact
+instance, expected position, and typed value or loads the exact/latest revision. Runtime never
+silently substitutes the then-latest position, because doing so would create a different revision
+rather than retry the uncertain command.
+
+### 6.8 EVM nonce persistence
+
+Tenant removal must not merge wallets across chains. The exact public domain is:
+
+~~~text
+WalletNonceDomainId = SHA-256(JCS {
+  domain: "mfm.evm.wallet-nonce-domain.v1",
+  chain_id,
+  sender,
+  nonce_domain
+})
+~~~
+
+Nonce heads key by WalletNonceDomainId. Operation rows key by
+(WalletNonceDomainId, operation_key). The same domain identity is used by the EVM binding/effect
+contract.
+
+Endpoint identity does not split one chain wallet nonce sequence. Credentials and signer secrets
+remain outside every persisted key.
+
+### 6.9 Global schema deletion
+
+The target schema has no:
+
+- tenant, Store scope, writer epoch, active identity, rotation, or database incarnation tables;
+- global object or per-run object-membership tables;
+- append-request, configuration-request, or separate receipt tables;
+- fact head, publication, sparse-tree, CT-log, proof, or node tables; or
+- global configuration head/sequence.
+
+check_ready verifies only the one current schema/format baseline and connectivity. Schema version is
+a static compatibility check, not a writer authority.
+
+## 7. Execution flows
+
+### 7.1 Configuration publication
+
+~~~text
+typed C
+  -> C::validate and Runtime value qualification
+  -> determine explicit ConfigurationKey
+  -> caller-supplied expected per-key position
+  -> Journal encode complete next revision
+  -> Store append
+
+Inserted | Existing
+  -> load/qualify exact revision
+  -> ProvenConfiguration<C>
+
+Stale
+  -> typed publication conflict; a new publication requires a newly observed expected position
+
+Indeterminate
+  -> retain nothing
+  -> caller loads or repeats the exact expected position and value
+~~~
+
+### 7.2 New run
+
+~~~text
+operation/domain layer deterministically constructs Program and typed C0
+  -> explicit fresh RunId
+  -> ProvenConfiguration<C>
+  -> Program validation and Runtime association
+  -> qualify C0 against Program's exact admitted-context contract
+  -> verify Program's exact configuration contract and entry point
+  -> Journal encode genesis with Program/C0 first-reference objects
+  -> Store append expected Absent
+
+Inserted
+  -> fold exact durable genesis
+  -> continue bounded progression
+
+Existing
+  -> load/fold current run
+
+Stale
+  -> load genesis
+  -> exact admission or AdmissionConflict
+
+Indeterminate
+  -> retain nothing
+  -> caller repeats exact start or reads RunId
+~~~
+
+Core never derives RunId. Every independent execution uses a new caller-supplied value. Retry
+reuses the exact RunId and admission inputs.
+
+### 7.3 Hot Pure State
+
+~~~text
+Runnable Pure occurrence
+  -> exact RegisteredState.start
+  -> bounded spawn_blocking evaluation
+  -> ProposedStateOutcome<Output, Failure>
+  -> Runtime value qualification
+  -> Journal encode Pure conclusion
+  -> Store append exact head
+
+Inserted | Existing
+  -> load/fold durable current run
+
+Stale
+  -> load/fold winner
+
+Indeterminate or cancellation
+  -> retain nothing
+  -> later resume recomputes if conclusion is absent
+~~~
+
+Pure evaluation must be deterministic and perform no ambient IO.
+
+### 7.4 Hot Access State
+
+~~~text
+Runnable Access occurrence
+  -> exact RegisteredState.start
+  -> bounded spawn_blocking preparation
+  -> PreparedAccess<S,C>
+  -> Journal encode StatePrepared
+  -> Store append exact head with Open/Replace reservation
+
+Inserted
+  -> consume local PreparedAccess
+  -> mint one CommittedCall<S,C>
+
+Existing | Stale | Indeterminate | cancellation
+  -> no CommittedCall
+~~~
+
+Only the Inserted branch continues:
+
+~~~text
+CommittedCall<S,C>
+  -> typed adapter/provider ingress
+  -> AccessResolution<S,C>
+
+Outcome(accepted evidence)
+  -> bounded spawn_blocking ordinary interpretation
+  -> typed outcome
+
+BlockedIntegrity(accepted evidence)
+  -> bounded pure registered integrity projection
+  -> typed failure
+
+Unresolved
+  -> append no conclusion
+  -> Read may later replace
+  -> Effect parks
+~~~
+
+For accepted Outcome or BlockedIntegrity:
+
+~~~text
+typed evidence/outcome qualification
+  -> Journal encode Access conclusion
+  -> Store append exact preparation head with Consume reservation
+
+Inserted | Existing
+  -> load/fold durable current run
+
+Stale
+  -> load/fold and classify same/replaced/conflict/invalid
+
+Indeterminate or cancellation
+  -> retain nothing
+  -> later history reveals conclusion or unresolved preparation
+~~~
+
+No path from retained preparation recreates the original provider entry.
+
+### 7.5 Resume, read, export, and inspect
+
+resume:
+
+~~~text
+Store complete current load
+  -> JournalHistory
+  -> retained Program decode
+  -> Runtime association
+  -> exact configuration load/qualification
+  -> Runtime fold
+  -> bounded advance_until_stable
+~~~
+
+read performs the same load, qualification, and fold but starts no State/provider work.
+
+export captures one exact current run and its exact configuration revision, then Journal encodes
+PortableRunBundle.
+
+inspect strictly decodes the bundle, associates its Program under RuntimeAssembly, qualifies its
+configuration, and runs the same fold with no State/provider work.
+
+There is no pending-owner resolution step.
+
+## 8. Facts are deleted
+
+The cutover deletes:
+
+- the mfm-facts crate;
+- FactSelectionMode, NoPriorFacts, PriorRunFacts, and the capability Facts associated type;
+- prior_fact_selection callbacks;
+- FactSelectionRequest, FactSelection, FactValue, FactProposalSet, provenance, completeness, and
+  frontier types;
+- facts from ProposedStateOutcome;
+- source refs used only as fact allow-lists;
+- fact fields from Program and every Journal record;
+- Store fact query/publication ports;
+- publication attachments and coordinate allocation;
+- fact-head CAS and rebinding;
+- sparse Merkle and CT log structures;
+- producer dependency DAGs and portable fact proofs;
+- fact limits, schema, SQL, migrations, fixtures, and tests; and
+- facts dependencies from every surviving crate.
+
+The target does not retain empty placeholder fields, NoPriorFacts markers, reserved tables, or a
+generic extension hook.
+
+Facts may return only through a separate future RFC with a reachable consumer and a new deliberate
+persisted contract.
+
+## 9. Identity and restore contract
+
+The cutover deletes StoreScopeId, StoreEpoch, TenantScopeId, StructuredStoreIdentity, Store opening
+brands, active-identity rows, rotation methods, identity retries, and every related field from:
+
+- Program and Journal;
+- hashes and canonical fixtures;
+- Store APIs and backend rows;
+- Runtime values and errors;
+- configuration;
+- App/transports;
+- portable bundles; and
+- EVM nonce authority.
+
+No replacement identifier may provide the same function under another name.
+
+One database is one authority and RunId is global within it. Deployment credentials and network
+exposure are external security boundaries.
+
+An in-place database restore requires all old peers to stop before the restored database is made
+writable. Restore with a surviving writer is unsupported and has no core safety claim.
+
+## 10. Package and API cutover
+
+### 10.1 mfm-values and derive
+
+- make MfmConfig extend MfmValue;
+- add the reserved Never value contract;
+- retain strict canonical, schema, no-float, bounded-input, and content-reference rules;
+- remove facts-related value/schema exports; and
+- update derives and compile-fail coverage.
+
+### 10.2 mfm-program
+
+- retain the immutable State-or-Match document;
+- make every failure contract non-optional;
+- persist complete Access association;
+- remove FailureValue and State::integrity_failure;
+- remove Program execution catalogs, reifiers, TypeId maps, brands, and erased callbacks;
+- remove fact behavior; and
+- expose no supported erase/downcast workflow.
+
+### 10.3 mfm-runtime
+
+- own RuntimeAssembly, Program association, the sole reducer, typed State drivers, configuration
+  qualification, bounded progression, RunView, and portable semantic inspection;
+- register the exact Access integrity projection;
+- keep only one private object-safe State driver/hot-value handoff;
+- run blocking deterministic callbacks outside the async executor;
+- retain no pending append/conclusion/configuration owner;
+- perform no background progression; and
+- expose no public State-by-State lifecycle algebra.
+
+### 10.4 mfm-journal
+
+- own exact RunFrameV1, ConfigurationRevisionV1, and PortableRunBundle codecs;
+- own strict construction/decoding, recursive heads, record digests, object closure, and fixed
+  limits;
+- expose opaque EncodedRunFrame, JournalHistory, EncodedConfigurationRevision, and qualified
+  portable types; and
+- remove open DTO validation choreography, identity fields, request ids, facts, and publication
+  rebinding.
+
+### 10.5 mfm-store
+
+- expose only the mechanical Store trait and physical command/result types;
+- implement identical Memory/PostgreSQL append semantics;
+- store frame/revision command digests on their immutable rows;
+- own no Program, reducer, State, capability, fact, configuration-C, or replay semantics; and
+- delete semantic Store facades, selection owners, brands, duplicated backend DTOs, and split ports.
+
+### 10.6 App and transports
+
+- establish an explicit fresh RunId before submission and make that same value reproducible to the
+  caller for an indeterminate retry;
+- call Runtime configuration/start/resume/read/export APIs;
+- render RunView and reviewed redaction-safe errors;
+- retain no RunSession, SuspendedRun, pending owner, or frame-derived status;
+- remove fixed-tenant facade state;
+- remove current trace/audit/replay endpoints unless separately reintroduced under a reviewed
+  transport contract; and
+- update CLI/REST documentation and fixtures in the same cutover.
+
+### 10.7 Replay
+
+Delete mfm-replay, its workspace membership, dependencies, DTOs, and reducer. Portable structural
+decoding belongs to Journal and semantic inspection belongs to RuntimeAssembly.
+
+## 11. Complete deletion checklist
+
+The cutover is incomplete while any of these supported concepts remains:
+
+~~~text
+ProgramCatalog
+ProgramCatalogBuilder
+ProgramCatalogInner
+ValueAssociation
+CapabilityAssociation
+ReifyValue
+QualifiedValue
+QualifiedTypedValue::erase
+public try_downcast
+catalog brand
+
+DynamicOutcome
+DynamicPreparationFailure
+DynamicStateRegistration
+DynamicPrepared
+DynamicCommit
+DynamicCall
+DynamicResolution
+RunSession
+SuspendedRun
+ParkedRun
+SpawnStep
+ResumeStep
+RuntimeStep
+PendingAppend
+PendingWork
+PendingKey
+acknowledgement lease
+completion/finalization cell
+pending-owner limit or permit
+resolver token
+
+StoreBrand
+StructuredStore
+OpenedStructuredStore
+StoreParts
+QualifiedHistoryPort
+HistoryReader
+StoreAuditPort
+QualifiedRun
+RunReducer
+RunSelection
+RunAction
+SelectedRun
+PreparedAdmission
+PreparedConclusion
+SelectedConclusion
+FactContinuation
+SemanticStore
+replay_terminality
+
+StructuredStoreBackend
+BackendAppendCommand
+BackendAppendOutcome
+AppendDisposition
+RawRunPrefix
+RawFrameBytes
+RawFactPublication
+RawFactSnapshot
+append request row
+configuration request row
+separate receipt row
+AppendRequestId
+IdempotencyConflict
+AcknowledgementUnknown result
+
+FailureValue
+optional State failure contract
+
+mfm-facts
+FactSelection
+FactProposalSet
+FactHead
+fact publication
+fact proof
+fact SQL
+
+global ConfigurationHead
+global configuration sequence
+configuration envelope middleman
+duplicated configuration schema ref
+
 StoreScopeId
 StoreEpoch
 TenantScopeId
 StructuredStoreIdentity
-rotate_identity
-active Store identity persistence
-
-ReifyValue
-ValueAssociation execution reifier
-CapabilityAssociation erased bind callback
-ProgramCatalog execution branding
-ProgramCatalogBuilder as a second execution registry
-catalog-bound ProgramIngress
-qualify_retained_erased public flow
-QualifiedTypedValue::erase public flow
-QualifiedValue::try_downcast public flow
-QualifiedValue cross-layer flow
-
-ErasedValue cross-layer alias
-DynamicOutcome
-DynamicPreparationFailure
-DynamicResolution option bag
-DynamicCommit
-erased DynamicPrepared / DynamicCall result flow
-DynamicPure / DynamicAccess adapter layer
-DynamicStateRegistration
-TypedPrepared / TypedCall islands inside the erased protocol
-PreparedExecution / OpenedPreparationCommit wrapper pair
-QualifiedRecordedEvidence forwarding wrapper
-AdmissionInput public dynamic wrapper
-RunSession.selected
-RunSession.latest erased slot
-RunSession.drive State-at-a-time method
-public RunSession coordination owner
-parallel SpawnStep / ResumeStep / RuntimeStep lifecycle algebras
-old public Runtime spawn/resume step surface
-Parked / Terminal public lifecycle variants
-App-owned SuspendedRun coordination
-App suspended owner map
-public PendingConclusion / SuspendedRun resolver protocol
-AdmitRunRequest / AdmitRunResponse lifecycle wrappers
-DriveResponse
-PublicRunView
-Application::drive one-State command
-finish_runtime_step
-resolve_suspended_run
-retain_suspended
-status_from_frames
-
-StoreBrand
-SemanticStore
-StructuredStore
-OpenedStructuredStore
-OpenedStoreInner
-MemoryStructuredBackend name/second-level backend role
-StoreParts
-QualifiedHistoryPort
-HistoryReader semantic facade
-ConfigurationStore semantic facade
-StoreAuditPort semantic facade
-QualifiedRun
-RunReducer in Store
-advance_selected in Store
-retained_program in Store
-replay_terminality in Store
-validate_prefix public Store path
-RunSelection
-RunAction in Store
-AccessActionMode in Store
-SelectedRun
-PreparedAdmission in Store
-AdmissionOutcome in Store
-PreparationAppend
-AccessPreparationCandidate
-AccessPreparationOutcome
-PreparedConclusion in Store
-SelectedConclusion
-SelectedConclusionOutcome
-SelectedConclusionPreparationOutcome
-FactContinuation in Store
-fact publication bind/rebind protocol
-
-RawHistoryLoadLimit
-RawFrameBytes public validation layer
-RawRunPrefix public validation layer
-RawConfigurationRevision public row DTO
-RawFactPublication semantic layer
-RawFactSnapshot semantic layer
-BackendAppendCommand broad DTO
-BackendAppendOutcome broad DTO
-BackendConfigurationOutcome
-BackendError / BackendFuture / BackendResult public aliases
-StoreOpenError as a separate opening error layer
-StoreWorkLimits as duplicate format/physical policy
-separate AppendDisposition
-StructuredStoreBackend broad SPI
-public backend row/result aliases
-
-PreparationMode
-FactPublication in Journal conclusion
-FactSelectionFrontier stream/head identity
-separate FactCompleteness validity flag
-ConfigurationHeadProjection
-RecordLogicalKey persisted/public DTO
-scope/epoch/tenant Journal fields
-append_request_id in canonical RunFrame
-duplicated preparation/conclusion fields listed in section 2.6
-public repeated Journal validate choreography
-
-ConfigurationWriteSession
-PreparedConfigurationAppend
-separate Store-branded SuspendedConfigurationAppend
-ResolvedConfigurationHead Store brand
-ResolvedConfiguration<C> Store qualification
-ConfigurationCommitOutcome<C> Store proof
-ConfigurationAppendCommand broad DTO
-separate ConfigurationAppendDisposition
-
-mfm-replay reducer/middle layer
-scope/epoch/tenant portable fields
-tenant/scope/epoch components of EVM nonce/effect identity
-```
-
-The following vocabulary illustrates the principal replacements; it is neither a required public
-type list nor a ceiling on private affine proof types:
-
-```text
-Runtime: RuntimeAssembly, ExecutableProgram, ProvenValue<T>, private ErasedProvenValue,
-         StateExecutionKey, RegisteredState, StateStart, ExecutionCursor,
-         QualifiedRunDependencies, ReducedRun, private PendingAppend custody, RunView
-Journal: EncodedRunFrame, JournalHistory, EncodedConfigurationEnvelope,
-         portable semantic bundle codec
-Store: Store, RunAppend, AppendOutcome, AppendReceipt
-Configuration: ConfigurationHead, immutable ConfigurationRef, PendingConfiguration<C>,
-               ProvenConfiguration<C>
-```
-
-## 11. Security and failure semantics
-
-The simplification preserves the existing high-risk invariants:
-
-- run streams remain append-only;
-- each append remains all-or-nothing;
-- manifests, values, facts, outputs, and Journal objects remain content-addressed;
-- structured hashes use canonical, float-free JSON;
-- secrets never enter manifests, events, objects, facts, snapshots, outputs, or error details;
-- provider IO occurs only through explicit adapters/capabilities;
-- admission and recovery use exactly the retained content-addressed Program, never a current-code
-  substitute;
-- fact selection preserves exact bounded snapshot and producer provenance;
-- no provider entry occurs before a newly inserted matching preparation;
-- an unknown acknowledgement never mints provider-entry authority;
-- private pending ownership conveys no durable authority and disappears on process loss;
-- no successful result becomes public before its conclusion is durable or found identical; and
-- replay performs no ambient IO or callback execution.
-
-Removing scope/epoch/tenant removes no cryptographic or authorization boundary because those IDs do
-not authenticate callers or encrypt rows. Deployment access control remains the responsibility of
-the trusted embedding and PostgreSQL deployment boundary. It deliberately removes live-peer restore
-fencing, so the stop-all-peers restore procedure in Section 6.3 is part of the safety contract.
-
-PostgreSQL corruption or hostile row mutation is still treated as untrusted byte ingress on load.
-Journal and Runtime fail closed with redaction-safe typed errors. Process-local typed proof is not a
-substitute for retained-data validation after a restart.
-
-The authenticated fact index/log assumes the trusted compiled Journal/Store transition code in this
-architecture. Retained `FactHead` values are the proof anchors: membership, non-membership,
-inclusion, and consistency witnesses detect omission, substitution, corruption, and cross-branch
-mixing relative to those roots. They do not authenticate a Byzantine writer or add an external
-signature. Malicious-writer resistance would require a separately approved validity/signing
-contract, not silent expansion of this cutover.
-
-## 12. Tests and verification contract
-
-### 12.1 Compile-time and unit proof tests
-
-- typed Runtime output reaches Journal encoding without Store requalification;
-- no supported API can pair an arbitrary contract ref with an unrelated value;
-- `ProvenValue`/`ErasedProvenValue` construction, erase, and downcast authority are not public;
-- Pure and Access both enter through `RegisteredState.start` and one `start_typed` downcast;
-- complete-key lookup includes exact failure and Access mode/fact/attempt metadata, has no partial
-  or implementation-only fallback, exact collisions fail assembly, and distinct generic
-  instantiations sharing one implementation reference remain distinguishable;
-- every State persists an exact failure contract, including the reserved Never contract;
-- occurrence bindings select a directly typed adapter inside monomorphic `StateStart`, with no
-  erased adapter/downcast or duplicate State start;
-- a schema-derived Match projector accepts every declared tag, rejects unknown/non-exhaustive tag
-  tables and wrong payload contracts, and produces the exact canonical payload/value reference
-  without invoking a State, adapter, provider, or authoring callback;
-- contract/schema/registration/`TypeId` mismatch fails without panic and before callbacks;
-- typed input, intent, evidence, and outcome remain correlated through preparation/conclusion;
-- Access preparation error, authenticated `NotActionable`, ordinary outcome, integrity block,
-  unresolved response, and cancellation before/during/after provider entry have exhaustive typed
-  fates and conserve the single custody permit;
-- a non-Clone typed value moves exactly once through hot entry and failure/Match routing;
-- only `Inserted` can consume `PreparedAccess<S, C>` into `CommittedCall<S, C>`;
-- `Existing`, `Stale`, and unknown acknowledgement cannot mint a call;
-- unknown acknowledgement, retryable definite no-commit, or incomplete stale/existing
-  classification retains the exact affine admission, preparation, conclusion, or configuration
-  owner, and cancellation returns its lease; and
-- hot advancement does not decode/reify Runtime's own just-produced output.
-
-Use compile-fail tests where ownership, visibility, or consuming APIs are the proof mechanism.
-
-### 12.2 Journal tests
-
-- canonical fixtures for all three record families;
-- exact-bound and bound-plus-one frame/object/history/configuration-envelope cases;
-- non-canonical JSON, floats, hash mismatch, object collision, missing closure, sequence gap, and
-  wrong recursive-head rejection;
-- unreferenced extra frame/configuration objects are rejected as strictly as missing objects;
-- exact genesis Program closure/reference checks and later-frame predecessor checks;
-- configuration-envelope contract/schema routing-key, object-closure, and digest checks;
-- configuration-revision-header sequence/predecessor/envelope/head-digest checks, including a forged
-  historical head;
-- fact genesis roots, route-key preimage, sparse leaf/node/update, publication descriptor/header,
-  append-only log inclusion/consistency, and membership/non-membership multiproof goldens;
-- wrong sparse/log root, predecessor/frontier, route order/duplication, proposal update set,
-  publication inclusion, cross-branch consistency, omitted/extra result, duplicate/unused proof node,
-  noncanonical default node, or alternate proof ordering fails structurally;
-- portable semantic bundles require and round-trip exact configuration/fact/producer dependencies;
-- one validation pass per decoded history;
-- no identity or conclusion-assigned fact-publication-coordinate fields in canonical output while
-  `FactSelection.frontier: FactHead` remains canonical; hostile frontier/root mismatch fails; and
-- portable round trips through Journal only.
-
-### 12.3 Runtime semantic tests
-
-- Pure and Access hot paths preserve typed context;
-- cold resume reifies retained values once and selects the same next State;
-- `State | Match` sequential/fail-fast behavior;
-- zero-State roots and values referenced only by Match declarations resolve explicit value
-  registrations; cold resume/read/inspect agree on the valid Program's terminal result;
-- preparation/conclusion race classification after reload, including exact retry, same semantic
-  conclusion, replacement, conflict, and idempotency conflict;
-- admission exact-ID retry, different-ID identical genesis, conflicting genesis, concurrent start,
-  stale, cancellation, and repeated-unknown classifications;
-- start and resume share one bounded progression loop, drain multiple actionable States, and stop
-  only at a durable boundary before the next State start;
-- every operational `RuntimeLimits` dimension accepts its exact bound and rejects or yields safely
-  at bound plus one, including State starts, pending owners, provider ingress, active progression,
-  and deterministic work; immutable Journal/configuration/fact proof format ceilings are tested
-  separately;
-- start, resume, read, and callback-free inspection agree on `RunView`, including runnable,
-  waiting, exact terminal values, and routed nonterminal failures;
-- retained-Program inspection succeeds without any live adapter and rejects a current-code Program
-  substitute or incomplete portable dependency bundle;
-- absence, acknowledgement indeterminacy, conflict, invalid history, missing dependencies,
-  incompatible assembly, capacity, and infrastructure error remain distinct;
-- cancellation at every append await leaves any affine owner in the bounded Runtime table;
-- cancellation before preparation commit releases an unused permit; cancellation after an inserted
-  preparation but before/during provider ingress consumes call authority and releases the permit;
-  accepted provider output reaches typed-conclusion custody before another await, after which
-  cancellation returns both its owner lease and transferred permit;
-- fault injection before submission and after transaction submission but before acknowledgement
-  distinguishes definite no-commit from unknown and preserves the same borrowed command/owner;
-- fault injection after command-identical `Existing` or `Stale` but before current-run load,
-  dependency qualification, or fold returns the exact owner lease to custody;
-- the pending table supports several owner kinds/append IDs for one run, reserves capacity before
-  work, transfers an Access permit through call/conclusion, resolves before new work, and never
-  exposes a resolver token above Runtime;
-- unknown preparation causes zero provider entry, and process loss cannot recreate a call;
-- authenticated fact absence appends no preparation and returns the unchanged durable runnable
-  view; integrity blocks never invoke ordinary State interpretation; unresolved Effect/Read
-  results project only their mode-permitted waiting/replacement fate;
-- a retained Read preparation permits only its declared bounded fresh replacement, while an
-  entry-once Effect remains parked after owner loss;
-- cold Read replacement and conclusion derive the exact persisted reservation key from run and
-  preparation sequence without loading a semantic reservation owner;
-- exact RunId admission identity distinguishes same-genesis retry, conflicting genesis, and a new
-  independent repetition according to the ratified policy; and
-- retained `RunAdmitted.entry_point` mismatch with the retained Program fails in Runtime, not
-  Journal;
-- authenticated fact dependencies reject omitted/reordered/index-tampered matches, wrong frontier
-  digest, unadmitted sources, wrong subjects, hostile producer sequence/head/Program/configuration/
-  proposal/value provenance, missing transitive producer history, non-decreasing frontiers, cycles,
-  and every dependency-DAG bound plus one;
-- an invalid latest route leaf fails closed and never falls back to an older publication;
-- assembly mismatch fails before append or callbacks.
-
-### 12.4 Store conformance tests
-
-Run identical Memory and PostgreSQL tests for:
-
-- exact-head CAS;
-- dense per-run sequence;
-- per-run append-request idempotency;
-- request-key serialization and idempotency re-read before head comparison, including overlapping
-  identical/conflicting IDs and an identical retry after later appends;
-- durable command-digest equality over target, expected head, complete frame/object/publication
-  attachment, reservation instruction, and receipt; each unequal field is conflicting reuse;
-- atomic frame/object/membership/head/reservation/fact-header/index/log/
-  append-request-digest/receipt writes;
-- inserted/existing/stale/unknown outcomes;
-- pre-submission and post-commit/pre-ack fault injection proves no-write versus
-  acknowledgement-unknown behavior, and an identical retry after the latter returns the original
-  durable receipt;
-- run target/sequence/predecessor/expected-head correlation;
-- complete-through-captured-head run loads and exact historical producer-prefix loads, with capacity
-  rather than truncation;
-- fact snapshot proofs capture/verify one frontier and return exactly one bounded result per query
-  key, without head/query changes, omitted matches, cross-branch substitution, or false finality;
-- sparse-index and append-only-log roots/nodes match exactly between Memory and PostgreSQL for the
-  same canonical batch, historical roots remain provable, missing reachable nodes are corruption,
-  and proof size is unaffected by unrelated publication count;
-- configuration physical-head load, latest-by-instance-and-contract-through-head, exact `ConfigurationRef`
-  load, append, exact retry, conflict, stale, and unknown outcomes;
-- aggregate byte/reservation conservation, deduplicated object charging, Open/Replace/Consume,
-  deterministic reservation-key correlation/restart, late-old consume rejection, stale no-op, and
-  exact-retry no-op; and
-- concurrent processes writing the same and different `RunId`s, including distinct first writers
-  racing an absent run head.
-
-No conformance test may require a Program catalog or `SelectedRun`.
-
-### 12.5 PostgreSQL fact/configuration tests
-
-- concurrent conclusions allocate at most one dense global fact coordinate and one exact
-  index/log transition each;
-- an identical retry returns the original coordinate;
-- run frame, fact publication header, sparse/log nodes, head, append-request digest, and receipt roll
-  back together;
-- sealed publication attachments cannot disagree with the conclusion or object closure;
-- duplicate routes or a partial/all-but-one multi-route update fail, and every node/header/head write
-  rolls back with the run append;
-- malformed physical fact ordering, head correlation, producer provenance, and snapshot bounds fail
-  at their assigned Store/Journal/Runtime boundaries;
-- later fact publications do not invalidate an earlier immutable selection;
-- configuration revisions use one dense global head and idempotent append ID;
-- overlapping identical configuration append IDs return `Inserted` then `Existing`, conflicting
-  IDs fail without an incomplete request row, and distinct first publications serialize against
-  the absent global head;
-- configuration append request rows preserve command digest and immutable receipt across later
-  revisions; hostile envelope routing/digest/head rows fail at their assigned boundary;
-- envelope/object/revision/request-receipt/head configuration writes are all-or-nothing, and
-  forged historical configuration-head sequence/digest pairs fail;
-- Runtime is the only typed configuration constructor/decoder and Store never returns `C`;
-- configuration acknowledgement cancellation/repeated unknown retain private custody, identical
-  high-level publish resolves it, and conflicting retry arguments fail;
-- latest-by-instance-and-contract selection does not return the latest revision of another
-  instance or contract;
-- admission remains bound to an older exact configuration revision after a newer one commits;
-- database restart preserves all runs without identity activation/rotation;
-- restore procedures require all old peers stopped and fresh processes afterward; no test or API
-  claims live-peer ABA fencing without epochs;
-- EVM sender/domain/operation nonce rows and uniqueness remain after tenant/scope/epoch rekeying;
-- no scope/epoch/tenant column, predicate, key, or hash input remains.
-
-### 12.6 Cross-repository absence and complexity checks
-
-The implementation report must include:
-
-- production Rust LOC before and after;
-- public exported types before and after;
-- direct dependency edges removed from Store;
-- `rg` evidence for deleted identity/erasure/middleman concepts;
-- files required to add a new State or entry point; and
-- confirmation that `backend.rs` was reduced by responsibility deletion, not merely split.
-
-Production LOC must be net-negative. Tests and explicit boundary checks may not be deleted merely to
-manufacture that result.
-
-## 13. Ordered implementation commits
-
-This RFC is documentation only. After the six Material uncertainties are ratified, implementation
-uses two ordered coherent code cutovers. Each includes every affected producer, consumer, test,
-fixture, `docs/design.md`, `docs/architecture.md`, crate document, and deletion; verification and
-documentation are not cleanup work.
-
-1. **`cut over global journal and persistence contracts`**
-
-   In one Program/domain/Journal/Store/Memory/PostgreSQL/Runtime/App/replay/configuration/fact/
-   EVM-nonce cutover, introduce exact persisted State failure/Access associations, the private
-   valid-by-construction lean frame/history/configuration-envelope/portable-bundle codecs, and the
-   explicit predecessor; introduce mechanical reservation instructions beside Journal-sealed
-   conclusion/publication attachments; allocate fact
-   coordinates atomically without frame rebinding; make fact/configuration streams global with the
-   ratified explicit configuration-instance routing; remove scope/epoch/tenant and identity
-   rotation; rewrite baseline schemas and fixtures; and delete every
-   old field, reader, hash, key, duplicated structural validator superseded by Journal, identity
-   retry, and fact-rebinding retry protocol. Store may still own the existing semantic reducer, fact
-   selection, and configuration
-   qualification at this coherent intermediate point and is the temporary consumer of the new
-   Journal-sealed payloads. Every Runtime/App/replay consumer is updated to that one persisted
-   contract; there is one structural qualification path and no dual schema or legacy decoder.
-
-2. **`move the complete semantic proof path into runtime`**
-
-   In one inseparable Program/Runtime/Store/Memory/PostgreSQL/App/replay cutover, add the exact
-   Runtime value/capability registrations, `StateExecutionKey`, `RegisteredState.start`,
-   `ProvenValue`, `ExecutableProgram`, affine cursor, sole reducer, typed configuration and fact
-   selection, bounded progression, private acknowledgement custody, `RunView`, cold resume, and
-   callback-free inspection. Simultaneously replace Store with its mechanical API, migrate App to
-   start/resume/read, delete `mfm-replay`, and delete Program
-   execution callbacks, Store reduction/selection/semantic owners, cross-layer erased values,
-   public lifecycle algebras, and App suspension/status logic. No intermediate commit may leave no
-   semantic owner or two semantic owners.
-
-For each cutover, run the narrow scope-selected checks first and expand as required by
-`docs/build-and-verification.md`. After both are complete and narrower failures are resolved, record
-the LOC/public-surface/dependency/absence evidence and run the composed CI gate once. If a public
-cutover cannot compile halfway, its deletion and replacement belong in the same commit. Do not
-maintain an erased and typed route, Store and Runtime reducers, old and new identity schemas, or
-independent replay reducers in parallel. Do not begin the later Followups RFC until this RFC's
-acceptance criteria pass.
-
-## 14. Rejected alternatives
-
-### Split `backend.rs` without changing ownership
-
-Rejected. It improves navigation while retaining every validation, DTO, dependency, and future
-change site that caused the size.
-
-### Keep Store reduction but rename `SelectedRun`
-
-Rejected. Runtime would still execute a persistence layer's semantic decision, and replay would
-still depend on Store's Program interpretation.
-
-### Remove all erasure
-
-Rejected. A data-selected heterogeneous Program needs one existential dispatch boundary in stable
-Rust. Pretending otherwise would produce a larger generated enum, unsafe casts, or a closed set of
-States. The correct target is one private, correlated erasure point.
-
-### Keep `QualifiedValue` public for convenience
-
-Rejected. It makes value/type/contract correlation reconstructible by convention and invites new
-Store/App DTOs to use erased values as a common currency.
-
-### Make Journal validate Program semantics
-
-Rejected. Journal would depend on Runtime/Program execution meaning and become a second reducer.
-Journal validates representation; Runtime validates execution semantics.
-
-### Let Store return a typed next action
-
-Rejected. Store cannot construct that proof without depending on Program catalogs and State
-registries. It should return retained bytes and mechanical write outcomes.
-
-### Retain scope/epoch as harmless metadata
-
-Rejected. Metadata that participates in schemas, hashes, keys, errors, and every API is an active
-namespace and lifecycle policy. It is not free, and the platform has no corresponding authority.
-
-### Retain tenant only for future isolation
-
-Rejected. A dormant tenant ID does not provide access control or deployment isolation. A future
-multi-authority product must define an explicit boundary and migration rather than tax every
-current core path.
-
-### Put the PostgreSQL fact coordinate in `StateConcluded`
-
-Rejected. It forces a persistence-assigned value back into semantic canonical bytes, requires Store
-to rebuild typed output, and creates avoidable frontier/rebind retries. The proposal set is
-semantic; its global publication position is physical index metadata.
-
-### Keep `mfm-replay` as a second semantic reducer
-
-Rejected. Replay and cold resume answer the same deterministic question. Journal owns portable
-bytes and Runtime owns the one callback-free fold.
-
-## 15. Acceptance criteria
-
-The architecture is complete when all of the following are true:
-
-1. Runtime is the only layer that evaluates `State | Match` and determines the next State.
-2. Store and PostgreSQL have no dependency on Program catalogs, State/capability semantics,
-   `QualifiedValue`, `RunAction`, or `SelectedRun`.
-3. `ExecutableProgram` resolves every declaration, exact failure/Access association, Match
-   projector, and semantic binding exactly; live adapter availability is additionally required for
-   admission and actual Access entry, never callback-free inspection.
-4. Complete `StateExecutionKey` lookup has no implementation-only fallback; Pure and Access both
-   enter through `RegisteredState.start` and one private `start_typed` downcast.
-5. One private Runtime registry handoff is the only execution-layer type erasure.
-6. A hot typed value is encoded once and never requalified by Store.
-7. Each loaded consumer/dependency snapshot crosses exactly one Journal structural qualification
-   and one Runtime semantic fold before use; an independent later load may create a new proof.
-8. Start and resume share one bounded `advance_until_stable`; start, resume, and read expose one
-   Runtime-derived `RunView` and no State-step lifecycle algebra.
-9. Acknowledgement owners stay in one bounded, cancellation-safe, private Runtime table; App and
-   Store never receive semantic retry authority, and process loss cannot mint provider entry.
-10. Journal frames are valid by construction and have no public repeated validation choreography.
-11. Store exposes only mechanical persistence operations and outcomes.
-12. PostgreSQL atomically appends run frames, sealed global fact publication headers, and the exact
-    sparse-index/append-only-log transition without modifying canonical conclusion bytes.
-13. Direct-new typed gating remains the only path to `CommittedCall<S, C>`.
-14. `StoreScopeId`, `StoreEpoch`, `TenantScopeId`, and equivalent ambient authority namespaces are
-    absent from Rust APIs, JSON, hashes, SQL, transports, facts, configuration, replay, and EVM
-    nonce keys; an explicitly supplied domain `ConfigurationInstanceId` is not authority identity.
-15. `RunId` alone identifies a run within the database authority, and concurrent processes
-    linearize through exact-head CAS; documented restore requires all pre-restore peers stopped.
-16. Configuration and facts each use one global append-only PostgreSQL sequence; configuration
-    latest lookup is partitioned by the ratified explicit instance/contract route; physical
-    `ConfigurationHead` is distinct from immutable `ConfigurationRef`; Runtime is their sole
-    semantic qualification/selection owner and Store handles only bytes and physical metadata.
-17. Portable decoding lives in Journal and semantic replay/status uses Runtime's sole reducer with
-    a compatible Runtime assembly; exact configuration revision headers; bounded authenticated fact
-    membership, non-membership, inclusion, and branch-consistency proofs; a dependency-closed
-    producer DAG; and no live callbacks.
-18. The complete deletion checklist has no compatibility aliases or forwarding wrappers.
-19. Authoritative design/architecture documents, fixtures, READMEs, and transport schemas describe
-    only the new design.
-20. Backend conformance, Runtime semantic, Journal canonical, PostgreSQL transaction, ownership,
-    and absence tests pass under the repository's scope-selected verification policy.
-21. Production Rust LOC and public coordination surface are net smaller than before the cutover.
-
-The intended end state can be summarized in one sentence:
-
-> Runtime decides and retains typed meaning, Journal proves bytes, and PostgreSQL proves atomic
-> persistence; no layer erases another layer's proof merely to reconstruct it later.
+active identity
+identity rotation
+database incarnation
+
+global object table
+per-run object membership
+
+mfm-replay
+separate replay reducer
+App suspended map
+App frame-derived status
+~~~
+
+Generic words such as state, scope, tenant, fact, trace, or audit may remain in unrelated prose or
+domain concepts. No supported core equivalent of a deleted responsibility may survive under a new
+name.
+
+Production LOC, exported type count, dependency edges, and files required to add a State must all
+decrease.
+
+## 12. Security and failure semantics
+
+- Secrets never enter Program, Journal frames, configuration revisions, portable bundles,
+  RunView, outputs, Store physical metadata, SQL keys, logs, or error details.
+- Hashed structured values contain no floats.
+- Journal and value canonicalization use fixed domain-separated SHA-256 recurrences and strict
+  canonical bytes.
+- Content hashes prove byte correlation and detect corruption; they are not external signatures
+  and do not claim Byzantine database authorship.
+- Runtime State logic performs no ambient IO. Provider, network, filesystem, signer, and storage IO
+  cross explicit adapters or Store.
+- Only a freshly observed preparation Inserted grants CommittedCall.
+- Existing, Stale, Indeterminate, history, cancellation, and restart grant no provider authority.
+- No success is exposed before a durable conclusion is observed.
+- Every Store failure after the candidate mutation may have committed is Indeterminate.
+- Read provider access is declared non-mutating and replacement is bounded. Effect has one
+  possible provider entry and parks after owner loss.
+- spawn_blocking may outlive its waiter but owns no IO or persistence authority.
+- Store append is atomic per frame/revision and exact-head linearized.
+- Frame/revision rows are immutable and exact retry never reapplies reservation/accounting changes.
+- Process death loses all volatile work and has no hidden recovery path.
+- Restore with a surviving old writer is unsupported.
+- Public errors are reviewed and redaction-safe.
+
+## 13. Tests and verification contract
+
+### 13.1 Program, value, and compile-time proofs
+
+- Program rejects missing/extra/incompatible input, output, failure, Access, and Match contracts.
+- Never has no constructible or decodable value.
+- Pure registration with Never succeeds.
+- Access registration with Never fails.
+- Access integrity projection is exact for S/C and may preserve allowed input correlation.
+- MfmConfig uses the same value registration and incompatible C fails association.
+- PreparedAccess and CommittedCall constructors remain private and owners remain affine.
+- Private State-driver results cannot contain PreparedAccess, CommittedCall, evidence, or a typed
+  conclusion.
+- No public erase/downcast or catalog branding path compiles.
+
+### 13.2 Journal goldens
+
+Golden fixtures freeze:
+
+- every RunFrameV1 record and outcome variant;
+- null genesis predecessor and non-genesis predecessor representation;
+- canonical field names, tagged variants, number representation, and object order;
+- nested raw canonical object representation;
+- run-head and record-digest recurrences;
+- ConfigurationKey, ConfigurationRevisionV1, revision head, and ConfigurationRef;
+- PortableRunBundle;
+- command and reservation digests; and
+- exact frame/run/configuration/portable-bundle bounds and independent bound-plus-one behavior.
+
+Negative fixtures cover:
+
+- non-canonical bytes, floats, duplicate/unknown fields, invalid UTF-8, and secret markers;
+- wrong sequence/predecessor/head/domain;
+- missing, duplicate, conflicting, repeated, out-of-order, and extra closure objects;
+- bad object content digest or contract/schema binding;
+- invalid record tag/shape and genesis kind;
+- failure under Never; and
+- wrong configuration key/contract/value/predecessor.
+
+### 13.3 Runtime semantic tests
+
+- hot and cold fold produce the same RunView;
+- Store-backed read and portable inspection produce the same RunView;
+- inspection invokes no State, adapter, provider, or configuration-authoring callback;
+- Match reduction uses the one schema-derived projection;
+- exact State key dispatch rejects partial or implementation-only matches;
+- only preparation Inserted mints CommittedCall;
+- Existing, Stale, Indeterminate, cancellation, and cold history mint none;
+- concurrent identical preparations cause at most one provider entry;
+- cancellation after preparation commit but before provider entry parks Effect;
+- cancellation during provider ingress never permits Effect re-entry;
+- accepted evidence lost before conclusion parks Effect;
+- Read alone may replace, at most once per occurrence per resume, and never exceeds its total
+  attempt bound;
+- old Read conclusion versus replacement commits at most one exact-head successor;
+- Pure work safely recomputes after cancellation;
+- no RunView success appears before durable conclusion;
+- an earlier RunView remains a valid captured snapshot if a formerly indeterminate transaction
+  commits later; and
+- active progression, State starts, blocking jobs, and provider ingress reject at configured bound
+  plus one.
+
+### 13.4 Store conformance
+
+The same suite runs against Memory and PostgreSQL:
+
+- absent-genesis race;
+- exact same-command retry before and after later head advancement;
+- different-command same-head race;
+- command digest/material corruption;
+- historical Existing;
+- stale performs no mutation;
+- Inserted writes frame, head, reservation, and accounting atomically;
+- rollback leaves no partial frame/head/reservation state;
+- exact Existing never reapplies reservation arithmetic;
+- Open, Replace, Consume, late old conclusion, and byte/frame/object bound-plus-one capacity
+  behavior;
+- first-reference byte/object accounting;
+- complete Current and Exact loads;
+- load budget returns Capacity without truncation;
+- stable bounded RunId pagination;
+- every pre-submission fault classified UnavailableBeforeSubmission performs no write;
+- every injected post-submission acknowledgement loss is Indeterminate;
+- later load distinguishes committed from rolled-back indeterminate cases; and
+- no AppendRequestId, request row, receipt row, object table, membership table, identity, or fact
+  table exists.
+
+### 13.5 Cancellation and blocking tests
+
+Barrier-controlled tests cover:
+
+- caller cancellation while deterministic spawn_blocking work continues;
+- detached blocking work performs no Store/provider IO and publishes no result;
+- cancellation before preparation append causes zero provider entries;
+- post-commit/pre-ack preparation loss causes zero provider entries on exact Existing;
+- rolled-back preparation loss permits one later Inserted and exactly one provider entry;
+- cancellation before/during Effect ingress leaves the durable preparation and no re-entry;
+- accepted Effect evidence lost before conclusion leaves Effect parked;
+- conclusion post-commit acknowledgement loss is later observed durably;
+- conclusion rollback leaves Effect waiting and Read replacement-eligible;
+- Pure conclusion commit/rollback loss is safely folded/recomputed; and
+- active-progression/provider permits release when their owning future drops, while a detached
+  blocking job retains its permit until the closure actually exits and then releases it.
+
+### 13.6 Configuration and EVM tests
+
+- same-key publishers serialize and stale correctly;
+- different ConfigurationKeys do not contend;
+- exact revision retry with the same expected position is Existing, including after a later
+  revision advances the key;
+- repeating an indeterminate publication never substitutes a newer expected position;
+- old exact ConfigurationRef remains loadable after newer revisions;
+- admission binds its exact revision without latest-at-commit CAS;
+- indeterminate publication commit/rollback is recovered only through caller reload/repetition;
+- per-revision, per-key count, and per-key byte limits reject bound plus one;
+- configuration instance/contract mismatch fails;
+- WalletNonceDomainId differs across chain, sender, and nonce-domain changes;
+- endpoint changes do not split the same chain wallet nonce sequence;
+- nonce operations remain idempotent and secret-free; and
+- no tenant field survives in EVM binding or SQL.
+
+### 13.7 Absence and complexity evidence
+
+Record:
+
+- workspace dependency graph before and after;
+- exported production types before and after;
+- net production LOC before and after;
+- files/registrations required to add one Pure and one Access State;
+- Store production LOC removed by semantic/fact/identity/request/object deletion;
+- one canonical Journal construction/decoding path;
+- one Runtime reducer;
+- one Runtime assembly registry;
+- one Store command per real operation; and
+- repository searches proving every concept in the deletion checklist is absent from supported
+  core APIs, wire, hashes, schema, App, and transports.
+
+Verification follows docs/build-and-verification.md. Run narrow owner-specific checks first,
+expand only for affected boundaries, and run the composed CI gate once after narrower failures are
+resolved.
+
+## 14. Ordered implementation commits
+
+### 14.1 freeze exact executable program contracts
+
+In one coherent Program/values/derive/domain cutover:
+
+- make State failure contracts mandatory MfmValue contracts;
+- add framework Never;
+- move accepted integrity failure to exact Access registration;
+- persist complete Access associations;
+- make MfmConfig extend MfmValue;
+- update every current domain implementation and Program fixture; and
+- update authoritative design/architecture and crate documentation for that current intermediate
+  contract.
+
+The existing Store remains the sole semantic owner in this commit. No second Runtime reducer is
+introduced yet.
+
+### 14.2 cut over minimal journal and persistence contracts
+
+In one clean-slate Journal/Store/Memory/PostgreSQL/Runtime/App/EVM cutover:
+
+- install RunFrameV1, ConfigurationRevisionV1, PortableRunBundle, exact hashes, and goldens;
+- embed exact first-reference object closure and charge frame bytes once;
+- introduce per-key configuration streams;
+- store physical command digests on frame/revision rows;
+- install the final reservation/accounting contract;
+- make RunId global and EVM nonce identity chain-aware;
+- delete tenant, scope, epoch, identities, rotation, facts, request ids/tables, receipt tables,
+  global object/membership tables, and global configuration sequencing;
+- rewrite baseline schemas and fixtures with no legacy reader; and
+- keep Store as the one explicitly documented temporary semantic reducer over the final persisted
+  contract.
+
+Every producer and consumer moves together. No old/new codec, schema, or compatibility adapter
+coexists.
+
+At this commit boundary Store still owns exactly one reducer and the existing caller-driven
+lifecycle surface, but that reducer consumes only the final JournalHistory and emits only the final
+RunAppend/ConfigurationAppend commands. Runtime and App are adapted to that one current surface;
+mfm-replay delegates to the same Store reducer and gains no replacement reducer. The intermediate
+has no facts, identity brands, request owners, old wire types, or alternate persistence API. Its
+tests and authoritative docs describe that state explicitly, so the next commit deletes ownership
+rather than choosing between two implementations.
+
+### 14.3 move execution and inspection into Runtime
+
+In one inseparable Program/Runtime/Store/App/replay cutover:
+
+- add the final RuntimeAssembly, Program association, sole reducer, direct-new gate,
+  advance_until_stable, cancellation semantics, typed configuration, RunView, export, and portable
+  inspection;
+- reduce Store to its final mechanical trait;
+- migrate App/transports to explicit RunId and Runtime APIs;
+- delete Program execution catalogs/reifiers, Store semantics, public lifecycle/session/suspension
+  types, App suspended/status logic, and mfm-replay; and
+- update every test, README, docs/design.md, docs/architecture.md, transport contract, and absence
+  check in the same commit.
+
+No commit leaves zero semantic owners or two semantic owners. No compatibility path is staged
+between commits.
+
+Commit subjects are lower case exactly as shown by the section titles.
+
+## 15. Rejected alternatives
+
+### Split Store files without changing ownership
+
+Rejected. Navigation improves while the same reducers, validators, DTOs, registries, and future
+change sites remain.
+
+### Keep Store reduction
+
+Rejected. Runtime would still execute a persistence layer's semantic decision and inspection would
+still require Store semantics.
+
+### Remove every erasure
+
+Rejected. A retained heterogeneous Program selects different Rust State families at runtime. One
+private exact-key registry dispatch is unavoidable.
+
+### Retain a pending-owner or cancellation-custody table
+
+Rejected. It improves availability across caller cancellation but cannot survive process death.
+The selected Read-replace/Effect-park contract already remains safe when volatile work is lost.
+Durable history is the only honest recovery authority.
+
+### Put provider interpretation or append in a detached finalizer
+
+Rejected. A background finalizer creates another lifecycle owner and makes cancellation appear
+stronger than process loss. spawn_blocking may finish pure CPU work only; it owns no IO or append
+authority.
+
+### Keep random append request ids
+
+Rejected. The canonical physical command digest plus the immutable target frame/revision row
+already provides exact idempotency. Separate request identities add conflict states and tables
+without proving another property.
+
+### Keep a separate command/receipt table
+
+Rejected. Every successful command creates exactly one immutable frame or configuration revision.
+That row can retain the command digest, physical instruction, and resulting position.
+
+### Store objects globally
+
+Rejected. Exact first-reference objects embedded in canonical frames make a run and portable bundle
+self-contained and give one byte-accounting model. Physical deduplication is not a semantic
+requirement.
+
+### Retain facts as empty extension points
+
+Rejected. Empty markers, fields, crates, tables, and capability modes preserve concepts and future
+change sites without a consumer. A future fact system must be designed from its real contract.
+
+### Keep a global configuration head
+
+Rejected. Admission needs one exact immutable revision, not a database-wide configuration
+snapshot. Per-key CAS removes unrelated contention and global sequencing.
+
+### Keep tenant, scope, epoch, or a renamed incarnation
+
+Rejected. They do not belong to the selected one-database core authority. Restore fencing is an
+operator/deployment concern outside this contract.
+
+### Keep mfm-replay or public trace/audit lifecycle DTOs
+
+Rejected. Runtime owns the only semantic fold. Future projections must reuse it rather than retain
+another reducer or Store port.
+
+## 16. Acceptance criteria
+
+Implementation is accepted only when:
+
+1. Program persists one exact input, output, mandatory failure, and complete Access association for
+   every State.
+2. Pure Never registration works, Access Never registration fails, and FailureValue is absent.
+3. RuntimeAssembly is the only concrete value/State/capability/configuration registry.
+4. Exactly one private object-safe State driver boundary and its HotValue handoff exist at
+   RegisteredState.start; typed execution owners never cross it.
+5. Runtime owns the only semantic reducer used by execution, read, and portable inspection.
+6. Store exposes only the mechanical operations in this RFC and depends on no Program, State,
+   capability, domain, fact, or Runtime-selection type.
+7. RunFrameV1, first-reference closure, run-head, record-digest, and every fixed limit match golden
+   fixtures.
+8. ConfigurationRevisionV1 uses caller-reproducible expected-position per-key CAS, and admission
+   binds one exact ConfigurationRef.
+9. Frame/revision rows retain their physical command digest and provide exact historical Existing
+   without request or receipt tables.
+10. PostgreSQL and Memory have identical absent-head, exact retry, stale, indeterminate,
+    reservation, and capacity behavior.
+11. Only a locally observed preparation Inserted mints CommittedCall.
+12. Existing, Stale, Indeterminate, history, cancellation, and restart never mint provider
+    authority.
+13. Runtime retains no pending append/conclusion/configuration owner, lease, permit, completion
+    cell, or resolver.
+14. spawn_blocking work owns no ambient IO or persistence authority and may be discarded safely.
+15. Read replacement is bounded; Effect has one possible provider entry and parks after owner loss.
+16. start, resume, and read return the same Runtime-derived RunView contract.
+17. export plus RuntimeAssembly.inspect reproduces Store-backed semantic RunView without live
+    callbacks.
+18. App/transports own no Runtime lifecycle or frame interpretation.
+19. mfm-replay and its reducer are deleted.
+20. mfm-facts and every fact selection/publication/proof/storage concept are deleted.
+21. tenant, scope, epoch, identity rotation, and database incarnation are absent from APIs, wire,
+    hashes, SQL, App, transports, and EVM.
+22. AppendRequestId, request/receipt tables, global objects/membership, and global configuration
+    head/sequence are absent.
+23. EVM nonce/effect identity includes chain, sender, and nonce domain and contains no tenant or
+    secret.
+24. docs/design.md, docs/architecture.md, transport documentation, crate READMEs, schemas, and
+    fixtures describe only this current design.
+25. Production LOC, exported types, dependency edges, and files required to add a State decrease.
+26. Scope-selected checks and final composed CI pass under docs/build-and-verification.md.
