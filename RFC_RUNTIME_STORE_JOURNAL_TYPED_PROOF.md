@@ -33,28 +33,26 @@ replacement incarnation concept.
 Facts are not part of this target. No current admitted capability consumes prior-run facts, so the
 fact selection/publication/proof system is deleted rather than rebuilt speculatively.
 
-Durable history is the only recovery authority. Runtime retains no process-local append or
-conclusion custody after a caller future is cancelled. Cancellation and process death may lose
-volatile work or a real provider result. Read may use a bounded fresh replacement; Effect parks.
-This availability cost is deliberate and is what permits the cancellation design to remain small
-and honest.
+Runtime has no cancellation concept. A supported caller that starts a mutating Runtime future must
+drive it to completion. Runtime does not add cancellation tokens, timeout wrappers, detached
+completion tasks, pending-result custody, or Runtime-owned semaphores. Synchronous State work is
+awaited through spawn_blocking only to protect the async executor. Adapters and Store own the
+waits, timeouts, pools, and explicit ambiguous-result classifications for their live IO.
+
+Process termination is outside the completion contract. After restart, durable history is the only
+recovery authority.
 
 ## Material uncertainties
 
 No material architecture choice remains open. These concrete validation artifacts are still
 required before implementation planning:
 
-1. **Adapter cancellation audit.** The selected contract assumes dropping adapter ingress destroys
-   every MFM retry authority even though external IO may continue. Current adapters have not yet
-   been proven not to clone CommittedCall authority, start autonomous Effect retries, or retain an
-   unbounded background task. If the assumption is wrong, the at-most-one provider-entry proof
-   fails. Resolve by auditing each current adapter and adding cancellation fixtures before planning.
-2. **Configuration instance inventory.** ConfigurationKey uses one explicit stable instance id for
+1. **Configuration instance inventory.** ConfigurationKey uses one explicit stable instance id for
    every independently current configuration series. The mechanism is settled, but the exact EVM
    and Portfolio instance ids and cardinalities are not yet recorded. An overly broad id makes
    unrelated publishers overwrite latest; an overly narrow id makes intended consumers miss
    updates. Resolve by checking in the complete instance inventory before codec goldens are frozen.
-3. **Transport retry inventory.** Runtime retains nothing after indeterminate admission or
+2. **Transport retry inventory.** Runtime retains nothing after indeterminate admission or
    configuration publication. Callers must reproduce the same explicit RunId or configuration
    instance, expected ConfigurationPosition, and canonical typed inputs. Current CLI and REST retry
    behavior has not yet been inventoried against that rule. If callers cannot reproduce those
@@ -63,8 +61,12 @@ required before implementation planning:
 
 The following are settled contracts, not uncertainties:
 
-- an Effect may park even when cancellation happened before provider entry;
-- an Effect may park after the external effect succeeded but its evidence or conclusion was lost;
+- supported callers drive every started mutating Runtime future to completion;
+- Runtime has no cancellation API, timeout, detached completion, or Runtime-owned semaphore;
+- Application/composition may bound top-level concurrency, while Adapter and Store own live-IO
+  wait control;
+- an Effect may park after Adapter returns Unresolved or after its conclusion append is
+  indeterminate and later absent;
 - blocking State/codec callbacks are trusted, bounded-input, pure, and terminating;
 - facts, tenant, scope, epoch, identity rotation, and database incarnation are absent;
 - trace and access-audit DTOs are not core Runtime APIs;
@@ -332,8 +334,9 @@ key. That single driver boundary owns the whole selected State attempt:
 - return only a small non-generic durable disposition to the outer progression loop.
 
 `PreparedAccess`, `CommittedCall`, accepted evidence, and typed conclusions never cross that
-boundary. They live only in the active caller-owned monomorphic driver future. Dropping that future
-drops those owners; no existential owner table or second dynamic lifecycle protocol exists.
+boundary. They live only in the active caller-owned monomorphic driver future and are consumed
+before that supported run-to-completion future returns. No existential owner table or second
+dynamic lifecycle protocol exists.
 
 One private `HotValue` wrapper may carry a just-qualified value across a successfully durable
 append into the next selected driver:
@@ -420,7 +423,6 @@ The following never mint CommittedCall:
 - Stale;
 - Indeterminate;
 - retained history;
-- caller cancellation;
 - process restart; or
 - finding the same preparation during cold fold.
 
@@ -428,10 +430,10 @@ Store can return Inserted at most once for one exact preparation position. Prepa
 affine, and promotion consumes it. Therefore MFM grants at most one provider-entry authority for
 each preparation.
 
-Read may append a bounded new preparation after an unresolved earlier attempt. An Unresolved result
-or loss of the hot Read owner ends the current top-level call as Waiting; a later resume may create
-at most one replacement for that occurrence in that call while the total attempt bound remains.
-Effect and a Read at its bound remain Waiting and never replace their preparation.
+Read may append a bounded new preparation after an earlier attempt returned Unresolved. Unresolved
+ends the current top-level call as Waiting; a later resume may create at most one replacement for
+that occurrence in that call while the total attempt bound remains. Effect and a Read at its bound
+remain Waiting and never replace their preparation.
 
 ### 4.3 One bounded caller-driven progression loop
 
@@ -454,77 +456,54 @@ Runtime stops at:
 - capacity; or
 - infrastructure failure.
 
-Runtime uses bounded semaphores for active progression, blocking CPU work, and provider ingress.
-They are resource controls, not recovery owners.
+Runtime owns no active-progression, CPU-job, planning-job, or provider-ingress semaphore.
+Application/composition may impose one operational bound on simultaneous top-level Runtime calls.
+Adapter clients and Store connection pools independently bound their own live IO. None of those
+resource policies is a Runtime semantic owner or persisted contract.
+
+The per-call State-start bound remains only as a deterministic yield point for a long run. It is
+not concurrency admission, does not allocate a permit, and is the only Runtime execution-limit
+setting in this target.
 
 There is no scheduler, timer, background run progression, process-wide writer lease, process-local
-per-run lock, pending append table, resolver queue, or retained recovery token.
+per-run lock, pending append table, resolver queue, retained recovery token, cancellation token, or
+detached completion task.
 
-### 4.4 Cancellation and process loss
+### 4.4 Completion and live-IO wait ownership
 
-Durable history is the only recovery authority. Runtime does not preserve volatile work when a
-caller future is dropped.
+Every mutating Runtime operation is run to completion by its supported caller. Application and
+transport code must not race that future against a timeout, abort it, drop it after a client
+disconnect, or treat dropping it as a domain operation. Runtime exposes no cancellation API and
+makes no completion or recovery promise for a caller that violates this contract.
 
-#### Deterministic work
+Runtime itself owns no timeout policy. Wait control exists only at live-IO boundaries:
 
-Cancellation before an append may discard Program association, State preparation, Pure evaluation,
-Access interpretation, canonical qualification, or frame encoding. That work may be recomputed
-from durable history.
+- an Adapter owns provider/client deadlines, connection limits, protocol acknowledgement, and the
+  exact mapping to accepted evidence, BlockedIntegrity, or Unresolved;
+- Store owns database/pool deadlines and the exact mapping to UnavailableBeforeSubmission or
+  Indeterminate; and
+- Application/composition may bound simultaneous top-level Runtime calls without becoming an
+  execution lifecycle owner.
 
-#### Preparation append
+An IO timeout is therefore an Adapter or Store result, not Runtime cancellation. Unresolved permits
+only the Program-declared Read replacement rule; it never recreates Effect authority.
+UnavailableBeforeSubmission proves no candidate mutation was submitted. Indeterminate means a
+Store mutation may have committed and is resolved only by exact retry or a later durable load.
 
-A cancelled preparation append may have committed or rolled back. Because the caller did not
-observe Inserted, it mints no CommittedCall.
-
-On a later load:
-
-- absence permits deterministic recomputation;
-- a durable Read preparation may permit a bounded replacement; and
-- a durable Effect preparation parks.
-
-An Effect may therefore park even when cancellation occurred after preparation commit but before
-provider entry. This is accepted availability loss.
-
-#### Provider ingress
-
-Once provider ingress is polled, cancellation may mean the provider did nothing, remains in flight,
-or performed the Effect. Runtime does not infer which. The affine call authority is lost.
-
-Read may later replace. Effect parks and never recreates the call.
-
-#### Accepted provider result
-
-Cancellation may discard accepted evidence, the interpreted outcome, or an encoded conclusion.
-No conclusion is promised until Store durably reports Inserted or exact Existing.
-
-If conclusion append acknowledgement is lost, a later complete load reveals either the conclusion
-or the unresolved preparation. Read may replace only in the latter case; Effect parks.
-
-#### Process death
-
-Process death has the same semantic result as losing every local future. No in-memory owner or
-command survives. The design provides no false claim that spawn_blocking or process-local custody
-can make process death recoverable.
+Process termination is unsupported as an operation-completion mechanism. No volatile typed owner
+or command is promised to survive it; after restart Runtime uses only durable history.
 
 ### 4.5 Blocking work contract
 
 State preparation, Pure evaluation, Access interpretation, integrity projection, value
-qualification, and substantial canonical work run through bounded spawn_blocking jobs when they
-may block the async executor.
+qualification, and substantial canonical work run through spawn_blocking when they may block the
+async executor. Runtime immediately awaits the JoinHandle before using the result.
 
-Dropping the awaiting future does not necessarily stop the blocking closure. A detached closure:
-
-- may finish its pure deterministic CPU work;
-- has its result discarded;
-- owns no Store or provider handle;
-- performs no ambient IO;
-- performs no append;
-- invokes no subsequent State; and
-- cannot publish a successful RunView.
-
-The blocking-work permit is moved into the closure, so caller cancellation does not free capacity
-while detached CPU work is still running. Registered callbacks are trusted, bounded-input, pure,
-and terminating. Runtime bounds concurrency, not CPU time.
+The blocking closure contains only trusted, bounded-input, pure, terminating synchronous work. It
+owns no Store, Adapter, provider client, async runtime handle, or append authority; it never invokes
+block_on. Store append and provider ingress remain ordinary async IO after the blocking result is
+observed. Runtime adds no CPU semaphore or blocking-job timeout. A callback that does not terminate
+violates its trusted registration contract; Runtime does not attempt to interrupt it.
 
 ### 4.6 Admission and conclusion races
 
@@ -544,8 +523,8 @@ present and classify:
 - Conflict when a different valid conclusion owns it; or
 - InvalidHistory.
 
-If that load or the caller is cancelled, no owner is retained. The next request starts from a fresh
-complete load.
+If that load fails, Runtime returns the classified error and retains no owner. The next request
+starts from a fresh complete load.
 
 ### 4.7 RunView and public Runtime surface
 
@@ -977,11 +956,10 @@ Meanings are normative:
   closed; an append may return it only before candidate mutation or after proven rollback, so this
   invocation wrote nothing.
 - UnavailableBeforeSubmission is allowed only when Store proves no transaction was submitted.
-- Indeterminate means the candidate mutation may have committed. Every failure or cancellation
-  observed after that point is classified only as Indeterminate when a result can still be returned.
+- Indeterminate means the candidate mutation may have committed. Every Store timeout, connection
+  loss, or driver failure observed after that point is classified only as Indeterminate.
 
 AcknowledgementUnknown is not an AppendResult. Runtime retains no command after Indeterminate.
-Caller-future cancellation returns no result and is semantically lost acknowledgement.
 
 ### 6.4 Idempotency and transaction order
 
@@ -1239,7 +1217,7 @@ reuses the exact RunId and admission inputs.
 ~~~text
 Runnable Pure occurrence
   -> exact RegisteredState.start
-  -> bounded spawn_blocking evaluation
+  -> spawn_blocking evaluation
   -> ProposedStateOutcome<Output, Failure>
   -> Runtime value qualification
   -> Journal encode Pure conclusion
@@ -1251,7 +1229,7 @@ Inserted | Existing
 Stale
   -> load/fold winner
 
-Indeterminate or cancellation
+Indeterminate
   -> retain nothing
   -> later resume recomputes if conclusion is absent
 ~~~
@@ -1263,7 +1241,7 @@ Pure evaluation must be deterministic and perform no ambient IO.
 ~~~text
 Runnable Access occurrence
   -> exact RegisteredState.start
-  -> bounded spawn_blocking preparation
+  -> spawn_blocking preparation
   -> PreparedAccess<S,C>
   -> Journal encode StatePrepared
   -> Store append exact head with Open/Replace reservation
@@ -1272,7 +1250,7 @@ Inserted
   -> consume local PreparedAccess
   -> mint one CommittedCall<S,C>
 
-Existing | Stale | Indeterminate | cancellation
+Existing | Stale | Indeterminate
   -> no CommittedCall
 ~~~
 
@@ -1284,7 +1262,7 @@ CommittedCall<S,C>
   -> AccessResolution<S,C>
 
 Outcome(accepted evidence)
-  -> bounded spawn_blocking ordinary interpretation
+  -> spawn_blocking ordinary interpretation
   -> typed outcome
 
 BlockedIntegrity(accepted evidence)
@@ -1310,7 +1288,7 @@ Inserted | Existing
 Stale
   -> load/fold and classify same/replaced/conflict/invalid
 
-Indeterminate or cancellation
+Indeterminate
   -> retain nothing
   -> later history reveals conclusion or unresolved preparation
 ~~~
@@ -1415,8 +1393,9 @@ writable. Restore with a surviving writer is unsupported and has no core safety 
   qualification, bounded progression, RunView, and portable semantic inspection;
 - register the exact Access integrity projection;
 - keep only one private object-safe State driver/hot-value handoff;
-- run blocking deterministic callbacks outside the async executor;
+- run blocking deterministic callbacks outside the async executor and immediately await them;
 - retain no pending append/conclusion/configuration owner;
+- own no cancellation API, timeout policy, detached completion task, or Runtime semaphore;
 - perform no background progression; and
 - expose no public State-by-State lifecycle algebra.
 
@@ -1435,14 +1414,27 @@ writable. Restore with a surviving writer is unsupported and has no core safety 
 - expose only the mechanical Store trait and physical command/result types;
 - implement identical Memory/PostgreSQL append semantics;
 - store frame/revision command digests on their immutable rows;
+- own database/pool wait control and classify failures as UnavailableBeforeSubmission or
+  Indeterminate at the exact submission boundary;
 - own no Program, reducer, State, capability, fact, configuration-C, or replay semantics; and
 - delete semantic Store facades, selection owners, brands, duplicated backend DTOs, and split ports.
 
-### 10.6 App and transports
+### 10.6 Adapters and live IO
+
+- own provider/client deadlines, connection limits, and protocol acknowledgement;
+- map every completed wait to accepted evidence, BlockedIntegrity, or Unresolved;
+- permit an internal retry only when the Adapter proves an Effect request was not submitted;
+- return Unresolved after any ambiguous Effect submission or response wait; and
+- expose no cancellation token or generic retry authority to Runtime.
+
+### 10.7 App and transports
 
 - establish an explicit fresh RunId before submission and make that same value reproducible to the
   caller for an indeterminate retry;
 - call Runtime configuration/start/resume/read/export APIs;
+- drive every started mutating Runtime future to completion without racing a timeout, aborting it,
+  or tying it to client-disconnect cancellation;
+- optionally apply one coarse operational bound to simultaneous top-level Runtime calls;
 - render RunView and reviewed redaction-safe errors;
 - retain no RunSession, SuspendedRun, pending owner, or frame-derived status;
 - remove fixed-tenant facade state;
@@ -1450,7 +1442,7 @@ writable. Restore with a surviving writer is unsupported and has no core safety 
   transport contract; and
 - update CLI/REST documentation and fixtures in the same cutover.
 
-### 10.7 Replay
+### 10.8 Replay
 
 Delete mfm-replay, its workspace membership, dependencies, DTOs, and reducer. Portable structural
 decoding belongs to Journal and semantic inspection belongs to RuntimeAssembly.
@@ -1491,6 +1483,19 @@ acknowledgement lease
 completion/finalization cell
 pending-owner limit or permit
 resolver token
+Runtime cancellation API/token/state
+Runtime active-session/CPU/planning/ingress semaphores
+max_active_sessions
+max_cpu_jobs
+max_planning_jobs
+max_ingress_jobs
+active_sessions
+cpu_jobs
+planning_jobs
+ingress_jobs
+Runtime semaphore acquire helpers and OwnedSemaphorePermit fields
+Runtime timeout policy
+Runtime detached completion task/finalizer
 
 StoreBrand
 StructuredStore
@@ -1578,15 +1583,18 @@ decrease.
 - Runtime State logic performs no ambient IO. Provider, network, filesystem, signer, and storage IO
   cross explicit adapters or Store.
 - Only a freshly observed preparation Inserted grants CommittedCall.
-- Existing, Stale, Indeterminate, history, cancellation, and restart grant no provider authority.
+- Existing, Stale, Indeterminate, history, and restart grant no provider authority.
 - No success is exposed before a durable conclusion is observed.
 - Every Store failure after the candidate mutation may have committed is Indeterminate.
-- Read provider access is declared non-mutating and replacement is bounded. Effect has one
-  possible provider entry and parks after owner loss.
-- spawn_blocking may outlive its waiter but owns no IO or persistence authority.
+- Read provider access is declared non-mutating and replacement after Unresolved is bounded. Effect
+  has one possible provider entry and parks after Unresolved or an absent indeterminate conclusion.
+- Supported callers drive mutating Runtime futures to completion; Runtime owns no cancellation or
+  timeout mechanism.
+- spawn_blocking owns only synchronous pure work, is immediately awaited, and contains no IO or
+  persistence authority.
 - Store append is atomic per frame/revision and exact-head linearized.
 - Frame/revision rows are immutable and exact retry never reapplies reservation/accounting changes.
-- Process death loses all volatile work and has no hidden recovery path.
+- Process termination has no operation-completion guarantee; restart trusts only durable history.
 - Restore with a surviving old writer is unsupported.
 - Public errors are reviewed and redaction-safe.
 
@@ -1637,20 +1645,18 @@ Negative fixtures cover:
 - Match reduction uses the one schema-derived projection;
 - exact State key dispatch rejects partial or implementation-only matches;
 - only preparation Inserted mints CommittedCall;
-- Existing, Stale, Indeterminate, cancellation, and cold history mint none;
+- Existing, Stale, Indeterminate, and cold history mint none;
 - concurrent identical preparations cause at most one provider entry;
-- cancellation after preparation commit but before provider entry parks Effect;
-- cancellation during provider ingress never permits Effect re-entry;
-- accepted evidence lost before conclusion parks Effect;
+- Adapter Unresolved never permits Effect re-entry;
+- an indeterminate Effect conclusion later found absent leaves Effect parked;
 - Read alone may replace, at most once per occurrence per resume, and never exceeds its total
   attempt bound;
 - old Read conclusion versus replacement commits at most one exact-head successor;
-- Pure work safely recomputes after cancellation;
+- Pure work safely recomputes after an indeterminate conclusion later found absent;
 - no RunView success appears before durable conclusion;
 - an earlier RunView remains a valid captured snapshot if a formerly indeterminate transaction
   commits later; and
-- active progression, State starts, blocking jobs, and provider ingress reject at configured bound
-  plus one.
+- the per-call State-start bound returns Runnable and a later resume continues from that exact head.
 
 ### 13.4 Store conformance
 
@@ -1677,22 +1683,26 @@ The same suite runs against Memory and PostgreSQL:
 - no AppendRequestId, request row, receipt row, object table, membership table, identity, or fact
   table exists.
 
-### 13.5 Cancellation and blocking tests
+### 13.5 Completion, blocking, and live-IO tests
 
-Barrier-controlled tests cover:
+Boundary-focused tests and repository checks cover:
 
-- caller cancellation while deterministic spawn_blocking work continues;
-- detached blocking work performs no Store/provider IO and publishes no result;
-- cancellation before preparation append causes zero provider entries;
-- post-commit/pre-ack preparation loss causes zero provider entries on exact Existing;
-- rolled-back preparation loss permits one later Inserted and exactly one provider entry;
-- cancellation before/during Effect ingress leaves the durable preparation and no re-entry;
-- accepted Effect evidence lost before conclusion leaves Effect parked;
+- every started mutating Runtime future is directly driven to completion by supported App and
+  transport paths;
+- Runtime exposes no cancellation token, timeout wrapper, detached completion task, or semaphore;
+- spawn_blocking closures contain only synchronous deterministic work and are awaited before
+  provider or Store IO;
+- Adapter deadline/transport ambiguity returns Unresolved through the capability contract;
+- Store pre-submission timeout returns UnavailableBeforeSubmission and possible post-submission
+  loss returns Indeterminate;
+- post-commit/pre-ack preparation Indeterminate causes zero provider entries on exact Existing;
+- rolled-back preparation Indeterminate permits one later Inserted and exactly one provider entry;
+- Effect Unresolved leaves the durable preparation and no re-entry;
+- accepted Effect evidence followed by a rolled-back indeterminate conclusion leaves Effect parked;
 - conclusion post-commit acknowledgement loss is later observed durably;
 - conclusion rollback leaves Effect waiting and Read replacement-eligible;
-- Pure conclusion commit/rollback loss is safely folded/recomputed; and
-- active-progression/provider permits release when their owning future drops, while a detached
-  blocking job retains its permit until the closure actually exits and then releases it.
+- Pure conclusion commit/rollback ambiguity is safely folded/recomputed; and
+- an optional composition-level top-call bound does not enter Runtime proof or persisted state.
 
 ### 13.6 Configuration and EVM tests
 
@@ -1723,6 +1733,7 @@ Record:
 - one canonical Journal construction/decoding path;
 - one Runtime reducer;
 - one Runtime assembly registry;
+- zero Runtime semaphore/cancellation/detached-completion paths;
 - one Store command per real operation; and
 - repository searches proving every concept in the deletion checklist is absent from supported
   core APIs, wire, hashes, schema, App, and transports.
@@ -1781,8 +1792,9 @@ rather than choosing between two implementations.
 In one inseparable Program/Runtime/Store/App/replay cutover:
 
 - add the final RuntimeAssembly, Program association, sole reducer, direct-new gate,
-  advance_until_stable, cancellation semantics, typed configuration, RunView, export, and portable
-  inspection;
+  advance_until_stable, run-to-completion caller contract, typed configuration, RunView, export,
+  and portable inspection;
+- delete Runtime cancellation, timeout, detached-completion, and semaphore machinery;
 - reduce Store to its final mechanical trait;
 - migrate App/transports to explicit RunId and Runtime APIs;
 - delete Program execution catalogs/reifiers, Store semantics, public lifecycle/session/suspension
@@ -1812,17 +1824,24 @@ still require Store semantics.
 Rejected. A retained heterogeneous Program selects different Rust State families at runtime. One
 private exact-key registry dispatch is unavoidable.
 
-### Retain a pending-owner or cancellation-custody table
+### Add Runtime cancellation or pending-result custody
 
-Rejected. It improves availability across caller cancellation but cannot survive process death.
-The selected Read-replace/Effect-park contract already remains safe when volatile work is lost.
-Durable history is the only honest recovery authority.
+Rejected. Supported callers drive mutating Runtime futures to completion. Runtime cancellation
+tokens, timeout branches, owner tables, retry leases, and cancellation-specific states would model
+an unsupported operation and duplicate live-IO wait ownership.
 
 ### Put provider interpretation or append in a detached finalizer
 
-Rejected. A background finalizer creates another lifecycle owner and makes cancellation appear
-stronger than process loss. spawn_blocking may finish pure CPU work only; it owns no IO or append
-authority.
+Rejected. A detached finalizer creates another lifecycle owner without solving process termination.
+Synchronous pure work is awaited through spawn_blocking; provider and Store work remains awaited
+live IO under Adapter and Store policy.
+
+### Wrap State execution and Store append inside spawn_blocking
+
+Rejected. spawn_blocking protects the async executor from synchronous CPU work; it is not a wait or
+durability owner. Store append is async live IO and must not be driven with block_on or a blocking
+database client inside the closure. The supported caller awaits the ordinary Runtime future through
+both phases.
 
 ### Keep random append request ids
 
@@ -1883,16 +1902,19 @@ Implementation is accepted only when:
 10. PostgreSQL and Memory have identical absent-head, exact retry, stale, indeterminate,
     reservation, and capacity behavior.
 11. Only a locally observed preparation Inserted mints CommittedCall.
-12. Existing, Stale, Indeterminate, history, cancellation, and restart never mint provider
-    authority.
+12. Existing, Stale, Indeterminate, history, and restart never mint provider authority.
 13. Runtime retains no pending append/conclusion/configuration owner, lease, permit, completion
-    cell, or resolver.
-14. spawn_blocking work owns no ambient IO or persistence authority and may be discarded safely.
-15. Read replacement is bounded; Effect has one possible provider entry and parks after owner loss.
+    cell, resolver, cancellation/timeout API, detached completion task, or Runtime semaphore.
+14. spawn_blocking work is synchronously pure, contains no block_on, Adapter, Store, or persistence
+    authority, and is awaited before dependent IO.
+15. Adapter and Store own live-IO wait classification; Read replacement is bounded after
+    Unresolved, while Effect has one possible provider entry and parks after Unresolved or an absent
+    indeterminate conclusion.
 16. start, resume, and read return the same Runtime-derived RunView contract.
 17. export plus RuntimeAssembly.inspect reproduces Store-backed semantic RunView without live
     callbacks.
-18. App/transports own no Runtime lifecycle or frame interpretation.
+18. App/transports own no Runtime lifecycle or frame interpretation, drive every started mutating
+    Runtime future to completion, and keep any top-call concurrency bound outside Runtime semantics.
 19. mfm-replay and its reducer are deleted.
 20. mfm-facts and every fact selection/publication/proof/storage concept are deleted.
 21. tenant, scope, epoch, identity rotation, and database incarnation are absent from APIs, wire,
