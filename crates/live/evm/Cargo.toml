@@ -2,7 +2,6 @@
 name = "mfm-evm-live"
 version = "0.1.0"
 edition = "2021"
-autotests = false
 description = "Qualified bounded EVM provider adapters for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
@@ -12,18 +11,11 @@ layer = "adapter"
 domain = "evm"
 domain-role = "live"
 
-[[test]]
-name = "adapter_closure"
-path = "tests/adapter_closure.rs"
-
 [dependencies]
-mfm-canonical = { path = "../../kernel/canonical" }
-mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-evm = { path = "../../domains/evm" }
 mfm-ids = { path = "../../kernel/ids" }
-mfm-portfolio = { path = "../../domains/portfolio" }
-mfm-program = { path = "../../kernel/program" }
 mfm-runtime = { path = "../../kernel/runtime" }
-serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

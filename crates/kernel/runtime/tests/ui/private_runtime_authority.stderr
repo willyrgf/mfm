@@ -1,0 +1,11 @@
+error[E0451]: field `store` of struct `Runtime` is private
+ --> tests/ui/private_runtime_authority.rs:4:19
+  |
+4 |     let Runtime { store, .. } = runtime;
+  |                   ^^^^^ private field
+
+error[E0451]: field `state` of struct `RunView` is private
+ --> tests/ui/private_runtime_authority.rs:9:19
+  |
+9 |     let RunView { state, .. } = view;
+  |                   ^^^^^ private field

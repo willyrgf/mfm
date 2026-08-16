@@ -26,8 +26,6 @@ pub enum StringGrammar {
     UnicodeScalarText,
     /// `content:sha256-v1:<64 lowercase hex>` owned by `ContentDigest`.
     ContentDigest,
-    /// `sha256-jcs-v1:<64 lowercase hex>` owned by `SemanticDigest`.
-    SemanticDigest,
     /// `run:sha256-jcs-v1:<64 lowercase hex>` owned by `RunId`.
     RunId,
     /// `artifact:sha256-jcs-v1:<64 lowercase hex>` owned by `ArtifactId`.
@@ -40,10 +38,6 @@ pub enum StringGrammar {
     EntryPointId,
     /// `mfm.<domain>/<name>@<positive canonical u64>` owned by `StableId`.
     StableId,
-    /// `mfm.store_scope.v1:<32 lowercase hex>` owned by `StoreScopeId`.
-    StoreScopeId,
-    /// `mfm.tenant_scope.v1:<32 lowercase hex>` owned by `TenantScopeId`.
-    TenantScopeId,
     /// `0|[1-9][0-9]{0,19}` canonical unsigned text.
     CanonicalUnsignedText,
     /// `[a-z0-9][a-z0-9._/-]*` lowercase path token.
@@ -58,15 +52,12 @@ impl StringGrammar {
         match self {
             Self::UnicodeScalarText => "unicode_scalar_text",
             Self::ContentDigest => "content_digest",
-            Self::SemanticDigest => "semantic_digest",
             Self::RunId => "run_id",
             Self::ArtifactId => "artifact_id",
             Self::SchemaId => "schema_id",
             Self::SemanticTypeId => "semantic_type_id",
             Self::EntryPointId => "entry_point_id",
             Self::StableId => "stable_id",
-            Self::StoreScopeId => "store_scope_id",
-            Self::TenantScopeId => "tenant_scope_id",
             Self::CanonicalUnsignedText => "canonical_unsigned_text",
             Self::LowerPathToken => "lower_path_token",
             Self::MediaType => "media_type",
@@ -79,8 +70,6 @@ impl StringGrammar {
 pub enum CanonicalJsonProfile {
     /// Framework surfaces that deliberately admit signed and unsigned integers.
     GeneralFloatFree,
-    /// Fact surfaces restricted to unsigned integers.
-    UnsignedNative,
 }
 
 impl CanonicalJsonProfile {
@@ -88,7 +77,6 @@ impl CanonicalJsonProfile {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::GeneralFloatFree => "general_float_free",
-            Self::UnsignedNative => "unsigned_native",
         }
     }
 }

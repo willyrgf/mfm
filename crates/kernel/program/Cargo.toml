@@ -2,7 +2,6 @@
 name = "mfm-program"
 version = "0.1.0"
 edition = "2021"
-autotests = false
 description = "Opaque sequential Program authority for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
@@ -17,14 +16,9 @@ binary-facing = false
 name = "mfm_program"
 path = "src/lib.rs"
 
-[[test]]
-name = "api_contract"
-path = "tests/api_contract.rs"
-
 [dependencies]
 mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
-mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-values = { path = "../values" }
 serde = { workspace = true }
@@ -32,5 +26,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+mfm-canonical = { path = "../canonical" }
 mfm-program-derive = { path = "../program-derive" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 trybuild = "1.0"

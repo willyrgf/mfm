@@ -1,30 +1,14 @@
 # mfm-storage-postgres
 
-The PostgreSQL adapter supplies mechanical exact-head ordering under the admitted
-`PrimaryCrashRestart` durability profile. Store remains the semantic owner.
+Durable implementation of the two-method mechanical Store. `PostgresStore::connect` owns its pool
+and gates every physical connection on the exact `mfm.run-history-postgres.v1` schema, three logged
+tables, primary status, `fsync=on`, and `full_page_writes=on`.
 
-The v8 inventory is deliberately append-only and partitioned by `(store_scope_id, store_epoch,
-tenant_scope_id)`: `mfm_run_frames` and `mfm_run_heads` retain run prefixes and heads;
-`mfm_fact_heads` and `mfm_fact_publications` retain the dense independent fact frontier and its
-publication coordinates; and `mfm_configuration_revisions`/`mfm_configuration_heads` retain the
-configuration stream. The writer materializes a zero `mfm_fact_heads` row with
-`ON CONFLICT DO NOTHING` and locks it before checking a first publication. The shared backend
-conformance race proves that concurrent first publishers linearize to one commit and one
-`FactFrontierChanged`, with no partial run or fact row.
+Loads use one read-only repeatable-read snapshot, prove a nonempty gap-free prefix and byte/digest
+accounting, then copy owned rows in one pure blocking job. Appends copy the candidate before BEGIN,
+force `synchronous_commit=on`, take the per-RunId advisory transaction lock before state reads,
+validate head/target, insert immutable bytes, update the head, and COMMIT.
 
-Configuration rows remain mechanical canonical bytes. Each row stores the exact typed content
-reference and cumulative byte count at its global sequence; the head stores the same count for
-bounded preflight before byte allocation. Store alone decodes and validates `MfmConfig` values.
-The baseline intentionally rejects retired generic `mfm.configuration` rows and has no legacy
-reader.
-
-The database also records one persisted `(store_scope_id, store_epoch)` deployment identity.
-Ordinary opens must match it, including simultaneous qualified opens. A trusted restore uses
-`PostgresStore::rotate_identity` with a fresh scope or epoch, then opens the new pair; that
-rotation makes already-open handles with the previous identity fail closed and leaves old
-partitions replay-only.
-
-Each simultaneous semantic opening has an independent process-local brand and consumes into one
-non-Clone mutation port plus read/configuration/audit ports. Runtime assemblies targeting this same
-persisted identity therefore load their own configuration evidence and cannot exchange selected
-runs or append owners; PostgreSQL linearizes them only through append-id lookup and exact-head CAS.
+Pre-COMMIT failures are definite typed capacity/corruption/unavailability. Only an IO/protocol loss
+after COMMIT submission is `Indeterminate`. Static schema installation is the migration artifact,
+not a public Store method. Managed same-crate tests run through the `postgres-test` task.

@@ -2,7 +2,6 @@
 name = "mfm-app"
 version = "0.1.0"
 edition = "2021"
-autotests = false
 description = "Fixed-tenant application facade for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
@@ -11,33 +10,15 @@ license = "MIT"
 layer = "assembly"
 binary-facing = true
 
-[features]
-test-support = []
-
 [dependencies]
-mfm-canonical = { path = "../kernel/canonical" }
-mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-evm = { path = "../domains/evm" }
 mfm-ids = { path = "../kernel/ids" }
-mfm-journal = { path = "../kernel/journal" }
 mfm-portfolio = { path = "../domains/portfolio" }
-mfm-program = { path = "../kernel/program" }
-mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
-mfm-store = { path = "../kernel/store" }
-mfm-values = { path = "../kernel/values" }
-serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 mfm-evm-live = { path = "../live/evm" }
+mfm-store = { path = "../kernel/store" }
+serde_json = { workspace = true }
 tokio = { workspace = true }
-
-[[test]]
-name = "evm_portfolio_cutover"
-path = "tests/evm_portfolio_cutover.rs"
-
-[[test]]
-name = "capacity_envelope"
-path = "tests/capacity_envelope.rs"

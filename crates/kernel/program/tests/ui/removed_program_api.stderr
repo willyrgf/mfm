@@ -1,0 +1,17 @@
+error[E0432]: unresolved imports `mfm_program::BindingDescriptor`, `mfm_program::ProgramBuilder`, `mfm_program::ProgramCatalog`, `mfm_program::ProgramDocument`, `mfm_program::QualifiedValue`, `mfm_program::SequentialControlAddress`
+ --> tests/ui/removed_program_api.rs:2:5
+  |
+2 |     BindingDescriptor, ProgramBuilder, ProgramCatalog, ProgramDocument, QualifiedValue,
+  |     ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^ no `QualifiedValue` in the root
+  |     |                  |               |               |
+  |     |                  |               |               no `ProgramDocument` in the root
+  |     |                  |               no `ProgramCatalog` in the root
+  |     |                  no `ProgramBuilder` in the root
+  |     no `BindingDescriptor` in the root
+3 |     SequentialControlAddress,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^ no `SequentialControlAddress` in the root
+  |
+help: a similar name exists in the module
+  |
+2 |     BindingDescriptor, ProgramBuilder, ProgramCatalog, RawProgramDocument, QualifiedValue,
+  |                                                        +++

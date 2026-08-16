@@ -24,4 +24,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+mfm-program-derive = { path = "../program-derive" }
+serde = { workspace = true }
 serde_json = { workspace = true }

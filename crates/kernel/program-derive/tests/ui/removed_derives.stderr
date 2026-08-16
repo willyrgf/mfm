@@ -1,0 +1,9 @@
+error[E0432]: unresolved imports `mfm_program_derive::MfmConfig`, `mfm_program_derive::OperationOutput`, `mfm_program_derive::PublicOutputs`, `mfm_program_derive::StateInput`
+ --> tests/ui/removed_derives.rs:1:26
+  |
+1 | use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs, StateInput};
+  |                          ^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^ no `StateInput` in the root
+  |                          |          |                |
+  |                          |          |                no `PublicOutputs` in the root
+  |                          |          no `OperationOutput` in the root
+  |                          no `MfmConfig` in the root

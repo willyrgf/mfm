@@ -2,7 +2,7 @@
 name = "mfm-capabilities"
 version = "0.1.0"
 edition = "2021"
-description = "Effect and capability contracts for the MFM typed kernel"
+description = "Observational Read capability contracts for the MFM typed kernel"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
@@ -18,12 +18,9 @@ path = "src/lib.rs"
 
 [dependencies]
 thiserror = { workspace = true }
-mfm-canonical = { path = "../canonical" }
-mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-values = { path = "../values" }
 
 [dev-dependencies]
 mfm-program-derive = { path = "../program-derive" }
 serde = { workspace = true }
-trybuild = "1.0"

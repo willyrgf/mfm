@@ -1,5 +1,0 @@
-error[E0599]: no associated function or constant named `append` found for struct `OpenedStructuredStore` in the current scope
- --> tests/ui/opened_store_has_no_generic_append.rs:4:36
-  |
-4 |     let _ = OpenedStructuredStore::append;
-  |                                    ^^^^^^ associated function or constant not found in `OpenedStructuredStore`

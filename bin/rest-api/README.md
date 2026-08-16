@@ -1,6 +1,6 @@
-# mfm REST API
+# MFM REST API
 
-The standalone REST binary is deliberately unavailable until a trusted embedding supplies an exact
-live `Application`. It does not open a local Store, publish configuration, expose admission/drive
-routes, or install a fake provider. Endpoint discovery, credentials, and Runtime topology remain
-outside this binary and require separately scoped deployment composition.
+The standalone REST binary currently prints one unavailable diagnostic and exits. It binds no
+listener, exposes no metadata or health route, and has no trusted live Runtime composition or
+run-progression endpoint. Any future route must use explicit RunId, typed Application input/output,
+bounded request parsing, and redaction-safe errors.

@@ -1,0 +1,2007 @@
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use mfm_capabilities::{CapabilityError, ReadCapabilityContract};
+use mfm_ids::{DigestAlgorithm, DigestBytes, EntryPointId, RunId, StableId};
+use mfm_journal::{EncodedRunFrame, JournalHistory, OutcomeKind, StoredRunBytes};
+use mfm_program::{
+    capability_contract_ref, nominal_contract_ref, state_implementation_ref, Declaration,
+    Execution, MatchDeclaration, MatchVariant, Never, Program, ProgramError, ProposedStateOutcome,
+    PureState, ReadPreparationError, ReadState, State, StateDeclaration,
+};
+use mfm_program_derive::MfmValue;
+use mfm_runtime::{ReadAdapterError, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError};
+use mfm_store::{AppendResult, MemoryStore, Store, StoreError};
+use mfm_values::canonicalize_mfm_value;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct Value {
+    value: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct OtherValue {
+    value: String,
+}
+
+struct Increment;
+
+impl State for Increment {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/increment@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for Increment {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success {
+            output: Value {
+                value: input.value + 1,
+            },
+        }
+    }
+}
+
+struct ConflictingIncrement;
+
+impl State for ConflictingIncrement {
+    type Input = Value;
+    type Output = OtherValue;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        Increment::state_id()
+    }
+}
+
+impl PureState for ConflictingIncrement {
+    fn evaluate(_input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success {
+            output: OtherValue {
+                value: "conflict".to_owned(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+enum Selector {
+    Left(BranchValue),
+    Right(BranchValue),
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+#[allow(clippy::redundant_allocation)] // Exercises recursive Box Match projection parity.
+enum NestedSelector {
+    Nested(Box<Box<BranchValue>>),
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+enum ManualSelectorDescriptor {
+    Branch(BranchValue),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ManualSelector {
+    Branch(BranchValue),
+}
+
+impl mfm_values::MfmValue for ManualSelector {
+    fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+        <ManualSelectorDescriptor as mfm_values::MfmValue>::schema_descriptor()
+    }
+
+    fn semantic_id() -> mfm_values::Result<mfm_ids::SemanticTypeId> {
+        <ManualSelectorDescriptor as mfm_values::MfmValue>::semantic_id()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct BranchValue {
+    value: u64,
+}
+
+struct Choose;
+
+impl State for Choose {
+    type Input = Value;
+    type Output = Selector;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/choose@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for Choose {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success {
+            output: if input.value % 2 == 0 {
+                Selector::Left(BranchValue { value: input.value })
+            } else {
+                Selector::Right(BranchValue { value: input.value })
+            },
+        }
+    }
+}
+
+struct ChooseNested;
+
+impl State for ChooseNested {
+    type Input = Value;
+    type Output = NestedSelector;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/choose-nested@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for ChooseNested {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success {
+            output: NestedSelector::Nested(Box::new(Box::new(BranchValue { value: input.value }))),
+        }
+    }
+}
+
+struct ChooseManual;
+
+impl State for ChooseManual {
+    type Input = Value;
+    type Output = ManualSelector;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/choose-manual@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for ChooseManual {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success {
+            output: ManualSelector::Branch(BranchValue { value: input.value }),
+        }
+    }
+}
+
+struct IncrementBranch;
+
+impl State for IncrementBranch {
+    type Input = BranchValue;
+    type Output = BranchValue;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/increment-branch@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+struct RightBranch;
+
+impl State for RightBranch {
+    type Input = BranchValue;
+    type Output = BranchValue;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/right-branch@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for RightBranch {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success {
+            output: BranchValue {
+                value: input.value + 100,
+            },
+        }
+    }
+}
+
+impl PureState for IncrementBranch {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success {
+            output: BranchValue {
+                value: input.value + 1,
+            },
+        }
+    }
+}
+
+struct Fail;
+
+impl State for Fail {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Value;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/fail@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for Fail {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Failure { failure: input }
+    }
+}
+
+struct Rejoin;
+
+impl State for Rejoin {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Value;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/rejoin@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for Rejoin {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        if input.value % 2 == 0 {
+            ProposedStateOutcome::Success { output: input }
+        } else {
+            ProposedStateOutcome::Failure { failure: input }
+        }
+    }
+}
+
+struct BlockingSignals {
+    entered: tokio::sync::Notify,
+    finished: tokio::sync::Notify,
+    release: AtomicBool,
+    evaluations: AtomicUsize,
+}
+
+static BLOCKING_SIGNALS: OnceLock<Mutex<Option<Arc<BlockingSignals>>>> = OnceLock::new();
+
+struct BlockingIncrement;
+
+impl State for BlockingIncrement {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/blocking-increment@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for BlockingIncrement {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        let signals = BLOCKING_SIGNALS
+            .get()
+            .and_then(|slot| slot.lock().ok()?.as_ref().cloned())
+            .expect("test installs blocking signals");
+        signals.evaluations.fetch_add(1, Ordering::SeqCst);
+        signals.entered.notify_one();
+        while !signals.release.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        signals.finished.notify_one();
+        ProposedStateOutcome::Success {
+            output: Value {
+                value: input.value + 1,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct Intent {
+    value: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct Evidence {
+    value: u64,
+    accepted: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct Binding {
+    route: u64,
+}
+
+struct Observation;
+
+impl ReadCapabilityContract for Observation {
+    type Intent = Intent;
+    type Evidence = Evidence;
+
+    fn contract_id() -> mfm_capabilities::Result<StableId> {
+        StableId::new("mfm.test.runtime/observation@1")
+            .map_err(|_| CapabilityError::InvalidContract)
+    }
+
+    fn bind_evidence(
+        intent: &Self::Intent,
+        evidence: &Self::Evidence,
+    ) -> mfm_capabilities::Result<()> {
+        (intent.value == evidence.value)
+            .then_some(())
+            .ok_or(CapabilityError::EvidenceBinding)
+    }
+}
+
+struct Observe;
+
+impl State for Observe {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Value;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/observe@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl ReadState<Observation> for Observe {
+    fn prepare(input: &Self::Input) -> Result<Intent, ReadPreparationError> {
+        (input.value != 999)
+            .then_some(Intent { value: input.value })
+            .ok_or(ReadPreparationError)
+    }
+
+    fn interpret(
+        input: Self::Input,
+        evidence: &Evidence,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        if evidence.accepted {
+            ProposedStateOutcome::Success { output: input }
+        } else {
+            ProposedStateOutcome::Failure { failure: input }
+        }
+    }
+}
+
+fn run(byte: u8) -> RunId {
+    RunId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([byte; 32]),
+    )
+}
+
+fn zero_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/zero@1").expect("entry"),
+        value.clone(),
+        value,
+        nominal_contract_ref::<Never>().expect("never"),
+        Vec::new(),
+    )
+    .expect("program")
+}
+
+fn pure_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let never = nominal_contract_ref::<Never>().expect("never");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/pure@1").expect("entry"),
+        value.clone(),
+        value.clone(),
+        never.clone(),
+        vec![Declaration::State(
+            StateDeclaration::new(
+                state_implementation_ref::<Increment>().expect("state"),
+                value.clone(),
+                value,
+                never,
+                Execution::pure(),
+                None,
+                None,
+            )
+            .expect("state declaration"),
+        )],
+    )
+    .expect("program")
+}
+
+fn match_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let branch_value = nominal_contract_ref::<BranchValue>().expect("branch value");
+    let selector = nominal_contract_ref::<Selector>().expect("selector");
+    let never = nominal_contract_ref::<Never>().expect("never");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/match@1").expect("entry"),
+        value.clone(),
+        branch_value.clone(),
+        never.clone(),
+        vec![
+            Declaration::State(
+                StateDeclaration::new(
+                    state_implementation_ref::<Choose>().expect("choose"),
+                    value.clone(),
+                    selector.clone(),
+                    never.clone(),
+                    Execution::pure(),
+                    Some(1),
+                    None,
+                )
+                .expect("choose declaration"),
+            ),
+            Declaration::Match(
+                MatchDeclaration::new(
+                    selector,
+                    vec![
+                        MatchVariant::new(StableId::new("left").expect("tag"), 2),
+                        MatchVariant::new(StableId::new("right").expect("tag"), 3),
+                    ],
+                )
+                .expect("match"),
+            ),
+            Declaration::State(
+                StateDeclaration::new(
+                    state_implementation_ref::<IncrementBranch>().expect("increment branch"),
+                    branch_value.clone(),
+                    branch_value.clone(),
+                    never.clone(),
+                    Execution::pure(),
+                    None,
+                    None,
+                )
+                .expect("left"),
+            ),
+            Declaration::State(
+                StateDeclaration::new(
+                    state_implementation_ref::<RightBranch>().expect("right branch"),
+                    branch_value.clone(),
+                    branch_value,
+                    never,
+                    Execution::pure(),
+                    None,
+                    None,
+                )
+                .expect("right"),
+            ),
+        ],
+    )
+    .expect("match program")
+}
+
+fn nested_match_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let branch_value = nominal_contract_ref::<BranchValue>().expect("branch value");
+    let selector = nominal_contract_ref::<NestedSelector>().expect("selector");
+    let never = nominal_contract_ref::<Never>().expect("never");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/nested-match@1").expect("entry"),
+        value.clone(),
+        branch_value.clone(),
+        never.clone(),
+        vec![
+            Declaration::State(
+                StateDeclaration::new(
+                    state_implementation_ref::<ChooseNested>().expect("choose nested"),
+                    value,
+                    selector.clone(),
+                    never.clone(),
+                    Execution::pure(),
+                    Some(1),
+                    None,
+                )
+                .expect("choose nested declaration"),
+            ),
+            Declaration::Match(
+                MatchDeclaration::new(
+                    selector,
+                    vec![MatchVariant::new(StableId::new("nested").expect("tag"), 2)],
+                )
+                .expect("nested match"),
+            ),
+            Declaration::State(
+                StateDeclaration::new(
+                    state_implementation_ref::<IncrementBranch>().expect("increment branch"),
+                    branch_value.clone(),
+                    branch_value,
+                    never,
+                    Execution::pure(),
+                    None,
+                    None,
+                )
+                .expect("nested target"),
+            ),
+        ],
+    )
+    .expect("nested match program")
+}
+
+fn manual_match_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let branch_value = nominal_contract_ref::<BranchValue>().expect("branch value");
+    let selector = nominal_contract_ref::<ManualSelector>().expect("selector");
+    let never = nominal_contract_ref::<Never>().expect("never");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/manual-match@1").expect("entry"),
+        value.clone(),
+        branch_value.clone(),
+        never.clone(),
+        vec![
+            Declaration::State(
+                StateDeclaration::new(
+                    state_implementation_ref::<ChooseManual>().expect("choose manual"),
+                    value,
+                    selector.clone(),
+                    never.clone(),
+                    Execution::pure(),
+                    Some(1),
+                    None,
+                )
+                .expect("choose manual declaration"),
+            ),
+            Declaration::Match(
+                MatchDeclaration::new(
+                    selector,
+                    vec![MatchVariant::new(StableId::new("branch").expect("tag"), 2)],
+                )
+                .expect("manual match"),
+            ),
+            Declaration::State(
+                StateDeclaration::new(
+                    state_implementation_ref::<IncrementBranch>().expect("increment branch"),
+                    branch_value.clone(),
+                    branch_value,
+                    never,
+                    Execution::pure(),
+                    None,
+                    None,
+                )
+                .expect("manual target"),
+            ),
+        ],
+    )
+    .expect("manual match program")
+}
+
+fn failure_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/failure@1").expect("entry"),
+        value.clone(),
+        value.clone(),
+        value.clone(),
+        vec![Declaration::State(
+            StateDeclaration::new(
+                state_implementation_ref::<Fail>().expect("fail"),
+                value.clone(),
+                value.clone(),
+                value,
+                Execution::pure(),
+                None,
+                None,
+            )
+            .expect("fail declaration"),
+        )],
+    )
+    .expect("failure program")
+}
+
+fn rejoin_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let never = nominal_contract_ref::<Never>().expect("never");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/rejoin@1").expect("entry"),
+        value.clone(),
+        value.clone(),
+        never.clone(),
+        vec![
+            Declaration::State(
+                StateDeclaration::new(
+                    state_implementation_ref::<Rejoin>().expect("rejoin"),
+                    value.clone(),
+                    value.clone(),
+                    value.clone(),
+                    Execution::pure(),
+                    Some(1),
+                    Some(1),
+                )
+                .expect("rejoin declaration"),
+            ),
+            Declaration::State(
+                StateDeclaration::new(
+                    state_implementation_ref::<Increment>().expect("increment"),
+                    value.clone(),
+                    value.clone(),
+                    never,
+                    Execution::pure(),
+                    None,
+                    None,
+                )
+                .expect("successor declaration"),
+            ),
+        ],
+    )
+    .expect("rejoin program")
+}
+
+fn blocking_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let never = nominal_contract_ref::<Never>().expect("never");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/blocking@1").expect("entry"),
+        value.clone(),
+        value.clone(),
+        never.clone(),
+        vec![Declaration::State(
+            StateDeclaration::new(
+                state_implementation_ref::<BlockingIncrement>().expect("blocking increment"),
+                value.clone(),
+                value,
+                never,
+                Execution::pure(),
+                None,
+                None,
+            )
+            .expect("blocking declaration"),
+        )],
+    )
+    .expect("blocking program")
+}
+
+fn foreign_zero_program() -> Program {
+    let other = nominal_contract_ref::<OtherValue>().expect("other value");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/foreign@1").expect("entry"),
+        other.clone(),
+        other,
+        nominal_contract_ref::<Never>().expect("never"),
+        Vec::new(),
+    )
+    .expect("foreign program")
+}
+
+fn unsupported_match_program() -> Program {
+    let selector = nominal_contract_ref::<OtherValue>().expect("selector");
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let never = nominal_contract_ref::<Never>().expect("never");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/unsupported-match@1").expect("entry"),
+        selector.clone(),
+        value.clone(),
+        never.clone(),
+        vec![
+            Declaration::Match(
+                MatchDeclaration::new(
+                    selector,
+                    vec![MatchVariant::new(StableId::new("left").expect("tag"), 1)],
+                )
+                .expect("match"),
+            ),
+            Declaration::State(
+                StateDeclaration::new(
+                    state_implementation_ref::<Increment>().expect("increment"),
+                    value.clone(),
+                    value,
+                    never,
+                    Execution::pure(),
+                    None,
+                    None,
+                )
+                .expect("target"),
+            ),
+        ],
+    )
+    .expect("unsupported match program")
+}
+
+fn binding() -> Binding {
+    Binding { route: 7 }
+}
+
+fn read_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let (_, binding_ref) = canonicalize_mfm_value(&binding()).expect("binding ref");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/read@1").expect("entry"),
+        value.clone(),
+        value.clone(),
+        value.clone(),
+        vec![Declaration::State(
+            StateDeclaration::new(
+                state_implementation_ref::<Observe>().expect("observe"),
+                value.clone(),
+                value.clone(),
+                value,
+                Execution::read(
+                    capability_contract_ref::<Observation>().expect("capability"),
+                    nominal_contract_ref::<Intent>().expect("intent"),
+                    nominal_contract_ref::<Evidence>().expect("evidence"),
+                    binding_ref,
+                ),
+                None,
+                None,
+            )
+            .expect("read declaration"),
+        )],
+    )
+    .expect("read program")
+}
+
+fn assert_same_view(left: &mfm_runtime::RunView, right: &mfm_runtime::RunView) {
+    assert_eq!(left.run_id(), right.run_id());
+    assert_eq!(left.head_sequence(), right.head_sequence());
+    assert_eq!(left.head_digest(), right.head_digest());
+    match (left.state(), right.state()) {
+        (RunViewState::Runnable, RunViewState::Runnable) => {}
+        (RunViewState::Succeeded(left), RunViewState::Succeeded(right))
+        | (RunViewState::Failed(left), RunViewState::Failed(right)) => {
+            assert_eq!(left.contract_ref(), right.contract_ref());
+            assert_eq!(left.value_ref(), right.value_ref());
+            assert_eq!(left.canonical_bytes(), right.canonical_bytes());
+        }
+        _ => panic!("run states differ"),
+    }
+}
+
+#[tokio::test]
+async fn runtime_hot_cold_pure_and_zero_state_paths_match() {
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder.register_value::<Value>().expect("value");
+    builder.register_pure::<Increment>().expect("pure");
+    let assembly = builder.finish().expect("assembly");
+    let store = Arc::new(MemoryStore::new());
+    let runtime = Runtime::new(assembly, store);
+
+    let zero_id = run(1);
+    let zero = runtime
+        .start(zero_id.clone(), zero_program(), Value { value: 4 })
+        .await
+        .expect("zero start");
+    assert_eq!(zero.head_sequence(), 1);
+    assert!(matches!(zero.state(), RunViewState::Succeeded(_)));
+    let zero_cold = runtime.read(&zero_id).await.expect("zero cold");
+    assert_same_view(&zero, &zero_cold);
+
+    let pure_id = run(2);
+    let pure = runtime
+        .start(pure_id.clone(), pure_program(), Value { value: 4 })
+        .await
+        .expect("pure start");
+    assert_eq!(pure.head_sequence(), 2);
+    let RunViewState::Succeeded(value) = pure.state() else {
+        panic!("pure success");
+    };
+    assert_eq!(value.canonical_bytes(), br#"{"value":5}"#);
+    let pure_cold = runtime.read(&pure_id).await.expect("pure cold");
+    assert_same_view(&pure, &pure_cold);
+}
+
+#[tokio::test]
+async fn runtime_hot_cold_match_and_failure_roots_match() {
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder.register_pure::<Choose>().expect("choose");
+    builder
+        .register_pure::<ChooseNested>()
+        .expect("choose nested");
+    builder
+        .register_pure::<IncrementBranch>()
+        .expect("increment branch");
+    builder
+        .register_pure::<RightBranch>()
+        .expect("right branch");
+    builder.register_pure::<Fail>().expect("fail");
+    builder.register_pure::<Rejoin>().expect("rejoin");
+    builder.register_pure::<Increment>().expect("increment");
+    let runtime = Runtime::new(
+        builder.finish().expect("assembly"),
+        Arc::new(MemoryStore::new()),
+    );
+
+    for (byte, input) in [(30, 4), (31, 5)] {
+        let id = run(byte);
+        let hot = runtime
+            .start(id.clone(), match_program(), Value { value: input })
+            .await
+            .expect("match start");
+        assert_eq!(hot.head_sequence(), 3);
+        let RunViewState::Succeeded(output) = hot.state() else {
+            panic!("match success");
+        };
+        assert_eq!(
+            output.canonical_bytes(),
+            format!(
+                "{{\"value\":{}}}",
+                if input % 2 == 0 {
+                    input + 1
+                } else {
+                    input + 100
+                }
+            )
+            .as_bytes()
+        );
+        let cold = runtime.read(&id).await.expect("match read");
+        assert_same_view(&hot, &cold);
+    }
+
+    let nested_id = run(29);
+    let nested_hot = runtime
+        .start(
+            nested_id.clone(),
+            nested_match_program(),
+            Value { value: 7 },
+        )
+        .await
+        .expect("nested match start");
+    assert_eq!(nested_hot.head_sequence(), 3);
+    let RunViewState::Succeeded(nested_value) = nested_hot.state() else {
+        panic!("nested match success");
+    };
+    assert_eq!(nested_value.canonical_bytes(), br#"{"value":8}"#);
+    assert_same_view(
+        &nested_hot,
+        &runtime.read(&nested_id).await.expect("nested match cold"),
+    );
+
+    let id = run(32);
+    let hot = runtime
+        .start(id.clone(), failure_program(), Value { value: 9 })
+        .await
+        .expect("failure start");
+    let RunViewState::Failed(failure) = hot.state() else {
+        panic!("failure root");
+    };
+    assert_eq!(failure.canonical_bytes(), br#"{"value":9}"#);
+    assert_same_view(&hot, &runtime.read(&id).await.expect("cold"));
+
+    for (byte, input) in [(33, 4), (34, 5)] {
+        let id = run(byte);
+        let hot = runtime
+            .start(id.clone(), rejoin_program(), Value { value: input })
+            .await
+            .expect("rejoin start");
+        assert_eq!(hot.head_sequence(), 3);
+        let RunViewState::Succeeded(value) = hot.state() else {
+            panic!("rejoin success");
+        };
+        assert_eq!(
+            value.canonical_bytes(),
+            format!("{{\"value\":{}}}", input + 1).as_bytes()
+        );
+        assert_same_view(&hot, &runtime.read(&id).await.expect("rejoin cold"));
+    }
+}
+
+fn register_read_runtime<F>(store: Arc<dyn Store>, callback: F) -> Runtime
+where
+    F: for<'a> Fn(
+            &'a Intent,
+        ) -> Pin<
+            Box<dyn Future<Output = std::result::Result<Evidence, ReadAdapterError>> + Send + 'a>,
+        > + Send
+        + Sync
+        + 'static,
+{
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder
+        .register_read::<Observe, Observation>()
+        .expect("read");
+    builder
+        .register_adapter::<Observation, _, _>(binding(), callback)
+        .expect("adapter");
+    Runtime::new(builder.finish().expect("assembly"), store)
+}
+
+async fn retained_head(store: &MemoryStore, id: &RunId) -> u64 {
+    let retained = store.load_run(id).await.expect("load").expect("present");
+    mfm_journal::JournalHistory::qualify(id, retained)
+        .expect("history")
+        .head_sequence()
+}
+
+struct CountingStore {
+    inner: Arc<MemoryStore>,
+    loads: AtomicUsize,
+    appends: AtomicUsize,
+}
+
+impl CountingStore {
+    fn new(inner: Arc<MemoryStore>) -> Self {
+        Self {
+            inner,
+            loads: AtomicUsize::new(0),
+            appends: AtomicUsize::new(0),
+        }
+    }
+
+    fn reset(&self) {
+        self.loads.store(0, Ordering::SeqCst);
+        self.appends.store(0, Ordering::SeqCst);
+    }
+}
+
+impl Store for CountingStore {
+    fn load_run<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            self.inner.load_run(run_id).await
+        })
+    }
+
+    fn append_run<'a>(
+        &'a self,
+        frame: &'a EncodedRunFrame,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<AppendResult, StoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.appends.fetch_add(1, Ordering::SeqCst);
+            self.inner.append_run(frame).await
+        })
+    }
+}
+
+#[tokio::test]
+async fn assembly_registration_is_idempotent_and_inconsistency_is_rejected() {
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder.register_value::<Value>().expect("value");
+    builder.register_value::<Value>().expect("idempotent value");
+    builder.register_pure::<Increment>().expect("state");
+    builder
+        .register_pure::<Increment>()
+        .expect("idempotent state");
+    assert_eq!(
+        builder.register_pure::<ConflictingIncrement>(),
+        Err(RuntimeError::IncompatibleAssembly)
+    );
+
+    let mut adapters = RuntimeAssemblyBuilder::new();
+    adapters
+        .register_adapter::<Observation, _, _>(binding(), |_| {
+            Box::pin(async {
+                Ok(Evidence {
+                    value: 1,
+                    accepted: true,
+                })
+            })
+        })
+        .expect("adapter");
+    assert_eq!(
+        adapters.register_adapter::<Observation, _, _>(binding(), |_| {
+            Box::pin(async {
+                Ok(Evidence {
+                    value: 1,
+                    accepted: true,
+                })
+            })
+        }),
+        Err(RuntimeError::IncompatibleAssembly)
+    );
+}
+
+#[tokio::test]
+async fn association_and_exact_retry_io_order_is_frozen() {
+    let memory = Arc::new(MemoryStore::new());
+    let store = Arc::new(CountingStore::new(memory));
+    let empty = Runtime::new(
+        RuntimeAssemblyBuilder::new()
+            .finish()
+            .expect("empty assembly"),
+        store.clone(),
+    );
+    let unsupported_id = run(35);
+    assert!(matches!(
+        empty
+            .start(unsupported_id.clone(), pure_program(), Value { value: 1 })
+            .await,
+        Err(RuntimeError::IncompatibleAssembly)
+    ));
+    assert_eq!(store.loads.load(Ordering::SeqCst), 0);
+    assert_eq!(store.appends.load(Ordering::SeqCst), 0);
+
+    let mut unsupported_match = RuntimeAssemblyBuilder::new();
+    unsupported_match
+        .register_value::<OtherValue>()
+        .expect("selector codec");
+    unsupported_match
+        .register_pure::<Increment>()
+        .expect("target");
+    let runtime = Runtime::new(unsupported_match.finish().expect("assembly"), store.clone());
+    assert!(matches!(
+        runtime
+            .start(
+                run(37),
+                unsupported_match_program(),
+                OtherValue {
+                    value: "left".to_owned(),
+                },
+            )
+            .await,
+        Err(RuntimeError::IncompatibleAssembly)
+    ));
+    assert_eq!(store.loads.load(Ordering::SeqCst), 0);
+    assert_eq!(store.appends.load(Ordering::SeqCst), 0);
+
+    let mut manual_match = RuntimeAssemblyBuilder::new();
+    manual_match
+        .register_pure::<ChooseManual>()
+        .expect("manual selector state");
+    manual_match
+        .register_pure::<IncrementBranch>()
+        .expect("manual selector target");
+    let runtime = Runtime::new(manual_match.finish().expect("assembly"), store.clone());
+    assert!(matches!(
+        runtime
+            .start(run(38), manual_match_program(), Value { value: 1 })
+            .await,
+        Err(RuntimeError::IncompatibleAssembly)
+    ));
+    assert_eq!(store.loads.load(Ordering::SeqCst), 0);
+    assert_eq!(store.appends.load(Ordering::SeqCst), 0);
+
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder.register_pure::<Increment>().expect("increment");
+    let runtime = Runtime::new(builder.finish().expect("assembly"), store.clone());
+    let id = run(36);
+    let first = runtime
+        .start(id.clone(), pure_program(), Value { value: 1 })
+        .await
+        .expect("inserted start");
+    assert_eq!(first.head_sequence(), 2);
+    assert_eq!(store.loads.load(Ordering::SeqCst), 0);
+    assert_eq!(store.appends.load(Ordering::SeqCst), 2);
+
+    store.reset();
+    let retry = runtime
+        .start(id.clone(), pure_program(), Value { value: 1 })
+        .await
+        .expect("exact retry");
+    assert_same_view(&first, &retry);
+    assert_eq!(store.loads.load(Ordering::SeqCst), 1);
+    assert_eq!(store.appends.load(Ordering::SeqCst), 1);
+
+    store.reset();
+    assert!(matches!(
+        empty.read(&id).await,
+        Err(RuntimeError::IncompatibleAssembly)
+    ));
+    assert_eq!(store.loads.load(Ordering::SeqCst), 1);
+    assert_eq!(store.appends.load(Ordering::SeqCst), 0);
+    store.reset();
+    assert!(matches!(
+        empty.resume(&id).await,
+        Err(RuntimeError::IncompatibleAssembly)
+    ));
+    assert_eq!(store.loads.load(Ordering::SeqCst), 1);
+    assert_eq!(store.appends.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn fused_read_hot_cold_and_fail_closed_paths_are_exact() {
+    let store = Arc::new(MemoryStore::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runtime = register_read_runtime(store.clone(), {
+        let calls = Arc::clone(&calls);
+        move |intent| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(Evidence {
+                    value: intent.value,
+                    accepted: true,
+                })
+            })
+        }
+    });
+    let id = run(40);
+    let hot = runtime
+        .start(id.clone(), read_program(), Value { value: 7 })
+        .await
+        .expect("read start");
+    assert_eq!(hot.head_sequence(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_same_view(&hot, &runtime.read(&id).await.expect("cold"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "read is observational");
+
+    let failure_store = Arc::new(MemoryStore::new());
+    let failure_calls = Arc::new(AtomicUsize::new(0));
+    let failure_runtime = register_read_runtime(failure_store, {
+        let calls = Arc::clone(&failure_calls);
+        move |intent| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(Evidence {
+                    value: intent.value,
+                    accepted: false,
+                })
+            })
+        }
+    });
+    let failure_id = run(39);
+    let failure_hot = failure_runtime
+        .start(failure_id.clone(), read_program(), Value { value: 6 })
+        .await
+        .expect("ordinary read failure");
+    assert!(matches!(failure_hot.state(), RunViewState::Failed(_)));
+    assert_same_view(
+        &failure_hot,
+        &failure_runtime
+            .read(&failure_id)
+            .await
+            .expect("cold ordinary read failure"),
+    );
+    assert_eq!(failure_calls.load(Ordering::SeqCst), 1);
+
+    let preparation_store = Arc::new(MemoryStore::new());
+    let preparation_calls = Arc::new(AtomicUsize::new(0));
+    let preparation_runtime = register_read_runtime(preparation_store.clone(), {
+        let calls = Arc::clone(&preparation_calls);
+        move |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(ReadAdapterError::Internal) })
+        }
+    });
+    let preparation_id = run(41);
+    assert!(matches!(
+        preparation_runtime
+            .start(preparation_id.clone(), read_program(), Value { value: 999 })
+            .await,
+        Err(RuntimeError::Internal)
+    ));
+    assert_eq!(preparation_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(retained_head(&preparation_store, &preparation_id).await, 1);
+
+    for (byte, adapter_error, expected) in [
+        (42, ReadAdapterError::Unavailable, RuntimeError::Unavailable),
+        (43, ReadAdapterError::Internal, RuntimeError::Internal),
+    ] {
+        let store = Arc::new(MemoryStore::new());
+        let runtime = register_read_runtime(store.clone(), move |_| {
+            Box::pin(async move { Err(adapter_error) })
+        });
+        let id = run(byte);
+        assert!(matches!(
+            runtime.start(id.clone(), read_program(), Value { value: 1 }).await,
+            Err(error) if error == expected
+        ));
+        assert_eq!(retained_head(&store, &id).await, 1);
+    }
+
+    let bind_store = Arc::new(MemoryStore::new());
+    let bind_runtime = register_read_runtime(bind_store.clone(), |intent| {
+        Box::pin(async move {
+            Ok(Evidence {
+                value: intent.value + 1,
+                accepted: true,
+            })
+        })
+    });
+    let bind_id = run(44);
+    assert!(matches!(
+        bind_runtime
+            .start(bind_id.clone(), read_program(), Value { value: 1 })
+            .await,
+        Err(RuntimeError::Internal)
+    ));
+    assert_eq!(retained_head(&bind_store, &bind_id).await, 1);
+}
+
+#[tokio::test]
+async fn adapter_panics_are_redacted_before_any_conclusion_append() {
+    let construction_store = Arc::new(MemoryStore::new());
+    let construction = register_read_runtime(construction_store.clone(), |_| {
+        panic!("construction payload must not escape")
+    });
+    let construction_id = run(45);
+    let error = construction
+        .start(construction_id.clone(), read_program(), Value { value: 1 })
+        .await
+        .err()
+        .expect("construction panic");
+    assert_eq!(error, RuntimeError::Internal);
+    assert_eq!(error.to_string(), "runtime internal failure");
+    assert_eq!(
+        retained_head(&construction_store, &construction_id).await,
+        1
+    );
+
+    let poll_store = Arc::new(MemoryStore::new());
+    let polling = register_read_runtime(poll_store.clone(), |_| {
+        Box::pin(async { panic!("poll payload must not escape") })
+    });
+    let poll_id = run(46);
+    assert!(matches!(
+        polling
+            .start(poll_id.clone(), read_program(), Value { value: 1 })
+            .await,
+        Err(RuntimeError::Internal)
+    ));
+    assert_eq!(retained_head(&poll_store, &poll_id).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_read_observations_have_one_exact_durable_winner() {
+    let store = Arc::new(MemoryStore::new());
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let make_runtime = || {
+        register_read_runtime(store.clone(), {
+            let barrier = Arc::clone(&barrier);
+            let calls = Arc::clone(&calls);
+            move |intent| {
+                let barrier = Arc::clone(&barrier);
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    barrier.wait().await;
+                    Ok(Evidence {
+                        value: intent.value,
+                        accepted: true,
+                    })
+                })
+            }
+        })
+    };
+    let left = make_runtime();
+    let right = make_runtime();
+    let id = run(47);
+    let (left, right) = tokio::join!(
+        left.start(id.clone(), read_program(), Value { value: 4 }),
+        right.start(id.clone(), read_program(), Value { value: 4 })
+    );
+    let left = left.expect("left");
+    let right = right.expect("right");
+    assert_same_view(&left, &right);
+    assert_eq!(left.head_sequence(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(retained_head(&store, &id).await, 2);
+}
+
+#[tokio::test]
+async fn cancellation_at_provider_await_leaves_only_the_acknowledged_prefix() {
+    let store = Arc::new(MemoryStore::new());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let runtime = Arc::new(register_read_runtime(store.clone(), {
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        move |intent| {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(Evidence {
+                    value: intent.value,
+                    accepted: true,
+                })
+            })
+        }
+    }));
+    let id = run(48);
+    let task = {
+        let runtime = Arc::clone(&runtime);
+        let id = id.clone();
+        tokio::spawn(async move { runtime.start(id, read_program(), Value { value: 4 }).await })
+    };
+    entered.notified().await;
+    task.abort();
+    match task.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("provider task was not cancelled"),
+    }
+    release.notify_waiters();
+    let view = runtime.read(&id).await.expect("durable prefix");
+    assert_eq!(view.head_sequence(), 1);
+    assert!(matches!(view.state(), RunViewState::Runnable));
+}
+
+#[test]
+fn cancellation_before_a_queued_blocking_job_performs_no_store_io() {
+    let executor = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("test executor");
+    executor.block_on(async {
+        let blocker_entered = Arc::new(tokio::sync::Notify::new());
+        let blocker_release = Arc::new(AtomicBool::new(false));
+        let blocker = tokio::task::spawn_blocking({
+            let entered = Arc::clone(&blocker_entered);
+            let release = Arc::clone(&blocker_release);
+            move || {
+                entered.notify_one();
+                while !release.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+            }
+        });
+        blocker_entered.notified().await;
+
+        let memory = Arc::new(MemoryStore::new());
+        let counted = Arc::new(CountingStore::new(memory.clone()));
+        let mut builder = RuntimeAssemblyBuilder::new();
+        builder.register_pure::<Increment>().expect("increment");
+        let runtime = Arc::new(Runtime::new(
+            builder.finish().expect("assembly"),
+            counted.clone(),
+        ));
+        let id = run(59);
+        let queued = Arc::new(tokio::sync::Notify::new());
+        let task = {
+            let runtime = Arc::clone(&runtime);
+            let id = id.clone();
+            let queued = Arc::clone(&queued);
+            tokio::spawn(async move {
+                let mut start = Box::pin(runtime.start(id, pure_program(), Value { value: 4 }));
+                std::future::poll_fn(|context| match start.as_mut().poll(context) {
+                    std::task::Poll::Pending => {
+                        queued.notify_one();
+                        std::task::Poll::Ready(())
+                    }
+                    std::task::Poll::Ready(_) => {
+                        panic!("blocking admission unexpectedly completed")
+                    }
+                })
+                .await;
+                start.await
+            })
+        };
+        queued.notified().await;
+        assert_eq!(counted.loads.load(Ordering::SeqCst), 0);
+        assert_eq!(counted.appends.load(Ordering::SeqCst), 0);
+        task.abort();
+        match task.await {
+            Err(error) => assert!(error.is_cancelled()),
+            Ok(_) => panic!("queued blocking task was not cancelled"),
+        }
+
+        blocker_release.store(true, Ordering::SeqCst);
+        blocker.await.expect("release blocking lane");
+        tokio::task::spawn_blocking(|| {})
+            .await
+            .expect("drain blocking lane");
+        assert_eq!(counted.loads.load(Ordering::SeqCst), 0);
+        assert_eq!(counted.appends.load(Ordering::SeqCst), 0);
+        assert!(memory.load_run(&id).await.expect("memory load").is_none());
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancellation_during_blocking_state_evaluation_cannot_start_dependent_io() {
+    let signals = Arc::new(BlockingSignals {
+        entered: tokio::sync::Notify::new(),
+        finished: tokio::sync::Notify::new(),
+        release: AtomicBool::new(false),
+        evaluations: AtomicUsize::new(0),
+    });
+    let slot = BLOCKING_SIGNALS.get_or_init(|| Mutex::new(None));
+    *slot.lock().expect("signals lock") = Some(Arc::clone(&signals));
+
+    let memory = Arc::new(MemoryStore::new());
+    let counted = Arc::new(CountingStore::new(memory.clone()));
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder
+        .register_pure::<BlockingIncrement>()
+        .expect("blocking state");
+    let runtime = Arc::new(Runtime::new(
+        builder.finish().expect("assembly"),
+        counted.clone(),
+    ));
+    let id = run(54);
+    let task = {
+        let runtime = Arc::clone(&runtime);
+        let id = id.clone();
+        tokio::spawn(async move {
+            runtime
+                .start(id, blocking_program(), Value { value: 4 })
+                .await
+        })
+    };
+    signals.entered.notified().await;
+    assert_eq!(counted.appends.load(Ordering::SeqCst), 1);
+    task.abort();
+    match task.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("blocking evaluation task was not cancelled"),
+    }
+    signals.release.store(true, Ordering::SeqCst);
+    signals.finished.notified().await;
+    tokio::task::yield_now().await;
+
+    assert_eq!(counted.appends.load(Ordering::SeqCst), 1);
+    assert_eq!(retained_head(&memory, &id).await, 1);
+    let resumed = runtime
+        .resume(&id)
+        .await
+        .expect("resume after cancellation");
+    assert_eq!(signals.evaluations.load(Ordering::SeqCst), 2);
+    assert_eq!(resumed.head_sequence(), 2);
+    assert!(matches!(resumed.state(), RunViewState::Succeeded(_)));
+    *slot.lock().expect("signals lock") = None;
+}
+
+struct BlockingSecondAppendStore {
+    inner: Arc<MemoryStore>,
+    appends: AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+struct CommitThenBlockAcknowledgementStore {
+    inner: Arc<MemoryStore>,
+    appends: AtomicUsize,
+    committed: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl Store for CommitThenBlockAcknowledgementStore {
+    fn load_run<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.inner.load_run(run_id)
+    }
+
+    fn append_run<'a>(
+        &'a self,
+        frame: &'a EncodedRunFrame,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<AppendResult, StoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let result = self.inner.append_run(frame).await?;
+            if self.appends.fetch_add(1, Ordering::SeqCst) + 1 == 2
+                && result == AppendResult::Inserted
+            {
+                self.committed.notify_one();
+                self.release.notified().await;
+            }
+            Ok(result)
+        })
+    }
+}
+
+impl Store for BlockingSecondAppendStore {
+    fn load_run<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.inner.load_run(run_id)
+    }
+
+    fn append_run<'a>(
+        &'a self,
+        frame: &'a EncodedRunFrame,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<AppendResult, StoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            if self.appends.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.inner.append_run(frame).await
+        })
+    }
+}
+
+#[tokio::test]
+async fn cancellation_at_append_await_cannot_publish_the_candidate() {
+    let memory = Arc::new(MemoryStore::new());
+    let store = Arc::new(BlockingSecondAppendStore {
+        inner: memory.clone(),
+        appends: AtomicUsize::new(0),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder.register_pure::<Increment>().expect("increment");
+    let runtime = Arc::new(Runtime::new(
+        builder.finish().expect("assembly"),
+        store.clone(),
+    ));
+    let id = run(49);
+    let task = {
+        let runtime = Arc::clone(&runtime);
+        let id = id.clone();
+        tokio::spawn(async move { runtime.start(id, pure_program(), Value { value: 4 }).await })
+    };
+    store.entered.notified().await;
+    task.abort();
+    match task.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("append task was not cancelled"),
+    }
+    store.release.notify_waiters();
+    assert_eq!(retained_head(&memory, &id).await, 1);
+    let view = runtime.read(&id).await.expect("prefix");
+    assert!(matches!(view.state(), RunViewState::Runnable));
+}
+
+#[tokio::test]
+async fn cancellation_after_atomic_append_commit_only_withholds_acknowledgement() {
+    let memory = Arc::new(MemoryStore::new());
+    let store = Arc::new(CommitThenBlockAcknowledgementStore {
+        inner: memory.clone(),
+        appends: AtomicUsize::new(0),
+        committed: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder.register_pure::<Increment>().expect("increment");
+    let runtime = Arc::new(Runtime::new(
+        builder.finish().expect("assembly"),
+        store.clone(),
+    ));
+    let id = run(55);
+    let task = {
+        let runtime = Arc::clone(&runtime);
+        let id = id.clone();
+        tokio::spawn(async move { runtime.start(id, pure_program(), Value { value: 4 }).await })
+    };
+    store.committed.notified().await;
+    task.abort();
+    match task.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("append acknowledgement task was not cancelled"),
+    }
+    store.release.notify_waiters();
+
+    assert_eq!(retained_head(&memory, &id).await, 2);
+    let view = runtime.read(&id).await.expect("committed conclusion");
+    assert_eq!(view.head_sequence(), 2);
+    assert!(matches!(view.state(), RunViewState::Succeeded(_)));
+}
+
+struct CommitThenIndeterminateStore {
+    inner: Arc<MemoryStore>,
+}
+
+impl Store for CommitThenIndeterminateStore {
+    fn load_run<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.inner.load_run(run_id)
+    }
+
+    fn append_run<'a>(
+        &'a self,
+        frame: &'a EncodedRunFrame,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<AppendResult, StoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let result = self.inner.append_run(frame).await?;
+            if frame.run_sequence() > 1 && result == AppendResult::Inserted {
+                Err(StoreError::Indeterminate)
+            } else {
+                Ok(result)
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn an_earlier_view_remains_a_snapshot_after_indeterminate_commit() {
+    let memory = Arc::new(MemoryStore::new());
+    let unavailable = register_read_runtime(memory.clone(), |_| {
+        Box::pin(async { Err(ReadAdapterError::Unavailable) })
+    });
+    let id = run(50);
+    assert!(matches!(
+        unavailable
+            .start(id.clone(), read_program(), Value { value: 8 })
+            .await,
+        Err(RuntimeError::Unavailable)
+    ));
+    let earlier = unavailable.read(&id).await.expect("earlier snapshot");
+    assert_eq!(earlier.head_sequence(), 1);
+
+    let ambiguous = register_read_runtime(
+        Arc::new(CommitThenIndeterminateStore {
+            inner: memory.clone(),
+        }),
+        |intent| {
+            Box::pin(async move {
+                Ok(Evidence {
+                    value: intent.value,
+                    accepted: true,
+                })
+            })
+        },
+    );
+    assert!(matches!(
+        ambiguous.resume(&id).await,
+        Err(RuntimeError::Indeterminate)
+    ));
+    assert_eq!(earlier.head_sequence(), 1);
+    assert!(matches!(earlier.state(), RunViewState::Runnable));
+
+    let later = unavailable.read(&id).await.expect("later snapshot");
+    assert_eq!(later.head_sequence(), 2);
+    assert!(matches!(later.state(), RunViewState::Succeeded(_)));
+}
+
+#[tokio::test]
+async fn cold_read_binding_failure_is_invalid_history_without_adapter_io() {
+    let id = run(51);
+    let program = read_program();
+    let input = Value { value: 4 };
+    let (input_bytes, input_ref) = canonicalize_mfm_value(&input).expect("input");
+    let genesis = EncodedRunFrame::admission(
+        &id,
+        program.content_ref(),
+        program.canonical_bytes(),
+        &input_ref,
+        input_bytes.as_bytes(),
+    )
+    .expect("genesis");
+    let genesis_for_store = EncodedRunFrame::admission(
+        &id,
+        program.content_ref(),
+        program.canonical_bytes(),
+        &input_ref,
+        input_bytes.as_bytes(),
+    )
+    .expect("stored genesis");
+    let history = JournalHistory::from_genesis(genesis).expect("history");
+    let intent = Intent { value: 4 };
+    let evidence = Evidence {
+        value: 5,
+        accepted: true,
+    };
+    let outcome = Value { value: 4 };
+    let (intent_bytes, intent_ref) = canonicalize_mfm_value(&intent).expect("intent");
+    let (evidence_bytes, evidence_ref) = canonicalize_mfm_value(&evidence).expect("evidence");
+    let (outcome_bytes, outcome_ref) = canonicalize_mfm_value(&outcome).expect("outcome");
+    let conclusion = history
+        .encode_read_conclusion(
+            &intent_ref,
+            intent_bytes.as_bytes(),
+            &evidence_ref,
+            evidence_bytes.as_bytes(),
+            OutcomeKind::Success,
+            &outcome_ref,
+            outcome_bytes.as_bytes(),
+        )
+        .expect("conclusion");
+    let store = Arc::new(MemoryStore::new());
+    assert_eq!(
+        store
+            .append_run(&genesis_for_store)
+            .await
+            .expect("append genesis"),
+        AppendResult::Inserted
+    );
+    assert_eq!(
+        store
+            .append_run(&conclusion)
+            .await
+            .expect("append conclusion"),
+        AppendResult::Inserted
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runtime = register_read_runtime(store, {
+        let calls = Arc::clone(&calls);
+        move |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(ReadAdapterError::Internal) })
+        }
+    });
+    assert!(matches!(
+        runtime.read(&id).await,
+        Err(RuntimeError::InvalidHistory)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn valid_foreign_genesis_collision_precedes_foreign_assembly_association() {
+    let id = run(56);
+    let foreign = foreign_zero_program();
+    let foreign_value = OtherValue {
+        value: "foreign".to_owned(),
+    };
+    let (foreign_bytes, foreign_ref) =
+        canonicalize_mfm_value(&foreign_value).expect("foreign value");
+    let genesis = EncodedRunFrame::admission(
+        &id,
+        foreign.content_ref(),
+        foreign.canonical_bytes(),
+        &foreign_ref,
+        foreign_bytes.as_bytes(),
+    )
+    .expect("foreign genesis");
+    let store = Arc::new(MemoryStore::new());
+    assert_eq!(
+        store.append_run(&genesis).await.expect("append foreign"),
+        AppendResult::Inserted
+    );
+
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder.register_pure::<Increment>().expect("increment");
+    let runtime = Runtime::new(builder.finish().expect("assembly"), store);
+    assert!(matches!(
+        runtime.start(id, pure_program(), Value { value: 1 }).await,
+        Err(RuntimeError::AdmissionConflict)
+    ));
+}
+
+struct FixedHistoryStore {
+    frames: Vec<Vec<u8>>,
+}
+
+impl Store for FixedHistoryStore {
+    fn load_run<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let frames = self.frames.clone();
+        Box::pin(async move {
+            Ok(Some(
+                StoredRunBytes::new(frames).expect("bounded fixed history"),
+            ))
+        })
+    }
+
+    fn append_run<'a>(
+        &'a self,
+        _frame: &'a EncodedRunFrame,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<AppendResult, StoreError>> + Send + 'a>>
+    {
+        Box::pin(async { Err(StoreError::Unavailable) })
+    }
+}
+
+#[tokio::test]
+async fn a_store_history_for_the_wrong_requested_run_id_is_invalid() {
+    let retained_id = run(57);
+    let program = zero_program();
+    let value = Value { value: 3 };
+    let (bytes, value_ref) = canonicalize_mfm_value(&value).expect("value");
+    let genesis = EncodedRunFrame::admission(
+        &retained_id,
+        program.content_ref(),
+        program.canonical_bytes(),
+        &value_ref,
+        bytes.as_bytes(),
+    )
+    .expect("genesis");
+    let store = Arc::new(FixedHistoryStore {
+        frames: vec![genesis.canonical_bytes().to_vec()],
+    });
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder.register_value::<Value>().expect("value codec");
+    let runtime = Runtime::new(builder.finish().expect("assembly"), store);
+    let requested_id = run(58);
+    assert!(matches!(
+        runtime.read(&requested_id).await,
+        Err(RuntimeError::InvalidHistory)
+    ));
+    assert!(matches!(
+        runtime.resume(&requested_id).await,
+        Err(RuntimeError::InvalidHistory)
+    ));
+}
+
+struct NotInsertedAbsentStore;
+
+impl Store for NotInsertedAbsentStore {
+    fn load_run<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn append_run<'a>(
+        &'a self,
+        _frame: &'a EncodedRunFrame,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<AppendResult, StoreError>> + Send + 'a>>
+    {
+        Box::pin(async { Ok(AppendResult::NotInserted) })
+    }
+}
+
+struct InsertThenNotInsertedAbsentStore {
+    appends: AtomicUsize,
+}
+
+impl Store for InsertThenNotInsertedAbsentStore {
+    fn load_run<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn append_run<'a>(
+        &'a self,
+        _frame: &'a EncodedRunFrame,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<AppendResult, StoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            Ok(if self.appends.fetch_add(1, Ordering::SeqCst) == 0 {
+                AppendResult::Inserted
+            } else {
+                AppendResult::NotInserted
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn not_inserted_followed_by_absence_is_internal() {
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder.register_value::<Value>().expect("value");
+    let runtime = Runtime::new(
+        builder.finish().expect("assembly"),
+        Arc::new(NotInsertedAbsentStore),
+    );
+    assert!(matches!(
+        runtime
+            .start(run(52), zero_program(), Value { value: 1 })
+            .await,
+        Err(RuntimeError::Internal)
+    ));
+
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder.register_pure::<Increment>().expect("increment");
+    let runtime = Runtime::new(
+        builder.finish().expect("assembly"),
+        Arc::new(InsertThenNotInsertedAbsentStore {
+            appends: AtomicUsize::new(0),
+        }),
+    );
+    assert!(matches!(
+        runtime
+            .start(run(53), pure_program(), Value { value: 1 })
+            .await,
+        Err(RuntimeError::Internal)
+    ));
+}
+
+#[derive(Clone, Copy)]
+enum Failure {
+    Capacity,
+    Corrupt,
+    Unavailable,
+    Indeterminate,
+}
+
+struct FaultStore {
+    failure: Failure,
+}
+
+impl Store for FaultStore {
+    fn load_run<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move { Err(store_error(self.failure)) })
+    }
+
+    fn append_run<'a>(
+        &'a self,
+        _frame: &'a EncodedRunFrame,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<AppendResult, StoreError>> + Send + 'a>>
+    {
+        Box::pin(async move { Err(store_error(self.failure)) })
+    }
+}
+
+fn store_error(failure: Failure) -> StoreError {
+    match failure {
+        Failure::Capacity => StoreError::Capacity,
+        Failure::Corrupt => StoreError::CorruptPhysicalState,
+        Failure::Unavailable => StoreError::Unavailable,
+        Failure::Indeterminate => StoreError::Indeterminate,
+    }
+}
+
+fn runtime_with_fault(failure: Failure) -> Runtime {
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder.register_value::<Value>().expect("value");
+    Runtime::new(
+        builder.finish().expect("assembly"),
+        Arc::new(FaultStore { failure }),
+    )
+}
+
+#[tokio::test]
+async fn store_error_mapping_is_operation_specific_and_exhaustive() {
+    let cases = [
+        (
+            Failure::Capacity,
+            RuntimeError::Internal,
+            RuntimeError::Capacity,
+        ),
+        (
+            Failure::Corrupt,
+            RuntimeError::InvalidHistory,
+            RuntimeError::InvalidHistory,
+        ),
+        (
+            Failure::Unavailable,
+            RuntimeError::Unavailable,
+            RuntimeError::Unavailable,
+        ),
+        (
+            Failure::Indeterminate,
+            RuntimeError::Internal,
+            RuntimeError::Indeterminate,
+        ),
+    ];
+    for (offset, (failure, load_expected, append_expected)) in cases.into_iter().enumerate() {
+        let runtime = runtime_with_fault(failure);
+        let id = run(u8::try_from(offset + 10).expect("byte"));
+        assert!(matches!(
+            runtime.read(&id).await,
+            Err(error) if error == load_expected
+        ));
+        assert!(matches!(
+            runtime.start(id, zero_program(), Value { value: 1 }).await,
+            Err(error) if error == append_expected
+        ));
+    }
+}
