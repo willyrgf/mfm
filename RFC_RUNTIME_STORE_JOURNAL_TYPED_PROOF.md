@@ -1,6 +1,9 @@
 # RFC: establish the core Runtime, Journal, and Store proof path
 
-Status: approved platform target; ready for implementation planning
+Status: approved platform target; implementation handoff ready
+
+Implementation handoff:
+[`IMPL_PLAN_RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`](IMPL_PLAN_RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md)
 
 This RFC is the clean-slate target for the MFM core proof path. It replaces the conflicting runtime,
 storage, replay, configuration, fact, tenant, scope, and writer-epoch contracts in
@@ -768,6 +771,13 @@ runs the ordinary State interpreter for every accepted evidence variant, and per
 intent with the evidence and outcome. Transient provider correlation stays private to the adapter.
 Runtime adds no call-id hash, StableId, or persisted correlation field.
 
+Runtime contains a trusted adapter fault at this one boundary. A small private wrapper applies
+`catch_unwind` both when constructing the callback future and around every poll of that future. A
+panic in either place maps to redacted RuntimeError::Internal and appends nothing; that returned
+error carries no panic payload or detail. Registered callbacks remain subject to the repository's
+no-secret panic/log contract because `catch_unwind` does not suppress an installed panic hook. This
+is not a retry, timeout, detached completion path, or public lifecycle.
+
 The driver always receives the same private qualified canonical-value representation. A value may
 originate from complete Journal qualification, from a locally constructed frame after Store returns
 Inserted, or from the existing pure Match payload projection, but its contract, content reference,
@@ -940,17 +950,26 @@ is folded.
 
 ### 4.5 Blocking work contract
 
-State preparation, Pure evaluation, Read interpretation, value
-qualification, and substantial canonical work run through spawn_blocking when they may block the
-async executor. Runtime immediately awaits the JoinHandle before using the result.
+State preparation, Pure evaluation, Read interpretation, cold Journal/Program/value qualification
+and full fold, hot value/frame qualification, and substantial canonical work run through
+spawn_blocking when they may block the async executor. Runtime immediately awaits the JoinHandle
+before using the result.
 
 The blocking closure contains only trusted, bounded-input, pure, terminating synchronous work. It
-owns no Store, Adapter, provider client, async runtime handle, or append authority; it never invokes
+may carry immutable pre-resolved driver/adapter handles as inert association data, but it never
+invokes State execution entry, an adapter callback, a provider method, or an async future. It owns
+no Store handle, connection, mutation, async runtime handle, or append authority and never invokes
 block_on. Store append and adapter/provider Read remain ordinary async IO after the blocking result
 is observed. If the outer Runtime future is dropped, an already-running blocking closure may finish,
 but its result is discarded and it cannot perform dependent IO or append. Runtime adds no CPU
 semaphore or blocking-job timeout. A callback that does not terminate violates its trusted
 registration contract; Runtime does not attempt to interrupt it.
+
+Store operations remain ordinary async operations. A Store implementation may offload only
+deterministic copying, hashing, validation, and SQL argument encoding over owned immutable
+snapshots. No database connection/transaction/advisory-lock authority, Memory guard/state/mutation
+authority, or block_on enters that job; all persistence IO and publication remain in the async
+future.
 
 ### 4.6 Admission and conclusion races
 
@@ -958,8 +977,10 @@ Admission's genesis frame derives expected head Absent.
 
 - Inserted commits the exact genesis.
 - NotInserted causes Runtime to load the complete current run. The exact same genesis resumes it; a
-  valid different genesis under the same RunId is AdmissionConflict; malformed history is
-  InvalidHistory.
+  different genesis that passes Journal structural qualification, strict retained Program
+  decode/ref verification, and the retained C0 schema-ref check is AdmissionConflict; malformed
+  history is InvalidHistory. Runtime does not typed-qualify an unsupported foreign C0 merely to
+  classify the collision.
 - Indeterminate retains nothing. The caller repeats exact start inputs or later reads the RunId.
 
 Conclusion uses the exact selected head. NotInserted means the same frame already exists or another
@@ -1028,7 +1049,7 @@ The mapping is normative:
 | Source | RuntimeError |
 | --- | --- |
 | resume/read of absent RunId | Absent |
-| different valid genesis under one RunId | AdmissionConflict |
+| structurally qualified different genesis under one RunId | AdmissionConflict |
 | Store append COMMIT ambiguity | Indeterminate |
 | Store physical corruption, retained fixed-limit violation, Journal/Program decode failure, or semantic retained-history violation | InvalidHistory |
 | retained C::bind_evidence failure | InvalidHistory |
@@ -1521,16 +1542,18 @@ ReadUnavailable
   -> return RuntimeError::Unavailable
 
 typed evidence
+  -> one immediately awaited pure spawn_blocking job
+  -> qualify exact typed evidence
   -> pure C::bind_evidence(intent, evidence)
-  -> spawn_blocking ordinary interpretation
-  -> typed outcome
+  -> ordinary interpretation with retained typed input
+  -> qualify typed outcome
+  -> encode fused Read frame
 ~~~
 
 For accepted evidence:
 
 ~~~text
-typed intent/evidence/outcome qualification
-  -> Journal encode one fused Read conclusion
+encoded fused Read conclusion
   -> Store append exact selected head
 
 Inserted
@@ -1751,8 +1774,8 @@ The cutover:
   States, and submission-status Read contracts;
 - deletes WalletNonceAuthority, nonce/broadcast adapter handles and registrations, signer integration
   from live EVM, and the mfm-storage-evm-postgres crate, migration, workspace edges, and fixtures;
-- removes Broadcast and PossibleEntry from surviving EvmProviderResponse plus every submission-only
-  EvmAdapterError branch, while retaining only Read evidence classifications;
+- removes Broadcast and PossibleEntry from surviving EvmProviderResponse, deletes
+  EvmAdapterError completely, and retains only Read evidence classifications;
 - removes TransactionReceipt, FinalizedHead, and CanonicalInclusionBlock from the surviving
   EvmReadIntent subject wire; removes Receipt, FinalizedHead, and CanonicalBlock from EvmReadValue;
   and deletes ReadCapabilityFamily::SubmissionStatus plus the EvmCapability<3> implementation and
@@ -2106,7 +2129,7 @@ public_signer_key_instance_ref
 evm_live_adapter_implementation_ref
 PostgresWalletNonce*/WalletNonceDomain* public exports
 EvmProviderResponse::Broadcast/PossibleEntry variants
-submission-only EvmAdapterError variants
+EvmAdapterError
 EvmReadSubject::TransactionReceipt/FinalizedHead/CanonicalInclusionBlock variants
 EvmReadValue::Receipt/FinalizedHead/CanonicalBlock variants
 ReadCapabilityFamily::SubmissionStatus and EvmCapability<3> implementation/IDs
@@ -2130,8 +2153,8 @@ grep. It inventories symbol/reexport roots, stable/schema IDs, wire tags/fields,
 manifest/dependency edges, fixtures, and current documentation claims. Renaming one listed owner or
 leaving an opaque compatibility wrapper fails the cutover.
 
-Production LOC, exported type count, dependency edges, and files required to add a State must all
-decrease.
+Tracked crate/bin `src` LOC (including inline tests, with external tests reported separately),
+exported type count, dependency edges, and files required to add a State must all decrease.
 
 ## 12. Security and failure semantics
 
@@ -2157,8 +2180,9 @@ decrease.
 - Dropping start/resume at any await is safety-neutral: it adds no candidate frame, or the single
   in-flight append may commit atomically; every already-acknowledged durable prefix remains, and the
   next complete load resolves the in-flight candidate. Runtime owns no cancellation mechanism.
-- spawn_blocking owns only synchronous pure work, is immediately awaited, and contains no IO or
-  persistence authority.
+- spawn_blocking owns only synchronous pure work, is immediately awaited, invokes no adapter or IO,
+  and contains no persistence authority; Store-internal pure byte jobs likewise own no Store
+  mutation/connection/transaction authority.
 - Store append is atomic per frame and exact-head linearized.
 - Frame rows are immutable; exact historical retry returns NotInserted and writes nothing.
 - Process termination loses only volatile Pure/Read work; restart trusts only durable history.
@@ -2299,8 +2323,9 @@ Negative fixtures cover:
   exact `mfm.evm/physical-target@1` semantic identity, and the derived binding ref; it rejects zero
   chain_id, duplicate planner targets for one chain, any extra field, every old binding-wrapper
   shape, and any caller-asserted ref;
-- restart with the same descriptor recreates the same ref; missing or wrong S/C/ref registration is
-  IncompatibleAssembly before any external call;
+- restart with the same descriptor recreates the same ref; `start` rejects missing or wrong
+  S/C/ref registration before its Store call, while `resume`/`read` perform their required complete
+  Store load and then reject it before adapter/provider or append IO;
 - binding_ref is an external assembly association, not a Journal closure object, and changing it
   changes Program identity and the recursively committed genesis/head;
 - every Inserted frame is folded by local exact extension without a Store reload; NotInserted and
@@ -2317,7 +2342,8 @@ Negative fixtures cover:
   Runnable for a later invocation;
 - ReadPreparationError appends no frame and maps to RuntimeError::Internal, while expected domain
   rejection flows only through typed Evidence and ProposedStateOutcome::Failure;
-- one start/resume invocation enters a selected Read adapter at most once;
+- one start/resume invocation enters each selected Read declaration occurrence at most once, while
+  a progressing multi-source DAG may enter several distinct Read occurrences;
 - concurrent Read observations may overlap, but exact-head append selects one durable fused
   conclusion and every NotInserted caller reloads that winner;
 - a fused Read conclusion retains the exact intent, evidence, and typed-outcome canonical objects;
@@ -2326,6 +2352,9 @@ Negative fixtures cover:
   conclusion frame, respectively, that retains the exact terminal value;
 - an earlier RunView remains a valid captured snapshot if a formerly indeterminate transaction
   commits later.
+- a different genesis that passes structural Journal/Program/C0-ref checks is AdmissionConflict
+  without foreign assembly association or typed foreign-C0 decoding; an exact genesis uses the
+  proposed typed association, and NotInserted followed by an absent load is Internal.
 
 ### 13.4 Store conformance
 
@@ -2377,16 +2406,22 @@ PostgreSQL-only integration and fault-injection tests additionally prove:
 Boundary-focused tests and repository checks cover:
 
 - Runtime exposes no cancellation token, timeout wrapper, detached completion task, or semaphore;
-- spawn_blocking closures contain only synchronous deterministic work and are awaited before
-  provider or Store IO;
+- Runtime spawn_blocking closures contain only synchronous deterministic work and are immediately
+  awaited before the next dependent provider or Store IO; cold work may follow the required load,
+  and local fold/qualification work may follow an acknowledged append;
 - dropping the outer future while spawn_blocking is running may let only that pure closure finish;
-  its result is discarded and it owns no IO or append authority;
+  its result is discarded, it owns no Store or append authority, and it invokes no adapter/provider
+  IO even when it carries their immutable handles as inert association data;
 - the exact public adapter shape is a stable-Rust higher-ranked borrowed-intent callback returning a
   boxed Send future of typed Evidence or zero-detail ReadUnavailable;
+- panic during adapter callback future construction or during any callback-future poll is privately
+  contained, maps to redacted RuntimeError::Internal, and appends nothing;
+- Store pure jobs hash/copy only owned immutable snapshots, executor heartbeat remains live, and
+  drop/join failure before publication leaves Memory and PostgreSQL unchanged;
 - adapter deadline/transport unavailability returns ReadUnavailable, appends no frame, and maps to
   RuntimeError::Unavailable;
-- Store failures definitely before commit return Unavailable and COMMIT ambiguity returns
-  Indeterminate;
+- Store database/pool availability failures definitely before commit return Unavailable,
+  Capacity/corruption retain their exact variants, and COMMIT ambiguity returns Indeterminate;
 - dropping start/resume before or during a provider Read leaves no external mutation and a later
   invocation may observe the same durable Runnable State;
 - dropping before conclusion append adds no candidate frame; dropping during append may leave the
@@ -2401,13 +2436,16 @@ Boundary-focused tests and repository checks cover:
 ### 13.6 EVM product-scope tests
 
 - the exact production entry-point inventory retains Portfolio and contains no EVM submission;
-- App rejects the retired `mfm.evm/submit-transaction@1` ID before run admission;
+- the first product-removal commit's old dispatcher rejects the retired
+  `mfm.evm/submit-transaction@1` ID before run admission; the final typed App accepts no arbitrary
+  entry-point ID or generic dispatch request, so that temporary regression is then deleted;
 - Portfolio native/token Reads, hot/cold fold, and child-failure mapping remain unchanged;
 - live EVM assembly requires only Read bindings and has no nonce-authority or signer dependency;
 - no submission State/capability/contract ID, selector, request/progress/result, binding, fixture,
   migration, SQL table, or production registration survives;
-- surviving EvmProviderResponse, EvmReadIntent, EvmReadValue, and EvmAdapterError wires contain no
-  broadcast/possible-entry/receipt/finality/canonical-inclusion or submission-only branch;
+- surviving EvmProviderResponse, EvmReadIntent, and EvmReadValue wires contain no
+  broadcast/possible-entry/receipt/finality/canonical-inclusion or submission-only branch, and
+  EvmAdapterError is absent;
 - mfm-storage-evm-postgres is absent from the workspace, manifests, and lockfile; and
 - current product documentation advertises no EVM submission path and records that a future path
   requires a durable transaction authority rather than nonce-only allocation.
@@ -2418,9 +2456,10 @@ Record:
 
 - workspace dependency graph before and after;
 - exported production types before and after;
-- net production LOC before and after;
+- net tracked crate/bin `src` LOC before and after, including inline tests, with external tests
+  reported separately;
 - files/registrations required to add one Pure and one Read State;
-- Store production LOC removed by semantic/fact/identity/request/object deletion;
+- Store source-tree LOC removed by semantic/fact/identity/request/object deletion;
 - one canonical Journal construction/decoding path;
 - one Runtime reducer;
 - one Runtime assembly registry;
@@ -2577,8 +2616,10 @@ live IO under Adapter and Store policy.
 
 Rejected. spawn_blocking protects the async executor from synchronous CPU work; it is not a wait or
 durability owner. Store append is async live IO and must not be driven with block_on or a blocking
-database client inside the closure. An already-running pure closure may finish after outer Future
-drop, but it cannot perform dependent IO or append.
+database client inside the closure. Store may offload pure copying, hashing, validation, and SQL
+argument encoding over owned immutable snapshots, but never a connection, transaction, Memory
+guard/state, mutation, or DML. An already-running pure closure may finish after outer Future drop,
+but it cannot perform dependent IO or append.
 
 ### Keep random append request ids
 
@@ -2711,12 +2752,15 @@ Implementation is accepted only when:
     proof and returns typed Evidence or ReadUnavailable; Runtime binds and ordinarily interprets every evidence variant, then appends one fused
     intent/evidence/outcome conclusion.
 16. ReadPreparationError maps to Internal and ReadUnavailable maps to Unavailable; both write
-    nothing, one invocation enters a selected Read at most once, and concurrent Read observations
-    select one exact-head durable winner while others reload it.
+    nothing, one invocation enters each selected Read declaration occurrence at most once, and
+    concurrent Read observations select one exact-head durable winner while others reload it.
+    Adapter callback construction/poll panics are privately contained as Internal and write
+    nothing.
 17. Dropping start/resume at every await is safety-neutral; Runtime retains no pending owner, lease,
     permit, completion cell, resolver, cancellation/timeout API, detached task, or semaphore.
-18. spawn_blocking work is synchronously pure, contains no block_on, Adapter, Store, or persistence
-    authority, and a closure finishing after outer Future drop cannot perform dependent IO.
+18. spawn_blocking work is synchronously pure, contains no block_on, invokes no Adapter/Store IO,
+    owns no persistence authority, and a closure finishing after outer Future drop cannot perform
+    dependent IO; Store byte jobs own only immutable snapshots.
 19. start, resume, and read use the same Runtime-derived RunView, and Succeeded/Failed always match
     the retained Program root contract.
 20. App/transports own no Runtime lifecycle or frame interpretation, verify selected EntryPointId
@@ -2745,7 +2789,8 @@ Implementation is accepted only when:
     Journal construction, and Journal does not claim arbitrary-string secret detection.
 30. docs/design.md, docs/architecture.md, transport/operator documentation, crate READMEs, schemas,
     and fixtures describe only this current design.
-31. Production LOC, exported types, dependency edges, and files required to add a State decrease.
+31. Tracked crate/bin `src` LOC, exported types, dependency edges, and files required to add a State
+    decrease; external tests are reported separately.
 32. Scope-selected checks and final composed CI pass under docs/build-and-verification.md.
 33. State/capability implementation-reference v1 preimages and the domain-owned
     `mfm.evm-physical-target@1` descriptor match exact goldens; no generic/live binding wrapper or
