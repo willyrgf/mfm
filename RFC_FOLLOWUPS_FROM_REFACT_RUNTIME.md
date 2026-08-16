@@ -37,10 +37,10 @@ facade, and numeric domain markers. It cannot supersede or restate the selected 
 proof, lifecycle, Store, identity, completion, or deletion contracts, and it does not reopen the
 selected Program format.
 
-It also inherits the core RFC's unresolved EVM-submission scope. If deferral is selected, this
-follow-up authors only surviving entry points and must not revive nonce/broadcast types. If
-submission remains required, this follow-up waits for the prerequisite durable transaction-authority
-RFC and cannot use the superseded nonce-only flow.
+It inherits the core RFC's approved retirement of EVM submission and generic Effect. This follow-up
+authors only surviving entry points and must not revive nonce/broadcast types. Any future submission
+work waits for a separately approved durable transaction-authority RFC and cannot use the
+superseded nonce-only flow.
 
 ---
 
@@ -96,11 +96,6 @@ count.
    and Failure for its response mapper or exposes the dynamic view unchanged. The wrong choice
    changes public entry-point and transport response types. Resolve with the intended generic client
    contract before planning this deferred RFC.
-
-3. **Inherited EVM entry-point scope.** The core RFC recommends retiring EVM transaction submission
-   but still requires product-owner confirmation. If deferral is approved, this RFC must delete its
-   submission Operation examples during rebase; if submission remains required, authoring work
-   waits for the separate durable transaction-authority RFC. Resolve together with the core choice.
 
 All Runtime/Journal/Store/Program-format choices are fixed by the core RFC. Explicit RunId replaces
 App-owned identity; independently published configuration, facts, portability, replay, and
