@@ -12,8 +12,8 @@ C0 -> RunAdmitted
 ```
 
 Admission is the only genesis. Store selects at most one actionable occurrence from a valid prefix.
-Trusted composition first publishes domain-owned Portfolio and EVM configuration values and gives
-each execution mutation port its own same-opening resolved head. Admission accepts a
+Trusted composition first publishes the domain-owned Portfolio configuration value and gives each
+execution mutation port its own same-opening resolved head. Admission accepts a
 catalog-qualified typed value and that Store-issued head; Store derives the genesis frame, sequence,
 and physical append identity. It records the selected head's global sequence and typed content
 identity; absent, foreign-opening, wrong-type, or fabricated heads fail before the genesis append.

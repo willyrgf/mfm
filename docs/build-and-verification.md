@@ -25,8 +25,8 @@ test cache, and mutable Cargo artifacts are never release inputs or trusted
 verification results.
 
 `nix run .#mfm` is a project CLI convenience, not a separate build lane. Until a separately scoped
-trusted embedding supplies endpoint, nonce, signer, and Runtime composition, it exposes only
-non-actionable local metadata.
+trusted embedding supplies endpoint and Runtime composition, it exposes only non-actionable local
+metadata.
 
 ## Responsibility boundary
 

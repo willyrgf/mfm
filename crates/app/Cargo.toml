@@ -32,7 +32,6 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 mfm-evm-live = { path = "../live/evm" }
-mfm-signing = { path = "../signing" }
 tokio = { workspace = true }
 
 [[test]]

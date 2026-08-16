@@ -142,3 +142,7 @@ retains the complete EVM context. Portfolio passes one opaque continuation throu
 collection and maps EVM failures to its terminal failure contract. There is no generic context
 type, ordered child-input bijection, or parallel workflow mechanism. App owns one mandatory
 Runtime and only dispatches typed selectors to these planners.
+
+The current product admits only Portfolio snapshot and uses EVM solely for observational balance
+Reads. Transaction submission requires a future durable transaction-authority/outbox design and
+has no production planner, State, capability, adapter, or App route.

@@ -22,31 +22,6 @@ fn canonical_json<T: Serialize>(value: &T) -> String {
         .to_owned()
 }
 
-fn submission_request() -> EvmSubmissionRequest {
-    EvmSubmissionRequest::planned(
-        EvmSubmissionSelector::new(
-            EvmTransactionTarget::new(1, "0xabc".to_owned(), "wallet-main".to_owned())
-                .expect("target"),
-            "request".to_owned(),
-            Vec::new(),
-            1,
-            "1".to_owned(),
-        )
-        .expect("selector"),
-        nominal_contract_ref::<EvmSubmissionSelector>().expect("signer reference"),
-    )
-    .expect("request")
-}
-
-fn submission_failure<O>(
-    outcome: ProposedStateOutcome<O, EvmSubmissionFailure>,
-) -> EvmSubmissionFailure {
-    match outcome {
-        ProposedStateOutcome::Failure { failure } => failure,
-        ProposedStateOutcome::Success { .. } => panic!("expected submission failure"),
-    }
-}
-
 fn balance_route_ref() -> ContentRef {
     nominal_contract_ref::<EvmBalanceRequest>().expect("route reference")
 }
@@ -122,27 +97,7 @@ fn balance_request_rejects_non_adjacent_duplicate_sources() {
 }
 
 #[test]
-fn admission_and_result_deserialization_reenter_domain_validation() {
-    assert!(serde_json::from_str::<EvmSubmissionRequest>(
-            r#"{"target":{"chain_id":1,"sender":"0xABC","nonce_domain":"main"},"idempotency_key":"request","data":[],"gas_limit":1,"max_fee":"1"}"#
-        )
-        .is_err());
-    assert!(serde_json::from_str::<EvmSubmissionOutput>(
-        r#"{"candidate_id":"candidate","transaction_hash":"","included":true}"#
-    )
-    .is_err());
-    assert!(
-        serde_json::from_str::<EvmSubmissionOutput>(r#"{"execution_disposition":"accepted"}"#)
-            .is_err()
-    );
-    assert!(serde_json::from_str::<EvmSubmissionFailure>(
-        r#"{"kind":"destination_rejected","value":{"code":"secret=canary"}}"#
-    )
-    .is_err());
-    assert!(serde_json::from_str::<EvmSubmissionFailure>(
-        r#"{"kind":"unknown_submission_failure"}"#
-    )
-    .is_err());
+fn balance_failure_deserialization_reenters_domain_validation() {
     assert!(serde_json::from_str::<EvmBalanceFailure>(
         r#"{"kind":"source_unavailable","value":{"stage":"forged","collection_ordinal":0,"code":"observation_unavailable"}}"#
     )
@@ -166,109 +121,6 @@ fn admission_and_result_deserialization_reenter_domain_validation() {
 }
 
 #[test]
-fn transaction_data_capacity_accepts_exact_and_rejects_plus_one() {
-    let target =
-        EvmTransactionTarget::new(1, "0xabc".to_owned(), "wallet-main".to_owned()).expect("target");
-    assert!(EvmSubmissionSelector::new(
-        target.clone(),
-        "capacity-exact".to_owned(),
-        vec![0; EVM_TRANSACTION_DATA_LIMIT],
-        1,
-        "1".to_owned(),
-    )
-    .is_ok());
-    assert!(EvmSubmissionSelector::new(
-        target,
-        "capacity-plus-one".to_owned(),
-        vec![0; EVM_TRANSACTION_DATA_LIMIT + 1],
-        1,
-        "1".to_owned(),
-    )
-    .is_err());
-}
-
-#[test]
-fn submission_progress_rejects_a_non_deterministic_candidate() {
-    let request = submission_request();
-    assert!(EvmSubmissionProgress::new(
-        request,
-        SubmissionPhase::Candidate {
-            nonce: 7,
-            candidate_id: "forged-candidate".to_owned(),
-        },
-    )
-    .is_err());
-}
-
-#[test]
-fn submission_failure_mapping_is_closed_and_stage_specific() {
-    let request = submission_request();
-    assert_eq!(
-        submission_failure(interpret_reserve_wallet_nonce(
-            request.clone(),
-            &NonceReservationEvidence::Rejected,
-        )),
-        EvmSubmissionFailure::NonceAuthorityUnavailable
-    );
-
-    let candidate_id = submission_candidate_id(&request.target, 7);
-    let candidate = EvmSubmissionProgress::new(
-        request,
-        SubmissionPhase::Candidate {
-            nonce: 7,
-            candidate_id: candidate_id.clone(),
-        },
-    )
-    .expect("candidate progress");
-    assert_eq!(
-        submission_failure(interpret_broadcast_transaction(
-            candidate,
-            &BroadcastEvidence::Rejected,
-        )),
-        EvmSubmissionFailure::DestinationRejected
-    );
-
-    let progress =
-        EvmSubmissionProgress::new(submission_request(), SubmissionPhase::Reserved { nonce: 7 })
-            .expect("reserved progress");
-    assert_eq!(
-        <EvmState<0, 0> as State>::integrity_failure(&submission_request()),
-        EvmSubmissionFailure::NonceAuthorityUnavailable
-    );
-    assert_eq!(
-        <EvmState<0, 2> as State>::integrity_failure(&progress),
-        EvmSubmissionFailure::ProviderUnavailable
-    );
-    assert_eq!(
-        <EvmState<0, 3> as State>::integrity_failure(&progress),
-        EvmSubmissionFailure::ProviderUnavailable
-    );
-    assert_eq!(
-        <EvmState<0, 4> as State>::integrity_failure(&progress),
-        EvmSubmissionFailure::ProviderUnavailable
-    );
-    assert_eq!(
-        <EvmState<0, 5> as State>::integrity_failure(&progress),
-        EvmSubmissionFailure::ProviderUnavailable
-    );
-    assert_eq!(
-        submission_failure(derive_submission_candidate({
-            let request = submission_request();
-            let candidate_id = submission_candidate_id(&request.target, 7);
-            EvmSubmissionProgress::new(
-                request,
-                SubmissionPhase::Candidate {
-                    nonce: 7,
-                    candidate_id,
-                },
-            )
-            .expect("candidate progress")
-        })),
-        EvmSubmissionFailure::NonceLineageDiverged
-    );
-}
-
-#[test]
 fn balance_context_rejects_a_forged_non_prefix_work_item() {
     let value = serde_json::json!({
         "request": {
@@ -281,7 +133,11 @@ fn balance_context_rejects_a_forged_non_prefix_work_item() {
             "decimals": 18
         },
         "caller_continuation": {"marker": "opaque"},
-        "metadata": {"collection_ordinal": 0, "correlation": "collection-0"},
+        "metadata": {
+            "collection_ordinal": 0,
+            "correlation": "collection-0",
+            "route_ref": balance_route_ref()
+        },
         "completed": [],
         "work": {
             "kind": "read_native_balance",
@@ -300,7 +156,7 @@ fn balance_context_rejects_a_forged_non_prefix_work_item() {
 
 #[test]
 fn read_evidence_requires_the_exact_operation_subject_and_value() {
-    let chain_intent = EvmReadIntent::for_balance(
+    let chain_intent = EvmReadIntent::new(
         "mfm.evm.read-chain-identity@1".to_owned(),
         1,
         EvmReadSubject::ChainIdentity,
@@ -318,14 +174,26 @@ fn read_evidence_requires_the_exact_operation_subject_and_value() {
         "route_ref": null,
     }))
     .is_err());
-    assert!(serde_json::from_value::<EvmReadIntent>(serde_json::json!({
-        "operation": "mfm.evm.read-finalized-head@1",
-        "chain_id": 1,
-        "subject": {"kind": "finalized_head"},
-        "route_ref": balance_route_ref(),
-    }))
-    .is_err());
-    let mismatched_chain_intent = EvmReadIntent::for_balance(
+    for subject in [
+        serde_json::json!({
+            "kind": "transaction_receipt",
+            "value": {"transaction_hash": "0xtx"},
+        }),
+        serde_json::json!({"kind": "finalized_head"}),
+        serde_json::json!({
+            "kind": "canonical_inclusion_block",
+            "value": {"number": "1"},
+        }),
+    ] {
+        assert!(serde_json::from_value::<EvmReadIntent>(serde_json::json!({
+            "operation": "mfm.evm.retired-status@1",
+            "chain_id": 1,
+            "subject": subject,
+            "route_ref": balance_route_ref(),
+        }))
+        .is_err());
+    }
+    let mismatched_chain_intent = EvmReadIntent::new(
         "mfm.evm.read-chain-identity@1".to_owned(),
         1,
         EvmReadSubject::InitialAnchor,
@@ -343,56 +211,23 @@ fn read_evidence_requires_the_exact_operation_subject_and_value() {
     )
     .is_err());
 
-    for (intent, evidence) in [
-        (
-            EvmReadIntent::new(
-                "mfm.evm.read-transaction-receipt@1".to_owned(),
-                1,
-                EvmReadSubject::TransactionReceipt {
-                    transaction_hash: "0xtx".to_owned(),
-                },
-            )
-            .expect("receipt intent"),
-            EvmReadEvidence::Returned {
-                value: EvmReadValue::Receipt {
-                    transaction_hash: "0xtx".to_owned(),
-                    execution_disposition: "succeeded".to_owned(),
-                    inclusion_block_number: "1".to_owned(),
-                    inclusion_block_hash: "0xblock".to_owned(),
-                },
-            },
-        ),
-        (
-            EvmReadIntent::new(
-                "mfm.evm.read-finalized-head@1".to_owned(),
-                1,
-                EvmReadSubject::FinalizedHead,
-            )
-            .expect("finalized-head intent"),
-            EvmReadEvidence::Returned {
-                value: EvmReadValue::FinalizedHead {
-                    number: "1".to_owned(),
-                },
-            },
-        ),
-        (
-            EvmReadIntent::new(
-                "mfm.evm.read-canonical-inclusion-block@1".to_owned(),
-                1,
-                EvmReadSubject::CanonicalInclusionBlock {
-                    number: "1".to_owned(),
-                },
-            )
-            .expect("canonical-block intent"),
-            EvmReadEvidence::Returned {
-                value: EvmReadValue::CanonicalBlock {
-                    number: "1".to_owned(),
-                    hash: "0xblock".to_owned(),
-                },
-            },
-        ),
+    for value in [
+        serde_json::json!({
+            "kind": "receipt",
+            "value": {
+                "transaction_hash": "0xtx",
+                "execution_disposition": "succeeded",
+                "inclusion_block_number": "1",
+                "inclusion_block_hash": "0xblock"
+            }
+        }),
+        serde_json::json!({"kind": "finalized_head", "value": {"number": "1"}}),
+        serde_json::json!({
+            "kind": "canonical_block",
+            "value": {"number": "1", "hash": "0xblock"},
+        }),
     ] {
-        assert!(EvmCapability::<3>::bind_evidence(&intent, &evidence).is_ok());
+        assert!(serde_json::from_value::<EvmReadValue>(value).is_err());
     }
 
     let source = EvmBalanceSource {
@@ -402,7 +237,7 @@ fn read_evidence_requires_the_exact_operation_subject_and_value() {
         token: None,
     };
     let anchor = EvmBlockAnchor::new("1".to_owned(), "0xblock".to_owned()).expect("anchor");
-    let balance_intent = EvmReadIntent::for_balance(
+    let balance_intent = EvmReadIntent::new(
         "mfm.evm.read-native-balance@1".to_owned(),
         1,
         EvmReadSubject::NativeBalance { source, anchor },
@@ -487,50 +322,7 @@ fn chain_identity_rejection_uses_the_frozen_collection_failure_code() {
 }
 
 #[test]
-fn frozen_submission_and_collection_wires_match_the_contract_goldens() {
-    assert_eq!(
-        canonical_json(&EvmSubmissionOutput::new(
-            EvmExecutionDisposition::Succeeded
-        )),
-        include_str!("../../../../docs/contracts/evm-portfolio/evm-submission-succeeded.json")
-            .trim()
-    );
-    assert_eq!(
-        canonical_json(&EvmSubmissionOutput::new(EvmExecutionDisposition::Reverted)),
-        include_str!("../../../../docs/contracts/evm-portfolio/evm-submission-reverted.json")
-            .trim()
-    );
-    for (failure, fixture) in [
-        (
-            EvmSubmissionFailure::NonceAuthorityUnavailable,
-            include_str!("../../../../docs/contracts/evm-portfolio/evm-submission-failure.json"),
-        ),
-        (
-            EvmSubmissionFailure::DestinationRejected,
-            include_str!(
-                "../../../../docs/contracts/evm-portfolio/evm-submission-destination-rejected.json"
-            ),
-        ),
-        (
-            EvmSubmissionFailure::ProviderUnavailable,
-            include_str!(
-                "../../../../docs/contracts/evm-portfolio/evm-submission-provider-unavailable.json"
-            ),
-        ),
-        (
-            EvmSubmissionFailure::NonceLineageDiverged,
-            include_str!(
-                "../../../../docs/contracts/evm-portfolio/evm-submission-nonce-lineage-diverged.json"
-            ),
-        ),
-    ] {
-        assert_eq!(canonical_json(&failure), fixture.trim());
-        assert_eq!(
-            serde_json::from_str::<EvmSubmissionFailure>(fixture).expect("closed failure wire"),
-            failure
-        );
-    }
-
+fn frozen_collection_wire_matches_the_contract_golden() {
     let completion = EvmBalanceCollectionCompletion::new(
         FrozenCallerContext {
             value: "portfolio:example".to_owned(),

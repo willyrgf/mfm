@@ -1,5 +1,8 @@
 # Capacity envelope and reservation proof
 
+Status: superseded one-time pre-cutover artifact. Retained only through the first cutover commit;
+it is not current product authority.
+
 This is the checked-in U1/U7/U9 artifact. Values are fixed contract bounds, not latency targets.
 Exact-bound and independent bound-plus-one tests are required at the owner named in each row.
 

@@ -1,11 +1,8 @@
 use mfm_app::application_catalog;
-use mfm_canonical::raw_content_digest;
+use mfm_canonical::{raw_content_digest, sha256_digest_bytes};
 use mfm_capabilities::AccessCapabilityContract;
-use mfm_evm::{
-    EvmBalanceBindings, EvmBalanceRequest, EvmBalanceSource, EvmCapability, EvmConfig, EvmState,
-    EvmSubmissionBindings, EvmSubmissionProgress, EvmSubmissionSelector, EvmTransactionTarget,
-};
-use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId, StableId};
+use mfm_evm::{EvmBalanceBindings, EvmBalanceRequest, EvmBalanceSource, EvmCapability, EvmState};
+use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_portfolio::{
     plan_snapshot, PortfolioConfig, PortfolioContinuation, PortfolioId, PortfolioSnapshotSelector,
 };
@@ -15,8 +12,6 @@ use mfm_program::{
 };
 use serde_json::json;
 
-const SENDER: &str = "0x1111111111111111111111111111111111111111";
-const EVM_TRANSACTION_DATA_MAX_BYTES: usize = 128 * 1024;
 const PORTFOLIO_COLLECTIONS_MAX: usize = 64;
 
 fn reference(label: &str) -> ContentRef {
@@ -44,39 +39,6 @@ where
         None,
     )
     .expect("read binding")
-}
-
-fn effect_binding<S, C>(signer: Option<ContentRef>) -> BindingDescriptor
-where
-    S: State,
-    C: AccessCapabilityContract,
-{
-    BindingDescriptor::new(
-        state_implementation_ref::<S>().expect("state"),
-        Some(capability_contract_ref::<C>().expect("capability")),
-        Some(reference("adapter")),
-        reference("target"),
-        Some(StableId::new("mfm.capacity-envelope.effect@1").expect("effect domain")),
-        signer,
-    )
-    .expect("effect binding")
-}
-
-fn make_submission_bindings(
-    target: EvmTransactionTarget,
-    signer: ContentRef,
-) -> EvmSubmissionBindings {
-    EvmSubmissionBindings::new(
-        target,
-        [
-            effect_binding::<EvmState<0, 0>, EvmCapability<0>>(None),
-            effect_binding::<EvmState<0, 2>, EvmCapability<1>>(Some(signer)),
-            read_binding::<EvmState<0, 3>, EvmCapability<3>>(),
-            read_binding::<EvmState<0, 4>, EvmCapability<3>>(),
-            read_binding::<EvmState<0, 5>, EvmCapability<3>>(),
-        ],
-    )
-    .expect("submission bindings")
 }
 
 fn balance_bindings() -> EvmBalanceBindings {
@@ -108,58 +70,7 @@ fn request(collection: usize) -> EvmBalanceRequest {
 }
 
 #[test]
-fn maximum_entry_point_programs_record_capacity_envelope() {
-    let target = EvmTransactionTarget::new(1, SENDER.to_owned(), "wallet-main".to_owned())
-        .expect("submission target");
-    let signer = reference("signer");
-    let submission_bindings = make_submission_bindings(target.clone(), signer.clone());
-    let (evm_input, evm_program, _) = mfm_evm::plan_submission(
-        EvmSubmissionSelector::new(
-            target.clone(),
-            "capacity-envelope".to_owned(),
-            vec![0; EVM_TRANSACTION_DATA_MAX_BYTES],
-            21_000,
-            "100".to_owned(),
-        )
-        .expect("submission selector"),
-        &serde_json::from_value::<EvmConfig>(json!({
-            "submission_routes": [{
-                "target": target,
-                "public_signer_key_instance_ref": signer,
-            }],
-        }))
-        .expect("EVM config"),
-        &[submission_bindings],
-    )
-    .expect("EVM plan")
-    .into_parts();
-    let evm_bytes = evm_program.canonical_bytes().expect("EVM Program bytes");
-    let evm_c0_bytes = canonical_value(&evm_input)
-        .expect("EVM C0 bytes")
-        .as_bytes()
-        .len();
-    let evm_progress: EvmSubmissionProgress = serde_json::from_value(json!({
-        "request": &evm_input,
-        "phase": {
-            "kind": "candidate",
-            "value": {
-                "nonce": u64::MAX,
-                "candidate_id": format!(
-                    "mfm.evm.candidate/{}/{}/{}/{}",
-                    1,
-                    SENDER,
-                    "wallet-main",
-                    u64::MAX,
-                ),
-            },
-        },
-    }))
-    .expect("candidate progress");
-    let evm_cn_bytes = canonical_value(&evm_progress)
-        .expect("EVM Cn bytes")
-        .as_bytes()
-        .len();
-
+fn maximum_portfolio_program_records_capacity_envelope() {
     let portfolio_id = PortfolioId {
         value: "portfolio-capacity-envelope".to_owned(),
     };
@@ -190,6 +101,11 @@ fn maximum_entry_point_programs_record_capacity_envelope() {
     let portfolio_bytes = portfolio_program
         .canonical_bytes()
         .expect("Portfolio Program bytes");
+    assert_eq!(
+        sha256_digest_bytes(portfolio_bytes.as_bytes()).to_string(),
+        "2804cfbda713daf631f1292dd1e4efe9a2e75d46ac86807e42ab8a91ef481c23",
+        "the surviving chain/anchor/balance Program wire must remain byte-for-byte stable",
+    );
     let portfolio_c0_bytes = canonical_value(&portfolio_input)
         .expect("Portfolio C0 bytes")
         .as_bytes()
@@ -224,20 +140,12 @@ fn maximum_entry_point_programs_record_capacity_envelope() {
         .as_bytes()
         .len();
 
-    let catalog = application_catalog().expect("catalog");
-    ProgramIngress::new(&catalog)
-        .decode(evm_bytes.as_bytes())
-        .expect("EVM Program ingress");
-    ProgramIngress::new(&catalog)
+    ProgramIngress::new(&application_catalog().expect("catalog"))
         .decode(portfolio_bytes.as_bytes())
         .expect("Portfolio Program ingress");
 
     eprintln!(
-        "capacity-envelope app evm declarations={} bytes={} c0_bytes={} cn_bytes={} portfolio collections={} sources={} declarations={} bytes={} c0_bytes={} cn_bytes={}",
-        evm_program.declarations().len(),
-        evm_bytes.as_bytes().len(),
-        evm_c0_bytes,
-        evm_cn_bytes,
+        "capacity-envelope app portfolio collections={} sources={} declarations={} bytes={} c0_bytes={} cn_bytes={}",
         PORTFOLIO_COLLECTIONS_MAX,
         PORTFOLIO_COLLECTIONS_MAX,
         portfolio_program.declarations().len(),

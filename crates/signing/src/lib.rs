@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
 //! Reusable public signing metadata and bounded signing requests.
 //!
-//! Private key custody remains outside this crate.  A Runtime binding records only the public
-//! signer key-instance identity; a live signer may retain secret material in its dedicated owner.
+//! Private key custody remains outside this crate. A live signer may retain secret material only
+//! in its dedicated owner; this crate exposes reusable public signing identity and request types.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -27,7 +27,7 @@ pub enum SigningError {
     Failed,
 }
 
-/// Public signer key-instance identity retained in immutable binding evidence.
+/// Reusable public signer key-instance identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicSignerKeyInstance {
@@ -75,7 +75,7 @@ impl SigningRequest {
     }
 }
 
-/// Public signer interface used by one qualified live adapter.
+/// Reusable public signer interface.
 pub trait Signer: Send + Sync + 'static {
     /// Returns the immutable public key-instance identity.
     fn public_identity(&self) -> &PublicSignerKeyInstance;
