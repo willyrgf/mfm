@@ -103,7 +103,7 @@ thiserror, SQLx, and Tokio are listed in their owning chunks and do not loosen t
 | Capabilities | IDs and Values |
 | Program | Canonical, Capabilities, IDs, and Values |
 | Journal | Canonical, IDs, and Values |
-| Store/Memory | Canonical, IDs, and Journal |
+| Store/Memory | IDs and Journal; no Canonical |
 | PostgreSQL Store | Canonical, IDs, Journal, and Store |
 | Runtime | Canonical, Capabilities, IDs, Journal, Program, Store, and Values |
 | EVM domain | Capabilities, IDs, Program, Program derive, and Values |
@@ -129,7 +129,7 @@ Exact ownership:
 | `mfm-storage-postgres` | one checked production constructor, physical readiness, snapshot load, exact-head append, static SQL baseline |
 | `mfm-runtime` | finalized assembly, the only semantic fold, typed Pure/Read execution, and `RunView` |
 | domains | deterministic Program/C0 authoring and reusable State semantics; no ambient IO |
-| live adapters | bind exact typed Read intent to an explicit target/client and return typed evidence or `ReadUnavailable` |
+| live adapters | bind exact typed Read intent to an explicit target/client and return typed evidence or `ReadAdapterError` |
 | App/transports | parse, select an entry point, require explicit `RunId`, invoke Runtime, and render redacted results |
 
 Forbidden edges and duplicate owners include:
@@ -255,8 +255,8 @@ Primary paths:
 - `crates/domains/evm/src/lib.rs`
 - `crates/domains/evm/tests/{unit,balance_matrix}.rs`
 - `crates/domains/evm/{Cargo.toml,README.md}`
-- `crates/domains/portfolio/{src,tests,Cargo.toml,README.md}` for the multi-source authoring fix
-  and its regressions
+- `crates/domains/portfolio/{src,tests,Cargo.toml,README.md}` for mechanical submission deletion
+  fallout and surviving-planner preservation
 
 Delete, rather than deprecate or leave unregistered:
 
@@ -329,12 +329,11 @@ the current capability mode to `ReadMode`, always author `ExecutionMode::Read`, 
 Effect branch/import. Generic Effect may remain temporarily inside the kernel, but no EVM/domain
 helper may still author it.
 
-Fix the existing multi-source Portfolio defect at this coherent product boundary. Using the current
-address-based Program API, make `append_balance_fragment` accept the exact validated balance
-request and unroll one complete check/anchor/select/Match/native-or-token/confirm group per source.
-Each confirm targets the next source group; only the last targets one consolidate State. Do not
-reduce the documented 64-source product to one source. Commit 2 ports this same proven algorithm to
-implicit u16 indices; it does not rediscover the behavior.
+Preserve the surviving Portfolio planner behavior at this deletion boundary except for mechanical
+changes required by submission removal. Do not implement the known multi-source graph correction
+against the address-based Program that Commit 2 deletes; Chunk 2G owns the single implementation
+against final implicit indices. Commit 1 remains a coherent product-deletion commit without adding
+or worsening that pre-existing planner defect.
 
 Tests for this chunk must prove:
 
@@ -343,17 +342,12 @@ Tests for this chunk must prove:
 - the submission entry-point and every retired stable/schema identity are absent; and
 - Portfolio's child EVM failure still reaches its mapper.
 
-Add a mixed native+token two-source success/output regression, a second-source failure/mapping
-regression, exact 64-source authoring evidence, and 65-source rejection. These survive Commit 2's
-mechanical Program-wire port.
-
 Update the forged-non-prefix balance-context regression from a fully valid baseline containing the
 now-required route ref, mutate only the work item, and assert that intended invariant. A fixture
 missing route_ref must not make the regression pass for the wrong reason.
 
 Architect gate `C1-A`: domain architect review for semantic completeness, stable-identity deletion,
-the Portfolio planner's multi-source change sites/regressions, and a smaller surviving EVM type
-graph.
+preservation of the surviving Portfolio planner, and a smaller surviving EVM type graph.
 
 ### 5.3 Chunk 1B — live EVM and nonce-store deletion
 
@@ -815,6 +809,12 @@ getter returning `Option<&ContentRef>`; sealed construction makes them all-or-no
 exposes exact `tag()` and `entry_index()`. Do not add `Program::declaration(index)`—the
 declarations slice and Runtime's private pre-resolved index table already own that lookup.
 
+Declaration/Execution constructors check only invariants local to their fields. `Program::new` and
+`Program::decode_canonical` call one shared whole-Program validator for limits, root/index/forward
+edge/target-kind/reachability and contract-continuity rules. Domain planners and Runtime do not
+duplicate that graph validator; RuntimeAssembly association adds only registry-dependent typed
+descriptor checks.
+
 The exact persisted projection is:
 
 ```text
@@ -944,7 +944,8 @@ Primary paths:
 Replace the current Journal implementation rather than adapting its open DTO graph. The retained
 public surface is one redaction-safe `JournalError`, the four Journal-owned constants, opaque
 `EncodedRunFrame`, opaque unqualified `StoredRunBytes`, qualified `JournalHistory`, and only the
-borrowed qualified record/object views Runtime needs.
+borrowed qualified record/object views Runtime needs, plus the sole non-qualifying
+`frame_head_digest` helper used by Journal and physical Store validation.
 
 ```rust
 pub const MAX_FRAME_BYTES: usize = 25_231_360;
@@ -952,6 +953,8 @@ pub const MAX_FRAME_NON_PAYLOAD_ENVELOPE: usize = 65_536;
 pub const MAX_RUN_FRAMES: u64 = 65_536;
 pub const MAX_RUN_BYTES: u64 = 536_870_912;
 // MAX_RUN_OBJECT_CANONICAL_BYTES is imported from mfm-values, not reexported.
+
+pub fn frame_head_digest(frame_bytes: &[u8]) -> ContentDigest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum JournalError {
@@ -1052,10 +1055,14 @@ are not `Clone`; their `Debug` implementations redact canonical content. Private
 use `serde_json::value::RawValue` to preserve nested canonical object bytes without a
 serialize/decode/serialize path.
 
-`StoredRunBytes::new` checks only nonempty input plus raw frame-count, per-frame-byte, and cumulative
-byte bounds. It deliberately does not claim canonical or structural validity. Store implementations
-can construct it; only `JournalHistory::qualify` consumes it. This asymmetry avoids a Store/Journal
-dependency cycle and avoids exposing raw retained bytes to Runtime.
+`StoredRunBytes::new` accepts exactly `1..=MAX_RUN_FRAMES` buffers and checks only that nonempty raw
+count plus per-frame-byte and cumulative-byte bounds. It deliberately does not claim canonical or
+structural validity. Store implementations can construct it; only `JournalHistory::qualify`
+consumes it. An empty `StoredRunBytes` is impossible. Absence is only `load_run -> None`: a private
+empty Memory synchronization shell (`frames.is_empty()` and no head), like PostgreSQL with no head
+and no frames, is merely absent and needs no cleanup lifecycle. Any physical frame without a head,
+or any head without a complete nonempty prefix, is CorruptPhysicalState. This asymmetry avoids a
+Store/Journal dependency cycle and avoids exposing raw retained bytes to Runtime.
 
 Local construction uses `Capacity` for fixed bounds and `InvalidFrame` for an invariant defect;
 retained qualification reports `InvalidHistory`. `StoredRunBytes::new` uses `InvalidHistory` for an
@@ -1090,9 +1097,12 @@ Construction canonicalizes and validates each raw object, enforces the shared 8 
 verifies the supplied instance ref, coalesces an identical ref only when its bytes are identical,
 sorts by the complete content ref, and enforces exact frame-local closure. It then measures
 non-object envelope bytes, enforces frame bounds, serializes exact JCS, and computes the recursive
-head. Successor constructors derive sequence and predecessor only from `JournalHistory`; callers do
-not supply them. `extend_inserted` consumes a known-inserted frame, rechecks RunId, sequence, and
-predecessor before extending the same qualified accumulator.
+head only through `frame_head_digest`. That infallible helper returns
+`ContentDigest::from_digest(DigestAlgorithm::Sha256V1,
+mfm_canonical::sha256_digest_bytes(frame_bytes))`; it hashes exact bytes and does not parse,
+canonicalize, or qualify a frame. Successor constructors derive sequence and predecessor only from
+`JournalHistory`; callers do not supply them. `extend_inserted` consumes a known-inserted frame,
+rechecks RunId, sequence, and predecessor before extending the same qualified accumulator.
 
 Qualification consumes `StoredRunBytes`; for every frame it strictly decodes/re-encodes, rejects
 unknowns/floats/noncanonical input, verifies closure/object refs/sorting/bounds, verifies genesis and
@@ -1123,6 +1133,9 @@ semantic record digest, call/preparation ID, or Effect tag.
 
 - exact canonical/frame-head goldens for admission, Pure success/failure, and fused Read
   success/failure;
+- hard-coded complete `content:sha256-v1:<64 lowercase hex>` head strings for a genesis and its
+  successor, exact equality with `frame_head_digest(frame.canonical_bytes())`, and rejection of the
+  `sha256-jcs-v1` tag even for identical digest bytes;
 - strict unknown-field/tag/version/v1-old-wire rejection;
 - missing/extra/duplicate/out-of-order/conflicting object closure tests;
 - wrong object hash/schema, wrong RunId, gap, predecessor, sequence, and recursive-head tests;
@@ -1290,13 +1303,13 @@ AlreadyConcludedSame / idempotency-conflict result types
 Store-owned ReadyError / StoreOpenError / check_ready
 ```
 
-Remove Store's production dependencies on capabilities, facts, Program, values, and serde_json. It
-depends only on `mfm-canonical`, IDs, Journal transfer/frame types, `thiserror`, and Tokio for its
-private async mutex/cooperative-copy/pure-job boundary. Memory uses the canonical crate's fixed
-SHA-256 primitive only to recompute
-`ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1,
-mfm_canonical::sha256_digest_bytes(frame_bytes))` for derived physical frame-head metadata. It does
-not parse JSON; frame construction and wire qualification remain Journal-owned.
+Remove Store's production dependencies on Canonical, capabilities, facts, Program, values, and
+serde_json. It depends only on IDs, Journal transfer/frame/hash surface, `thiserror`, and Tokio for
+its private async mutex/cooperative-copy/pure-job boundary. Memory stores
+`EncodedRunFrame::head_digest()` on insertion and calls only
+`mfm_journal::frame_head_digest(frame_bytes)` when recomputing derived physical metadata on load.
+It never selects a digest algorithm or parses JSON; frame construction and wire qualification
+remain Journal-owned.
 
 #### Store conformance
 
@@ -1308,6 +1321,11 @@ competing candidate, later exact historical retry, absent-head orphan, corrupt t
 capacity/count/byte limits, atomic fault boundary, complete load, and error taxonomy. If a dev-only
 helper is required, keep it inside tests rather than exposing backend commands or production
 constructors.
+
+The matrix also proves absence is `None`, a private empty Memory synchronization shell loads as
+`None`, no backend can return `Some` with an empty transfer, frames without a head and a head without
+a complete nonempty prefix are CorruptPhysicalState, independently corrupted bytes/digest metadata
+is detected through Journal's helper, and mfm-store has no mfm-canonical dependency or call site.
 
 Architect gate `C2-D`: storage-interface architect. Require object-safety/lifetime review, an
 explicit search showing Store has no semantic/domain dependency, and proof that Memory publishes
@@ -1376,7 +1394,7 @@ CREATE TABLE public.mfm_run_frames (
     run_sequence BIGINT NOT NULL CHECK (run_sequence BETWEEN 1 AND 65536),
     frame_bytes BYTEA NOT NULL CHECK (octet_length(frame_bytes) BETWEEN 1 AND 25231360),
     head_digest TEXT COLLATE "C" NOT NULL
-        CHECK (head_digest ~ '^content:sha256-jcs-v1:[0-9a-f]{64}$'),
+        CHECK (head_digest ~ '^content:sha256-v1:[0-9a-f]{64}$'),
     PRIMARY KEY (run_id, run_sequence)
 );
 
@@ -1437,7 +1455,8 @@ require min(sequence) == 1, max(sequence) == head_sequence,
 fetch all frame rows ordered by sequence
 move the owned Vec<PgRow> into one pure spawn_blocking job
 inside that job decode borrowed BYTEA slices from the owned rows, verify RunId/key/order,
-    raw length, stored digest against exact retained frame_bytes, and checked accumulated sum;
+    raw length, stored digest using mfm_journal::frame_head_digest(exact retained frame_bytes),
+    and checked accumulated sum;
     copy final buffers and construct StoredRunBytes::new
 commit read-only transaction and return Some(...)
 ```
@@ -1495,6 +1514,10 @@ The natural `(run_id, run_sequence)` target and exact frame bytes are the sole r
 collisions may only over-serialize. Do not add a second lock, target digest index, command ID,
 expected position, result position, or full-history scan on append.
 
+PostgreSQL retains its direct mfm-canonical dependency only for the separate advisory-lock JCS
+preimage above. It never uses Canonical to select or brand a frame-head algorithm; insertion uses
+the sealed frame projection and physical reload/append validation uses Journal's helper.
+
 Classify errors at the commit boundary:
 
 - pre-COMMIT connection/query failure or confirmed rollback/rejection: `Unavailable` when it is an
@@ -1517,6 +1540,8 @@ their own variants. Never return `Indeterminate` merely because an earlier state
 - current-thread executor heartbeat during large row hashing/copy, exact `query_with` BYTEA
   persistence, and configured-SQLx `PgRow`/`PgArguments` Send assertions;
 - synchronous-commit assertion and advisory-lock hash golden;
+- head-digest constraint accepts exact `content:sha256-v1:<64 lowercase hex>` and rejects the
+  `sha256-jcs-v1` tag without changing the advisory-lock JCS golden;
 - fault injection before COMMIT submission, confirmed rollback, COMMIT rejection, and unknown
   acknowledgement;
 - exact sequence/frame/run-byte SQL boundaries and hostile grammar/constraint rows; and
@@ -1568,8 +1593,12 @@ pub enum RuntimeError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("read is unavailable")]
-pub struct ReadUnavailable;
+pub enum ReadAdapterError {
+    #[error("read adapter is unavailable")]
+    Unavailable,
+    #[error("read adapter failed")]
+    Internal,
+}
 
 pub struct RuntimeAssemblyBuilder { /* private registries */ }
 pub struct RuntimeAssembly { /* finalized immutable Arc-owned inner */ }
@@ -1593,7 +1622,7 @@ impl RuntimeAssemblyBuilder {
         B: MfmValue,
         F: for<'a> Fn(&'a C::Intent)
                 -> Pin<Box<dyn Future<
-                    Output = std::result::Result<C::Evidence, ReadUnavailable>,
+                    Output = std::result::Result<C::Evidence, ReadAdapterError>,
                 > + Send + 'a>>
             + Send
             + Sync
@@ -1843,10 +1872,12 @@ callback, a provider/client method, or an async future. No Store handle, connect
 append authority enters a Runtime blocking closure.
 
 `ReadPreparationError` becomes `Internal`, enters no adapter, and appends nothing.
-`ReadUnavailable` becomes `Unavailable`, appends nothing, and ends that invocation—there is no
-immediate retry loop. Every evidence variant, including domain integrity evidence, goes through
-ordinary State interpretation. Concurrent Reads may observe twice; exact-head append selects one
-durable winner and every `NotInserted` caller reloads it.
+`ReadAdapterError::Unavailable` becomes Runtime `Unavailable`; `ReadAdapterError::Internal` becomes
+Runtime `Internal`. Both append nothing and end that invocation—there is no immediate retry loop.
+Every accepted evidence variant, including authenticated external domain-integrity evidence, goes
+through ordinary State interpretation. A local intent/target mismatch is the adapter `Internal`
+case and cannot mint durable evidence. Concurrent Reads may observe twice; exact-head append selects
+one durable winner and every `NotInserted` caller reloads it.
 
 Contain panics only at the trusted adapter boundary. A small Runtime-private future wrapper applies
 `catch_unwind` both when constructing the callback future and around every poll of that future.
@@ -1874,8 +1905,8 @@ Implement one conversion table, not scattered `From` guesses:
 | retained Read bind failure | `InvalidHistory` |
 | inconsistent registration/finalization or unsupported Program | `IncompatibleAssembly` |
 | local admission/outcome/frame or append capacity | `Capacity` |
-| Read adapter/provider or definite Store unavailability | `Unavailable` |
-| supplied Program/C0 mismatch, hot bind, trusted driver/join/codec fault | `Internal` |
+| `ReadAdapterError::Unavailable` or definite Store unavailability | `Unavailable` |
+| `ReadAdapterError::Internal`, supplied Program/C0 mismatch, hot bind, trusted driver/join/codec fault | `Internal` |
 
 Private in-flight faults retain their sources only until classification. The public Copy
 `RuntimeError` carries only the redacted code/message above. Do not turn errors into RunView states.
@@ -1919,8 +1950,15 @@ Rewrite API/compile tests and add:
 - unsupported Program/ABI and Match association: `start` rejects before any Store call, while
   `resume`/`read` necessarily load but reject before adapter/provider/append IO;
 - hot == cold RunView for Pure, Read, Match, mapped failure, both roots, Never, and zero-State;
-- fused Read bind hot/cold, preparation failure, provider unavailable, one ingress per selected
-  Read declaration occurrence per invocation, concurrent winner, and domain integrity evidence;
+- fused Read bind hot/cold, preparation failure, both ReadAdapterError mappings, one ingress per
+  selected Read declaration occurrence per invocation, concurrent winner, and authenticated
+  external domain-integrity evidence;
+- wrong intent chain and wrong route independently produce adapter `Internal`, enter no provider,
+  append nothing, and never manufacture `EvmReadEvidence::IntegrityBlocked`;
+- a synthetic child-success path and handler-success path rejoin the same successor under hot and
+  cold folding;
+- an already returned RunView remains an unchanged valid snapshot when an indeterminate append is
+  later observed committed, while a later read may return the advanced view;
 - adapter callback panic during future construction and during future polling maps to `Internal`
   with no append and no panic detail in the returned Runtime error;
 - known Inserted performs zero loads; NotInserted performs one complete reload;
@@ -2019,8 +2057,8 @@ Refactor `append_balance_fragment` to use `&EvmPhysicalTarget`/its derived ref a
 u16 successors. It constructs the exact Program declarations directly; no `BindingDescriptor`,
 address helper/map, or live-owned planner wrapper remains.
 
-Port Commit 1's complete validated `EvmBalanceRequest` unrolling to implicit indices. For each
-source emit the reusable
+Implement the complete validated `EvmBalanceRequest` unrolling once, against the final implicit
+indices. For each source emit the reusable
 check-chain -> anchor -> select -> Match -> native-or-(decimals -> token) -> confirm group. A
 confirm-success edge targets the next source's check; only the final confirm targets one collection
 consolidate State. This repeats occurrences, not State registrations or adapter callbacks. With S
@@ -2052,7 +2090,7 @@ pub trait EvmProvider: Send + Sync + 'static {
         operation: StableId,
         request_bytes: Vec<u8>,
     ) -> Pin<Box<dyn Future<
-        Output = std::result::Result<EvmProviderResponse, ReadUnavailable>,
+        Output = std::result::Result<EvmProviderResponse, ReadAdapterError>,
     > + Send + 'a>>;
 }
 
@@ -2069,9 +2107,11 @@ and response-size reserialization. The request future itself correlates the supp
 provider echo would not independently authenticate it. Delete `Broadcast`/`PossibleEntry` and
 `EvmAdapterError` completely. Raw-wire bounds/authentication remain inside the trusted
 provider/adapter ingress before it returns this closed typed response. An authentication/integrity
-failure safe to conclude is `IntegrityBlocked`; true transport/provider unavailability is
-`ReadUnavailable`. Installer/assembly failure already has the exact Runtime error owner; do not
-wrap it in a live-adapter error.
+failure safe to conclude is `IntegrityBlocked` only when it is an authenticated external
+observation. Timeout, transport failure, and malformed/unauthenticated raw ingress return
+`ReadAdapterError::Unavailable`; a trusted local invariant returns `ReadAdapterError::Internal`.
+Installer/assembly failure already has the exact Runtime error owner; do not wrap it in a
+live-adapter error.
 
 Use one direct installer, not a contribution object:
 
@@ -2090,8 +2130,9 @@ consolidate States with `register_pure`, plus the Portfolio Pure States. Live IO
 State registration or a generic cumulative-context parameter. One target may
 serve all six current Read States.
 Each callback captures the exact provider/target pair, checks typed intent chain and route against
-that target before IO, serializes bounded provider request bytes, authenticates/qualifies one
-response, and returns typed evidence or `ReadUnavailable`. Runtime alone applies
+that target before IO, and returns `ReadAdapterError::Internal` with no provider call or append when
+they differ. Otherwise it serializes bounded provider request bytes, authenticates/qualifies one
+response, and returns typed evidence or the narrow `ReadAdapterError`. Runtime alone applies
 `C::bind_evidence` and State interpretation.
 
 Trusted composition is the TCB for pairing an opaque provider handle with its public target.
@@ -2117,8 +2158,10 @@ surviving source use and a smaller owner is impossible.
 - endpoint change changes target ref and Program; handle replacement does not;
 - one target reused across three capabilities/six Read States without duplicate callback keys;
 - raw asserted ref cannot compile; missing/wrong/duplicate adapter association is rejected;
-- wrong intent route/chain never enters provider and becomes exact typed integrity failure;
-- provider unavailable appends nothing; every accepted evidence maps through ordinary interpreter;
+- wrong intent route/chain never enters provider, appends nothing, and returns Runtime Internal;
+- provider unavailable appends nothing; adapter Internal remains distinct; every accepted evidence
+  maps through the ordinary interpreter, and only authenticated external integrity evidence becomes
+  durable;
 - Portfolio native/token success, hot/cold equivalence, and child failure mapper/root failure; and
 - mixed native+token two-source progression/output, second-source failure mapping, 64-source
   authoring/capacity, and 65-source rejection; and
@@ -2152,27 +2195,25 @@ pub type Result<T> = std::result::Result<T, ApplicationError>;
 pub enum ApplicationError {
     #[error("application request is invalid")]
     InvalidRequest,
+    #[error("application internal failure")]
+    Internal,
     #[error("runtime operation failed")]
     Runtime(#[source] RuntimeError),
 }
 
 pub struct Application {
     runtime: Runtime,
-    portfolio: PortfolioConfig,
-    targets: Vec<EvmPhysicalTarget>,
 }
 
 impl Application {
-    pub fn new(
-        runtime: Runtime,
-        portfolio: PortfolioConfig,
-        targets: Vec<EvmPhysicalTarget>,
-    ) -> Self;
+    pub fn new(runtime: Runtime) -> Self;
 
     pub async fn start_portfolio(
         &self,
         run_id: RunId,
         selector: PortfolioSnapshotSelector,
+        config: &PortfolioConfig,
+        targets: &[EvmPhysicalTarget],
     ) -> Result<RunView>;
 
     pub async fn resume(&self, run_id: &RunId) -> Result<RunView>;
@@ -2180,14 +2221,18 @@ impl Application {
 }
 ```
 
-`start_portfolio` calls `plan_snapshot`, maps selector `PortfolioError::InvalidValue` to
-`InvalidRequest`, and maps trusted config/target/continuation/Program planning failure to
-`ApplicationError::Runtime(RuntimeError::Internal)`. It verifies the fixed
+`start_portfolio` calls `plan_snapshot`. Selector rejection or selector/config mismatch maps to
+`InvalidRequest`; trusted target coverage/order, impossible continuation, Program authoring, or a
+wrong fixed entry-point invariant maps to the App-owned redacted `Internal`. Only an error actually
+returned by Runtime is wrapped as `ApplicationError::Runtime(error)`; do not add a blanket
+conversion or manufacture `Runtime(RuntimeError::Internal)` for an App fault. It verifies the fixed
 `PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID` equals
 `Program.entry_point_id`, and calls
 `Runtime::start` with the caller-supplied RunId. `resume` and `read` delegate directly. App never
 generates a RunId, accepts a separate Runtime entry selector, opens Store, registers an assembly,
-or inspects Journal frames.
+or inspects Journal frames. Application owns only Runtime; checked PortfolioConfig and targets are
+borrowed for start and need not be reconstructed or retained for later resume/read. A cold Runtime
+still requires the exact target/provider associations registered in its assembly.
 
 The normal App dependency target is only IDs, EVM domain target, Portfolio, Runtime, and error
 support. Remove direct dependencies on canonical, capabilities, Journal, Program, replay, Store,
@@ -2242,7 +2287,12 @@ Admit/Drive JSON DTOs.
 #### App/workspace verification
 
 - start requires explicit RunId and dispatch EntryPointId equals retained Program field;
-- exact admission retry and Runtime errors pass through one redacted App error mapping;
+- invalid selector maps to `ApplicationError::InvalidRequest`, trusted target/Program/planner
+  failure maps to `ApplicationError::Internal`, and an actual Runtime Absent remains exactly
+  `ApplicationError::Runtime(RuntimeError::Absent)`;
+- exact admission retry and actual Runtime errors pass through the redacted App error mapping;
+- Application is constructed from Runtime alone; after a successful start/composition test drops
+  every authoring Config/target slice and proves cold resume/read still succeeds;
 - resume/read perform no frame inspection and return Runtime RunView directly;
 - no App method can hold a session/pending owner or invoke replay/export/trace/audit;
 - CLI/REST command/help/output contracts match the retained metadata-only surface;
@@ -2454,9 +2504,9 @@ falls between chunks.
 | 2C Journal | open frame/record/object/outcome DTOs; preparation/Access/occurrence/call fields; record digest; dictionary/object-count; config/fact/portable codecs | sealed frame, opaque bytes, qualified history/views |
 | 2D Store | semantic reducer/selection/ports/brands/owners; backend command/result layers; readiness/list/audit/config/fact APIs; expected position/request/receipt/reservation/global object/accounting | two-method Store plus Memory |
 | 2E PostgreSQL | broad error/profile/open/migrate/rotate/check APIs; every old table/query/column/index for identity/config/fact/request/receipt/reservation/object membership | checked connect and three-table baseline |
-| 2F Runtime | Dynamic/Access/preparation/CommittedCall/owner/session/step/pending/Waiting/limits/semaphore/cancellation/finalizer types; public implementation/driver/BoxFuture/downcast paths | one private driver/fold and RunView |
+| 2F Runtime | Dynamic/Access/preparation/CommittedCall/owner/session/step/pending/Waiting/limits/semaphore/cancellation/finalizer types; ReadUnavailable; public implementation/driver/BoxFuture/downcast paths | one private driver/fold, ReadAdapterError, and RunView |
 | 2G domains/live | duplicate behavior traits; BindingDescriptor/binding/live assembly wrappers; live-owned target; call IDs/provider submission branches; domain config lifecycle | standard State traits, direct target, callback-only installer |
-| 2H App/workspace | generic Admit/Drive/status/replay/trace/audit/export DTOs; suspended map/frame decoder/catalog validation; facts/replay crates | three-method Portfolio App facade |
+| 2H App/workspace | generic Admit/Drive/status/replay/trace/audit/export DTOs; suspended map/frame decoder/catalog validation; facts/replay crates | Runtime-only three-method Portfolio App facade with borrowed start inputs |
 | 2I docs/build | old cutover manifest/log, stale preflight/BTC docs, old schemas/goldens/tasks/current claims | one absence manifest/scanner and current docs |
 
 The following absent responsibilities must not reappear under a different name:
@@ -2665,7 +2715,7 @@ Commit 1 is ready only when:
 
 - `C1-A`, `C1-B`, `C1-C`, and the non-author combined-diff architect all say `APPROVE` against the
   same proposed commit tree;
-- the two-source/64-source Portfolio regressions and existing native/token/failure behavior pass;
+- existing surviving Portfolio native/token/failure behavior remains unchanged;
 - no production source, export, registration, fixture, task, SQL object, or dependency can submit,
   allocate nonce, sign for submission, broadcast, or poll submission status;
 - all listed current product docs describe Portfolio-only operation and the four superseded
@@ -2746,6 +2796,9 @@ Commit 2 is ready only when:
   and domain target goldens match the RFC and this plan;
 - hot/cold Pure, fused Read, Match, mapped failure, Never, zero-State, concurrent winner,
   cancellation, and Store ambiguity/corruption tests all pass;
+- the synthetic child-success/handler-success hot-and-cold rejoin, immutable earlier-RunView after
+  late indeterminate commit, and cold App resume/read after dropping authoring Config/targets tests
+  all pass explicitly;
 - the replacement manifest covers every deletion-ledger item, its scoped scanner self-tests pass,
   and supported current docs contain no alternate owner or stale claim;
 - Cargo metadata has exactly 18 members, only justified target dependency edges, and no facts,
