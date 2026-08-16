@@ -94,6 +94,8 @@ All choices and validation results are frozen:
   rotation, and database incarnation are absent;
 - every frame carries all canonical objects directly named by its record; there is no
   history-dependent first-reference dictionary, object-count limit, or object reservation;
+- every run-frame head is a `Sha256V1` ContentDigest over the exact retained canonical RunFrameV1
+  bytes; Journal alone owns that tag and derivation;
 - every frame-embedded Program/value object is at most 8,388,608 canonical bytes, so the largest
   three-object Read conclusion is representable without per-State sizing;
 - exact qualified record equality uses the closed record fields and content references directly;
@@ -107,6 +109,9 @@ All choices and validation results are frozen:
   App-derived RunId path is replaced rather than preserved. Any future start route accepts and
   echoes an explicit RunId before execution; exact admission retry reuses that RunId and the same
   Program/context;
+- a Read adapter returns only typed Evidence or the closed redacted
+  `ReadAdapterError::{Unavailable, Internal}`; a trusted pre-provider target mismatch is Internal
+  and cannot mint durable Evidence;
 - supported PostgreSQL recovery is one monotonic locally durable timeline. Writable rewind,
   acknowledged-commit-losing failover, and writable historical clones are outside the safety
   claim.
@@ -226,7 +231,8 @@ does not pretend an in-database identifier can fence a history that was itself r
 | Capabilities | Values/ids |
 | Journal | Values/ids canonical primitives and its own record types |
 | Store trait | ids and opaque Journal representations |
-| Memory/PostgreSQL | Store trait, Journal's sealed transfer types, and storage-driver primitives |
+| Memory Store | Store trait, ids, Journal's sealed transfer/hash surface, and async primitives; never Canonical |
+| PostgreSQL Store | Store trait, ids, Journal's sealed transfer/hash surface, Canonical only for the advisory-lock JCS hash, and SQL/async primitives |
 | Runtime | Values, Program, Capabilities, Journal, and Store trait |
 | Domain operations/States | Values, Program, and Capabilities; never Store |
 | Adapters | Capability/Runtime ingress plus reusable transports/signers |
@@ -238,9 +244,11 @@ representations, never on Program, State, capabilities, domains, or Runtime sele
 Runtime receives retained bytes only from Store, passes them through Journal structural decoding,
 and then performs semantic reduction.
 
-The concrete Memory and mfm-storage-postgres implementations may depend directly on mfm-journal for
-EncodedRunFrame and StoredRunBytes; that edge already points downward and requires no mfm-store
-reexport or raw-byte adapter.
+The concrete Memory and mfm-storage-postgres implementations depend directly on mfm-journal for
+EncodedRunFrame, StoredRunBytes, and the one frame-head digest derivation; that edge already points
+downward and requires no mfm-store reexport or raw-byte adapter. Memory has no direct mfm-canonical
+dependency. PostgreSQL retains mfm-canonical only for its distinct Store-owned advisory-lock JCS
+hash; frame-head hashing remains Journal-owned.
 
 ### 2.2 Validation ownership
 
@@ -598,6 +606,12 @@ builder still never accepts a caller-asserted binding ref. Program supplies read
 bytes and its ordinary ContentRef to Journal; there is no ProgramBuilder lifecycle, ProgramIngress,
 ProgramDocument value, or ProgramRef wrapper.
 
+Declaration constructors enforce only invariants local to their own fields. `Program::new` and
+`Program::decode_canonical` share the sole whole-Program validator for declaration/count bounds,
+entry/root rules, index bounds, forward edges, target kinds, reachability, and graph-wide contract
+continuity. RuntimeAssembly association owns only checks requiring registered typed descriptors.
+Domain planners and Runtime do not duplicate whole-Program validation.
+
 MatchDeclaration::new sorts arms with the exact raw-byte comparator and rejects duplicates;
 decode_canonical rejects an out-of-order retained arm vector rather than normalizing retained bytes.
 Declaration array order is never normalized.
@@ -628,6 +642,10 @@ RuntimeAssemblyBuilder owns:
 Its sole public contribution methods are:
 
 ~~~text
+ReadAdapterError =
+    Unavailable
+  | Internal
+
 RuntimeAssemblyBuilder::new() -> RuntimeAssemblyBuilder
 register_value<T: MfmValue>() -> Result<(), RuntimeError>
 register_pure<S: PureState>() -> Result<(), RuntimeError>
@@ -638,7 +656,7 @@ where
   C: ReadCapabilityContract,
   B: MfmValue,
   F: for<'a> Fn(&'a C::Intent)
-       -> Pin<Box<dyn Future<Output = Result<C::Evidence, ReadUnavailable>> + Send + 'a>>
+       -> Pin<Box<dyn Future<Output = Result<C::Evidence, ReadAdapterError>> + Send + 'a>>
      + Send + Sync + 'static
 
 finish(self) -> Result<RuntimeAssembly, RuntimeError>
@@ -717,11 +735,14 @@ duplicate chain even when the endpoint differs. It places the selected ref in ev
 Read declaration and typed C0 route and needs no EvmBalanceBindings/BindingDescriptor wrapper. The sealed live adapter
 constructor derives the ref itself and captures the client; it never accepts a caller-asserted ref
 as proof. Before provider IO the callback checks the typed intent chain/route against its captured
-target/ref. An opaque provider client cannot self-attest its network route, so trusted composition's
-pairing of that handle with the public target is an explicit TCB assertion. One target ref may serve
-several capability registrations. A semantic target-schema change changes the ref. Whether the
-immutable assembly uses one or several private maps is an implementation detail; it exposes one
-association path and one final consistency check.
+target/ref. A mismatch is a trusted planner/State/adapter defect: it returns
+`ReadAdapterError::Internal`, invokes no provider, and appends nothing. It never fabricates durable
+integrity Evidence. Only an authenticated external provider `IntegrityBlocked` response may become
+`EvmReadEvidence::IntegrityBlocked`. An opaque provider client cannot self-attest its network route,
+so trusted composition's pairing of that handle with the public target is an explicit TCB
+assertion. One target ref may serve several capability registrations. A semantic target-schema
+change changes the ref. Whether the immutable assembly uses one or several private maps is an
+implementation detail; it exposes one association path and one final consistency check.
 
 Planner and Runtime derive the target ref through the same MfmValue canonical qualification/content
 addressing rule; EvmPhysicalTarget introduces no ad hoc hash schema.
@@ -755,15 +776,19 @@ The registered adapter callback has this exact stable-Rust shape (modulo private
 
 ~~~text
 dyn for<'a> Fn(&'a C::Intent)
-  -> BoxFuture<'a, Result<C::Evidence, ReadUnavailable>>
+  -> BoxFuture<'a, Result<C::Evidence, ReadAdapterError>>
   + Send + Sync
 ~~~
 
 `BoxFuture<'a, T>` is a private alias for a pinned boxed `Future<Output = T> + Send + 'a`.
-`ReadUnavailable` is the Runtime-owned public zero-detail unit error required by cross-crate live
-adapters and is redaction-safe. The callback therefore borrows the exact typed
-intent while Runtime retains its private qualification proof, only for the lifetime of its future,
-and returns either one typed `C::Evidence` or ReadUnavailable.
+`ReadAdapterError` is the Runtime-owned closed public enum with exactly two zero-detail,
+redaction-safe variants: `Unavailable` and `Internal`. It replaces the former unit
+`ReadUnavailable`; no generic message, source, retry advice, or RuntimeError passthrough is exposed
+to adapters. The callback therefore borrows the exact typed intent while Runtime retains its
+private qualification proof, only for the lifetime of its future, and returns either one typed
+`C::Evidence` or that narrow adapter error. `Unavailable` means no trusted observation was produced
+because of timeout, transport/provider failure, or malformed/unauthenticated raw ingress.
+`Internal` means a trusted local adapter/target/serialization invariant failed.
 The callback captures its validated binding descriptor and live handles; it receives no RunId,
 Store position, append authority, public call token, or generic retry token. Runtime retains the
 intent and its canonical proof across the await, applies the registered pure `C::bind_evidence`,
@@ -864,7 +889,9 @@ A Read performs no externally mutating action and needs no durable preparation a
 derives and qualifies its intent locally, invokes the exact registered adapter once in that
 top-level progression call, and either:
 
-- receives ReadUnavailable, appends nothing, and returns RuntimeError::Unavailable; or
+- receives `ReadAdapterError::Unavailable`, appends nothing, and returns
+  RuntimeError::Unavailable;
+- receives `ReadAdapterError::Internal`, appends nothing, and returns RuntimeError::Internal; or
 - receives typed evidence, binds and interprets it, and appends one fused Read conclusion against
   the exact head that selected that State.
 
@@ -910,9 +937,9 @@ resource policies is a Runtime semantic owner or persisted contract.
 
 There is no separate per-call State-start counter or yield setting. Program acyclicity,
 MAX_RUN_FRAMES, and MAX_RUN_BYTES bound successful progression; async IO awaits and spawn_blocking
-keep the executor cooperative. One ReadUnavailable error ends that top-level call, so Runtime never
-immediately loops on a failing provider. read may observe Runnable. A successful start/resume
-continues until terminal success/failure; its nonterminal stops are errors.
+keep the executor cooperative. One `ReadAdapterError` ends that top-level call, so Runtime never
+immediately loops on a failing provider or trusted adapter defect. read may observe Runnable. A
+successful start/resume continues until terminal success/failure; its nonterminal stops are errors.
 
 There is no scheduler, timer, background run progression, process-wide writer lease, process-local
 per-run lock, pending append table, resolver queue, retained recovery token, cancellation token, or
@@ -932,15 +959,16 @@ deadline or stop polling after disconnect; cancellation is merely absence of fur
 Runtime itself owns no timeout policy. Wait control exists only at live-IO boundaries:
 
 - an Adapter owns provider/client deadlines, connection limits, protocol acknowledgement, and the
-  exact mapping to typed evidence or ReadUnavailable;
+  exact mapping to typed evidence or `ReadAdapterError`;
 - Store owns database/pool deadlines and the exact mapping to Unavailable or Indeterminate; and
 - Application/composition may bound simultaneous top-level Runtime calls without becoming an
   execution lifecycle owner.
 
-An IO timeout is therefore an Adapter or Store result, not a Runtime lifecycle. ReadUnavailable
-appends nothing and maps to RuntimeError::Unavailable, leaving the durable run Runnable. Store append
-Unavailable proves the candidate definitely did not commit; load Unavailable means no complete
-snapshot was returned. Indeterminate means COMMIT
+An IO timeout is therefore an Adapter or Store result, not a Runtime lifecycle.
+`ReadAdapterError::Unavailable` appends nothing and maps to RuntimeError::Unavailable;
+`ReadAdapterError::Internal` appends nothing and maps to RuntimeError::Internal. Both leave the
+durable run Runnable. Store append Unavailable proves the candidate definitely did not commit;
+load Unavailable means no complete snapshot was returned. Indeterminate means COMMIT
 may have reached PostgreSQL and its outcome is unavailable; it is resolved only by exact retry
 inside Store or a later durable load.
 
@@ -1057,8 +1085,9 @@ The mapping is normative:
 | RuntimeAssembly Read capability contract_id/registration failure | IncompatibleAssembly |
 | valid Program unsupported or inconsistently associated by the finalized assembly | IncompatibleAssembly |
 | local admission/outcome/frame construction or append capacity rejection | Capacity |
-| Read adapter/provider or definite Store load/append unavailability | Unavailable |
+| ReadAdapterError::Unavailable or definite Store load/append unavailability | Unavailable |
 | trusted supplied Program/typed-C0 contract mismatch before admission | Internal |
+| ReadAdapterError::Internal, including pre-provider intent/target mismatch | Internal |
 | hot C::bind_evidence failure after typed adapter return | Internal |
 | unexpected trusted driver, callback, join, or codec failure after redaction | Internal |
 
@@ -1193,10 +1222,32 @@ MAX_RUN_BYTES, which is the accepted cost of deleting cross-frame dictionary sta
 The frame head is:
 
 ~~~text
-run_head_digest = SHA-256(JCS(RunFrameV1))
+canonical_frame_bytes = JCS(RunFrameV1)
+run_head_digest = ContentDigest(
+  algorithm = Sha256V1,
+  digest = SHA-256(canonical_frame_bytes)
+)
 ~~~
 
-The domain field prevents cross-format reuse. The frame does not contain its own digest.
+Its persisted spelling is exactly `content:sha256-v1:` followed by 64 lowercase hexadecimal
+characters. `Sha256V1` is deliberate: the head addresses the exact retained canonical frame bytes,
+whereas `Sha256JcsV1` is reserved for a digest whose owner asserts structured-JCS qualification at
+that hashing boundary. The JCS step above produces the one retained byte representation before the
+exact-byte digest is taken. The frame's domain field prevents cross-format reuse; there is no extra
+prefix, envelope, newline, old HeadMaterial projection, or second hash. The frame does not contain
+its own digest.
+
+Journal exports exactly one non-qualifying derivation used by Journal, Memory, and PostgreSQL:
+
+~~~text
+frame_head_digest(frame_bytes: &[u8]) -> ContentDigest
+~~~
+
+It computes the branded `Sha256V1` digest over the supplied exact bytes and proves neither
+canonicality nor a valid RunFrame. EncodedRunFrame construction and JournalHistory qualification
+own those stronger proofs and use the same function. Store implementations use it only to
+recompute and compare derived physical row metadata; this does not create a second decoder or move
+wire qualification into Store.
 
 Genesis requires:
 
@@ -1204,7 +1255,8 @@ Genesis requires:
 - previous_head_digest null; and
 - RunAdmitted.
 
-Every later frame requires the exact previous sequence plus one and the previous frame digest.
+Every later frame requires the exact previous sequence plus one and the previous frame's complete
+`Sha256V1` digest string.
 
 EncodedRunFrame and qualified history expose sealed read-only sequence/head projections required by
 Runtime and Store implementations. There is no separate RunPosition public type, wire field, or
@@ -1287,9 +1339,11 @@ mfm-journal owns StoredRunBytes, because mfm-store already depends on Journal's 
 and reversing that ownership would create either a dependency cycle or a public raw-history getter.
 StoredRunBytes is a public opaque, invariant-checked, explicitly unqualified transfer type required
 by the Store trait signature. Its public fallible constructor accepts ordered frame-byte buffers for
-Store implementations and checks only raw frame-count, per-frame, and cumulative-byte ceilings
-before retaining a private vector. Its fields are private and it exposes no frame/bytes iterator or
-inspection accessor. `JournalHistory::qualify` consumes it and performs the only
+Store implementations and accepts exactly `1..=MAX_RUN_FRAMES` buffers. It checks only that
+nonempty raw count plus the per-frame and cumulative-byte ceilings before retaining a private
+vector. Empty input is invalid history and cannot represent absence; `load_run` represents absence
+only as `None`. Its fields are private and it exposes no frame/bytes iterator or inspection accessor.
+`JournalHistory::qualify` consumes it and performs the only
 structural/canonical/history qualification. Runtime cannot build semantic history by reading raw
 bytes around Journal. Sealed construction applies to EncodedRunFrame and qualified JournalHistory,
 not to this cross-backend transfer constructor.
@@ -1313,12 +1367,17 @@ snapshot it:
 4. checks row count, minimum/maximum sequence, and summed octet length against head sequence and
    total bytes;
 5. fetches every frame in sequence order; and
-6. checks the row RunId/sequence, per-frame length, recomputed frame digest, and accumulated length.
+6. checks the row RunId/sequence, per-frame length, frame digest recomputed only through Journal's
+   `frame_head_digest`, and accumulated length.
 
 A gap, duplicate, orphan, wrong digest, or inconsistent head/accounting row is
 CorruptPhysicalState. Only then does Store return bytes for Journal canonical qualification and
 predecessor recurrence. A concurrent append is wholly before or wholly after the captured prefix,
 never a truncated mix.
+
+Memory stores `EncodedRunFrame::head_digest()` when publishing an inserted frame and uses the same
+Journal helper when checking retained bytes on load. PostgreSQL uses that helper for frame-row
+metadata too. Neither backend chooses or reconstructs the frame-head algorithm itself.
 
 Store does not decode Program, reduce State-or-Match, select facts, reify domain values, or
 construct adapter authority.
@@ -1376,7 +1435,8 @@ advisory lock. The exact transaction is:
    when no head exists, also run an indexed EXISTS-any-frame-for-RunId query under the same lock;
 4. validate observed physical state before classifying the candidate: a missing head permits no
    frame for that RunId and therefore requires that EXISTS result to be false; a present head must
-   join its exact row and have a locally valid sequence, recomputed digest, and bounded total; any
+   join its exact row and have a locally valid sequence, digest recomputed through Journal's sole
+   `frame_head_digest` function, and bounded total; any
    observed target must have the requested key, self-consistent bytes/digest, and a sequence no
    later than the head; and a candidate sequence at or before the head must have a target row.
    Violation is CorruptPhysicalState;
@@ -1419,7 +1479,9 @@ The logical schema contains:
 The static schema-baseline marker remains. Sequence, identifier/digest, frame-length, total, and
 foreign-key constraints are physical defenses. Predecessor and byte length are not duplicated
 columns: the frame seals the predecessor and PostgreSQL supplies octet_length. The head digest is
-read by joining its frame. Runtime deployment may grant only SELECT/INSERT/UPDATE needed by these
+read by joining its frame. Every `run_frames.head_digest` value must match the exact
+`^content:sha256-v1:[0-9a-f]{64}$` grammar; a `sha256-jcs-v1` head is incompatible even when its 32
+digest bytes are identical. Runtime deployment may grant only SELECT/INSERT/UPDATE needed by these
 transactions, but this RFC adds no trigger or database-role proof layer.
 
 The rewritten `crates/storages/postgres/migrations/0001_*.sql` is the static
@@ -1535,11 +1597,15 @@ ReadPreparationError
 typed intent
   -> qualify exact typed intent
   -> typed borrowed-intent adapter ingress
-  -> Result<C::Evidence, ReadUnavailable>
+  -> Result<C::Evidence, ReadAdapterError>
 
-ReadUnavailable
+ReadAdapterError::Unavailable
   -> append nothing
   -> return RuntimeError::Unavailable
+
+ReadAdapterError::Internal
+  -> append nothing
+  -> return RuntimeError::Internal
 
 typed evidence
   -> one immediately awaited pure spawn_blocking job
@@ -1569,8 +1635,8 @@ Indeterminate
   -> later history reveals the committed conclusion or the same Runnable State
 ~~~
 
-One invocation enters a selected Read at most once before either obtaining evidence or returning
-ReadUnavailable. A later start/resume may safely make another non-mutating observation when no
+One invocation enters a selected Read at most once before either obtaining evidence or returning a
+`ReadAdapterError`. A later start/resume may safely make another non-mutating observation when no
 conclusion is durable.
 
 ### 7.4 Resume and read
@@ -1721,6 +1787,8 @@ graph. It does not cause a second Program format, delete Match, or add FailureNe
 - own only the exact RunFrameV1 codec;
 - own strict construction/decoding, recursive run heads, exact frame-local object closure, and
   fixed frame/run/object/envelope limits;
+- export the sole non-qualifying `Sha256V1` frame-head digest function used for physical
+  recomputation, without exposing a raw-frame parser;
 - own public sealed EncodedRunFrame and qualified JournalHistory plus public
   opaque/invariant-checked unqualified StoredRunBytes, where EncodedRunFrame exposes Store's
   required read-only exact-byte projection while StoredRunBytes/JournalHistory expose no raw-history
@@ -1736,6 +1804,8 @@ graph. It does not cause a second Program format, delete Match, or add FailureNe
   pool-taking/unchecked constructor, durability profile, broad concrete error, post-open method, or
   dyn-Store readiness method;
 - implement identical Memory/PostgreSQL append semantics;
+- recompute physical frame-row digests only through Journal's exact helper; Memory has no Canonical
+  dependency, while PostgreSQL uses Canonical only for its separate advisory-lock JCS hash;
 - derive sequence, predecessor, and target identity from the candidate frame; use the immutable
   `(run_id, sequence)` row plus exact bytes as the receipt;
 - account only each exact candidate's actual frame/count/byte cost, with no preparation preflight or
@@ -1753,13 +1823,15 @@ graph. It does not cause a second Program format, delete Match, or add FailureNe
 ### 10.7 Adapters and live IO
 
 - own provider/client deadlines, connection limits, and protocol acknowledgement;
-- return one capability-owned typed Evidence value or redaction-safe ReadUnavailable;
+- return one capability-owned typed Evidence value or redaction-safe
+  `ReadAdapterError::{Unavailable, Internal}`;
 - perform only externally observational, duplicate-safe Reads; any protocol-level retry remains
   inside that one borrowed-intent callback and its deadline;
 - expose no cancellation token or generic retry token to Runtime;
 - accept only evidence and outcomes within the universal run-object envelope; and
 - encode provider rejection, safe failure, and integrity block in the capability's closed Evidence
-  contract for ordinary State interpretation; a retryable unavailability appends no record.
+  contract for ordinary State interpretation only after a trusted external observation; a local
+  intent/target mismatch returns `Internal`, and either adapter error appends no record.
 
 ### 10.8 EVM product scope
 
@@ -1789,6 +1861,33 @@ No disabled entry point, compatibility decoder, placeholder nonce type, private 
 submission assembly, generic Effect mode, or synthetic mutation fixture remains.
 
 ### 10.9 App and transports
+
+The retained in-process App owns only Runtime. Snapshot authoring inputs are borrowed only by the
+start call; they are not App state required by resume/read:
+
+~~~text
+Application { runtime: Runtime }
+
+ApplicationError =
+    InvalidRequest
+  | Internal
+  | Runtime(RuntimeError)
+
+Application::new(runtime) -> Application
+start_portfolio(run_id, selector, &PortfolioConfig, &[EvmPhysicalTarget])
+  -> Result<RunView, ApplicationError>
+resume(run_id) -> Result<RunView, ApplicationError>
+read(run_id) -> Result<RunView, ApplicationError>
+~~~
+
+`InvalidRequest` is only selector/request rejection, including a selector that the checked
+authoring configuration does not admit. `Internal` is a redacted trusted planning failure,
+including invalid target coverage/order, impossible continuation, Program authoring failure, or a
+wrong fixed Portfolio entry-point invariant. `Runtime(error)` wraps only an error actually returned
+by Runtime; App never fabricates `Runtime(RuntimeError::Internal)` for its own failure and should not
+add a blanket conversion that obscures that ownership. PortfolioConfig remains checked at
+construction/decoding. A cold Runtime still requires its registered target/provider associations,
+but App resume/read require no separate authoring Config or target slice.
 
 - accept an explicit fresh RunId on every future start route and echo it before execution so exact
   admission retry is possible;
@@ -1877,6 +1976,7 @@ UnresolvedAccess
 UnresolvedClassification
 ReadResolution
 ReadObservation
+ReadUnavailable unit error (replaced by ReadAdapterError)
 BlockedIntegrityProjection
 PreparedExecution
 PreparedAccess
@@ -2171,8 +2271,9 @@ exported type count, dependency edges, and files required to add a State must al
   cross explicit adapters or Store.
 - Every registered capability is an externally observational, duplicate-safe Read. Its closed typed
   Evidence owns durable provider rejection, safe-failure, and integrity-block classifications.
-- One selected Read is entered at most once per start/resume invocation. ReadUnavailable writes
-  nothing; a later invocation may safely observe it again.
+- One selected Read is entered at most once per start/resume invocation. Either ReadAdapterError
+  writes nothing; a later invocation may safely observe it again. Only authenticated external
+  observations may become durable integrity Evidence.
 - No success is exposed before the durable frame retaining the exact terminal value is observed:
   genesis for a zero-State Program, or a conclusion otherwise.
 - Every Store failure for which COMMIT may have reached PostgreSQL and the candidate may have
@@ -2276,7 +2377,10 @@ Golden fixtures freeze:
 - canonical field names, tagged variants, number representation, and object order;
 - nested raw canonical object representation;
 - repeated cross-frame references with complete frame-local objects;
-- the run-head recurrence;
+- the run-head recurrence, with hard-coded full `content:sha256-v1:<64 lowercase hex>` strings for
+  one genesis and its successor, equality between EncodedRunFrame's projection and
+  `frame_head_digest` over the exact frame bytes, and rejection of `sha256-jcs-v1` even when the 32
+  digest bytes are identical;
 - exact run/object limits and their independent bound-plus-one behavior;
 - an exact 8 MiB run object and rejection at one byte over;
 - a fixture with every non-payload field at its maximum whose measured overhead remains within the
@@ -2334,12 +2438,16 @@ Negative fixtures cover:
 - a cold EVM child failure reaches MapEvmBalanceFailure with its contract, reference, and canonical
   bytes unchanged;
 - the mapper's failure becomes exact root PortfolioSnapshotFailure and suppresses every later normal
-  State; EvmReadEvidence::IntegrityBlocked reaches the same exact typed route through the ordinary
-  shared interpreter;
+  State; an authenticated provider `IntegrityBlocked` response enters the provider, becomes durable
+  EvmReadEvidence::IntegrityBlocked, and reaches the same exact typed route through the ordinary
+  shared interpreter under hot and cold fold;
 - a small synthetic recovery handler proves child success and handler success rejoin the same next
   State under identical hot and cold folding;
-- ReadUnavailable appends no frame, maps to RuntimeError::Unavailable, and leaves the same State
-  Runnable for a later invocation;
+- `ReadAdapterError::Unavailable` appends no frame, maps to RuntimeError::Unavailable, and leaves
+  the same State Runnable for a later invocation; `ReadAdapterError::Internal` also appends no frame
+  but maps to RuntimeError::Internal;
+- wrong intent chain and wrong route are tested independently: each enters no provider, appends no
+  frame, and returns RuntimeError::Internal rather than durable integrity Evidence;
 - ReadPreparationError appends no frame and maps to RuntimeError::Internal, while expected domain
   rejection flows only through typed Evidence and ProposedStateOutcome::Failure;
 - one start/resume invocation enters each selected Read declaration occurrence at most once, while
@@ -2361,6 +2469,9 @@ Negative fixtures cover:
 The same suite runs against Memory and PostgreSQL:
 
 - Store remains object-safe behind Arc<dyn Store> with borrowing boxed futures;
+- an absent run returns `None`; no Store returns `Some` with an empty StoredRunBytes transfer, and
+  physical row/head evidence that cannot form a nonempty complete prefix is
+  CorruptPhysicalState;
 - absent-genesis race;
 - exact target-row/frame retry before and after later head advancement;
 - different-frame same-head race and occupied-target corruption;
@@ -2374,12 +2485,16 @@ The same suite runs against Memory and PostgreSQL:
 - NotInserted bypasses insertion-capacity checks and leaves head/total unchanged;
 - frame-local object bytes are charged exactly once as part of their containing frame;
 - complete current loads from one snapshot under concurrent append;
-- gaps, wrong heads/digests/totals, and over-format-limit histories return CorruptPhysicalState;
+- gaps, independently corrupted frame bytes or head metadata, wrong heads/digests/totals, and
+  over-format-limit histories return CorruptPhysicalState in both Memory and PostgreSQL through the
+  Journal-owned digest helper;
 - absent head with either a candidate-target or noncandidate orphan frame is rejected before
   genesis insertion;
 
 PostgreSQL-only integration and fault-injection tests additionally prove:
 
+- the head-digest SQL constraint accepts only `content:sha256-v1:<64 lowercase hex>` and rejects the
+  `sha256-jcs-v1` tag, while the separate advisory-lock golden remains unchanged;
 - PostgreSQL load begins REPEATABLE READ READ ONLY before its first snapshot read;
 - PostgreSQL append acquires the transaction advisory lock before target/head reads and forces
   synchronous_commit=on;
@@ -2401,6 +2516,9 @@ PostgreSQL-only integration and fault-injection tests additionally prove:
   counter, Exact selector, pagination API, object table, membership table, configuration table,
   identity, or fact table exists.
 
+Cargo/dependency evidence proves mfm-store/Memory does not depend on or call mfm-canonical;
+mfm-storage-postgres retains that dependency only for the advisory-lock JCS hash.
+
 ### 13.5 Cancellation, blocking, and live-IO tests
 
 Boundary-focused tests and repository checks cover:
@@ -2413,13 +2531,14 @@ Boundary-focused tests and repository checks cover:
   its result is discarded, it owns no Store or append authority, and it invokes no adapter/provider
   IO even when it carries their immutable handles as inert association data;
 - the exact public adapter shape is a stable-Rust higher-ranked borrowed-intent callback returning a
-  boxed Send future of typed Evidence or zero-detail ReadUnavailable;
+  boxed Send future of typed Evidence or closed zero-detail ReadAdapterError;
 - panic during adapter callback future construction or during any callback-future poll is privately
   contained, maps to redacted RuntimeError::Internal, and appends nothing;
 - Store pure jobs hash/copy only owned immutable snapshots, executor heartbeat remains live, and
   drop/join failure before publication leaves Memory and PostgreSQL unchanged;
-- adapter deadline/transport unavailability returns ReadUnavailable, appends no frame, and maps to
-  RuntimeError::Unavailable;
+- adapter deadline/transport unavailability returns `ReadAdapterError::Unavailable`, appends no
+  frame, and maps to RuntimeError::Unavailable; a trusted local adapter invariant returns
+  `ReadAdapterError::Internal`, appends no frame, and maps to RuntimeError::Internal;
 - Store database/pool availability failures definitely before commit return Unavailable,
   Capacity/corruption retain their exact variants, and COMMIT ambiguity returns Indeterminate;
 - dropping start/resume before or during a provider Read leaves no external mutation and a later
@@ -2440,6 +2559,12 @@ Boundary-focused tests and repository checks cover:
   `mfm.evm/submit-transaction@1` ID before run admission; the final typed App accepts no arbitrary
   entry-point ID or generic dispatch request, so that temporary regression is then deleted;
 - Portfolio native/token Reads, hot/cold fold, and child-failure mapping remain unchanged;
+- Application is constructible from Runtime alone; `start_portfolio` borrows checked authoring
+  Config/targets, and they can be dropped before later App resume/read succeeds from the cold
+  Runtime assembly and durable run;
+- invalid selector/request maps to ApplicationError::InvalidRequest, trusted target/Program/planner
+  failure maps to ApplicationError::Internal, and an actual RuntimeError::Absent remains exactly
+  ApplicationError::Runtime(RuntimeError::Absent);
 - live EVM assembly requires only Read bindings and has no nonce-authority or signer dependency;
 - no submission State/capability/contract ID, selector, request/progress/result, binding, fixture,
   migration, SQL table, or production registration survives;
@@ -2728,12 +2853,13 @@ Implementation is accepted only when:
    local fold_next rather than complete reload/refold.
 7. Store is object-safe and exposes only load_run and append_run; mfm-journal owns the public
    opaque/invariant-checked StoredRunBytes transfer type with its checked constructor and no raw
-   getter, concrete PostgreSQL open/reconnect performs mandatory readiness checks before admitting a
+   getter plus the sole frame-head digest function; mfm-store/Memory has no Canonical dependency,
+   concrete PostgreSQL open/reconnect performs mandatory readiness checks before admitting a
    connection, and Store depends on no Program, State, capability, domain, fact, configuration,
    portability, or Runtime-selection type.
-8. ProgramDocumentV2 order, RunFrameV1, frame-local closure, run-head recurrence, the 8 MiB object
-   ceiling, 65,536-byte envelope allowance, 25,231,360-byte frame maximum, and every fixed run limit
-   match goldens.
+8. ProgramDocumentV2 order, RunFrameV1, frame-local closure, the exact `Sha256V1` run-head
+   recurrence/full-string goldens, the 8 MiB object ceiling, 65,536-byte envelope allowance,
+   25,231,360-byte frame maximum, and every fixed run limit match goldens.
 9. RunFrameV1 has only admission, Pure-conclusion, and fused Read-conclusion records; entry-point,
    occurrence, preparation, attempt, replacement, and preparation-sequence fields are absent.
 10. Every frame embeds exactly the canonical objects directly named by its record; first-reference
@@ -2749,13 +2875,15 @@ Implementation is accepted only when:
     COMMIT may have happened; load Unavailable returns no partial snapshot and has no mutation
     implication.
 15. A Read adapter borrows only exact typed intent while Runtime retains its private qualification
-    proof and returns typed Evidence or ReadUnavailable; Runtime binds and ordinarily interprets every evidence variant, then appends one fused
+    proof and returns typed Evidence or `ReadAdapterError::{Unavailable, Internal}`; Runtime binds
+    and ordinarily interprets every accepted evidence variant, then appends one fused
     intent/evidence/outcome conclusion.
-16. ReadPreparationError maps to Internal and ReadUnavailable maps to Unavailable; both write
-    nothing, one invocation enters each selected Read declaration occurrence at most once, and
-    concurrent Read observations select one exact-head durable winner while others reload it.
-    Adapter callback construction/poll panics are privately contained as Internal and write
-    nothing.
+16. ReadPreparationError and ReadAdapterError::Internal map to Internal, while
+    ReadAdapterError::Unavailable maps to Unavailable; all write nothing, one invocation enters each
+    selected Read declaration occurrence at most once, and concurrent Read observations select one
+    exact-head durable winner while others reload it. A pre-provider intent/target mismatch is
+    Internal and cannot mint durable integrity Evidence. Adapter callback construction/poll panics
+    are privately contained as Internal and write nothing.
 17. Dropping start/resume at every await is safety-neutral; Runtime retains no pending owner, lease,
     permit, completion cell, resolver, cancellation/timeout API, detached task, or semaphore.
 18. spawn_blocking work is synchronously pure, contains no block_on, invokes no Adapter/Store IO,
@@ -2763,9 +2891,12 @@ Implementation is accepted only when:
     dependent IO; Store byte jobs own only immutable snapshots.
 19. start, resume, and read use the same Runtime-derived RunView, and Succeeded/Failed always match
     the retained Program root contract.
-20. App/transports own no Runtime lifecycle or frame interpretation, verify selected EntryPointId
-    equals Program.entry_point_id before start, may safely drop a top-level future, and keep any
-    concurrency bound outside Runtime semantics.
+20. Application owns only Runtime, borrows checked Portfolio authoring inputs only for start,
+    classifies request rejection as ApplicationError::InvalidRequest and trusted planning failure
+    as ApplicationError::Internal, wraps only actual Runtime failures, and owns no Runtime lifecycle
+    or frame interpretation. App/transports verify selected EntryPointId equals
+    Program.entry_point_id before start, may safely drop a top-level future, and keep any concurrency
+    bound outside Runtime semantics.
 21. A future start transport accepts and echoes explicit RunId before execution; exact admission
     retry reuses that RunId and identical inputs.
 22. mfm-replay, portable bundles, export, offline inspection, and every replacement semantic ingress
