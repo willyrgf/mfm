@@ -9,7 +9,6 @@ pub(super) struct ContainerAttrs {
     pub(super) rename_all: Option<String>,
     pub(super) enum_tag: Option<String>,
     pub(super) enum_content: Option<String>,
-    pub(super) validate: Option<Path>,
     pub(super) transparent_string: bool,
     pub(super) transparent_map: bool,
     pub(super) serde_transparent: bool,
@@ -28,7 +27,6 @@ impl ContainerAttrs {
             rename_all: None,
             enum_tag: None,
             enum_content: None,
-            validate: None,
             transparent_string: false,
             transparent_map: false,
             serde_transparent: false,
@@ -47,15 +45,6 @@ impl ContainerAttrs {
                         output.version = meta.value()?.parse::<LitStr>()?.value();
                     } else if meta.path.is_ident("schema") {
                         output.schema_name = meta.value()?.parse::<LitStr>()?.value();
-                    } else if meta.path.is_ident("validate") {
-                        let value = meta.value()?.parse::<LitStr>()?.value();
-                        output.validate =
-                            Some(syn::parse_str::<Path>(&value).map_err(|error| {
-                                syn::Error::new(
-                                    meta.path.span(),
-                                    format!("invalid config validator path: {error}"),
-                                )
-                            })?);
                     } else if meta.path.is_ident("transparent_string") {
                         output.transparent_string = true;
                     } else if meta.path.is_ident("transparent_map") {

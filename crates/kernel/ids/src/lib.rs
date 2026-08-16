@@ -146,12 +146,6 @@ pub enum SemanticTypeKind {}
 /// Marker for schema ids.
 pub enum SchemaKind {}
 
-/// Marker for effect kind ids.
-pub enum EffectKindKind {}
-
-/// Marker for capability kind ids.
-pub enum CapabilityKindKind {}
-
 /// Marker for run ids.
 pub enum RunIdKind {}
 
@@ -164,23 +158,11 @@ pub enum ContentDigestKind {}
 /// Marker for schema versions.
 pub enum SchemaVersionKind {}
 
-/// Marker for effect versions.
-pub enum EffectVersionKind {}
-
-/// Marker for capability versions.
-pub enum CapabilityVersionKind {}
-
 /// Typed semantic type identity.
 pub type SemanticTypeId = Identity<SemanticTypeKind>;
 
 /// Typed schema identity.
 pub type SchemaId = Identity<SchemaKind>;
-
-/// Typed effect kind identity.
-pub type EffectKind = Identity<EffectKindKind>;
-
-/// Typed capability kind identity.
-pub type CapabilityKind = Identity<CapabilityKindKind>;
 
 /// Typed run identity.
 pub type RunId = Identity<RunIdKind>;
@@ -190,252 +172,6 @@ pub type ArtifactId = Identity<ArtifactIdKind>;
 
 /// Generic digest of canonical bytes or artifact bytes.
 pub type ContentDigest = Identity<ContentDigestKind>;
-
-/// Minimal sequential State/Match address shared by Program, Journal, and Store.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SequentialControlAddress {
-    declaration_ordinal: u32,
-    match_arm_ordinals: Vec<u32>,
-}
-
-impl<'de> Deserialize<'de> for SequentialControlAddress {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            declaration_ordinal: u32,
-            match_arm_ordinals: Vec<u32>,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.declaration_ordinal, wire.match_arm_ordinals)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-impl SequentialControlAddress {
-    /// Creates one bounded declaration address.
-    pub fn new(declaration_ordinal: u32, match_arm_ordinals: Vec<u32>) -> Result<Self> {
-        if match_arm_ordinals.len() > 64 {
-            return Err(IdentityError::new("sequential address is too deep"));
-        }
-        Ok(Self {
-            declaration_ordinal,
-            match_arm_ordinals,
-        })
-    }
-
-    /// Returns the declaration ordinal.
-    pub const fn declaration_ordinal(&self) -> u32 {
-        self.declaration_ordinal
-    }
-
-    /// Returns enclosing Match arm ordinals.
-    pub fn match_arm_ordinals(&self) -> &[u32] {
-        &self.match_arm_ordinals
-    }
-}
-
-fn validate_scope_id(value: &str, prefix: &str, label: &str) -> Result<()> {
-    let suffix = value
-        .strip_prefix(prefix)
-        .ok_or_else(|| IdentityError::new(format!("{label} prefix mismatch")))?;
-    if suffix.len() != 32
-        || !suffix
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(IdentityError::new(format!(
-            "{label} must use 32 lowercase hex characters"
-        )));
-    }
-    Ok(())
-}
-
-/// Store-owned deployment scope identifier.
-///
-/// This non-secret value identifies a deployment trust domain for run identity derivation.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StoreScopeId(String);
-
-impl StoreScopeId {
-    /// Stable v1 store scope prefix.
-    pub const PREFIX: &'static str = "mfm.store_scope.v1:";
-
-    /// Creates a store scope id from the stable persisted string shape.
-    pub fn new(value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        validate_scope_id(&value, Self::PREFIX, "store scope id")?;
-        Ok(Self(value))
-    }
-
-    /// Returns the persisted store scope id string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for StoreScopeId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for StoreScopeId {
-    type Err = IdentityError;
-
-    fn from_str(value: &str) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl Serialize for StoreScopeId {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for StoreScopeId {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
-
-/// Store writer epoch used to qualify append writers.
-///
-/// The wire form is a canonical decimal `u64` JSON string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StoreEpoch(u64);
-
-impl StoreEpoch {
-    /// Creates an epoch from its numeric value.
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the numeric epoch.
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-
-    /// Parses the exact canonical decimal `u64` spelling.
-    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
-        let value = value.as_ref();
-        if value.is_empty()
-            || (value.len() > 1 && value.starts_with('0'))
-            || !value.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Err(IdentityError::new(
-                "store epoch must use canonical decimal u64 spelling",
-            ));
-        }
-        value
-            .parse::<u64>()
-            .map(Self)
-            .map_err(|_| IdentityError::new("store epoch exceeds u64"))
-    }
-}
-
-impl fmt::Display for StoreEpoch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl FromStr for StoreEpoch {
-    type Err = IdentityError;
-
-    fn from_str(value: &str) -> Result<Self> {
-        Self::parse(value)
-    }
-}
-
-impl Serialize for StoreEpoch {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for StoreEpoch {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::parse(value).map_err(serde::de::Error::custom)
-    }
-}
-
-/// App-owned non-secret tenant ownership scope.
-///
-/// This scalar is copied into admitted roots and qualified resource deployments. It is not a content
-/// reference, credential, principal, or mutable membership identifier.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TenantScopeId(String);
-
-impl TenantScopeId {
-    /// Stable v1 tenant scope prefix.
-    pub const PREFIX: &'static str = "mfm.tenant_scope.v1:";
-
-    /// Creates a tenant scope id from the stable persisted string shape.
-    pub fn new(value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        validate_scope_id(&value, Self::PREFIX, "tenant scope id")?;
-        Ok(Self(value))
-    }
-
-    /// Returns the persisted tenant scope id string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for TenantScopeId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for TenantScopeId {
-    type Err = IdentityError;
-
-    fn from_str(value: &str) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl Serialize for TenantScopeId {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for TenantScopeId {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
 
 /// Lightweight content identity containing only interpretation and exact-byte digest.
 ///
@@ -517,12 +253,6 @@ impl<'de> Deserialize<'de> for ContentRef {
 /// Schema version string.
 pub type SchemaVersion = Version<SchemaVersionKind>;
 
-/// Effect descriptor version string.
-pub type EffectVersion = Version<EffectVersionKind>;
-
-/// Capability implementation version string.
-pub type CapabilityVersion = Version<CapabilityVersionKind>;
-
 fn parse_identity<K>(value: &str) -> Result<Identity<K>>
 where
     K: private::IdentityCategory,
@@ -575,21 +305,6 @@ where
             Ok(Identity {
                 raw: value.to_owned(),
                 canonical_name: Some(parts[1].to_owned()),
-                algorithm,
-                digest,
-                _kind: PhantomData,
-            })
-        }
-        private::IdentityLayout::NamespaceNameDigest => {
-            require_part_count(K::PREFIX, &parts, 5)?;
-            validate_token("namespace", parts[1])?;
-            validate_token("name", parts[2])?;
-            let algorithm = parts[3].parse()?;
-            validate_identity_algorithm::<K>(algorithm)?;
-            let digest = parts[4].parse()?;
-            Ok(Identity {
-                raw: value.to_owned(),
-                canonical_name: Some(format!("{}/{}", parts[1], parts[2])),
                 algorithm,
                 digest,
                 _kind: PhantomData,
@@ -672,14 +387,14 @@ fn validate_name_token(grammar: &'static str, value: &str) -> CheckedStringResul
             CheckedStringErrorReason::Empty,
         ));
     };
-    if !is_lower_or_digit(first) {
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
         return Err(CheckedStringError::new(
             grammar,
             CheckedStringErrorReason::InvalidStart,
         ));
     }
     for (offset, ch) in chars.enumerate() {
-        if is_lower_or_digit(ch) || matches!(ch, '.' | '_' | '-' | '/') {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-' | '/') {
             continue;
         }
         return Err(CheckedStringError::new(
@@ -689,47 +404,6 @@ fn validate_name_token(grammar: &'static str, value: &str) -> CheckedStringResul
                 index: offset + 1,
             },
         ));
-    }
-    Ok(())
-}
-
-fn validate_stable_author_key(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
-    validate_len(value, grammar, 256)?;
-    for prefix in ["mfm.", "sys.", "_"] {
-        if value.starts_with(prefix) {
-            return Err(CheckedStringError::new(
-                grammar,
-                CheckedStringErrorReason::ReservedPrefix { prefix },
-            ));
-        }
-    }
-    for segment in value.split('/') {
-        validate_segment_len(grammar, segment, 64)?;
-        let mut chars = segment.chars();
-        let Some(first) = chars.next() else {
-            return Err(CheckedStringError::new(
-                grammar,
-                CheckedStringErrorReason::EmptySegment,
-            ));
-        };
-        if !is_lower_or_digit(first) {
-            return Err(CheckedStringError::new(
-                grammar,
-                CheckedStringErrorReason::InvalidStart,
-            ));
-        }
-        for (offset, ch) in chars.enumerate() {
-            if is_lower_or_digit(ch) || matches!(ch, '.' | '_' | '-') {
-                continue;
-            }
-            return Err(CheckedStringError::new(
-                grammar,
-                CheckedStringErrorReason::InvalidCharacter {
-                    ch,
-                    index: offset + 1,
-                },
-            ));
-        }
     }
     Ok(())
 }
@@ -835,134 +509,6 @@ fn validate_entry_point_id(grammar: &'static str, value: &str) -> CheckedStringR
     Ok(())
 }
 
-#[allow(dead_code)]
-fn validate_invocation_identity(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
-    if value.len() != 36 {
-        return Err(CheckedStringError::new(
-            grammar,
-            if value.is_empty() {
-                CheckedStringErrorReason::Empty
-            } else {
-                CheckedStringErrorReason::InvalidEnd
-            },
-        ));
-    }
-    for (index, byte) in value.bytes().enumerate() {
-        let accepted = match index {
-            8 | 13 | 18 | 23 => byte == b'-',
-            14 => byte == b'4',
-            19 => matches!(byte, b'8' | b'9' | b'a' | b'b'),
-            _ => byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'),
-        };
-        if !accepted {
-            return Err(CheckedStringError::new(
-                grammar,
-                CheckedStringErrorReason::InvalidCharacter {
-                    ch: byte as char,
-                    index,
-                },
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_field_segment(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
-    validate_non_empty(value, grammar)?;
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::Empty,
-        ));
-    };
-    if !first.is_ascii_alphanumeric() {
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::InvalidStart,
-        ));
-    }
-    for (offset, ch) in chars.enumerate() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/') {
-            continue;
-        }
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::InvalidCharacter {
-                ch,
-                index: offset + 1,
-            },
-        ));
-    }
-    Ok(())
-}
-
-fn validate_field_path(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
-    validate_non_empty(value, grammar)?;
-    for segment in value.split('.') {
-        validate_field_segment(grammar, segment)?;
-    }
-    Ok(())
-}
-
-fn validate_local_public_id(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
-    validate_len(value, grammar, 128)?;
-    let Some(first) = value.bytes().next() else {
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::Empty,
-        ));
-    };
-    let Some(last) = value.bytes().last() else {
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::Empty,
-        ));
-    };
-    if !is_lower_or_digit_byte(first) {
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::InvalidStart,
-        ));
-    }
-    if !is_lower_or_digit_byte(last) {
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::InvalidEnd,
-        ));
-    }
-    for (index, byte) in value.bytes().enumerate() {
-        if is_lower_or_digit_byte(byte) || matches!(byte, b'.' | b'_' | b'-') {
-            continue;
-        }
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::InvalidCharacter {
-                ch: byte as char,
-                index,
-            },
-        ));
-    }
-    Ok(())
-}
-
-fn validate_runtime_env_name(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
-    validate_len(value, grammar, 256)?;
-    for (index, byte) in value.bytes().enumerate() {
-        if matches!(byte, b'A'..=b'Z' | b'0'..=b'9' | b'_') {
-            continue;
-        }
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::InvalidCharacter {
-                ch: byte as char,
-                index,
-            },
-        ));
-    }
-    Ok(())
-}
-
 fn validate_len(value: &str, grammar: &'static str, max: usize) -> CheckedStringResult<()> {
     validate_non_empty(value, grammar)?;
     if value.len() > max {
@@ -982,30 +528,6 @@ fn validate_non_empty(value: &str, grammar: &'static str) -> CheckedStringResult
         ));
     }
     Ok(())
-}
-
-fn validate_segment_len(
-    grammar: &'static str,
-    segment: &str,
-    max: usize,
-) -> CheckedStringResult<()> {
-    if segment.is_empty() {
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::EmptySegment,
-        ));
-    }
-    if segment.len() > max {
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::SegmentTooLong { max },
-        ));
-    }
-    Ok(())
-}
-
-fn is_lower_or_digit(ch: char) -> bool {
-    ch.is_ascii_lowercase() || ch.is_ascii_digit()
 }
 
 fn is_lower_or_digit_byte(byte: u8) -> bool {
@@ -1033,7 +555,6 @@ mod private {
     pub enum IdentityLayout {
         NamespaceNameVersionDigest,
         NameVersionDigest,
-        NamespaceNameDigest,
         DigestOnly,
     }
 }
@@ -1078,8 +599,6 @@ impl private::IdentityCategory for SchemaKind {
     const REQUIRED_VERSION: Option<&'static str> = None;
     const POSITIVE_CANONICAL_U64_VERSION: bool = true;
 }
-impl_identity_category!(EffectKindKind, "effect", NamespaceNameDigest);
-impl_identity_category!(CapabilityKindKind, "capability", NamespaceNameDigest);
 
 impl_digest_only_category!(RunIdKind, "run");
 impl_digest_only_category!(ArtifactIdKind, "artifact");
@@ -1094,8 +613,6 @@ macro_rules! impl_version_category {
 }
 
 impl_version_category!(SchemaVersionKind, "schema version");
-impl_version_category!(EffectVersionKind, "effect version");
-impl_version_category!(CapabilityVersionKind, "capability version");
 
 #[cfg(test)]
 #[path = "tests.rs"]

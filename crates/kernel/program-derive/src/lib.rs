@@ -6,12 +6,12 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
-use quote::{format_ident, quote};
+use quote::quote;
 use syn::parse_macro_input;
 use syn::spanned::Spanned;
 use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Fields, FieldsNamed, FieldsUnnamed,
-    GenericArgument, GenericParam, Ident, LitStr, Path, PathArguments, Type, TypePath, Variant,
+    GenericArgument, GenericParam, Ident, LitStr, PathArguments, Type, TypePath, Variant,
 };
 
 #[path = "attributes.rs"]
@@ -25,42 +25,6 @@ use self::shape::{schema_shape_tokens, DeriveKind};
 /// Derives `mfm_values::MfmValue` for a named struct.
 pub fn derive_mfm_value(input: TokenStream) -> TokenStream {
     expand_schema_derive(parse_macro_input!(input as DeriveInput), DeriveKind::Value).into()
-}
-
-#[proc_macro_derive(MfmConfig, attributes(mfm, serde))]
-/// Derives `mfm_values::MfmConfig` for a named struct.
-pub fn derive_mfm_config(input: TokenStream) -> TokenStream {
-    expand_schema_derive(parse_macro_input!(input as DeriveInput), DeriveKind::Config).into()
-}
-
-#[proc_macro_derive(StateInput, attributes(mfm, serde))]
-/// Derives `mfm_values::StateInput` for a named struct.
-pub fn derive_state_input(input: TokenStream) -> TokenStream {
-    expand_schema_derive(
-        parse_macro_input!(input as DeriveInput),
-        DeriveKind::StateInput,
-    )
-    .into()
-}
-
-#[proc_macro_derive(OperationOutput, attributes(mfm, serde))]
-/// Derives `mfm_values::OperationOutput` for a named struct.
-pub fn derive_operation_output(input: TokenStream) -> TokenStream {
-    expand_schema_derive(
-        parse_macro_input!(input as DeriveInput),
-        DeriveKind::OperationOutput,
-    )
-    .into()
-}
-
-#[proc_macro_derive(PublicOutputs, attributes(mfm, serde))]
-/// Derives `mfm_values::PublicOutputs` for a named struct.
-pub fn derive_public_outputs(input: TokenStream) -> TokenStream {
-    expand_schema_derive(
-        parse_macro_input!(input as DeriveInput),
-        DeriveKind::PublicOutputs,
-    )
-    .into()
 }
 
 #[proc_macro_derive(PersistedSchema, attributes(mfm, serde))]
@@ -111,14 +75,6 @@ fn expand_schema_derive_result(
     let (impl_generics, ty_generics, where_clause) = impl_generics.split_for_impl();
 
     let attrs = ContainerAttrs::parse(&input.attrs, &input.ident)?;
-    let input_destinations = if kind == DeriveKind::StateInput {
-        Some(state_input_destinations(
-            &input.data,
-            attrs.rename_all.as_deref(),
-        )?)
-    } else {
-        None
-    };
     let shape_output = schema_shape_tokens(
         &input.data,
         attrs.rename_all.as_deref(),
@@ -128,11 +84,24 @@ fn expand_schema_derive_result(
     )?;
     let shape = shape_output.shape;
     let default_bounds = shape_output.default_bounds;
+    let match_projection_impl = if kind == DeriveKind::Value {
+        match &input.data {
+            Data::Enum(data) => enum_match_projection_tokens(data, attrs.rename_all.as_deref())?,
+            Data::Struct(_) => quote! {},
+            Data::Union(union) => {
+                return Err(syn::Error::new_spanned(
+                    union.union_token,
+                    "MFM derives do not support unions",
+                ));
+            }
+        }
+    } else {
+        quote! {}
+    };
     let ident = &input.ident;
     let schema_name = attrs.schema_name;
     let version = attrs.version;
     let schema_kind = kind.schema_kind_tokens();
-    let schema_method = format_ident!("{}", kind.schema_method());
     let derive_macro_version = concat!("mfm-program-derive/", env!("CARGO_PKG_VERSION"));
     let audit_path = quote! {
         ::mfm_values::SchemaAudit::__derive_generated(
@@ -184,21 +153,6 @@ fn expand_schema_derive_result(
             #audit_path,
         )
     };
-
-    let config_validate_method =
-        if let (DeriveKind::Config, Some(validate_path)) = (kind, &attrs.validate) {
-            quote! {
-                fn validate(
-                    &self,
-                ) -> ::std::result::Result<(), ::mfm_values::ConfigError> {
-                    #validate_path(self)
-                        .map_err(|error| ::mfm_values::ConfigError::new(error.to_string()))
-                }
-            }
-        } else {
-            quote! {}
-        };
-    let input_destination_names = input_destinations.unwrap_or_default();
 
     let identity_body = quote! {
         #(#default_bounds)*
@@ -283,103 +237,125 @@ fn expand_schema_derive_result(
                 fn schema_descriptor() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
                     #descriptor_body
                 }
-            }
-        },
-        DeriveKind::Config => quote! {
-            impl #impl_generics ::mfm_values::MfmConfig for #ident #ty_generics #where_clause {
-                fn schema_descriptor() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
-                    #descriptor_body
-                }
 
-                #config_validate_method
+                #match_projection_impl
             }
-        },
-        DeriveKind::StateInput => quote! {
-            impl #impl_generics ::mfm_values::StateInput for #ident #ty_generics #where_clause {
-                fn #schema_method() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
-                    #descriptor_body
-                }
-
-                fn input_destination_paths(
-                ) -> ::mfm_values::Result<Vec<::mfm_ids::FieldPath>> {
-                    let mut paths = vec![
-                        #(
-                            ::mfm_ids::FieldPath::new(#input_destination_names)
-                                .map_err(|error| {
-                                    ::mfm_values::ValueError::Identity(error.to_string())
-                                })?
-                        ),*
-                    ];
-                    paths.sort();
-                    paths.dedup();
-                    Ok(paths)
-                }
-            }
-        },
-        DeriveKind::OperationOutput => quote! {
-            impl #impl_generics ::mfm_values::OperationOutput for #ident #ty_generics #where_clause {
-                fn #schema_method() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
-                    #descriptor_body
-                }
-            }
-        },
-        DeriveKind::PublicOutputs => quote! {
-            impl #impl_generics ::mfm_values::PublicOutputDescriptor for #ident #ty_generics #where_clause {
-                fn #schema_method() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
-                    #descriptor_body
-                }
-            }
-
-            impl #impl_generics ::mfm_values::PublicOutputs for #ident #ty_generics #where_clause {}
         },
     };
 
     Ok(impl_block)
 }
 
-fn state_input_destinations(data: &Data, rename_all: Option<&str>) -> syn::Result<Vec<String>> {
-    let Data::Struct(DataStruct {
-        fields: Fields::Named(fields),
-        ..
-    }) = data
-    else {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            "StateInput derive supports named structs only in v1",
-        ));
-    };
-    let mut destinations = Vec::with_capacity(fields.named.len());
-    for field in &fields.named {
-        let ident = field
-            .ident
-            .as_ref()
-            .ok_or_else(|| syn::Error::new(field.span(), "StateInput fields must be named"))?;
-        let attrs = FieldAttrs::parse(&field.attrs)?;
-        if attrs.default {
-            return Err(syn::Error::new(
-                field.span(),
-                "StateInput fields cannot use serde(default)",
-            ));
-        }
+fn enum_match_projection_tokens(
+    data: &DataEnum,
+    rename_all: Option<&str>,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let mut arms = Vec::new();
+    for variant in &data.variants {
+        let attrs = VariantAttrs::parse(&variant.attrs)?;
         let wire_name = attrs
             .rename
-            .unwrap_or_else(|| apply_rename_all(&ident.to_string(), rename_all));
-        mfm_ids::FieldSegment::new(&wire_name).map_err(|error| {
-            syn::Error::new(
-                ident.span(),
-                format!("StateInput field has an illegal wire name: {error}"),
-            )
-        })?;
-        destinations.push(wire_name);
+            .unwrap_or_else(|| apply_rename_all(&variant.ident.to_string(), rename_all));
+        let ident = &variant.ident;
+        if let Fields::Unnamed(fields) = &variant.fields {
+            let payload = fields.unnamed.first().and_then(|field| {
+                if fields.unnamed.len() != 1 {
+                    None
+                } else if is_inline_value_type(&field.ty, &[]) {
+                    Some(proc_macro2::TokenStream::new())
+                } else if let Some(depth) = boxed_inline_value_depth(&field.ty) {
+                    let unbox = (0..depth).map(|_| quote!(let payload = *payload;));
+                    Some(quote!(#(#unbox)*))
+                } else {
+                    None
+                }
+            });
+            if let Some(unbox) = payload {
+                arms.push(quote! {
+                    Self::#ident(payload) => {
+                        #unbox
+                        Some(visitor.visit(#wire_name, payload))
+                    }
+                });
+            }
+        }
     }
-    destinations.sort();
-    if destinations.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(syn::Error::new(
-            fields.span(),
-            "StateInput destinations must be unique after serde renaming",
-        ));
+    let supported = arms.len() == data.variants.len();
+    let fallback = (!supported).then(|| quote!(_ => None,));
+    Ok(quote! {
+        const __MFM_MATCH_PROJECTION_SUPPORTED: bool = #supported;
+
+        fn __mfm_visit_match_payload<V: ::mfm_values::MatchPayloadVisitor>(
+            self,
+            visitor: V,
+        ) -> ::std::option::Option<V::Output> {
+            match self {
+                #(#arms)*
+                #fallback
+            }
+        }
+    })
+}
+
+fn boxed_inline_value_depth(ty: &Type) -> Option<usize> {
+    let mut depth = 0_usize;
+    let mut inner = ty;
+    loop {
+        let Type::Path(path) = inner else {
+            return None;
+        };
+        let segment = path.path.segments.last()?;
+        if segment.ident != "Box" {
+            return (depth > 0 && is_inline_value_type(inner, &[])).then_some(depth);
+        }
+        depth = depth.checked_add(1)?;
+        inner = one_generic_type(segment, "Box").ok()?;
     }
-    Ok(destinations)
+}
+
+fn is_inline_value_type(ty: &Type, generic_params: &[Ident]) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    if path.path.segments.len() == 1
+        && generic_params
+            .iter()
+            .any(|parameter| parameter == &segment.ident)
+    {
+        return true;
+    }
+    !matches!(
+        segment.ident.to_string().as_str(),
+        "bool"
+            | "String"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "NonZeroU16"
+            | "NonZeroU32"
+            | "NonZeroU64"
+            | "ContentRef"
+            | "ContentDigest"
+            | "SchemaId"
+            | "SemanticTypeId"
+            | "RunId"
+            | "ArtifactId"
+            | "StableId"
+            | "EntryPointId"
+            | "Box"
+            | "Option"
+            | "Vec"
+            | "NonEmpty"
+            | "BTreeMap"
+    )
 }
 
 fn one_generic_type<'a>(segment: &'a syn::PathSegment, label: &str) -> syn::Result<&'a Type> {

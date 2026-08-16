@@ -1,9 +1,9 @@
 # mfm-evm
 
-The EVM domain owns stable observational State contracts and the secret-free cumulative contexts
-used by Portfolio balance collection. Balance work carries the planned route and checked
-chain/anchor/asset data through a full-context native/token Match, then consolidates one
-common-anchor collection. Live provider transport remains an adapter responsibility.
+Secret-free typed EVM Read capabilities, cumulative balance State semantics, and domain-owned
+`EvmPhysicalTarget`. Six observational Read States and two Pure States implement Program contracts
+directly. The native/token fragment is deterministically unrolled per source.
 
-Transaction submission is not supported. It requires a future design for durable transaction
-authority and an outbox before it can return to the product graph.
+The domain validates chain/route binding, anchors, quantities, decimal scale, and closed evidence.
+Authenticated integrity evidence maps to the distinct `IntegrityBlocked` failure. This crate has no
+Runtime, Store, live client, signer, nonce, broadcast, or ambient IO dependency.

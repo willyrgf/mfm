@@ -93,21 +93,6 @@ impl From<CheckedStringError> for IdentityError {
     }
 }
 
-/// Returns a short stable display fragment from an id-like string.
-///
-/// The fragment is derived from the suffix after the final `:` separator, keeps
-/// ASCII alphanumeric characters only, and is capped at `max_len` characters.
-pub fn short_stable_id_fragment(value: &str, max_len: usize) -> String {
-    value
-        .rsplit(':')
-        .next()
-        .unwrap_or(value)
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .take(max_len)
-        .collect()
-}
-
 macro_rules! checked_string_type {
     ($ty:ident, $grammar:literal, $validator:ident, $doc:literal) => {
         #[doc = $doc]
@@ -216,13 +201,6 @@ checked_string_type!(
 );
 
 checked_string_type!(
-    StableAuthorKey,
-    "stable author key",
-    validate_stable_author_key,
-    "Stable author-provided key used as deterministic identity input."
-);
-
-checked_string_type!(
     StableId,
     "stable id",
     validate_stable_id,
@@ -234,39 +212,4 @@ checked_string_type!(
     "entry-point id",
     validate_entry_point_id,
     "Versioned public entry-point identifier using the exact identifier grammar."
-);
-
-checked_string_type!(
-    AppendRequestId,
-    "append request id",
-    validate_stable_id,
-    "Stable caller-selected idempotency identity for one append request."
-);
-
-checked_string_type!(
-    FieldSegment,
-    "field segment",
-    validate_field_segment,
-    "Checked nonempty segment used by a field path or typed source projection."
-);
-
-checked_string_type!(
-    FieldPath,
-    "field path",
-    validate_field_path,
-    "Checked dot-separated field path."
-);
-
-checked_string_type!(
-    LocalPublicId,
-    "local public id",
-    validate_local_public_id,
-    "Checked process-local public identifier."
-);
-
-checked_string_type!(
-    RuntimeEnvName,
-    "runtime env name",
-    validate_runtime_env_name,
-    "Checked runtime environment variable name."
 );

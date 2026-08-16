@@ -3,10 +3,6 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DeriveKind {
     Value,
-    Config,
-    StateInput,
-    OperationOutput,
-    PublicOutputs,
     PersistedContract,
 }
 
@@ -14,21 +10,7 @@ impl DeriveKind {
     pub(super) fn schema_kind_tokens(self) -> proc_macro2::TokenStream {
         match self {
             Self::Value => quote!(::mfm_values::SchemaKind::Value),
-            Self::Config => quote!(::mfm_values::SchemaKind::PlanningConfig),
-            Self::StateInput => quote!(::mfm_values::SchemaKind::StateInput),
-            Self::OperationOutput => quote!(::mfm_values::SchemaKind::OperationOutput),
-            Self::PublicOutputs => quote!(::mfm_values::SchemaKind::PublicOutput),
             Self::PersistedContract => quote!(::mfm_values::SchemaKind::PersistedContract),
-        }
-    }
-
-    pub(super) fn schema_method(self) -> &'static str {
-        match self {
-            Self::Value | Self::Config => "schema_descriptor",
-            Self::StateInput => "input_schema_descriptor",
-            Self::OperationOutput => "output_schema_descriptor",
-            Self::PublicOutputs => "public_schema_descriptor",
-            Self::PersistedContract => "schema_descriptor",
         }
     }
 }
@@ -56,14 +38,6 @@ pub(super) fn schema_shape_tokens(
         return Err(syn::Error::new(
             Span::call_site(),
             "unsigned bounds require PersistedSchema on a serde-transparent newtype",
-        ));
-    }
-    if kind == DeriveKind::StateInput
-        && (attrs.transparent_string || attrs.transparent_map || attrs.serde_transparent)
-    {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            "StateInput derive supports ordinary named structs only",
         ));
     }
     if attrs.transparent_string {
@@ -283,13 +257,6 @@ fn enum_shape_tokens(
     attrs: &ContainerAttrs,
     generic_params: &[Ident],
 ) -> syn::Result<SchemaShapeOutput> {
-    if kind == DeriveKind::StateInput {
-        return Err(syn::Error::new(
-            data.enum_token.span,
-            "StateInput derive supports named structs only in v1",
-        ));
-    }
-
     let mut variants = Vec::new();
     let mut default_bounds = Vec::new();
     let mut variant_names = Vec::new();
@@ -392,12 +359,6 @@ fn field_descriptor_tokens(
             .as_ref()
             .ok_or_else(|| syn::Error::new(field.span(), "MFM derives require named fields"))?;
         let attrs = FieldAttrs::parse(&field.attrs)?;
-        if kind == DeriveKind::StateInput && attrs.default {
-            return Err(syn::Error::new(
-                field.span(),
-                "StateInput fields cannot use serde(default)",
-            ));
-        }
         let wire_name = attrs
             .rename
             .unwrap_or_else(|| apply_rename_all(&ident.to_string(), rename_all));
@@ -668,13 +629,6 @@ fn shape_tokens_for_path(
                 }))
             }
         }
-        _ if kind == DeriveKind::StateInput && ident.ends_with("Input") => {
-            let ty = quote!(#type_path);
-            Ok(quote!({
-                let descriptor = <#ty as ::mfm_values::StateInput>::input_schema_descriptor()?;
-                descriptor.identity.canonical_json_shape()?.clone()
-            }))
-        }
         _ if kind == DeriveKind::PersistedContract => {
             // A nested persisted owner declares its own shape; the outer
             // contract embeds it so one type never restates another's fields.
@@ -722,21 +676,10 @@ fn checked_identity_shape(ident: &str) -> Option<proc_macro2::TokenStream> {
         "ContentDigest" => (quote!(ContentDigest), 128_u32),
         "SchemaId" => (quote!(SchemaId), 512),
         "SemanticTypeId" => (quote!(SemanticTypeId), 512),
-        "SemanticDigest" => (quote!(SemanticDigest), 128),
         "RunId" => (quote!(RunId), 128),
         "ArtifactId" => (quote!(ArtifactId), 128),
-        "JournalRecordHash"
-        | "JournalCommitDigest"
-        | "RunSemanticStateDigest"
-        | "FactContentIdentityDigest"
-        | "FactLogicalIdentityDigest"
-        | "FactQueryDigest"
-        | "RequestDigest" => (quote!(SemanticDigest), 128),
-        "StableId" | "AppendRequestId" => (quote!(StableId), 256),
-        "StoreEpoch" => (quote!(CanonicalUnsignedText), 20),
-        "StoreScopeId" => (quote!(StoreScopeId), 64),
-        "TenantScopeId" => (quote!(TenantScopeId), 64),
-        "EntryPointId" => (quote!(EntryPointId), 256),
+        "StableId" => (quote!(StableId), 512),
+        "EntryPointId" => (quote!(EntryPointId), 512),
         _ => return None,
     };
     let (grammar, maximum_bytes) = grammar_and_bound;

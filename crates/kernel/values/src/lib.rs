@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
 //! Typed value and descriptor contracts for the MFM typed kernel.
 //!
-//! This crate owns the first derive-backed value/config/output descriptor
-//! contract. Domain crates should get implementations from derives; the
+//! This crate owns the derive-backed typed-value and persisted-schema descriptor
+//! contracts. Domain crates should get implementations from derives; the
 //! hand-written implementations here are framework-owned generic constructors.
 //!
 //! ```
@@ -22,10 +22,12 @@
 use std::collections::BTreeMap;
 
 use mfm_canonical::{
-    CanonicalBytes, CanonicalJsonBytes, DecimalString, PlainCanonicalJsonBytes,
-    MAX_CANONICAL_JSON_DEPTH,
+    sha256_digest_bytes, CanonicalBytes, CanonicalJsonBytes, DecimalString,
+    PlainCanonicalJsonBytes, MAX_CANONICAL_JSON_DEPTH,
 };
-use mfm_ids::{DigestAlgorithm, NameToken, SchemaId, SchemaVersion, SemanticTypeId};
+use mfm_ids::{
+    ContentDigest, ContentRef, DigestAlgorithm, NameToken, SchemaId, SchemaVersion, SemanticTypeId,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -33,8 +35,6 @@ pub use mfm_canonical::limits::{
     MAX_ARRAY_ITEMS, MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES, MAX_OBJECT_ENTRIES, MAX_STRING_UTF8_BYTES,
 };
 
-mod generic_values;
-pub use self::generic_values::{ArtifactRef, NonEmpty};
 mod persisted;
 pub use self::persisted::{
     validate_derived_persisted_owner, validate_derived_persisted_owner_prevalidated,
@@ -71,6 +71,8 @@ const SECRET_MARKERS: &[&str] = &[
     "bearer ",
 ];
 const MAX_SCHEMA_IDENTITY_BYTES: usize = 65_536;
+/// Maximum canonical bytes of one value retained in a run frame.
+pub const MAX_RUN_OBJECT_CANONICAL_BYTES: usize = 8_388_608;
 /// Maximum recursive depth admitted by current schema identities and values.
 ///
 /// Schema identities add three object levels around their shape — the identity
@@ -82,7 +84,7 @@ pub const MAX_SCHEMA_DEPTH: usize = MAX_CANONICAL_JSON_DEPTH - 3;
 /// Result type for descriptor and value-contract operations.
 pub type Result<T> = std::result::Result<T, ValueError>;
 
-/// Error returned by value/config descriptor helpers.
+/// Error returned by value descriptor helpers.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ValueError {
     /// Descriptor construction failed.
@@ -97,6 +99,9 @@ pub enum ValueError {
     /// Canonical value bytes did not match the complete closed schema shape.
     #[error("value does not match schema shape")]
     SchemaShapeMismatch,
+    /// A valid value exceeded the retained object byte ceiling.
+    #[error("value capacity exceeded")]
+    Capacity,
     /// Artifact reference identity does not match the expected value type.
     #[error("artifact reference {field} mismatch: expected {expected}, got {actual}")]
     ArtifactTypeMismatch {
@@ -107,16 +112,13 @@ pub enum ValueError {
         /// Actual typed identity.
         actual: String,
     },
-    /// Config validation failed.
-    #[error("config error: {0}")]
-    Config(String),
 }
 
 /// Returns `true` when `input` matches MFM's high-signal secret-marker policy.
 ///
 /// This is a conservative persisted-surface guard. It is not intended to prove that arbitrary
 /// text is safe; it blocks known secret field markers and mnemonic-shaped phrases before values
-/// become canonical artifacts, configs, events, or public outputs.
+/// become canonical run objects or public results.
 pub fn string_contains_secret_marker(input: &str) -> bool {
     let lower = input.to_ascii_lowercase();
     if SECRET_MARKERS.iter().any(|marker| lower.contains(marker)) {
@@ -152,29 +154,12 @@ fn looks_like_mnemonic_phrase(input: &str) -> bool {
     (12..=24).contains(&count)
 }
 
-/// Error returned by typed planning config validation.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{message}")]
-pub struct ConfigError {
-    message: String,
-}
-
-impl ConfigError {
-    /// Creates a config validation error.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-
-    /// Returns the stable human-readable diagnostic.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
 /// Values that may cross typed state boundaries.
 pub trait MfmValue: Serialize + DeserializeOwned + Send + Sync + 'static {
+    /// Whether this implementation provides a complete static Match projection hook.
+    #[doc(hidden)]
+    const __MFM_MATCH_PROJECTION_SUPPORTED: bool = false;
+
     /// Returns the schema descriptor for this value type.
     fn schema_descriptor() -> Result<SchemaDescriptor>;
 
@@ -185,99 +170,60 @@ pub trait MfmValue: Serialize + DeserializeOwned + Send + Sync + 'static {
     fn schema_id() -> Result<SchemaId> {
         Self::schema_descriptor()?.schema_id()
     }
-}
 
-/// Deterministic planning config that is safe to persist in manifests/specs.
-pub trait MfmConfig: Serialize + DeserializeOwned + Send + Sync + 'static {
-    /// Returns the schema descriptor for this planning config type.
-    fn schema_descriptor() -> Result<SchemaDescriptor>;
-
-    /// Derives this config's schema id from its schema descriptor identity.
-    fn schema_id() -> Result<SchemaId> {
-        Self::schema_descriptor()?.schema_id()
-    }
-
-    /// Validates authored config before typed expansion.
-    fn validate(&self) -> std::result::Result<(), ConfigError> {
-        Ok(())
+    /// Moves a derive-proven one-field enum payload into a monomorphized visitor.
+    #[doc(hidden)]
+    fn __mfm_visit_match_payload<V: MatchPayloadVisitor>(self, visitor: V) -> Option<V::Output>
+    where
+        Self: Sized,
+    {
+        let _ = visitor;
+        None
     }
 }
 
-/// Config value that has passed its [`MfmConfig`] semantic validation hook.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedConfig<C: MfmConfig> {
-    config: C,
+/// Static-dispatch visitor used by the derive-backed Runtime Match projection.
+#[doc(hidden)]
+pub trait MatchPayloadVisitor {
+    /// Projection result owned by the consumer.
+    type Output;
+
+    /// Receives the exact moved one-field payload.
+    fn visit<T: MfmValue>(self, tag: &'static str, payload: T) -> Self::Output;
 }
 
-impl<C: MfmConfig> ValidatedConfig<C> {
-    /// Validates a config value and mints validated config authority.
-    pub fn new(config: C) -> std::result::Result<Self, ConfigError> {
-        config.validate()?;
-        Ok(Self { config })
+/// Canonicalizes one typed value and derives its exact schema/content identity.
+pub fn canonicalize_mfm_value<T: MfmValue>(
+    value: &T,
+) -> std::result::Result<(PlainCanonicalJsonBytes, ContentRef), ValueError> {
+    let descriptor = T::schema_descriptor()?;
+    let semantic_id = T::semantic_id()?;
+    let schema_id = T::schema_id()?;
+    if descriptor.identity().semantic_type_id.as_ref() != Some(&semantic_id)
+        || descriptor.schema_id()? != schema_id
+    {
+        return Err(ValueError::Descriptor(
+            "value descriptor does not match its Rust owner".to_owned(),
+        ));
     }
 
-    /// Returns the validated config value.
-    pub const fn as_ref(&self) -> &C {
-        &self.config
+    let json = serde_json::to_string(value).map_err(|_| ValueError::SchemaShapeMismatch)?;
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|_| ValueError::SchemaShapeMismatch)?;
+    descriptor
+        .identity()
+        .validate_canonical_value(canonical.as_bytes())?;
+    if canonical.as_bytes().len() > MAX_RUN_OBJECT_CANONICAL_BYTES {
+        return Err(ValueError::Capacity);
     }
-
-    /// Consumes this authority into the validated config value.
-    pub fn into_inner(self) -> C {
-        self.config
-    }
-
-    /// Serializes the validated config through the shared canonical JSON path.
-    ///
-    /// Program certification and configuration publication both use this method so a semantic config
-    /// has one canonical byte representation and one content digest implementation.
-    pub fn canonical_json(
-        &self,
-    ) -> std::result::Result<mfm_canonical::PlainCanonicalJsonBytes, ConfigError> {
-        let json = serde_json::to_string(&self.config)
-            .map_err(|error| ConfigError::new(format!("failed to serialize config: {error}")))?;
-        mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
-            .map_err(|error| ConfigError::new(format!("failed to canonicalize config: {error}")))
-    }
+    let content_digest = ContentDigest::from_digest(
+        DigestAlgorithm::Sha256V1,
+        sha256_digest_bytes(canonical.as_bytes()),
+    );
+    let content_ref = ContentRef::new(schema_id, content_digest)
+        .map_err(|error| ValueError::Identity(error.to_string()))?;
+    Ok((canonical, content_ref))
 }
-
-/// Descriptor contract for public launch/render output surfaces.
-pub trait PublicOutputDescriptor: Send + Sync + 'static {
-    /// Returns the public output schema descriptor.
-    fn public_schema_descriptor() -> Result<SchemaDescriptor>;
-
-    /// Derives the public output schema id from the descriptor identity.
-    fn public_schema_id() -> Result<SchemaId> {
-        Self::public_schema_descriptor()?.schema_id()
-    }
-}
-
-/// Descriptor contract for typed state input structs.
-pub trait StateInput: Send + Sync + 'static {
-    /// Returns the state input schema descriptor.
-    fn input_schema_descriptor() -> Result<SchemaDescriptor>;
-
-    /// Derives the state input schema id from the descriptor identity.
-    fn input_schema_id() -> Result<SchemaId> {
-        Self::input_schema_descriptor()?.schema_id()
-    }
-
-    /// Returns canonical named input destinations in ordinal order.
-    fn input_destination_paths() -> Result<Vec<mfm_ids::FieldPath>>;
-}
-
-/// Descriptor contract for operation output structs.
-pub trait OperationOutput: Send + Sync + 'static {
-    /// Returns the operation output schema descriptor.
-    fn output_schema_descriptor() -> Result<SchemaDescriptor>;
-
-    /// Derives the operation output schema id from the descriptor identity.
-    fn output_schema_id() -> Result<SchemaId> {
-        Self::output_schema_descriptor()?.schema_id()
-    }
-}
-
-/// Public launch/render output contract.
-pub trait PublicOutputs: PublicOutputDescriptor {}
 
 /// Schema descriptor with hash-defining identity fields split from audit-only
 /// provenance.
@@ -568,32 +514,51 @@ impl SchemaIdentity {
             (SchemaKind::Value, None) => Err(ValueError::Descriptor(
                 "value schema identities must include a semantic type id".to_owned(),
             ))?,
-            (
-                SchemaKind::PlanningConfig
-                | SchemaKind::StateInput
-                | SchemaKind::OperationOutput
-                | SchemaKind::PublicOutput
-                | SchemaKind::PersistedContract,
-                None,
-            ) => {}
-            (
-                SchemaKind::PlanningConfig
-                | SchemaKind::StateInput
-                | SchemaKind::OperationOutput
-                | SchemaKind::PublicOutput
-                | SchemaKind::PersistedContract,
-                Some(_),
-            ) => Err(ValueError::Descriptor(
+            (SchemaKind::PersistedContract, None) => {}
+            (SchemaKind::PersistedContract, Some(_)) => Err(ValueError::Descriptor(
                 "non-value schema identities must not include a semantic type id".to_owned(),
             ))?,
         }
-        self.encoding.validate_descriptor()?;
+        if self.claims_reserved_never_identity() && !self.is_reserved_never_identity() {
+            return Err(ValueError::Descriptor(
+                "reserved Never identity does not match its exact schema".to_owned(),
+            ));
+        }
+        if !self.is_reserved_never_identity() {
+            self.encoding.validate_descriptor()?;
+        }
         if self.canonical_json_unchecked()?.as_bytes().len() > MAX_SCHEMA_IDENTITY_BYTES {
             return Err(ValueError::Descriptor(
                 "schema identity exceeds the canonical byte bound".to_owned(),
             ));
         }
         Ok(())
+    }
+
+    fn is_reserved_never_identity(&self) -> bool {
+        let Some(semantic_type_id) = self.semantic_type_id.as_ref() else {
+            return false;
+        };
+        matches!(
+            &self.encoding,
+            PersistedEncoding::CanonicalJson {
+                shape: SchemaShape::Enum {
+                    tagging: EnumTagging::External,
+                    variants,
+                },
+            } if variants.is_empty()
+        ) && self.schema_kind == SchemaKind::Value
+            && semantic_type_id.as_str()
+                == "semantic:mfm.kernel:never:1:sha256-jcs-v1:527c198ca1e6170ddf8966dd86ebd418b62226f14f6ef34d7b7ddd7b91a36835"
+            && self.schema_name.as_str() == "mfm.kernel.never"
+            && self.schema_version.as_str() == "1"
+    }
+
+    fn claims_reserved_never_identity(&self) -> bool {
+        self.semantic_type_id.as_ref().is_some_and(|identity| {
+            identity.as_str()
+                == "semantic:mfm.kernel:never:1:sha256-jcs-v1:527c198ca1e6170ddf8966dd86ebd418b62226f14f6ef34d7b7ddd7b91a36835"
+        }) || self.schema_name.as_str() == "mfm.kernel.never"
     }
 
     fn canonical_json_unchecked(&self) -> Result<CanonicalJsonBytes> {
@@ -691,16 +656,7 @@ pub enum DescriptorProvenance {
 pub enum SchemaKind {
     /// Runtime value crossing a state boundary.
     Value,
-    /// Deterministic planning config.
-    PlanningConfig,
-    /// Typed state input interface.
-    StateInput,
-    /// Operation output interface.
-    OperationOutput,
-    /// Public output surface.
-    PublicOutput,
-    /// Retained history/component contract that is not a state value, config,
-    /// input, or output.
+    /// Retained component contract that is not a runtime value.
     PersistedContract,
 }
 
@@ -708,10 +664,6 @@ impl SchemaKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Value => "value",
-            Self::PlanningConfig => "planning_config",
-            Self::StateInput => "state_input",
-            Self::OperationOutput => "operation_output",
-            Self::PublicOutput => "public_output",
             Self::PersistedContract => "persisted_contract",
         }
     }
@@ -1675,23 +1627,17 @@ fn literal_matches(literal: &LiteralValue, value: &serde_json::Value) -> bool {
 /// descriptor never carries regular-expression text and the grammar has exactly
 /// one implementation.
 fn grammar_admits(grammar: StringGrammar, value: &str) -> bool {
-    use mfm_ids::{
-        ContentDigest, RunId, SchemaId, SemanticDigest, SemanticTypeId, StableId, StoreScopeId,
-        TenantScopeId,
-    };
+    use mfm_ids::{ContentDigest, RunId, SchemaId, SemanticTypeId, StableId};
 
     match grammar {
         StringGrammar::UnicodeScalarText => !value.chars().any(|ch| ch.is_control()),
         StringGrammar::ContentDigest => ContentDigest::parse(value).is_ok(),
-        StringGrammar::SemanticDigest => SemanticDigest::parse(value).is_ok(),
         StringGrammar::RunId => RunId::parse(value).is_ok(),
         StringGrammar::ArtifactId => mfm_ids::ArtifactId::parse(value).is_ok(),
         StringGrammar::SchemaId => SchemaId::parse(value).is_ok(),
         StringGrammar::SemanticTypeId => SemanticTypeId::parse(value).is_ok(),
         StringGrammar::EntryPointId => mfm_ids::EntryPointId::new(value).is_ok(),
         StringGrammar::StableId => StableId::new(value).is_ok(),
-        StringGrammar::StoreScopeId => StoreScopeId::new(value).is_ok(),
-        StringGrammar::TenantScopeId => TenantScopeId::new(value).is_ok(),
         StringGrammar::CanonicalUnsignedText => {
             value == "0"
                 || (value.len() <= 20
@@ -1737,7 +1683,6 @@ fn validate_canonical_json_terminal(
                 CanonicalJsonProfile::GeneralFloatFree => {
                     require(number.is_u64() || number.is_i64())
                 }
-                CanonicalJsonProfile::UnsignedNative => require(number.is_u64()),
             }
         }
         serde_json::Value::String(text) => {
@@ -2032,15 +1977,12 @@ fn parse_string_grammar(value: &str) -> Result<StringGrammar> {
     [
         StringGrammar::UnicodeScalarText,
         StringGrammar::ContentDigest,
-        StringGrammar::SemanticDigest,
         StringGrammar::RunId,
         StringGrammar::ArtifactId,
         StringGrammar::SchemaId,
         StringGrammar::SemanticTypeId,
         StringGrammar::EntryPointId,
         StringGrammar::StableId,
-        StringGrammar::StoreScopeId,
-        StringGrammar::TenantScopeId,
         StringGrammar::CanonicalUnsignedText,
         StringGrammar::LowerPathToken,
         StringGrammar::MediaType,
@@ -2062,13 +2004,10 @@ fn parse_sequence_ordering(value: &str) -> Result<SequenceOrdering> {
 }
 
 fn parse_canonical_json_profile(value: &str) -> Result<CanonicalJsonProfile> {
-    [
-        CanonicalJsonProfile::GeneralFloatFree,
-        CanonicalJsonProfile::UnsignedNative,
-    ]
-    .into_iter()
-    .find(|profile| profile.as_str() == value)
-    .ok_or(ValueError::InvalidSchemaIdentity)
+    [CanonicalJsonProfile::GeneralFloatFree]
+        .into_iter()
+        .find(|profile| profile.as_str() == value)
+        .ok_or(ValueError::InvalidSchemaIdentity)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2165,10 +2104,6 @@ impl TryFrom<SchemaIdentityWire> for SchemaIdentity {
         }
         let schema_kind = match wire.schema_kind.as_str() {
             "value" => SchemaKind::Value,
-            "planning_config" => SchemaKind::PlanningConfig,
-            "state_input" => SchemaKind::StateInput,
-            "operation_output" => SchemaKind::OperationOutput,
-            "public_output" => SchemaKind::PublicOutput,
             "persisted_contract" => SchemaKind::PersistedContract,
             _ => return Err(ValueError::InvalidSchemaIdentity),
         };
@@ -2586,6 +2521,7 @@ impl<V> MfmDefault for BTreeMap<String, V> {}
 /// intentionally do not implement generic serde traits.
 #[doc(hidden)]
 pub fn framework_value_descriptor(
+    owner_crate: &str,
     semantic_type_id: SemanticTypeId,
     schema_name: &str,
     shape: SchemaShape,
@@ -2599,7 +2535,7 @@ pub fn framework_value_descriptor(
             schema_version("1")?,
             shape,
         )?,
-        SchemaAudit::framework("mfm-values", rust_type_path),
+        SchemaAudit::framework(owner_crate, rust_type_path),
     )
 }
 

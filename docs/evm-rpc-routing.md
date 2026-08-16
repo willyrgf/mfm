@@ -1,17 +1,19 @@
-# EVM routing
+# EVM Read routing
 
-An immutable binding descriptor records the exact State, capability, stable live-adapter
-implementation, and physical route/target needed for process association and callback-free replay.
-It contains no endpoint credential, deployment history, or mutable lifecycle lineage.
+`EvmPhysicalTarget { chain_id, endpoint_ref }` is the sole public route identity. The EVM domain owns
+its checked schema/value/content ref. Portfolio planning requires targets strictly sorted and unique
+by chain ID and places the selected binding ref in every Read declaration and C0 route.
 
-Trusted composition creates each descriptor and its live registration together. The adapter
-rejects a wrong role, target, binding, planned balance route, or call correlation before a provider
-is entered. Every current EVM operation is an observational Read used by Portfolio balance
-collection.
+Trusted composition pairs each target with one opaque provider handle and calls
+`register_evm_reads`. The installer derives the binding ref and registers the three surviving Read
+capabilities directly. One target serves all six current Read State occurrences; no call ID, role
+map, descriptor wrapper, or live assembly contribution exists.
 
-The adapter authenticates the protocol response against the committed call, canonical intent,
-capability, target, and request correlation, then discards raw provider material. Replacing a
-binding rotates the Store scope or writer epoch; old nonterminal runs are replay-only.
+Before IO, the callback checks intent chain and route against the captured target. A local mismatch
+returns `ReadAdapterError::Internal`, enters no provider, and appends nothing. Timeout, transport, or
+malformed unauthenticated ingress returns `Unavailable`. Accepted provider results are the closed
+typed `Read`, `Rejected`, `SafeFailure`, and `IntegrityBlocked` cases. Only authenticated external
+integrity evidence becomes durable.
 
-Transaction submission is outside this routing contract. A future design must first define durable
-transaction authority and outbox semantics.
+Endpoint identity changes the target ref and Program. Replacing credentials or a client handle
+under the same public target does not. Credentials are never target material.

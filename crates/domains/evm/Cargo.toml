@@ -2,7 +2,6 @@
 name = "mfm-evm"
 version = "0.1.0"
 edition = "2021"
-autotests = false
 description = "Secret-free EVM cumulative contexts and capability contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
@@ -12,16 +11,8 @@ layer = "domain"
 domain = "evm"
 domain-role = "source"
 
-[[test]]
-name = "balance_matrix"
-path = "tests/balance_matrix.rs"
-
-[features]
-test-support = []
-
 [dependencies]
 mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }

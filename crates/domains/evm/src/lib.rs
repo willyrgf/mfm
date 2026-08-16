@@ -7,14 +7,13 @@
 
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
-use std::num::NonZeroU16;
 
-use mfm_capabilities::{AccessCapabilityContract, NoPriorFacts, ProposedStateOutcome, ReadMode};
+use mfm_capabilities::ReadCapabilityContract;
 use mfm_ids::{ContentRef, StableId};
 use mfm_program::{
-    capability_contract_ref, nominal_contract_ref, state_implementation_ref, BindingDescriptor,
-    Declaration, ExecutionMode, FailureValue, MatchDeclaration, MatchVariant,
-    SequentialControlAddress, State, StateDeclaration,
+    capability_contract_ref, nominal_contract_ref, state_implementation_ref, Declaration,
+    Execution, MatchDeclaration, MatchVariant, ProposedStateOutcome, PureState,
+    ReadPreparationError, ReadState, State, StateDeclaration,
 };
 use mfm_program_derive::MfmValue;
 use mfm_values::{string_contains_secret_marker, MfmValue as MfmValueTrait};
@@ -42,6 +41,59 @@ macro_rules! impl_checked_deserialize {
             }
         }
     };
+}
+
+/// Secret-free public identity of one live EVM route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "physical-target",
+    version = "1",
+    schema = "mfm.evm-physical-target"
+)]
+pub struct EvmPhysicalTarget {
+    chain_id: u64,
+    endpoint_ref: ContentRef,
+}
+
+impl_checked_deserialize!(EvmPhysicalTarget {
+    chain_id: u64,
+    endpoint_ref: ContentRef,
+});
+
+impl EvmPhysicalTarget {
+    /// Constructs one public route identity.
+    pub fn new(chain_id: u64, endpoint_ref: ContentRef) -> Result<Self, EvmDomainError> {
+        if chain_id == 0 {
+            return Err(EvmDomainError::InvalidValue);
+        }
+        Ok(Self {
+            chain_id,
+            endpoint_ref,
+        })
+    }
+
+    /// Returns the public EVM chain id.
+    pub const fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    /// Returns the public endpoint identity.
+    pub const fn endpoint_ref(&self) -> &ContentRef {
+        &self.endpoint_ref
+    }
+
+    /// Derives the exact canonical adapter binding identity.
+    pub fn binding_ref(&self) -> Result<ContentRef, EvmDomainError> {
+        mfm_values::canonicalize_mfm_value(self)
+            .map(|(_, reference)| reference)
+            .map_err(|_| EvmDomainError::Program)
+    }
+
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        Self::new(self.chain_id, self.endpoint_ref.clone()).map(|_| ())
+    }
 }
 
 /// Maximum admitted EVM balance sources.
@@ -1024,18 +1076,11 @@ pub struct EvmCapability<const KIND: u8>;
 
 macro_rules! impl_read_capability {
     ($ty:ty, $name:literal, $family:ident) => {
-        impl AccessCapabilityContract for $ty {
-            type Mode = ReadMode;
+        impl ReadCapabilityContract for $ty {
             type Intent = EvmReadIntent;
             type Evidence = EvmReadEvidence;
-            type Facts = NoPriorFacts;
-
             fn contract_id() -> mfm_capabilities::Result<StableId> {
                 StableId::new($name).map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
-            }
-
-            fn total_attempt_bound() -> NonZeroU16 {
-                NonZeroU16::new(3).expect("constant")
             }
 
             fn bind_evidence(
@@ -1068,23 +1113,6 @@ impl_read_capability!(
 
 /// Reusable semantic EVM balance State selected by its closed family and stage.
 pub struct EvmState<const FAMILY: u8, const STAGE: u8, K: MfmValueTrait>(PhantomData<fn() -> K>);
-
-/// Domain-owned implementation for a callback-free pure EVM State.
-pub trait EvmPureState: State {
-    /// Consumes one complete State input and produces its typed outcome.
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure>;
-}
-
-/// Domain-owned implementation for a capability-bound EVM State.
-pub trait EvmAccessState<C: AccessCapabilityContract>: State {
-    /// Prepares the exact capability intent from the complete retained input.
-    fn prepare(input: &Self::Input) -> Result<C::Intent, EvmDomainError>;
-    /// Consumes the retained input only after exact authenticated evidence is accepted.
-    fn interpret(
-        input: Self::Input,
-        evidence: &C::Evidence,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure>;
-}
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1232,16 +1260,6 @@ impl<'de> Deserialize<'de> for EvmBalanceFailure {
     }
 }
 
-impl FailureValue for EvmBalanceFailure {
-    fn integrity_blocked() -> Self {
-        Self::IntegrityBlocked {
-            stage: EvmBalanceFailureStage::Consolidate.as_str().to_owned(),
-            collection_ordinal: 0,
-            code: EvmBalanceFailureCode::IntegrityBlocked.as_str().to_owned(),
-        }
-    }
-}
-
 fn balance_integrity_failure<K: MfmValueTrait>(
     context: &EvmBalanceContext<K>,
     stage: EvmBalanceFailureStage,
@@ -1262,10 +1280,6 @@ macro_rules! impl_balance_state {
 
             fn state_id() -> mfm_program::Result<StableId> {
                 StableId::new($id).map_err(|_| mfm_program::ProgramError::InvalidContract)
-            }
-
-            fn integrity_failure(input: &Self::Input) -> Self::Failure {
-                balance_integrity_failure(input, $failure_stage)
             }
         }
     };
@@ -1360,6 +1374,12 @@ fn interpret_check_chain_identity<K: MfmValueTrait>(
     input: EvmBalanceContext<K>,
     evidence: &EvmReadEvidence,
 ) -> ProposedStateOutcome<EvmBalanceContext<K>, EvmBalanceFailure> {
+    if matches!(evidence, EvmReadEvidence::IntegrityBlocked) {
+        return failure(balance_integrity_failure(
+            &input,
+            EvmBalanceFailureStage::CheckChainIdentity,
+        ));
+    }
     let intent = match prepare_check_chain_identity(&input) {
         Ok(intent) => intent,
         Err(_) => return balance_failure(&input, EvmBalanceFailureStage::CheckChainIdentity),
@@ -1406,6 +1426,12 @@ fn interpret_read_initial_anchor<K: MfmValueTrait>(
     input: EvmBalanceContext<K>,
     evidence: &EvmReadEvidence,
 ) -> ProposedStateOutcome<EvmBalanceContext<K>, EvmBalanceFailure> {
+    if matches!(evidence, EvmReadEvidence::IntegrityBlocked) {
+        return failure(balance_integrity_failure(
+            &input,
+            EvmBalanceFailureStage::ReadInitialAnchor,
+        ));
+    }
     let intent = match prepare_read_initial_anchor(&input) {
         Ok(intent) => intent,
         Err(_) => return balance_failure(&input, EvmBalanceFailureStage::ReadInitialAnchor),
@@ -1481,6 +1507,12 @@ fn interpret_read_native_balance<K: MfmValueTrait>(
     input: EvmBalanceContext<K>,
     evidence: &EvmReadEvidence,
 ) -> ProposedStateOutcome<EvmBalanceContext<K>, EvmBalanceFailure> {
+    if matches!(evidence, EvmReadEvidence::IntegrityBlocked) {
+        return failure(balance_integrity_failure(
+            &input,
+            EvmBalanceFailureStage::ReadNativeBalance,
+        ));
+    }
     let intent = match prepare_read_native_balance(&input) {
         Ok(intent) => intent,
         Err(_) => return balance_failure(&input, EvmBalanceFailureStage::ReadNativeBalance),
@@ -1547,6 +1579,12 @@ fn interpret_read_token_decimals<K: MfmValueTrait>(
     input: EvmBalanceContext<K>,
     evidence: &EvmReadEvidence,
 ) -> ProposedStateOutcome<EvmBalanceContext<K>, EvmBalanceFailure> {
+    if matches!(evidence, EvmReadEvidence::IntegrityBlocked) {
+        return failure(balance_integrity_failure(
+            &input,
+            EvmBalanceFailureStage::ReadTokenDecimals,
+        ));
+    }
     let intent = match prepare_read_token_decimals(&input) {
         Ok(intent) => intent,
         Err(_) => return balance_failure(&input, EvmBalanceFailureStage::ReadTokenDecimals),
@@ -1605,6 +1643,12 @@ fn interpret_read_token_balance<K: MfmValueTrait>(
     input: EvmBalanceContext<K>,
     evidence: &EvmReadEvidence,
 ) -> ProposedStateOutcome<EvmBalanceContext<K>, EvmBalanceFailure> {
+    if matches!(evidence, EvmReadEvidence::IntegrityBlocked) {
+        return failure(balance_integrity_failure(
+            &input,
+            EvmBalanceFailureStage::ReadTokenBalance,
+        ));
+    }
     let intent = match prepare_read_token_balance(&input) {
         Ok(intent) => intent,
         Err(_) => return balance_failure(&input, EvmBalanceFailureStage::ReadTokenBalance),
@@ -1660,6 +1704,12 @@ fn interpret_confirm_balance_anchor<K: MfmValueTrait>(
     mut input: EvmBalanceContext<K>,
     evidence: &EvmReadEvidence,
 ) -> ProposedStateOutcome<EvmBalanceContext<K>, EvmBalanceFailure> {
+    if matches!(evidence, EvmReadEvidence::IntegrityBlocked) {
+        return failure(balance_integrity_failure(
+            &input,
+            EvmBalanceFailureStage::ConfirmAnchor,
+        ));
+    }
     let intent = match prepare_confirm_balance_anchor(&input) {
         Ok(intent) => intent,
         Err(_) => return balance_failure(&input, EvmBalanceFailureStage::ConfirmAnchor),
@@ -1739,16 +1789,19 @@ fn consolidate_balance_collection<K: MfmValueTrait>(
 
 macro_rules! impl_balance_access {
     ($stage:literal, $capability:ty, $prepare:path, $interpret:path) => {
-        impl<K: MfmValueTrait> EvmAccessState<$capability> for EvmState<1, $stage, K> {
+        impl<K: MfmValueTrait> ReadState<$capability> for EvmState<1, $stage, K> {
             fn prepare(
                 input: &Self::Input,
-            ) -> Result<<$capability as AccessCapabilityContract>::Intent, EvmDomainError> {
-                $prepare(input)
+            ) -> std::result::Result<
+                <$capability as ReadCapabilityContract>::Intent,
+                ReadPreparationError,
+            > {
+                $prepare(input).map_err(|_| ReadPreparationError)
             }
 
             fn interpret(
                 input: Self::Input,
-                evidence: &<$capability as AccessCapabilityContract>::Evidence,
+                evidence: &<$capability as ReadCapabilityContract>::Evidence,
             ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
                 $interpret(input, evidence)
             }
@@ -1792,12 +1845,12 @@ impl_balance_access!(
     prepare_confirm_balance_anchor,
     interpret_confirm_balance_anchor
 );
-impl<K: MfmValueTrait> EvmPureState for EvmState<1, 2, K> {
+impl<K: MfmValueTrait> PureState for EvmState<1, 2, K> {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
         select_balance_asset(input)
     }
 }
-impl<K: MfmValueTrait> EvmPureState for EvmState<1, 7, K> {
+impl<K: MfmValueTrait> PureState for EvmState<1, 7, K> {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
         consolidate_balance_collection(input)
     }
@@ -1839,74 +1892,22 @@ fn advance_balance_context<K: MfmValueTrait>(
     }
 }
 
-/// Exact live bindings required by one reusable EVM balance fragment route.
-#[derive(Debug, Clone)]
-pub struct EvmBalanceBindings {
-    /// Chain id selected by this route.
-    pub chain_id: u64,
-    descriptors: [BindingDescriptor; 6],
-}
-
-impl EvmBalanceBindings {
-    /// Constructs one complete immutable binding set in the fragment's State order.
-    pub fn new(chain_id: u64, descriptors: [BindingDescriptor; 6]) -> Result<Self, EvmDomainError> {
-        if chain_id == 0 {
-            return Err(EvmDomainError::Program);
-        }
-        let [check_chain_identity, read_initial_anchor, read_native_balance, read_token_decimals, read_token_balance, confirm_anchor] =
-            &descriptors;
-        validate_access_binding::<EvmState<1, 0, EvmBalanceRequest>, EvmCapability<2>>(
-            check_chain_identity,
-        )?;
-        validate_access_binding::<EvmState<1, 1, EvmBalanceRequest>, EvmCapability<6>>(
-            read_initial_anchor,
-        )?;
-        validate_access_binding::<EvmState<1, 3, EvmBalanceRequest>, EvmCapability<7>>(
-            read_native_balance,
-        )?;
-        validate_access_binding::<EvmState<1, 4, EvmBalanceRequest>, EvmCapability<7>>(
-            read_token_decimals,
-        )?;
-        validate_access_binding::<EvmState<1, 5, EvmBalanceRequest>, EvmCapability<7>>(
-            read_token_balance,
-        )?;
-        validate_access_binding::<EvmState<1, 6, EvmBalanceRequest>, EvmCapability<6>>(
-            confirm_anchor,
-        )?;
-        if descriptors.iter().any(|binding| {
-            binding.effect_domain().is_some() || binding.public_signer_key_instance_ref().is_some()
-        }) || descriptors.iter().skip(1).any(|binding| {
-            binding.physical_target_ref() != check_chain_identity.physical_target_ref()
-        }) {
-            return Err(EvmDomainError::Program);
-        }
-        Ok(Self {
-            chain_id,
-            descriptors,
-        })
-    }
-
-    /// Returns the one physical route identity shared by all reads in this fragment.
-    pub fn route_ref(&self) -> mfm_ids::ContentRef {
-        self.descriptors[0].physical_target_ref().clone()
-    }
-
-    /// Returns descriptors in the constructor's fixed semantic order.
-    pub const fn descriptors(&self) -> &[BindingDescriptor; 6] {
-        &self.descriptors
-    }
-}
-
-/// Appends one unrolled, reusable balance fragment to a Program declaration list.
+/// Appends one fully unrolled reusable balance fragment.
+///
+/// The caller supplies declaration indices in final Program order. Each source
+/// contributes eight occurrences; the one consolidate State follows them.
+#[allow(clippy::too_many_arguments)]
 pub fn append_balance_fragment<K: MfmValueTrait>(
     declarations: &mut Vec<Declaration>,
-    start_ordinal: u32,
-    bindings: &EvmBalanceBindings,
-    failure_next: SequentialControlAddress,
-    completion_next: SequentialControlAddress,
+    start_index: u16,
+    source_count: usize,
+    target: &EvmPhysicalTarget,
+    failure_next_index: u16,
+    completion_next_index: Option<u16>,
 ) -> Result<(), EvmDomainError> {
-    let [check_chain_identity, read_initial_anchor, read_native_balance, read_token_decimals, read_token_balance, confirm_anchor] =
-        bindings.descriptors();
+    if source_count == 0 || source_count > EVM_BALANCE_SOURCE_LIMIT {
+        return Err(EvmDomainError::Program);
+    }
     let context =
         nominal_contract_ref::<EvmBalanceContext<K>>().map_err(|_| EvmDomainError::Program)?;
     let asset =
@@ -1915,222 +1916,175 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
         .map_err(|_| EvmDomainError::Program)?;
     let failure =
         nominal_contract_ref::<EvmBalanceFailure>().map_err(|_| EvmDomainError::Program)?;
-    let initial = address(start_ordinal + 1)?;
-    let select = address(start_ordinal + 2)?;
-    let selector = address(start_ordinal + 3)?;
-    let native = address(start_ordinal + 4)?;
-    let decimals = address(start_ordinal + 5)?;
-    let token = address(start_ordinal + 6)?;
-    let confirm = address(start_ordinal + 7)?;
-    let consolidate = address(start_ordinal + 8)?;
-    declarations.extend([
-        state_with_failure(
-            access_state::<EvmState<1, 0, K>, EvmCapability<2>>(
-                start_ordinal,
+    let binding_ref = target.binding_ref()?;
+    let source_count_u16 = u16::try_from(source_count).map_err(|_| EvmDomainError::Program)?;
+    let consolidate_index = start_index
+        .checked_add(
+            source_count_u16
+                .checked_mul(8)
+                .ok_or(EvmDomainError::Program)?,
+        )
+        .ok_or(EvmDomainError::Program)?;
+
+    for source in 0..source_count_u16 {
+        let base = start_index
+            .checked_add(source.checked_mul(8).ok_or(EvmDomainError::Program)?)
+            .ok_or(EvmDomainError::Program)?;
+        let index = |offset: u16| base.checked_add(offset).ok_or(EvmDomainError::Program);
+        let check = index(0)?;
+        let initial = index(1)?;
+        let select = index(2)?;
+        let selector = index(3)?;
+        let native = index(4)?;
+        let decimals = index(5)?;
+        let token = index(6)?;
+        let confirm = index(7)?;
+        let after_confirm = if source + 1 == source_count_u16 {
+            consolidate_index
+        } else {
+            base.checked_add(8).ok_or(EvmDomainError::Program)?
+        };
+        declarations.extend([
+            Declaration::State(read_state::<EvmState<1, 0, K>, EvmCapability<2>>(
+                check,
                 context.clone(),
                 context.clone(),
                 failure.clone(),
-                initial.clone(),
-                check_chain_identity,
-            ),
-            &failure_next,
-        )?,
-        state_with_failure(
-            access_state::<EvmState<1, 1, K>, EvmCapability<6>>(
-                start_ordinal + 1,
+                initial,
+                failure_next_index,
+                binding_ref.clone(),
+            )?),
+            Declaration::State(read_state::<EvmState<1, 1, K>, EvmCapability<6>>(
+                initial,
                 context.clone(),
                 context.clone(),
                 failure.clone(),
-                select.clone(),
-                read_initial_anchor,
-            ),
-            &failure_next,
-        )?,
-        state_with_failure(
-            pure_state::<EvmState<1, 2, K>>(
-                start_ordinal + 2,
+                select,
+                failure_next_index,
+                binding_ref.clone(),
+            )?),
+            Declaration::State(pure_state::<EvmState<1, 2, K>>(
+                select,
                 context.clone(),
                 asset.clone(),
                 failure.clone(),
-                Some(selector.clone()),
+                Some(selector),
+                Some(failure_next_index),
+            )?),
+            Declaration::Match(
+                MatchDeclaration::new(
+                    asset.clone(),
+                    vec![
+                        MatchVariant::new(
+                            StableId::new("native").map_err(|_| EvmDomainError::Program)?,
+                            native,
+                        ),
+                        MatchVariant::new(
+                            StableId::new("token").map_err(|_| EvmDomainError::Program)?,
+                            decimals,
+                        ),
+                    ],
+                )
+                .map_err(|_| EvmDomainError::Program)?,
             ),
-            &failure_next,
-        )?,
-        Declaration::Match(
-            MatchDeclaration::new(
-                selector,
-                asset,
-                vec![
-                    MatchVariant::new(
-                        StableId::new("native").map_err(|_| EvmDomainError::Program)?,
-                        context.clone(),
-                        context.clone(),
-                        native.clone(),
-                    ),
-                    MatchVariant::new(
-                        StableId::new("token").map_err(|_| EvmDomainError::Program)?,
-                        context.clone(),
-                        context.clone(),
-                        decimals.clone(),
-                    ),
-                ],
-            )
-            .map_err(|_| EvmDomainError::Program)?,
-        ),
-        state_with_failure(
-            access_state::<EvmState<1, 3, K>, EvmCapability<7>>(
-                start_ordinal + 4,
+            Declaration::State(read_state::<EvmState<1, 3, K>, EvmCapability<7>>(
+                native,
                 context.clone(),
                 context.clone(),
                 failure.clone(),
-                confirm.clone(),
-                read_native_balance,
-            ),
-            &failure_next,
-        )?,
-        state_with_failure(
-            access_state::<EvmState<1, 4, K>, EvmCapability<7>>(
-                start_ordinal + 5,
+                confirm,
+                failure_next_index,
+                binding_ref.clone(),
+            )?),
+            Declaration::State(read_state::<EvmState<1, 4, K>, EvmCapability<7>>(
+                decimals,
                 context.clone(),
                 context.clone(),
                 failure.clone(),
-                token.clone(),
-                read_token_decimals,
-            ),
-            &failure_next,
-        )?,
-        state_with_failure(
-            access_state::<EvmState<1, 5, K>, EvmCapability<7>>(
-                start_ordinal + 6,
+                token,
+                failure_next_index,
+                binding_ref.clone(),
+            )?),
+            Declaration::State(read_state::<EvmState<1, 5, K>, EvmCapability<7>>(
+                token,
                 context.clone(),
                 context.clone(),
                 failure.clone(),
-                confirm.clone(),
-                read_token_balance,
-            ),
-            &failure_next,
-        )?,
-        state_with_failure(
-            access_state::<EvmState<1, 6, K>, EvmCapability<6>>(
-                start_ordinal + 7,
+                confirm,
+                failure_next_index,
+                binding_ref.clone(),
+            )?),
+            Declaration::State(read_state::<EvmState<1, 6, K>, EvmCapability<6>>(
+                confirm,
                 context.clone(),
                 context.clone(),
                 failure.clone(),
-                consolidate.clone(),
-                confirm_anchor,
-            ),
-            &failure_next,
-        )?,
-        state_with_failure(
-            pure_state::<EvmState<1, 7, K>>(
-                start_ordinal + 8,
-                context,
-                completion,
-                failure,
-                Some(completion_next),
-            ),
-            &failure_next,
-        )?,
-    ]);
+                after_confirm,
+                failure_next_index,
+                binding_ref.clone(),
+            )?),
+        ]);
+    }
+    declarations.push(Declaration::State(pure_state::<EvmState<1, 7, K>>(
+        consolidate_index,
+        context,
+        completion,
+        failure,
+        completion_next_index,
+        Some(failure_next_index),
+    )?));
     Ok(())
-}
-
-fn address(ordinal: u32) -> Result<SequentialControlAddress, EvmDomainError> {
-    SequentialControlAddress::new(ordinal, Vec::new()).map_err(|_| EvmDomainError::Program)
-}
-
-fn state_with_failure(
-    state: Result<StateDeclaration, EvmDomainError>,
-    failure_next: &SequentialControlAddress,
-) -> Result<Declaration, EvmDomainError> {
-    state?
-        .with_failure_next(failure_next.clone())
-        .map(|state| Declaration::State(Box::new(state)))
-        .map_err(|_| EvmDomainError::Program)
 }
 
 fn pure_state<S: State>(
-    ordinal: u32,
-    input: mfm_ids::ContentRef,
-    output: mfm_ids::ContentRef,
-    failure: mfm_ids::ContentRef,
-    next: Option<SequentialControlAddress>,
+    _index: u16,
+    input: ContentRef,
+    output: ContentRef,
+    failure: ContentRef,
+    next_index: Option<u16>,
+    failure_next_index: Option<u16>,
 ) -> Result<StateDeclaration, EvmDomainError> {
-    let implementation = state_implementation_ref::<S>().map_err(|_| EvmDomainError::Program)?;
-    match next {
-        Some(next) => StateDeclaration::with_next(
-            address(ordinal)?,
-            implementation,
-            input,
-            output,
-            Some(failure),
-            ExecutionMode::Pure,
-            next,
-        )
-        .map_err(|_| EvmDomainError::Program),
-        None => StateDeclaration::new(
-            address(ordinal)?,
-            implementation,
-            input,
-            output,
-            Some(failure),
-            ExecutionMode::Pure,
-            true,
-        )
-        .map_err(|_| EvmDomainError::Program),
-    }
-}
-
-fn access_state<S: State, C: AccessCapabilityContract<Mode = ReadMode>>(
-    ordinal: u32,
-    input: mfm_ids::ContentRef,
-    output: mfm_ids::ContentRef,
-    failure: mfm_ids::ContentRef,
-    next: SequentialControlAddress,
-    binding: &BindingDescriptor,
-) -> Result<StateDeclaration, EvmDomainError> {
-    validate_access_binding::<S, C>(binding)?;
-    let implementation = state_implementation_ref::<S>().map_err(|_| EvmDomainError::Program)?;
-    let capability_contract_ref =
-        capability_contract_ref::<C>().map_err(|_| EvmDomainError::Program)?;
-    let execution = ExecutionMode::Read {
-        capability_contract_ref,
-        total_attempt_bound: C::total_attempt_bound().get(),
-        fact_selection_required: C::requires_prior_facts(),
-    };
-    StateDeclaration::with_next(
-        address(ordinal)?,
-        implementation,
+    StateDeclaration::new(
+        state_implementation_ref::<S>().map_err(|_| EvmDomainError::Program)?,
         input,
         output,
-        Some(failure),
-        execution,
-        next,
+        failure,
+        Execution::pure(),
+        next_index,
+        failure_next_index,
     )
-    .map_err(|_| EvmDomainError::Program)?
-    .with_execution_binding(binding.clone())
     .map_err(|_| EvmDomainError::Program)
 }
 
-fn validate_access_binding<S: State, C: AccessCapabilityContract<Mode = ReadMode>>(
-    binding: &BindingDescriptor,
-) -> Result<(), EvmDomainError> {
-    if binding.state_implementation_ref()
-        != &state_implementation_ref::<S>().map_err(|_| EvmDomainError::Program)?
-        || binding.capability_contract_ref()
-            != Some(&capability_contract_ref::<C>().map_err(|_| EvmDomainError::Program)?)
-        || binding.adapter_implementation_ref().is_none()
-    {
-        return Err(EvmDomainError::Program);
-    }
-    Ok(())
+#[allow(clippy::too_many_arguments)]
+fn read_state<S: State, C: ReadCapabilityContract>(
+    _index: u16,
+    input: ContentRef,
+    output: ContentRef,
+    failure: ContentRef,
+    next_index: u16,
+    failure_next_index: u16,
+    binding_ref: ContentRef,
+) -> Result<StateDeclaration, EvmDomainError> {
+    StateDeclaration::new(
+        state_implementation_ref::<S>().map_err(|_| EvmDomainError::Program)?,
+        input,
+        output,
+        failure,
+        Execution::read(
+            capability_contract_ref::<C>().map_err(|_| EvmDomainError::Program)?,
+            nominal_contract_ref::<C::Intent>().map_err(|_| EvmDomainError::Program)?,
+            nominal_contract_ref::<C::Evidence>().map_err(|_| EvmDomainError::Program)?,
+            binding_ref,
+        ),
+        Some(next_index),
+        Some(failure_next_index),
+    )
+    .map_err(|_| EvmDomainError::Program)
 }
 
 fn success<O, F>(output: O) -> ProposedStateOutcome<O, F> {
-    ProposedStateOutcome::Success {
-        output,
-        facts: mfm_facts::FactProposalSet::empty(),
-    }
+    ProposedStateOutcome::Success { output }
 }
 
 fn failure<O, F>(failure: F) -> ProposedStateOutcome<O, F> {
@@ -2304,5 +2258,82 @@ fn valid_public_text(value: &str, maximum: usize) -> bool {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit.rs"]
-mod tests;
+mod tests {
+    use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, SchemaId};
+
+    use super::*;
+
+    #[derive(Debug, Serialize, Deserialize, MfmValue)]
+    #[serde(deny_unknown_fields)]
+    struct Continuation {
+        value: u8,
+    }
+
+    fn context() -> EvmBalanceContext<Continuation> {
+        let source = EvmBalanceSource {
+            source_id: "wallet.native".to_owned(),
+            chain_id: 1,
+            address: "0x1111111111111111111111111111111111111111".to_owned(),
+            token: None,
+        };
+        let request = EvmBalanceRequest::new(vec![source], 18).expect("request");
+        let route = ContentRef::new(
+            SchemaId::new(
+                "mfm.test.route",
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([1; 32]),
+            )
+            .expect("schema"),
+            ContentDigest::from_digest(DigestAlgorithm::Sha256V1, DigestBytes::from_array([2; 32])),
+        )
+        .expect("route");
+        EvmBalanceContext::new(
+            request,
+            Continuation { value: 1 },
+            0,
+            "collection".to_owned(),
+            route,
+        )
+        .expect("context")
+    }
+
+    #[test]
+    fn ordinary_read_interpreter_maps_every_failure_evidence_variant() {
+        for evidence in [EvmReadEvidence::Rejected, EvmReadEvidence::SafeFailure] {
+            let ProposedStateOutcome::Failure { failure } =
+                <EvmState<1, 0, Continuation> as ReadState<EvmCapability<2>>>::interpret(
+                    context(),
+                    &evidence,
+                )
+            else {
+                panic!("rejection evidence must be a typed failure");
+            };
+            assert!(matches!(
+                failure,
+                EvmBalanceFailure::SourceUnavailable {
+                    ref stage,
+                    collection_ordinal: 0,
+                    ref code,
+                } if stage == "check_chain_identity" && code == "chain_identity_unavailable"
+            ));
+        }
+
+        let ProposedStateOutcome::Failure { failure } =
+            <EvmState<1, 0, Continuation> as ReadState<EvmCapability<2>>>::interpret(
+                context(),
+                &EvmReadEvidence::IntegrityBlocked,
+            )
+        else {
+            panic!("integrity evidence must be a typed failure");
+        };
+        assert!(matches!(
+            failure,
+            EvmBalanceFailure::IntegrityBlocked {
+                ref stage,
+                collection_ordinal: 0,
+                ref code,
+            } if stage == "check_chain_identity" && code == "integrity_blocked"
+        ));
+    }
+}

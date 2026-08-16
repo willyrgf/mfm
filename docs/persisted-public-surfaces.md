@@ -1,30 +1,24 @@
 # Persisted and public surfaces
 
-Persisted run data is a strict canonical frame stream. Each frame contains one `RunAdmitted`,
-`StatePrepared`, or `StateConcluded` record plus its append-atomic object closure. Values are
-content-addressed by nominal contract and exact canonical bytes. Hashed structures contain no
-floating-point values.
+Program v2 is one strict checked canonical document. It contains entry point, admitted-context
+contract, exact root success/failure contracts, and an ordered State/Match declaration array. There
+is no public wire DTO parallel to `Program`.
 
-These Journal types are public checked wire DTOs for strict decoding, replay/export, tests, and
-mechanical storage conformance. Constructing one proves bounded canonical structure only; it does
-not create semantic mutation authority. Supported execution accepts catalog-qualified typed values
-and coordinate-free intent/outcome/evidence/fact material. Store alone supplies frame coordinates
-and append identities under an affine `SelectedRun` owner.
+Journal persists only canonical `mfm-run-frame@1` frames. Genesis records the exact Program and C0.
+Later frames are either one fused Pure conclusion or one fused Read intent/evidence/outcome
+conclusion. Every referenced object appears exactly once in the frame-local sorted object closure.
+Recursive heads use `content:sha256-v1` over exact canonical frame bytes.
 
-`RunAdmitted.configuration` is the exact resolved configuration stream coordinate: its one-based
-global sequence and typed content reference. It is not a caller-supplied generic content reference.
-Configuration revisions are separate from run frames and retain canonical bytes, the exact
-`MfmConfig` schema/content identity, and cumulative stream bytes. The retired generic
-`mfm.configuration` schema has no reader.
+`EncodedRunFrame` is sealed and exposes Store's read-only run/sequence/predecessor/head/byte
+projections. `StoredRunBytes` is opaque unqualified transfer. `JournalHistory` is the sole qualified
+complete prefix and exposes only borrowed semantic records/objects required by Runtime. No raw frame
+parser, open Journal DTO, portable codec, or independent semantic record hash is public.
 
-Public App, CLI, REST, export, and error surfaces contain no credentials, private keys, raw provider
-bytes, provider diagnostics, or secret-bearing context. A fixed-tenant facade derives partition
-identity from trusted construction rather than caller input.
+Store persists immutable frame bytes and one current head only. PostgreSQL owns exactly
+`mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads`; the static schema contract is
+`mfm.run-history-postgres.v1`.
 
-`QualifiedRun` is cloneable callback-free evidence. `HistoryReader` can return it but cannot promote
-it. `SelectedRun` is non-Clone, non-Serde, has no public constructor, and can release its history
-only by consuming itself. Runtime exposes neither its exact mutation port nor the opened Store.
-
-Portable export is one canonical v5 structural envelope of complete frames. Import rechecks the
-stream identity, framing, canonical bytes, sequence, identity, and the closed three-family record
-algebra before a consumer receives a qualified prefix.
+Public `RunView` contains RunId, durable sequence/head, and `Runnable`, typed `Succeeded`, or typed
+`Failed`. Terminal retained values expose contract ref, instance ref, and exact canonical bytes.
+Public surfaces never contain credentials, private keys, raw provider material, or unreviewed error
+details.

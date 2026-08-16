@@ -1,5 +1,0 @@
-error: cannot construct `QualifiedRun` with struct literal syntax due to private fields
- --> tests/ui/qualified_run_is_not_field_constructible.rs:4:13
-  |
-4 |     let _ = QualifiedRun {};
-  |             ^^^^^^^^^^^^

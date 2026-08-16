@@ -1,8 +1,13 @@
 # MFM
 
-MFM is a typed append-only State runner with one byte-ingress trust boundary. The current product
-supports `mfm.portfolio/snapshot@1` through its fixed-tenant App facade. Its EVM integration is
-observational and supplies the balance Reads used by that Portfolio workflow.
+MFM is a typed, append-only execution core for deterministic State/Match Programs with explicit
+observational Reads. Runtime is the sole reducer, Journal seals exact canonical frames, and Store
+provides only complete-prefix load and atomic exact-head append.
 
-Read [docs/design.md](docs/design.md), [docs/architecture.md](docs/architecture.md), and
-[docs/build-and-verification.md](docs/build-and-verification.md) for the contracts and workflow.
+The current product composition is Portfolio snapshot execution over secret-free EVM balance Reads.
+Callers supply an explicit `RunId`; Application is a thin facade over one already-composed Runtime.
+The CLI exposes one-shot help/version metadata. The REST binary prints one unavailable diagnostic
+and exits without binding a listener.
+
+Start with [design](docs/design.md), [architecture](docs/architecture.md), and
+[build and verification](docs/build-and-verification.md).

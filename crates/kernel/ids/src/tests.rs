@@ -1,56 +1,21 @@
 use super::*;
 
-macro_rules! accepts {
-    ($ty:ty, $value:expr) => {
-        assert_eq!(<$ty>::new($value).expect($value).as_ref(), $value);
-    };
-}
+#[test]
+fn retained_checked_ids_enforce_their_full_bounds() {
+    assert!(StableId::new("a".repeat(512)).is_ok());
+    assert!(StableId::new("a".repeat(513)).is_err());
 
-macro_rules! rejects {
-    ($ty:ty, $value:expr) => {
-        assert!(<$ty>::new($value).is_err(), "{:?}", $value);
-    };
+    let entry = format!("mfm.{}/x@1", "a".repeat(504));
+    assert_eq!(entry.len(), 512);
+    assert!(EntryPointId::new(&entry).is_ok());
+    assert!(EntryPointId::new(format!("{entry}a")).is_err());
 }
 
 #[test]
-fn checked_string_primitives_cover_shared_grammars() {
-    accepts!(NameToken, "mfm.kernel/value_1");
-    accepts!(StableAuthorKey, "portfolio/main-wallet");
-    accepts!(EntryPointId, "mfm.a/b@1");
-    accepts!(EntryPointId, "mfm.portfolio/snapshot@18446744073709551615");
-    accepts!(FieldSegment, "total/value-1");
-    accepts!(FieldPath, "result.total/value");
-    accepts!(LocalPublicId, "ethereum-mainnet");
-    accepts!(RuntimeEnvName, "MFM_SECRET_1");
-
-    rejects!(NameToken, "_name");
-    rejects!(StableAuthorKey, "mfm.reserved");
-    rejects!(EntryPointId, "mfm.portfolio-/snapshot@1");
-    rejects!(EntryPointId, "mfm.portfolio/snapshot_@1");
-    rejects!(EntryPointId, "mfm.portfolio/snapshot@01");
-    rejects!(EntryPointId, "mfm.portfolio/snapshot@0");
-    rejects!(EntryPointId, "mfm.portfolio/snapshot@18446744073709551616");
-    rejects!(FieldSegment, "");
-    rejects!(FieldSegment, "nested.field");
-    rejects!(FieldSegment, "_private");
-    rejects!(FieldPath, "result..total");
-    rejects!(LocalPublicId, "bad/slash");
-    rejects!(RuntimeEnvName, "mfm_secret");
-}
-
-#[test]
-fn short_stable_id_fragment_uses_alphanumeric_suffix() {
-    assert_eq!(
-        short_stable_id_fragment("content:sha256-jcs-v1:0123-45zz", 6),
-        "012345"
-    );
-}
-
-#[test]
-fn sequential_address_deserialization_reenters_its_depth_bound() {
-    let value = serde_json::json!({
-        "declaration_ordinal": 1,
-        "match_arm_ordinals": vec![0_u32; 65],
-    });
-    assert!(serde_json::from_value::<SequentialControlAddress>(value).is_err());
+fn content_ref_requires_schema_and_exact_byte_algorithms() {
+    let bytes = DigestBytes::from_array([0; 32]);
+    let schema =
+        SchemaId::new("mfm-test", "1", DigestAlgorithm::Sha256JcsV1, bytes).expect("schema");
+    let content = ContentDigest::from_digest(DigestAlgorithm::Sha256V1, bytes);
+    assert!(ContentRef::new(schema, content).is_ok());
 }

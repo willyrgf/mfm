@@ -1,15 +1,50 @@
 #![warn(missing_docs)]
-//! Capability-owned intent, evidence, and entry-discipline contracts.
-//!
-//! This crate contains no provider client and no execution callback.  A capability describes the
-//! exact canonical intent and closed evidence value that an adapter may exchange at the Runtime
-//! boundary. The sealed Read and one-entry Effect modes make retry authority a durable contract
-//! rather than a generic error policy.
+//! Closed contracts for observational Read capabilities.
 
-pub mod single_trust;
+use mfm_ids::StableId;
+use mfm_values::MfmValue;
 
-pub use single_trust::{
-    AccessCapabilityContract, AccessEvidenceValue, AccessMode, CapabilityError, EffectMode,
-    FactSelectionMode, NoPriorFacts, PriorRunFacts, ProposedStateOutcome,
-    QualifiedRecordedEvidence, ReadMode, Result,
-};
+/// Result type for capability contract operations.
+pub type Result<T> = std::result::Result<T, CapabilityError>;
+
+/// Redaction-safe capability contract error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CapabilityError {
+    /// A static capability identity is invalid.
+    #[error("capability contract is invalid")]
+    InvalidContract,
+    /// Evidence does not bind to the exact intent.
+    #[error("capability evidence does not bind to intent")]
+    EvidenceBinding,
+}
+
+/// One observational capability with a closed intent/evidence contract.
+pub trait ReadCapabilityContract: Send + Sync + 'static {
+    /// Canonical intent passed to the trusted adapter.
+    type Intent: MfmValue;
+    /// Closed evidence returned by the trusted adapter.
+    type Evidence: MfmValue;
+
+    /// Returns the stable capability contract identity.
+    fn contract_id() -> Result<StableId>;
+
+    /// Proves that evidence answers the exact intent.
+    fn bind_evidence(intent: &Self::Intent, evidence: &Self::Evidence) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors_are_closed_and_redacted() {
+        assert_eq!(
+            CapabilityError::InvalidContract.to_string(),
+            "capability contract is invalid"
+        );
+        assert_eq!(
+            CapabilityError::EvidenceBinding.to_string(),
+            "capability evidence does not bind to intent"
+        );
+    }
+}

@@ -1,11 +1,11 @@
 # Known limitations
 
-- The admitted PostgreSQL durability profile covers primary crash/restart only. It makes no host
-  loss, failover, replica, quorum, or multi-primary claim.
-- Trusted Rust State implementations and adapters are inside the process trust base; untrusted
-  plugins require a separate process or enforceable sandbox.
-- Dropping a process-local owner before a conclusion is durable deliberately leaves only the
-  durable prefix. The design does not claim rollback resistance after every later head anchor is
-  lost.
-- The current product fixes one entry point, `mfm.portfolio/snapshot@1`. Transaction submission
-  remains unsupported until a future RFC defines durable transaction authority and an outbox.
+- PostgreSQL claims primary crash/restart durability only. It does not claim safe writable rollback,
+  host-loss failover, quorum, replica, or multi-primary authority.
+- Trusted Rust State implementations, assembly, and adapters are in the process trust base.
+- Runtime has caller-driven progression only; it owns no background scheduler or timeout policy.
+- The current product entry point is `mfm.portfolio/snapshot@1`.
+- EVM transaction submission remains unsupported until a future RFC defines durable transaction
+  authority and outbox semantics.
+- The standalone CLI exposes one-shot help/version metadata. The REST binary only prints an
+  unavailable diagnostic and exits; it binds no listener and exposes no route.

@@ -1,16 +1,16 @@
 # Portfolio snapshot
 
-Portfolio admission creates one typed `PortfolioSnapshotInput`. Pure expansion turns its ordered
-collection demand into a sequential Program. A Portfolio State constructs one complete EVM child
-context, including the declaration ordinal/correlation and its secret-free selected route identity.
-EVM work derives its completed prefix and active source from that context, preserves the complete
-context through the native/token Match, and requires a common checked anchor before it returns one
-collection result. Each bound Read intent carries that route identity, which the live adapter checks
-against the committed descriptor before provider entry. The fragment returns its opaque caller
-continuation unchanged, and a Portfolio Pure resume State appends exactly that result to the
-complete continuation.
+`plan_snapshot(selector, config, targets)` returns the checked Program and typed C0. Selector and
+configuration are checked process-local authoring inputs, not persisted generic configuration.
+Targets are strictly sorted/unique by chain ID and each selected target ref is retained in Program
+and C0.
 
-The final Pure consolidation owns declaration-order/binding realization validation, checked integer
-and decimal totals, quote selection, and frozen public output construction. A child failure maps to
-the terminal Portfolio failure contract and suppresses later normal work. No runtime collection
-loop, caller-supplied routes, output map, or multi-result product is persisted.
+For every source, the Program emits check-chain, initial-anchor, select-asset, native/token Match,
+balance reads, confirm-anchor, and consolidation occurrences. Occurrences repeat in the Program;
+typed State implementations and adapter callbacks register once. Up to 64 total sources are
+accepted; 65 are rejected.
+
+The cumulative context retains the complete admitted request, caller continuation, route identity,
+source order, and checked observations. Native and token branches rejoin one contract. Each child
+failure reaches one Portfolio failure mapper; later normal work is suppressed. Final Pure
+consolidation builds the frozen snapshot/report with checked decimal-string arithmetic.

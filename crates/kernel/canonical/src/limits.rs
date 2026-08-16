@@ -1,8 +1,8 @@
 //! Canonical JSON syntax bounds.
 //!
 //! These are the global grammar budgets every canonical decoder shares. Bounds
-//! that describe a domain rather than the syntax — batch sizes, portable
-//! framing, fact scans, provider payloads — belong to the owner that enforces
+//! that describe a domain rather than the syntax — frame sizes, run history,
+//! or provider payloads — belong to the owner that enforces
 //! them, not here.
 
 /// Maximum items in one canonical array.

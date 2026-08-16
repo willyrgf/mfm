@@ -2,15 +2,10 @@
 name = "mfm-store"
 version = "0.1.0"
 edition = "2021"
-autotests = false
-description = "Callback-free durable semantic Store for MFM"
+description = "Mechanical append-only Store for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
-
-[[test]]
-name = "api_contract"
-path = "tests/api_contract.rs"
 
 [package.metadata.mfm]
 layer = "kernel"
@@ -21,24 +16,12 @@ binary-facing = false
 name = "mfm_store"
 path = "src/lib.rs"
 
-[features]
-test-support = []
-backend-conformance = ["test-support"]
-
 [dependencies]
-mfm-canonical = { path = "../canonical" }
-mfm-capabilities = { path = "../capabilities" }
-mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
-mfm-program = { path = "../program" }
-mfm-values = { path = "../values" }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-mfm-program-derive = { path = "../program-derive" }
-serde = { workspace = true }
+mfm-canonical = { path = "../canonical" }
 tokio = { workspace = true }
-trybuild = "1.0"

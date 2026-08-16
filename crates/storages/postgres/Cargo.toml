@@ -15,19 +15,14 @@ binary-facing = false
 name = "mfm_storage_postgres"
 path = "src/lib.rs"
 
-[features]
-parity-tests = ["mfm-store/backend-conformance"]
-test-support = ["mfm-store/backend-conformance"]
-
 [dependencies]
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-journal = { path = "../../kernel/journal" }
 mfm-store = { path = "../../kernel/store" }
-serde = { workspace = true }
-serde_json = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

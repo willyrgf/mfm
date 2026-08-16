@@ -105,7 +105,7 @@ in
       run = [ "cargo" "test" "--workspace" "--all-targets" ];
     };
     postgres-test = (cargoLeaf {
-      run = [ "cargo" "test" "-p" "mfm-storage-postgres" "--features" "test-support" "--all-targets" ];
+      run = [ "cargo" "test" "-p" "mfm-storage-postgres" "--lib" "--" "--include-ignored" ];
       env = {
         DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
       };
@@ -121,20 +121,17 @@ in
     };
     capacity-app = cargoLeaf {
       run = [
-        "cargo" "test" "-p" "mfm-app" "maximum_portfolio_program_records_capacity_envelope" "--"
-        "--nocapture"
+        "cargo" "test" "-p" "mfm-evm" "-p" "mfm-portfolio" "-p" "mfm-app" "--all-targets" "--" "--nocapture"
       ];
     };
     capacity-runtime = cargoLeaf {
       run = [
-        "cargo" "test" "-p" "mfm-runtime" "pure_session_advances_through_runtime_and_store" "--"
-        "--nocapture"
+        "cargo" "test" "-p" "mfm-runtime" "--test" "runtime_contract" "--" "--nocapture"
       ];
     };
     capacity-store = cargoLeaf {
       run = [
-        "cargo" "test" "-p" "mfm-store"
-        "configuration_capacity_accepts_each_exact_bound_and_rejects_plus_one" "--" "--nocapture"
+        "cargo" "test" "-p" "mfm-store" "-p" "mfm-journal" "--all-targets" "--" "--nocapture"
       ];
     };
     capacity-envelope = {
