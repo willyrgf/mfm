@@ -3,37 +3,44 @@
 Status: deferred; requires rebase after the core proof-path cutover
 
 Relationship: this RFC now follows `RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`, which must be
-implemented first. That core RFC owns typed Runtime entry and progression, `ProvenValue`, the exact
-`RegisteredState.start` registry, Runtime reduction and `RunView`/`RunError`, acknowledgement
-custody, Journal qualification, mechanical Store persistence, facts, configuration, and replay
-inspection.
-Former Sections 5.2--5.8 and 10.2--10.3 of this document have moved there. This RFC retains later
-work on reusable Operation authoring, deterministic capability-owned authoring-time State
-injection, generic Application entry points, thin transports, and expressive domain contract
-types.
+implemented first. That core RFC owns typed Runtime entry/progression, the exact assembly/State
+boundary, the sole reducer and RunView/RuntimeError, Journal qualification, mechanical Store
+persistence, exact Program root success/failure contracts, and ordinary common State failure
+continuations. It deletes acknowledgement custody, facts, independently published configuration,
+portable inspection, and replay instead of leaving those responsibilities here.
+
+This RFC retains only later work on reusable Operation authoring, deterministic capability-owned
+authoring-time State injection, generic Application entry points, thin transports, and expressive
+domain contract types.
 
 In this RFC, capability injection means only deterministic authoring/composition-time pre/post
-State expansion. It never means Runtime capability driving, intent/evidence/fact codec ownership,
+State expansion. It never means Runtime capability driving, intent/evidence codec ownership,
 provider execution, or occurrence adapter association; the core RFC owns those Runtime and
 assembly responsibilities exclusively.
 
 This document is not an implementation input until it is rebased on the completed core contract.
-In particular, its State-only Program/address/failure-continuation proposal currently conflicts
-with the core RFC's retained `State | Match` algebra. The later rebase must either lower
-`OperationExpansion` into that retained algebra or present and ratify a separate complete Program
-format cutover; it may not silently override the core while both RFCs are pending.
+Its State-only Program, ordinal-address, bounded-reservation, FailureNext::ByVariant, configuration,
+fact, replay, acknowledgement-owner, and App-owned admission-identity text is superseded now. The
+rebase must lower OperationExpansion into the retained State-or-Match declarations and their
+optional success/common-failure successors. A real future need for variant failure routing lowers
+through an ordinary Pure router State plus retained Match; it does not add another persisted route
+kind.
 
-The current draft explores a State-only lowering for `OperationExpansion`, but that persisted
-Program proposal is non-authoritative until the Material uncertainty below is resolved. The later
-authoring contract continues to preserve complete cumulative contexts, typed capability
-intent/evidence, provider-entry safety, content identity, and callback-free inspection. Operations
-remain authoring-only and never enter persisted formats or replay.
+The later authoring contract continues to preserve complete cumulative contexts, typed Read
+intent/evidence, exact binding association, content identity, and inspection free of authoring or
+live-IO callbacks. Cold proof may invoke only the core-pre-resolved pure qualification/projection
+relations such as C::bind_evidence and Match projection. Operations remain authoring-only and never
+enter persisted formats.
 
 After rebase, this RFC may supersede manual Program construction, the fixed EVM/Portfolio App
 facade, and numeric domain markers. It cannot supersede or restate the selected core's ownership,
-proof, lifecycle, Store, identity, acknowledgement, fact, configuration, or replay contracts. If a
-separate Program-format cutover is ratified, it updates the one Runtime reducer and Journal
-occurrence codec in place in the same cutover; it creates no alternate owner or parallel path.
+proof, lifecycle, Store, identity, completion, or deletion contracts, and it does not reopen the
+selected Program format.
+
+It also inherits the core RFC's unresolved EVM-submission scope. If deferral is selected, this
+follow-up authors only surviving entry points and must not revive nonce/broadcast types. If
+submission remains required, this follow-up waits for the prerequisite durable transaction-authority
+RFC and cannot use the superseded nonce-only flow.
 
 ---
 
@@ -41,29 +48,32 @@ occurrence codec in place in the same cutover; it creates no alternate owner or 
 
 MFM will add two reusable paths and consume one core-owned path:
 
-1. `OperationExpansion` is the only Program-authoring and State-setup path. Its small sequence DSL
-   accepts child Operations and State occurrences in semantic order, connects lexical success, and
-   lowers one typed failure policy. During authoring-time Access State setup, the exact capability
+1. After rebase, `OperationExpansion` is the only Program-authoring and State-setup path. Its small
+   sequence DSL accepts child Operations and State occurrences in semantic order, connects lexical
+   success, and lowers typed failure policy into the core's existing common State failure successor
+   and retained State-or-Match graph. During authoring-time capability-backed State setup, the exact capability
    may inject ordinary States before and after that occurrence.
 2. Runtime behavior is inherited exclusively from `RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`.
-   This RFC adds no value-proof family, registry, reducer, progression loop, `RunView`, `RunError`,
-   acknowledgement policy, Store semantic path, or replay reducer. Its Application and authoring
+   This RFC adds no value-proof family, registry, reducer, progression loop, `RunView`,
+   `RuntimeError`,
+   completion policy, Store semantic path, or replay reducer. Its Application and authoring
    work consumes the core's high-level start/resume/read contract and exact registered-State
    boundary.
 3. `ApplicationBuilder::entry_point` is the only public entry-point registration path. Each
-   registration combines a strict typed request, the core-selected exact typed root-configuration
-   acquisition, typed domain bindings, `C0` construction, and the same `[Operations + States]`
-   sequence DSL. Private type erasure occurs only after typed registration.
+   registration combines a strict typed request, deterministic Program and `C0` authoring, typed
+   domain bindings, and the same `[Operations + States]` sequence DSL. Invocation forwards the
+   caller-supplied explicit RunId required by the core. Private type erasure occurs only after typed
+   registration.
 
 CLI and HTTP consume the same Application request/response contract. They parse and render
-transport data and invoke entry points; they do not plan Programs, select domain configuration or
-bindings, drive States, retain suspended owners, open Store mutation, or install adapters.
+transport data and invoke entry points; they do not plan Programs, select domain bindings, drive
+States, retain suspended owners, open Store mutation, or install adapters.
 
 Numeric domain markers are deleted. EVM capabilities and EVM/Portfolio States use semantic Rust
 types while preserving stable contract IDs wherever the semantic contract is unchanged. New or
 consolidated States receive new IDs and never reuse retired IDs. Source-level renaming alone must
-not change a stable identity. Canonical Program/address changes described by the State-only
-candidate occur only if the later rebase separately approves that persisted-format cutover.
+not change a stable identity. The superseded State-only candidate does not reopen the core Program
+bytes or control-index contract.
 
 The cutover must fundamentally reduce complexity and increase reuse rather than relocate
 coordination. The final tree must have fewer concepts, duplicated code paths, public lifecycle and
@@ -75,38 +85,26 @@ count.
 
 ## Material uncertainties
 
-1. **Final Operation lowering target.** The current body assumes a State-only Program with
-   ordinal-only addresses and State-owned failure continuations, while the selected core proof-path
-   RFC deliberately retains `State | Match`. That makes the authoring format, persisted addresses,
-   Program schema identity/version, reducer inputs, fixtures, and several acceptance tests
-   uncertain. Implementing the current text would reopen the core immediately after its cutover.
-   Resolve after the core lands by rebasing
-   `OperationExpansion` onto the retained algebra or by approving a separate complete Program
-   contract replacement with its own migration/deletion scope.
+1. **Failure-policy authoring API.** The lowering target is fixed, but the smallest typed DSL for
+   common handlers, Never/impossible branches, and successful recovery rejoin has not been selected.
+   If chosen poorly it can add generic/type-state machinery without changing persisted behavior.
+   Resolve by prototyping the current Portfolio mapper plus one infallible State against the retained
+   State-or-Match builder, then keep the smallest API that expresses both.
 
-2. **Inherited admission identity shape.** The core RFC still requires product ratification of its
-   global `RunId` repetition/idempotency rule. Whether invocation must receive an explicit `RunId`
-   or another resolved admission-identity input changes the public `Application::invoke`
-   parameters. A same-`RunId` retry after configuration or authoring changes must also either recover
-   the original admission inputs or deliberately classify a different genesis as conflict. This RFC
-   therefore leaves that parameter schematic. Resolve the core choice first, then rebase this RFC so
-   Application and both transports forward exactly that contract without an App-owned identity
-   policy.
+2. **Application terminal typing.** Core RunView intentionally carries dynamic retained root values.
+   This follow-up has not selected whether a registered entry point privately decodes exact Output
+   and Failure for its response mapper or exposes the dynamic view unchanged. The wrong choice
+   changes public entry-point and transport response types. Resolve with the intended generic client
+   contract before planning this deferred RFC.
 
-3. **Inherited configuration currentness.** The core RFC has not yet ratified whether admission may
-   use an explicitly selected immutable `ConfigurationRef` or must prove the matching configuration
-   is latest when admission commits. The former permits a long-lived registered
-   `ProvenConfiguration<C>`; the latter requires invocation to capture/reload a
-   `ConfigurationHead` and join its precondition to a new admission. Either branch must preserve the
-   original immutable revision when the resolved RunId policy treats a call as retry of an existing
-   admission. The core must also ratify whether latest series are global per contract or use its
-   recommended explicit `ConfigurationInstanceId`; generic entry-point registration must carry that
-   instance when required. Resolve the core choices together, then rebase entry-point registration
-   and invocation to carry exactly that proof without an App-owned freshness rule.
+3. **Inherited EVM entry-point scope.** The core RFC recommends retiring EVM transaction submission
+   but still requires product-owner confirmation. If deferral is approved, this RFC must delete its
+   submission Operation examples during rebase; if submission remains required, authoring work
+   waits for the separate durable transaction-authority RFC. Resolve together with the core choice.
 
-All Runtime/Journal/Store choices formerly listed here are no longer choices in this RFC. It
-inherits the core RFC's ownership, exact registry, progression, acknowledgement,
-`RunView`/`RunError`, fact, configuration, identity, and replay contracts without variation.
+All Runtime/Journal/Store/Program-format choices are fixed by the core RFC. Explicit RunId replaces
+App-owned identity; independently published configuration, facts, portability, replay, and
+acknowledgement custody are deleted rather than inherited choices.
 
 ## 1. Goals and constraints
 
@@ -133,22 +131,21 @@ The architectural test is:
 The runtime refactor established the correct durable and execution boundaries:
 
 - every State has explicit complete input, output, and failure contracts;
-- every selected run path is deterministic, sequential, and fail-fast;
-- capability intent, evidence, Read/Effect mode, fact behavior, and provider-entry discipline are
-  explicit;
+- every selected run path is deterministic, sequential, and follows exact retained success/failure
+  continuations to an exact root result;
+- Read capability intent, evidence, and exact binding association are explicit;
 - strict Program decoding plus exact Runtime assembly association remain the type/contract trust
   boundary;
-- each successful State conclusion is durable before its successor context advances;
-- Store append atomicity and content addressing remain unchanged; and
-- Runtime, Store, import, audit, and replay never invoke authoring callbacks.
+- Program retains exact admitted-context, root-success, and root-failure contracts;
+- each State conclusion is durable before any success or failure successor advances;
+- Store append atomicity and content addressing remain core-owned; and
+- Runtime start/resume/read never invoke Operation authoring callbacks.
 
-The current State-only candidate would additionally establish these persisted contracts, but they
-are non-authoritative until the Material uncertainty is resolved:
+The following State-only candidate claims are superseded and must be deleted during rebase:
 
 - the Program contains only canonically ordered ordinary `State` declarations;
 - each declaration owns its fixed success continuation and terminal, common, or exhaustive
   variant-selected failure continuation;
-- the Program retains exact root input, terminal success, and terminal failure contracts; and
 - State occurrences use ordinal-only `StateAddress` in Program and Journal occurrence payloads
   consumed by Runtime inspection; Store remains opaque to that address.
 
@@ -221,20 +218,27 @@ is consolidation or deletion.
 
 | Component | Owns | Does not own |
 | --- | --- | --- |
-| Domain Operation | Exact Input/Output/unhandled-Failure contracts, ordered reusable child Operations and States, domain context transitions, and typed construction helpers | Runtime execution, final addresses, or transport decoding |
-| `OperationExpansion` | The only recursion/flattening path, lexical success and typed failure-policy lowering, State setup, deterministic authoring-time capability injection, contract continuity, bounds, addresses, final State-declaration transitions, and Program construction | Domain semantics, provider IO, Runtime capability driving, occurrence adapter association, or persisted expansion metadata |
-| State | One reusable domain transition with complete input, output, and failure contracts | Expansion, final addresses, final continuations, or awareness that it was injected |
+| Domain Operation | Exact Input/Output/unhandled-Failure contracts, ordered reusable child Operations and States, domain context transitions, and typed construction helpers | Runtime execution, final declaration indices/control lowering, or transport decoding |
+| `OperationExpansion` | The only recursion/flattening path, lexical success and typed failure-policy lowering, State setup, deterministic authoring-time capability injection, contract continuity, bounds, deterministic declaration order/private successor-index lowering, final State-declaration transitions, and Program construction | Domain semantics, provider IO, Runtime capability driving, occurrence adapter association, or persisted expansion metadata |
+| State | One reusable domain transition with complete input, output, and failure contracts | Expansion, final declaration indices, final continuations, or awareness that it was injected |
 | Final State declaration | One occurrence's immutable execution data and fixed success/failure transitions | Domain behavior or authoring callbacks |
-| Access capability | Intent/evidence/mode/fact discipline and deterministic authoring-time pre/post State injection | Address assignment, scheduling, Runtime capability driving or codec qualification, provider execution, or occurrence adapter association |
-| Adapter/binding | Exact provider implementation and immutable association for one Access occurrence | Operation composition or entry-point dispatch |
-| Trusted composition | Explicit Runtime assembly contributions, mechanical Store, live adapters, resolved configurations, and configured entry-point registration | Transport request handling |
+| Read capability | Intent/evidence discipline and deterministic authoring-time pre/post State injection | Declaration-index assignment, scheduling, Runtime capability driving or codec qualification, provider execution, or adapter association |
+| Adapter/binding | Immutable provider/target association selected by exact Read declarations | Operation composition or entry-point dispatch |
+| Trusted composition | Explicit Runtime assembly contributions, mechanical Store, live adapters, process-local authoring inputs, and configured entry-point registration | Transport request handling |
 | `ApplicationBuilder` | Entry-point registration, validation, and private heterogeneous dispatch construction | Domain-specific global registries or Runtime stepping |
-| `Application` | Strict public input, entry-point lookup, Runtime invocation, core-owned `RunView`/`RunError` pass-through, narrow pre-admission `InvokeError`, and read-only public queries | Domain sequencing, Store mutation, Runtime lifecycle-step coordination, or an App-owned run status/terminal/error projection |
-| Runtime | The core RFC's exact registered-State binding, sole reducer/value conversion, typed execution, admission, bounded advancement, private acknowledgement custody, `RunView`, `RunError`, and cold recovery | Operation authoring, transport concerns, public lifecycle custody, or background scheduling |
-| Runtime inspection | Callback-free State success/failure routing, run status, result, trace, audit, and export derivation through the core reducer | Live State/adapter/provider invocation |
+| `Application` | Strict public input, entry-point lookup, Runtime invocation, core-owned `RunView`/`RuntimeError` pass-through, narrow pre-admission `InvokeError`, and read-only public queries | Domain sequencing, Store mutation, Runtime lifecycle-step coordination, or an App-owned run status/terminal/error projection |
+| Runtime | The core RFC's exact registered-State binding, sole reducer/value conversion, typed execution, admission, graph-bounded advancement, `RunView`, `RuntimeError`, and cold recovery | Operation authoring, transport concerns, pending-result custody, or background scheduling |
+| Runtime inspection | Authoring/live-IO-free State success/failure routing and Store-backed RunView derivation through the core's pre-resolved pure qualifiers | Live State/adapter/provider invocation or a second portable/replay ingress |
 | CLI/HTTP | Transport parsing, invocation, status mapping, and rendering | Catalogs, configs, bindings, adapters, expanders, or Runtime internals |
 
 ## 4. Problem group A: fragmented Program authoring
+
+> **Archival boundary:** Sections 4 through 14 are non-authoritative rebase source only. Their
+> State-only Program, FailureNext::ByVariant, reservation, configuration, fact, replay,
+> acknowledgement-custody, identity, EVM submission/nonce, generic Effect/preparation,
+> binding-descriptor, and admission contracts must not be implemented. Before this follow-up returns
+> to planning, those sections must be rewritten against the selected core; their imperative wording
+> and acceptance criteria are inactive.
 
 ### 4.1 Problem situation
 
@@ -276,7 +280,7 @@ An Operation is an authoring-only sequence with three exact nominal contracts:
 Operation {
   Input: MfmValue
   Output: MfmValue
-  Failure: FailureValue
+  Failure: MfmValue
   expand(&mut OperationExpansion<Input, Output, Failure>)
 }
 ```
@@ -547,7 +551,7 @@ FailureNext = Terminal | State(address) | ByVariant { stable_tag -> Next }
 ```
 
 The failure contract and `on_failure` are non-optional because every `State::Failure` is an exact
-`FailureValue`. Terminality is represented only by `Next::Terminal`; the old parallel
+`MfmValue`. Terminality is represented only by `Next::Terminal`; the old parallel
 `terminal` flag and optional next/failure fields are deleted.
 
 Successful closed-sum interpretation is domain behavior. A producing State carries the complete
@@ -856,7 +860,7 @@ entry_point<Request, Configuration, C0, Output, Failure>(
 ```
 
 `Request`, `C0`, and `Output` use their exact registered `MfmValue` contracts;
-`Configuration: MfmConfig`; and `Failure: FailureValue`. The request contract is an ingress type,
+`Configuration: MfmConfig`; and `Failure: MfmValue`. The request contract is an ingress type,
 not necessarily a State context or retained Program root. The returned source set is the core's
 candidate admitted-source input; Runtime alone constructs or rejects the core's bounded,
 sorted-unique admitted-source proof during start.
@@ -1700,7 +1704,7 @@ final complete tree; do not immediately precede it with redundant `.#check`, `.#
 
 For RFC-only edits, validate repository links and claims and run `git diff --check`.
 
-## 13. Logical implementation sequence
+## 13. Archival draft implementation sequence (inactive)
 
 No code in this RFC begins until `RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md` is implemented and all
 of its acceptance criteria pass. The core's commits, tests, and deletions are not repeated here.
@@ -1741,11 +1745,11 @@ The final report includes the complexity/reuse, LOC, public-surface, dependency,
 audit. No commit adds a second reducer, registry, run view, acknowledgement policy, Store semantic
 path, replay path, or compatibility facade beside the completed core.
 
-## 14. Acceptance criteria
+## 14. Archival draft acceptance criteria (inactive)
 
-Sections 14.2, 14.5, and 14.6 contain draft criteria for the State-only candidate. They are not
-active acceptance criteria and must be replaced by the rebase commit. Sections 14.1, 14.3, and
-14.4 remain directionally binding.
+No criterion in this section is active or directionally binding. The rebase must replace the whole
+section rather than selecting clauses from the superseded State-only/configuration/fact/lifecycle
+proposal.
 
 ### 14.1 Simplicity and reuse
 
