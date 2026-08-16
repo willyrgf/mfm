@@ -1,6 +1,10 @@
 # Required RFC fixes: implementation handoff
 
-Status: approved target design, ready for implementation.
+Status: superseded by `RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`; archival only, not implementation
+input.
+
+The selected core target replaces this handoff. Its fixes and commit sequence must not be merged
+into the new implementation plan.
 
 This document is the implementation plan for the five remaining acceptance gaps in
 `RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`. It replaces the earlier issue inventory. The engineer

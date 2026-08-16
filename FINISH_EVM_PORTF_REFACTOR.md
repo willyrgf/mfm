@@ -1,8 +1,8 @@
 # Finish the EVM and Portfolio single-trust-boundary refactor
 
-Status: implementation plan. This document does not change the normative RFC or its original
-implementation plan. It records the corrective work required before their completion can be
-claimed.
+Status: superseded by `RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`; archival only, not implementation
+input. Its corrective sequence belongs to the prior target and must not be combined with the new
+core plan.
 
 Baseline: `bc103f891a9576bba98b18adc437ad6f201fc9e0`.
 

@@ -1,5 +1,9 @@
 # Single trust-boundary cutover manifest
 
+Status: superseded by `RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`; archival only, not implementation
+or negative-scan input for the selected cutover. The new implementation plan must replace or delete
+this prior-target manifest rather than extend it.
+
 This is the path-scoped deletion manifest for the incompatible cutover described by the RFC and
 implementation plan. The scanner itself excludes this file, the RFC, and the implementation plan.
 Every other match is either deleted by the owning commit or explicitly allowed by the final audit.

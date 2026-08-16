@@ -1,8 +1,11 @@
 2026-08-12 — implementation record
 
-The RFC and implementation plan are immutable normative inputs. The cutover manifest is the
-literal deletion inventory; this file records implementation progress and unresolved risks without
-duplicating deleted protocol names.
+Status: superseded by `RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`; archival progress record only,
+not a normative input or implementation handoff for the selected cutover.
+
+For that superseded effort, the prior RFC and implementation plan were treated as immutable inputs
+and its cutover manifest was the literal deletion inventory. This file records only historical
+implementation progress and unresolved risks.
 
 The preflight commit recorded the two supported entry-point capability inventory, immutable
 binding inventory, context ownership table, outer capacity envelope, durability profile, scope/

@@ -1,11 +1,11 @@
 # Implementation plan: refactor MFM to a single byte-ingress trust boundary
 
-Status: implementation handoff; U1-U11 rulings are settled and implementation is blocked only by
-the three bounded proofs in
-[Material uncertainties and preflight gates](#material-uncertainties-and-preflight-gates)
+Status: superseded by `RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`; archival only, not implementation
+input
 
-Normative architecture:
-[`RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`](RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md)
+This plan describes the superseded architecture and must not be combined with the selected core
+target. A new implementation plan must be derived from
+[`RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`](RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md).
 
 Audience: engineer-agent implementing the complete MFM platform cutover
 

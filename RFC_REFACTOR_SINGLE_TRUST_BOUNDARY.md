@@ -1,11 +1,11 @@
 # RFC: refactor to a single byte-ingress trust boundary
 
-Status: accepted platform target; implementation pending three bounded preflight proofs
+Status: superseded by `RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`; archival only
 
-Relationship: this RFC supersedes `rfc_single_trust_boundary.md` and is the normative architecture
-for the complete MFM platform cutover. Current code and authoritative docs describe the
-implementation being replaced where they conflict with this target. Implementation must leave one
-current contract and no compatibility paths.
+Relationship: this RFC records the prior target and is not implementation-planning input. The
+selected normative cutover is `RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`, which deliberately
+replaces this document's ownership, persistence, lifecycle, identity, configuration, fact, and
+replay decisions. No compatibility path between the two targets is permitted.
 
 ---
 
