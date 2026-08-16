@@ -1,5 +1,8 @@
 # Cumulative-context ABI proof
 
+Status: superseded one-time pre-cutover artifact. Retained only through the first cutover commit;
+it is not current product authority.
+
 This is the checked-in U8/U11 artifact. Every row names one complete typed value crossing a State
 boundary. Runtime and Store preserve the nominal contract/content identity; they do not assemble,
 split, reorder, or interpret domain fields.

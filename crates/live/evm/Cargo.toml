@@ -24,8 +24,6 @@ mfm-ids = { path = "../../kernel/ids" }
 mfm-portfolio = { path = "../../domains/portfolio" }
 mfm-program = { path = "../../kernel/program" }
 mfm-runtime = { path = "../../kernel/runtime" }
-mfm-signing = { path = "../../signing" }
-mfm-storage-evm-postgres = { path = "../../storages/evm-postgres" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

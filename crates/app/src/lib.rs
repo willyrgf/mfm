@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Fixed-tenant admission orchestration for the two supported domain entry points.
+//! Fixed-tenant admission orchestration for the supported Portfolio entry point.
 //!
 //! App parses bounded public selectors, invokes the domain planners, qualifies their exact final
 //! Program and `C0`, and delegates every mutation to one mandatory catalog-wide Runtime. It owns
@@ -10,10 +10,8 @@ use std::sync::Mutex;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_evm::{
-    plan_submission, submission_closure_documents, EvmBalanceAsset, EvmBalanceBindings,
-    EvmBalanceCollectionCompletion, EvmBalanceContext, EvmBalanceFailure, EvmCapability, EvmConfig,
-    EvmSubmissionBindings, EvmSubmissionFailure, EvmSubmissionOutput, EvmSubmissionProgress,
-    EvmSubmissionRequest, EvmSubmissionSelector, EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID,
+    EvmBalanceAsset, EvmBalanceBindings, EvmBalanceCollectionCompletion, EvmBalanceContext,
+    EvmBalanceFailure, EvmCapability,
 };
 use mfm_ids::{DigestAlgorithm, RunId, StableId, TenantScopeId};
 use mfm_journal::single_trust::{RunFrame, RunRecord};
@@ -248,49 +246,32 @@ pub struct Application {
     runtime: Runtime,
     portfolio_configuration: PortfolioConfig,
     portfolio_configuration_head: ResolvedConfigurationHead,
-    evm_configuration: EvmConfig,
-    evm_configuration_head: ResolvedConfigurationHead,
-    submission_bindings: Vec<EvmSubmissionBindings>,
     balance_bindings: Vec<EvmBalanceBindings>,
     suspended: Mutex<BTreeMap<RunId, Box<SuspendedRun>>>,
 }
 
 impl Application {
     /// Composes one complete fixed-tenant facade from a mandatory live Runtime and typed config.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         reader: HistoryReader,
         configuration: ConfigurationStore,
         audit: StoreAuditPort,
         runtime: Runtime,
         portfolio_configuration: ResolvedConfiguration<PortfolioConfig>,
-        evm_configuration: ResolvedConfiguration<EvmConfig>,
-        submission_bindings: Vec<EvmSubmissionBindings>,
         balance_bindings: Vec<EvmBalanceBindings>,
     ) -> Result<Self> {
         if reader.identity() != runtime.store_identity()
             || configuration.identity() != runtime.store_identity()
             || audit.identity() != runtime.store_identity()
             || !configuration.owns_head(portfolio_configuration.head())
-            || !configuration.owns_head(evm_configuration.head())
             || !runtime.accepts_configuration_head(portfolio_configuration.head())
-            || !runtime.accepts_configuration_head(evm_configuration.head())
-            || submission_bindings.is_empty()
             || balance_bindings.is_empty()
         {
             return Err(PublicError::Internal);
         }
         let portfolio_value = portfolio_configuration.value().clone();
         let portfolio_head = portfolio_configuration.into_head();
-        let evm_value = evm_configuration.value().clone();
-        let evm_head = evm_configuration.into_head();
-        validate_runtime_closure(
-            &runtime,
-            &portfolio_value,
-            &evm_value,
-            &submission_bindings,
-            &balance_bindings,
-        )?;
+        validate_runtime_closure(&runtime, &portfolio_value, &balance_bindings)?;
         Ok(Self {
             tenant_scope_id: runtime.store_identity().tenant().clone(),
             reader,
@@ -299,9 +280,6 @@ impl Application {
             runtime,
             portfolio_configuration: portfolio_value,
             portfolio_configuration_head: portfolio_head,
-            evm_configuration: evm_value,
-            evm_configuration_head: evm_head,
-            submission_bindings,
             balance_bindings,
             suspended: Mutex::new(BTreeMap::new()),
         })
@@ -326,24 +304,6 @@ impl Application {
                     input,
                     document,
                     self.portfolio_configuration_head.clone(),
-                    source_refs,
-                )
-                .await;
-        }
-        if request.entry_point_id.as_str() == EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID {
-            let selector: EvmSubmissionSelector =
-                serde_json::from_value(request.selector.clone()).map_err(admission_invalid)?;
-            let plan =
-                plan_submission(selector, &self.evm_configuration, &self.submission_bindings)
-                    .map_err(|_| admission_invalid(()))?;
-            let (input, document, source_refs) = plan.into_parts();
-            return self
-                .admit_planned(
-                    request.entry_point_id,
-                    request.selector,
-                    input,
-                    document,
-                    self.evm_configuration_head.clone(),
                     source_refs,
                 )
                 .await;
@@ -580,11 +540,12 @@ impl Application {
     }
 }
 
-/// Builds the exact catalog required by the two current domain entry points.
+/// Builds the exact catalog required by the current Portfolio entry point.
 pub fn application_catalog() -> Result<ProgramCatalog> {
     let mut builder = ProgramCatalog::builder();
     register_catalog_values(&mut builder)?;
-    let root = nominal_contract_ref::<EvmSubmissionRequest>().map_err(|_| PublicError::Internal)?;
+    let root =
+        nominal_contract_ref::<PortfolioSnapshotInput>().map_err(|_| PublicError::Internal)?;
     let placeholder = ProgramDocument::new(
         StableId::new("mfm.application-catalog@1").map_err(|_| PublicError::Internal)?,
         root.clone(),
@@ -606,10 +567,6 @@ fn register_catalog_values(builder: &mut ProgramCatalogBuilder) -> Result<()> {
                 .map_err(|_| PublicError::Internal)?
         };
     }
-    value!(EvmSubmissionRequest);
-    value!(EvmSubmissionProgress);
-    value!(EvmSubmissionOutput);
-    value!(EvmSubmissionFailure);
     value!(EvmBalanceContext<PortfolioContinuation>);
     value!(EvmBalanceAsset<PortfolioContinuation>);
     value!(EvmBalanceFailure);
@@ -619,16 +576,7 @@ fn register_catalog_values(builder: &mut ProgramCatalogBuilder) -> Result<()> {
     value!(PortfolioSnapshotOutput);
     value!(PortfolioSnapshotFailure);
     builder
-        .register_capability::<EvmCapability<0>>()
-        .map_err(|_| PublicError::Internal)?;
-    builder
-        .register_capability::<EvmCapability<1>>()
-        .map_err(|_| PublicError::Internal)?;
-    builder
         .register_capability::<EvmCapability<2>>()
-        .map_err(|_| PublicError::Internal)?;
-    builder
-        .register_capability::<EvmCapability<3>>()
         .map_err(|_| PublicError::Internal)?;
     builder
         .register_capability::<EvmCapability<6>>()
@@ -642,8 +590,6 @@ fn register_catalog_values(builder: &mut ProgramCatalogBuilder) -> Result<()> {
 fn validate_runtime_closure(
     runtime: &Runtime,
     portfolio: &PortfolioConfig,
-    evm: &EvmConfig,
-    submission_bindings: &[EvmSubmissionBindings],
     balance_bindings: &[EvmBalanceBindings],
 ) -> Result<()> {
     let catalog = runtime.catalog();
@@ -655,16 +601,6 @@ fn validate_runtime_closure(
     runtime
         .validate_program(&program)
         .map_err(|_| PublicError::Internal)?;
-    for document in
-        submission_closure_documents(evm, submission_bindings).map_err(|_| PublicError::Internal)?
-    {
-        let program = catalog
-            .program(document)
-            .map_err(|_| PublicError::Internal)?;
-        runtime
-            .validate_program(&program)
-            .map_err(|_| PublicError::Internal)?;
-    }
     Ok(())
 }
 

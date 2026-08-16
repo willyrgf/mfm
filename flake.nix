@@ -52,7 +52,9 @@
           rustToolchain
           pkgs.cargo-nextest
           pkgs.git
+          pkgs.jq
           pkgs.pkg-config
+          pkgs.ripgrep
           pkgs.stdenv.cc
           (mkSqlxCli system)
         ]

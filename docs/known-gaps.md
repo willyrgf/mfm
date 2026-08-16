@@ -7,5 +7,5 @@
 - Dropping a process-local owner before a conclusion is durable deliberately leaves only the
   durable prefix. The design does not claim rollback resistance after every later head anchor is
   lost.
-- The current product fixes the two entry points `mfm.portfolio/snapshot@1` and
-  `mfm.evm/submit-transaction@1`. Additional workflows require a new design decision.
+- The current product fixes one entry point, `mfm.portfolio/snapshot@1`. Transaction submission
+  remains unsupported until a future RFC defines durable transaction authority and an outbox.

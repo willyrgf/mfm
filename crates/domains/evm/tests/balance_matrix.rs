@@ -313,7 +313,7 @@ fn canonical(value: &Value) -> String {
 fn native_and_token_paths_have_the_exact_stage_order_and_preserve_match_payload() {
     let context = initial_context(None);
     let intent = prepare::<Check, EvmCapability<2>>(&context).expect("chain intent");
-    assert_eq!(intent.route_ref(), Some(&route_ref()));
+    assert_eq!(intent.route_ref(), &route_ref());
     let context = success(interpret::<Check, EvmCapability<2>>(
         context,
         &returned(&intent, EvmReadValue::ChainId(1)),

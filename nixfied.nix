@@ -121,7 +121,7 @@ in
     };
     capacity-app = cargoLeaf {
       run = [
-        "cargo" "test" "-p" "mfm-app" "maximum_entry_point_programs_record_capacity_envelope" "--"
+        "cargo" "test" "-p" "mfm-app" "maximum_portfolio_program_records_capacity_envelope" "--"
         "--nocapture"
       ];
     };

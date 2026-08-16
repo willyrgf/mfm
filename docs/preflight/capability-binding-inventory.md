@@ -1,5 +1,8 @@
 # Capability and binding inventory
 
+Status: superseded one-time pre-cutover artifact. Retained only through the first cutover commit;
+it is not current product authority.
+
 This is the checked-in U3/U5 preflight artifact for the two admitted entry points. It records the
 provider assertion boundary, the finite evidence algebra, and the immutable binding material that
 can survive in durable history. No secret, credential, raw provider payload, or freshness lineage

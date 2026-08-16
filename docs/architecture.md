@@ -95,8 +95,8 @@ cold resume then consume the retained Program document, never a current-code rep
 
 ### Adapters
 
-Adapters own clients, protocol authentication, stable-key transmission, nonce/signing mechanics,
-and raw response disposal. They return only bounded capability evidence or an unresolved result.
+Adapters own clients, protocol authentication, stable-key transmission, and raw response disposal.
+They return only bounded capability evidence or an unresolved result.
 An integrity-blocked Access result consumes a capability-certified route whose typed failure is
 contract-fixed and callback-free; it cannot mint a successor context, retry authority, or fact
 publication.
@@ -104,15 +104,15 @@ publication.
 ### App and storage
 
 App exposes a fixed-tenant admission facade with one mandatory Runtime. It validates the finite
-Portfolio/EVM configuration and exact binding closure, dispatches typed selectors to domain
-planners, and never authors Programs or appends through a Store fallback. Storage reports
+Portfolio configuration and exact EVM balance Read binding closure, dispatches the typed Portfolio
+selector to its domain planner, and never authors Programs or appends through a Store fallback. Storage reports
 mechanical dispositions and admitted durability; it does not rerun Program semantics. PostgreSQL
 scope and writer epoch are immutable append preconditions, not process locks. The database records
 the active deployment identity; a trusted restore explicitly rotates it, making already-open
 old-identity handles fail closed while preserving same-identity multiple opens.
 
 Trusted App composition receives read, configuration, audit, and Runtime-owned mutation capability
-from one exact opening. Both resolved configuration heads and every selected route must validate
+from one exact opening. The resolved configuration head and every selected route must validate
 against that one Runtime assembly. Equal persisted identity and catalog metadata establish
 composition compatibility but never transpose selected owners.
 

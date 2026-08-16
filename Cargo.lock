@@ -727,7 +727,6 @@ dependencies = [
  "mfm-program",
  "mfm-replay",
  "mfm-runtime",
- "mfm-signing",
  "mfm-store",
  "mfm-values",
  "serde",
@@ -788,8 +787,6 @@ dependencies = [
  "mfm-portfolio",
  "mfm-program",
  "mfm-runtime",
- "mfm-signing",
- "mfm-storage-evm-postgres",
  "serde",
  "serde_json",
  "thiserror",
@@ -930,15 +927,6 @@ version = "0.1.0"
 dependencies = [
  "mfm-ids",
  "serde",
- "thiserror",
-]
-
-[[package]]
-name = "mfm-storage-evm-postgres"
-version = "0.1.0"
-dependencies = [
- "mfm-ids",
- "sqlx",
  "thiserror",
 ]
 
