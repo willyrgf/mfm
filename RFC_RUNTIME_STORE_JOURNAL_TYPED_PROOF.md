@@ -1,6 +1,6 @@
 # RFC: establish the core Runtime, Journal, and Store proof path
 
-Status: architecture review complete; implementation planning blocked on one product-scope choice
+Status: approved platform target; ready for implementation planning
 
 This RFC is the clean-slate target for the MFM core proof path. It replaces the conflicting runtime,
 storage, replay, configuration, fact, tenant, scope, and writer-epoch contracts in
@@ -51,7 +51,7 @@ requires a second complete-history ingress or export format. Runtime reads and q
 history only through Store. A future portability feature requires a consumer-driven RFC rather
 than reserving another wire surface now.
 
-The recommended product scope retains Portfolio snapshots and their EVM Read capabilities but
+The selected product scope retains Portfolio snapshots and their EVM Read capabilities but
 retires the in-process EOA transaction-submission entry point. The current split nonce-reservation,
 signing, broadcast, and status flow has no durable owner that can prevent a reserved nonce gap after
 process/provider failure. This RFC does not disguise that missing authority as an operational
@@ -59,8 +59,8 @@ assumption. The same cutover deletes generic Effect: nonce reservation and broad
 production consumers, and retaining synthetic-only mutation semantics would constrain the future
 transaction authority without a current need. The core execution algebra is Pure or externally
 observational Read.
-If submission remains a milestone requirement, its durable transaction authority and Runtime
-interaction are a separate prerequisite RFC as described under Material uncertainties.
+A future submission milestone requires a separate durable transaction-authority RFC that owns its
+Runtime interaction; it cannot restore this retired nonce-only path.
 
 Runtime futures are cancellation-safe without a cancellation concept. Dropping start or resume
 loses only volatile Pure/Read work: Pure recomputes, a Read may be observed again, and a possibly
@@ -72,21 +72,12 @@ After process termination, durable history is the only recovery authority.
 
 ## Material uncertainties
 
-1. **EVM transaction submission and Effect milestone scope.** The recommended target retires
-   `mfm.evm/submit-transaction@1`, deletes its now-unconsumed generic Effect mode, and keeps
-   Portfolio snapshots plus their EVM Reads. This is uncertain because App, repository
-   documentation, and integration tests currently advertise the in-process submission entry point
-   even though no CLI/REST route or production composition uses it. If removal is unacceptable,
-   the nonce-only design in the prior draft is unsafe: a crash or rejection after allocating nonce
-   N can strand the sender while higher nonces continue to be issued. Keeping submission therefore
-   requires a separate durable per-sender transaction authority/outbox that owns nonce allocation
-   through exact signed-byte custody, retransmission, reconciliation, and higher-nonce fencing; it
-   must also define its Runtime mutation contract rather than inherit synthetic one-entry/permanent-
-   parking behavior. Sender-retirement wording or nonce-receipt recovery is not sufficient. Resolve
-   by obtaining explicit product-owner approval either to defer the entry point and Effect in this
-   cutover or to fund that separate outbox RFC before implementation planning.
+none. Product ownership approved retiring `mfm.evm/submit-transaction@1` and generic Effect from
+this cutover. A future submission path requires a separately approved durable per-sender
+transaction authority/outbox that owns nonce allocation through exact signed-byte custody,
+retransmission, reconciliation, and higher-nonce fencing.
 
-All other choices and validation results are frozen:
+All choices and validation results are frozen:
 
 - dropping start/resume is safety-neutral and loses only volatile Pure/Read work; Runtime has no
   cancellation API, cleanup branch, detached completion, or Runtime-owned semaphore;
@@ -799,7 +790,7 @@ according to what they mean:
   RuntimeAssembly or adapters; the exact secret-free physical target identity required by an
   adapter association is already committed by Program's binding_ref.
 
-Concretely, EvmConfig is submission-only and is deleted outright with that recommended retired
+Concretely, EvmConfig is submission-only and is deleted outright with that retired
 entry point; no empty or renamed replacement remains. PortfolioConfig becomes an ordinary
 process-local snapshot-authoring input, loses its MfmValue/MfmConfig derives, and is never passed to
 Runtime, Journal, or Store. `plan_snapshot` validates it and consumes its selected public material
@@ -1749,7 +1740,7 @@ graph. It does not cause a second Program format, delete Match, or add FailureNe
 
 ### 10.8 EVM product scope
 
-Subject to the one Material uncertainty, the cutover:
+The cutover:
 
 - retires `mfm.evm/submit-transaction@1` without reassigning its stable ID;
 - retains Portfolio snapshot and the EVM Read capabilities they use;
@@ -2446,9 +2437,8 @@ resolved.
 
 ### 14.1 remove unsafe evm transaction submission
 
-After explicit resolution of the Material uncertainty in favor of deferral, remove the complete
-submission path in one coherent EVM-domain/live-adapter/App/storage/workspace/test/documentation
-commit:
+Remove the complete submission path in one coherent
+EVM-domain/live-adapter/App/storage/workspace/test/documentation commit:
 
 - retire the submission entry-point and every submission-only State, capability, typed value,
   planner, binding, dispatcher, adapter handle, and fixture, including EvmConfig with no empty
