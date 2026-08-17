@@ -325,6 +325,9 @@ live-EVM signer/broadcast/nonce adapter integration
 App EVM-submission dispatch and composition
 SINGLE_TRUST_BOUNDARY_CUTOVER_MANIFEST.md prior-target inventory
 IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.log prior-target handoff record
+EvmCapability<const KIND: u8>
+EvmState<const FAMILY: u8, const STAGE: u8, K>
+PortfolioState<const STAGE: u8>
 ```
 
 ## Scoped scanner policy
@@ -350,9 +353,9 @@ not a parallel prose checklist. `path` rules are repository-relative. Regex scop
 `production`, `schema`, `sql`, `task`, `docs`, or one exact repository-relative file.
 
 ```cutover-rules
-ledger	.	68f22f635f2192634e4f64a4a01509ec8c969bc917c8124065fefea97f29dc28
-inventory	.	71
-ruleset	.	90fccf383413f6ef0837f0dd7ab9e1aa0ece578bb63e8f6db153e701f707bc97
+ledger	.	ac0fce9687f1ad52354b3b32a1a7a53a1395d05047afb775e313e2d013ce56d6
+inventory	.	74
+ruleset	.	3a9ee98d8a928c12958b4d1d365c937e1e52cb06a9ce697191b048494c90afcd
 path	.	SINGLE_TRUST_BOUNDARY_CUTOVER_MANIFEST.md
 path	.	IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.log
 path	.	crates/kernel/facts
@@ -420,7 +423,10 @@ regex	docs	(publish|load|resolve)[a-z -]*configuration|fact (frontier|publicatio
 regex	docs	(nonce|signer|broadcast)[^\n]*(Application|application)[^\n]*(supports|owns|provides)
 regex	docs	App-owned (status|frame)|StatePrepared[[:space:]]+(is|record|event)
 regex	production	(struct|enum|trait|type)[[:space:]]+(EffectKindKind|EffectVersionKind|ReservationInstruction|ReplayReducer|AcknowledgementLease|AcknowledgmentLease|RuntimeCancellationToken|RuntimeTimeoutPolicy|CompletionCell|FinalizationCell|PendingOwnerPermit|ResolverToken|AccessBindingV2|[A-Za-z0-9_]*(Cancellation|Timeout)[A-Za-z0-9_]*|[A-Za-z0-9_]*(Finalizer|CompletionTask))\b|trait[[:space:]]+Store[^{]*\{[^}]*fn[[:space:]]+check_ready\b|struct[[:space:]]+StateDeclaration[^{]*\{[^}]*(address|entry_address)[[:space:]]*:|\b(next_address|failure_next_address|entry_address|occurrence|terminal|completion_cell|finalization_cell|pending_owner_limit|pending_owner_permit|resolver_token|acknowledgement_lease|cancellation_token|timeout_policy)[[:space:]]*:|\b(preparation_ordinal|permits_replacement|replaces)\b|\bwallet_nonce_effect_domain\b|enum[[:space:]]+SchemaKind[^{]*\{[^}]*(StateInput|OperationOutput|PublicOutput)\b|enum[[:space:]]+ReadCapabilityFamily[^{]*\{[^}]*\bSubmissionStatus\b|ReadCapabilityFamily[[:space:]]*::[[:space:]]*SubmissionStatus\b|fn[[:space:]]+detached_completion_finalizer\b|#[[:space:]]*\[[[:space:]]*proc_macro_derive[[:space:]]*\([[:space:]]*(StateInput|OperationOutput|PublicOutputs)\b
-coverage	.	23b65fbf0adaea2ddb8a37a5089148f3c8d18787960f30ba0c9234b6421bf9c3
+regex	production	\bEvmCapability[[:space:]]*<
+regex	production	\bEvmState[[:space:]]*<
+regex	production	\bPortfolioState[[:space:]]*<
+coverage	.	fd8445fdba6dbd89f20a2cbb1009296d64d2fbd60d6dc766aba1dc0470ede35e
 ```
 
 ## Machine coverage map
@@ -740,4 +746,7 @@ contents independently, and then executes every referenced rule.
 307	R061
 308	R004
 309	R005
+310	R071
+311	R072
+312	R073
 ```

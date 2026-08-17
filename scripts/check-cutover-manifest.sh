@@ -454,6 +454,18 @@ run_canary() {
       mkdir -p "$canary_root/src"
       printf '%s\n' '#[proc_macro_derive(PublicOutputs)]' 'pub fn derive_public_outputs() {}' >"$canary_root/src/lib.rs"
       ;;
+    numeric-evm-capability)
+      mkdir -p "$canary_root/src"
+      printf '%s\n' 'pub struct EvmCapability<const KIND: u8>;' >"$canary_root/src/lib.rs"
+      ;;
+    numeric-evm-state)
+      mkdir -p "$canary_root/src"
+      printf '%s\n' 'pub struct EvmState<const FAMILY: u8, const STAGE: u8>;' >"$canary_root/src/lib.rs"
+      ;;
+    numeric-portfolio-state)
+      mkdir -p "$canary_root/src"
+      printf '%s\n' 'pub struct PortfolioState<const STAGE: u8>;' >"$canary_root/src/lib.rs"
+      ;;
     *)
       echo "unknown cutover scanner canary: $label" >&2
       exit 2
@@ -475,7 +487,7 @@ if ! scan_current_tree; then
   exit 1
 fi
 
-for canary in path package dependency package-compact package-single-quoted dependency-quoted dependency-renamed dependency-dotted dependency-dotted-quoted dependency-dotted-dev dependency-dotted-target feature-double-quoted feature-single-quoted export private hot-value execution-key reexport-direct reexport-braced reexport-multiline conflict function limit-field capability wire sql sql-lowercase sql-uppercase-object sql-uppercase-column docs docs-journal docs-app effect-identities store-readiness address-fields occurrence-field reservation-instruction replay-reducer wallet-domain submission-status async-ownership schema-kind-variants terminal-field completion-cell finalization-cell pending-owner-permit resolver-token access-binding run-admitted postgres-wallet-nonce enum-whitespace capability-owned-direct capability-owned-reexport store-owned-reexport live-owned-alias live-owned-reexport acknowledgement-field completion-field finalization-field pending-owner-limit-field pending-owner-permit-field resolver-field cancellation-field timeout-field read-replacement state-input-derive operation-output-derive public-outputs-derive; do
+for canary in path package dependency package-compact package-single-quoted dependency-quoted dependency-renamed dependency-dotted dependency-dotted-quoted dependency-dotted-dev dependency-dotted-target feature-double-quoted feature-single-quoted export private hot-value execution-key reexport-direct reexport-braced reexport-multiline conflict function limit-field capability wire sql sql-lowercase sql-uppercase-object sql-uppercase-column docs docs-journal docs-app effect-identities store-readiness address-fields occurrence-field reservation-instruction replay-reducer wallet-domain submission-status async-ownership schema-kind-variants terminal-field completion-cell finalization-cell pending-owner-permit resolver-token access-binding run-admitted postgres-wallet-nonce enum-whitespace capability-owned-direct capability-owned-reexport store-owned-reexport live-owned-alias live-owned-reexport acknowledgement-field completion-field finalization-field pending-owner-limit-field pending-owner-permit-field resolver-field cancellation-field timeout-field read-replacement state-input-derive operation-output-derive public-outputs-derive numeric-evm-capability numeric-evm-state numeric-portfolio-state; do
   run_canary "$canary"
 done
 cleanup_canary

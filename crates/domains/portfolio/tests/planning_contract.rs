@@ -1,7 +1,56 @@
 use mfm_evm::EvmPhysicalTarget;
+use mfm_evm::{EvmBalanceCollectionCompletion, EvmBalanceContext, EvmBalanceFailure};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
-use mfm_portfolio::{plan_snapshot, PortfolioConfig, PortfolioError, PortfolioSnapshotSelector};
-use mfm_program::Declaration;
+use mfm_portfolio::{
+    plan_snapshot, ConsolidatePortfolio, EnterPortfolioCollection, InitializePortfolio,
+    MapEvmBalanceFailure, PortfolioConfig, PortfolioContinuation, PortfolioError,
+    PortfolioSnapshotFailure, PortfolioSnapshotInput, PortfolioSnapshotOutput,
+    PortfolioSnapshotSelector, ResumePortfolioCollection,
+};
+use mfm_program::{Declaration, PureState, State};
+
+#[test]
+fn semantic_portfolio_states_preserve_exact_contracts() {
+    fn assert_state<S, I, O>()
+    where
+        S: State<Input = I, Output = O, Failure = PortfolioSnapshotFailure> + PureState,
+        I: mfm_values::MfmValue,
+        O: mfm_values::MfmValue,
+    {
+    }
+
+    assert_state::<InitializePortfolio, PortfolioSnapshotInput, PortfolioContinuation>();
+    assert_state::<
+        EnterPortfolioCollection,
+        PortfolioContinuation,
+        EvmBalanceContext<PortfolioContinuation>,
+    >();
+    assert_state::<
+        ResumePortfolioCollection,
+        EvmBalanceCollectionCompletion<PortfolioContinuation>,
+        PortfolioContinuation,
+    >();
+    assert_state::<MapEvmBalanceFailure, EvmBalanceFailure, PortfolioSnapshotOutput>();
+    assert_state::<ConsolidatePortfolio, PortfolioContinuation, PortfolioSnapshotOutput>();
+
+    assert_eq!(
+        [
+            InitializePortfolio::state_id().expect("initialize"),
+            EnterPortfolioCollection::state_id().expect("enter"),
+            ResumePortfolioCollection::state_id().expect("resume"),
+            MapEvmBalanceFailure::state_id().expect("failure mapper"),
+            ConsolidatePortfolio::state_id().expect("consolidate"),
+        ]
+        .map(|id| id.as_str().to_owned()),
+        [
+            "mfm.portfolio.state.initialize@1",
+            "mfm.portfolio.state.enter-collection@1",
+            "mfm.portfolio.state.resume-collection@1",
+            "mfm.portfolio.state.map-evm-failure@1",
+            "mfm.portfolio.state.consolidate@1",
+        ]
+    );
+}
 
 fn endpoint(byte: u8) -> ContentRef {
     ContentRef::new(

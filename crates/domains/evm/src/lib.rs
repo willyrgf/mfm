@@ -1071,8 +1071,14 @@ fn validate_read_capability_intent(
     valid.then_some(()).ok_or(EvmDomainError::EvidenceBinding)
 }
 
-/// Exact EVM Access capability selected by its closed observational Read contract kind.
-pub struct EvmCapability<const KIND: u8>;
+/// Observational EVM Read capability for the target chain identity.
+pub struct EvmChainIdentityRead;
+
+/// Observational EVM Read capability for chain anchors.
+pub struct EvmAnchorRead;
+
+/// Observational EVM Read capability for native and token balances.
+pub struct EvmBalanceRead;
 
 macro_rules! impl_read_capability {
     ($ty:ty, $name:literal, $family:ident) => {
@@ -1096,23 +1102,40 @@ macro_rules! impl_read_capability {
 }
 
 impl_read_capability!(
-    EvmCapability<2>,
+    EvmChainIdentityRead,
     "mfm.evm.capability.read-chain-identity@1",
     ChainIdentity
 );
 impl_read_capability!(
-    EvmCapability<6>,
+    EvmAnchorRead,
     "mfm.evm.capability.read-anchor@1",
     LatestAnchor
 );
-impl_read_capability!(
-    EvmCapability<7>,
-    "mfm.evm.capability.read-balance@1",
-    Balance
-);
+impl_read_capability!(EvmBalanceRead, "mfm.evm.capability.read-balance@1", Balance);
 
-/// Reusable semantic EVM balance State selected by its closed family and stage.
-pub struct EvmState<const FAMILY: u8, const STAGE: u8, K: MfmValueTrait>(PhantomData<fn() -> K>);
+/// Verifies that one balance collection targets the expected EVM chain.
+pub struct CheckChainIdentity<K: MfmValueTrait>(PhantomData<fn() -> K>);
+
+/// Reads the initial anchor for one balance source.
+pub struct ReadInitialAnchor<K: MfmValueTrait>(PhantomData<fn() -> K>);
+
+/// Selects native or token balance observation topology.
+pub struct SelectBalanceAsset<K: MfmValueTrait>(PhantomData<fn() -> K>);
+
+/// Reads one native-asset balance.
+pub struct ReadNativeBalance<K: MfmValueTrait>(PhantomData<fn() -> K>);
+
+/// Reads the decimal scale for one token asset.
+pub struct ReadTokenDecimals<K: MfmValueTrait>(PhantomData<fn() -> K>);
+
+/// Reads one token-asset balance.
+pub struct ReadTokenBalance<K: MfmValueTrait>(PhantomData<fn() -> K>);
+
+/// Confirms that the initial balance anchor remains current.
+pub struct ConfirmBalanceAnchor<K: MfmValueTrait>(PhantomData<fn() -> K>);
+
+/// Consolidates one completed EVM balance collection.
+pub struct ConsolidateBalanceCollection<K: MfmValueTrait>(PhantomData<fn() -> K>);
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1272,8 +1295,8 @@ fn balance_integrity_failure<K: MfmValueTrait>(
 }
 
 macro_rules! impl_balance_state {
-    ($stage:literal, $input:ty, $output:ty, $id:literal, $failure_stage:expr) => {
-        impl<K: MfmValueTrait> State for EvmState<1, $stage, K> {
+    ($state:ident, $input:ty, $output:ty, $id:literal) => {
+        impl<K: MfmValueTrait> State for $state<K> {
             type Input = $input;
             type Output = $output;
             type Failure = EvmBalanceFailure;
@@ -1286,60 +1309,52 @@ macro_rules! impl_balance_state {
 }
 
 impl_balance_state!(
-    0,
+    CheckChainIdentity,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.check-chain-identity@1",
-    EvmBalanceFailureStage::CheckChainIdentity
+    "mfm.evm.state.check-chain-identity@1"
 );
 impl_balance_state!(
-    1,
+    ReadInitialAnchor,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.read-initial-anchor@1",
-    EvmBalanceFailureStage::ReadInitialAnchor
+    "mfm.evm.state.read-initial-anchor@1"
 );
 impl_balance_state!(
-    2,
+    SelectBalanceAsset,
     EvmBalanceContext<K>,
     EvmBalanceAsset<K>,
-    "mfm.evm.state.select-asset@1",
-    EvmBalanceFailureStage::SelectAsset
+    "mfm.evm.state.select-asset@1"
 );
 impl_balance_state!(
-    3,
+    ReadNativeBalance,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.read-native-balance@1",
-    EvmBalanceFailureStage::ReadNativeBalance
+    "mfm.evm.state.read-native-balance@1"
 );
 impl_balance_state!(
-    4,
+    ReadTokenDecimals,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.read-token-decimals@1",
-    EvmBalanceFailureStage::ReadTokenDecimals
+    "mfm.evm.state.read-token-decimals@1"
 );
 impl_balance_state!(
-    5,
+    ReadTokenBalance,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.read-token-balance@1",
-    EvmBalanceFailureStage::ReadTokenBalance
+    "mfm.evm.state.read-token-balance@1"
 );
 impl_balance_state!(
-    6,
+    ConfirmBalanceAnchor,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.confirm-balance-anchor@1",
-    EvmBalanceFailureStage::ConfirmAnchor
+    "mfm.evm.state.confirm-balance-anchor@1"
 );
 impl_balance_state!(
-    7,
+    ConsolidateBalanceCollection,
     EvmBalanceContext<K>,
     EvmBalanceCollectionCompletion<K>,
-    "mfm.evm.state.consolidate-balance-collection@1",
-    EvmBalanceFailureStage::Consolidate
+    "mfm.evm.state.consolidate-balance-collection@1"
 );
 
 fn balance_read_intent<K: MfmValueTrait>(
@@ -1788,8 +1803,8 @@ fn consolidate_balance_collection<K: MfmValueTrait>(
 }
 
 macro_rules! impl_balance_access {
-    ($stage:literal, $capability:ty, $prepare:path, $interpret:path) => {
-        impl<K: MfmValueTrait> ReadState<$capability> for EvmState<1, $stage, K> {
+    ($state:ident, $capability:ty, $prepare:path, $interpret:path) => {
+        impl<K: MfmValueTrait> ReadState<$capability> for $state<K> {
             fn prepare(
                 input: &Self::Input,
             ) -> std::result::Result<
@@ -1810,47 +1825,47 @@ macro_rules! impl_balance_access {
 }
 
 impl_balance_access!(
-    0,
-    EvmCapability<2>,
+    CheckChainIdentity,
+    EvmChainIdentityRead,
     prepare_check_chain_identity,
     interpret_check_chain_identity
 );
 impl_balance_access!(
-    1,
-    EvmCapability<6>,
+    ReadInitialAnchor,
+    EvmAnchorRead,
     prepare_read_initial_anchor,
     interpret_read_initial_anchor
 );
 impl_balance_access!(
-    3,
-    EvmCapability<7>,
+    ReadNativeBalance,
+    EvmBalanceRead,
     prepare_read_native_balance,
     interpret_read_native_balance
 );
 impl_balance_access!(
-    4,
-    EvmCapability<7>,
+    ReadTokenDecimals,
+    EvmBalanceRead,
     prepare_read_token_decimals,
     interpret_read_token_decimals
 );
 impl_balance_access!(
-    5,
-    EvmCapability<7>,
+    ReadTokenBalance,
+    EvmBalanceRead,
     prepare_read_token_balance,
     interpret_read_token_balance
 );
 impl_balance_access!(
-    6,
-    EvmCapability<6>,
+    ConfirmBalanceAnchor,
+    EvmAnchorRead,
     prepare_confirm_balance_anchor,
     interpret_confirm_balance_anchor
 );
-impl<K: MfmValueTrait> PureState for EvmState<1, 2, K> {
+impl<K: MfmValueTrait> PureState for SelectBalanceAsset<K> {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
         select_balance_asset(input)
     }
 }
-impl<K: MfmValueTrait> PureState for EvmState<1, 7, K> {
+impl<K: MfmValueTrait> PureState for ConsolidateBalanceCollection<K> {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
         consolidate_balance_collection(input)
     }
@@ -1944,7 +1959,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
             base.checked_add(8).ok_or(EvmDomainError::Program)?
         };
         declarations.extend([
-            Declaration::State(read_state::<EvmState<1, 0, K>, EvmCapability<2>>(
+            Declaration::State(read_state::<CheckChainIdentity<K>, EvmChainIdentityRead>(
                 context.clone(),
                 context.clone(),
                 failure.clone(),
@@ -1952,7 +1967,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
                 failure_next_index,
                 binding_ref.clone(),
             )?),
-            Declaration::State(read_state::<EvmState<1, 1, K>, EvmCapability<6>>(
+            Declaration::State(read_state::<ReadInitialAnchor<K>, EvmAnchorRead>(
                 context.clone(),
                 context.clone(),
                 failure.clone(),
@@ -1960,7 +1975,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
                 failure_next_index,
                 binding_ref.clone(),
             )?),
-            Declaration::State(pure_state::<EvmState<1, 2, K>>(
+            Declaration::State(pure_state::<SelectBalanceAsset<K>>(
                 context.clone(),
                 asset.clone(),
                 failure.clone(),
@@ -1983,7 +1998,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
                 )
                 .map_err(|_| EvmDomainError::Program)?,
             ),
-            Declaration::State(read_state::<EvmState<1, 3, K>, EvmCapability<7>>(
+            Declaration::State(read_state::<ReadNativeBalance<K>, EvmBalanceRead>(
                 context.clone(),
                 context.clone(),
                 failure.clone(),
@@ -1991,7 +2006,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
                 failure_next_index,
                 binding_ref.clone(),
             )?),
-            Declaration::State(read_state::<EvmState<1, 4, K>, EvmCapability<7>>(
+            Declaration::State(read_state::<ReadTokenDecimals<K>, EvmBalanceRead>(
                 context.clone(),
                 context.clone(),
                 failure.clone(),
@@ -1999,7 +2014,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
                 failure_next_index,
                 binding_ref.clone(),
             )?),
-            Declaration::State(read_state::<EvmState<1, 5, K>, EvmCapability<7>>(
+            Declaration::State(read_state::<ReadTokenBalance<K>, EvmBalanceRead>(
                 context.clone(),
                 context.clone(),
                 failure.clone(),
@@ -2007,7 +2022,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
                 failure_next_index,
                 binding_ref.clone(),
             )?),
-            Declaration::State(read_state::<EvmState<1, 6, K>, EvmCapability<6>>(
+            Declaration::State(read_state::<ConfirmBalanceAnchor<K>, EvmAnchorRead>(
                 context.clone(),
                 context.clone(),
                 failure.clone(),
@@ -2017,7 +2032,9 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
             )?),
         ]);
     }
-    declarations.push(Declaration::State(pure_state::<EvmState<1, 7, K>>(
+    declarations.push(Declaration::State(pure_state::<
+        ConsolidateBalanceCollection<K>,
+    >(
         context,
         completion,
         failure,
@@ -2307,6 +2324,123 @@ mod tests {
     }
 
     #[test]
+    fn semantic_capabilities_and_states_preserve_exact_contracts() {
+        fn assert_state<S, I, O, F>()
+        where
+            S: State<Input = I, Output = O, Failure = F>,
+            I: MfmValueTrait,
+            O: MfmValueTrait,
+            F: MfmValueTrait,
+        {
+        }
+
+        fn assert_read<S, C>()
+        where
+            S: ReadState<C>,
+            C: ReadCapabilityContract,
+        {
+        }
+
+        fn assert_pure<S: PureState>() {}
+
+        assert_eq!(
+            [
+                EvmChainIdentityRead::contract_id().expect("chain identity capability"),
+                EvmAnchorRead::contract_id().expect("anchor capability"),
+                EvmBalanceRead::contract_id().expect("balance capability"),
+            ]
+            .map(|id| id.as_str().to_owned()),
+            [
+                "mfm.evm.capability.read-chain-identity@1",
+                "mfm.evm.capability.read-anchor@1",
+                "mfm.evm.capability.read-balance@1",
+            ]
+        );
+
+        assert_state::<
+            CheckChainIdentity<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceFailure,
+        >();
+        assert_state::<
+            ReadInitialAnchor<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceFailure,
+        >();
+        assert_state::<
+            SelectBalanceAsset<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceAsset<Continuation>,
+            EvmBalanceFailure,
+        >();
+        assert_state::<
+            ReadNativeBalance<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceFailure,
+        >();
+        assert_state::<
+            ReadTokenDecimals<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceFailure,
+        >();
+        assert_state::<
+            ReadTokenBalance<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceFailure,
+        >();
+        assert_state::<
+            ConfirmBalanceAnchor<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceFailure,
+        >();
+        assert_state::<
+            ConsolidateBalanceCollection<Continuation>,
+            EvmBalanceContext<Continuation>,
+            EvmBalanceCollectionCompletion<Continuation>,
+            EvmBalanceFailure,
+        >();
+
+        assert_read::<CheckChainIdentity<Continuation>, EvmChainIdentityRead>();
+        assert_read::<ReadInitialAnchor<Continuation>, EvmAnchorRead>();
+        assert_pure::<SelectBalanceAsset<Continuation>>();
+        assert_read::<ReadNativeBalance<Continuation>, EvmBalanceRead>();
+        assert_read::<ReadTokenDecimals<Continuation>, EvmBalanceRead>();
+        assert_read::<ReadTokenBalance<Continuation>, EvmBalanceRead>();
+        assert_read::<ConfirmBalanceAnchor<Continuation>, EvmAnchorRead>();
+        assert_pure::<ConsolidateBalanceCollection<Continuation>>();
+
+        assert_eq!(
+            [
+                CheckChainIdentity::<Continuation>::state_id().expect("check chain"),
+                ReadInitialAnchor::<Continuation>::state_id().expect("initial anchor"),
+                SelectBalanceAsset::<Continuation>::state_id().expect("select asset"),
+                ReadNativeBalance::<Continuation>::state_id().expect("native balance"),
+                ReadTokenDecimals::<Continuation>::state_id().expect("token decimals"),
+                ReadTokenBalance::<Continuation>::state_id().expect("token balance"),
+                ConfirmBalanceAnchor::<Continuation>::state_id().expect("confirm anchor"),
+                ConsolidateBalanceCollection::<Continuation>::state_id().expect("consolidate"),
+            ]
+            .map(|id| id.as_str().to_owned()),
+            [
+                "mfm.evm.state.check-chain-identity@1",
+                "mfm.evm.state.read-initial-anchor@1",
+                "mfm.evm.state.select-asset@1",
+                "mfm.evm.state.read-native-balance@1",
+                "mfm.evm.state.read-token-decimals@1",
+                "mfm.evm.state.read-token-balance@1",
+                "mfm.evm.state.confirm-balance-anchor@1",
+                "mfm.evm.state.consolidate-balance-collection@1",
+            ]
+        );
+    }
+
+    #[test]
     fn balance_fragment_derives_every_internal_index_from_prefilled_program_order() {
         let context_ref =
             nominal_contract_ref::<EvmBalanceContext<Continuation>>().expect("context contract");
@@ -2314,7 +2448,7 @@ mod tests {
             .expect("completion contract");
         let failure_ref = nominal_contract_ref::<EvmBalanceFailure>().expect("failure contract");
         let filler = Declaration::State(
-            pure_state::<EvmState<1, 7, Continuation>>(
+            pure_state::<ConsolidateBalanceCollection<Continuation>>(
                 context_ref,
                 completion_ref,
                 failure_ref,
@@ -2369,7 +2503,7 @@ mod tests {
     fn ordinary_read_interpreter_maps_every_failure_evidence_variant() {
         for evidence in [EvmReadEvidence::Rejected, EvmReadEvidence::SafeFailure] {
             let ProposedStateOutcome::Failure { failure } =
-                <EvmState<1, 0, Continuation> as ReadState<EvmCapability<2>>>::interpret(
+                <CheckChainIdentity<Continuation> as ReadState<EvmChainIdentityRead>>::interpret(
                     context(),
                     &evidence,
                 )
@@ -2387,7 +2521,7 @@ mod tests {
         }
 
         let ProposedStateOutcome::Failure { failure } =
-            <EvmState<1, 0, Continuation> as ReadState<EvmCapability<2>>>::interpret(
+            <CheckChainIdentity<Continuation> as ReadState<EvmChainIdentityRead>>::interpret(
                 context(),
                 &EvmReadEvidence::IntegrityBlocked,
             )
