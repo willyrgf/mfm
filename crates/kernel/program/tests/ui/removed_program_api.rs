@@ -1,6 +1,13 @@
 use mfm_program::{
-    BindingDescriptor, ProgramBuilder, ProgramCatalog, ProgramDocument, QualifiedValue,
-    SequentialControlAddress,
+    Execution, ForwardLabel, MatchDeclaration, MatchVariant, Program, ProgramAuthor,
+    StateDeclaration,
 };
 
-fn main() {}
+fn main() {
+    let _ = Program::new;
+    let _ = StateDeclaration::new;
+    let _ = Execution::pure;
+    let _ = Execution::read;
+    let _ = MatchDeclaration::new;
+    let _ = MatchVariant::new;
+}

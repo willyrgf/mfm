@@ -8,13 +8,12 @@
 use std::collections::BTreeSet;
 
 use mfm_evm::{
-    append_balance_fragment, EvmBalanceCollectionCompletion, EvmBalanceContext, EvmBalanceFailure,
+    CollectEvmBalances, EvmBalanceCollectionCompletion, EvmBalanceContext, EvmBalanceFailure,
     EvmBalanceRequest, EvmBalanceSource, EvmPhysicalTarget,
 };
 use mfm_ids::{ContentRef, EntryPointId, StableId};
 use mfm_program::{
-    nominal_contract_ref, state_implementation_ref, Declaration, Execution, Program,
-    ProposedStateOutcome, PureState, State, StateDeclaration,
+    expand_program, Operation, OperationExpansion, Program, ProposedStateOutcome, PureState, State,
 };
 use mfm_program_derive::MfmValue;
 use mfm_values::string_contains_secret_marker;
@@ -994,7 +993,7 @@ pub fn plan_snapshot(
     }
 
     let mut demand = Vec::with_capacity(config.collections.len());
-    let mut selected = Vec::with_capacity(config.collections.len());
+    let mut checked_collections = Vec::with_capacity(config.collections.len());
     for collection in &config.collections {
         let chain_id = collection
             .request
@@ -1012,162 +1011,49 @@ pub fn plan_snapshot(
             collection.request.clone(),
             route_ref,
         )?);
-        selected.push((target, collection.request.sources.len()));
+        checked_collections.push(
+            CollectEvmBalances::<PortfolioContinuation>::new(
+                target.clone(),
+                collection.request.sources.len(),
+            )
+            .map_err(|_| PortfolioError::Program)?,
+        );
     }
     let input =
         PortfolioSnapshotInput::from_demand(config.portfolio_id.clone(), demand, selector.quote)?;
-    let program = portfolio_program(&selected)?;
+    let root = PortfolioSnapshotOperation {
+        checked_collections,
+    };
+    let program = expand_program(entry_point_id()?, &root).map_err(|_| PortfolioError::Program)?;
     Ok((program, input))
 }
 
-struct CollectionLayout<'a> {
-    target: &'a EvmPhysicalTarget,
-    source_count: usize,
-    enter: u16,
-    resume: u16,
-    mapper: u16,
+struct PortfolioSnapshotOperation {
+    checked_collections: Vec<CollectEvmBalances<PortfolioContinuation>>,
 }
 
-fn portfolio_program(
-    selections: &[(&EvmPhysicalTarget, usize)],
-) -> Result<Program, PortfolioError> {
-    if selections.is_empty() || selections.len() > PORTFOLIO_COLLECTION_LIMIT {
-        return Err(PortfolioError::Program);
-    }
-    let input =
-        nominal_contract_ref::<PortfolioSnapshotInput>().map_err(|_| PortfolioError::Program)?;
-    let continuation =
-        nominal_contract_ref::<PortfolioContinuation>().map_err(|_| PortfolioError::Program)?;
-    let context = nominal_contract_ref::<EvmBalanceContext<PortfolioContinuation>>()
-        .map_err(|_| PortfolioError::Program)?;
-    let completion =
-        nominal_contract_ref::<EvmBalanceCollectionCompletion<PortfolioContinuation>>()
-            .map_err(|_| PortfolioError::Program)?;
-    let evm_failure =
-        nominal_contract_ref::<EvmBalanceFailure>().map_err(|_| PortfolioError::Program)?;
-    let output =
-        nominal_contract_ref::<PortfolioSnapshotOutput>().map_err(|_| PortfolioError::Program)?;
-    let failure =
-        nominal_contract_ref::<PortfolioSnapshotFailure>().map_err(|_| PortfolioError::Program)?;
+impl Operation for PortfolioSnapshotOperation {
+    type Input = PortfolioSnapshotInput;
+    type Output = PortfolioSnapshotOutput;
+    type Failure = PortfolioSnapshotFailure;
 
-    let mut cursor = 1_u16;
-    let mut layouts = Vec::with_capacity(selections.len());
-    for (target, source_count) in selections {
-        let source_count_u16 = u16::try_from(*source_count).map_err(|_| PortfolioError::Program)?;
-        let enter = cursor;
-        let fragment_len = source_count_u16
-            .checked_mul(8)
-            .and_then(|count| count.checked_add(1))
-            .ok_or(PortfolioError::Program)?;
-        let resume = enter
-            .checked_add(1)
-            .and_then(|fragment| fragment.checked_add(fragment_len))
-            .ok_or(PortfolioError::Program)?;
-        let mapper = resume.checked_add(1).ok_or(PortfolioError::Program)?;
-        cursor = mapper.checked_add(1).ok_or(PortfolioError::Program)?;
-        layouts.push(CollectionLayout {
-            target,
-            source_count: *source_count,
-            enter,
-            resume,
-            mapper,
-        });
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.pure::<InitializePortfolio>()?;
+        for child in &self.checked_collections {
+            body.pure::<EnterPortfolioCollection>()?;
+            body.with_failure_handler::<EvmBalanceFailure, PortfolioContinuation>(
+                |protected| {
+                    protected.operation(child)?;
+                    protected.pure::<ResumePortfolioCollection>()
+                },
+                |handler| handler.pure::<MapEvmBalanceFailure>(),
+            )?;
+        }
+        body.pure::<ConsolidatePortfolio>()
     }
-    let terminal = cursor;
-    let capacity = usize::from(terminal)
-        .checked_add(1)
-        .ok_or(PortfolioError::Program)?;
-    let mut declarations = Vec::with_capacity(capacity);
-    declarations.push(Declaration::State(portfolio_pure_state::<
-        InitializePortfolio,
-    >(
-        input.clone(),
-        continuation.clone(),
-        failure.clone(),
-        Some(layouts[0].enter),
-        None,
-    )?));
-
-    for (position, layout) in layouts.iter().enumerate() {
-        let fragment = layout.enter.checked_add(1).ok_or(PortfolioError::Program)?;
-        declarations.push(Declaration::State(portfolio_pure_state::<
-            EnterPortfolioCollection,
-        >(
-            continuation.clone(),
-            context.clone(),
-            failure.clone(),
-            Some(fragment),
-            None,
-        )?));
-        append_balance_fragment::<PortfolioContinuation>(
-            &mut declarations,
-            layout.source_count,
-            layout.target,
-            layout.mapper,
-            Some(layout.resume),
-        )
-        .map_err(|_| PortfolioError::Program)?;
-        let next = layouts
-            .get(position + 1)
-            .map_or(terminal, |next| next.enter);
-        declarations.push(Declaration::State(portfolio_pure_state::<
-            ResumePortfolioCollection,
-        >(
-            completion.clone(),
-            continuation.clone(),
-            failure.clone(),
-            Some(next),
-            None,
-        )?));
-        declarations.push(Declaration::State(portfolio_pure_state::<
-            MapEvmBalanceFailure,
-        >(
-            evm_failure.clone(),
-            output.clone(),
-            failure.clone(),
-            None,
-            None,
-        )?));
-    }
-    declarations.push(Declaration::State(portfolio_pure_state::<
-        ConsolidatePortfolio,
-    >(
-        continuation,
-        output.clone(),
-        failure.clone(),
-        None,
-        None,
-    )?));
-    if declarations.len() != capacity {
-        return Err(PortfolioError::Program);
-    }
-    Program::new(
-        entry_point_id().map_err(|_| PortfolioError::Program)?,
-        input,
-        output,
-        failure,
-        declarations,
-    )
-    .map_err(|_| PortfolioError::Program)
-}
-
-fn portfolio_pure_state<S: State>(
-    input: ContentRef,
-    output: ContentRef,
-    failure: ContentRef,
-    next_index: Option<u16>,
-    failure_next_index: Option<u16>,
-) -> Result<StateDeclaration, PortfolioError> {
-    StateDeclaration::new(
-        state_implementation_ref::<S>().map_err(|_| PortfolioError::Program)?,
-        input,
-        output,
-        failure,
-        Execution::pure(),
-        next_index,
-        failure_next_index,
-    )
-    .map_err(|_| PortfolioError::Program)
 }
 
 /// Redaction-safe Portfolio domain error.

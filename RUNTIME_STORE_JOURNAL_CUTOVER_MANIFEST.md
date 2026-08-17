@@ -328,6 +328,20 @@ IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.log prior-target handoff record
 EvmCapability<const KIND: u8>
 EvmState<const FAMILY: u8, const STAGE: u8, K>
 PortfolioState<const STAGE: u8>
+ProgramAuthor
+ForwardLabel
+public Program authoring label/place/raw select/_to/return_success methods
+public Program authoring route/successor/address types
+raw Program/State/Execution/Match constructor calls outside mfm-program
+append_balance_fragment
+CollectionLayout
+portfolio_program
+portfolio_pure_state
+domain-local pure_state/read_state declaration helpers
+direct declaration-vector authoring in EVM/Portfolio
+direct Operation::expand composition outside mfm-program
+direct CapabilityInjection hook calls outside mfm-program
+extra InjectionWriter methods beyond pure
 ```
 
 ## Scoped scanner policy
@@ -353,9 +367,9 @@ not a parallel prose checklist. `path` rules are repository-relative. Regex scop
 `production`, `schema`, `sql`, `task`, `docs`, or one exact repository-relative file.
 
 ```cutover-rules
-ledger	.	ac0fce9687f1ad52354b3b32a1a7a53a1395d05047afb775e313e2d013ce56d6
-inventory	.	74
-ruleset	.	3a9ee98d8a928c12958b4d1d365c937e1e52cb06a9ce697191b048494c90afcd
+ledger	.	061c95d4e8d050cbb11671499901eef808a03d8751263aa2efa92f88495cc8ad
+inventory	.	83
+ruleset	.	e08f1faaf7920d08de32f12232da391fb09c947d1bd870e7354aff8eec028cb6
 path	.	SINGLE_TRUST_BOUNDARY_CUTOVER_MANIFEST.md
 path	.	IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.log
 path	.	crates/kernel/facts
@@ -426,13 +440,22 @@ regex	production	(struct|enum|trait|type)[[:space:]]+(EffectKindKind|EffectVersi
 regex	production	\bEvmCapability[[:space:]]*<
 regex	production	\bEvmState[[:space:]]*<
 regex	production	\bPortfolioState[[:space:]]*<
-coverage	.	fd8445fdba6dbd89f20a2cbb1009296d64d2fbd60d6dc766aba1dc0470ede35e
+regex	production	\b(ProgramAuthor|ForwardLabel)\b
+regex	crates/kernel/program/src	pub[[:space:]]+fn[[:space:]]+(label|place|select|[A-Za-z_][A-Za-z0-9_]*_to|return_success)\b
+regex	crates/kernel/program/src	pub[[:space:]]+(struct|enum|trait|type)[[:space:]]+[A-Za-z0-9_]*(Label|Route|Successor|Address)[A-Za-z0-9_]*\b
+regex	production-non-program	\b(Program|StateDeclaration|MatchDeclaration|MatchVariant)[[:space:]]*::[[:space:]]*new[[:space:]]*\(|\bExecution[[:space:]]*::[[:space:]]*(pure|read)[[:space:]]*\(
+regex	production	\b(append_balance_fragment|CollectionLayout|portfolio_program|portfolio_pure_state)\b|fn[[:space:]]+(pure_state|read_state)[[:space:]]*(<|\()
+regex	crates/domains	\bVec[[:space:]]*<[[:space:]]*Declaration[[:space:]]*>|declarations[[:space:]]*\.[[:space:]]*(push|extend)[[:space:]]*\(|vec![[:space:]]*\[[^]]*Declaration[[:space:]]*::
+regex	production-non-program	(\.[[:space:]]*expand|Operation[[:space:]]*::[[:space:]]*expand)[[:space:]]*\(
+regex	production-non-program	::[[:space:]]*(original_binding_ref|write_before|write_after)[[:space:]]*\(
+regex	crates/kernel/program/src	(?s)impl[[:space:]]+InjectionWriter[[:space:]]*\{.*?pub[[:space:]]+fn[[:space:]]+(?!pure\b)[A-Za-z_][A-Za-z0-9_]*
+coverage	.	9f9ceb5d6ed06cfb67d41243fb6a6f279dc4e29adb3dfa253713b70699346876
 ```
 
 ## Machine coverage map
 
 Each nonblank row maps the same-numbered entry in the complete deletion ledger to the implicit
-`Rnnn` identifier of the same-numbered machine rule above. The scanner requires all 309 ordinals
+`Rnnn` identifier of the same-numbered machine rule above. The scanner requires all 326 ordinals
 exactly once, rejects references outside the exact ruleset, fingerprints the ledger and full rule
 contents independently, and then executes every referenced rule.
 
@@ -749,4 +772,18 @@ contents independently, and then executes every referenced rule.
 310	R071
 311	R072
 312	R073
+313	R074
+314	R074
+315	R075
+316	R076
+317	R077
+318	R078
+319	R078
+320	R078
+321	R078
+322	R078
+323	R079
+324	R080
+325	R081
+326	R082
 ```

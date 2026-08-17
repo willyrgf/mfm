@@ -1,17 +1,97 @@
-error[E0432]: unresolved imports `mfm_program::BindingDescriptor`, `mfm_program::ProgramBuilder`, `mfm_program::ProgramCatalog`, `mfm_program::ProgramDocument`, `mfm_program::QualifiedValue`, `mfm_program::SequentialControlAddress`
- --> tests/ui/removed_program_api.rs:2:5
+error[E0432]: unresolved imports `mfm_program::ForwardLabel`, `mfm_program::ProgramAuthor`
+ --> tests/ui/removed_program_api.rs:2:16
   |
-2 |     BindingDescriptor, ProgramBuilder, ProgramCatalog, ProgramDocument, QualifiedValue,
-  |     ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^ no `QualifiedValue` in the root
-  |     |                  |               |               |
-  |     |                  |               |               no `ProgramDocument` in the root
-  |     |                  |               no `ProgramCatalog` in the root
-  |     |                  no `ProgramBuilder` in the root
-  |     no `BindingDescriptor` in the root
-3 |     SequentialControlAddress,
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^ no `SequentialControlAddress` in the root
+2 |     Execution, ForwardLabel, MatchDeclaration, MatchVariant, Program, ProgramAuthor,
+  |                ^^^^^^^^^^^^ no `ForwardLabel` in the root             ^^^^^^^^^^^^^ no `ProgramAuthor` in the root
   |
 help: a similar name exists in the module
   |
-2 |     BindingDescriptor, ProgramBuilder, ProgramCatalog, RawProgramDocument, QualifiedValue,
-  |                                                        +++
+2 -     Execution, ForwardLabel, MatchDeclaration, MatchVariant, Program, ProgramAuthor,
+2 +     Execution, ForwardLabel, MatchDeclaration, MatchVariant, Program, ProgramError,
+  |
+
+error[E0624]: associated function `new` is private
+ --> tests/ui/removed_program_api.rs:7:22
+  |
+7 |       let _ = Program::new;
+  |                        ^^^ private associated function
+  |
+ ::: src/lib.rs
+  |
+  | /     pub(crate) fn new(
+  | |         entry_point_id: EntryPointId,
+  | |         admitted_context_contract_ref: ContentRef,
+  | |         root_success_contract_ref: ContentRef,
+  | |         root_failure_contract_ref: ContentRef,
+  | |         declarations: Vec<Declaration>,
+  | |     ) -> Result<Self> {
+  | |_____________________- private associated function defined here
+
+error[E0624]: associated function `new` is private
+ --> tests/ui/removed_program_api.rs:8:31
+  |
+8 |       let _ = StateDeclaration::new;
+  |                                 ^^^ private associated function
+  |
+ ::: src/lib.rs
+  |
+  | /     pub(crate) fn new(
+  | |         state_implementation_ref: ContentRef,
+  | |         input_contract_ref: ContentRef,
+  | |         output_contract_ref: ContentRef,
+... |
+  | |         failure_next_index: Option<u16>,
+  | |     ) -> Self {
+  | |_____________- private associated function defined here
+
+error[E0624]: associated function `pure` is private
+ --> tests/ui/removed_program_api.rs:9:24
+  |
+9 |     let _ = Execution::pure;
+  |                        ^^^^ private associated function
+  |
+ ::: src/lib.rs
+  |
+  |     pub(crate) fn pure() -> Self {
+  |     ---------------------------- private associated function defined here
+
+error[E0624]: associated function `read` is private
+  --> tests/ui/removed_program_api.rs:10:24
+   |
+10 |       let _ = Execution::read;
+   |                          ^^^^ private associated function
+   |
+  ::: src/lib.rs
+   |
+   | /     pub(crate) fn read(
+   | |         capability_contract_ref: ContentRef,
+   | |         intent_contract_ref: ContentRef,
+   | |         evidence_contract_ref: ContentRef,
+   | |         binding_ref: ContentRef,
+   | |     ) -> Self {
+   | |_____________- private associated function defined here
+
+error[E0624]: associated function `new` is private
+  --> tests/ui/removed_program_api.rs:11:31
+   |
+11 |       let _ = MatchDeclaration::new;
+   |                                 ^^^ private associated function
+   |
+  ::: src/lib.rs
+   |
+   | /     pub(crate) fn new(
+   | |         selector_contract_ref: ContentRef,
+   | |         mut variants: Vec<MatchVariant>,
+   | |     ) -> Result<Self> {
+   | |_____________________- private associated function defined here
+
+error[E0624]: associated function `new` is private
+  --> tests/ui/removed_program_api.rs:12:27
+   |
+12 |     let _ = MatchVariant::new;
+   |                           ^^^ private associated function
+   |
+  ::: src/lib.rs
+   |
+   |     pub(crate) fn new(tag: StableId, entry_index: u16) -> Self {
+   |     ---------------------------------------------------------- private associated function defined here

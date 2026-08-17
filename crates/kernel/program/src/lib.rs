@@ -1,8 +1,12 @@
 #![warn(missing_docs)]
-//! Checked callback-free Program contracts and typed State behavior.
+//! Typed deterministic authoring and checked immutable Program v2 contracts.
 //!
 //! A Program is the sole persisted control document. Runtime associates its
-//! immutable declarations with typed implementations; this crate performs no IO.
+//! immutable declarations with typed implementations. Authoring callbacks and
+//! capability injection are erased before construction; this crate performs no IO.
+
+#[cfg(test)]
+extern crate self as mfm_program;
 
 use std::collections::BTreeSet;
 
@@ -17,6 +21,15 @@ use mfm_values::{
     MAX_RUN_OBJECT_CANONICAL_BYTES,
 };
 use serde::{Deserialize, Serialize};
+
+mod authoring;
+
+#[cfg(test)]
+mod tests;
+
+pub use authoring::{
+    expand_program, CapabilityInjection, InjectionWriter, MatchJoin, Operation, OperationExpansion,
+};
 
 const MAX_DECLARATIONS: usize = 65_536;
 const MAX_STATES: usize = 65_535;
@@ -204,12 +217,12 @@ struct ReadExecution {
 
 impl Execution {
     /// Constructs Pure execution.
-    pub fn pure() -> Self {
+    pub(crate) fn pure() -> Self {
         Self { read: None }
     }
 
     /// Constructs Read execution with its complete static ABI and binding.
-    pub fn read(
+    pub(crate) fn read(
         capability_contract_ref: ContentRef,
         intent_contract_ref: ContentRef,
         evidence_contract_ref: ContentRef,
@@ -266,7 +279,7 @@ pub struct StateDeclaration {
 impl StateDeclaration {
     /// Constructs one State declaration.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         state_implementation_ref: ContentRef,
         input_contract_ref: ContentRef,
         output_contract_ref: ContentRef,
@@ -274,8 +287,8 @@ impl StateDeclaration {
         execution: Execution,
         next_index: Option<u16>,
         failure_next_index: Option<u16>,
-    ) -> Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             state_implementation_ref,
             input_contract_ref,
             output_contract_ref,
@@ -283,7 +296,7 @@ impl StateDeclaration {
             execution,
             next_index,
             failure_next_index,
-        })
+        }
     }
 
     /// Returns the State implementation reference.
@@ -331,7 +344,7 @@ pub struct MatchVariant {
 
 impl MatchVariant {
     /// Constructs one Match arm.
-    pub fn new(tag: StableId, entry_index: u16) -> Self {
+    pub(crate) fn new(tag: StableId, entry_index: u16) -> Self {
         Self { tag, entry_index }
     }
 
@@ -355,7 +368,10 @@ pub struct MatchDeclaration {
 
 impl MatchDeclaration {
     /// Constructs one selector, sorting arms by raw tag bytes.
-    pub fn new(selector_contract_ref: ContentRef, mut variants: Vec<MatchVariant>) -> Result<Self> {
+    pub(crate) fn new(
+        selector_contract_ref: ContentRef,
+        mut variants: Vec<MatchVariant>,
+    ) -> Result<Self> {
         if variants.is_empty() {
             return Err(ProgramError::InvalidContract);
         }
@@ -413,7 +429,7 @@ pub struct Program {
 
 impl Program {
     /// Constructs and validates one Program.
-    pub fn new(
+    pub(crate) fn new(
         entry_point_id: EntryPointId,
         admitted_context_contract_ref: ContentRef,
         root_success_contract_ref: ContentRef,
@@ -885,7 +901,7 @@ struct RawState {
 
 impl RawState {
     fn try_checked(self) -> Result<StateDeclaration> {
-        StateDeclaration::new(
+        Ok(StateDeclaration::new(
             self.state_implementation_ref.try_checked()?,
             self.input_contract_ref.try_checked()?,
             self.output_contract_ref.try_checked()?,
@@ -893,7 +909,7 @@ impl RawState {
             self.execution.try_checked()?,
             self.next_index.0,
             self.failure_next_index.0,
-        )
+        ))
     }
 }
 

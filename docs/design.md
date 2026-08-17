@@ -6,10 +6,21 @@ ordered array of State or Match declarations. Index zero is the root; every succ
 failure contracts. Missing success/failure successors mean the corresponding exact root result;
 `Never` is the reserved uninhabited failure contract and can never be encoded as a value.
 
+Source code authors the graph through one deterministic typed `Operation`. `expand_program` gives
+the root Operation the sole `OperationExpansion` compiler context, which flattens Pure States,
+exact-pair Reads, child Operations, structured Match joins, and exact failure handlers into one
+private symbolic draft before constructing Program v2. Operations, callbacks, injection setup, and
+scope boundaries are erased; only the immutable State/Match graph is persisted.
+
 Pure States deterministically map typed input to typed success/failure. Read States deterministically
 prepare typed intent, then interpret typed evidence. Runtime associates all values, State drivers,
 Match projections, and `(capability contract, binding ref)` adapters before execution. State code has
 no ambient IO and there is no generic effect or mutation capability.
+
+Each Read occurrence applies the exact capability/State pair's authoring-time injection policy.
+Injection may add deterministic Pure topology before or after the one kernel-owned Read, but it
+cannot perform IO, access or replace that Read, register an adapter, or grant execution authority.
+Effect, signing, nonce, broadcast, and durable mutation authority remain deferred.
 
 Runtime admits `(RunId, Program, C0)`, appends genesis, folds the qualified history, executes only
 the selected declaration, and appends one fused conclusion. A Read frame contains intent, accepted

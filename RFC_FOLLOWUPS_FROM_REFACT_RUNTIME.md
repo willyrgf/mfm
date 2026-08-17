@@ -1,6 +1,6 @@
 # RFC: semantic domain contracts, Operation expansion, and capability-owned injection
 
-Status: accepted design; implementation pending
+Status: implemented
 
 Relationship: this RFC follows the implemented
 `RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`,
@@ -1026,7 +1026,7 @@ converted into `ProgramError` inside `Operation::expand`.
 Conceptually:
 
 ```rust
-impl Operation for PortfolioSnapshotOperation<'_> {
+impl Operation for PortfolioSnapshotOperation {
     type Input = PortfolioSnapshotInput;
     type Output = PortfolioSnapshotOutput;
     type Failure = PortfolioSnapshotFailure;

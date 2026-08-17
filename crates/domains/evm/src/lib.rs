@@ -11,9 +11,8 @@ use std::marker::PhantomData;
 use mfm_capabilities::ReadCapabilityContract;
 use mfm_ids::{ContentRef, StableId};
 use mfm_program::{
-    capability_contract_ref, nominal_contract_ref, state_implementation_ref, Declaration,
-    Execution, MatchDeclaration, MatchVariant, ProposedStateOutcome, PureState,
-    ReadPreparationError, ReadState, State, StateDeclaration,
+    CapabilityInjection, Operation, OperationExpansion, ProgramError, ProposedStateOutcome,
+    PureState, ReadPreparationError, ReadState, State,
 };
 use mfm_program_derive::MfmValue;
 use mfm_values::{string_contains_secret_marker, MfmValue as MfmValueTrait};
@@ -1907,186 +1906,79 @@ fn advance_balance_context<K: MfmValueTrait>(
     }
 }
 
-/// Appends one fully unrolled reusable balance fragment.
-///
-/// The fragment starts at the current declaration length in final Program
-/// order. Each source contributes eight occurrences; the one consolidate State
-/// follows them. Callers supply only the external failure and completion routes.
-pub fn append_balance_fragment<K: MfmValueTrait>(
-    declarations: &mut Vec<Declaration>,
+/// Deterministically expands one checked EVM balance collection.
+pub struct CollectEvmBalances<K: MfmValueTrait> {
+    target: EvmPhysicalTarget,
     source_count: usize,
-    target: &EvmPhysicalTarget,
-    failure_next_index: u16,
-    completion_next_index: Option<u16>,
-) -> Result<(), EvmDomainError> {
-    if source_count == 0 || source_count > EVM_BALANCE_SOURCE_LIMIT {
-        return Err(EvmDomainError::Program);
+    marker: PhantomData<fn() -> K>,
+}
+
+impl<K: MfmValueTrait> CollectEvmBalances<K> {
+    /// Constructs one collection expansion with a checked source count.
+    pub fn new(target: EvmPhysicalTarget, source_count: usize) -> Result<Self, EvmDomainError> {
+        if !(1..=EVM_BALANCE_SOURCE_LIMIT).contains(&source_count) {
+            return Err(EvmDomainError::Program);
+        }
+        Ok(Self {
+            target,
+            source_count,
+            marker: PhantomData,
+        })
     }
-    let context =
-        nominal_contract_ref::<EvmBalanceContext<K>>().map_err(|_| EvmDomainError::Program)?;
-    let asset =
-        nominal_contract_ref::<EvmBalanceAsset<K>>().map_err(|_| EvmDomainError::Program)?;
-    let completion = nominal_contract_ref::<EvmBalanceCollectionCompletion<K>>()
-        .map_err(|_| EvmDomainError::Program)?;
-    let failure =
-        nominal_contract_ref::<EvmBalanceFailure>().map_err(|_| EvmDomainError::Program)?;
-    let binding_ref = target.binding_ref()?;
-    let start_index = u16::try_from(declarations.len()).map_err(|_| EvmDomainError::Program)?;
-    let source_count_u16 = u16::try_from(source_count).map_err(|_| EvmDomainError::Program)?;
-    let consolidate_index = start_index
-        .checked_add(
-            source_count_u16
-                .checked_mul(8)
-                .ok_or(EvmDomainError::Program)?,
-        )
-        .ok_or(EvmDomainError::Program)?;
+}
 
-    for source in 0..source_count_u16 {
-        let base = start_index
-            .checked_add(source.checked_mul(8).ok_or(EvmDomainError::Program)?)
-            .ok_or(EvmDomainError::Program)?;
-        let index = |offset: u16| base.checked_add(offset).ok_or(EvmDomainError::Program);
-        let initial = index(1)?;
-        let select = index(2)?;
-        let selector = index(3)?;
-        let native = index(4)?;
-        let decimals = index(5)?;
-        let token = index(6)?;
-        let confirm = index(7)?;
-        let after_confirm = if source + 1 == source_count_u16 {
-            consolidate_index
-        } else {
-            base.checked_add(8).ok_or(EvmDomainError::Program)?
-        };
-        declarations.extend([
-            Declaration::State(read_state::<CheckChainIdentity<K>, EvmChainIdentityRead>(
-                context.clone(),
-                context.clone(),
-                failure.clone(),
-                initial,
-                failure_next_index,
-                binding_ref.clone(),
-            )?),
-            Declaration::State(read_state::<ReadInitialAnchor<K>, EvmAnchorRead>(
-                context.clone(),
-                context.clone(),
-                failure.clone(),
-                select,
-                failure_next_index,
-                binding_ref.clone(),
-            )?),
-            Declaration::State(pure_state::<SelectBalanceAsset<K>>(
-                context.clone(),
-                asset.clone(),
-                failure.clone(),
-                Some(selector),
-                Some(failure_next_index),
-            )?),
-            Declaration::Match(
-                MatchDeclaration::new(
-                    asset.clone(),
-                    vec![
-                        MatchVariant::new(
-                            StableId::new("native").map_err(|_| EvmDomainError::Program)?,
-                            native,
-                        ),
-                        MatchVariant::new(
-                            StableId::new("token").map_err(|_| EvmDomainError::Program)?,
-                            decimals,
-                        ),
-                    ],
-                )
-                .map_err(|_| EvmDomainError::Program)?,
-            ),
-            Declaration::State(read_state::<ReadNativeBalance<K>, EvmBalanceRead>(
-                context.clone(),
-                context.clone(),
-                failure.clone(),
-                confirm,
-                failure_next_index,
-                binding_ref.clone(),
-            )?),
-            Declaration::State(read_state::<ReadTokenDecimals<K>, EvmBalanceRead>(
-                context.clone(),
-                context.clone(),
-                failure.clone(),
-                token,
-                failure_next_index,
-                binding_ref.clone(),
-            )?),
-            Declaration::State(read_state::<ReadTokenBalance<K>, EvmBalanceRead>(
-                context.clone(),
-                context.clone(),
-                failure.clone(),
-                confirm,
-                failure_next_index,
-                binding_ref.clone(),
-            )?),
-            Declaration::State(read_state::<ConfirmBalanceAnchor<K>, EvmAnchorRead>(
-                context.clone(),
-                context.clone(),
-                failure.clone(),
-                after_confirm,
-                failure_next_index,
-                binding_ref.clone(),
-            )?),
-        ]);
+impl<K: MfmValueTrait> Operation for CollectEvmBalances<K> {
+    type Input = EvmBalanceContext<K>;
+    type Output = EvmBalanceCollectionCompletion<K>;
+    type Failure = EvmBalanceFailure;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        for _ in 0..self.source_count {
+            body.read::<CheckChainIdentity<K>, EvmChainIdentityRead>(&self.target)?;
+            body.read::<ReadInitialAnchor<K>, EvmAnchorRead>(&self.target)?;
+            body.pure::<SelectBalanceAsset<K>>()?;
+            body.match_join::<EvmBalanceAsset<K>, EvmBalanceContext<K>>(|arms| {
+                let native = StableId::new("native").map_err(|_| ProgramError::InvalidContract)?;
+                arms.arm::<EvmBalanceContext<K>>(native, |branch| {
+                    branch.read::<ReadNativeBalance<K>, EvmBalanceRead>(&self.target)
+                })?;
+                let token = StableId::new("token").map_err(|_| ProgramError::InvalidContract)?;
+                arms.arm::<EvmBalanceContext<K>>(token, |branch| {
+                    branch.read::<ReadTokenDecimals<K>, EvmBalanceRead>(&self.target)?;
+                    branch.read::<ReadTokenBalance<K>, EvmBalanceRead>(&self.target)
+                })
+            })?;
+            body.read::<ConfirmBalanceAnchor<K>, EvmAnchorRead>(&self.target)?;
+        }
+        body.pure::<ConsolidateBalanceCollection<K>>()
     }
-    declarations.push(Declaration::State(pure_state::<
-        ConsolidateBalanceCollection<K>,
-    >(
-        context,
-        completion,
-        failure,
-        completion_next_index,
-        Some(failure_next_index),
-    )?));
-    Ok(())
 }
 
-fn pure_state<S: State>(
-    input: ContentRef,
-    output: ContentRef,
-    failure: ContentRef,
-    next_index: Option<u16>,
-    failure_next_index: Option<u16>,
-) -> Result<StateDeclaration, EvmDomainError> {
-    StateDeclaration::new(
-        state_implementation_ref::<S>().map_err(|_| EvmDomainError::Program)?,
-        input,
-        output,
-        failure,
-        Execution::pure(),
-        next_index,
-        failure_next_index,
-    )
-    .map_err(|_| EvmDomainError::Program)
+macro_rules! impl_identity_injection {
+    ($capability:ty, $state:ident) => {
+        impl<K: MfmValueTrait> CapabilityInjection<$state<K>> for $capability {
+            type Setup = EvmPhysicalTarget;
+            type ExpandedInput = EvmBalanceContext<K>;
+            type ExpandedOutput = EvmBalanceContext<K>;
+
+            fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
+                setup
+                    .binding_ref()
+                    .map_err(|_| ProgramError::InvalidContract)
+            }
+        }
+    };
 }
 
-fn read_state<S: State, C: ReadCapabilityContract>(
-    input: ContentRef,
-    output: ContentRef,
-    failure: ContentRef,
-    next_index: u16,
-    failure_next_index: u16,
-    binding_ref: ContentRef,
-) -> Result<StateDeclaration, EvmDomainError> {
-    StateDeclaration::new(
-        state_implementation_ref::<S>().map_err(|_| EvmDomainError::Program)?,
-        input,
-        output,
-        failure,
-        Execution::read(
-            capability_contract_ref::<C>().map_err(|_| EvmDomainError::Program)?,
-            nominal_contract_ref::<C::Intent>().map_err(|_| EvmDomainError::Program)?,
-            nominal_contract_ref::<C::Evidence>().map_err(|_| EvmDomainError::Program)?,
-            binding_ref,
-        ),
-        Some(next_index),
-        Some(failure_next_index),
-    )
-    .map_err(|_| EvmDomainError::Program)
-}
+impl_identity_injection!(EvmChainIdentityRead, CheckChainIdentity);
+impl_identity_injection!(EvmAnchorRead, ReadInitialAnchor);
+impl_identity_injection!(EvmBalanceRead, ReadNativeBalance);
+impl_identity_injection!(EvmBalanceRead, ReadTokenDecimals);
+impl_identity_injection!(EvmBalanceRead, ReadTokenBalance);
+impl_identity_injection!(EvmAnchorRead, ConfirmBalanceAnchor);
 
 fn success<O, F>(output: O) -> ProposedStateOutcome<O, F> {
     ProposedStateOutcome::Success { output }
@@ -2264,7 +2156,8 @@ fn valid_public_text(value: &str, maximum: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, SchemaId};
+    use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, EntryPointId, SchemaId};
+    use mfm_program::{expand_program, Declaration, StateDeclaration};
 
     use super::*;
 
@@ -2313,14 +2206,9 @@ mod tests {
         }
     }
 
-    fn assert_state_edges(declarations: &[Declaration], index: usize, success: u16, failure: u16) {
+    fn assert_state_success(declarations: &[Declaration], index: usize, success: Option<u16>) {
         let state = state_at(declarations, index);
-        assert_eq!(state.next_index(), Some(success), "success edge at {index}");
-        assert_eq!(
-            state.failure_next_index(),
-            Some(failure),
-            "failure edge at {index}"
-        );
+        assert_eq!(state.next_index(), success, "success edge at {index}");
     }
 
     #[test]
@@ -2441,51 +2329,39 @@ mod tests {
     }
 
     #[test]
-    fn balance_fragment_derives_every_internal_index_from_prefilled_program_order() {
-        let context_ref =
-            nominal_contract_ref::<EvmBalanceContext<Continuation>>().expect("context contract");
-        let completion_ref = nominal_contract_ref::<EvmBalanceCollectionCompletion<Continuation>>()
-            .expect("completion contract");
-        let failure_ref = nominal_contract_ref::<EvmBalanceFailure>().expect("failure contract");
-        let filler = Declaration::State(
-            pure_state::<ConsolidateBalanceCollection<Continuation>>(
-                context_ref,
-                completion_ref,
-                failure_ref,
-                None,
-                None,
-            )
-            .expect("filler"),
-        );
-        let mut declarations = vec![filler; 3];
+    fn balance_operation_derives_topology_without_external_indices() {
         let target = EvmPhysicalTarget::new(1, route()).expect("target");
-
-        append_balance_fragment::<Continuation>(&mut declarations, 2, &target, 60, Some(61))
-            .expect("fragment");
-
-        assert_eq!(declarations.len(), 20);
+        let operation =
+            CollectEvmBalances::<Continuation>::new(target.clone(), 2).expect("operation");
+        let program = expand_program(
+            EntryPointId::new("mfm.test/evm-balance@1").expect("entry"),
+            &operation,
+        )
+        .expect("Program");
+        let declarations = program.declarations();
+        assert_eq!(declarations.len(), 17);
         for (index, success) in [
-            (3, 4),
-            (4, 5),
-            (5, 6),
-            (7, 10),
-            (8, 9),
-            (9, 10),
-            (10, 11),
-            (11, 12),
-            (12, 13),
-            (13, 14),
-            (15, 18),
-            (16, 17),
-            (17, 18),
-            (18, 19),
-            (19, 61),
+            (0, Some(1)),
+            (1, Some(2)),
+            (2, Some(3)),
+            (4, Some(7)),
+            (5, Some(6)),
+            (6, Some(7)),
+            (7, Some(8)),
+            (8, Some(9)),
+            (9, Some(10)),
+            (10, Some(11)),
+            (12, Some(15)),
+            (13, Some(14)),
+            (14, Some(15)),
+            (15, Some(16)),
+            (16, None),
         ] {
-            assert_state_edges(&declarations, index, success, 60);
+            assert_state_success(declarations, index, success);
         }
         for (index, expected) in [
-            (6, [("native", 7), ("token", 8)]),
-            (14, [("native", 15), ("token", 16)]),
+            (3, [("native", 4), ("token", 5)]),
+            (11, [("native", 12), ("token", 13)]),
         ] {
             let Declaration::Match(selector) = &declarations[index] else {
                 panic!("declaration {index} must be a Match");
@@ -2497,6 +2373,24 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected);
         }
+        assert!(declarations
+            .iter()
+            .filter_map(|declaration| match declaration {
+                Declaration::State(state) => state.execution().binding_ref(),
+                Declaration::Match(_) => None,
+            })
+            .all(|binding| binding == &target.binding_ref().expect("binding")));
+        assert_eq!(
+            declarations
+                .iter()
+                .filter(|declaration| matches!(declaration, Declaration::State(state) if !state.execution().is_pure()))
+                .count(),
+            12
+        );
+        assert!(CollectEvmBalances::<Continuation>::new(target.clone(), 1).is_ok());
+        assert!(CollectEvmBalances::<Continuation>::new(target.clone(), 64).is_ok());
+        assert!(CollectEvmBalances::<Continuation>::new(target.clone(), 0).is_err());
+        assert!(CollectEvmBalances::<Continuation>::new(target, 65).is_err());
     }
 
     #[test]

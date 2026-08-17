@@ -30,6 +30,11 @@ retention, child failure mapping, quote selection, and final snapshot/report pro
 chain/anchor/source validation, raw quantities and decimal scale, common-anchor confirmation, and
 collection completion. Live EVM owns only bounded provider ingress for the exact planned Read.
 
+Portfolio authors the root through a private Operation and composes the public configured
+`CollectEvmBalances<K>` child without forecasting its size. EVM owns the child topology and six
+explicit capability/State binding policies. Operation and injection metadata are not part of this
+frozen Program or result wire.
+
 `Rejected` and `SafeFailure` map through ordinary source-failure interpretation.
 `IntegrityBlocked` remains distinct through the EVM failure and Portfolio mapper. A local target or
 route mismatch is Runtime `Internal`, never manufactured durable evidence.

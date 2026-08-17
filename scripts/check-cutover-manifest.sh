@@ -72,11 +72,15 @@ scan_regex() {
       ;;
     production)
       targets=("$repository_root/crates" "$repository_root/bin")
-      globs=(-g '**/src/**/*.rs')
+      globs=(-g '**/src/**/*.rs' -g '!crates/kernel/program/src/tests.rs')
+      ;;
+    production-non-program)
+      targets=("$repository_root/crates" "$repository_root/bin")
+      globs=(-g '**/src/**/*.rs' -g '!crates/kernel/program/src/**')
       ;;
     schema)
       targets=("$repository_root/crates" "$repository_root/bin" "$repository_root/.github" "$repository_root/.config" "$repository_root/nix" "$repository_root/flake.nix" "$repository_root/nixfied.nix" "$repository_root/scripts")
-      globs=(-g '**/src/**/*.rs' -g '**/migrations/*.sql' -g 'build.rs' -g '*.nix' -g '*.yml' -g '*.yaml' -g '*.toml' -g '*.sh' -g '!check-cutover-manifest.sh')
+      globs=(-g '**/src/**/*.rs' -g '!crates/kernel/program/src/tests.rs' -g '**/migrations/*.sql' -g 'build.rs' -g '*.nix' -g '*.yml' -g '*.yaml' -g '*.toml' -g '*.sh' -g '!check-cutover-manifest.sh')
       ;;
     sql)
       targets=("$repository_root/crates")
@@ -466,6 +470,47 @@ run_canary() {
       mkdir -p "$canary_root/src"
       printf '%s\n' 'pub struct PortfolioState<const STAGE: u8>;' >"$canary_root/src/lib.rs"
       ;;
+    authoring-alternate)
+      cleanup_canary
+      canary_root="$(mktemp -d "$repository_root/crates/kernel/program/src/.cutover-scan-canary.XXXXXX")"
+      printf '%s\n' 'struct ProgramAuthor;' 'struct ForwardLabel;' >"$canary_root/canary.rs"
+      ;;
+    authoring-method)
+      cleanup_canary
+      canary_root="$(mktemp -d "$repository_root/crates/kernel/program/src/.cutover-scan-canary.XXXXXX")"
+      printf '%s\n' 'impl OperationExpansion { pub fn return_success(&mut self) {} }' >"$canary_root/canary.rs"
+      ;;
+    authoring-route)
+      cleanup_canary
+      canary_root="$(mktemp -d "$repository_root/crates/kernel/program/src/.cutover-scan-canary.XXXXXX")"
+      printf '%s\n' 'pub struct SuccessorRoute;' >"$canary_root/canary.rs"
+      ;;
+    raw-program-constructor)
+      mkdir -p "$canary_root/src"
+      printf '%s\n' 'fn bypass() { let _ = Program::new(); }' >"$canary_root/src/lib.rs"
+      ;;
+    raw-domain-author)
+      mkdir -p "$canary_root/src"
+      printf '%s\n' 'fn append_balance_fragment() {}' >"$canary_root/src/lib.rs"
+      ;;
+    declaration-vector)
+      cleanup_canary
+      canary_root="$(mktemp -d "$repository_root/crates/domains/evm/src/.cutover-scan-canary.XXXXXX")"
+      printf '%s\n' 'fn raw() -> Vec<Declaration> { Vec::new() }' >"$canary_root/canary.rs"
+      ;;
+    direct-operation-expand)
+      mkdir -p "$canary_root/src"
+      printf '%s\n' 'fn bypass(child: &Child, body: &mut Body) { child.expand(body); }' >"$canary_root/src/lib.rs"
+      ;;
+    direct-injection-hook)
+      mkdir -p "$canary_root/src"
+      printf '%s\n' 'fn bypass() { Capability::write_before(); }' >"$canary_root/src/lib.rs"
+      ;;
+    injection-writer-extra)
+      cleanup_canary
+      canary_root="$(mktemp -d "$repository_root/crates/kernel/program/src/.cutover-scan-canary.XXXXXX")"
+      printf '%s\n' 'impl InjectionWriter {' '    pub fn read(&mut self) {}' '}' >"$canary_root/canary.rs"
+      ;;
     *)
       echo "unknown cutover scanner canary: $label" >&2
       exit 2
@@ -487,7 +532,7 @@ if ! scan_current_tree; then
   exit 1
 fi
 
-for canary in path package dependency package-compact package-single-quoted dependency-quoted dependency-renamed dependency-dotted dependency-dotted-quoted dependency-dotted-dev dependency-dotted-target feature-double-quoted feature-single-quoted export private hot-value execution-key reexport-direct reexport-braced reexport-multiline conflict function limit-field capability wire sql sql-lowercase sql-uppercase-object sql-uppercase-column docs docs-journal docs-app effect-identities store-readiness address-fields occurrence-field reservation-instruction replay-reducer wallet-domain submission-status async-ownership schema-kind-variants terminal-field completion-cell finalization-cell pending-owner-permit resolver-token access-binding run-admitted postgres-wallet-nonce enum-whitespace capability-owned-direct capability-owned-reexport store-owned-reexport live-owned-alias live-owned-reexport acknowledgement-field completion-field finalization-field pending-owner-limit-field pending-owner-permit-field resolver-field cancellation-field timeout-field read-replacement state-input-derive operation-output-derive public-outputs-derive numeric-evm-capability numeric-evm-state numeric-portfolio-state; do
+for canary in path package dependency package-compact package-single-quoted dependency-quoted dependency-renamed dependency-dotted dependency-dotted-quoted dependency-dotted-dev dependency-dotted-target feature-double-quoted feature-single-quoted export private hot-value execution-key reexport-direct reexport-braced reexport-multiline conflict function limit-field capability wire sql sql-lowercase sql-uppercase-object sql-uppercase-column docs docs-journal docs-app effect-identities store-readiness address-fields occurrence-field reservation-instruction replay-reducer wallet-domain submission-status async-ownership schema-kind-variants terminal-field completion-cell finalization-cell pending-owner-permit resolver-token access-binding run-admitted postgres-wallet-nonce enum-whitespace capability-owned-direct capability-owned-reexport store-owned-reexport live-owned-alias live-owned-reexport acknowledgement-field completion-field finalization-field pending-owner-limit-field pending-owner-permit-field resolver-field cancellation-field timeout-field read-replacement state-input-derive operation-output-derive public-outputs-derive numeric-evm-capability numeric-evm-state numeric-portfolio-state authoring-alternate authoring-method authoring-route raw-program-constructor raw-domain-author declaration-vector direct-operation-expand direct-injection-hook injection-writer-extra; do
   run_canary "$canary"
 done
 cleanup_canary

@@ -102,6 +102,39 @@ fn config_with_sources(count: usize) -> serde_json::Value {
     })
 }
 
+fn two_collection_config() -> serde_json::Value {
+    serde_json::json!({
+        "portfolio_id": "portfolio-example",
+        "quotes": ["usd"],
+        "collections": [
+            {
+                "correlation": "chain-one",
+                "request": {
+                    "sources": [{
+                        "source_id": "wallet.one",
+                        "chain_id": 1,
+                        "address": "0x0000000000000000000000000000000000000001",
+                        "token": null
+                    }],
+                    "decimals": 18
+                }
+            },
+            {
+                "correlation": "chain-two",
+                "request": {
+                    "sources": [{
+                        "source_id": "wallet.two",
+                        "chain_id": 2,
+                        "address": "0x0000000000000000000000000000000000000002",
+                        "token": null
+                    }],
+                    "decimals": 18
+                }
+            }
+        ]
+    })
+}
+
 #[test]
 fn planner_binds_every_read_to_the_exact_target() {
     let config: PortfolioConfig = serde_json::from_value(config_with_sources(2)).expect("config");
@@ -124,6 +157,52 @@ fn planner_binds_every_read_to_the_exact_target() {
         input["collections"][0]["route_ref"],
         serde_json::to_value(&expected_binding).expect("binding json")
     );
+}
+
+#[test]
+fn repeated_owned_children_keep_distinct_bindings_and_exact_parent_topology() {
+    let config: PortfolioConfig =
+        serde_json::from_value(two_collection_config()).expect("two collections");
+    let targets = [target(1, 2), target(2, 3)];
+    let first_binding = targets[0].binding_ref().expect("first binding");
+    let second_binding = targets[1].binding_ref().expect("second binding");
+    let (program, _) = plan_snapshot(selector(), &config, &targets).expect("two-child plan");
+    assert_eq!(program.declarations().len(), 26);
+
+    let bindings = program
+        .declarations()
+        .iter()
+        .filter_map(|declaration| match declaration {
+            Declaration::State(state) => state.execution().binding_ref(),
+            Declaration::Match(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(bindings.len(), 12);
+    assert!(bindings[..6]
+        .iter()
+        .all(|binding| *binding == &first_binding));
+    assert!(bindings[6..]
+        .iter()
+        .all(|binding| *binding == &second_binding));
+
+    let state = |index: usize| {
+        let Declaration::State(state) = &program.declarations()[index] else {
+            panic!("declaration {index} must be a State");
+        };
+        state
+    };
+    assert_eq!(state(10).next_index(), Some(11));
+    assert_eq!(state(11).next_index(), Some(13));
+    assert_eq!(state(12).next_index(), None);
+    assert_eq!(state(22).next_index(), Some(23));
+    assert_eq!(state(23).next_index(), Some(25));
+    assert_eq!(state(24).next_index(), None);
+    for index in [2, 3, 4, 6, 7, 8, 9, 10] {
+        assert_eq!(state(index).failure_next_index(), Some(12));
+    }
+    for index in [14, 15, 16, 18, 19, 20, 21, 22] {
+        assert_eq!(state(index).failure_next_index(), Some(24));
+    }
 }
 
 #[test]
