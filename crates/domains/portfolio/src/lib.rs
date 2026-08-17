@@ -865,7 +865,7 @@ fn sum_unsigned(values: &[String]) -> Option<String> {
     })
 }
 
-/// Selector used by the fixed-tenant application to choose the admitted Portfolio target.
+/// Selector for selecting an admitted Portfolio target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioSnapshotSelector {
@@ -1015,7 +1015,6 @@ struct CollectionLayout<'a> {
     target: &'a EvmPhysicalTarget,
     source_count: usize,
     enter: u16,
-    fragment: u16,
     resume: u16,
     mapper: u16,
 }
@@ -1047,13 +1046,13 @@ fn portfolio_program(
     for (target, source_count) in selections {
         let source_count_u16 = u16::try_from(*source_count).map_err(|_| PortfolioError::Program)?;
         let enter = cursor;
-        let fragment = enter.checked_add(1).ok_or(PortfolioError::Program)?;
         let fragment_len = source_count_u16
             .checked_mul(8)
             .and_then(|count| count.checked_add(1))
             .ok_or(PortfolioError::Program)?;
-        let resume = fragment
-            .checked_add(fragment_len)
+        let resume = enter
+            .checked_add(1)
+            .and_then(|fragment| fragment.checked_add(fragment_len))
             .ok_or(PortfolioError::Program)?;
         let mapper = resume.checked_add(1).ok_or(PortfolioError::Program)?;
         cursor = mapper.checked_add(1).ok_or(PortfolioError::Program)?;
@@ -1061,7 +1060,6 @@ fn portfolio_program(
             target,
             source_count: *source_count,
             enter,
-            fragment,
             resume,
             mapper,
         });
@@ -1082,18 +1080,18 @@ fn portfolio_program(
     ));
 
     for (position, layout) in layouts.iter().enumerate() {
+        let fragment = layout.enter.checked_add(1).ok_or(PortfolioError::Program)?;
         declarations.push(Declaration::State(
             portfolio_pure_state::<PortfolioState<1>>(
                 continuation.clone(),
                 context.clone(),
                 failure.clone(),
-                Some(layout.fragment),
+                Some(fragment),
                 None,
             )?,
         ));
         append_balance_fragment::<PortfolioContinuation>(
             &mut declarations,
-            layout.fragment,
             layout.source_count,
             layout.target,
             layout.mapper,
