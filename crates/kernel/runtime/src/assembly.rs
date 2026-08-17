@@ -444,14 +444,7 @@ impl RuntimeAssemblyBuilder {
         }
         let descriptor = T::schema_descriptor().map_err(|_| RuntimeError::IncompatibleAssembly)?;
         let semantic = T::semantic_id().map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        let schema = T::schema_id().map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        if descriptor.identity().semantic_type_id.as_ref() != Some(&semantic)
-            || descriptor
-                .identity()
-                .schema_id()
-                .map_err(|_| RuntimeError::IncompatibleAssembly)?
-                != schema
-        {
+        if descriptor.identity().semantic_type_id.as_ref() != Some(&semantic) {
             return Err(RuntimeError::IncompatibleAssembly);
         }
         let contract_ref =

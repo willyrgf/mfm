@@ -82,6 +82,36 @@ impl ReadCapabilityContract for IdentityRead {
     }
 }
 
+struct InvalidIdentityState;
+
+impl State for InvalidIdentityState {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        Err(ProgramError::InvalidContract)
+    }
+}
+
+struct InvalidIdentityRead;
+
+impl ReadCapabilityContract for InvalidIdentityRead {
+    type Intent = Value;
+    type Evidence = Value;
+
+    fn contract_id() -> mfm_capabilities::Result<StableId> {
+        Err(CapabilityError::InvalidContract)
+    }
+
+    fn bind_evidence(
+        _intent: &Self::Intent,
+        _evidence: &Self::Evidence,
+    ) -> mfm_capabilities::Result<()> {
+        Ok(())
+    }
+}
+
 #[test]
 fn never_identity_is_the_exact_reserved_root_exception() {
     let descriptor = Never::schema_descriptor().expect("Never descriptor");
@@ -188,6 +218,18 @@ fn implementation_reference_preimages_remain_v1_exact() {
             .content_digest()
             .as_str(),
         "content:sha256-v1:70c931a7ae3e52ce943296347e6a3f0ab04425cfb8a390428145ff34753ced54"
+    );
+}
+
+#[test]
+fn static_state_and_capability_identity_failures_map_at_program_authoring() {
+    assert_eq!(
+        state_implementation_ref::<InvalidIdentityState>(),
+        Err(ProgramError::InvalidContract)
+    );
+    assert_eq!(
+        capability_contract_ref::<InvalidIdentityRead>(),
+        Err(ProgramError::InvalidContract)
     );
 }
 

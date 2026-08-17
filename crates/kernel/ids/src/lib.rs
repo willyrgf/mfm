@@ -6,6 +6,10 @@
 //! formatting; canonical byte production and digest computation live in later
 //! kernel crates.
 //!
+//! [`RunId`] and [`ArtifactId`] are fixed to `sha256-jcs-v1`; [`ContentDigest`] accepts both
+//! supported algorithms. [`ContentRef`] binds interpretation to exact-byte identity, while Journal
+//! separately qualifies retained frame-local bytes.
+//!
 //! ```compile_fail
 //! use mfm_ids::{SchemaId, SemanticTypeId};
 //!
@@ -173,10 +177,10 @@ pub type ArtifactId = Identity<ArtifactIdKind>;
 /// Generic digest of canonical bytes or artifact bytes.
 pub type ContentDigest = Identity<ContentDigestKind>;
 
-/// Lightweight content identity containing only interpretation and exact-byte digest.
+/// Lightweight content identity containing only interpretation and exact-byte identity.
 ///
-/// This value proves neither retention, producer lineage, run reachability, object evidence, nor
-/// access authority. Journal-retained values use the separate producer-bound `ValueRef` contract.
+/// Journal separately qualifies the exact frame-local bytes retained under this reference. This
+/// value alone proves neither retention, producer lineage, run reachability, nor access authority.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentRef {
     schema_id: SchemaId,

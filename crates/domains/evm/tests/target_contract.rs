@@ -33,7 +33,10 @@ fn physical_target_has_one_exact_checked_identity() {
         ),
         "mfm.evm/physical-target@1"
     );
-    let schema = EvmPhysicalTarget::schema_id().expect("schema identity");
+    let schema = EvmPhysicalTarget::schema_descriptor()
+        .expect("schema descriptor")
+        .schema_id()
+        .expect("schema identity");
     assert_eq!(schema.canonical_name(), Some("mfm.evm-physical-target"));
     assert_eq!(schema.version(), Some("1"));
     assert_eq!(

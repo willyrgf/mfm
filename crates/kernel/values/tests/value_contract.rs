@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use mfm_ids::{DigestAlgorithm, DigestBytes, SemanticTypeId};
 use mfm_program_derive::MfmValue;
 use mfm_values::{canonicalize_mfm_value, ValueError};
@@ -39,6 +41,40 @@ struct TextValue {
     text: String,
 }
 
+static DESCRIPTOR_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Serialize, Deserialize)]
+struct CountingValue {
+    label: String,
+    value: u64,
+}
+
+impl mfm_values::MfmValue for CountingValue {
+    fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+        DESCRIPTOR_CALLS.fetch_add(1, Ordering::SeqCst);
+        <ExactValue as mfm_values::MfmValue>::schema_descriptor()
+    }
+
+    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
+        <ExactValue as mfm_values::MfmValue>::semantic_id()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct OversizedShapeInvalid {
+    text: String,
+}
+
+impl mfm_values::MfmValue for OversizedShapeInvalid {
+    fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+        <ExactValue as mfm_values::MfmValue>::schema_descriptor()
+    }
+
+    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
+        <ExactValue as mfm_values::MfmValue>::semantic_id()
+    }
+}
+
 #[test]
 fn canonicalization_proves_descriptor_bytes_secret_policy_and_exact_digest() {
     let value = ExactValue {
@@ -69,6 +105,28 @@ fn canonicalization_proves_descriptor_bytes_secret_policy_and_exact_digest() {
 #[test]
 fn valid_object_over_the_shared_ceiling_is_capacity() {
     let oversized = TextValue {
+        text: "a".repeat(mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES),
+    };
+    assert_eq!(
+        canonicalize_mfm_value(&oversized),
+        Err(ValueError::Capacity)
+    );
+}
+
+#[test]
+fn canonicalization_obtains_one_descriptor_from_its_value_owner() {
+    DESCRIPTOR_CALLS.store(0, Ordering::SeqCst);
+    canonicalize_mfm_value(&CountingValue {
+        label: "public".to_owned(),
+        value: 7,
+    })
+    .expect("qualified value");
+    assert_eq!(DESCRIPTOR_CALLS.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn oversized_shape_invalid_value_is_capacity_before_shape_qualification() {
+    let oversized = OversizedShapeInvalid {
         text: "a".repeat(mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES),
     };
     assert_eq!(
