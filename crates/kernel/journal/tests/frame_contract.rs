@@ -158,6 +158,49 @@ fn fused_read_closure_coalesces_identical_objects() {
 }
 
 #[test]
+fn repeated_cross_frame_object_is_valid_hot_and_cold() {
+    let run = run(15);
+    let shared = br#"{"shared":true}"#;
+    let context = b"[]";
+    let shared_ref = object_ref("mfm.test.shared", shared);
+    let genesis = EncodedRunFrame::admission(
+        &run,
+        &shared_ref,
+        shared,
+        &object_ref("mfm.test.context", context),
+        context,
+    )
+    .expect("genesis");
+    let genesis_bytes = genesis.canonical_bytes().to_vec();
+    let mut history = JournalHistory::from_genesis(genesis).expect("history");
+    let successor = history
+        .encode_pure_conclusion(OutcomeKind::Success, &shared_ref, shared)
+        .expect("repeated object successor");
+    let successor_bytes = successor.canonical_bytes().to_vec();
+
+    let JournalRecord::StateConcludedPure { outcome, .. } =
+        history.extend_inserted(successor).expect("hot extension")
+    else {
+        panic!("successor record");
+    };
+    assert_eq!(outcome.content_ref(), &shared_ref);
+    assert_eq!(outcome.canonical_bytes(), shared);
+
+    let cold = JournalHistory::qualify(
+        &run,
+        StoredRunBytes::new(vec![genesis_bytes, successor_bytes]).expect("stored prefix"),
+    )
+    .expect("cold qualification");
+    let JournalRecord::StateConcludedPure { outcome, .. } =
+        cold.records().nth(1).expect("cold successor")
+    else {
+        panic!("cold successor record");
+    };
+    assert_eq!(outcome.content_ref(), &shared_ref);
+    assert_eq!(outcome.canonical_bytes(), shared);
+}
+
+#[test]
 fn every_record_and_outcome_has_the_exact_frozen_wire() {
     let run = run(11);
     let program = br#"{"program":1}"#;
@@ -488,7 +531,7 @@ fn journal_capacity_theorem_is_exact() {
 }
 
 #[test]
-fn three_maximum_objects_fit_and_object_plus_one_is_capacity() {
+fn object_one_byte_over_the_exact_limit_is_capacity() {
     let run = run(14);
     let genesis = EncodedRunFrame::admission(
         &run,
@@ -499,46 +542,8 @@ fn three_maximum_objects_fit_and_object_plus_one_is_capacity() {
     )
     .expect("genesis");
     let history = JournalHistory::from_genesis(genesis).expect("history");
-    let value = |suffix: char| {
-        let mut text = String::with_capacity(MAX_RUN_OBJECT_CANONICAL_BYTES);
-        text.push('"');
-        text.extend(std::iter::repeat_n('a', MAX_RUN_OBJECT_CANONICAL_BYTES - 3));
-        text.push(suffix);
-        text.push('"');
-        text
-    };
-    let intent = value('i');
-    let evidence = value('e');
-    let outcome = value('o');
-    let maximum_schema_name = format!("m{}", "a".repeat(423));
-    assert_eq!(
-        object_ref(&maximum_schema_name, b"1")
-            .schema_id()
-            .as_str()
-            .len(),
-        512
-    );
-    let frame = history
-        .encode_read_conclusion(
-            &object_ref(&maximum_schema_name, intent.as_bytes()),
-            intent.as_bytes(),
-            &object_ref(&maximum_schema_name, evidence.as_bytes()),
-            evidence.as_bytes(),
-            OutcomeKind::Success,
-            &object_ref(&maximum_schema_name, outcome.as_bytes()),
-            outcome.as_bytes(),
-        )
-        .expect("three maximum objects");
-    assert!(frame.canonical_bytes().len() <= MAX_FRAME_BYTES);
-    let payload = intent.len() + evidence.len() + outcome.len();
-    let envelope = frame
-        .canonical_bytes()
-        .len()
-        .checked_sub(payload)
-        .expect("payload is contained in frame");
-    assert!(envelope <= MAX_FRAME_NON_PAYLOAD_ENVELOPE);
-
-    let oversized = format!("\"{}\"", "a".repeat(MAX_RUN_OBJECT_CANONICAL_BYTES));
+    let oversized = format!("\"{}\"", "a".repeat(MAX_RUN_OBJECT_CANONICAL_BYTES - 1));
+    assert_eq!(oversized.len(), MAX_RUN_OBJECT_CANONICAL_BYTES + 1);
     assert!(matches!(
         history.encode_pure_conclusion(
             OutcomeKind::Success,

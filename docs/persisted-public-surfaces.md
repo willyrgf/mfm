@@ -4,7 +4,7 @@ Program v2 is one strict checked canonical document. It contains entry point, ad
 contract, exact root success/failure contracts, and an ordered State/Match declaration array. There
 is no public wire DTO parallel to `Program`.
 
-Journal persists only canonical `mfm-run-frame@1` frames. Genesis records the exact Program and C0.
+Journal persists only canonical `mfm.run.frame.v1` frames. Genesis records the exact Program and C0.
 Later frames are either one fused Pure conclusion or one fused Read intent/evidence/outcome
 conclusion. Every referenced object appears exactly once in the frame-local sorted object closure.
 Recursive heads use `content:sha256-v1` over exact canonical frame bytes.

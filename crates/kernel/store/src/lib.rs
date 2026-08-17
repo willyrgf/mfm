@@ -345,7 +345,8 @@ fn validate_physical(
     }
     let mut total = 0_u64;
     for frame in frames {
-        if frame.bytes.len() > MAX_FRAME_BYTES
+        if frame.bytes.is_empty()
+            || frame.bytes.len() > MAX_FRAME_BYTES
             || frame_head_digest(&frame.bytes) != frame.head_digest
         {
             return Err(StoreError::CorruptPhysicalState);

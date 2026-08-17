@@ -436,6 +436,21 @@ async fn managed_postgres_store_contract() {
 
     reset_schema(&mut connection).await;
     connection
+        .execute("DROP TABLE public.mfm_store_schema")
+        .await
+        .expect("drop marker table");
+    connection
+        .execute("CREATE TABLE public.mfm_store_schema (schema_contract BIGINT PRIMARY KEY)")
+        .await
+        .expect("install wrong marker type");
+    connection
+        .execute("INSERT INTO public.mfm_store_schema (schema_contract) VALUES (1)")
+        .await
+        .expect("insert wrong marker");
+    assert_incompatible(&database_url).await;
+
+    reset_schema(&mut connection).await;
+    connection
         .execute("DELETE FROM public.mfm_store_schema")
         .await
         .expect("remove marker");

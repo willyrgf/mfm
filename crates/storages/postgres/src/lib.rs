@@ -162,21 +162,6 @@ async fn verify_connection(connection: &mut PgConnection) -> std::result::Result
         return Err(GateError::Incompatible);
     }
 
-    let markers: Vec<String> =
-        sqlx::query_scalar("SELECT schema_contract FROM public.mfm_store_schema ORDER BY 1")
-            .fetch_all(&mut *connection)
-            .await
-            .map_err(|error| {
-                if is_undefined_schema_object(&error) {
-                    GateError::Incompatible
-                } else {
-                    GateError::Unavailable
-                }
-            })?;
-    if markers != [SCHEMA_CONTRACT] {
-        return Err(GateError::Incompatible);
-    }
-
     let relations: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT c.relname, c.relkind::text, c.relpersistence::text \
          FROM pg_catalog.pg_class c \
@@ -230,6 +215,21 @@ async fn verify_connection(connection: &mut PgConnection) -> std::result::Result
         ),
     ];
     if columns != expected_columns {
+        return Err(GateError::Incompatible);
+    }
+
+    let markers: Vec<String> =
+        sqlx::query_scalar("SELECT schema_contract FROM public.mfm_store_schema ORDER BY 1")
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(|error| {
+                if is_undefined_schema_object(&error) {
+                    GateError::Incompatible
+                } else {
+                    GateError::Unavailable
+                }
+            })?;
+    if markers != [SCHEMA_CONTRACT] {
         return Err(GateError::Incompatible);
     }
 
