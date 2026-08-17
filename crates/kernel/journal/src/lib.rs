@@ -937,7 +937,97 @@ impl RawOutcome {
 
 #[cfg(test)]
 mod tests {
+    use mfm_ids::DigestBytes;
+
     use super::*;
+
+    fn object_ref(schema_name: &str, bytes: &[u8]) -> ContentRef {
+        ContentRef::new(
+            SchemaId::new(
+                schema_name,
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([0; 32]),
+            )
+            .expect("schema"),
+            raw_content_digest(bytes),
+        )
+        .expect("reference")
+    }
+
+    fn maximum_object(suffix: char) -> String {
+        let mut text = String::with_capacity(MAX_RUN_OBJECT_CANONICAL_BYTES);
+        text.push('"');
+        text.extend(std::iter::repeat_n('a', MAX_RUN_OBJECT_CANONICAL_BYTES - 3));
+        text.push(suffix);
+        text.push('"');
+        assert_eq!(text.len(), MAX_RUN_OBJECT_CANONICAL_BYTES);
+        text
+    }
+
+    #[test]
+    fn maximum_sequence_and_three_maximum_objects_fit_before_successor_capacity() {
+        let intent = maximum_object('i');
+        let evidence = maximum_object('e');
+        let outcome = maximum_object('o');
+        let maximum_schema_name = format!("m{}", "a".repeat(423));
+        let intent_ref = object_ref(&maximum_schema_name, intent.as_bytes());
+        let evidence_ref = object_ref(&maximum_schema_name, evidence.as_bytes());
+        let outcome_ref = object_ref(&maximum_schema_name, outcome.as_bytes());
+        assert_eq!(intent_ref.schema_id().as_str().len(), 512);
+        assert_eq!(evidence_ref.schema_id().as_str().len(), 512);
+        assert_eq!(outcome_ref.schema_id().as_str().len(), 512);
+        assert_ne!(intent_ref, evidence_ref);
+        assert_ne!(intent_ref, outcome_ref);
+        assert_ne!(evidence_ref, outcome_ref);
+
+        let frame = construct_frame(
+            RunId::from_digest(DigestBytes::from_array([14; 32])),
+            MAX_RUN_FRAMES,
+            Some(ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                DigestBytes::from_array([7; 32]),
+            )),
+            RecordOwned::StateConcludedRead {
+                intent: intent_ref.clone(),
+                evidence: evidence_ref.clone(),
+                outcome: OutcomeOwned {
+                    kind: OutcomeKind::Success,
+                    value: outcome_ref.clone(),
+                },
+            },
+            vec![
+                (outcome_ref, outcome.as_bytes()),
+                (intent_ref, intent.as_bytes()),
+                (evidence_ref, evidence.as_bytes()),
+            ],
+        )
+        .expect("maximum frame");
+        assert_eq!(frame.run_sequence(), MAX_RUN_FRAMES);
+        assert!(frame.canonical_bytes().len() <= MAX_FRAME_BYTES);
+        let payload = intent.len() + evidence.len() + outcome.len();
+        let envelope = frame
+            .canonical_bytes()
+            .len()
+            .checked_sub(payload)
+            .expect("payload is contained in frame");
+        assert!(envelope <= MAX_FRAME_NON_PAYLOAD_ENVELOPE);
+
+        let total_bytes = u64::try_from(frame.canonical_bytes().len()).expect("frame length");
+        let history = JournalHistory {
+            frames: vec![frame.frame],
+            total_bytes,
+        };
+        let next = b"null";
+        assert!(matches!(
+            history.encode_pure_conclusion(
+                OutcomeKind::Success,
+                &object_ref("mfm.test.next", next),
+                next,
+            ),
+            Err(JournalError::Capacity)
+        ));
+    }
 
     #[test]
     fn transfer_capacity_boundaries_are_exact_without_large_allocations() {

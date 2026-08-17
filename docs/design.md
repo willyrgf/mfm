@@ -16,7 +16,7 @@ the selected declaration, and appends one fused conclusion. A Read frame contain
 evidence, and outcome together; adapter errors append nothing. Match is a pure projection and adds no
 frame. Zero-State Programs terminate at genesis. Hot advancement and cold reload use the same fold.
 
-Journal owns the exact `mfm-run-frame@1` canonical wire, recursive exact-byte SHA-256 heads, strict
+Journal owns the exact `mfm.run.frame.v1` canonical wire, recursive exact-byte SHA-256 heads, strict
 frame-local object closure, and history qualification. Store sees only sealed frames and opaque
 complete transfers. It atomically inserts at the exact head or writes nothing.
 

@@ -298,6 +298,27 @@ async fn private_empty_and_corrupt_shells_are_classified() {
     .await;
     assert!(store.load_run(&empty).await.expect("empty shell").is_none());
 
+    let empty_frame = run(20);
+    install_run(
+        &store,
+        &empty_frame,
+        MemoryRun {
+            frames: vec![Arc::new(StoredFrame {
+                bytes: Vec::new(),
+                head_digest: frame_head_digest(&[]),
+            })],
+            head: Some(Head {
+                sequence: 1,
+                total_bytes: 0,
+            }),
+        },
+    )
+    .await;
+    assert!(matches!(
+        store.load_run(&empty_frame).await,
+        Err(StoreError::CorruptPhysicalState)
+    ));
+
     let orphan = run(22);
     let frame = genesis(&orphan);
     install_run(
