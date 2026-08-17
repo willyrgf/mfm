@@ -84,20 +84,12 @@ fn expand_schema_derive_result(
     )?;
     let shape = shape_output.shape;
     let default_bounds = shape_output.default_bounds;
-    let match_projection_impl = if kind == DeriveKind::Value {
-        match &input.data {
-            Data::Enum(data) => enum_match_projection_tokens(data, attrs.rename_all.as_deref())?,
-            Data::Struct(_) => quote! {},
-            Data::Union(union) => {
-                return Err(syn::Error::new_spanned(
-                    union.union_token,
-                    "MFM derives do not support unions",
-                ));
-            }
-        }
-    } else {
-        quote! {}
-    };
+    if let Data::Union(union) = &input.data {
+        return Err(syn::Error::new_spanned(
+            union.union_token,
+            "MFM derives do not support unions",
+        ));
+    }
     let ident = &input.ident;
     let schema_name = attrs.schema_name;
     let version = attrs.version;
@@ -188,125 +180,11 @@ fn expand_schema_derive_result(
                 fn schema_descriptor() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
                     #descriptor_body
                 }
-
-                #match_projection_impl
             }
         },
     };
 
     Ok(impl_block)
-}
-
-fn enum_match_projection_tokens(
-    data: &DataEnum,
-    rename_all: Option<&str>,
-) -> syn::Result<proc_macro2::TokenStream> {
-    let mut arms = Vec::new();
-    for variant in &data.variants {
-        let attrs = VariantAttrs::parse(&variant.attrs)?;
-        let wire_name = attrs
-            .rename
-            .unwrap_or_else(|| apply_rename_all(&variant.ident.to_string(), rename_all));
-        let ident = &variant.ident;
-        if let Fields::Unnamed(fields) = &variant.fields {
-            let payload = fields.unnamed.first().and_then(|field| {
-                if fields.unnamed.len() != 1 {
-                    None
-                } else if is_inline_value_type(&field.ty, &[]) {
-                    Some(proc_macro2::TokenStream::new())
-                } else if let Some(depth) = boxed_inline_value_depth(&field.ty) {
-                    let unbox = (0..depth).map(|_| quote!(let payload = *payload;));
-                    Some(quote!(#(#unbox)*))
-                } else {
-                    None
-                }
-            });
-            if let Some(unbox) = payload {
-                arms.push(quote! {
-                    Self::#ident(payload) => {
-                        #unbox
-                        Some(visitor.visit(#wire_name, payload))
-                    }
-                });
-            }
-        }
-    }
-    let supported = arms.len() == data.variants.len();
-    let fallback = (!supported).then(|| quote!(_ => None,));
-    Ok(quote! {
-        const __MFM_MATCH_PROJECTION_SUPPORTED: bool = #supported;
-
-        fn __mfm_visit_match_payload<V: ::mfm_values::MatchPayloadVisitor>(
-            self,
-            visitor: V,
-        ) -> ::std::option::Option<V::Output> {
-            match self {
-                #(#arms)*
-                #fallback
-            }
-        }
-    })
-}
-
-fn boxed_inline_value_depth(ty: &Type) -> Option<usize> {
-    let mut depth = 0_usize;
-    let mut inner = ty;
-    loop {
-        let Type::Path(path) = inner else {
-            return None;
-        };
-        let segment = path.path.segments.last()?;
-        if segment.ident != "Box" {
-            return (depth > 0 && is_inline_value_type(inner, &[])).then_some(depth);
-        }
-        depth = depth.checked_add(1)?;
-        inner = one_generic_type(segment, "Box").ok()?;
-    }
-}
-
-fn is_inline_value_type(ty: &Type, generic_params: &[Ident]) -> bool {
-    let Type::Path(path) = ty else {
-        return false;
-    };
-    let Some(segment) = path.path.segments.last() else {
-        return false;
-    };
-    if path.path.segments.len() == 1
-        && generic_params
-            .iter()
-            .any(|parameter| parameter == &segment.ident)
-    {
-        return true;
-    }
-    !matches!(
-        segment.ident.to_string().as_str(),
-        "bool"
-            | "String"
-            | "i8"
-            | "i16"
-            | "i32"
-            | "i64"
-            | "u8"
-            | "u16"
-            | "u32"
-            | "u64"
-            | "NonZeroU16"
-            | "NonZeroU32"
-            | "NonZeroU64"
-            | "ContentRef"
-            | "ContentDigest"
-            | "SchemaId"
-            | "SemanticTypeId"
-            | "RunId"
-            | "ArtifactId"
-            | "StableId"
-            | "EntryPointId"
-            | "Box"
-            | "Option"
-            | "Vec"
-            | "NonEmpty"
-            | "BTreeMap"
-    )
 }
 
 fn one_generic_type<'a>(segment: &'a syn::PathSegment, label: &str) -> syn::Result<&'a Type> {
