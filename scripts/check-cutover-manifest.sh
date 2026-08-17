@@ -7,7 +7,7 @@ canary_path=""
 canary_root=""
 
 cleanup_canary() {
-  if [[ -n "$canary_path" && -e "$canary_path" ]]; then
+  if [[ -n "$canary_path" ]] && [[ -e "$canary_path" || -L "$canary_path" ]]; then
     rm -f -- "$canary_path"
   fi
   if [[ -n "$canary_root" && -d "$canary_root" ]]; then
@@ -118,7 +118,7 @@ scan_current_tree() {
     count=$((count + 1))
     case "$kind" in
       path)
-        if [[ -e "$repository_root/$pattern" ]]; then
+        if [[ -e "$repository_root/$pattern" || -L "$repository_root/$pattern" ]]; then
           echo "$pattern" >&2
           echo "cutover scan failed: deleted path" >&2
           failures=1
@@ -191,7 +191,7 @@ run_canary() {
   case "$label" in
     path)
       canary_path="$repository_root/docs/btc-rpc-routing.md"
-      : >"$canary_path"
+      ln -s "$canary_root/missing-target" "$canary_path"
       ;;
     package)
       printf '%s\n' '[package]' 'name = "mfm-facts"' >"$canary_root/Cargo.toml"
