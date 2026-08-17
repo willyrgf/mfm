@@ -515,15 +515,24 @@ impl PortfolioSnapshotFailure {
     }
 }
 
-/// Reusable semantic Portfolio State selected by its fixed stage ordinal.
-///
-/// The ordinal is an internal closed mapping: 0 initialize, 1 enter collection, 2 resume
-/// collection, 3 map EVM failure, and 4 consolidate.
-pub struct PortfolioState<const STAGE: u8>;
+/// Initializes one Portfolio snapshot continuation.
+pub struct InitializePortfolio;
+
+/// Enters the next EVM balance collection.
+pub struct EnterPortfolioCollection;
+
+/// Resumes Portfolio aggregation after one EVM balance collection.
+pub struct ResumePortfolioCollection;
+
+/// Maps an EVM balance failure into the Portfolio failure contract.
+pub struct MapEvmBalanceFailure;
+
+/// Consolidates all completed collections into the Portfolio snapshot output.
+pub struct ConsolidatePortfolio;
 
 macro_rules! impl_portfolio_state {
-    ($stage:literal, $input:ty, $output:ty, $id:literal) => {
-        impl State for PortfolioState<$stage> {
+    ($state:ident, $input:ty, $output:ty, $id:literal) => {
+        impl State for $state {
             type Input = $input;
             type Output = $output;
             type Failure = PortfolioSnapshotFailure;
@@ -536,31 +545,31 @@ macro_rules! impl_portfolio_state {
 }
 
 impl_portfolio_state!(
-    0,
+    InitializePortfolio,
     PortfolioSnapshotInput,
     PortfolioContinuation,
     "mfm.portfolio.state.initialize@1"
 );
 impl_portfolio_state!(
-    1,
+    EnterPortfolioCollection,
     PortfolioContinuation,
     EvmBalanceContext<PortfolioContinuation>,
     "mfm.portfolio.state.enter-collection@1"
 );
 impl_portfolio_state!(
-    2,
+    ResumePortfolioCollection,
     EvmBalanceCollectionCompletion<PortfolioContinuation>,
     PortfolioContinuation,
     "mfm.portfolio.state.resume-collection@1"
 );
 impl_portfolio_state!(
-    3,
+    MapEvmBalanceFailure,
     EvmBalanceFailure,
     PortfolioSnapshotOutput,
     "mfm.portfolio.state.map-evm-failure@1"
 );
 impl_portfolio_state!(
-    4,
+    ConsolidatePortfolio,
     PortfolioContinuation,
     PortfolioSnapshotOutput,
     "mfm.portfolio.state.consolidate@1"
@@ -732,8 +741,8 @@ fn consolidate_portfolio(
 }
 
 macro_rules! impl_portfolio_pure {
-    ($stage:literal, $evaluate:path) => {
-        impl PureState for PortfolioState<$stage> {
+    ($state:ident, $evaluate:path) => {
+        impl PureState for $state {
             fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
                 $evaluate(input)
             }
@@ -741,11 +750,11 @@ macro_rules! impl_portfolio_pure {
     };
 }
 
-impl_portfolio_pure!(0, initialize_portfolio);
-impl_portfolio_pure!(1, enter_portfolio_collection);
-impl_portfolio_pure!(2, resume_portfolio_collection);
-impl_portfolio_pure!(3, map_evm_balance_failure);
-impl_portfolio_pure!(4, consolidate_portfolio);
+impl_portfolio_pure!(InitializePortfolio, initialize_portfolio);
+impl_portfolio_pure!(EnterPortfolioCollection, enter_portfolio_collection);
+impl_portfolio_pure!(ResumePortfolioCollection, resume_portfolio_collection);
+impl_portfolio_pure!(MapEvmBalanceFailure, map_evm_balance_failure);
+impl_portfolio_pure!(ConsolidatePortfolio, consolidate_portfolio);
 
 fn portfolio_success<O, F>(output: O) -> ProposedStateOutcome<O, F> {
     ProposedStateOutcome::Success { output }
@@ -1069,27 +1078,27 @@ fn portfolio_program(
         .checked_add(1)
         .ok_or(PortfolioError::Program)?;
     let mut declarations = Vec::with_capacity(capacity);
-    declarations.push(Declaration::State(
-        portfolio_pure_state::<PortfolioState<0>>(
-            input.clone(),
-            continuation.clone(),
-            failure.clone(),
-            Some(layouts[0].enter),
-            None,
-        )?,
-    ));
+    declarations.push(Declaration::State(portfolio_pure_state::<
+        InitializePortfolio,
+    >(
+        input.clone(),
+        continuation.clone(),
+        failure.clone(),
+        Some(layouts[0].enter),
+        None,
+    )?));
 
     for (position, layout) in layouts.iter().enumerate() {
         let fragment = layout.enter.checked_add(1).ok_or(PortfolioError::Program)?;
-        declarations.push(Declaration::State(
-            portfolio_pure_state::<PortfolioState<1>>(
-                continuation.clone(),
-                context.clone(),
-                failure.clone(),
-                Some(fragment),
-                None,
-            )?,
-        ));
+        declarations.push(Declaration::State(portfolio_pure_state::<
+            EnterPortfolioCollection,
+        >(
+            continuation.clone(),
+            context.clone(),
+            failure.clone(),
+            Some(fragment),
+            None,
+        )?));
         append_balance_fragment::<PortfolioContinuation>(
             &mut declarations,
             layout.source_count,
@@ -1101,34 +1110,34 @@ fn portfolio_program(
         let next = layouts
             .get(position + 1)
             .map_or(terminal, |next| next.enter);
-        declarations.push(Declaration::State(
-            portfolio_pure_state::<PortfolioState<2>>(
-                completion.clone(),
-                continuation.clone(),
-                failure.clone(),
-                Some(next),
-                None,
-            )?,
-        ));
-        declarations.push(Declaration::State(
-            portfolio_pure_state::<PortfolioState<3>>(
-                evm_failure.clone(),
-                output.clone(),
-                failure.clone(),
-                None,
-                None,
-            )?,
-        ));
-    }
-    declarations.push(Declaration::State(
-        portfolio_pure_state::<PortfolioState<4>>(
-            continuation,
+        declarations.push(Declaration::State(portfolio_pure_state::<
+            ResumePortfolioCollection,
+        >(
+            completion.clone(),
+            continuation.clone(),
+            failure.clone(),
+            Some(next),
+            None,
+        )?));
+        declarations.push(Declaration::State(portfolio_pure_state::<
+            MapEvmBalanceFailure,
+        >(
+            evm_failure.clone(),
             output.clone(),
             failure.clone(),
             None,
             None,
-        )?,
-    ));
+        )?));
+    }
+    declarations.push(Declaration::State(portfolio_pure_state::<
+        ConsolidatePortfolio,
+    >(
+        continuation,
+        output.clone(),
+        failure.clone(),
+        None,
+        None,
+    )?));
     if declarations.len() != capacity {
         return Err(PortfolioError::Program);
     }

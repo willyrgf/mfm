@@ -4,12 +4,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use mfm_app::{Application, ApplicationError};
-use mfm_evm::{EvmCapability, EvmPhysicalTarget, EvmReadValue, EvmState};
+use mfm_evm::{
+    CheckChainIdentity, ConfirmBalanceAnchor, ConsolidateBalanceCollection, EvmAnchorRead,
+    EvmBalanceRead, EvmChainIdentityRead, EvmPhysicalTarget, EvmReadValue, ReadInitialAnchor,
+    ReadNativeBalance, ReadTokenBalance, ReadTokenDecimals, SelectBalanceAsset,
+};
 use mfm_evm_live::{register_evm_reads, EvmProvider, EvmProviderResponse};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId, StableId};
 use mfm_portfolio::{
-    plan_snapshot, PortfolioConfig, PortfolioContinuation, PortfolioSnapshotInput,
-    PortfolioSnapshotSelector, PortfolioState,
+    plan_snapshot, ConsolidatePortfolio, EnterPortfolioCollection, InitializePortfolio,
+    MapEvmBalanceFailure, PortfolioConfig, PortfolioContinuation, PortfolioSnapshotInput,
+    PortfolioSnapshotSelector, ResumePortfolioCollection,
 };
 use mfm_runtime::{ReadAdapterError, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError};
 use mfm_store::MemoryStore;
@@ -99,41 +104,43 @@ fn assembly(
 fn state_builder() -> RuntimeAssemblyBuilder {
     let mut builder = RuntimeAssemblyBuilder::new();
     builder
-        .register_pure::<PortfolioState<0>>()
+        .register_pure::<InitializePortfolio>()
         .expect("initialize");
-    builder.register_pure::<PortfolioState<1>>().expect("enter");
     builder
-        .register_pure::<PortfolioState<2>>()
+        .register_pure::<EnterPortfolioCollection>()
+        .expect("enter");
+    builder
+        .register_pure::<ResumePortfolioCollection>()
         .expect("resume");
     builder
-        .register_pure::<PortfolioState<3>>()
+        .register_pure::<MapEvmBalanceFailure>()
         .expect("failure mapper");
     builder
-        .register_pure::<PortfolioState<4>>()
+        .register_pure::<ConsolidatePortfolio>()
         .expect("consolidate");
     builder
-        .register_read::<EvmState<1, 0, PortfolioContinuation>, EvmCapability<2>>()
+        .register_read::<CheckChainIdentity<PortfolioContinuation>, EvmChainIdentityRead>()
         .expect("chain read");
     builder
-        .register_read::<EvmState<1, 1, PortfolioContinuation>, EvmCapability<6>>()
+        .register_read::<ReadInitialAnchor<PortfolioContinuation>, EvmAnchorRead>()
         .expect("initial anchor");
     builder
-        .register_pure::<EvmState<1, 2, PortfolioContinuation>>()
+        .register_pure::<SelectBalanceAsset<PortfolioContinuation>>()
         .expect("asset selector");
     builder
-        .register_read::<EvmState<1, 3, PortfolioContinuation>, EvmCapability<7>>()
+        .register_read::<ReadNativeBalance<PortfolioContinuation>, EvmBalanceRead>()
         .expect("native balance");
     builder
-        .register_read::<EvmState<1, 4, PortfolioContinuation>, EvmCapability<7>>()
+        .register_read::<ReadTokenDecimals<PortfolioContinuation>, EvmBalanceRead>()
         .expect("token decimals");
     builder
-        .register_read::<EvmState<1, 5, PortfolioContinuation>, EvmCapability<7>>()
+        .register_read::<ReadTokenBalance<PortfolioContinuation>, EvmBalanceRead>()
         .expect("token balance");
     builder
-        .register_read::<EvmState<1, 6, PortfolioContinuation>, EvmCapability<6>>()
+        .register_read::<ConfirmBalanceAnchor<PortfolioContinuation>, EvmAnchorRead>()
         .expect("confirm anchor");
     builder
-        .register_pure::<EvmState<1, 7, PortfolioContinuation>>()
+        .register_pure::<ConsolidateBalanceCollection<PortfolioContinuation>>()
         .expect("collection consolidate");
     builder
 }

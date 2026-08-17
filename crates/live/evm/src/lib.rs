@@ -8,7 +8,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use mfm_evm::{EvmCapability, EvmPhysicalTarget, EvmReadEvidence, EvmReadIntent, EvmReadValue};
+use mfm_evm::{
+    EvmAnchorRead, EvmBalanceRead, EvmChainIdentityRead, EvmPhysicalTarget, EvmReadEvidence,
+    EvmReadIntent, EvmReadValue,
+};
 use mfm_ids::StableId;
 use mfm_runtime::{ReadAdapterError, RuntimeAssemblyBuilder};
 
@@ -61,9 +64,9 @@ pub fn register_evm_reads(
             })
         }};
     }
-    register!(EvmCapability<2>, target.clone(), Arc::clone(&provider))?;
-    register!(EvmCapability<6>, target.clone(), Arc::clone(&provider))?;
-    register!(EvmCapability<7>, target, provider)
+    register!(EvmChainIdentityRead, target.clone(), Arc::clone(&provider))?;
+    register!(EvmAnchorRead, target.clone(), Arc::clone(&provider))?;
+    register!(EvmBalanceRead, target, provider)
 }
 
 async fn read(
