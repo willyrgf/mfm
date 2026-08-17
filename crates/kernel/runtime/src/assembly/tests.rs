@@ -1,5 +1,5 @@
-use mfm_ids::{DigestAlgorithm, DigestBytes, SemanticTypeId, StableId};
-use mfm_program::{nominal_contract_ref, Declaration, Execution, MatchVariant, StateDeclaration};
+use mfm_ids::{DigestAlgorithm, DigestBytes, SemanticTypeId};
+use mfm_program::{nominal_contract_ref, Declaration, Never, Program};
 use mfm_program_derive::MfmValue;
 use mfm_values::{
     framework_value_descriptor, EnumVariantDescriptor, GenericArgumentDescriptor, SchemaShape,
@@ -190,7 +190,7 @@ impl<const CASE: u8> MfmValue for ManualShapeSelector<CASE> {
 }
 
 fn association_result<S: MfmValue>(
-    arms: Vec<MatchVariant>,
+    tags: &[&str],
     target_input: ContentRef,
 ) -> Result<MatchProjection> {
     let mut builder = RuntimeAssemblyBuilder::new();
@@ -199,25 +199,65 @@ fn association_result<S: MfmValue>(
         .expect("payload codec");
     builder.register_value::<S>().expect("selector codec");
     let assembly = builder.finish().expect("assembly");
+    let program = retained_match_program::<S>(tags, &target_input);
+    let Declaration::Match(match_declaration) = &program.declarations()[0] else {
+        panic!("root Match");
+    };
     let selector_contract = nominal_contract_ref::<S>().expect("selector contract");
-    let target = Declaration::State(
-        StateDeclaration::new(
-            target_input.clone(),
-            target_input.clone(),
-            target_input.clone(),
-            target_input,
-            Execution::pure(),
-            None,
-            None,
-        )
-        .expect("target"),
-    );
     associate_match(
         assembly.codec(&selector_contract).expect("selector codec"),
-        &arms,
-        &[target],
+        match_declaration.variants(),
+        program.declarations(),
         &assembly.inner,
     )
+}
+
+fn retained_match_program<S: MfmValue>(tags: &[&str], target_input: &ContentRef) -> Program {
+    let selector = nominal_contract_ref::<S>().expect("selector contract");
+    let never = nominal_contract_ref::<Never>().expect("Never contract");
+    let variants = tags
+        .iter()
+        .enumerate()
+        .map(|(index, tag)| {
+            serde_json::json!({
+                "tag": tag,
+                "entry_index": index + 1,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut declarations = vec![serde_json::json!({
+        "kind": "match",
+        "value": {
+            "selector_contract_ref": selector,
+            "variants": variants,
+        }
+    })];
+    declarations.extend(tags.iter().map(|_| {
+        serde_json::json!({
+            "kind": "state",
+            "value": {
+                "state_implementation_ref": target_input,
+                "input_contract_ref": target_input,
+                "output_contract_ref": target_input,
+                "failure_contract_ref": never,
+                "execution": { "kind": "pure" },
+                "next_index": null,
+                "failure_next_index": null,
+            }
+        })
+    }));
+    let wire = serde_json::json!({
+        "entry_point_id": "mfm.test.runtime/retained-match@1",
+        "admitted_context_contract_ref": selector,
+        "root_success_contract_ref": target_input,
+        "root_failure_contract_ref": never,
+        "declarations": declarations,
+    });
+    let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&wire).expect("wire"),
+    )
+    .expect("canonical");
+    Program::decode_canonical(canonical.as_bytes()).expect("retained Match Program")
 }
 
 fn assert_exact_projection<S: MfmValue>(selector: S) {
@@ -230,26 +270,15 @@ fn assert_exact_projection<S: MfmValue>(selector: S) {
 
     let payload_contract = nominal_contract_ref::<AsymmetricPayload>().expect("payload contract");
     let selector_contract = nominal_contract_ref::<S>().expect("selector contract");
-    let target = Declaration::State(
-        StateDeclaration::new(
-            payload_contract.clone(),
-            payload_contract.clone(),
-            payload_contract.clone(),
-            payload_contract,
-            Execution::pure(),
-            None,
-            None,
-        )
-        .expect("target"),
-    );
+    let program = retained_match_program::<S>(&["selected"], &payload_contract);
+    let Declaration::Match(match_declaration) = &program.declarations()[0] else {
+        panic!("root Match");
+    };
     let selector_codec = assembly.codec(&selector_contract).expect("selector codec");
     let projection = associate_match(
         selector_codec.clone(),
-        &[MatchVariant::new(
-            StableId::new("selected").expect("tag"),
-            0,
-        )],
-        &[target],
+        match_declaration.variants(),
+        program.declarations(),
         &assembly.inner,
     )
     .expect("projection");
@@ -264,7 +293,7 @@ fn assert_exact_projection<S: MfmValue>(selector: S) {
     let (hot_entry, hot_payload) = projection.project(hot_selector).expect("hot payload");
     let (cold_entry, cold_payload) = projection.project(cold_selector).expect("cold payload");
 
-    assert_eq!(hot_entry, 0);
+    assert_eq!(hot_entry, 1);
     assert_eq!(hot_entry, cold_entry);
     assert_eq!(hot_payload.contract_ref, cold_payload.contract_ref);
     assert_eq!(hot_payload.value_ref, cold_payload.value_ref);
@@ -324,62 +353,14 @@ fn nested_boxed_projection_preserves_exact_nested_bytes() {
 fn unsupported_match_shapes_fail_association() {
     let target = nominal_contract_ref::<AsymmetricPayload>().expect("target");
     for result in [
-        association_result::<ManualShapeSelector<0>>(
-            vec![MatchVariant::new(
-                StableId::new("selected").expect("tag"),
-                0,
-            )],
-            target.clone(),
-        ),
-        association_result::<ManualShapeSelector<1>>(
-            vec![MatchVariant::new(
-                StableId::new("selected").expect("tag"),
-                0,
-            )],
-            target.clone(),
-        ),
-        association_result::<ManualShapeSelector<2>>(
-            vec![MatchVariant::new(
-                StableId::new("selected").expect("tag"),
-                0,
-            )],
-            target.clone(),
-        ),
-        association_result::<ManualShapeSelector<3>>(
-            vec![MatchVariant::new(
-                StableId::new("selected").expect("tag"),
-                0,
-            )],
-            target.clone(),
-        ),
-        association_result::<ManualShapeSelector<4>>(
-            vec![MatchVariant::new(
-                StableId::new("selected").expect("tag"),
-                0,
-            )],
-            target.clone(),
-        ),
-        association_result::<ManualShapeSelector<5>>(
-            vec![MatchVariant::new(
-                StableId::new("selected").expect("tag"),
-                0,
-            )],
-            target.clone(),
-        ),
-        association_result::<ManualShapeSelector<6>>(
-            vec![MatchVariant::new(
-                StableId::new("selected").expect("tag"),
-                0,
-            )],
-            target.clone(),
-        ),
-        association_result::<ManualShapeSelector<7>>(
-            vec![MatchVariant::new(
-                StableId::new("selected").expect("tag"),
-                0,
-            )],
-            target.clone(),
-        ),
+        association_result::<ManualShapeSelector<0>>(&["selected"], target.clone()),
+        association_result::<ManualShapeSelector<1>>(&["selected"], target.clone()),
+        association_result::<ManualShapeSelector<2>>(&["selected"], target.clone()),
+        association_result::<ManualShapeSelector<3>>(&["selected"], target.clone()),
+        association_result::<ManualShapeSelector<4>>(&["selected"], target.clone()),
+        association_result::<ManualShapeSelector<5>>(&["selected"], target.clone()),
+        association_result::<ManualShapeSelector<6>>(&["selected"], target.clone()),
+        association_result::<ManualShapeSelector<7>>(&["selected"], target.clone()),
     ] {
         assert!(matches!(result, Err(RuntimeError::IncompatibleAssembly)));
     }
@@ -388,28 +369,17 @@ fn unsupported_match_shapes_fail_association() {
 #[test]
 fn match_tags_and_target_contract_must_be_exact_and_exhaustive() {
     let payload = nominal_contract_ref::<AsymmetricPayload>().expect("payload");
-    let selected = MatchVariant::new(StableId::new("selected").expect("tag"), 0);
     assert!(matches!(
-        association_result::<GenericExternal<AsymmetricPayload>>(Vec::new(), payload.clone()),
+        association_result::<GenericExternal<AsymmetricPayload>>(&["unknown"], payload.clone(),),
+        Err(RuntimeError::IncompatibleAssembly)
+    ));
+    assert!(matches!(
+        association_result::<TwoGenericExternal<AsymmetricPayload>>(&["first"], payload.clone(),),
         Err(RuntimeError::IncompatibleAssembly)
     ));
     assert!(matches!(
         association_result::<GenericExternal<AsymmetricPayload>>(
-            vec![MatchVariant::new(StableId::new("unknown").expect("tag"), 0)],
-            payload.clone(),
-        ),
-        Err(RuntimeError::IncompatibleAssembly)
-    ));
-    assert!(matches!(
-        association_result::<TwoGenericExternal<AsymmetricPayload>>(
-            vec![MatchVariant::new(StableId::new("first").expect("tag"), 0)],
-            payload.clone(),
-        ),
-        Err(RuntimeError::IncompatibleAssembly)
-    ));
-    assert!(matches!(
-        association_result::<GenericExternal<AsymmetricPayload>>(
-            vec![selected],
+            &["selected"],
             nominal_contract_ref::<GenericExternal<AsymmetricPayload>>().expect("wrong target"),
         ),
         Err(RuntimeError::IncompatibleAssembly)

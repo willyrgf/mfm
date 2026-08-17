@@ -6,7 +6,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | --- | --- | --- |
 | IDs / Values | checked identities, schema descriptors, canonical typed values, 8 MiB object bound | execution or IO |
 | Capabilities | `ReadCapabilityContract` and intent/evidence binding | State outcomes or retries |
-| Program | checked v2 State/Match graph, `State`, `PureState`, `ReadState`, `Never` | registries, IO, scheduling |
+| Program | typed Operation authoring, sole private lowering draft, checked v2 State/Match graph, `State`, `PureState`, `ReadState`, `Never` | registries, IO, scheduling |
 | Runtime | immutable assembly, Program association, sole fold, typed execution/progression | persisted wire or physical storage |
 | Journal | exact frame encoding and complete-history qualification | domain interpretation or persistence IO |
 | Store | object-safe complete load and atomic append | Program, State, capability, or reducer semantics |
@@ -28,6 +28,18 @@ caller -> Application -> Runtime -> Journal frame -> Store append
                                   -> Read adapter -> provider
 Store load -> Journal qualify -> Runtime fold -> RunView
 ```
+
+The source-authoring sequence is separate from progression:
+
+```text
+domain Operation -> OperationExpansion -> one private flat draft -> immutable Program v2
+                         |-> exact capability/State injection policy
+```
+
+`match_join` owns both ordinary value-selected topology and recovery selected by a Pure failure
+classifier. `with_failure_handler` routes only the named typed State failures; it does not catch
+compiler, Runtime, adapter, Store, cancellation, or panic failures. Runtime, Journal, and Store
+never receive Operations, authoring setup, callbacks, or scope metadata.
 
 Pure work and byte-heavy validation run in immediately awaited pure blocking jobs. Connections,
 transactions, Store mutation, and provider IO remain async and outside those jobs. Dropping an

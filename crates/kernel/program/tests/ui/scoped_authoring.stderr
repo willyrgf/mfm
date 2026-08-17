@@ -1,0 +1,119 @@
+error[E0599]: no method named `read` found for mutable reference `&mut InjectionWriter` in the current scope
+ --> tests/ui/scoped_authoring.rs:7:12
+  |
+7 |     writer.read();
+  |            ^^^^ method not found in `&mut InjectionWriter`
+
+error[E0599]: no method named `operation` found for mutable reference `&mut InjectionWriter` in the current scope
+ --> tests/ui/scoped_authoring.rs:8:12
+  |
+8 |     writer.operation();
+  |            ^^^^^^^^^ method not found in `&mut InjectionWriter`
+
+error[E0599]: no method named `match_join` found for mutable reference `&mut InjectionWriter` in the current scope
+ --> tests/ui/scoped_authoring.rs:9:12
+  |
+9 |     writer.match_join();
+  |            ^^^^^^^^^^ method not found in `&mut InjectionWriter`
+
+error[E0599]: no method named `with_failure_handler` found for mutable reference `&mut InjectionWriter` in the current scope
+  --> tests/ui/scoped_authoring.rs:10:12
+   |
+10 |     writer.with_failure_handler();
+   |            ^^^^^^^^^^^^^^^^^^^^ method not found in `&mut InjectionWriter`
+
+error[E0599]: no method named `finish` found for mutable reference `&mut InjectionWriter` in the current scope
+  --> tests/ui/scoped_authoring.rs:11:12
+   |
+11 |     writer.finish();
+   |            ^^^^^^ method not found in `&mut InjectionWriter`
+
+error[E0599]: no method named `select` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
+  --> tests/ui/scoped_authoring.rs:15:10
+   |
+15 |     join.select();
+   |          ^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
+
+error[E0599]: no method named `place` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
+  --> tests/ui/scoped_authoring.rs:16:10
+   |
+16 |     join.place();
+   |          ^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
+
+error[E0599]: no method named `branch_to` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
+  --> tests/ui/scoped_authoring.rs:17:10
+   |
+17 |     join.branch_to();
+   |          ^^^^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
+
+error[E0599]: no method named `return_success` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
+  --> tests/ui/scoped_authoring.rs:18:10
+   |
+18 |     join.return_success();
+   |          ^^^^^^^^^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
+
+error[E0599]: no method named `finish` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
+  --> tests/ui/scoped_authoring.rs:19:10
+   |
+19 |     join.finish();
+   |          ^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
+
+error: cannot construct `InjectionWriter` with struct literal syntax due to private fields
+  --> tests/ui/scoped_authoring.rs:23:19
+   |
+23 |     let _writer = InjectionWriter {};
+   |                   ^^^^^^^^^^^^^^^
+
+error: cannot construct `MatchJoin<Never, Never, Never>` with struct literal syntax due to private fields
+  --> tests/ui/scoped_authoring.rs:24:17
+   |
+24 |     let _join = MatchJoin::<Never, Never, Never> {};
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `InjectionWriter: Clone` is not satisfied
+  --> tests/ui/scoped_authoring.rs:25:21
+   |
+25 |     require_clone::<InjectionWriter>();
+   |                     ^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `InjectionWriter`
+   |
+note: required by a bound in `require_clone`
+  --> tests/ui/scoped_authoring.rs:3:21
+   |
+ 3 | fn require_clone<T: Clone>() {}
+   |                     ^^^^^ required by this bound in `require_clone`
+
+error[E0277]: the trait bound `InjectionWriter: Default` is not satisfied
+  --> tests/ui/scoped_authoring.rs:26:23
+   |
+26 |     require_default::<InjectionWriter>();
+   |                       ^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `InjectionWriter`
+   |
+note: required by a bound in `require_default`
+  --> tests/ui/scoped_authoring.rs:4:23
+   |
+ 4 | fn require_default<T: Default>() {}
+   |                       ^^^^^^^ required by this bound in `require_default`
+
+error[E0277]: the trait bound `MatchJoin<Never, Never, Never>: Clone` is not satisfied
+  --> tests/ui/scoped_authoring.rs:27:21
+   |
+27 |     require_clone::<MatchJoin<Never, Never, Never>>();
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `MatchJoin<Never, Never, Never>`
+   |
+note: required by a bound in `require_clone`
+  --> tests/ui/scoped_authoring.rs:3:21
+   |
+ 3 | fn require_clone<T: Clone>() {}
+   |                     ^^^^^ required by this bound in `require_clone`
+
+error[E0277]: the trait bound `MatchJoin<Never, Never, Never>: Default` is not satisfied
+  --> tests/ui/scoped_authoring.rs:28:23
+   |
+28 |     require_default::<MatchJoin<Never, Never, Never>>();
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `MatchJoin<Never, Never, Never>`
+   |
+note: required by a bound in `require_default`
+  --> tests/ui/scoped_authoring.rs:4:23
+   |
+ 4 | fn require_default<T: Default>() {}
+   |                       ^^^^^^^ required by this bound in `require_default`

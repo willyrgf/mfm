@@ -244,8 +244,7 @@ fn state_program() -> Program {
         Execution::pure(),
         None,
         None,
-    )
-    .expect("declaration");
+    );
     Program::new(
         EntryPointId::new("mfm.test/program@1").expect("entry"),
         value.clone(),
@@ -254,102 +253,6 @@ fn state_program() -> Program {
         vec![Declaration::State(state)],
     )
     .expect("program")
-}
-
-fn read_match_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value contract");
-    let never = nominal_contract_ref::<Never>().expect("never contract");
-    let read = StateDeclaration::new(
-        state_implementation_ref::<IdentityState>().expect("read state"),
-        value.clone(),
-        value.clone(),
-        never.clone(),
-        Execution::read(
-            capability_contract_ref::<IdentityRead>().expect("capability"),
-            value.clone(),
-            value.clone(),
-            value.clone(),
-        ),
-        Some(1),
-        None,
-    )
-    .expect("read declaration");
-    let selector = MatchDeclaration::new(
-        value.clone(),
-        vec![
-            MatchVariant::new(StableId::new("right").expect("right"), 3),
-            MatchVariant::new(StableId::new("left").expect("left"), 2),
-        ],
-    )
-    .expect("match declaration");
-    let terminal = |implementation| {
-        Declaration::State(
-            StateDeclaration::new(
-                implementation,
-                value.clone(),
-                value.clone(),
-                never.clone(),
-                Execution::pure(),
-                None,
-                None,
-            )
-            .expect("terminal"),
-        )
-    };
-    Program::new(
-        EntryPointId::new("mfm.test/read-match-program@1").expect("entry"),
-        value.clone(),
-        value.clone(),
-        never.clone(),
-        vec![
-            Declaration::State(read),
-            Declaration::Match(selector),
-            terminal(state_implementation_ref::<LeftIdentityState>().expect("left state")),
-            terminal(state_implementation_ref::<RightIdentityState>().expect("right state")),
-        ],
-    )
-    .expect("read Match program")
-}
-
-#[test]
-fn read_and_match_program_v2_wire_is_exact() {
-    let program = read_match_program();
-    assert_eq!(
-        std::str::from_utf8(program.canonical_bytes()).expect("utf8"),
-        r#"{"admitted_context_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"declarations":[{"kind":"state","value":{"execution":{"binding_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"capability_contract_ref":{"content_digest":"content:sha256-v1:70c931a7ae3e52ce943296347e6a3f0ab04425cfb8a390428145ff34753ced54","schema_id":"schema:mfm.capability-contract:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"},"evidence_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"intent_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"kind":"read"},"failure_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.kernel.never:1:sha256-jcs-v1:00e01bfecb60f575bba12886041598ad758074b704806a8af2c036172c01a4d8"},"failure_next_index":null,"input_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"next_index":1,"output_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"state_implementation_ref":{"content_digest":"content:sha256-v1:fab16c95f74ec061a9482105a20937043dd820e983a35ae63d235d69e53c540a","schema_id":"schema:mfm.state-implementation:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}}},{"kind":"match","value":{"selector_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"variants":[{"entry_index":2,"tag":"left"},{"entry_index":3,"tag":"right"}]}},{"kind":"state","value":{"execution":{"kind":"pure"},"failure_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.kernel.never:1:sha256-jcs-v1:00e01bfecb60f575bba12886041598ad758074b704806a8af2c036172c01a4d8"},"failure_next_index":null,"input_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"next_index":null,"output_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"state_implementation_ref":{"content_digest":"content:sha256-v1:882a30a8a3e07f3171a8675eb01814cce42412690088fdc5348a335ee1d18fc5","schema_id":"schema:mfm.state-implementation:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}}},{"kind":"state","value":{"execution":{"kind":"pure"},"failure_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.kernel.never:1:sha256-jcs-v1:00e01bfecb60f575bba12886041598ad758074b704806a8af2c036172c01a4d8"},"failure_next_index":null,"input_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"next_index":null,"output_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"state_implementation_ref":{"content_digest":"content:sha256-v1:890cdf6de49a4abb8e12671ecd4bf8c6d28e028adc2a150e14dc4cd69c752737","schema_id":"schema:mfm.state-implementation:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}}}],"entry_point_id":"mfm.test/read-match-program@1","root_failure_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.kernel.never:1:sha256-jcs-v1:00e01bfecb60f575bba12886041598ad758074b704806a8af2c036172c01a4d8"},"root_success_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"}}"#
-    );
-    assert_eq!(
-        program.content_ref().schema_id().as_str(),
-        "schema:mfm-program-document:2:sha256-jcs-v1:fc3c33ba3470e25a166df52597c4b45a723dd6d0823d1318938c29225323076c"
-    );
-    assert_eq!(
-        program.content_ref().content_digest().as_str(),
-        "content:sha256-v1:82aa393ce2010c625726fd23faba701844f7164c4c3798425cdc8b6bd3ef2940"
-    );
-
-    let Declaration::State(read) = &program.declarations()[0] else {
-        panic!("read declaration");
-    };
-    let value = nominal_contract_ref::<Value>().expect("value contract");
-    assert_eq!(
-        read.execution().capability_contract_ref(),
-        Some(&capability_contract_ref::<IdentityRead>().expect("capability"))
-    );
-    assert_eq!(read.execution().intent_contract_ref(), Some(&value));
-    assert_eq!(read.execution().evidence_contract_ref(), Some(&value));
-    assert_eq!(read.execution().binding_ref(), Some(&value));
-    let Declaration::Match(selector) = &program.declarations()[1] else {
-        panic!("Match declaration");
-    };
-    assert_eq!(selector.selector_contract_ref(), &value);
-    assert_eq!(selector.variants()[0].tag().as_str(), "left");
-    assert_eq!(selector.variants()[0].entry_index(), 2);
-    assert_eq!(selector.variants()[1].tag().as_str(), "right");
-    assert_eq!(selector.variants()[1].entry_index(), 3);
-
-    let decoded = Program::decode_canonical(program.canonical_bytes()).expect("decode");
-    assert_eq!(decoded.canonical_bytes(), program.canonical_bytes());
-    assert_eq!(decoded.content_ref(), program.content_ref());
 }
 
 #[test]
@@ -471,18 +374,15 @@ fn state(
     next: Option<u16>,
     failure_next: Option<u16>,
 ) -> Declaration {
-    Declaration::State(
-        StateDeclaration::new(
-            state_implementation_ref::<IdentityState>().expect("state"),
-            input,
-            output,
-            failure,
-            Execution::pure(),
-            next,
-            failure_next,
-        )
-        .expect("declaration"),
-    )
+    Declaration::State(StateDeclaration::new(
+        state_implementation_ref::<IdentityState>().expect("state"),
+        input,
+        output,
+        failure,
+        Execution::pure(),
+        next,
+        failure_next,
+    ))
 }
 
 #[test]
@@ -577,6 +477,10 @@ fn match_branch_rejoin_common_failure_and_tag_order_are_checked() {
         ),
         Err(ProgramError::InvalidContract)
     );
+    let maximum = (0..256)
+        .map(|index| MatchVariant::new(StableId::new(format!("tag-{index:03}")).expect("tag"), 1))
+        .collect();
+    assert!(MatchDeclaration::new(value.clone(), maximum).is_ok());
     let too_many = (0..257)
         .map(|index| MatchVariant::new(StableId::new(format!("tag-{index:03}")).expect("tag"), 1))
         .collect();
@@ -601,7 +505,7 @@ fn program_bounds_and_edge_targets_are_exact() {
         ),
         Err(ProgramError::InvalidContract)
     );
-    assert!(StateDeclaration::new(
+    let _ = StateDeclaration::new(
         state_implementation_ref::<IdentityState>().expect("state"),
         value.clone(),
         value.clone(),
@@ -609,8 +513,7 @@ fn program_bounds_and_edge_targets_are_exact() {
         Execution::pure(),
         Some(u16::MAX),
         None,
-    )
-    .is_ok());
+    );
     assert_eq!(
         Program::decode_canonical(&vec![b' '; 8_388_609]),
         Err(ProgramError::Capacity)
@@ -658,18 +561,15 @@ fn program_bounds_and_edge_targets_are_exact() {
     let implementation = state_implementation_ref::<IdentityState>().expect("implementation");
     let mut oversized = Vec::with_capacity(12_000);
     for index in 0..12_000_u16 {
-        oversized.push(Declaration::State(
-            StateDeclaration::new(
-                implementation.clone(),
-                value.clone(),
-                value.clone(),
-                nominal_contract_ref::<Never>().expect("never"),
-                Execution::pure(),
-                (index < 11_999).then_some(index + 1),
-                None,
-            )
-            .expect("oversized declaration"),
-        ));
+        oversized.push(Declaration::State(StateDeclaration::new(
+            implementation.clone(),
+            value.clone(),
+            value.clone(),
+            nominal_contract_ref::<Never>().expect("never"),
+            Execution::pure(),
+            (index < 11_999).then_some(index + 1),
+            None,
+        )));
     }
     assert_eq!(
         Program::new(
@@ -696,8 +596,7 @@ fn program_rejects_back_edges_and_unreachable_declarations() {
         Execution::pure(),
         Some(0),
         None,
-    )
-    .expect("local declaration");
+    );
     assert_eq!(
         Program::new(
             EntryPointId::new("mfm.test/back-edge@1").expect("entry"),
@@ -717,8 +616,7 @@ fn program_rejects_back_edges_and_unreachable_declarations() {
         Execution::pure(),
         Some(1),
         None,
-    )
-    .expect("forward declaration");
+    );
     let later_back_edge = StateDeclaration::new(
         implementation.clone(),
         value.clone(),
@@ -727,8 +625,7 @@ fn program_rejects_back_edges_and_unreachable_declarations() {
         Execution::pure(),
         Some(0),
         None,
-    )
-    .expect("later declaration");
+    );
     assert_eq!(
         Program::new(
             EntryPointId::new("mfm.test/later-back-edge@1").expect("entry"),
@@ -753,7 +650,6 @@ fn program_rejects_back_edges_and_unreachable_declarations() {
             None,
             None,
         )
-        .expect("terminal")
     };
     assert_eq!(
         Program::new(
@@ -791,18 +687,15 @@ fn declaration_sibling_order_is_identity_bearing() {
             )
         };
         let terminal = |implementation| {
-            Declaration::State(
-                StateDeclaration::new(
-                    implementation,
-                    value.clone(),
-                    value.clone(),
-                    never.clone(),
-                    Execution::pure(),
-                    None,
-                    None,
-                )
-                .expect("terminal"),
-            )
+            Declaration::State(StateDeclaration::new(
+                implementation,
+                value.clone(),
+                value.clone(),
+                never.clone(),
+                Execution::pure(),
+                None,
+                None,
+            ))
         };
         Program::new(
             EntryPointId::new("mfm.test/sibling-order@1").expect("entry"),
@@ -1044,9 +937,4 @@ fn graph_contract_mismatches_and_never_placements_are_rejected() {
             state(value.clone(), value, never.clone(), None, None),
         ],
     );
-}
-
-#[test]
-fn removed_program_lifecycle_does_not_compile() {
-    trybuild::TestCases::new().compile_fail("tests/ui/removed_program_api.rs");
 }

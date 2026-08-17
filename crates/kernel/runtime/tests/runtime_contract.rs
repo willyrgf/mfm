@@ -7,9 +7,9 @@ use mfm_capabilities::{CapabilityError, ReadCapabilityContract};
 use mfm_ids::{DigestBytes, EntryPointId, RunId, StableId};
 use mfm_journal::{EncodedRunFrame, JournalHistory, OutcomeKind, StoredRunBytes};
 use mfm_program::{
-    capability_contract_ref, nominal_contract_ref, state_implementation_ref, Declaration,
-    Execution, MatchDeclaration, MatchVariant, Never, Program, ProgramError, ProposedStateOutcome,
-    PureState, ReadPreparationError, ReadState, State, StateDeclaration,
+    capability_contract_ref, expand_program, nominal_contract_ref, state_implementation_ref,
+    CapabilityInjection, Never, Operation, OperationExpansion, Program, ProgramError,
+    ProposedStateOutcome, PureState, ReadPreparationError, ReadState, State,
 };
 use mfm_program_derive::MfmValue;
 use mfm_runtime::{ReadAdapterError, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError};
@@ -27,6 +27,19 @@ struct Value {
 #[serde(deny_unknown_fields)]
 struct OtherValue {
     value: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct RecoveryPayload {
+    value: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+enum RecoverySelector {
+    Recover(RecoveryPayload),
+    Terminal(RecoveryPayload),
 }
 
 struct Increment;
@@ -722,379 +735,595 @@ impl ReadState<AssociationCountingCapability> for AssociationCountingRead {
     }
 }
 
+struct HookSupport;
+
+impl State for HookSupport {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/hook-support@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for HookSupport {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+struct HookCapability;
+
+impl ReadCapabilityContract for HookCapability {
+    type Intent = Intent;
+    type Evidence = Evidence;
+
+    fn contract_id() -> mfm_capabilities::Result<StableId> {
+        StableId::new("mfm.test.runtime/hook-capability@1")
+            .map_err(|_| CapabilityError::InvalidContract)
+    }
+
+    fn bind_evidence(
+        intent: &Self::Intent,
+        evidence: &Self::Evidence,
+    ) -> mfm_capabilities::Result<()> {
+        Observation::bind_evidence(intent, evidence)
+    }
+}
+
+struct HookRead;
+
+impl State for HookRead {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/hook-read@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl ReadState<HookCapability> for HookRead {
+    fn prepare(input: &Self::Input) -> Result<Intent, ReadPreparationError> {
+        Ok(Intent { value: input.value })
+    }
+
+    fn interpret(
+        input: Self::Input,
+        _evidence: &Evidence,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+#[derive(Default)]
+struct HookCounters {
+    before: AtomicUsize,
+    binding: AtomicUsize,
+    after: AtomicUsize,
+}
+
+struct HookSetup {
+    binding: Binding,
+    counters: Arc<HookCounters>,
+}
+
+impl CapabilityInjection<HookRead> for HookCapability {
+    type Setup = HookSetup;
+    type ExpandedInput = Value;
+    type ExpandedOutput = Value;
+
+    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<mfm_ids::ContentRef> {
+        setup.counters.binding.fetch_add(1, Ordering::SeqCst);
+        canonicalize_mfm_value(&setup.binding)
+            .map(|(_, binding_ref)| binding_ref)
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+
+    fn write_before(
+        setup: &Self::Setup,
+        writer: &mut mfm_program::InjectionWriter,
+    ) -> mfm_program::Result<()> {
+        setup.counters.before.fetch_add(1, Ordering::SeqCst);
+        writer.pure::<HookSupport>()
+    }
+
+    fn write_after(
+        setup: &Self::Setup,
+        writer: &mut mfm_program::InjectionWriter,
+    ) -> mfm_program::Result<()> {
+        setup.counters.after.fetch_add(1, Ordering::SeqCst);
+        writer.pure::<HookSupport>()
+    }
+}
+
+struct ClassifiedFailure;
+
+impl State for ClassifiedFailure {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Value;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/classified-failure@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for ClassifiedFailure {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        if input.value % 2 == 0 {
+            ProposedStateOutcome::Success { output: input }
+        } else {
+            ProposedStateOutcome::Failure { failure: input }
+        }
+    }
+}
+
+struct ClassifyRecovery;
+
+impl State for ClassifyRecovery {
+    type Input = Value;
+    type Output = RecoverySelector;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/classify-recovery@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for ClassifyRecovery {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        let output = if input.value == 3 {
+            RecoverySelector::Terminal(RecoveryPayload { value: input.value })
+        } else {
+            RecoverySelector::Recover(RecoveryPayload { value: input.value })
+        };
+        ProposedStateOutcome::Success { output }
+    }
+}
+
+struct RecoverValue;
+
+impl State for RecoverValue {
+    type Input = RecoveryPayload;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/recover-value@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for RecoverValue {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success {
+            output: Value { value: input.value },
+        }
+    }
+}
+
+struct TerminalRecovery;
+
+impl State for TerminalRecovery {
+    type Input = RecoveryPayload;
+    type Output = OtherValue;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/terminal-recovery@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for TerminalRecovery {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success {
+            output: OtherValue {
+                value: format!("terminal-{}", input.value),
+            },
+        }
+    }
+}
+
+struct FinalizeRecovery;
+
+impl State for FinalizeRecovery {
+    type Input = Value;
+    type Output = OtherValue;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/finalize-recovery@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for FinalizeRecovery {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success {
+            output: OtherValue {
+                value: format!("final-{}", input.value),
+            },
+        }
+    }
+}
+
 fn run(byte: u8) -> RunId {
     RunId::from_digest(DigestBytes::from_array([byte; 32]))
 }
 
+struct EmptyValue;
+
+impl Operation for EmptyValue {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        _body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        Ok(())
+    }
+}
+
+struct ForeignEmpty;
+
+impl Operation for ForeignEmpty {
+    type Input = OtherValue;
+    type Output = OtherValue;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        _body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        Ok(())
+    }
+}
+
+struct PureOperation<S>(std::marker::PhantomData<fn() -> S>);
+
+impl<S: PureState> Operation for PureOperation<S> {
+    type Input = S::Input;
+    type Output = S::Output;
+    type Failure = S::Failure;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.pure::<S>()
+    }
+}
+
+struct MissingRootCodec;
+
+impl Operation for MissingRootCodec {
+    type Input = Value;
+    type Output = Value;
+    type Failure = OtherValue;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.pure::<Increment>()
+    }
+}
+
+struct RuntimeMatch;
+
+impl Operation for RuntimeMatch {
+    type Input = Value;
+    type Output = BranchValue;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.pure::<Choose>()?;
+        body.match_join::<Selector, BranchValue>(|arms| {
+            arms.arm::<BranchValue>(
+                StableId::new("left").map_err(|_| ProgramError::InvalidContract)?,
+                |branch| branch.pure::<IncrementBranch>(),
+            )?;
+            arms.arm::<BranchValue>(
+                StableId::new("right").map_err(|_| ProgramError::InvalidContract)?,
+                |branch| branch.pure::<RightBranch>(),
+            )
+        })
+    }
+}
+
+struct RuntimeNestedMatch;
+
+impl Operation for RuntimeNestedMatch {
+    type Input = Value;
+    type Output = BranchValue;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.pure::<ChooseNested>()?;
+        body.match_join::<NestedSelector, BranchValue>(|arms| {
+            arms.arm::<BranchValue>(
+                StableId::new("nested").map_err(|_| ProgramError::InvalidContract)?,
+                |branch| branch.pure::<IncrementBranch>(),
+            )
+        })
+    }
+}
+
+struct RuntimeManualMatch;
+
+impl Operation for RuntimeManualMatch {
+    type Input = Value;
+    type Output = BranchValue;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.pure::<ChooseManual>()?;
+        body.match_join::<ManualSelector, BranchValue>(|arms| {
+            arms.arm::<BranchValue>(
+                StableId::new("branch").map_err(|_| ProgramError::InvalidContract)?,
+                |branch| branch.pure::<IncrementBranch>(),
+            )
+        })
+    }
+}
+
+macro_rules! identity_injection {
+    ($capability:ty, $state:ty) => {
+        impl CapabilityInjection<$state> for $capability {
+            type Setup = Binding;
+            type ExpandedInput = <$state as State>::Input;
+            type ExpandedOutput = <$state as State>::Output;
+
+            fn original_binding_ref(
+                setup: &Self::Setup,
+            ) -> mfm_program::Result<mfm_ids::ContentRef> {
+                canonicalize_mfm_value(setup)
+                    .map(|(_, binding_ref)| binding_ref)
+                    .map_err(|_| ProgramError::InvalidContract)
+            }
+        }
+    };
+}
+
+identity_injection!(Observation, Observe);
+identity_injection!(Observation, ObserveNever);
+identity_injection!(AssociationCountingCapability, AssociationCountingRead);
+
+struct RuntimeRead;
+
+impl Operation for RuntimeRead {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Value;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.read::<Observe, Observation>(&binding())
+    }
+}
+
+struct RuntimeReadNever;
+
+impl Operation for RuntimeReadNever {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.read::<ObserveNever, Observation>(&binding())
+    }
+}
+
+struct RuntimeAssociationCountingRead;
+
+impl Operation for RuntimeAssociationCountingRead {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.read::<AssociationCountingRead, AssociationCountingCapability>(&binding())
+    }
+}
+
+struct RuntimeHookRead {
+    setup: HookSetup,
+}
+
+impl Operation for RuntimeHookRead {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.read::<HookRead, HookCapability>(&self.setup)
+    }
+}
+
+struct RuntimeClassifiedRecovery;
+
+impl Operation for RuntimeClassifiedRecovery {
+    type Input = Value;
+    type Output = OtherValue;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.with_failure_handler::<Value, Value>(
+            |protected| protected.pure::<ClassifiedFailure>(),
+            |handler| {
+                handler.pure::<ClassifyRecovery>()?;
+                handler.match_join::<RecoverySelector, Value>(|arms| {
+                    arms.arm::<RecoveryPayload>(
+                        StableId::new("recover").map_err(|_| ProgramError::InvalidContract)?,
+                        |branch| branch.pure::<RecoverValue>(),
+                    )?;
+                    arms.arm::<RecoveryPayload>(
+                        StableId::new("terminal").map_err(|_| ProgramError::InvalidContract)?,
+                        |branch| branch.pure::<TerminalRecovery>(),
+                    )
+                })
+            },
+        )?;
+        body.pure::<FinalizeRecovery>()
+    }
+}
+
 fn zero_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value");
-    Program::new(
+    expand_program(
         EntryPointId::new("mfm.test.runtime/zero@1").expect("entry"),
-        value.clone(),
-        value,
-        nominal_contract_ref::<Never>().expect("never"),
-        Vec::new(),
+        &EmptyValue,
     )
-    .expect("program")
+    .expect("zero Program")
 }
 
 fn pure_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value");
-    let never = nominal_contract_ref::<Never>().expect("never");
-    Program::new(
+    expand_program(
         EntryPointId::new("mfm.test.runtime/pure@1").expect("entry"),
-        value.clone(),
-        value.clone(),
-        never.clone(),
-        vec![Declaration::State(
-            StateDeclaration::new(
-                state_implementation_ref::<Increment>().expect("state"),
-                value.clone(),
-                value,
-                never,
-                Execution::pure(),
-                None,
-                None,
-            )
-            .expect("state declaration"),
-        )],
+        &PureOperation::<Increment>(std::marker::PhantomData),
     )
-    .expect("program")
+    .expect("pure Program")
 }
 
 fn counting_retry_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value");
-    let never = nominal_contract_ref::<Never>().expect("never");
-    Program::new(
+    expand_program(
         EntryPointId::new("mfm.test.runtime/counting-retry@1").expect("entry"),
-        value.clone(),
-        value.clone(),
-        never.clone(),
-        vec![Declaration::State(
-            StateDeclaration::new(
-                state_implementation_ref::<CountingRetryIncrement>().expect("state"),
-                value.clone(),
-                value,
-                never,
-                Execution::pure(),
-                None,
-                None,
-            )
-            .expect("state declaration"),
-        )],
+        &PureOperation::<CountingRetryIncrement>(std::marker::PhantomData),
     )
-    .expect("program")
+    .expect("counting Program")
 }
 
 fn missing_root_codec_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value");
-    let never = nominal_contract_ref::<Never>().expect("never");
-    Program::new(
+    expand_program(
         EntryPointId::new("mfm.test.runtime/missing-root-codec@1").expect("entry"),
-        value.clone(),
-        value.clone(),
-        nominal_contract_ref::<OtherValue>().expect("unreferenced root failure"),
-        vec![Declaration::State(
-            StateDeclaration::new(
-                state_implementation_ref::<Increment>().expect("state"),
-                value.clone(),
-                value,
-                never,
-                Execution::pure(),
-                None,
-                None,
-            )
-            .expect("state declaration"),
-        )],
+        &MissingRootCodec,
     )
-    .expect("program")
+    .expect("missing root codec Program")
 }
 
 fn match_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value");
-    let branch_value = nominal_contract_ref::<BranchValue>().expect("branch value");
-    let selector = nominal_contract_ref::<Selector>().expect("selector");
-    let never = nominal_contract_ref::<Never>().expect("never");
-    Program::new(
+    expand_program(
         EntryPointId::new("mfm.test.runtime/match@1").expect("entry"),
-        value.clone(),
-        branch_value.clone(),
-        never.clone(),
-        vec![
-            Declaration::State(
-                StateDeclaration::new(
-                    state_implementation_ref::<Choose>().expect("choose"),
-                    value.clone(),
-                    selector.clone(),
-                    never.clone(),
-                    Execution::pure(),
-                    Some(1),
-                    None,
-                )
-                .expect("choose declaration"),
-            ),
-            Declaration::Match(
-                MatchDeclaration::new(
-                    selector,
-                    vec![
-                        MatchVariant::new(StableId::new("left").expect("tag"), 2),
-                        MatchVariant::new(StableId::new("right").expect("tag"), 3),
-                    ],
-                )
-                .expect("match"),
-            ),
-            Declaration::State(
-                StateDeclaration::new(
-                    state_implementation_ref::<IncrementBranch>().expect("increment branch"),
-                    branch_value.clone(),
-                    branch_value.clone(),
-                    never.clone(),
-                    Execution::pure(),
-                    None,
-                    None,
-                )
-                .expect("left"),
-            ),
-            Declaration::State(
-                StateDeclaration::new(
-                    state_implementation_ref::<RightBranch>().expect("right branch"),
-                    branch_value.clone(),
-                    branch_value,
-                    never,
-                    Execution::pure(),
-                    None,
-                    None,
-                )
-                .expect("right"),
-            ),
-        ],
+        &RuntimeMatch,
     )
-    .expect("match program")
+    .expect("Match Program")
 }
 
 fn nested_match_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value");
-    let branch_value = nominal_contract_ref::<BranchValue>().expect("branch value");
-    let selector = nominal_contract_ref::<NestedSelector>().expect("selector");
-    let never = nominal_contract_ref::<Never>().expect("never");
-    Program::new(
+    expand_program(
         EntryPointId::new("mfm.test.runtime/nested-match@1").expect("entry"),
-        value.clone(),
-        branch_value.clone(),
-        never.clone(),
-        vec![
-            Declaration::State(
-                StateDeclaration::new(
-                    state_implementation_ref::<ChooseNested>().expect("choose nested"),
-                    value,
-                    selector.clone(),
-                    never.clone(),
-                    Execution::pure(),
-                    Some(1),
-                    None,
-                )
-                .expect("choose nested declaration"),
-            ),
-            Declaration::Match(
-                MatchDeclaration::new(
-                    selector,
-                    vec![MatchVariant::new(StableId::new("nested").expect("tag"), 2)],
-                )
-                .expect("nested match"),
-            ),
-            Declaration::State(
-                StateDeclaration::new(
-                    state_implementation_ref::<IncrementBranch>().expect("increment branch"),
-                    branch_value.clone(),
-                    branch_value,
-                    never,
-                    Execution::pure(),
-                    None,
-                    None,
-                )
-                .expect("nested target"),
-            ),
-        ],
+        &RuntimeNestedMatch,
     )
-    .expect("nested match program")
+    .expect("nested Match Program")
 }
 
 fn manual_match_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value");
-    let branch_value = nominal_contract_ref::<BranchValue>().expect("branch value");
-    let selector = nominal_contract_ref::<ManualSelector>().expect("selector");
-    let never = nominal_contract_ref::<Never>().expect("never");
-    Program::new(
+    expand_program(
         EntryPointId::new("mfm.test.runtime/manual-match@1").expect("entry"),
-        value.clone(),
-        branch_value.clone(),
-        never.clone(),
-        vec![
-            Declaration::State(
-                StateDeclaration::new(
-                    state_implementation_ref::<ChooseManual>().expect("choose manual"),
-                    value,
-                    selector.clone(),
-                    never.clone(),
-                    Execution::pure(),
-                    Some(1),
-                    None,
-                )
-                .expect("choose manual declaration"),
-            ),
-            Declaration::Match(
-                MatchDeclaration::new(
-                    selector,
-                    vec![MatchVariant::new(StableId::new("branch").expect("tag"), 2)],
-                )
-                .expect("manual match"),
-            ),
-            Declaration::State(
-                StateDeclaration::new(
-                    state_implementation_ref::<IncrementBranch>().expect("increment branch"),
-                    branch_value.clone(),
-                    branch_value,
-                    never,
-                    Execution::pure(),
-                    None,
-                    None,
-                )
-                .expect("manual target"),
-            ),
-        ],
+        &RuntimeManualMatch,
     )
-    .expect("manual match program")
+    .expect("manual Match Program")
 }
 
 fn failure_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value");
-    Program::new(
+    expand_program(
         EntryPointId::new("mfm.test.runtime/failure@1").expect("entry"),
-        value.clone(),
-        value.clone(),
-        value.clone(),
-        vec![Declaration::State(
-            StateDeclaration::new(
-                state_implementation_ref::<Fail>().expect("fail"),
-                value.clone(),
-                value.clone(),
-                value,
-                Execution::pure(),
-                None,
-                None,
-            )
-            .expect("fail declaration"),
-        )],
+        &PureOperation::<Fail>(std::marker::PhantomData),
     )
-    .expect("failure program")
+    .expect("failure Program")
 }
 
 fn rejoin_program() -> Program {
     let value = nominal_contract_ref::<Value>().expect("value");
     let never = nominal_contract_ref::<Never>().expect("never");
-    Program::new(
-        EntryPointId::new("mfm.test.runtime/rejoin@1").expect("entry"),
-        value.clone(),
-        value.clone(),
-        never.clone(),
-        vec![
-            Declaration::State(
-                StateDeclaration::new(
-                    state_implementation_ref::<Rejoin>().expect("rejoin"),
-                    value.clone(),
-                    value.clone(),
-                    value.clone(),
-                    Execution::pure(),
-                    Some(1),
-                    Some(1),
-                )
-                .expect("rejoin declaration"),
+    decode_program(serde_json::json!({
+        "entry_point_id": "mfm.test.runtime/rejoin@1",
+        "admitted_context_contract_ref": value,
+        "root_success_contract_ref": value,
+        "root_failure_contract_ref": never,
+        "declarations": [
+            state_wire(
+                state_implementation_ref::<Rejoin>().expect("rejoin"),
+                value.clone(), value.clone(), value.clone(),
+                serde_json::json!({ "kind": "pure" }), Some(1), Some(1),
             ),
-            Declaration::State(
-                StateDeclaration::new(
-                    state_implementation_ref::<Increment>().expect("increment"),
-                    value.clone(),
-                    value.clone(),
-                    never,
-                    Execution::pure(),
-                    None,
-                    None,
-                )
-                .expect("successor declaration"),
+            state_wire(
+                state_implementation_ref::<Increment>().expect("increment"),
+                value.clone(), value.clone(), never.clone(),
+                serde_json::json!({ "kind": "pure" }), None, None,
             ),
         ],
-    )
-    .expect("rejoin program")
+    }))
 }
 
 fn blocking_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value");
-    let never = nominal_contract_ref::<Never>().expect("never");
-    Program::new(
+    expand_program(
         EntryPointId::new("mfm.test.runtime/blocking@1").expect("entry"),
-        value.clone(),
-        value.clone(),
-        never.clone(),
-        vec![Declaration::State(
-            StateDeclaration::new(
-                state_implementation_ref::<BlockingIncrement>().expect("blocking increment"),
-                value.clone(),
-                value,
-                never,
-                Execution::pure(),
-                None,
-                None,
-            )
-            .expect("blocking declaration"),
-        )],
+        &PureOperation::<BlockingIncrement>(std::marker::PhantomData),
     )
-    .expect("blocking program")
+    .expect("blocking Program")
 }
 
 fn foreign_zero_program() -> Program {
-    let other = nominal_contract_ref::<OtherValue>().expect("other value");
-    Program::new(
+    expand_program(
         EntryPointId::new("mfm.test.runtime/foreign@1").expect("entry"),
-        other.clone(),
-        other,
-        nominal_contract_ref::<Never>().expect("never"),
-        Vec::new(),
+        &ForeignEmpty,
     )
-    .expect("foreign program")
+    .expect("foreign Program")
 }
 
 fn unsupported_match_program() -> Program {
     let selector = nominal_contract_ref::<OtherValue>().expect("selector");
     let value = nominal_contract_ref::<Value>().expect("value");
     let never = nominal_contract_ref::<Never>().expect("never");
-    Program::new(
-        EntryPointId::new("mfm.test.runtime/unsupported-match@1").expect("entry"),
-        selector.clone(),
-        value.clone(),
-        never.clone(),
-        vec![
-            Declaration::Match(
-                MatchDeclaration::new(
-                    selector,
-                    vec![MatchVariant::new(StableId::new("left").expect("tag"), 1)],
-                )
-                .expect("match"),
-            ),
-            Declaration::State(
-                StateDeclaration::new(
-                    state_implementation_ref::<Increment>().expect("increment"),
-                    value.clone(),
-                    value,
-                    never,
-                    Execution::pure(),
-                    None,
-                    None,
-                )
-                .expect("target"),
+    decode_program(serde_json::json!({
+        "entry_point_id": "mfm.test.runtime/unsupported-match@1",
+        "admitted_context_contract_ref": selector,
+        "root_success_contract_ref": value,
+        "root_failure_contract_ref": never,
+        "declarations": [
+            {
+                "kind": "match",
+                "value": {
+                    "selector_contract_ref": selector,
+                    "variants": [{ "tag": "left", "entry_index": 1 }],
+                },
+            },
+            state_wire(
+                state_implementation_ref::<Increment>().expect("increment"),
+                value.clone(), value.clone(), never.clone(),
+                serde_json::json!({ "kind": "pure" }), None, None,
             ),
         ],
-    )
-    .expect("unsupported match program")
+    }))
 }
 
 fn binding() -> Binding {
@@ -1102,121 +1331,90 @@ fn binding() -> Binding {
 }
 
 fn read_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value");
-    let (_, binding_ref) = canonicalize_mfm_value(&binding()).expect("binding ref");
-    Program::new(
+    expand_program(
         EntryPointId::new("mfm.test.runtime/read@1").expect("entry"),
-        value.clone(),
-        value.clone(),
-        value.clone(),
-        vec![Declaration::State(
-            StateDeclaration::new(
-                state_implementation_ref::<Observe>().expect("observe"),
-                value.clone(),
-                value.clone(),
-                value,
-                Execution::read(
-                    capability_contract_ref::<Observation>().expect("capability"),
-                    nominal_contract_ref::<Intent>().expect("intent"),
-                    nominal_contract_ref::<Evidence>().expect("evidence"),
-                    binding_ref,
-                ),
-                None,
-                None,
-            )
-            .expect("read declaration"),
-        )],
+        &RuntimeRead,
     )
-    .expect("read program")
+    .expect("read Program")
 }
 
 fn read_never_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value");
-    let never = nominal_contract_ref::<Never>().expect("never");
-    let (_, binding_ref) = canonicalize_mfm_value(&binding()).expect("binding ref");
-    Program::new(
+    expand_program(
         EntryPointId::new("mfm.test.runtime/read-never@1").expect("entry"),
-        value.clone(),
-        value.clone(),
-        never.clone(),
-        vec![Declaration::State(
-            StateDeclaration::new(
-                state_implementation_ref::<ObserveNever>().expect("observe never"),
-                value.clone(),
-                value,
-                never,
-                Execution::read(
-                    capability_contract_ref::<Observation>().expect("capability"),
-                    nominal_contract_ref::<Intent>().expect("intent"),
-                    nominal_contract_ref::<Evidence>().expect("evidence"),
-                    binding_ref,
-                ),
-                None,
-                None,
-            )
-            .expect("read never declaration"),
-        )],
+        &RuntimeReadNever,
     )
-    .expect("read never program")
+    .expect("read Never Program")
 }
 
 fn missing_capability_program() -> Program {
     let value = nominal_contract_ref::<Value>().expect("value");
     let (_, binding_ref) = canonicalize_mfm_value(&binding()).expect("binding ref");
-    Program::new(
-        EntryPointId::new("mfm.test.runtime/missing-capability@1").expect("entry"),
-        value.clone(),
-        value.clone(),
-        value.clone(),
-        vec![Declaration::State(
-            StateDeclaration::new(
-                state_implementation_ref::<Observe>().expect("observe"),
-                value.clone(),
-                value.clone(),
-                value,
-                Execution::read(
-                    capability_contract_ref::<AlternateObservation>().expect("missing capability"),
-                    nominal_contract_ref::<Intent>().expect("intent"),
-                    nominal_contract_ref::<Evidence>().expect("evidence"),
-                    binding_ref,
-                ),
-                None,
-                None,
-            )
-            .expect("missing capability declaration"),
+    decode_program(serde_json::json!({
+        "entry_point_id": "mfm.test.runtime/missing-capability@1",
+        "admitted_context_contract_ref": value,
+        "root_success_contract_ref": value,
+        "root_failure_contract_ref": value,
+        "declarations": [state_wire(
+            state_implementation_ref::<Observe>().expect("observe"),
+            value.clone(), value.clone(), value.clone(),
+            serde_json::json!({
+                "kind": "read",
+                "capability_contract_ref": capability_contract_ref::<AlternateObservation>().expect("capability"),
+                "intent_contract_ref": nominal_contract_ref::<Intent>().expect("intent"),
+                "evidence_contract_ref": nominal_contract_ref::<Evidence>().expect("evidence"),
+                "binding_ref": binding_ref,
+            }),
+            None, None,
         )],
-    )
-    .expect("missing capability program")
+    }))
 }
 
 fn association_counting_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value");
-    let never = nominal_contract_ref::<Never>().expect("never");
-    let (_, binding_ref) = canonicalize_mfm_value(&binding()).expect("binding ref");
-    Program::new(
+    expand_program(
         EntryPointId::new("mfm.test.runtime/association-counting@1").expect("entry"),
-        value.clone(),
-        value.clone(),
-        never.clone(),
-        vec![Declaration::State(
-            StateDeclaration::new(
-                state_implementation_ref::<AssociationCountingRead>().expect("state"),
-                value.clone(),
-                value,
-                never,
-                Execution::read(
-                    capability_contract_ref::<AssociationCountingCapability>().expect("capability"),
-                    nominal_contract_ref::<Intent>().expect("intent"),
-                    nominal_contract_ref::<Evidence>().expect("evidence"),
-                    binding_ref,
-                ),
-                None,
-                None,
-            )
-            .expect("association counting declaration"),
-        )],
+        &RuntimeAssociationCountingRead,
     )
-    .expect("association counting program")
+    .expect("association counting Program")
+}
+
+fn classified_recovery_program() -> Program {
+    expand_program(
+        EntryPointId::new("mfm.test.runtime/classified-recovery@1").expect("entry"),
+        &RuntimeClassifiedRecovery,
+    )
+    .expect("classified recovery Program")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn state_wire(
+    implementation: mfm_ids::ContentRef,
+    input: mfm_ids::ContentRef,
+    output: mfm_ids::ContentRef,
+    failure: mfm_ids::ContentRef,
+    execution: serde_json::Value,
+    next_index: Option<u16>,
+    failure_next_index: Option<u16>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "state",
+        "value": {
+            "state_implementation_ref": implementation,
+            "input_contract_ref": input,
+            "output_contract_ref": output,
+            "failure_contract_ref": failure,
+            "execution": execution,
+            "next_index": next_index,
+            "failure_next_index": failure_next_index,
+        },
+    })
+}
+
+fn decode_program(wire: serde_json::Value) -> Program {
+    let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&wire).expect("wire JSON"),
+    )
+    .expect("canonical Program JSON");
+    Program::decode_canonical(canonical.as_bytes()).expect("retained Program")
 }
 
 fn assert_same_view(left: &mfm_runtime::RunView, right: &mfm_runtime::RunView) {
@@ -1360,6 +1558,55 @@ async fn runtime_hot_cold_match_and_failure_roots_match() {
             format!("{{\"value\":{}}}", input + 1).as_bytes()
         );
         assert_same_view(&hot, &runtime.read(&id).await.expect("rejoin cold"));
+    }
+}
+
+#[tokio::test]
+async fn classified_failure_recovery_and_terminal_paths_are_hot_cold_exact() {
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder
+        .register_pure::<ClassifiedFailure>()
+        .expect("fallible State");
+    builder
+        .register_pure::<ClassifyRecovery>()
+        .expect("classifier State");
+    builder
+        .register_pure::<RecoverValue>()
+        .expect("recover State");
+    builder
+        .register_pure::<TerminalRecovery>()
+        .expect("terminal State");
+    builder
+        .register_pure::<FinalizeRecovery>()
+        .expect("final State");
+    let runtime = Runtime::new(
+        builder.finish().expect("assembly"),
+        Arc::new(MemoryStore::new()),
+    );
+
+    for (byte, input, expected, sequence) in [
+        (70, 0, br#"{"value":"final-0"}"#.as_slice(), 3),
+        (71, 1, br#"{"value":"final-1"}"#.as_slice(), 5),
+        (72, 3, br#"{"value":"terminal-3"}"#.as_slice(), 4),
+    ] {
+        let id = run(byte);
+        let hot = runtime
+            .start(
+                id.clone(),
+                classified_recovery_program(),
+                Value { value: input },
+            )
+            .await
+            .expect("classified recovery start");
+        assert_eq!(hot.head_sequence(), sequence);
+        let RunViewState::Succeeded(output) = hot.state() else {
+            panic!("classified path must succeed");
+        };
+        assert_eq!(output.canonical_bytes(), expected);
+        assert_same_view(
+            &hot,
+            &runtime.read(&id).await.expect("classified cold read"),
+        );
     }
 }
 
@@ -1764,6 +2011,80 @@ async fn association_uses_persisted_refs_without_rerunning_static_id_functions()
     assert!(matches!(view.state(), RunViewState::Succeeded(_)));
     assert_eq!(ASSOCIATION_STATE_ID_CALLS.load(Ordering::SeqCst), 0);
     assert_eq!(ASSOCIATION_CAPABILITY_ID_CALLS.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn injection_hooks_run_only_during_source_authoring() {
+    fn assert_authored_once(counters: &HookCounters) {
+        assert_eq!(counters.before.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.binding.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.after.load(Ordering::SeqCst), 1);
+    }
+
+    let counters = Arc::new(HookCounters::default());
+    let authored = expand_program(
+        EntryPointId::new("mfm.test.runtime/hook-read-program@1").expect("entry"),
+        &RuntimeHookRead {
+            setup: HookSetup {
+                binding: binding(),
+                counters: Arc::clone(&counters),
+            },
+        },
+    )
+    .expect("hook-authored Program");
+    assert_authored_once(&counters);
+
+    let decoded = Program::decode_canonical(authored.canonical_bytes()).expect("decode Program");
+    assert_authored_once(&counters);
+
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder
+        .register_pure::<HookSupport>()
+        .expect("hook support State");
+    builder
+        .register_read::<HookRead, HookCapability>()
+        .expect("hook Read State");
+    builder
+        .register_adapter::<HookCapability, _, _>(binding(), {
+            let provider_calls = Arc::clone(&provider_calls);
+            move |intent| {
+                provider_calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    Ok(Evidence {
+                        value: intent.value,
+                        accepted: true,
+                    })
+                })
+            }
+        })
+        .expect("hook adapter");
+    assert_authored_once(&counters);
+
+    let runtime = Runtime::new(
+        builder.finish().expect("hook assembly"),
+        Arc::new(MemoryStore::new()),
+    );
+    assert_authored_once(&counters);
+
+    let id = run(73);
+    let hot = runtime
+        .start(id.clone(), decoded, Value { value: 9 })
+        .await
+        .expect("hook Program start");
+    assert_eq!(hot.head_sequence(), 4);
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    assert_authored_once(&counters);
+
+    let resumed = runtime.resume(&id).await.expect("completed resume");
+    assert_same_view(&hot, &resumed);
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    assert_authored_once(&counters);
+
+    let cold = runtime.read(&id).await.expect("cold read");
+    assert_same_view(&hot, &cold);
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    assert_authored_once(&counters);
 }
 
 #[tokio::test]

@@ -4,6 +4,11 @@
 its checked schema/value/content ref. Portfolio planning requires targets strictly sorted and unique
 by chain ID and places the selected binding ref in every Read declaration and C0 route.
 
+At source-authoring time, each of the six supported capability/State pairs owns an explicit
+`CapabilityInjection` implementation. The current policies are identity policies: they derive the
+same target binding and emit exactly the designated Read. This policy is deterministic topology
+only; provider handles, credentials, adapter registration, and IO remain live Runtime concerns.
+
 Trusted composition pairs each target with one opaque provider handle and calls
 `register_evm_reads`. The installer derives the binding ref and registers the three surviving Read
 capabilities directly. One target serves all six current Read State occurrences; no call ID, role

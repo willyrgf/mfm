@@ -2,7 +2,7 @@
 name = "mfm-program"
 version = "0.1.0"
 edition = "2021"
-description = "Opaque sequential Program authority for MFM"
+description = "Typed Operation authoring and immutable Program v2 contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"

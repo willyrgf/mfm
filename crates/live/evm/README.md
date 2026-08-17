@@ -6,3 +6,6 @@ before IO, bounds request encoding, and returns typed evidence or `ReadAdapterEr
 
 The crate owns no State registration, planner, binding wrapper, live assembly contribution, call ID,
 response echo, signer, nonce, broadcast, or transaction-submission path.
+
+Capability injection is not live registration: it is deterministic domain-owned Program topology
+applied before Runtime sees the Program. This crate never invokes Operation or injection hooks.
