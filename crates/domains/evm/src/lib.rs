@@ -1894,12 +1894,11 @@ fn advance_balance_context<K: MfmValueTrait>(
 
 /// Appends one fully unrolled reusable balance fragment.
 ///
-/// The caller supplies declaration indices in final Program order. Each source
-/// contributes eight occurrences; the one consolidate State follows them.
-#[allow(clippy::too_many_arguments)]
+/// The fragment starts at the current declaration length in final Program
+/// order. Each source contributes eight occurrences; the one consolidate State
+/// follows them. Callers supply only the external failure and completion routes.
 pub fn append_balance_fragment<K: MfmValueTrait>(
     declarations: &mut Vec<Declaration>,
-    start_index: u16,
     source_count: usize,
     target: &EvmPhysicalTarget,
     failure_next_index: u16,
@@ -1917,6 +1916,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
     let failure =
         nominal_contract_ref::<EvmBalanceFailure>().map_err(|_| EvmDomainError::Program)?;
     let binding_ref = target.binding_ref()?;
+    let start_index = u16::try_from(declarations.len()).map_err(|_| EvmDomainError::Program)?;
     let source_count_u16 = u16::try_from(source_count).map_err(|_| EvmDomainError::Program)?;
     let consolidate_index = start_index
         .checked_add(
@@ -1931,7 +1931,6 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
             .checked_add(source.checked_mul(8).ok_or(EvmDomainError::Program)?)
             .ok_or(EvmDomainError::Program)?;
         let index = |offset: u16| base.checked_add(offset).ok_or(EvmDomainError::Program);
-        let check = index(0)?;
         let initial = index(1)?;
         let select = index(2)?;
         let selector = index(3)?;
@@ -1946,7 +1945,6 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
         };
         declarations.extend([
             Declaration::State(read_state::<EvmState<1, 0, K>, EvmCapability<2>>(
-                check,
                 context.clone(),
                 context.clone(),
                 failure.clone(),
@@ -1955,7 +1953,6 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
                 binding_ref.clone(),
             )?),
             Declaration::State(read_state::<EvmState<1, 1, K>, EvmCapability<6>>(
-                initial,
                 context.clone(),
                 context.clone(),
                 failure.clone(),
@@ -1964,7 +1961,6 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
                 binding_ref.clone(),
             )?),
             Declaration::State(pure_state::<EvmState<1, 2, K>>(
-                select,
                 context.clone(),
                 asset.clone(),
                 failure.clone(),
@@ -1988,7 +1984,6 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
                 .map_err(|_| EvmDomainError::Program)?,
             ),
             Declaration::State(read_state::<EvmState<1, 3, K>, EvmCapability<7>>(
-                native,
                 context.clone(),
                 context.clone(),
                 failure.clone(),
@@ -1997,7 +1992,6 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
                 binding_ref.clone(),
             )?),
             Declaration::State(read_state::<EvmState<1, 4, K>, EvmCapability<7>>(
-                decimals,
                 context.clone(),
                 context.clone(),
                 failure.clone(),
@@ -2006,7 +2000,6 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
                 binding_ref.clone(),
             )?),
             Declaration::State(read_state::<EvmState<1, 5, K>, EvmCapability<7>>(
-                token,
                 context.clone(),
                 context.clone(),
                 failure.clone(),
@@ -2015,7 +2008,6 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
                 binding_ref.clone(),
             )?),
             Declaration::State(read_state::<EvmState<1, 6, K>, EvmCapability<6>>(
-                confirm,
                 context.clone(),
                 context.clone(),
                 failure.clone(),
@@ -2026,7 +2018,6 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
         ]);
     }
     declarations.push(Declaration::State(pure_state::<EvmState<1, 7, K>>(
-        consolidate_index,
         context,
         completion,
         failure,
@@ -2037,7 +2028,6 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
 }
 
 fn pure_state<S: State>(
-    _index: u16,
     input: ContentRef,
     output: ContentRef,
     failure: ContentRef,
@@ -2056,9 +2046,7 @@ fn pure_state<S: State>(
     .map_err(|_| EvmDomainError::Program)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn read_state<S: State, C: ReadCapabilityContract>(
-    _index: u16,
     input: ContentRef,
     output: ContentRef,
     failure: ContentRef,
@@ -2269,15 +2257,8 @@ mod tests {
         value: u8,
     }
 
-    fn context() -> EvmBalanceContext<Continuation> {
-        let source = EvmBalanceSource {
-            source_id: "wallet.native".to_owned(),
-            chain_id: 1,
-            address: "0x1111111111111111111111111111111111111111".to_owned(),
-            token: None,
-        };
-        let request = EvmBalanceRequest::new(vec![source], 18).expect("request");
-        let route = ContentRef::new(
+    fn route() -> ContentRef {
+        ContentRef::new(
             SchemaId::new(
                 "mfm.test.route",
                 "1",
@@ -2287,15 +2268,101 @@ mod tests {
             .expect("schema"),
             ContentDigest::from_digest(DigestAlgorithm::Sha256V1, DigestBytes::from_array([2; 32])),
         )
-        .expect("route");
+        .expect("route")
+    }
+
+    fn context() -> EvmBalanceContext<Continuation> {
+        let source = EvmBalanceSource {
+            source_id: "wallet.native".to_owned(),
+            chain_id: 1,
+            address: "0x1111111111111111111111111111111111111111".to_owned(),
+            token: None,
+        };
+        let request = EvmBalanceRequest::new(vec![source], 18).expect("request");
         EvmBalanceContext::new(
             request,
             Continuation { value: 1 },
             0,
             "collection".to_owned(),
-            route,
+            route(),
         )
         .expect("context")
+    }
+
+    fn state_at(declarations: &[Declaration], index: usize) -> &StateDeclaration {
+        match &declarations[index] {
+            Declaration::State(state) => state,
+            Declaration::Match(_) => panic!("declaration {index} must be a State"),
+        }
+    }
+
+    fn assert_state_edges(declarations: &[Declaration], index: usize, success: u16, failure: u16) {
+        let state = state_at(declarations, index);
+        assert_eq!(state.next_index(), Some(success), "success edge at {index}");
+        assert_eq!(
+            state.failure_next_index(),
+            Some(failure),
+            "failure edge at {index}"
+        );
+    }
+
+    #[test]
+    fn balance_fragment_derives_every_internal_index_from_prefilled_program_order() {
+        let context_ref =
+            nominal_contract_ref::<EvmBalanceContext<Continuation>>().expect("context contract");
+        let completion_ref = nominal_contract_ref::<EvmBalanceCollectionCompletion<Continuation>>()
+            .expect("completion contract");
+        let failure_ref = nominal_contract_ref::<EvmBalanceFailure>().expect("failure contract");
+        let filler = Declaration::State(
+            pure_state::<EvmState<1, 7, Continuation>>(
+                context_ref,
+                completion_ref,
+                failure_ref,
+                None,
+                None,
+            )
+            .expect("filler"),
+        );
+        let mut declarations = vec![filler; 3];
+        let target = EvmPhysicalTarget::new(1, route()).expect("target");
+
+        append_balance_fragment::<Continuation>(&mut declarations, 2, &target, 60, Some(61))
+            .expect("fragment");
+
+        assert_eq!(declarations.len(), 20);
+        for (index, success) in [
+            (3, 4),
+            (4, 5),
+            (5, 6),
+            (7, 10),
+            (8, 9),
+            (9, 10),
+            (10, 11),
+            (11, 12),
+            (12, 13),
+            (13, 14),
+            (15, 18),
+            (16, 17),
+            (17, 18),
+            (18, 19),
+            (19, 61),
+        ] {
+            assert_state_edges(&declarations, index, success, 60);
+        }
+        for (index, expected) in [
+            (6, [("native", 7), ("token", 8)]),
+            (14, [("native", 15), ("token", 16)]),
+        ] {
+            let Declaration::Match(selector) = &declarations[index] else {
+                panic!("declaration {index} must be a Match");
+            };
+            let actual = selector
+                .variants()
+                .iter()
+                .map(|variant| (variant.tag().as_str(), variant.entry_index()))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

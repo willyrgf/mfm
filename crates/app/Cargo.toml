@@ -2,7 +2,7 @@
 name = "mfm-app"
 version = "0.1.0"
 edition = "2021"
-description = "Fixed-tenant application facade for MFM"
+description = "Portfolio Runtime facade for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 

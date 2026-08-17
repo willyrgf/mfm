@@ -116,3 +116,16 @@ fn portfolio_program_and_c0_capacity_contract() {
     assert_eq!(program.declarations().len(), 518);
     assert!(serde_json::from_value::<PortfolioConfig>(config_with_sources(65)).is_err());
 }
+
+#[test]
+fn representative_program_identity_is_stable() {
+    let config: PortfolioConfig =
+        serde_json::from_value(config_with_sources(2)).expect("representative config");
+    let (program, _) =
+        plan_snapshot(selector(), &config, &[target(1, 2)]).expect("representative plan");
+    assert_eq!(program.canonical_bytes().len(), 36_560);
+    assert_eq!(
+        serde_json::to_string(program.content_ref()).expect("content ref JSON"),
+        r#"{"content_digest":"content:sha256-v1:59c503d1d8faa1a7afc33d9bb0bcad42d053e7cecb8571023bbc0cef42ab4beb","schema_id":"schema:mfm-program-document:2:sha256-jcs-v1:fc3c33ba3470e25a166df52597c4b45a723dd6d0823d1318938c29225323076c"}"#
+    );
+}
