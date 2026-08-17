@@ -22,8 +22,8 @@
 use std::collections::BTreeMap;
 
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalBytes, CanonicalJsonBytes, DecimalString,
-    PlainCanonicalJsonBytes, MAX_CANONICAL_JSON_DEPTH,
+    CanonicalBytes, CanonicalJsonBytes, DecimalString, PlainCanonicalJsonBytes,
+    MAX_CANONICAL_JSON_DEPTH,
 };
 use mfm_ids::{
     ContentDigest, ContentRef, DigestAlgorithm, NameToken, SchemaId, SchemaVersion, SemanticTypeId,
@@ -37,10 +37,9 @@ pub use mfm_canonical::limits::{
 
 mod persisted;
 pub use self::persisted::{
-    validate_derived_persisted_owner, validate_derived_persisted_owner_prevalidated,
-    CanonicalJsonLinesPersistedSchema, CanonicalJsonPersistedSchema, CanonicalJsonProfile,
-    LiteralValue, MediaType, PersistedObjectPayload, PersistedSchema, SequenceOrdering,
-    StringGrammar, MAX_MEDIA_TYPE_BYTES,
+    validate_derived_persisted_owner, CanonicalJsonLinesPersistedSchema,
+    CanonicalJsonPersistedSchema, CanonicalJsonProfile, LiteralValue, MediaType,
+    PersistedObjectPayload, PersistedSchema, SequenceOrdering, StringGrammar, MAX_MEDIA_TYPE_BYTES,
 };
 
 // Keep this list intentionally small and high-signal to avoid false positives on public
@@ -99,7 +98,7 @@ pub enum ValueError {
     /// Canonical value bytes did not match the complete closed schema shape.
     #[error("value does not match schema shape")]
     SchemaShapeMismatch,
-    /// A valid value exceeded the retained object byte ceiling.
+    /// Canonical value bytes exceeded the retained object ceiling before shape qualification.
     #[error("value capacity exceeded")]
     Capacity,
     /// Artifact reference identity does not match the expected value type.
@@ -166,11 +165,6 @@ pub trait MfmValue: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Returns the stable semantic identity for this value kind.
     fn semantic_id() -> Result<SemanticTypeId>;
 
-    /// Derives this value's schema id from its schema descriptor identity.
-    fn schema_id() -> Result<SchemaId> {
-        Self::schema_descriptor()?.schema_id()
-    }
-
     /// Moves a derive-proven one-field enum payload into a monomorphized visitor.
     #[doc(hidden)]
     fn __mfm_visit_match_payload<V: MatchPayloadVisitor>(self, visitor: V) -> Option<V::Output>
@@ -198,30 +192,27 @@ pub fn canonicalize_mfm_value<T: MfmValue>(
 ) -> std::result::Result<(PlainCanonicalJsonBytes, ContentRef), ValueError> {
     let descriptor = T::schema_descriptor()?;
     let semantic_id = T::semantic_id()?;
-    let schema_id = T::schema_id()?;
-    if descriptor.identity().semantic_type_id.as_ref() != Some(&semantic_id)
-        || descriptor.schema_id()? != schema_id
-    {
+    if descriptor.identity().semantic_type_id.as_ref() != Some(&semantic_id) {
         return Err(ValueError::Descriptor(
             "value descriptor does not match its Rust owner".to_owned(),
         ));
     }
+    let schema_id = descriptor.schema_id()?;
 
     let json = serde_json::to_string(value).map_err(|_| ValueError::SchemaShapeMismatch)?;
     let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
         .map_err(|_| ValueError::SchemaShapeMismatch)?;
-    descriptor
-        .identity()
-        .validate_canonical_value(canonical.as_bytes())?;
     if canonical.as_bytes().len() > MAX_RUN_OBJECT_CANONICAL_BYTES {
         return Err(ValueError::Capacity);
     }
-    let content_digest = ContentDigest::from_digest(
-        DigestAlgorithm::Sha256V1,
-        sha256_digest_bytes(canonical.as_bytes()),
-    );
-    let content_ref = ContentRef::new(schema_id, content_digest)
-        .map_err(|error| ValueError::Identity(error.to_string()))?;
+    descriptor
+        .identity()
+        .validate_canonical_value(canonical.as_bytes())?;
+    let content_ref = ContentRef::new(
+        schema_id,
+        ContentDigest::from_digest(DigestAlgorithm::Sha256V1, canonical.digest_bytes()),
+    )
+    .map_err(|error| ValueError::Identity(error.to_string()))?;
     Ok((canonical, content_ref))
 }
 
@@ -1631,7 +1622,8 @@ fn grammar_admits(grammar: StringGrammar, value: &str) -> bool {
 
     match grammar {
         StringGrammar::UnicodeScalarText => !value.chars().any(|ch| ch.is_control()),
-        StringGrammar::ContentDigest => ContentDigest::parse(value).is_ok(),
+        StringGrammar::ContentDigest => ContentDigest::parse(value)
+            .is_ok_and(|digest| digest.algorithm() == DigestAlgorithm::Sha256V1),
         StringGrammar::RunId => RunId::parse(value).is_ok(),
         StringGrammar::ArtifactId => mfm_ids::ArtifactId::parse(value).is_ok(),
         StringGrammar::SchemaId => SchemaId::parse(value).is_ok(),
@@ -1757,9 +1749,16 @@ pub struct GenericArgumentDescriptor {
 impl GenericArgumentDescriptor {
     /// Creates a generic argument descriptor for an `MfmValue`.
     pub fn for_value<T: MfmValue>() -> Result<Self> {
+        let descriptor = T::schema_descriptor()?;
+        let semantic_type_id = T::semantic_id()?;
+        if descriptor.identity().semantic_type_id.as_ref() != Some(&semantic_type_id) {
+            return Err(ValueError::Descriptor(
+                "generic descriptor does not match its Rust owner".to_owned(),
+            ));
+        }
         Ok(Self {
-            schema_id: T::schema_id()?,
-            semantic_type_id: T::semantic_id()?,
+            schema_id: descriptor.schema_id()?,
+            semantic_type_id,
         })
     }
 }
@@ -2570,7 +2569,19 @@ fn reject_duplicate_names<'a>(
 
 #[cfg(test)]
 mod secret_marker_tests {
-    use super::string_contains_secret_marker;
+    use super::{grammar_admits, string_contains_secret_marker, DigestAlgorithm, StringGrammar};
+    use mfm_ids::{ContentDigest, DigestBytes};
+
+    #[test]
+    fn content_ref_grammar_accepts_only_exact_byte_digest_algorithm() {
+        let bytes = DigestBytes::from_array([4; 32]);
+        let raw = ContentDigest::from_digest(DigestAlgorithm::Sha256V1, bytes);
+        let jcs = ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, bytes);
+
+        assert!(ContentDigest::parse(jcs.as_str()).is_ok());
+        assert!(grammar_admits(StringGrammar::ContentDigest, raw.as_str()));
+        assert!(!grammar_admits(StringGrammar::ContentDigest, jcs.as_str()));
+    }
 
     #[test]
     fn policy_covers_persisted_secret_canaries() {

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use mfm_capabilities::{CapabilityError, ReadCapabilityContract};
-use mfm_ids::{DigestAlgorithm, DigestBytes, EntryPointId, RunId, StableId};
+use mfm_ids::{DigestBytes, EntryPointId, RunId, StableId};
 use mfm_journal::{EncodedRunFrame, JournalHistory, OutcomeKind, StoredRunBytes};
 use mfm_program::{
     capability_contract_ref, nominal_contract_ref, state_implementation_ref, Declaration,
@@ -378,10 +378,7 @@ impl ReadState<Observation> for Observe {
 }
 
 fn run(byte: u8) -> RunId {
-    RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([byte; 32]),
-    )
+    RunId::from_digest(DigestBytes::from_array([byte; 32]))
 }
 
 fn zero_program() -> Program {

@@ -9,10 +9,7 @@ use mfm_store::{AppendResult, MemoryStore, Store};
 mod scenarios;
 
 fn run() -> RunId {
-    RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([7; 32]),
-    )
+    RunId::from_digest(DigestBytes::from_array([7; 32]))
 }
 
 fn reference(name: &str, bytes: &[u8]) -> ContentRef {

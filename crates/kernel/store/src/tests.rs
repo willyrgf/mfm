@@ -12,10 +12,7 @@ use super::*;
 mod hostile;
 
 fn run(byte: u8) -> RunId {
-    RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([byte; 32]),
-    )
+    RunId::from_digest(DigestBytes::from_array([byte; 32]))
 }
 
 fn reference(name: &str, bytes: &[u8]) -> ContentRef {

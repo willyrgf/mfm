@@ -169,64 +169,15 @@ fn expand_schema_derive_result(
 
     let impl_block = match kind {
         DeriveKind::PersistedContract => quote! {
-            impl #impl_generics #ident #ty_generics #where_clause {
-                fn __mfm_persisted_schema_identity(
-                ) -> ::mfm_values::Result<&'static ::mfm_values::SchemaIdentity> {
-                    static IDENTITY: ::std::sync::OnceLock<
-                        ::std::result::Result<::mfm_values::SchemaIdentity, ::std::string::String>,
-                    > = ::std::sync::OnceLock::new();
-                    match IDENTITY.get_or_init(|| {
-                            (|| -> ::mfm_values::Result<::mfm_values::SchemaIdentity> {
-                                #identity_body
-                            })()
-                            .map_err(|error| error.to_string())
-                        }) {
-                        Ok(identity) => Ok(identity),
-                        Err(error) => Err(::mfm_values::ValueError::Descriptor(error.clone())),
-                    }
-                }
-            }
-
             impl #impl_generics ::mfm_values::PersistedSchema for #ident #ty_generics #where_clause {
                 fn schema_identity() -> ::mfm_values::Result<::mfm_values::SchemaIdentity> {
-                    Self::__mfm_persisted_schema_identity().cloned()
-                }
-
-                fn schema_shape() -> ::mfm_values::Result<::mfm_values::SchemaShape> {
-                    Self::__mfm_persisted_schema_identity()?
-                        .canonical_json_shape()
-                        .cloned()
-                }
-
-                fn validate_canonical_bytes(bytes: &[u8]) -> ::mfm_values::Result<()> {
-                    Self::__mfm_persisted_schema_identity()?
-                        .validate_canonical_value_for_prevalidated_owner(bytes)
-                }
-
-                fn schema_id() -> ::mfm_values::Result<::mfm_ids::SchemaId> {
-                    // The derived identity is constant, so its schema id is too.
-                    // Retained content references are derived inside recursive
-                    // program and history walks; recanonicalizing the whole
-                    // shape per reference would be both quadratic and stack
-                    // hungry there.
-                    static SCHEMA_ID: ::std::sync::OnceLock<
-                        ::std::result::Result<::mfm_ids::SchemaId, ::std::string::String>,
-                    > = ::std::sync::OnceLock::new();
-                    SCHEMA_ID
-                        .get_or_init(|| {
-                            Self::__mfm_persisted_schema_identity()
-                                .and_then(|identity| identity.schema_id())
-                                .map_err(|error| error.to_string())
-                        })
-                        .clone()
-                        .map_err(::mfm_values::ValueError::Descriptor)
+                    #identity_body
                 }
 
                 fn validate(&self) -> ::mfm_values::Result<()> {
-                    ::mfm_values::validate_derived_persisted_owner_prevalidated(
-                        self,
-                        Self::__mfm_persisted_schema_identity()?,
-                    )
+                    let identity =
+                        <Self as ::mfm_values::PersistedSchema>::schema_identity()?;
+                    ::mfm_values::validate_derived_persisted_owner(self, &identity)
                 }
             }
         },

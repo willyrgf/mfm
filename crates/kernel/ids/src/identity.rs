@@ -238,8 +238,7 @@ impl<K> Identity<K>
 where
     K: private::DigestOnlyCategory,
 {
-    /// Constructs a digest-only identity from already validated digest bytes.
-    pub fn from_digest(algorithm: DigestAlgorithm, digest: DigestBytes) -> Self {
+    pub(super) fn with_digest_algorithm(algorithm: DigestAlgorithm, digest: DigestBytes) -> Self {
         let raw = format!("{}:{algorithm}:{digest}", K::PREFIX);
         Self {
             raw,
@@ -248,6 +247,27 @@ where
             digest,
             _kind: PhantomData,
         }
+    }
+}
+
+impl Identity<RunIdKind> {
+    /// Constructs a run id with the fixed `Sha256JcsV1` algorithm.
+    pub fn from_digest(digest: DigestBytes) -> Self {
+        Self::with_digest_algorithm(DigestAlgorithm::Sha256JcsV1, digest)
+    }
+}
+
+impl Identity<ArtifactIdKind> {
+    /// Constructs an artifact id with the fixed `Sha256JcsV1` algorithm.
+    pub fn from_digest(digest: DigestBytes) -> Self {
+        Self::with_digest_algorithm(DigestAlgorithm::Sha256JcsV1, digest)
+    }
+}
+
+impl Identity<ContentDigestKind> {
+    /// Constructs a content digest with one caller-selected supported algorithm.
+    pub fn from_digest(algorithm: DigestAlgorithm, digest: DigestBytes) -> Self {
+        Self::with_digest_algorithm(algorithm, digest)
     }
 }
 

@@ -84,10 +84,7 @@ fn run_id() -> RunId {
 }
 
 fn run_id_with(byte: u8) -> RunId {
-    RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([byte; 32]),
-    )
+    RunId::from_digest(DigestBytes::from_array([byte; 32]))
 }
 
 fn assembly(

@@ -176,15 +176,12 @@ fn implementation_ref(schema_name: &str, id: StableId) -> Result<ContentRef> {
 /// Derives the nominal contract reference for a typed value.
 pub fn nominal_contract_ref<T: MfmValue>() -> Result<ContentRef> {
     let descriptor = T::schema_descriptor().map_err(|_| ProgramError::InvalidContract)?;
-    let descriptor_schema = descriptor
+    let schema = descriptor
         .identity()
         .schema_id()
         .map_err(|_| ProgramError::InvalidContract)?;
-    let schema = T::schema_id().map_err(|_| ProgramError::InvalidContract)?;
     let semantic = T::semantic_id().map_err(|_| ProgramError::InvalidContract)?;
-    if descriptor_schema != schema
-        || descriptor.identity().semantic_type_id.as_ref() != Some(&semantic)
-    {
+    if descriptor.identity().semantic_type_id.as_ref() != Some(&semantic) {
         return Err(ProgramError::InvalidContract);
     }
     ContentRef::new(schema, raw_content_digest(b"mfm.contract.v1"))

@@ -201,9 +201,7 @@ pub trait PersistedSchema: Sized {
 
     /// Returns the exact canonical-JSON shape owned by this contract.
     ///
-    /// Derived owners override this operation so an enclosing owner clones the
-    /// cached shape once instead of cloning and then discarding a complete
-    /// nested identity.
+    /// The default derives the shape from this owner's schema identity.
     #[doc(hidden)]
     fn schema_shape() -> Result<crate::SchemaShape> {
         Self::schema_identity()?.into_canonical_json_shape()
@@ -335,20 +333,6 @@ pub fn validate_derived_persisted_owner<T: Serialize>(
     let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
         .map_err(|_| ValueError::SchemaShapeMismatch)?;
     identity.validate_canonical_value(canonical.as_bytes())
-}
-
-/// Validates a derived owner against an already checked cached identity.
-///
-/// This is public only because proc-macro expansions execute downstream.
-#[doc(hidden)]
-pub fn validate_derived_persisted_owner_prevalidated<T: Serialize>(
-    value: &T,
-    identity: &SchemaIdentity,
-) -> Result<()> {
-    let json = serde_json::to_string(value).map_err(|_| ValueError::SchemaShapeMismatch)?;
-    let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
-        .map_err(|_| ValueError::SchemaShapeMismatch)?;
-    identity.validate_canonical_value_for_prevalidated_owner(canonical.as_bytes())
 }
 
 #[cfg(test)]

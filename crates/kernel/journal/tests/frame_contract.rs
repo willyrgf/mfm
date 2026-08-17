@@ -8,10 +8,7 @@ use mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES;
 use serde_json::{json, Value};
 
 fn run(byte: u8) -> RunId {
-    RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([byte; 32]),
-    )
+    RunId::from_digest(DigestBytes::from_array([byte; 32]))
 }
 
 fn object_ref(schema_name: &str, bytes: &[u8]) -> ContentRef {
@@ -278,6 +275,12 @@ fn strict_wire_and_frame_local_closure_reject_hostile_inputs() {
     let mut wrong_tag = original.clone();
     wrong_tag["record"]["kind"] = json!("admitted");
     mutations.push(canonical(&wrong_tag));
+    let mut wrong_run_algorithm = original.clone();
+    wrong_run_algorithm["run_id"] = json!(original["run_id"]
+        .as_str()
+        .expect("run id")
+        .replace("sha256-jcs-v1", "sha256-v1"));
+    mutations.push(canonical(&wrong_run_algorithm));
     for retired_tag in ["state_prepared", "state_concluded_access"] {
         let mut retired = original.clone();
         retired["record"]["kind"] = json!(retired_tag);

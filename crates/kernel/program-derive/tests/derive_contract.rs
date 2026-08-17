@@ -38,8 +38,18 @@ enum Internal {
 
 #[derive(Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
-struct Retained {
-    value: u64,
+struct Retained<T> {
+    value: T,
+}
+
+#[derive(Serialize, Deserialize, MfmValue)]
+struct FirstRetainedValue {
+    first: u64,
+}
+
+#[derive(Serialize, Deserialize, MfmValue)]
+struct SecondRetainedValue {
+    second: String,
 }
 
 struct Capture;
@@ -86,7 +96,25 @@ fn surviving_derives_generate_exact_static_match_hooks() {
     assert!(Internal::NamedValue { value: 9 }
         .__mfm_visit_match_payload(Capture)
         .is_none());
-    assert!(Retained::schema_identity().is_ok());
+}
+
+#[test]
+fn generic_persisted_derives_keep_monomorphization_specific_identity() {
+    let second_identity = Retained::<SecondRetainedValue>::schema_identity().expect("second");
+    let second_schema = Retained::<SecondRetainedValue>::schema_id().expect("second schema");
+    let first_identity = Retained::<FirstRetainedValue>::schema_identity().expect("first");
+    let first_schema = Retained::<FirstRetainedValue>::schema_id().expect("first schema");
+
+    assert_ne!(first_identity, second_identity);
+    assert_ne!(first_schema, second_schema);
+    assert_eq!(
+        first_identity.schema_id().expect("first identity schema"),
+        first_schema
+    );
+    assert_eq!(
+        second_identity.schema_id().expect("second identity schema"),
+        second_schema
+    );
 }
 
 #[test]
