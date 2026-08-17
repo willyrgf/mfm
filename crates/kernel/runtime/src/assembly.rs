@@ -7,15 +7,13 @@ use std::task::{Context, Poll};
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_capabilities::ReadCapabilityContract;
-use mfm_ids::{ContentRef, SemanticTypeId};
+use mfm_ids::{ContentRef, SchemaId, SemanticTypeId};
 use mfm_program::{
     capability_contract_ref, nominal_contract_ref, state_implementation_ref, Declaration, Never,
     Program, PureState, ReadState, StateDeclaration,
 };
-use mfm_values::{
-    canonicalize_mfm_value, MatchPayloadVisitor, MfmValue, SchemaDescriptor, SchemaShape,
-    ValueError,
-};
+use mfm_values::{canonicalize_mfm_value, EnumTagging, MfmValue, SchemaDescriptor, SchemaShape};
+use serde_json::value::RawValue;
 
 use crate::engine::{self, DriverContext, DriverDisposition};
 use crate::{ReadAdapterError, Result, RuntimeError};
@@ -55,16 +53,13 @@ impl std::fmt::Debug for QualifiedValue {
 }
 
 type ColdQualifier = fn(&ValueCodec, &ContentRef, &[u8]) -> std::result::Result<QualifiedValue, ()>;
-type MatchProjector = fn(QualifiedValue, &MatchProjection) -> Result<(u16, QualifiedValue)>;
 
 pub(crate) struct ValueCodec {
     codec_type_id: TypeId,
     semantic_id: SemanticTypeId,
-    match_projection_supported: bool,
     contract_ref: ContentRef,
     descriptor: SchemaDescriptor,
     qualify: ColdQualifier,
-    project_match: MatchProjector,
 }
 
 impl ValueCodec {
@@ -101,53 +96,6 @@ fn qualify_typed<T: MfmValue>(
         canonical,
         typed: Box::new(typed),
     })
-}
-
-fn project_typed<T: MfmValue>(
-    selector: QualifiedValue,
-    projection: &MatchProjection,
-) -> Result<(u16, QualifiedValue)> {
-    if selector.contract_ref != projection.selector_codec.contract_ref {
-        return Err(RuntimeError::Internal);
-    }
-    let selector = selector
-        .typed
-        .downcast::<T>()
-        .map_err(|_| RuntimeError::Internal)?;
-    selector
-        .__mfm_visit_match_payload(RuntimeMatchVisitor { projection })
-        .ok_or(RuntimeError::Internal)?
-}
-
-struct RuntimeMatchVisitor<'a> {
-    projection: &'a MatchProjection,
-}
-
-impl MatchPayloadVisitor for RuntimeMatchVisitor<'_> {
-    type Output = Result<(u16, QualifiedValue)>;
-
-    fn visit<T: MfmValue>(self, tag: &'static str, payload: T) -> Self::Output {
-        let variant = self
-            .projection
-            .variants
-            .iter()
-            .find(|variant| variant.tag == tag)
-            .ok_or(RuntimeError::Internal)?;
-        let contract = nominal_contract_ref::<T>().map_err(|_| RuntimeError::Internal)?;
-        if variant.codec.codec_type_id != TypeId::of::<T>()
-            || variant.codec.contract_ref != contract
-        {
-            return Err(RuntimeError::Internal);
-        }
-        let qualified = qualify_hot(payload).map_err(|error| match error {
-            ValueError::Capacity => RuntimeError::Capacity,
-            _ => RuntimeError::Internal,
-        })?;
-        if qualified.contract_ref != variant.codec.contract_ref {
-            return Err(RuntimeError::Internal);
-        }
-        Ok((variant.entry_index, qualified))
-    }
 }
 
 pub(crate) fn qualify_hot<T: MfmValue>(
@@ -469,11 +417,9 @@ impl RuntimeAssemblyBuilder {
             Arc::new(ValueCodec {
                 codec_type_id: TypeId::of::<T>(),
                 semantic_id: semantic,
-                match_projection_supported: T::__MFM_MATCH_PROJECTION_SUPPORTED,
                 contract_ref,
                 descriptor,
                 qualify: qualify_typed::<T>,
-                project_match: project_typed::<T>,
             }),
         );
         Ok(())
@@ -646,6 +592,15 @@ impl RuntimeAssembly {
         let admitted_context_codec = self
             .codec(program.admitted_context_contract_ref())
             .ok_or(RuntimeError::IncompatibleAssembly)?;
+        for contract_ref in [
+            program.root_success_contract_ref(),
+            program.root_failure_contract_ref(),
+        ] {
+            self.inner
+                .values
+                .get(contract_ref)
+                .ok_or(RuntimeError::IncompatibleAssembly)?;
+        }
         let mut declarations = Vec::with_capacity(program.declarations().len());
         for declaration in program.declarations() {
             match declaration {
@@ -741,7 +696,8 @@ pub(crate) struct ReadCodecs {
 }
 
 pub(crate) struct MatchProjection {
-    selector_codec: Arc<ValueCodec>,
+    selector_contract_ref: ContentRef,
+    tagging: EnumTagging,
     variants: Vec<VariantProjection>,
 }
 
@@ -753,7 +709,53 @@ struct VariantProjection {
 
 impl MatchProjection {
     pub(crate) fn project(&self, selector: QualifiedValue) -> Result<(u16, QualifiedValue)> {
-        (self.selector_codec.project_match)(selector, self)
+        if selector.contract_ref != self.selector_contract_ref {
+            return Err(RuntimeError::Internal);
+        }
+
+        let (selected_tag, payload_bytes) =
+            selected_match_payload(&self.tagging, &selector.canonical)?;
+        let variant = self
+            .variants
+            .iter()
+            .find(|variant| variant.tag == selected_tag)
+            .ok_or(RuntimeError::Internal)?;
+        let value_ref = ContentRef::new(
+            variant.codec.contract_ref.schema_id().clone(),
+            raw_content_digest(payload_bytes),
+        )
+        .map_err(|_| RuntimeError::Internal)?;
+        let payload = variant
+            .codec
+            .qualify(&value_ref, payload_bytes)
+            .map_err(|_| RuntimeError::Internal)?;
+        Ok((variant.entry_index, payload))
+    }
+}
+
+fn selected_match_payload<'a>(
+    tagging: &EnumTagging,
+    selector: &'a PlainCanonicalJsonBytes,
+) -> Result<(String, &'a [u8])> {
+    let fields: BTreeMap<String, &'a RawValue> =
+        serde_json::from_slice(selector.as_bytes()).map_err(|_| RuntimeError::Internal)?;
+
+    match tagging {
+        EnumTagging::External if fields.len() == 1 => {
+            let (tag, payload) = fields.into_iter().next().ok_or(RuntimeError::Internal)?;
+            Ok((tag, payload.get().as_bytes()))
+        }
+        EnumTagging::Adjacent { tag, content } if fields.len() == 2 => {
+            let selected = serde_json::from_str::<String>(
+                fields.get(tag).ok_or(RuntimeError::Internal)?.get(),
+            )
+            .map_err(|_| RuntimeError::Internal)?;
+            let payload = fields.get(content).ok_or(RuntimeError::Internal)?;
+            Ok((selected, payload.get().as_bytes()))
+        }
+        EnumTagging::External | EnumTagging::Adjacent { .. } | EnumTagging::Internal { .. } => {
+            Err(RuntimeError::Internal)
+        }
     }
 }
 
@@ -763,21 +765,20 @@ fn associate_match(
     declarations: &[Declaration],
     assembly: &AssemblyInner,
 ) -> Result<MatchProjection> {
-    if !selector_codec.match_projection_supported {
-        return Err(RuntimeError::IncompatibleAssembly);
-    }
     let shape = selector_codec
         .descriptor
         .identity()
         .canonical_json_shape()
         .map_err(|_| RuntimeError::IncompatibleAssembly)?;
-    let SchemaShape::Enum {
-        tagging: _,
-        variants,
-    } = shape
-    else {
+    let SchemaShape::Enum { tagging, variants } = shape else {
         return Err(RuntimeError::IncompatibleAssembly);
     };
+    if !matches!(
+        tagging,
+        EnumTagging::External | EnumTagging::Adjacent { .. }
+    ) {
+        return Err(RuntimeError::IncompatibleAssembly);
+    }
     if variants.len() != arms.len() {
         return Err(RuntimeError::IncompatibleAssembly);
     }
@@ -786,8 +787,11 @@ fn associate_match(
         if variant.name != arm.tag().as_str() {
             return Err(RuntimeError::IncompatibleAssembly);
         }
+        let (schema_id, semantic_id, serialized_shape) =
+            match_payload_descriptor(&variant.shape).ok_or(RuntimeError::IncompatibleAssembly)?;
         let payload_contract =
-            payload_contract_ref(&variant.shape).ok_or(RuntimeError::IncompatibleAssembly)?;
+            ContentRef::new(schema_id.clone(), raw_content_digest(b"mfm.contract.v1"))
+                .map_err(|_| RuntimeError::IncompatibleAssembly)?;
         let target = declarations
             .get(usize::from(arm.entry_index()))
             .ok_or(RuntimeError::IncompatibleAssembly)?;
@@ -802,6 +806,14 @@ fn associate_match(
             .get(&payload_contract)
             .cloned()
             .ok_or(RuntimeError::IncompatibleAssembly)?;
+        let codec_shape = codec
+            .descriptor
+            .identity()
+            .canonical_json_shape()
+            .map_err(|_| RuntimeError::IncompatibleAssembly)?;
+        if &codec.semantic_id != semantic_id || codec_shape != serialized_shape {
+            return Err(RuntimeError::IncompatibleAssembly);
+        }
         projections.push(VariantProjection {
             tag: variant.name.clone(),
             entry_index: arm.entry_index(),
@@ -809,18 +821,44 @@ fn associate_match(
         });
     }
     Ok(MatchProjection {
-        selector_codec,
+        selector_contract_ref: selector_codec.contract_ref.clone(),
+        tagging: tagging.clone(),
         variants: projections,
     })
 }
 
-fn payload_contract_ref(shape: &SchemaShape) -> Option<ContentRef> {
+fn match_payload_descriptor(
+    shape: &SchemaShape,
+) -> Option<(&SchemaId, &SemanticTypeId, &SchemaShape)> {
     let payload = match shape {
         SchemaShape::Tuple(elements) if elements.len() == 1 => &elements[0],
         other => other,
     };
-    let SchemaShape::InlineValue { schema_id, .. } = payload else {
-        return None;
-    };
-    ContentRef::new(schema_id.clone(), raw_content_digest(b"mfm.contract.v1")).ok()
+
+    match payload {
+        SchemaShape::InlineValue {
+            schema_id,
+            semantic_type_id,
+            serialized_shape,
+        } => Some((schema_id, semantic_type_id, serialized_shape.as_ref())),
+        SchemaShape::Generic {
+            constructor,
+            arguments,
+            serialized_shape,
+        } if constructor == "mfm/generic-value" => {
+            let [argument] = arguments.as_slice() else {
+                return None;
+            };
+            Some((
+                &argument.schema_id,
+                &argument.semantic_type_id,
+                serialized_shape.as_ref(),
+            ))
+        }
+        _ => None,
+    }
 }
+
+#[cfg(test)]
+#[path = "assembly/tests.rs"]
+mod tests;

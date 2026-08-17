@@ -24,7 +24,7 @@ mfm-journal = { path = "../journal" }
 mfm-program = { path = "../program" }
 mfm-store = { path = "../store" }
 mfm-values = { path = "../values" }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 

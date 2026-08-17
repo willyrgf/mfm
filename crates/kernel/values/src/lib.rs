@@ -155,35 +155,11 @@ fn looks_like_mnemonic_phrase(input: &str) -> bool {
 
 /// Values that may cross typed state boundaries.
 pub trait MfmValue: Serialize + DeserializeOwned + Send + Sync + 'static {
-    /// Whether this implementation provides a complete static Match projection hook.
-    #[doc(hidden)]
-    const __MFM_MATCH_PROJECTION_SUPPORTED: bool = false;
-
     /// Returns the schema descriptor for this value type.
     fn schema_descriptor() -> Result<SchemaDescriptor>;
 
     /// Returns the stable semantic identity for this value kind.
     fn semantic_id() -> Result<SemanticTypeId>;
-
-    /// Moves a derive-proven one-field enum payload into a monomorphized visitor.
-    #[doc(hidden)]
-    fn __mfm_visit_match_payload<V: MatchPayloadVisitor>(self, visitor: V) -> Option<V::Output>
-    where
-        Self: Sized,
-    {
-        let _ = visitor;
-        None
-    }
-}
-
-/// Static-dispatch visitor used by the derive-backed Runtime Match projection.
-#[doc(hidden)]
-pub trait MatchPayloadVisitor {
-    /// Projection result owned by the consumer.
-    type Output;
-
-    /// Receives the exact moved one-field payload.
-    fn visit<T: MfmValue>(self, tag: &'static str, payload: T) -> Self::Output;
 }
 
 /// Canonicalizes one typed value and derives its exact schema/content identity.

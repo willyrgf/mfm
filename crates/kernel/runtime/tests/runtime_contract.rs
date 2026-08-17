@@ -51,6 +51,32 @@ impl PureState for Increment {
     }
 }
 
+static PURE_RETRY_EVALUATIONS: AtomicUsize = AtomicUsize::new(0);
+
+struct CountingRetryIncrement;
+
+impl State for CountingRetryIncrement {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/counting-retry-increment@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for CountingRetryIncrement {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        PURE_RETRY_EVALUATIONS.fetch_add(1, Ordering::SeqCst);
+        ProposedStateOutcome::Success {
+            output: Value {
+                value: input.value + 1,
+            },
+        }
+    }
+}
+
 struct ConflictingIncrement;
 
 impl State for ConflictingIncrement {
@@ -377,6 +403,325 @@ impl ReadState<Observation> for Observe {
     }
 }
 
+struct AliasObservation;
+
+impl ReadCapabilityContract for AliasObservation {
+    type Intent = Intent;
+    type Evidence = Evidence;
+
+    fn contract_id() -> mfm_capabilities::Result<StableId> {
+        Observation::contract_id()
+    }
+
+    fn bind_evidence(
+        intent: &Self::Intent,
+        evidence: &Self::Evidence,
+    ) -> mfm_capabilities::Result<()> {
+        Observation::bind_evidence(intent, evidence)
+    }
+}
+
+struct DriftObservation;
+
+impl ReadCapabilityContract for DriftObservation {
+    type Intent = OtherValue;
+    type Evidence = Evidence;
+
+    fn contract_id() -> mfm_capabilities::Result<StableId> {
+        Observation::contract_id()
+    }
+
+    fn bind_evidence(
+        _intent: &Self::Intent,
+        _evidence: &Self::Evidence,
+    ) -> mfm_capabilities::Result<()> {
+        Ok(())
+    }
+}
+
+struct AlternateObservation;
+
+impl ReadCapabilityContract for AlternateObservation {
+    type Intent = Intent;
+    type Evidence = Evidence;
+
+    fn contract_id() -> mfm_capabilities::Result<StableId> {
+        StableId::new("mfm.test.runtime/alternate-observation@1")
+            .map_err(|_| CapabilityError::InvalidContract)
+    }
+
+    fn bind_evidence(
+        intent: &Self::Intent,
+        evidence: &Self::Evidence,
+    ) -> mfm_capabilities::Result<()> {
+        Observation::bind_evidence(intent, evidence)
+    }
+}
+
+struct AliasObserve;
+
+impl State for AliasObserve {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Value;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/alias-observe@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl ReadState<AliasObservation> for AliasObserve {
+    fn prepare(input: &Self::Input) -> Result<Intent, ReadPreparationError> {
+        Ok(Intent { value: input.value })
+    }
+
+    fn interpret(
+        input: Self::Input,
+        _evidence: &Evidence,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+struct DriftObserve;
+
+impl State for DriftObserve {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Value;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/drift-observe@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl ReadState<DriftObservation> for DriftObserve {
+    fn prepare(input: &Self::Input) -> Result<OtherValue, ReadPreparationError> {
+        Ok(OtherValue {
+            value: input.value.to_string(),
+        })
+    }
+
+    fn interpret(
+        input: Self::Input,
+        _evidence: &Evidence,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+struct ReadIncrementCollision;
+
+impl State for ReadIncrementCollision {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        Increment::state_id()
+    }
+}
+
+impl ReadState<Observation> for ReadIncrementCollision {
+    fn prepare(input: &Self::Input) -> Result<Intent, ReadPreparationError> {
+        Ok(Intent { value: input.value })
+    }
+
+    fn interpret(
+        input: Self::Input,
+        _evidence: &Evidence,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+struct ReadCollisionOne;
+struct ReadCollisionTwo;
+
+impl State for ReadCollisionOne {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/read-collision@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl State for ReadCollisionTwo {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        ReadCollisionOne::state_id()
+    }
+}
+
+impl ReadState<Observation> for ReadCollisionOne {
+    fn prepare(input: &Self::Input) -> Result<Intent, ReadPreparationError> {
+        Ok(Intent { value: input.value })
+    }
+
+    fn interpret(
+        input: Self::Input,
+        _evidence: &Evidence,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+impl ReadState<AlternateObservation> for ReadCollisionTwo {
+    fn prepare(input: &Self::Input) -> Result<Intent, ReadPreparationError> {
+        Ok(Intent { value: input.value })
+    }
+
+    fn interpret(
+        input: Self::Input,
+        _evidence: &Evidence,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+struct InvalidRuntimeState;
+
+impl State for InvalidRuntimeState {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        Err(ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for InvalidRuntimeState {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+struct InvalidRuntimeCapability;
+
+impl ReadCapabilityContract for InvalidRuntimeCapability {
+    type Intent = Intent;
+    type Evidence = Evidence;
+
+    fn contract_id() -> mfm_capabilities::Result<StableId> {
+        Err(CapabilityError::InvalidContract)
+    }
+
+    fn bind_evidence(
+        _intent: &Self::Intent,
+        _evidence: &Self::Evidence,
+    ) -> mfm_capabilities::Result<()> {
+        Ok(())
+    }
+}
+
+struct InvalidRuntimeRead;
+
+impl State for InvalidRuntimeRead {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/invalid-runtime-read@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl ReadState<InvalidRuntimeCapability> for InvalidRuntimeRead {
+    fn prepare(input: &Self::Input) -> Result<Intent, ReadPreparationError> {
+        Ok(Intent { value: input.value })
+    }
+
+    fn interpret(
+        input: Self::Input,
+        _evidence: &Evidence,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+struct ObserveNever;
+
+impl State for ObserveNever {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/observe-never@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl ReadState<Observation> for ObserveNever {
+    fn prepare(input: &Self::Input) -> Result<Intent, ReadPreparationError> {
+        Ok(Intent { value: input.value })
+    }
+
+    fn interpret(
+        input: Self::Input,
+        _evidence: &Evidence,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+static ASSOCIATION_STATE_ID_CALLS: AtomicUsize = AtomicUsize::new(0);
+static ASSOCIATION_CAPABILITY_ID_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+struct AssociationCountingCapability;
+
+impl ReadCapabilityContract for AssociationCountingCapability {
+    type Intent = Intent;
+    type Evidence = Evidence;
+
+    fn contract_id() -> mfm_capabilities::Result<StableId> {
+        ASSOCIATION_CAPABILITY_ID_CALLS.fetch_add(1, Ordering::SeqCst);
+        StableId::new("mfm.test.runtime/association-counting@1")
+            .map_err(|_| CapabilityError::InvalidContract)
+    }
+
+    fn bind_evidence(
+        intent: &Self::Intent,
+        evidence: &Self::Evidence,
+    ) -> mfm_capabilities::Result<()> {
+        Observation::bind_evidence(intent, evidence)
+    }
+}
+
+struct AssociationCountingRead;
+
+impl State for AssociationCountingRead {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        ASSOCIATION_STATE_ID_CALLS.fetch_add(1, Ordering::SeqCst);
+        StableId::new("mfm.test.runtime/association-counting-read@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl ReadState<AssociationCountingCapability> for AssociationCountingRead {
+    fn prepare(input: &Self::Input) -> Result<Intent, ReadPreparationError> {
+        Ok(Intent { value: input.value })
+    }
+
+    fn interpret(
+        input: Self::Input,
+        _evidence: &Evidence,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
 fn run(byte: u8) -> RunId {
     RunId::from_digest(DigestBytes::from_array([byte; 32]))
 }
@@ -401,6 +746,54 @@ fn pure_program() -> Program {
         value.clone(),
         value.clone(),
         never.clone(),
+        vec![Declaration::State(
+            StateDeclaration::new(
+                state_implementation_ref::<Increment>().expect("state"),
+                value.clone(),
+                value,
+                never,
+                Execution::pure(),
+                None,
+                None,
+            )
+            .expect("state declaration"),
+        )],
+    )
+    .expect("program")
+}
+
+fn counting_retry_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let never = nominal_contract_ref::<Never>().expect("never");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/counting-retry@1").expect("entry"),
+        value.clone(),
+        value.clone(),
+        never.clone(),
+        vec![Declaration::State(
+            StateDeclaration::new(
+                state_implementation_ref::<CountingRetryIncrement>().expect("state"),
+                value.clone(),
+                value,
+                never,
+                Execution::pure(),
+                None,
+                None,
+            )
+            .expect("state declaration"),
+        )],
+    )
+    .expect("program")
+}
+
+fn missing_root_codec_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let never = nominal_contract_ref::<Never>().expect("never");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/missing-root-codec@1").expect("entry"),
+        value.clone(),
+        value.clone(),
+        nominal_contract_ref::<OtherValue>().expect("unreferenced root failure"),
         vec![Declaration::State(
             StateDeclaration::new(
                 state_implementation_ref::<Increment>().expect("state"),
@@ -737,6 +1130,95 @@ fn read_program() -> Program {
     .expect("read program")
 }
 
+fn read_never_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let never = nominal_contract_ref::<Never>().expect("never");
+    let (_, binding_ref) = canonicalize_mfm_value(&binding()).expect("binding ref");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/read-never@1").expect("entry"),
+        value.clone(),
+        value.clone(),
+        never.clone(),
+        vec![Declaration::State(
+            StateDeclaration::new(
+                state_implementation_ref::<ObserveNever>().expect("observe never"),
+                value.clone(),
+                value,
+                never,
+                Execution::read(
+                    capability_contract_ref::<Observation>().expect("capability"),
+                    nominal_contract_ref::<Intent>().expect("intent"),
+                    nominal_contract_ref::<Evidence>().expect("evidence"),
+                    binding_ref,
+                ),
+                None,
+                None,
+            )
+            .expect("read never declaration"),
+        )],
+    )
+    .expect("read never program")
+}
+
+fn missing_capability_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let (_, binding_ref) = canonicalize_mfm_value(&binding()).expect("binding ref");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/missing-capability@1").expect("entry"),
+        value.clone(),
+        value.clone(),
+        value.clone(),
+        vec![Declaration::State(
+            StateDeclaration::new(
+                state_implementation_ref::<Observe>().expect("observe"),
+                value.clone(),
+                value.clone(),
+                value,
+                Execution::read(
+                    capability_contract_ref::<AlternateObservation>().expect("missing capability"),
+                    nominal_contract_ref::<Intent>().expect("intent"),
+                    nominal_contract_ref::<Evidence>().expect("evidence"),
+                    binding_ref,
+                ),
+                None,
+                None,
+            )
+            .expect("missing capability declaration"),
+        )],
+    )
+    .expect("missing capability program")
+}
+
+fn association_counting_program() -> Program {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let never = nominal_contract_ref::<Never>().expect("never");
+    let (_, binding_ref) = canonicalize_mfm_value(&binding()).expect("binding ref");
+    Program::new(
+        EntryPointId::new("mfm.test.runtime/association-counting@1").expect("entry"),
+        value.clone(),
+        value.clone(),
+        never.clone(),
+        vec![Declaration::State(
+            StateDeclaration::new(
+                state_implementation_ref::<AssociationCountingRead>().expect("state"),
+                value.clone(),
+                value,
+                never,
+                Execution::read(
+                    capability_contract_ref::<AssociationCountingCapability>().expect("capability"),
+                    nominal_contract_ref::<Intent>().expect("intent"),
+                    nominal_contract_ref::<Evidence>().expect("evidence"),
+                    binding_ref,
+                ),
+                None,
+                None,
+            )
+            .expect("association counting declaration"),
+        )],
+    )
+    .expect("association counting program")
+}
+
 fn assert_same_view(left: &mfm_runtime::RunView, right: &mfm_runtime::RunView) {
     assert_eq!(left.run_id(), right.run_id());
     assert_eq!(left.head_sequence(), right.head_sequence());
@@ -994,6 +1476,82 @@ async fn assembly_registration_is_idempotent_and_inconsistency_is_rejected() {
         }),
         Err(RuntimeError::IncompatibleAssembly)
     );
+
+    let mut capability_type_collision = RuntimeAssemblyBuilder::new();
+    capability_type_collision
+        .register_read::<Observe, Observation>()
+        .expect("original capability type");
+    assert_eq!(
+        capability_type_collision.register_read::<AliasObserve, AliasObservation>(),
+        Err(RuntimeError::IncompatibleAssembly)
+    );
+
+    let mut capability_abi_collision = RuntimeAssemblyBuilder::new();
+    capability_abi_collision
+        .register_read::<Observe, Observation>()
+        .expect("original capability ABI");
+    assert_eq!(
+        capability_abi_collision.register_read::<DriftObserve, DriftObservation>(),
+        Err(RuntimeError::IncompatibleAssembly)
+    );
+
+    let mut state_mode_collision = RuntimeAssemblyBuilder::new();
+    state_mode_collision
+        .register_pure::<Increment>()
+        .expect("pure state");
+    assert_eq!(
+        state_mode_collision.register_read::<ReadIncrementCollision, Observation>(),
+        Err(RuntimeError::IncompatibleAssembly)
+    );
+
+    let mut state_capability_collision = RuntimeAssemblyBuilder::new();
+    state_capability_collision
+        .register_read::<ReadCollisionOne, Observation>()
+        .expect("first state capability");
+    assert_eq!(
+        state_capability_collision.register_read::<ReadCollisionTwo, AlternateObservation>(),
+        Err(RuntimeError::IncompatibleAssembly)
+    );
+
+    let mut invalid_static_identity = RuntimeAssemblyBuilder::new();
+    assert_eq!(
+        invalid_static_identity.register_pure::<InvalidRuntimeState>(),
+        Err(RuntimeError::IncompatibleAssembly)
+    );
+    let mut invalid_capability_identity = RuntimeAssemblyBuilder::new();
+    assert_eq!(
+        invalid_capability_identity.register_read::<InvalidRuntimeRead, InvalidRuntimeCapability>(),
+        Err(RuntimeError::IncompatibleAssembly)
+    );
+}
+
+#[tokio::test]
+async fn read_state_with_never_failure_registers_associates_and_executes() {
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder
+        .register_read::<ObserveNever, Observation>()
+        .expect("read never");
+    builder
+        .register_adapter::<Observation, _, _>(binding(), |intent| {
+            Box::pin(async move {
+                Ok(Evidence {
+                    value: intent.value,
+                    accepted: true,
+                })
+            })
+        })
+        .expect("adapter");
+    let runtime = Runtime::new(
+        builder.finish().expect("assembly"),
+        Arc::new(MemoryStore::new()),
+    );
+    let id = run(39);
+    let hot = runtime
+        .start(id.clone(), read_never_program(), Value { value: 7 })
+        .await
+        .expect("read never start");
+    assert!(matches!(hot.state(), RunViewState::Succeeded(_)));
+    assert_same_view(&hot, &runtime.read(&id).await.expect("cold read never"));
 }
 
 #[tokio::test]
@@ -1015,6 +1573,76 @@ async fn association_and_exact_retry_io_order_is_frozen() {
     ));
     assert_eq!(store.loads.load(Ordering::SeqCst), 0);
     assert_eq!(store.appends.load(Ordering::SeqCst), 0);
+
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let mut missing_capability_builder = RuntimeAssemblyBuilder::new();
+    missing_capability_builder
+        .register_read::<Observe, Observation>()
+        .expect("read state");
+    missing_capability_builder
+        .register_adapter::<Observation, _, _>(binding(), {
+            let provider_calls = Arc::clone(&provider_calls);
+            move |intent| {
+                provider_calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    Ok(Evidence {
+                        value: intent.value,
+                        accepted: true,
+                    })
+                })
+            }
+        })
+        .expect("adapter");
+    let missing_capability = Runtime::new(
+        missing_capability_builder.finish().expect("assembly"),
+        store.clone(),
+    );
+    assert!(matches!(
+        missing_capability
+            .start(run(59), missing_capability_program(), Value { value: 1 })
+            .await,
+        Err(RuntimeError::IncompatibleAssembly)
+    ));
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(store.loads.load(Ordering::SeqCst), 0);
+    assert_eq!(store.appends.load(Ordering::SeqCst), 0);
+
+    let mut missing_root_builder = RuntimeAssemblyBuilder::new();
+    missing_root_builder
+        .register_pure::<Increment>()
+        .expect("reachable state");
+    let missing_root = Runtime::new(
+        missing_root_builder.finish().expect("assembly"),
+        store.clone(),
+    );
+    assert!(matches!(
+        missing_root
+            .start(run(56), missing_root_codec_program(), Value { value: 1 },)
+            .await,
+        Err(RuntimeError::IncompatibleAssembly)
+    ));
+    assert_eq!(store.loads.load(Ordering::SeqCst), 0);
+    assert_eq!(store.appends.load(Ordering::SeqCst), 0);
+
+    let mut complete_root_builder = RuntimeAssemblyBuilder::new();
+    complete_root_builder
+        .register_pure::<Increment>()
+        .expect("reachable state");
+    complete_root_builder
+        .register_value::<OtherValue>()
+        .expect("root failure codec");
+    let complete_root = Runtime::new(
+        complete_root_builder.finish().expect("assembly"),
+        store.clone(),
+    );
+    let complete = complete_root
+        .start(run(57), missing_root_codec_program(), Value { value: 1 })
+        .await
+        .expect("complete roots");
+    assert!(matches!(complete.state(), RunViewState::Succeeded(_)));
+    assert_eq!(store.loads.load(Ordering::SeqCst), 0);
+    assert_eq!(store.appends.load(Ordering::SeqCst), 2);
+    store.reset();
 
     let mut unsupported_match = RuntimeAssemblyBuilder::new();
     unsupported_match
@@ -1047,14 +1675,26 @@ async fn association_and_exact_retry_io_order_is_frozen() {
         .register_pure::<IncrementBranch>()
         .expect("manual selector target");
     let runtime = Runtime::new(manual_match.finish().expect("assembly"), store.clone());
-    assert!(matches!(
-        runtime
-            .start(run(38), manual_match_program(), Value { value: 1 })
-            .await,
-        Err(RuntimeError::IncompatibleAssembly)
-    ));
-    assert_eq!(store.loads.load(Ordering::SeqCst), 0);
-    assert_eq!(store.appends.load(Ordering::SeqCst), 0);
+    let manual_id = run(38);
+    let manual = runtime
+        .start(
+            manual_id.clone(),
+            manual_match_program(),
+            Value { value: 1 },
+        )
+        .await
+        .expect("manual selector execution");
+    let RunViewState::Succeeded(value) = manual.state() else {
+        panic!("manual selector success");
+    };
+    assert_eq!(value.canonical_bytes(), br#"{"value":2}"#);
+    assert_same_view(
+        &manual,
+        &runtime.read(&manual_id).await.expect("manual cold"),
+    );
+    assert_eq!(store.loads.load(Ordering::SeqCst), 1);
+    assert_eq!(store.appends.load(Ordering::SeqCst), 3);
+    store.reset();
 
     let mut builder = RuntimeAssemblyBuilder::new();
     builder.register_pure::<Increment>().expect("increment");
@@ -1091,6 +1731,39 @@ async fn association_and_exact_retry_io_order_is_frozen() {
     ));
     assert_eq!(store.loads.load(Ordering::SeqCst), 1);
     assert_eq!(store.appends.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn association_uses_persisted_refs_without_rerunning_static_id_functions() {
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder
+        .register_read::<AssociationCountingRead, AssociationCountingCapability>()
+        .expect("counting read");
+    builder
+        .register_adapter::<AssociationCountingCapability, _, _>(binding(), |intent| {
+            Box::pin(async move {
+                Ok(Evidence {
+                    value: intent.value,
+                    accepted: true,
+                })
+            })
+        })
+        .expect("adapter");
+    let program = association_counting_program();
+    ASSOCIATION_STATE_ID_CALLS.store(0, Ordering::SeqCst);
+    ASSOCIATION_CAPABILITY_ID_CALLS.store(0, Ordering::SeqCst);
+    let runtime = Runtime::new(
+        builder.finish().expect("assembly"),
+        Arc::new(MemoryStore::new()),
+    );
+
+    let view = runtime
+        .start(run(60), program, Value { value: 4 })
+        .await
+        .expect("associated execution");
+    assert!(matches!(view.state(), RunViewState::Succeeded(_)));
+    assert_eq!(ASSOCIATION_STATE_ID_CALLS.load(Ordering::SeqCst), 0);
+    assert_eq!(ASSOCIATION_CAPABILITY_ID_CALLS.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1584,6 +2257,41 @@ struct CommitThenIndeterminateStore {
     inner: Arc<MemoryStore>,
 }
 
+struct AbsentIndeterminateConclusionStore {
+    inner: Arc<MemoryStore>,
+    conclusion_attempts: AtomicUsize,
+}
+
+impl Store for AbsentIndeterminateConclusionStore {
+    fn load_run<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.inner.load_run(run_id)
+    }
+
+    fn append_run<'a>(
+        &'a self,
+        frame: &'a EncodedRunFrame,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<AppendResult, StoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            if frame.run_sequence() > 1
+                && self.conclusion_attempts.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                return Err(StoreError::Indeterminate);
+            }
+            self.inner.append_run(frame).await
+        })
+    }
+}
+
 impl Store for CommitThenIndeterminateStore {
     fn load_run<'a>(
         &'a self,
@@ -1653,6 +2361,39 @@ async fn an_earlier_view_remains_a_snapshot_after_indeterminate_commit() {
     let later = unavailable.read(&id).await.expect("later snapshot");
     assert_eq!(later.head_sequence(), 2);
     assert!(matches!(later.state(), RunViewState::Succeeded(_)));
+}
+
+#[tokio::test]
+async fn absent_indeterminate_pure_conclusion_recomputes_and_commits_on_resume() {
+    PURE_RETRY_EVALUATIONS.store(0, Ordering::SeqCst);
+    let memory = Arc::new(MemoryStore::new());
+    let store = Arc::new(AbsentIndeterminateConclusionStore {
+        inner: memory,
+        conclusion_attempts: AtomicUsize::new(0),
+    });
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder
+        .register_pure::<CountingRetryIncrement>()
+        .expect("counting pure");
+    let runtime = Runtime::new(builder.finish().expect("assembly"), store);
+    let id = run(58);
+
+    assert!(matches!(
+        runtime
+            .start(id.clone(), counting_retry_program(), Value { value: 4 })
+            .await,
+        Err(RuntimeError::Indeterminate)
+    ));
+    assert_eq!(PURE_RETRY_EVALUATIONS.load(Ordering::SeqCst), 1);
+    let prefix = runtime.read(&id).await.expect("genesis prefix");
+    assert_eq!(prefix.head_sequence(), 1);
+    assert!(matches!(prefix.state(), RunViewState::Runnable));
+
+    let resumed = runtime.resume(&id).await.expect("resumed conclusion");
+    assert_eq!(PURE_RETRY_EVALUATIONS.load(Ordering::SeqCst), 2);
+    assert_eq!(resumed.head_sequence(), 2);
+    assert!(matches!(resumed.state(), RunViewState::Succeeded(_)));
+    assert_same_view(&resumed, &runtime.read(&id).await.expect("cold final"));
 }
 
 #[tokio::test]

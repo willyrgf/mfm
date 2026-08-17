@@ -440,6 +440,20 @@ fn program_v2_round_trips_and_rejects_hostile_wire() {
             "retired v1 field {retired_field}"
         );
     }
+    for retired_field in [
+        "execution_binding",
+        "physical_target_ref",
+        "adapter_implementation_ref",
+    ] {
+        let mut retired: serde_json::Value =
+            serde_json::from_slice(program.canonical_bytes()).expect("program json");
+        retired["declarations"][0]["value"]["execution"][retired_field] = serde_json::json!({});
+        assert_eq!(
+            Program::decode_canonical(&canonical_json(&retired)),
+            Err(ProgramError::Canonical),
+            "retired inline field {retired_field}"
+        );
+    }
 }
 
 fn canonical_json(value: &serde_json::Value) -> Vec<u8> {
