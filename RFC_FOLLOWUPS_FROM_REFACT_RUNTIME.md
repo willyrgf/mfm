@@ -32,8 +32,9 @@ MFM will make exactly two current changes:
 
 There is no `ProgramAuthor`, no `OperationExpansion -> ProgramAuthor -> Program` handoff, and no
 second authoring authority. `OperationExpansion` owns typed occurrence setup, nested expansion,
-capability injection, opaque forward routes, atomic scratch scopes, fixed bounds, final `u16`
-resolution, and the one call into Program's existing validator/canonical encoder.
+capability injection, structured Match joins, scoped failure handlers, atomic scratch scopes, fixed
+bounds, final `u16` resolution, and the one call into Program's existing
+validator/canonical encoder.
 
 An Operation is not persisted and is not a Runtime concept. It is ordinary deterministic Rust
 authoring code with exact associated Input, Output, and Failure value contracts. An Operation value
@@ -43,22 +44,30 @@ State type with different checked capability setup is likewise ordinary and lega
 
 Capability injection is authoring-time topology only. It performs no IO, reserves no nonce, signs
 nothing, calls no provider, registers no adapter, and grants no execution authority. The expansion
-kernel emits the designated wrapped State occurrence exactly once between its before and after
-suffixes. Hooks cannot access, replace, suppress, or retarget that private occurrence. A hook may
-author a separate occurrence of the same State type when that is valid topology.
+kernel emits the designated wrapped Read occurrence exactly once between its before and after
+suffixes. Hooks cannot access, replace, suppress, retarget, or emit that private Read occurrence.
+Repeated occurrences of the same Read type remain legal through ordinary
+`OperationExpansion::read`; each independently applies its exact pairing policy.
+
+The DSL uses the same structured `match_join` construct for ordinary value-dependent topology and
+for recovery selected by a Pure failure-classifier State. `with_failure_handler` routes an exact
+failure contract from one State, child Operation, or larger protected region into such a handler.
+There is no public label, route, successor, branch outcome, or failure-policy algebra.
 
 The retained Program algebra remains exactly `Declaration::{State, Match}` with declaration-array
 identity, root index zero, strictly forward `u16` successors, optional success/failure successors,
-and the existing Match projection. Operation boundaries, configuration, hooks, labels, scopes, and
-draft routes are erased before Program construction. No Program schema, Program bytes, Journal
-frame, Store row, PostgreSQL table, Runtime reducer, or persisted identity changes in this RFC.
+and the existing Match projection. Operation boundaries, configuration, hooks, structured scopes,
+and private draft routes are erased before Program construction. No Program schema, Program bytes,
+Journal frame, Store row, PostgreSQL table, Runtime reducer, or persisted identity changes in this
+RFC.
 
 ## Material uncertainties
 
 1. **Future durable Effect shape**
    - **Choice:** freeze the Operation compiler and deterministic capability-owned
      before/original/after expansion for the current Read-only system. A future Effect emission
-     method is not added here.
+     method is not added here; nested Read emission is likewise deferred until a concrete injected
+     topology requires it.
    - **Why uncertain:** the transaction-authority/outbox contract has not fixed its Effect ABI,
      durable command proof, nonce fencing, ambiguous provider acknowledgement, signer custody,
      reconciliation, or exact failure contracts.
@@ -69,29 +78,44 @@ frame, Store row, PostgreSQL table, Runtime reducer, or persisted identity chang
      exact `reserve -> derive/sign -> broadcast -> observe/confirm -> consolidate` Operation and
      its durable authority boundary against this expansion model.
 
-2. **Opaque labels versus higher-level combinators**
-   - **Choice:** keep one opaque forward-label escape hatch for the current native/token Match,
-     branch rejoin, and Portfolio child-failure mapper. Keep common sequence and child composition
-     lexical.
-   - **Why uncertain:** a narrow `match_join` or `attempt` convenience may eventually be more
-     readable, but Rust closure scopes and terminal/recovery typing can add more public writer
-     types and methods than labels remove.
-   - **Consequence if wrong:** Operation implementations retain a few explicit semantic labels
-     longer than necessary, or a premature convenience API recreates the rejected failure DSL.
-   - **Resolution:** compile the exact current EVM Match/rejoin and Portfolio success/failure shape
-     first. Add a convenience only when a second production use proves a smaller combined public
-     surface and production LOC. The private draft and Program wire do not change either way.
+2. **Forward-only recovery semantics**
+   - **Choice:** a handled failure may recover only by producing the handler scope's exact join
+     contract `J`, or may terminate successfully by producing a distinct enclosing Operation
+     output `O`. When `J == O`, an open result is always a join; direct same-contract termination is
+     unavailable, while a nested already-closed terminal remains closed. It cannot retry or jump
+     backward.
+   - **Why uncertain:** Portfolio's current failure handler is terminal; there is no current
+     production handler that recovers to a join, and `EvmBalanceFailure` does not currently carry
+     a recoverable continuation context.
+   - **Consequence if wrong:** retry or loop semantics require a deliberate Program contract
+     change. A real `J == O` early-exit need would require one separately justified terminal
+     mechanism; neither can be smuggled into this cut.
+   - **Resolution:** exercise the first concrete classified recovery with a domain-owned complete
+     failure/selector payload and retain a synthetic hot/cold recovery proof now. Add no public
+     route escape hatch or kernel-owned ambient context.
 
-3. **Trusted open Operation callbacks**
-   - **Choice:** treat `Operation::expand` implementations as trusted deterministic authoring code
-     and require child composition through `OperationExpansion::{operation, operation_to}`. The
-     repository scanner enforces that call discipline in supported production roots.
-   - **Why uncertain:** Rust cannot let downstream crates implement this open trait while also
-     making it mechanically impossible for an implementation to call another public `expand`
-     method directly with its current scope.
-   - **Consequence if wrong:** an untrusted downstream implementation could bypass child-scope
-     atomicity, associated-contract checks, and recursion accounting, although the final Program
-     validator would still enforce the persisted graph's structural invariants.
+3. **Selector descriptor breadth**
+   - **Choice:** source authoring supports the same external/adjacent, single embedded nominal
+     payload selector shapes that Runtime Match association supports today.
+   - **Why uncertain:** generic selector descriptors must be proven across both tagging styles and
+     future payload types, not only `EvmBalanceAsset<K>`.
+   - **Consequence if wrong:** a future selector shape may need descriptor support, but does not
+     justify raw labels or an alternate branch API.
+   - **Resolution:** add generic external/adjacent authoring and Runtime association tests plus
+     hostile internal/unit/unsupported-shape cases.
+
+4. **Trusted open authoring callbacks**
+   - **Choice:** treat `Operation::expand` and capability-injection hook implementations as trusted
+     deterministic authoring code. Child composition must use `OperationExpansion::operation`, and
+     hooks may emit support topology only through `InjectionWriter`. The repository scanner
+     forbids direct hook-to-hook composition in supported production roots.
+   - **Why uncertain:** Rust cannot let downstream crates implement these open traits while also
+     making direct calls to another public `expand`, `original_binding_ref`, `write_before`, or
+     `write_after` method mechanically impossible.
+   - **Consequence if wrong:** direct `Operation::expand` can bypass child-scope atomicity and
+     associated-contract/depth accounting. Direct hook calls retain the restricted writer's suffix
+     continuity checks but bypass capability-policy ownership and kernel callback-depth accounting.
+     The final Program validator still enforces persisted graph structure.
    - **Resolution:** approve the same trusted-code boundary already used for State implementations.
      If arbitrary downstream Operation implementations must be mechanically sandboxed, redesign
      the invocation API before implementation planning rather than adding a second builder or a
@@ -116,8 +140,8 @@ The implementation must:
   construction in `OperationExpansion`;
 - remove caller-managed declaration indices and parent knowledge of child declaration counts;
 - preserve exact existing Program v2 bytes and identities for every current valid plan;
-- keep all authoring values, callbacks, labels, and scratch state out of Program, Runtime, Journal,
-  Store, and cold recovery; and
+- keep all authoring values, callbacks, structured scopes, and scratch state out of Program,
+  Runtime, Journal, Store, and cold recovery; and
 - reduce combined kernel/domain authoring complexity and future change sites without introducing a
   second Program algebra.
 
@@ -146,14 +170,21 @@ The cutover adds five logical public authoring concepts in `mfm-program`:
 
 - `Operation`;
 - scoped `OperationExpansion`;
-- opaque `ForwardLabel`;
+- scoped `MatchJoin`;
 - `CapabilityInjection<S>`; and
-- restricted `InjectionWriter<'_, F>`.
+- restricted `InjectionWriter`.
 
 It adds one root function, `expand_program`, and reuses `ProgramError` plus the crate `Result`. It
 adds no authoring error enum, public node/recipe enum, public draft, public raw route, address type,
 dynamic registry, trait-object collection, stored callback, execution mode, persisted Operation,
 or dependency edge.
+
+The callable-item ceiling is exact. `Operation` exposes only `expand`; `CapabilityInjection`
+exposes only `original_binding_ref`, `write_before`, and `write_after`; `OperationExpansion`
+exposes `pure`, `read`, `operation`, `match_join`, and `with_failure_handler`; `MatchJoin` exposes
+only `arm`; and `InjectionWriter` exposes only `pure`. That is eleven trait/compiler/writer methods
+or associated functions plus the one root function. Exceeding five
+concepts or this callable inventory is an architect `BLOCK`, not an invitation to add aliases.
 
 The same cutover makes the existing raw Program source constructors crate-private and deletes
 domain-local declaration constructors, fragment-size forecasts, and index arithmetic. The
@@ -210,11 +241,12 @@ when `expand_program` resolves that draft and invokes the existing Program valid
 | Owner | Owns | Must not own |
 | --- | --- | --- |
 | `Operation` | Reusable domain authoring boundary, exact Input/Output/Failure contracts, checked per-instance configuration, and deterministic semantic expansion order | Final indices, raw declarations, IO, Runtime registration, persisted metadata, or provider handles |
-| `OperationExpansion` | One private flat draft, child scopes, capability setup/injection, symbolic forward routes, atomic merge, bounds, final index resolution, and Program construction | Domain behavior, provider selection, Runtime execution, or a second finalized representation |
+| `OperationExpansion` | One private flat draft, child scopes, structured Match/failure scopes, capability setup/injection, atomic merge, bounds, final index resolution, and Program construction | Domain behavior, provider selection, Runtime execution, or a second finalized representation |
+| `MatchJoin` | One scoped set of typed selector arms with a common success join and optional exact Operation success termination | Public labels/routes, Runtime Match projection, failure policy, or a second branch representation |
 | `CapabilityInjection<S> for C` | Checked setup for the exact capability/State pairing, original binding derivation, and deterministic before/after policy | Runtime capability execution, adapter registration, nonce allocation, signing, provider calls, raw routes, or Program finalization |
-| `InjectionWriter` | Restricted lexical Pure/Read State emission into one atomic occurrence suffix | Match, labels, child failure routing, original-State access, Program finish, Runtime handles, or IO |
-| Domain State | One reusable typed Pure or Read transition | Operation expansion, final routes, or knowledge that it was injected |
-| Runtime/Journal/Store | The implemented association, execution, history, and persistence boundaries | Any Operation, label, authoring setup, or injection hook |
+| `InjectionWriter` | Restricted lexical Pure State emission into one atomic occurrence suffix | Match, failure handlers, child composition, termination, original-State access, Program finish, Runtime handles, or IO |
+| Domain State | One reusable typed Pure or Read transition | Operation expansion, final topology, or knowledge that it was injected |
+| Runtime/Journal/Store | The implemented association, execution, history, and persistence boundaries | Any Operation, structured authoring scope, authoring setup, or injection hook |
 | Future Effect authority | Durable command authority, idempotence, reservation/fencing, signer/mutation rules, and ambiguity recovery | Treating authoring injection as execution evidence |
 
 ## 4. Semantic contract names
@@ -319,12 +351,6 @@ pub fn expand_program<O: Operation>(
     root: &O,
 ) -> Result<Program>;
 
-/// One authoring-only forward destination owned by one expansion.
-#[derive(Clone)]
-pub struct ForwardLabel {
-    // private root-expansion token, creating-scope token, slot, and target contract
-}
-
 /// The one scoped pre-Program expansion and lowering context.
 pub struct OperationExpansion<I, O, F>
 where
@@ -332,23 +358,33 @@ where
     O: MfmValue,
     F: MfmValue,
 {
-    // private root/scope contracts, draft, labels, counts, and recursion depth
+    // private root/scope contracts, draft, frontiers, handlers, counts, and depth
+}
+
+/// One scoped typed Match whose nonterminal arms rejoin at one exact contract.
+pub struct MatchJoin<I, O, F>
+where
+    I: MfmValue,
+    O: MfmValue,
+    F: MfmValue,
+{
+    // owned private Match scratch plus root/scope contract markers
 }
 ```
 
 The exact private field/module layout is implementation detail. `OperationExpansion` owns its
 scratch; it exposes no public lifetime parameter. All public items require complete rustdoc under
-`#![warn(missing_docs)]`. `ForwardLabel` has no public constructor, raw slot, index, or stable
-`Debug` representation. `Operation: Sized` deliberately rules out `dyn Operation` registries and
-boxed heterogeneous Operation collections.
+`#![warn(missing_docs)]`. `MatchJoin` owns its scratch, has no public constructor, `Default`, or
+`Clone`, and is supplied only by mutable borrow to its one callback. `Operation: Sized`
+deliberately rules out `dyn Operation` registries and boxed heterogeneous Operation collections.
 
 Private fields must represent `I`, `O`, and `F` (with a non-owning marker when no typed private
 field already does) so the generic scope is a real Rust type contract rather than unused syntax.
 
 `expand_program` is the sole trusted source ingress. It derives the root Input/Output/Failure refs,
-creates one root scope, invokes `root.expand` exactly once, seals its remaining scope exits, resolves
-the draft, and invokes the existing strict Program validator/encoder once. A failed expansion or
-final encoding returns `ProgramError` and exposes no partial Program.
+creates one root scope, invokes `root.expand` exactly once, seals its remaining scope exits,
+resolves the draft, and invokes the existing strict Program validator/encoder once. A failed
+expansion or final encoding returns `ProgramError` and exposes no partial Program.
 
 ### 5.2 State execution remains explicit and typed
 
@@ -385,10 +421,10 @@ Read capability, Intent/Evidence ABI, and injection policy pairing through its b
 Effect RFC may add a separately reviewed typed Effect method; this RFC adds no placeholder.
 
 Rust call order is the sequence DSL. A successful lexical item feeds the next item. A lexical
-State or child failure propagates through the current Operation scope only when it is `Never` or
-the scope's exact Failure contract. Any other failure requires an explicit typed handler route.
-Every predecessor output must equal the next item's input. These nominal checks occur during
-expansion; callers never pass raw contract refs.
+State or child failure resolves to the nearest active exact handler, the scope's exact Failure
+contract, or no edge for `Never`. Any other failure rejects. Every predecessor output must equal
+the next item's input. These nominal checks occur during expansion; callers never pass raw
+contract refs.
 
 Pure States receive no hidden occurrence configuration because Program v2 has nowhere to persist
 it. Runtime-relevant parameters must be in C0, a complete State context, or an immutable binding.
@@ -404,10 +440,8 @@ constructor. There is no configuration registry, erased config map, or persisted
 Repetition is ordinary Rust:
 
 ```rust
-for child in &self.checked_collections {
-    // This helper uses operation_to because the child exposes EvmBalanceFailure,
-    // while the Portfolio root exposes PortfolioSnapshotFailure.
-    self.expand_collection(expansion, child)?;
+for step in &self.checked_steps {
+    expansion.operation(step)?;
 }
 ```
 
@@ -422,41 +456,42 @@ declaration and are not persisted.
 
 When child expansion returns, an open lexical tail becomes that child scope's success exit only if
 its complete current contract equals `Op::Output`. Every propagated inhabited failure must equal
-`Op::Failure`; `Never` contributes no exit. `operation` connects those exits to the parent's lexical
-continuation/failure scope, while `operation_to` connects them to the explicitly checked labels or
-enclosing scope exits. No caller receives or rewrites the child's internal routes.
+`Op::Failure`; `Never` contributes no exit. `operation` connects those exits to the parent's
+lexical continuation and nearest exact active failure handler or scope failure. No caller receives
+or rewrites the child's internal routes.
 
 The same State type may likewise occur repeatedly. A different Read setup may produce a different
 binding or injection topology. A different Pure runtime behavior parameter must instead be carried
 by the typed input context; it cannot be captured invisibly in authoring code.
 
 `Operation` implementations are trusted deterministic authoring code, like State implementations.
-They must compose children only through `OperationExpansion::{operation, operation_to}`. The open
-trait method cannot prevent a malicious implementation from directly calling another
+They must compose children only through `OperationExpansion::operation`. The open trait method
+cannot prevent a malicious implementation from directly calling another
 `Operation::expand` method or recursing in ordinary Rust. Supported-current production code must
 contain no such direct call outside `mfm-program`; the absence scanner enforces that boundary.
 
-Child composition entered through the kernel methods is bounded by one private recursion-depth
-limit and the existing declaration/Program ceilings. Direct or mutual recursion through those
-methods rejects deterministically. An empty root Operation remains legal only under the existing
-zero-State root identity rules. Empty nested Operations reject in this cut so they do not require
-label-alias or zero-length-scope semantics.
+The private `MAX_AUTHORING_CALLBACK_DEPTH` is exactly 64 simultaneously active kernel-entered
+authoring callbacks. The root/child `Operation::expand`, Match definition/arm, protected/handler,
+and capability `original_binding_ref`/before/after callbacks each count while active. Before
+invoking the 65th callback, expansion returns `ProgramError::Capacity`. Direct or mutual recursion
+entered through compiler methods is therefore deterministic; direct trusted-code method calls
+remain the explicit bypass in Material uncertainty 4. An empty root Operation remains legal only
+under the existing zero-State root identity rules. Empty nested Operations reject in this cut so
+they do not require zero-length child-scope semantics.
 
-The lexical `operation` method is retained because composing a sequence from child Operations is an
-explicit requirement of this DSL, even though the current EVM child needs `operation_to` because
-its failure contract differs from Portfolio's. A focused synthetic consuming test must prove the
-lexical method; the implementation report must list it honestly as user-mandated rather than claim
-a current production call site.
+The current Portfolio root uses `operation` inside an exact failure-handler scope, so the method has
+a production caller. The configured EVM child may repeat with distinct target/setup values without
+parent knowledge of its declaration count.
 
-### 5.4 Exceptional forward control
+### 5.4 Structured Match joins and failure handlers
 
-The common API is lexical. Program v2 nevertheless contains two real non-linear shapes today:
+Program v2 contains two intentional non-linear shapes:
 
-- native/token Match arms of unequal length that rejoin at `ConfirmBalanceAnchor`; and
-- EVM child failure that skips `ResumePortfolioCollection` and enters terminal
-  `MapEvmBalanceFailure` authoring.
+- a typed value selects one of several State/Operation sequences that rejoin at one contract; and
+- an exact failure from a State, child Operation, or protected region enters a State-first handler
+  that either recovers to one join contract or terminates the Operation.
 
-One opaque label facility owns those exceptional routes:
+The DSL exposes those shapes directly and no lower-level route mechanism:
 
 ```rust
 impl<I, O, F> OperationExpansion<I, O, F>
@@ -465,105 +500,175 @@ where
     O: MfmValue,
     F: MfmValue,
 {
-    pub fn label<T: MfmValue>(&mut self) -> Result<ForwardLabel>;
-    pub fn place(&mut self, label: ForwardLabel) -> Result<()>;
-
-    pub fn pure_to<S>(
+    pub fn match_join<T, J>(
         &mut self,
-        success: Option<ForwardLabel>,
-        failure: Option<ForwardLabel>,
+        define: impl FnOnce(&mut MatchJoin<I, O, F>) -> Result<()>,
     ) -> Result<()>
     where
-        S: PureState;
+        T: MfmValue,
+        J: MfmValue;
 
-    pub fn read_to<S, C>(
+    pub fn with_failure_handler<E, J>(
         &mut self,
-        setup: &<C as CapabilityInjection<S>>::Setup,
-        success: Option<ForwardLabel>,
-        failure: Option<ForwardLabel>,
+        protected: impl FnOnce(&mut Self) -> Result<()>,
+        handler: impl FnOnce(&mut Self) -> Result<()>,
     ) -> Result<()>
     where
-        S: ReadState<C>,
-        C: ReadCapabilityContract + CapabilityInjection<S>;
+        E: MfmValue,
+        J: MfmValue;
+}
 
-    pub fn operation_to<Op: Operation>(
+impl<I, O, F> MatchJoin<I, O, F>
+where
+    I: MfmValue,
+    O: MfmValue,
+    F: MfmValue,
+{
+    pub fn arm<P>(
         &mut self,
-        child: &Op,
-        success: Option<ForwardLabel>,
-        failure: Option<ForwardLabel>,
-    ) -> Result<()>;
-
-    pub fn select<T: MfmValue>(
-        &mut self,
-        arms: Vec<(StableId, ForwardLabel)>,
-    ) -> Result<()>;
+        tag: StableId,
+        branch: impl FnOnce(&mut OperationExpansion<I, O, F>) -> Result<()>,
+    ) -> Result<()>
+    where
+        P: MfmValue;
 }
 ```
 
-The `_to` spellings are the conceptual distinction between lexical composition and exceptional
-routing. The implementation plan may choose an equally small spelling after compiling the exact
-EVM/Portfolio call sites, but it must not add a `Routes` algebra, failure-policy hierarchy, closure
-registry, or second draft representation.
+Callbacks are synchronous, never stored or boxed, and never retried. A successful enclosing
+construct invokes each supplied callback exactly once. On failure, an entered callback runs at
+most once and later branch/handler callbacks need not run. Their `OperationExpansion` values are
+private scratch scopes initialized at the contracts described below. The public `I`, `O`, and `F`
+parameters retain the enclosing Operation boundary; the scratch cursor and join contracts are
+checked by exact nominal refs during expansion.
 
-Within a routed occurrence, `Some(label)` selects that forward destination. `None` exits the
-current Operation scope with the occurrence's exact success or failure contract. At the root,
-remaining exact scope exits become Program terminal success/failure. `Never` has no failure edge.
-Lexical methods use an internal `Following` success route and exact scope-failure propagation; they
-do not require callers to allocate labels for ordinary sequences.
+#### Match join
 
-Every route is contract-checked. A success label must accept the complete expanded occurrence or
-child Output; a failure label must accept its complete Failure. A `None` success is legal only when
-that Output equals the current Operation Output. A `None` inhabited failure is legal only when it
-equals the current Operation Failure; `Never` remains edge-free. The same rules apply to direct
-States and flattened child Operations.
+`match_join::<T, J>` consumes an open frontier whose exact current contract is `T`, emits one
+Program v2 Match, and returns the union of its nonterminal arm-success frontiers as exact `J`.
 
-`label::<T>` binds the label privately to the nominal contract that its eventual target declaration
-must consume: a State input or Match selector. Each use also accumulates its target-kind constraint:
-a failure destination or Match arm requires a State, while an ordinary success destination may
-target a State or Match. `place` validates ownership and marks the label pending; the next
-successful lexical or routed `pure`/`read`/`operation` emission, or a compatible `select` emission,
-binds every pending label at that position. This includes the first injected-before State or the
-first declaration of a child Operation. A child entry is never skipped to bind an interior State.
-If that entry is Match, only a compatible success-only label may bind it; a pending State-only
-label rejects the entire child emission atomically. The same rule makes a pending State-only label
-reject `select` atomically, while a success-only label may validly target a Match selector as
-Program v2 already permits.
+For each `arm::<P>(tag, branch)`:
 
-Every lexical emitter, every `_to` emitter, and `select` uses scratch-before-commit semantics.
-Routed `pure_to`, `read_to`, and `operation_to` bind pending placements exactly as their lexical
-counterparts do. A failed emitter preserves the active `Following` predecessor, every pending
-placement, the label table, and the draft exactly, so retry binds only on the next successful
-emission. A successful `select` leaves State-only pending placements untouched only by rejecting
-before commit; it never silently retargets them to an interior branch State.
+- `tag` must name exactly one variant in `T`'s retained closed descriptor;
+- the variant's embedded nominal payload contract must equal `P`;
+- only the external/adjacent single-payload shapes already supported by Runtime are accepted;
+- the branch scratch starts at exact `P`;
+- the flattened branch must be nonempty and State-first; an injected-before State counts, while an
+  empty branch or Match-first child does not;
+- a branch ending at exact `J` remains open for the common join; and
+- a branch ending at a distinct exact enclosing Operation `O` terminates at `ScopeSuccess`.
 
-The private scope tracks whether a lexical path is open. Root/child entry begins open. An explicit
-success route or Match closes the current path; a placed incoming label opens a new path at its
-next declaration; placing a label while a path is open creates an ordinary join at the next
-declaration. Emitting with neither an open path nor a pending incoming label rejects. This is the
-minimum compiler state needed to author branch bodies and rejoins without exposing indices or a
-public branch AST.
+Every selector variant must appear exactly once. Unknown, duplicate, missing, unit, unsupported
+shape/tagging, wrong-payload, and wrong-join arms reject. `MAX_MATCH_ARMS` and the existing Program
+limits apply. Match variant records are sorted/deduplicated by raw tag bytes exactly as today, but
+physical branch declaration blocks remain in `arm` call order and are never sorted with metadata.
 
-Labels carry both a private token for their root expansion and a private token for the exact
-Operation scope that created them. They are cloneable for joins but not `Copy`. Public label use and
-placement reject both cross-expansion and cross-scope labels. A child therefore cannot capture a
-parent label and bypass its declared scope exits through `pure_to`, `read_to`, or `place`.
+If at least one branch remains open, the enclosing frontier becomes exact `J`. If every branch
+ends at a distinct `O`, the enclosing path is closed. When `J == O`, every such result is a join;
+this cut deliberately exposes no direct terminal choice for an open equal-contract frontier. An
+already-closed `ScopeSuccess` returned by a nested all-terminal construct remains closed.
 
-`operation_to` validates parent labels in the parent scope, expands the child without exposing
-those labels, seals the child's exact ScopeSuccess/ScopeFailure exits, and connects those sealed
-exits to the parent routes in kernel-owned merge code. The expansion also rejects duplicate
-placement, use after placement as a forward target, dangling referenced or pending labels,
-self/backward targets, contract mismatch, out-of-range/u16 overflow, and unreachable declarations.
-Label allocation is incrementally bounded so unused labels cannot grow memory without limit.
+This construct owns both ordinary and error-classified branching. State-local Rust matching remains
+appropriate when it changes only data. `match_join` is required when a value changes future
+topology, capability use, or durable observation boundaries. There are no conditional/no-op Reads:
+both branch declaration blocks and injection suffixes are authored; at Runtime the unselected
+branch executes no State and causes no adapter, provider, or Journal activity.
 
-`select::<T>` consumes the current open selector path, emits Match, and leaves the path closed until
-an arm label is placed. Its arm labels must resolve specifically to forward State declarations;
-other success-only labels may resolve to a State input or Match selector as allowed by Program v2.
-`select::<T>` derives only T's nominal selector contract and retains Program v2's exact Match
-representation, nonempty rule, raw-byte tag sorting/deduplication, and arm bound. Runtime
-association remains the sole owner that proves the registered selector descriptor is a supported
-closed sum and that each exact payload contract matches its target State input. A structurally
-valid but assembly-incompatible Match may finish authoring and is rejected by Runtime before
-admission/provider/append IO.
+Runtime retains its independent hostile-wire Match association proof. Source authoring validates
+the typed descriptor so a wrong `P` fails before Program construction; Runtime still rejects any
+forged retained Program with unsupported tagging/shape, incomplete tags, or payload/target/codec
+mismatch before admission/provider/append IO.
+
+#### Scoped failure handling
+
+`with_failure_handler::<E, J>` creates three physical regions in exact order:
+
+```text
+protected declarations
+handler declarations
+outer continuation
+```
+
+The protected callback may contain one State/child occurrence or a larger bounded sequence of
+States and Operations. The same method is therefore the per-occurrence handler and the default
+handler for an Operation region; there is no second handler policy or overload.
+
+The handler routes only declared domain `State::Failure` edges in the authored Program. It does
+not catch `ProgramError`, `RuntimeError`, adapter/Store errors, callback panics, cancellation, or
+authoring callback failures; those retain their existing owners and abort without being converted
+into a domain selector.
+
+The protected callback starts at the caller's current contract. Inhabited failures resolve by
+searching active handlers from innermost to outermost:
+
+- exact `E` enters this handler;
+- an exact enclosing-handler error enters that enclosing handler;
+- exact Operation `F` becomes the scope failure when no handler intercepts it;
+- `Never` has no edge; and
+- any other failure contract rejects.
+
+`E == F` is legal and intercepts the protected region's failures. A handler is active only while
+expanding its protected callback, not while expanding its own handler callback, so it never catches
+itself recursively. Nested protected scopes may intentionally use the same `E`: the innermost
+active handler wins, while that inner handler's own `E`/`F` failure may enter an enclosing same-`E`
+default handler that is still active before it exits the Operation.
+
+The protected region must expose at least one reachable `E` edge and every open protected-success
+path must end at exact `J`. The handler starts at exact `E`, must be nonempty and State-first, and
+may:
+
+- recover by leaving an open success frontier of exact `J`;
+- terminate successfully by ending at a distinct exact `O`;
+- propagate an exact `F` State failure through the ordinary nearest-enclosing-handler or scope
+  failure rule; or
+- install a nested handler for any exact failure contract.
+
+Protected success and recovered handler success join at the next outer occurrence and skip the
+physically adjacent handler. A Pure classifier followed by `match_join` may therefore send
+recoverable variants to Operations that produce `J`, send fatal variants to an Operation that
+produces a distinct `O`, and propagate classifier Failure as exact `F`. Program failure edges still
+target the classifier's first State, never Match directly.
+
+`E` and every recovery selector payload must carry the complete public context required by its
+handler and recovery Operation. The expansion kernel and Runtime retain no ambient pre-failure
+input to merge back into a partial error.
+
+Conceptually:
+
+```rust
+body.with_failure_handler::<ReadFailure, Context>(
+    |protected| protected.read::<Observe, ObservationRead>(setup),
+    |handler| {
+        handler.pure::<ClassifyReadFailure>()?;
+        handler.match_join::<ReadFailureClass, Context>(|arms| {
+            arms.arm::<RetryableFailure>(retryable_tag()?, |retryable| {
+                retryable.operation(&recover_to_context)
+            })?;
+
+            arms.arm::<FatalFailure>(fatal_tag()?, |fatal| {
+                fatal.operation(&map_to_output)
+            })
+        })
+    },
+)?;
+```
+
+Recovery is forward-only. The handler cannot retry the protected occurrence, jump backward,
+implement `finally`, or infer compensation/rollback semantics.
+
+#### Exit inference and atomicity
+
+Branch and handler exit classification occurs only after the callback returns. An already-closed
+`ScopeSuccess` remains terminal. Otherwise an open exact `J` remains open for the join, an open
+distinct exact `O` becomes `ScopeSuccess`, and every other contract rejects. Reaching `O`
+temporarily does not terminate a callback if later lexical States move the frontier. When
+`J == O`, an open frontier is always the join. Nonempty/State-first rules prevent inference from
+creating an empty terminal arm or handler.
+
+Every State occurrence, child Operation, Match arm set, and handler region builds in isolated
+scratch and commits once. Callback, descriptor, child, injection, depth, contract, or capacity
+failure discards the entire construct and leaves the parent draft, current frontier, and active
+handler stack unchanged. Side effects in captured callback code are outside rollback and forbidden
+by the deterministic-authoring trust contract.
 
 ### 5.5 One private draft and one final validator
 
@@ -571,27 +676,46 @@ admission/provider/append IO.
 
 ```text
 ExpansionDraft {
-  root/scope contract refs,
-  process-local expansion token,
-  bounded label table,
-  Vec<DraftDeclaration>,
+  declarations: Vec<DraftDeclaration>,
+  entry: optional { DraftId, contract, declaration kind },
+  open_success: optional Frontier { contract, edge slots },
+  scoped exits and intercepted failure slots,
+  counts and depth,
 }
 
 DraftDeclaration = State(DraftState) | Match(DraftMatch)
-DraftRoute = Following | ScopeSuccess | ScopeFailure | Label(private_slot)
+DraftRoute = Open | Target(DraftId) | ScopeSuccess | ScopeFailure | NoEdge
 ```
 
 This is explanatory private structure, not a frozen public type layout. After a typed State or
 Operation call returns, all heterogeneous Rust types have already been reduced to exact immutable
 refs and private routes. Do not retain `Any`, boxed Operations, erased authoring callbacks, a nested
-Operation tree, or a second finalized declaration vector.
+Operation tree, public label table, or a second finalized declaration vector. `DraftId` is a
+private local ordinal; it is neither public nor persisted.
 
-Every State occurrence, injected suffix, and child Operation builds in scratch. Validate external
-labels, typed context/failure continuity, recursion, counts, and capacity before one infallible
-merge into the parent draft. Errors leave the parent semantically unchanged; there is no poisoned
-writer state.
+Private lowering must preserve these exact rules:
 
-Contract, label, scope, and deterministic expansion defects map to
+- Match is appended before every arm body;
+- each Match variant targets that arm's first State;
+- one arm's open `J` slots never bind to the next arm body;
+- protected `E` failure slots target the handler's first State;
+- protected-success and recovered-handler `J` slots skip the handler and remain open for the outer
+  continuation;
+- a child scope's success/failure exits remain symbolic until kernel-owned parent merge; and
+- finalization converts private targets once to forward `u16` indices and calls `Program::new`
+  once.
+
+Every State occurrence, injected suffix, child Operation, Match, and failure-handler region builds
+in scratch. Validate typed context/failure continuity, descriptor/entry constraints, callback
+depth, counts, and capacity before one infallible merge into the parent draft. Errors leave the
+parent semantically unchanged; there is no poisoned writer state.
+
+A direct State occurrence needs only local fallible construction before append; do not introduce a
+separate State-scratch type or nested draft abstraction for that one declaration. Owned child,
+Match, handler, and injection scratch exists only where multiple declarations or exits must commit
+atomically.
+
+Contract, descriptor, scope, and deterministic expansion defects map to
 `ProgramError::InvalidContract`; fixed depth/count/byte ceilings map to `ProgramError::Capacity`;
 the existing final canonical encoding/decoding taxonomy remains unchanged. Do not add an Operation
 error family or leak domain/debug detail through Program errors.
@@ -636,7 +760,7 @@ where
     S: State,
 {
     /// Checked authoring input for this exact capability/State pairing.
-    type Setup: ?Sized;
+    type Setup;
 
     /// Complete input contract exposed by the expanded occurrence.
     type ExpandedInput: MfmValue;
@@ -650,7 +774,7 @@ where
     /// Writes zero or more ordinary States before the original State.
     fn write_before(
         _setup: &Self::Setup,
-        _writer: &mut InjectionWriter<'_, S::Failure>,
+        _writer: &mut InjectionWriter,
     ) -> Result<()> {
         Ok(())
     }
@@ -658,7 +782,7 @@ where
     /// Writes zero or more ordinary States after original success.
     fn write_after(
         _setup: &Self::Setup,
-        _writer: &mut InjectionWriter<'_, S::Failure>,
+        _writer: &mut InjectionWriter,
     ) -> Result<()> {
         Ok(())
     }
@@ -669,76 +793,70 @@ There is no blanket identity implementation. Every supported pairing implements 
 explicitly, so unsupported pairings fail at compile time and a later pair-specific policy is not
 blocked by Rust coherence.
 
-`Setup` is a domain-owned checked, bounded, deterministic, secret-free product. It may contain
+`Setup` is a sized domain-owned checked, bounded, deterministic, secret-free product. It may contain
 public content/binding references but never providers, clients, signers, private keys, credentials,
 nonce-authority handles, Store connections, Runtime handles, or mutable ambient state.
 `original_binding_ref` derives the binding from the same setup used by the hooks. It neither
 registers nor selects a live adapter.
 
-Setup/binding continuity applies to the designated original occurrence. A separately nested Read
-occurrence has its own exact pairing, setup, and binding proof; it does not inherit authority from
-the outer occurrence.
+Setup/binding continuity applies only to the designated original occurrence; hooks inherit no
+execution authority from it.
 
 ### 6.2 Restricted injection writer
 
 ```rust
-pub struct InjectionWriter<'a, F: MfmValue> {
-    // private scratch suffix, current contract, required failure, and depth
+pub struct InjectionWriter {
+    // owned private scratch suffix plus current/required-failure refs
 }
 
-impl<F: MfmValue> InjectionWriter<'_, F> {
+impl InjectionWriter {
     pub fn pure<S>(&mut self) -> Result<()>
     where
         S: PureState;
-
-    pub fn read<S, C>(
-        &mut self,
-        setup: &<C as CapabilityInjection<S>>::Setup,
-    ) -> Result<()>
-    where
-        S: ReadState<C>,
-        C: ReadCapabilityContract + CapabilityInjection<S>;
 }
 ```
 
-Its constructor and fields are private. It exposes no label, Match, child-failure route, raw
-declaration, original-State access, Program finalization, Runtime registration, provider handle,
-runtime value inspection, retained callback, or IO.
+It owns the temporary suffix and is passed to each hook by one ordinary mutable borrow. Its
+constructor and fields are private, and it implements neither `Default` nor `Clone`. It exposes no
+Match, failure handler, child Operation, termination, raw declaration, original-State access,
+Program finalization, Runtime registration, provider handle, runtime value inspection, retained
+callback, or IO.
 
-The initial cut permits only lexical State emission through this writer. Add child-Operation
-emission only with a real nonempty production policy that demonstrably reuses an Operation and
-preserves the same single input/output/common-failure suffix contract with lower combined API/LOC.
+The initial cut permits only lexical Pure State emission through this writer. A synthetic nonempty
+policy proves the before/original/after contract. Add Read, Effect, or child-Operation emission only
+with a real production policy that requires it and preserves the same single
+input/output/common-failure suffix contract with lower combined API/LOC.
 
-Each injected State failure must be exact `Never` or exact `F`. `Never` receives no failure edge;
-an inhabited `F` uses the enclosing occurrence's one failure route. Any other failure contract
-returns `ProgramError::InvalidContract` before the parent draft changes.
+Each injected Pure State failure must be exact `Never` or the designated original
+`S::Failure` stored as the writer's private required-failure ref. `Never` receives no failure edge;
+an inhabited exact match uses the designated occurrence's active failure route. Any other failure
+contract returns `ProgramError::InvalidContract` before the parent draft changes.
 
 ### 6.3 Expansion algorithm
 
-`OperationExpansion::{read, read_to}` and recursive `InjectionWriter::read` share one private
-`expand_read_suffix::<S, C>(setup, depth)` implementation.
+`OperationExpansion::read` owns one private `expand_read_occurrence::<S, C>(setup)` implementation.
 
 For one designated `read::<S, C>(setup)` occurrence:
 
-1. For routed emission, validate the supplied success/failure labels belong to the current
-   Operation scope and root expansion, remain eligible forward references, and have the required
-   contracts without mutating them.
-2. Derive `<C as CapabilityInjection<S>>::ExpandedInput`, `ExpandedOutput`, and `S::Failure` refs.
-3. Open one empty scratch suffix at the expanded input contract.
-4. Call `<C as CapabilityInjection<S>>::write_before(setup, writer)` exactly once.
-5. Require the writer's current success contract to equal `S::Input`.
-6. Derive S's exact implementation ref, C's exact Read ABI, and
+1. Derive `<C as CapabilityInjection<S>>::ExpandedInput`, `ExpandedOutput`, and `S::Failure` refs.
+2. Open one empty scratch suffix at the expanded input contract.
+3. Call `<C as CapabilityInjection<S>>::write_before(setup, writer)` exactly once.
+4. Require the writer's current success contract to equal `S::Input`.
+5. Derive S's exact implementation ref, C's exact Read ABI, and
    `<C as CapabilityInjection<S>>::original_binding_ref(setup)`.
-7. Append the designated original S occurrence exactly once in kernel-owned scratch code. Hooks
-   never receive its seed or declaration, although they may author a separate same-type occurrence.
-8. Continue the scratch writer at `S::Output` and call
+6. Append the designated original S occurrence exactly once in kernel-owned scratch code. Hooks
+   never receive its seed or declaration and cannot emit a Read. A separate same-type occurrence
+   must enter through ordinary `OperationExpansion::read` and independently apply its policy.
+7. Continue the scratch writer at `S::Output` and call
    `<C as CapabilityInjection<S>>::write_after(setup, writer)` exactly once.
-9. Require the final success contract to equal
+8. Require the final success contract to equal
    `<C as CapabilityInjection<S>>::ExpandedOutput`.
-10. Incrementally enforce recursion and scratch bounds, then checked-add the complete suffix to the
-   parent declaration/u16 limits.
-11. Only after all fallible checks succeed, bind labels pending at this occurrence and merge the
-    suffix into the parent draft in one infallible commit.
+9. Incrementally enforce scratch bounds, then checked-add the complete suffix to the parent
+   declaration/u16 limits.
+10. Resolve every inhabited suffix failure through the active exact handler stack or enclosing
+    scope Failure without exposing that routing to the hook.
+11. Only after all fallible checks succeed, merge the suffix into the parent draft in one
+    infallible commit.
 
 Success order is exact:
 
@@ -747,15 +865,15 @@ ExpandedInput
   -> before State 1 -> ... -> before State N
   -> one designated original S declaration
   -> after State 1 -> ... -> after State M
-  -> lexical continuation, explicit success label, or scope success exit
+  -> lexical continuation or scope success exit
 ```
 
 Any inhabited before/original/after failure skips the unfinished suffix and uses the occurrence's
-one failure route. There is no `finally`, rollback, compensation, retry, recovery, or variant
-failure policy inside injection. An explicit handler State or child Operation belongs to the
-enclosing Operation graph.
+one active structured handler or scope-failure route. There is no `finally`, rollback,
+compensation, retry, recovery, or variant failure policy inside injection. An explicit handler
+State or child Operation belongs to the enclosing Operation graph.
 
-### 6.4 Context continuity, nesting, and limits
+### 6.4 Context continuity and limits
 
 The writer carries one complete current success contract; it never merges patches or keeps an
 ambient context map.
@@ -766,13 +884,11 @@ ambient context map.
 - Each predecessor output must equal its successor input.
 - Every State output is the complete next context.
 
-An injected Read invokes the same private suffix algorithm recursively. One private depth bound
-rejects direct or mutual injection cycles as `ProgramError::Capacity`. Scratch growth checks depth
-and declaration capacity incrementally. Exact whole-Program canonical-byte capacity is checked only
-after label resolution by Program's existing encoder/validator.
+Scratch growth checks declaration capacity incrementally. Exact whole-Program canonical-byte
+capacity is checked only after private target resolution by Program's existing encoder/validator.
 
-Hook error, binding failure, context/failure mismatch, recursion overflow, or capacity failure
-drops the suffix and leaves the enclosing Operation expansion unchanged.
+Hook error, binding failure, context/failure mismatch, or capacity failure drops the suffix and
+leaves the enclosing Operation expansion unchanged.
 
 ### 6.5 Current Read identity policies
 
@@ -808,6 +924,11 @@ Program decode, Runtime association, start, hot advancement, cold resume, read, 
 qualification, Store load/append, and provider ingress invoke Operation/injection code zero times.
 They use only the retained immutable Program.
 
+Supported production hooks emit support States only through `InjectionWriter::pure`; direct
+hook-to-hook method calls are forbidden trusted-code bypasses, just as direct child
+`Operation::expand` composition is forbidden. No runtime claim depends on arbitrary downstream
+authoring code obeying more than the final Program validator enforces.
+
 Because strict canonical Program decode remains public, injection is not an authorization boundary.
 A hostile but structurally valid Program can omit an expected injected State. The future
 transaction-authority RFC must define authenticated durable authorization, concurrency/fencing,
@@ -825,8 +946,8 @@ must define its release or reconciliation behavior.
 ### 7.1 `CollectEvmBalances<K>`
 
 Replace public `append_balance_fragment` with one semantic configured child Operation, named
-`CollectEvmBalances<K>` unless implementation discovers an existing clearer domain name. It owns
-private invariant-bearing fields and has a checked constructor for:
+exactly `CollectEvmBalances<K>`. It owns private invariant-bearing fields and has a checked
+constructor for:
 
 - the `EvmPhysicalTarget`; and
 - source count in `1..=EVM_BALANCE_SOURCE_LIMIT`.
@@ -855,44 +976,40 @@ CheckChainIdentity
 ```
 
 After all sources, emit `ConsolidateBalanceCollection`. Use lexical `pure`/`read` calls for ordinary
-success/failure flow and semantic labels only for the retained Match arms and shared Confirm rejoin.
-All six Reads go through capability injection. Native execution makes no token provider request;
-token execution makes no native provider request.
+success/failure flow and `match_join` for the retained branch and shared Confirm rejoin. All six
+Reads go through capability injection. Both native and token branch Reads are authored. Native
+execution performs no token Read/provider call; token execution performs no native Read/provider
+call.
 
-The exceptional part is conceptually:
+The configured Operation is conceptually:
 
 ```rust
-let native = body.label::<EvmBalanceContext<K>>()?;
-let token = body.label::<EvmBalanceContext<K>>()?;
-let confirm = body.label::<EvmBalanceContext<K>>()?;
+for _ in 0..self.source_count {
+    body.read::<CheckChainIdentity<K>, EvmChainIdentityRead>(&self.target)?;
+    body.read::<ReadInitialAnchor<K>, EvmAnchorRead>(&self.target)?;
+    body.pure::<SelectBalanceAsset<K>>()?;
 
-body.pure::<SelectBalanceAsset<K>>()?;
-body.select::<EvmBalanceAsset<K>>(vec![
-    (stable_tag("native")?, native.clone()),
-    (stable_tag("token")?, token.clone()),
-])?;
+    body.match_join::<EvmBalanceAsset<K>, EvmBalanceContext<K>>(|arms| {
+        arms.arm::<EvmBalanceContext<K>>(native_tag()?, |native| {
+            native.read::<ReadNativeBalance<K>, EvmBalanceRead>(&self.target)
+        })?;
 
-body.place(native)?;
-body.read_to::<ReadNativeBalance<K>, EvmBalanceRead>(
-    &self.target,
-    Some(confirm.clone()),
-    None,
-)?;
+        arms.arm::<EvmBalanceContext<K>>(token_tag()?, |token| {
+            token.read::<ReadTokenDecimals<K>, EvmBalanceRead>(&self.target)?;
+            token.read::<ReadTokenBalance<K>, EvmBalanceRead>(&self.target)
+        })
+    })?;
 
-body.place(token)?;
-body.read::<ReadTokenDecimals<K>, EvmBalanceRead>(&self.target)?;
-body.read_to::<ReadTokenBalance<K>, EvmBalanceRead>(
-    &self.target,
-    Some(confirm.clone()),
-    None,
-)?;
+    body.read::<ConfirmBalanceAnchor<K>, EvmAnchorRead>(&self.target)?;
+}
 
-body.place(confirm)?;
-body.read::<ConfirmBalanceAnchor<K>, EvmAnchorRead>(&self.target)?;
+body.pure::<ConsolidateBalanceCollection<K>>()
 ```
 
-This is explanatory source shape, not a new `stable_tag` public helper requirement. Production uses
-the existing checked StableId construction and exact tags.
+This is explanatory source shape, not a new `native_tag`/`token_tag` public helper requirement.
+Production uses the existing checked StableId construction and exact tags. Match is necessary
+because the selected value changes future Read topology: neither branch executes, calls, or
+journals the other branch's capability path at Runtime.
 
 Delete fragment entry/count parameters, caller-provided completion/failure indices, `start_index`,
 `base`, offset closures, per-source multiplication, consolidate-index arithmetic, raw declaration
@@ -924,13 +1041,21 @@ impl Operation for PortfolioSnapshotOperation<'_> {
     ) -> mfm_program::Result<()> {
         body.pure::<InitializePortfolio>()?;
 
-        for collection in &self.checked_collections {
+        for child in &self.checked_collections {
             body.pure::<EnterPortfolioCollection>()?;
 
-            // Expand one configured CollectEvmBalances child. Its success enters
-            // ResumePortfolioCollection; its EvmBalanceFailure enters the explicit
-            // terminal MapEvmBalanceFailure branch.
-            self.expand_collection(body, collection)?;
+            body.with_failure_handler::<
+                EvmBalanceFailure,
+                PortfolioContinuation,
+            >(
+                |protected| {
+                    protected.operation(child)?;
+                    protected.pure::<ResumePortfolioCollection>()
+                },
+                |handler| {
+                    handler.pure::<MapEvmBalanceFailure>()
+                },
+            )?;
         }
 
         body.pure::<ConsolidatePortfolio>()
@@ -952,37 +1077,16 @@ Child success targets Resume. Child failure targets the mapper and skips Resume.
 targets the next collection or final consolidation. The mapper's declared success and failure both
 exit through the exact root contracts; authoring does not assume its implementation always fails.
 
-For each collection, the root Operation therefore performs the equivalent of:
-
-```rust
-let resume = body.label::<EvmBalanceCollectionCompletion<PortfolioContinuation>>()?;
-let mapper = body.label::<EvmBalanceFailure>()?;
-let next = body.label::<PortfolioContinuation>()?;
-
-body.operation_to(
-    // Constructed and validated before expand_program.
-    checked_child,
-    Some(resume.clone()),
-    Some(mapper.clone()),
-)?;
-
-body.place(resume)?;
-body.pure_to::<ResumePortfolioCollection>(Some(next.clone()), None)?;
-
-body.place(mapper)?;
-body.pure_to::<MapEvmBalanceFailure>(None, None)?;
-
-body.place(next)?;
-```
-
-The final collection's `next` label binds to `ConsolidatePortfolio`; earlier labels bind to the
-next `EnterPortfolioCollection`. The actual implementation may reserve the next semantic label
-outside the helper so the ordinary loop emits the same order without a special last-iteration
-branch.
+For each collection, protected success and handler recovery would rejoin as exact
+`PortfolioContinuation` at the next `EnterPortfolioCollection` or final `ConsolidatePortfolio`.
+This handler is instead terminal: `MapEvmBalanceFailure` reaches exact root output and
+the distinct-`O` exit rule seals that path. Its declared `PortfolioSnapshotFailure` still exits
+through the root failure contract. The DSL does not assume which variant the State implementation
+returns.
 
 Delete `CollectionLayout`, numeric cursor, fragment-length, terminal-index and capacity forecasts,
 direct `Vec<Declaration>` mutation, and `portfolio_pure_state`. Portfolio knows the child
-Operation's semantic contracts and routes, never its declaration count.
+Operation's semantic contracts and handler boundary, never its declaration count.
 
 ### 7.3 Exact identity freeze
 
@@ -1010,8 +1114,9 @@ submission entry point.
 The later transaction-authority RFC necessarily owns a deliberate Program execution-contract and
 schema decision plus Runtime and Journal consequences. Store remains mechanical unless separately
 changed. That RFC may add typed Effect occurrence emission to `OperationExpansion` and
-`InjectionWriter`, plus the first non-empty production injection policy. Those are illustrative
-possibilities, not reserved API spellings.
+`InjectionWriter`, may add Read emission to the writer only if its concrete topology needs it, and
+may add the first non-empty production injection policy. Those are illustrative possibilities,
+not reserved API spellings.
 
 Conceptually, a future capability pairing may author:
 
@@ -1055,13 +1160,14 @@ Do not restore the retired generic Effect preparation/replacement protocol or no
 
 Do not add a macro language, stored Operation AST, HList/type-level sequence, public recipe/node
 enum, dynamic Operation registry, `Box<dyn Operation>` collection, generic failure-policy object,
-variant-failure router, or separate branch compiler.
+variant-failure router, public route/label token, raw successor method, separate branch compiler,
+or second terminal/handler policy.
 
-Common composition remains ordinary Rust call order and loops. Opaque labels handle the two current
-exceptional graph shapes. Reconsider a label-free `match_join`, `attempt`, or failure-mapping
-convenience only after a second concrete use proves that it deletes more concepts, methods, and
-combined production LOC than it adds. Any convenience lowers through the same
-`OperationExpansion`; it is never another authoring authority.
+Common composition remains ordinary Rust call order and loops. `match_join` owns every current
+value-selected topology and `with_failure_handler` owns exact scoped interception. Add label-free
+lexical conveniences only after repeated production call sites prove they delete more concepts,
+methods, and combined production LOC than they add. Any convenience must lower through the same
+private draft and cannot become another authoring authority.
 
 ### 9.2 Generic Application entry points
 
@@ -1087,10 +1193,10 @@ progression, automatic provider retry, or detached run worker is added.
 
 ### 10.1 `mfm-program`
 
-Add `Operation`, `OperationExpansion`, `ForwardLabel`, `expand_program`,
+Add `Operation`, `OperationExpansion`, `MatchJoin`, `expand_program`,
 `CapabilityInjection`, and `InjectionWriter` in one private authoring module re-exported only at the
-crate root. Reuse existing State/capability/value-ref helpers. Keep the draft, routes, scopes, and
-depth/capacity machinery private.
+crate root. Reuse existing State/capability/value-ref helpers. Keep the draft, target fixups,
+frontiers, handler stack, scopes, and depth/capacity machinery private.
 
 Make the six raw constructors in Section 5.6 crate-private after all consumers migrate. Delete all
 `ProgramAuthor` text/symbols if any prototype created them. Do not add a second public module path,
@@ -1142,18 +1248,23 @@ Execution behavior and proof assertions remain unchanged.
 
 ### 10.6 Documentation and absence enforcement
 
-Update `docs/design.md`, `docs/architecture.md`, Portfolio/EVM/Program READMEs, and directly affected
-examples. Document Operations as deterministic authoring-only composition, States as execution
-leaves, and Program as the only persisted graph.
+Update `docs/design.md`, `docs/architecture.md`, Portfolio/EVM/Program READMEs, and directly
+affected examples. Document Operations as deterministic authoring-only composition, States as
+execution leaves, and Program as the only persisted graph.
 
 Extend the supported-current cutover manifest/scanner for the numeric families, `ProgramAuthor`,
-raw source constructors, direct declaration-vector authoring, direct `.expand(...)` or
-`Operation::expand(...)` composition outside the `mfm-program` owner, and current docs teaching
-numeric indices. Refresh its
-fingerprint/coverage under the existing scanner contract. Trait implementations and narrow negative
-tests necessarily contain the `expand` spelling; the rule targets method-call syntax in supported
-production roots, not definitions. Hostile fixtures may name rejected inputs under narrow test
-scopes; production exports and current docs may not teach them.
+`ForwardLabel`, `label`, `place`, `_to` authoring methods, raw `select`, raw source constructors,
+direct declaration-vector authoring, direct `.expand(...)` or `Operation::expand(...)` composition
+outside the `mfm-program` owner, direct hook-to-hook `original_binding_ref`/`write_before`/
+`write_after` calls, and current docs teaching numeric indices or public routes.
+Refresh its fingerprint/coverage under the existing scanner contract. Trait implementations and
+narrow negative tests necessarily contain the `expand` spelling; the rule targets method-call
+syntax in supported production roots, not definitions. Hostile fixtures may name rejected inputs
+under narrow test scopes; production exports and current docs may not teach them.
+
+Generic spellings such as `label`, `place`, `select`, and `_to` are forbidden only as the removed
+`mfm-program` authoring exports/calls or exact retired owner-qualified symbols. The scanner must not
+globally reject unrelated domain prose or ordinary collection/API methods with the same words.
 
 ## 11. Ordered implementation commits
 
@@ -1183,15 +1294,16 @@ Architect gate: a non-author Program/capability reviewer traces:
 
 - one configured Operation repeated with distinct configuration;
 - one nested child success/failure scope;
-- the native/token Match and Confirm rejoin;
+- the native/token `match_join` and Confirm rejoin;
+- one terminal Portfolio failure handler and one synthetic recovering classifier/Match handler;
 - one synthetic non-empty injection from checked setup to final bytes;
 - exact designated-original emission;
 - one private draft and one Program finalization path;
-- atomic failures and bounded recursion; and
-- combined kernel/domain authoring LOC and public-method tradeoffs. Every public method names its
-  current production caller; lexical `operation` is explicitly recorded as a user-required DSL
-  primitive with a synthetic consuming proof, and the first non-empty injection proof is likewise
-  identified as synthetic.
+- atomic failures and the exact 64-callback depth bound; and
+- combined kernel/domain authoring LOC and public-method tradeoffs. Every structured expansion
+  method names its current production caller. The recovering-handler proof and the first non-empty
+  injection policy are explicitly identified as synthetic; `InjectionWriter::pure` is the only
+  public method without a current production call site.
 
 The reviewer `BLOCK`s any alternate Program representation, dynamic authoring registry, Runtime
 hook, raw-index exposure, source-constructor bypass, placeholder Effect API, or unjustified
@@ -1226,36 +1338,54 @@ Prove:
 - zero-State root identity and one-State root behavior remain exact;
 - lexical Pure, Read, and child Operation success/failure continuity;
 - the same State and Operation may repeat with distinct checked setup/configuration;
-- each `operation`/`operation_to` call invokes its configured child exactly once;
+- each `operation` call invokes its configured child exactly once;
 - configured child domain values are validated before `expand_program`, and expansion introduces
   no domain-error-to-`ProgramError` conversion;
 - nested Operations flatten without persisted boundary declarations, and root/child exact success
   and failure scope exits are each rewritten to their intended parent or terminal destinations;
 - child error/capacity/contract failure leaves the parent draft unchanged;
-- direct and mutual Operation recursion entered through `operation`/`operation_to` rejects at the
-  private bound, and production code contains no direct `.expand(...)` composition call;
+- direct and mutual Operation recursion entered through `operation`, plus mixed nested Match,
+  handler, and hook callbacks, accept depth 64 and reject the 65th callback before invocation;
+- production code contains no direct `.expand(...)` or hook-to-hook composition call that bypasses
+  this depth accounting;
 - empty nested Operations reject while root zero-State remains valid;
 - source order is identity-bearing and never normalized;
+- typed external and adjacent Match descriptors with heterogeneous payloads, State arms, child
+  Operation arms, and exact common joins;
+- unknown, duplicate, missing, unit, unsupported-shape/tagging, wrong-`P`, wrong-`J`, empty, and
+  Match-first arms reject atomically;
+- Match metadata sorts/deduplicates by raw tag bytes while physical arm declaration blocks retain
+  callback order;
+- an injected-before State is the arm target, and nonempty injection does not change semantic join
+  destinations;
+- mixed join/terminal arms, all-terminal closure, distinct-`O` terminal inference, `J == O`
+  join-only inference for open frontiers, and nested already-closed terminal composition;
+- protected success skips the physically adjacent handler and recovered handler success rejoins
+  the same exact `J` continuation;
+- exact handled `E`, `Never`, outer `F` bypass, `E == F`, foreign failures, nearest nested-handler
+  behavior, and same-`E` inner override/outer fallback;
+- unreachable, empty, Match-first, wrong-input, wrong-join, and wrong-handler failure contracts
+  reject atomically;
+- terminal-to-`O`, recovery-to-`J`, whole-region and one-occurrence handlers, and a Pure classifier
+  followed by mixed recovering/terminal Match arms;
+- the synthetic classified recovery produces identical hot and cold branch, join, and terminal
+  views;
+- the handler cannot intercept its own failure recursively, retry protected work, or jump backward;
 - native/token Match branches of unequal length rejoin the exact Confirm State;
-- EVM child success enters Resume while failure skips Resume and enters the mapper;
-- Resume precedes Mapper physically and both mapper exits obey exact root contracts;
-- labels are root-and-scope-branded, contract-bound, forward-only, placed once, fully resolved, and
-  bounded;
-- captured parent labels, leaked child labels, sibling-scope labels, cross-expansion labels,
-  duplicate/missing placements, pending-without-emission, dangling, self, backward,
-  wrong-contract, out-of-bounds, and unreachable routes reject atomically;
-- successful lexical and `_to` emissions bind pending placements to their first emitted
-  declaration, while failed emissions preserve the prior `Following` predecessor and all pending
-  placements so an exact retry can succeed;
-- failed `select` preserves the predecessor, pending placements, labels, and draft; a compatible
-  success-only pending label may bind a Match entry, while a State-only pending label rejects a
-  direct Match or Match-first child without skipping to an interior State;
-- Match tags sort/deduplicate by raw bytes and resolve only to forward State targets;
+- EVM child success enters Resume while failure skips Resume and enters the State-first mapper;
+- Resume precedes Mapper physically, Resume success skips Mapper, and both mapper exits obey exact
+  root contracts;
+- in a two-collection graph, the first Resume targets the second Enter, each child failure targets
+  only its own Mapper, both Mappers terminate, and the final Resume targets Consolidate;
+- successful constructs invoke every supplied callback once; failures never retry an entered
+  callback, may short-circuit later callbacks, and preserve the parent frontier, handler stack,
+  counts, and draft;
 - Runtime hostile association still rejects unsupported Match tagging/shape, missing/unknown tags,
-  payload-target mismatch, and missing/mismatched codecs;
+  payload-target mismatch, and missing/mismatched codecs after raw constructors become private;
 - declaration/u16/Program-byte limits retain existing error classifications; and
-- raw Program/State/Execution/Match constructors plus `ProgramAuthor` are inaccessible outside
-  `mfm-program`.
+- raw Program/State/Execution/Match constructors, `ProgramAuthor`, `ForwardLabel`, public labels,
+  raw routes, and raw `select` are inaccessible outside `mfm-program`; compile-fail tests also prove
+  callers cannot construct or retain `MatchJoin`/`InjectionWriter` beyond their callback scopes.
 
 ### 12.3 Injection tests
 
@@ -1263,29 +1393,33 @@ Prove:
 
 - every current identity policy emits exactly one unchanged original Read declaration;
 - a synthetic non-empty policy emits exact before/original/after order;
-- the designated kernel-owned occurrence is inserted once and is not directly exposed; separate
-  same-type occurrences remain legal topology;
-- hooks run exactly once during source authoring and zero times afterward;
+- the designated kernel-owned occurrence is inserted once and is not directly exposed or writable
+  by a hook; two ordinary same-type Read occurrences each apply their policy and emit their own
+  designated occurrence;
+- successful source authoring runs each applicable hook exactly once and zero times afterward;
 - `ExpandedInput -> before -> S::Input` and `S::Output -> after -> ExpandedOutput` continuity;
 - `Never` and exact original failure are accepted while foreign failure rejects atomically;
 - a before/original/after failure skips the unfinished suffix and takes one exact failure route;
 - binding ref derives from the same setup used by the designated occurrence's hooks;
-- nested Read injection preserves order and uses its own setup/binding;
-- non-empty injection shifts counts while the entry, outer Match, rejoin, completion, and failure
-  labels still resolve semantically;
-- recursion, hook error, binding error, contract mismatch, and capacity leave the parent unchanged;
+- multiple injected Pure States preserve exact lexical order and use no hidden setup/binding;
+- non-empty injection shifts counts while Match-arm entry, join, completion, and active-handler
+  targets still resolve semantically;
+- hook error, binding error, contract mismatch, and capacity leave the parent unchanged;
+- an entered failing hook is not retried, and later hooks short-circuit when an earlier stage fails;
 - identical checked setup produces identical Program bytes;
-- `InjectionWriter` cannot construct itself, place labels, select Match, choose successors, finish,
-  emit raw declarations, access the designated original, or obtain any IO authority/handle through
-  this API; hooks receive no such authority through the expansion contract; and
+- `InjectionWriter` cannot construct itself, Match, install a failure handler, compose a child
+  Operation, terminate a scope, choose successors, finish, emit raw declarations, access the
+  designated original, or obtain any IO authority/handle through this API; hooks receive no such
+  authority through the expansion contract; and
 - hook counters remain unchanged during decode, Runtime association/start/resume/read, Journal,
   Store, and provider entry.
 
 ### 12.4 Domain equivalence and dexterity
 
 Prove exact native, token, mixed-source, multi-source, failure-mapper, and maximum-capacity graphs.
-Confirm native skips token Reads, token skips native Reads, token decimals remain separately durable,
-wrong route/chain remains pre-provider `Internal`, and hot/cold views remain equal.
+Confirm native execution skips token Reads, token execution skips native Reads, token decimals
+remain separately durable, wrong route/chain remains pre-provider `Internal`, and hot/cold views
+remain equal.
 
 Record the complete files/registrations changed to add:
 
@@ -1303,11 +1437,12 @@ Store, schema, or App production edit.
 Using identical reviewed roots/commands before and after, report:
 
 - tracked source-tree LOC and external-test LOC;
+- all Commit-2 production Rust additions/deletions, so code movement cannot escape the measure;
 - production additions/deletions for the `mfm-program` authoring module plus affected EVM/Portfolio
   authoring code;
 - public logical items/methods added versus made private/deleted;
-- the current production call site for every public authoring method, with the two explicit
-  synthetic exceptions recorded above;
+- the current production call site for every public authoring method, with the restricted writer
+  methods and synthetic recovering-handler fixture recorded honestly;
 - normal internal dependency edges;
 - numeric/index-authoring call sites; and
 - State/Operation/injection change sites from Section 12.4.
@@ -1351,12 +1486,16 @@ This RFC explicitly rejects:
 - a new Program version/schema/address wire, Journal record, Store table, or migration;
 - public raw Program/State/Execution/Match constructors beside `expand_program`;
 - public numeric indices, declaration reservations, or parent child-size forecasts;
+- public labels, raw routes/successors, `_to` emitters, or raw `select` beside the structured DSL;
 - a persisted/public Operation AST, node/recipe enum, HList, dynamic registry, or boxed Operation
   collection;
 - a second expansion/lowering representation or finalized declaration form;
 - dynamic execution-mode discovery from erased States;
 - a broad failure-policy hierarchy, variant-failure Runtime reducer, `FailureNext::ByVariant`,
-  recovery DSL, `finally`, rollback, compensation, or automatic retry;
+  backward retry/recovery routes, `finally`, rollback, compensation, or automatic retry;
+- separate ordinary-Match and failure-classifier branch APIs instead of the same `match_join`;
+- conditional/no-op Reads, `NotApplicable` evidence, a Pure/Read hybrid execution mode, or a linear
+  native-plus-token superset;
 - a macro language before ordinary Rust DSL repetition proves insufficient;
 - a blanket empty injection impl or fake identity capability;
 - raw routes, Match, Program finalization, Runtime handles, or IO through `InjectionWriter`;
@@ -1387,26 +1526,33 @@ The RFC is implemented only when:
 8. repeated Operations/States with distinct checked configuration expand deterministically;
 9. child Operation boundaries flatten atomically and persist no metadata;
 10. lexical State/Operation continuity and exact scope success/failure contracts are enforced;
-11. root-and-scope-branded opaque labels resolve once to exact forward `u16` indices and all
-    hostile cases reject;
-12. Program v2 State/Match wire, schema, declaration order, root rules, and limits remain exact;
-13. `CapabilityInjection` is exact-pair, setup-bound, deterministic, and authoring-only;
-14. `InjectionWriter` exposes only restricted lexical Pure/Read State emission;
-15. before/original/after context and common-failure continuity are exact;
-16. the designated wrapped occurrence is emitted once by kernel-owned code and never exposed to a
-    hook, while separate same-type occurrences remain legal;
-17. expansion/injection failure is atomic, kernel-entered Operation and injection recursion are
-    bounded, and supported production code never composes through direct `.expand(...)` calls;
-18. all six current EVM Read pairings use explicit identity injection;
-19. EVM/Portfolio authoring contains no declaration-index/count coordination;
-20. representative and capacity Program bytes/content refs remain exact;
-21. Runtime, Journal, Store, PostgreSQL, App production API, CLI, and REST behavior are unchanged;
-22. no Effect, nonce, submission, outbox, config/fact/replay/lifecycle/compatibility surface is
+11. `match_join` is the sole value-selected topology API, proves exact typed arms/common joins,
+    preserves physical branch order, and has no public label/raw-route escape hatch;
+12. `with_failure_handler` handles one exact failure contract from a State, child, or region and
+    supports State-first terminal or forward-recovery topology through the same `match_join`;
+13. arm/handler exit inference maps open `J` to a join and distinct open `O` to terminal success,
+    preserves nested closed success, and cannot create an empty arm or handler;
+14. Program v2 State/Match wire, schema, declaration order, root rules, and limits remain exact;
+15. `CapabilityInjection` is exact-pair, setup-bound, deterministic, and authoring-only;
+16. `InjectionWriter` exposes only restricted lexical Pure State emission;
+17. before/original/after context and common-failure continuity are exact;
+18. the designated wrapped Read occurrence is emitted once by kernel-owned code and never exposed
+    or writable through a hook, while each ordinary repeated same-type Read independently applies
+    its policy;
+19. expansion/injection failure is atomic, kernel-entered authoring callback depth accepts 64 and
+    rejects the 65th callback before invocation, and supported production code never composes
+    through direct `.expand(...)` or hook-to-hook calls;
+20. all six current EVM Read pairings use explicit identity injection;
+21. EVM/Portfolio authoring contains no declaration-index/count coordination;
+22. native/token topology authors both paths, while Runtime executes only the selected path;
+23. representative and capacity Program bytes/content refs remain exact;
+24. Runtime, Journal, Store, PostgreSQL, App production API, CLI, and REST behavior are unchanged;
+25. no Effect, nonce, submission, outbox, config/fact/replay/lifecycle/compatibility surface is
     reintroduced;
-23. current docs and the negative scanner teach only this authoring model;
-24. the combined complexity report achieves a non-positive production-authoring LOC delta or
+26. current docs and the negative scanner teach only this authoring model;
+27. the combined complexity report achieves a non-positive production-authoring LOC delta or
     records the mandatory architect justification for every irreducible positive line; and
-25. both commit-level reviews, cumulative review, focused verification, and final CI are recorded
+28. both commit-level reviews, cumulative review, focused verification, and final CI are recorded
     and green.
 
 ## 15. Cutover and rollback
