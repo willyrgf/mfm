@@ -17,8 +17,8 @@ use mfm_ids::{
     SemanticTypeId, StableId,
 };
 use mfm_values::{
-    CanonicalJsonProfile, EnumTagging, MfmValue, SchemaIdentity, SchemaKind, SchemaShape,
-    MAX_RUN_OBJECT_CANONICAL_BYTES,
+    CanonicalJsonProfile, EnumTagging, MfmValue, SchemaDescriptor, SchemaIdentity, SchemaKind,
+    SchemaShape, MAX_RUN_OBJECT_CANONICAL_BYTES,
 };
 use serde::{Deserialize, Serialize};
 
@@ -188,6 +188,10 @@ fn implementation_ref(schema_name: &str, id: StableId) -> Result<ContentRef> {
 
 /// Derives the nominal contract reference for a typed value.
 pub fn nominal_contract_ref<T: MfmValue>() -> Result<ContentRef> {
+    derive_nominal_contract::<T>().map(|(contract_ref, _)| contract_ref)
+}
+
+pub(crate) fn derive_nominal_contract<T: MfmValue>() -> Result<(ContentRef, SchemaDescriptor)> {
     let descriptor = T::schema_descriptor().map_err(|_| ProgramError::InvalidContract)?;
     let schema = descriptor
         .identity()
@@ -197,8 +201,9 @@ pub fn nominal_contract_ref<T: MfmValue>() -> Result<ContentRef> {
     if descriptor.identity().semantic_type_id.as_ref() != Some(&semantic) {
         return Err(ProgramError::InvalidContract);
     }
-    ContentRef::new(schema, raw_content_digest(b"mfm.contract.v1"))
-        .map_err(|_| ProgramError::InvalidContract)
+    let contract_ref = ContentRef::new(schema, raw_content_digest(b"mfm.contract.v1"))
+        .map_err(|_| ProgramError::InvalidContract)?;
+    Ok((contract_ref, descriptor))
 }
 
 /// One Pure or Read execution declaration.
