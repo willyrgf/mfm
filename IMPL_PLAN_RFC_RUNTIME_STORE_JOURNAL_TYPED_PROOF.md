@@ -1,7 +1,9 @@
 # Implementation plan: establish the Runtime, Journal, and Store proof path
 
-Status: approved implementation handoff for
-[`RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`](RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md)
+Status: implemented historical plan. The current repair and verification workflow is owned by
+[`FIXES_IMPL_PLAN_RFC_FOLLOWUPS.md`](FIXES_IMPL_PLAN_RFC_FOLLOWUPS.md) and
+[`docs/build-and-verification.md`](docs/build-and-verification.md). Commands and checkpoints below
+are retained as historical record, not current instructions.
 
 Audience: engineer-agents and architect reviewers implementing the complete MFM cutover
 

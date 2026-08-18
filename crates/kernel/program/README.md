@@ -76,3 +76,8 @@ wire ingress; raw declaration and Program source constructors are private.
 Program is content addressed and has no catalog, registry, erased value, runtime implementation,
 configuration contract, persisted Operation, or second wire DTO. Capability injection is
 deterministic authoring-time topology only and grants no provider, signer, or mutation authority.
+Operation implementations compose children only through `OperationExpansion`, and capability
+policies emit support States only through `InjectionWriter`. Direct trait callback calls bypass
+kernel callback accounting and are forbidden in reviewed production code. This trusted-code rule
+is not a security or authorization boundary; checked Program construction remains the persisted
+graph boundary.

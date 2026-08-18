@@ -41,6 +41,12 @@ classifier. `with_failure_handler` routes only the named typed State failures; i
 compiler, Runtime, adapter, Store, cancellation, or panic failures. Runtime, Journal, and Store
 never receive Operations, authoring setup, callbacks, or scope metadata.
 
+Operation implementations compose children only through `OperationExpansion`, and capability
+policies emit support States only through `InjectionWriter`. Direct trait callback calls bypass
+kernel callback accounting and are forbidden in reviewed production code. This trusted-code rule
+is not a security or authorization boundary; checked Program construction remains the persisted
+graph boundary.
+
 Pure work and byte-heavy validation run in immediately awaited pure blocking jobs. Connections,
 transactions, Store mutation, and provider IO remain async and outside those jobs. Dropping an
 operation is safe: no candidate exists yet, or the one in-flight append commits atomically and the

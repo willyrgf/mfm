@@ -1,7 +1,9 @@
 # Implementation plan: semantic contracts, Operation expansion, and capability injection
 
-Status: approved implementation handoff for
-[`RFC_FOLLOWUPS_FROM_REFACT_RUNTIME.md`](RFC_FOLLOWUPS_FROM_REFACT_RUNTIME.md)
+Status: implemented historical plan. The current repair and verification workflow is owned by
+[`FIXES_IMPL_PLAN_RFC_FOLLOWUPS.md`](FIXES_IMPL_PLAN_RFC_FOLLOWUPS.md) and
+[`docs/build-and-verification.md`](docs/build-and-verification.md). Commands and checkpoints below
+are retained as historical record, not current instructions.
 
 Audience: engineer-agents and non-author architect reviewers implementing the complete source
 authoring cutover

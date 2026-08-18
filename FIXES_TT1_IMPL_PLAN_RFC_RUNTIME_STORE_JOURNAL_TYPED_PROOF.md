@@ -1,7 +1,9 @@
 # TT1 implementation fixes for the Runtime, Journal, and Store proof path
 
-Status: implementation-ready corrective plan for the tree at
-`ea0ac115b8d82750e49211b58fb277067e735024`
+Status: implemented historical corrective plan. The current repair and verification workflow is
+owned by [`FIXES_IMPL_PLAN_RFC_FOLLOWUPS.md`](FIXES_IMPL_PLAN_RFC_FOLLOWUPS.md) and
+[`docs/build-and-verification.md`](docs/build-and-verification.md). Commands and checkpoints below
+are retained as historical record, not current instructions.
 
 Authority:
 
