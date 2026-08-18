@@ -1,0 +1,41 @@
+error[E0521]: borrowed data escapes outside of method
+  --> tests/ui/scoped_escape.rs:23:9
+   |
+21 |         expansion: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+   |         ---------  - let's call the lifetime of this reference `'1`
+   |         |
+   |         `expansion` is a reference that is only valid in the method body
+22 |     ) -> mfm_program::Result<()> {
+23 |         require_static_expansion(expansion);
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |         |
+   |         `expansion` escapes the method body here
+   |         argument requires that `'1` must outlive `'static`
+
+error[E0521]: borrowed data escapes outside of closure
+  --> tests/ui/scoped_escape.rs:42:13
+   |
+41 |         expansion.match_join::<Never, Never>(|join| {
+   |                                               ----
+   |                                               |
+   |                                               `join` is a reference that is only valid in the closure body
+   |                                               has type `&'1 mut MatchJoin<Never, Never, Never>`
+42 |             require_static_join(join);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |             |
+   |             `join` escapes the closure body here
+   |             argument requires that `'1` must outlive `'static`
+
+error[E0521]: borrowed data escapes outside of associated function
+  --> tests/ui/scoped_escape.rs:78:9
+   |
+76 |         writer: &mut InjectionWriter,
+   |         ------  - let's call the lifetime of this reference `'1`
+   |         |
+   |         `writer` is a reference that is only valid in the associated function body
+77 |     ) -> mfm_program::Result<()> {
+78 |         require_static_writer(writer);
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |         |
+   |         `writer` escapes the associated function body here
+   |         argument requires that `'1` must outlive `'static`

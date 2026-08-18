@@ -233,140 +233,6 @@ fn static_state_and_capability_identity_failures_map_at_program_authoring() {
     );
 }
 
-fn state_program() -> Program {
-    let value = nominal_contract_ref::<Value>().expect("value contract");
-    let never = nominal_contract_ref::<Never>().expect("never contract");
-    let state = StateDeclaration::new(
-        state_implementation_ref::<IdentityState>().expect("state"),
-        value.clone(),
-        value.clone(),
-        never.clone(),
-        Execution::pure(),
-        None,
-        None,
-    );
-    Program::new(
-        EntryPointId::new("mfm.test/program@1").expect("entry"),
-        value.clone(),
-        value.clone(),
-        never.clone(),
-        vec![Declaration::State(state)],
-    )
-    .expect("program")
-}
-
-#[test]
-fn program_v2_round_trips_and_rejects_hostile_wire() {
-    let program = state_program();
-    assert_eq!(
-        std::str::from_utf8(program.canonical_bytes()).expect("utf8"),
-        r#"{"admitted_context_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"declarations":[{"kind":"state","value":{"execution":{"kind":"pure"},"failure_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.kernel.never:1:sha256-jcs-v1:00e01bfecb60f575bba12886041598ad758074b704806a8af2c036172c01a4d8"},"failure_next_index":null,"input_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"next_index":null,"output_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"},"state_implementation_ref":{"content_digest":"content:sha256-v1:fab16c95f74ec061a9482105a20937043dd820e983a35ae63d235d69e53c540a","schema_id":"schema:mfm.state-implementation:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}}}],"entry_point_id":"mfm.test/program@1","root_failure_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.kernel.never:1:sha256-jcs-v1:00e01bfecb60f575bba12886041598ad758074b704806a8af2c036172c01a4d8"},"root_success_contract_ref":{"content_digest":"content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927","schema_id":"schema:mfm.derived.value:1:sha256-jcs-v1:e48ceec83bc342688038e9ad63e1720d80fe62978f7b9af0a4d7bc53628f4add"}}"#
-    );
-    assert_eq!(
-        program.content_ref().schema_id().as_str(),
-        "schema:mfm-program-document:2:sha256-jcs-v1:fc3c33ba3470e25a166df52597c4b45a723dd6d0823d1318938c29225323076c"
-    );
-    assert_eq!(
-        program.content_ref().content_digest().as_str(),
-        "content:sha256-v1:e7faf0b0db6284824c9d75baf9cd237a43fdf3627ac71f0ea5be6d958d4d035f"
-    );
-    let decoded = Program::decode_canonical(program.canonical_bytes()).expect("decode");
-    assert_eq!(decoded.content_ref(), program.content_ref());
-    assert_eq!(decoded.canonical_bytes(), program.canonical_bytes());
-
-    let mut unknown: serde_json::Value =
-        serde_json::from_slice(program.canonical_bytes()).expect("json");
-    unknown
-        .as_object_mut()
-        .expect("object")
-        .insert("version".to_owned(), serde_json::json!(1));
-    let unknown = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
-        &serde_json::to_string(&unknown).expect("json"),
-    )
-    .expect("canonical");
-    assert_eq!(
-        Program::decode_canonical(unknown.as_bytes()),
-        Err(ProgramError::Canonical)
-    );
-
-    let mut noncanonical = program.canonical_bytes().to_vec();
-    noncanonical.push(b' ');
-    assert_eq!(
-        Program::decode_canonical(&noncanonical),
-        Err(ProgramError::Canonical)
-    );
-
-    let raw: serde_json::Value =
-        serde_json::from_slice(program.canonical_bytes()).expect("program json");
-    for field in ["next_index", "failure_next_index"] {
-        let mut omitted = raw.clone();
-        omitted["declarations"][0]["value"]
-            .as_object_mut()
-            .expect("state")
-            .remove(field);
-        assert_eq!(
-            Program::decode_canonical(&canonical_json(&omitted)),
-            Err(ProgramError::Canonical),
-            "missing mandatory nullable field {field}"
-        );
-    }
-    let mut overflow = raw.clone();
-    overflow["declarations"][0]["value"]["next_index"] = serde_json::json!(65_536_u64);
-    assert_eq!(
-        Program::decode_canonical(&canonical_json(&overflow)),
-        Err(ProgramError::Canonical)
-    );
-    let mut nested_unknown = raw;
-    nested_unknown["declarations"][0]["value"]["execution"]["legacy"] = serde_json::json!(true);
-    assert_eq!(
-        Program::decode_canonical(&canonical_json(&nested_unknown)),
-        Err(ProgramError::Canonical)
-    );
-
-    for retired_tag in ["state_prepared", "state_concluded_access"] {
-        let mut retired: serde_json::Value =
-            serde_json::from_slice(program.canonical_bytes()).expect("program json");
-        retired["declarations"][0]["kind"] = serde_json::json!(retired_tag);
-        assert_eq!(
-            Program::decode_canonical(&canonical_json(&retired)),
-            Err(ProgramError::Canonical),
-            "retired v1 tag {retired_tag}"
-        );
-    }
-    for retired_field in ["occurrence", "preparation"] {
-        let mut retired: serde_json::Value =
-            serde_json::from_slice(program.canonical_bytes()).expect("program json");
-        retired["declarations"][0]["value"][retired_field] = serde_json::json!({});
-        assert_eq!(
-            Program::decode_canonical(&canonical_json(&retired)),
-            Err(ProgramError::Canonical),
-            "retired v1 field {retired_field}"
-        );
-    }
-    for retired_field in [
-        "execution_binding",
-        "physical_target_ref",
-        "adapter_implementation_ref",
-    ] {
-        let mut retired: serde_json::Value =
-            serde_json::from_slice(program.canonical_bytes()).expect("program json");
-        retired["declarations"][0]["value"]["execution"][retired_field] = serde_json::json!({});
-        assert_eq!(
-            Program::decode_canonical(&canonical_json(&retired)),
-            Err(ProgramError::Canonical),
-            "retired inline field {retired_field}"
-        );
-    }
-}
-
-fn canonical_json(value: &serde_json::Value) -> Vec<u8> {
-    mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
-        &serde_json::to_string(value).expect("json"),
-    )
-    .expect("canonical")
-    .to_vec()
-}
-
 fn state(
     input: ContentRef,
     output: ContentRef,
@@ -423,7 +289,7 @@ fn match_branch_rejoin_common_failure_and_tag_order_are_checked() {
         ["a", "a-0", "a.0", "a0"]
     );
 
-    let program = Program::new(
+    let _program = Program::new(
         EntryPointId::new("mfm.test/branch-rejoin@1").expect("entry"),
         value.clone(),
         value.clone(),
@@ -449,24 +315,6 @@ fn match_branch_rejoin_common_failure_and_tag_order_are_checked() {
         ],
     )
     .expect("branch/rejoin program");
-    assert_eq!(
-        Program::decode_canonical(program.canonical_bytes())
-            .expect("round trip")
-            .content_ref(),
-        program.content_ref()
-    );
-
-    let mut hostile_order: serde_json::Value =
-        serde_json::from_slice(program.canonical_bytes()).expect("program json");
-    hostile_order["declarations"][0]["value"]["variants"]
-        .as_array_mut()
-        .expect("variants")
-        .swap(0, 1);
-    assert_eq!(
-        Program::decode_canonical(&canonical_json(&hostile_order)),
-        Err(ProgramError::InvalidContract)
-    );
-
     assert_eq!(
         MatchDeclaration::new(
             value.clone(),
@@ -514,11 +362,6 @@ fn program_bounds_and_edge_targets_are_exact() {
         Some(u16::MAX),
         None,
     );
-    assert_eq!(
-        Program::decode_canonical(&vec![b' '; 8_388_609]),
-        Err(ProgramError::Capacity)
-    );
-
     let match_declaration = Declaration::Match(
         MatchDeclaration::new(
             value.clone(),

@@ -1,79 +1,234 @@
-error[E0599]: no method named `read` found for mutable reference `&mut InjectionWriter` in the current scope
- --> tests/ui/scoped_authoring.rs:7:12
+error[E0599]: no method named `label` found for mutable reference `&mut OperationExpansion<Never, Never, Never>` in the current scope
+ --> tests/ui/scoped_authoring.rs:7:15
   |
-7 |     writer.read();
-  |            ^^^^ method not found in `&mut InjectionWriter`
+7 |     expansion.label();
+  |               ^^^^^ method not found in `&mut OperationExpansion<Never, Never, Never>`
+
+error[E0599]: no method named `place` found for mutable reference `&mut OperationExpansion<Never, Never, Never>` in the current scope
+ --> tests/ui/scoped_authoring.rs:8:15
+  |
+8 |     expansion.place();
+  |               ^^^^^ method not found in `&mut OperationExpansion<Never, Never, Never>`
+
+error[E0599]: no method named `select` found for mutable reference `&mut OperationExpansion<Never, Never, Never>` in the current scope
+ --> tests/ui/scoped_authoring.rs:9:15
+  |
+9 |     expansion.select();
+  |               ^^^^^^ method not found in `&mut OperationExpansion<Never, Never, Never>`
+
+error[E0599]: no method named `branch_to` found for mutable reference `&mut OperationExpansion<Never, Never, Never>` in the current scope
+  --> tests/ui/scoped_authoring.rs:10:15
+   |
+10 |     expansion.branch_to();
+   |               ^^^^^^^^^ method not found in `&mut OperationExpansion<Never, Never, Never>`
+
+error[E0599]: no method named `return_success` found for mutable reference `&mut OperationExpansion<Never, Never, Never>` in the current scope
+  --> tests/ui/scoped_authoring.rs:11:15
+   |
+11 |     expansion.return_success();
+   |               ^^^^^^^^^^^^^^ method not found in `&mut OperationExpansion<Never, Never, Never>`
+
+error[E0599]: no method named `finish` found for mutable reference `&mut OperationExpansion<Never, Never, Never>` in the current scope
+  --> tests/ui/scoped_authoring.rs:12:15
+   |
+12 |     expansion.finish();
+   |               ^^^^^^ method not found in `&mut OperationExpansion<Never, Never, Never>`
+
+error[E0599]: no method named `effect` found for mutable reference `&mut OperationExpansion<Never, Never, Never>` in the current scope
+  --> tests/ui/scoped_authoring.rs:13:15
+   |
+13 |     expansion.effect();
+   |               ^^^^^^ method not found in `&mut OperationExpansion<Never, Never, Never>`
+
+error[E0599]: no method named `read` found for mutable reference `&mut InjectionWriter` in the current scope
+  --> tests/ui/scoped_authoring.rs:17:12
+   |
+17 |     writer.read();
+   |            ^^^^ method not found in `&mut InjectionWriter`
 
 error[E0599]: no method named `operation` found for mutable reference `&mut InjectionWriter` in the current scope
- --> tests/ui/scoped_authoring.rs:8:12
-  |
-8 |     writer.operation();
-  |            ^^^^^^^^^ method not found in `&mut InjectionWriter`
+  --> tests/ui/scoped_authoring.rs:18:12
+   |
+18 |     writer.operation();
+   |            ^^^^^^^^^ method not found in `&mut InjectionWriter`
 
 error[E0599]: no method named `match_join` found for mutable reference `&mut InjectionWriter` in the current scope
- --> tests/ui/scoped_authoring.rs:9:12
-  |
-9 |     writer.match_join();
-  |            ^^^^^^^^^^ method not found in `&mut InjectionWriter`
+  --> tests/ui/scoped_authoring.rs:19:12
+   |
+19 |     writer.match_join();
+   |            ^^^^^^^^^^ method not found in `&mut InjectionWriter`
 
 error[E0599]: no method named `with_failure_handler` found for mutable reference `&mut InjectionWriter` in the current scope
-  --> tests/ui/scoped_authoring.rs:10:12
+  --> tests/ui/scoped_authoring.rs:20:12
    |
-10 |     writer.with_failure_handler();
+20 |     writer.with_failure_handler();
    |            ^^^^^^^^^^^^^^^^^^^^ method not found in `&mut InjectionWriter`
 
-error[E0599]: no method named `finish` found for mutable reference `&mut InjectionWriter` in the current scope
-  --> tests/ui/scoped_authoring.rs:11:12
+error[E0599]: no method named `label` found for mutable reference `&mut InjectionWriter` in the current scope
+  --> tests/ui/scoped_authoring.rs:21:12
    |
-11 |     writer.finish();
+21 |     writer.label();
+   |            ^^^^^ method not found in `&mut InjectionWriter`
+
+error[E0599]: no method named `place` found for mutable reference `&mut InjectionWriter` in the current scope
+  --> tests/ui/scoped_authoring.rs:22:12
+   |
+22 |     writer.place();
+   |            ^^^^^ method not found in `&mut InjectionWriter`
+
+error[E0599]: no method named `select` found for mutable reference `&mut InjectionWriter` in the current scope
+  --> tests/ui/scoped_authoring.rs:23:12
+   |
+23 |     writer.select();
+   |            ^^^^^^ method not found in `&mut InjectionWriter`
+
+error[E0599]: no method named `branch_to` found for mutable reference `&mut InjectionWriter` in the current scope
+  --> tests/ui/scoped_authoring.rs:24:12
+   |
+24 |     writer.branch_to();
+   |            ^^^^^^^^^ method not found in `&mut InjectionWriter`
+
+error[E0599]: no method named `return_success` found for mutable reference `&mut InjectionWriter` in the current scope
+  --> tests/ui/scoped_authoring.rs:25:12
+   |
+25 |     writer.return_success();
+   |            ^^^^^^^^^^^^^^ method not found in `&mut InjectionWriter`
+
+error[E0599]: no method named `finish` found for mutable reference `&mut InjectionWriter` in the current scope
+  --> tests/ui/scoped_authoring.rs:26:12
+   |
+26 |     writer.finish();
+   |            ^^^^^^ method not found in `&mut InjectionWriter`
+
+error[E0599]: no method named `effect` found for mutable reference `&mut InjectionWriter` in the current scope
+  --> tests/ui/scoped_authoring.rs:27:12
+   |
+27 |     writer.effect();
    |            ^^^^^^ method not found in `&mut InjectionWriter`
 
 error[E0599]: no method named `select` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:15:10
+  --> tests/ui/scoped_authoring.rs:31:10
    |
-15 |     join.select();
+31 |     join.select();
    |          ^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
 
 error[E0599]: no method named `place` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:16:10
+  --> tests/ui/scoped_authoring.rs:32:10
    |
-16 |     join.place();
+32 |     join.place();
+   |          ^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
+
+error[E0599]: no method named `label` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
+  --> tests/ui/scoped_authoring.rs:33:10
+   |
+33 |     join.label();
    |          ^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
 
 error[E0599]: no method named `branch_to` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:17:10
+  --> tests/ui/scoped_authoring.rs:34:10
    |
-17 |     join.branch_to();
+34 |     join.branch_to();
    |          ^^^^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
 
 error[E0599]: no method named `return_success` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:18:10
+  --> tests/ui/scoped_authoring.rs:35:10
    |
-18 |     join.return_success();
+35 |     join.return_success();
    |          ^^^^^^^^^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
 
 error[E0599]: no method named `finish` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:19:10
+  --> tests/ui/scoped_authoring.rs:36:10
    |
-19 |     join.finish();
+36 |     join.finish();
    |          ^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
 
-error: cannot construct `InjectionWriter` with struct literal syntax due to private fields
-  --> tests/ui/scoped_authoring.rs:23:19
+error[E0599]: no method named `effect` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
+  --> tests/ui/scoped_authoring.rs:37:10
    |
-23 |     let _writer = InjectionWriter {};
+37 |     join.effect();
+   |          ^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
+
+error: cannot construct `OperationExpansion<Never, Never, Never>` with struct literal syntax due to private fields
+  --> tests/ui/scoped_authoring.rs:41:22
+   |
+41 |     let _expansion = OperationExpansion::<Never, Never, Never> {};
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: you might have meant to use the `new` associated function
+   |
+41 -     let _expansion = OperationExpansion::<Never, Never, Never> {};
+41 +     let _expansion = OperationExpansion::<Never, Never, Never>::new(_, _, _, _, _, _);
+   |
+
+error: cannot construct `InjectionWriter` with struct literal syntax due to private fields
+  --> tests/ui/scoped_authoring.rs:42:19
+   |
+42 |     let _writer = InjectionWriter {};
    |                   ^^^^^^^^^^^^^^^
 
 error: cannot construct `MatchJoin<Never, Never, Never>` with struct literal syntax due to private fields
-  --> tests/ui/scoped_authoring.rs:24:17
+  --> tests/ui/scoped_authoring.rs:43:17
    |
-24 |     let _join = MatchJoin::<Never, Never, Never> {};
+43 |     let _join = MatchJoin::<Never, Never, Never> {};
    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error[E0277]: the trait bound `InjectionWriter: Clone` is not satisfied
-  --> tests/ui/scoped_authoring.rs:25:21
+error[E0624]: associated function `new` is private
+  --> tests/ui/scoped_authoring.rs:44:56
    |
-25 |     require_clone::<InjectionWriter>();
+44 |       let _ = OperationExpansion::<Never, Never, Never>::new;
+   |                                                          ^^^ private associated function
+   |
+  ::: src/authoring.rs
+   |
+   | /     fn new(
+   | |         input_contract_ref: ContentRef,
+   | |         output_contract_ref: ContentRef,
+   | |         failure_contract_ref: ContentRef,
+...  |
+   | |         identities: IdentityMemo,
+   | |     ) -> Self {
+   | |_____________- private associated function defined here
+
+error[E0599]: no associated function or constant named `new` found for struct `InjectionWriter` in the current scope
+  --> tests/ui/scoped_authoring.rs:45:30
+   |
+45 |     let _ = InjectionWriter::new;
+   |                              ^^^ associated function or constant not found in `InjectionWriter`
+
+error[E0599]: no associated function or constant named `new` found for struct `MatchJoin<I, O, F>` in the current scope
+  --> tests/ui/scoped_authoring.rs:46:47
+   |
+46 |     let _ = MatchJoin::<Never, Never, Never>::new;
+   |                                               ^^^ associated function or constant not found in `MatchJoin<Never, Never, Never>`
+
+error[E0277]: the trait bound `OperationExpansion<Never, Never, Never>: Clone` is not satisfied
+  --> tests/ui/scoped_authoring.rs:47:21
+   |
+47 |     require_clone::<OperationExpansion<Never, Never, Never>>();
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `OperationExpansion<Never, Never, Never>`
+   |
+note: required by a bound in `require_clone`
+  --> tests/ui/scoped_authoring.rs:3:21
+   |
+ 3 | fn require_clone<T: Clone>() {}
+   |                     ^^^^^ required by this bound in `require_clone`
+
+error[E0277]: the trait bound `OperationExpansion<Never, Never, Never>: Default` is not satisfied
+  --> tests/ui/scoped_authoring.rs:48:23
+   |
+48 |     require_default::<OperationExpansion<Never, Never, Never>>();
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `OperationExpansion<Never, Never, Never>`
+   |
+note: required by a bound in `require_default`
+  --> tests/ui/scoped_authoring.rs:4:23
+   |
+ 4 | fn require_default<T: Default>() {}
+   |                       ^^^^^^^ required by this bound in `require_default`
+
+error[E0277]: the trait bound `InjectionWriter: Clone` is not satisfied
+  --> tests/ui/scoped_authoring.rs:49:21
+   |
+49 |     require_clone::<InjectionWriter>();
    |                     ^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `InjectionWriter`
    |
 note: required by a bound in `require_clone`
@@ -83,9 +238,9 @@ note: required by a bound in `require_clone`
    |                     ^^^^^ required by this bound in `require_clone`
 
 error[E0277]: the trait bound `InjectionWriter: Default` is not satisfied
-  --> tests/ui/scoped_authoring.rs:26:23
+  --> tests/ui/scoped_authoring.rs:50:23
    |
-26 |     require_default::<InjectionWriter>();
+50 |     require_default::<InjectionWriter>();
    |                       ^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `InjectionWriter`
    |
 note: required by a bound in `require_default`
@@ -95,9 +250,9 @@ note: required by a bound in `require_default`
    |                       ^^^^^^^ required by this bound in `require_default`
 
 error[E0277]: the trait bound `MatchJoin<Never, Never, Never>: Clone` is not satisfied
-  --> tests/ui/scoped_authoring.rs:27:21
+  --> tests/ui/scoped_authoring.rs:51:21
    |
-27 |     require_clone::<MatchJoin<Never, Never, Never>>();
+51 |     require_clone::<MatchJoin<Never, Never, Never>>();
    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `MatchJoin<Never, Never, Never>`
    |
 note: required by a bound in `require_clone`
@@ -107,9 +262,9 @@ note: required by a bound in `require_clone`
    |                     ^^^^^ required by this bound in `require_clone`
 
 error[E0277]: the trait bound `MatchJoin<Never, Never, Never>: Default` is not satisfied
-  --> tests/ui/scoped_authoring.rs:28:23
+  --> tests/ui/scoped_authoring.rs:52:23
    |
-28 |     require_default::<MatchJoin<Never, Never, Never>>();
+52 |     require_default::<MatchJoin<Never, Never, Never>>();
    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `MatchJoin<Never, Never, Never>`
    |
 note: required by a bound in `require_default`

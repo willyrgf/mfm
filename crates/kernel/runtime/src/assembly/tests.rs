@@ -193,10 +193,20 @@ fn association_result<S: MfmValue>(
     tags: &[&str],
     target_input: ContentRef,
 ) -> Result<MatchProjection> {
+    association_result_with_payload::<S>(tags, target_input, true)
+}
+
+fn association_result_with_payload<S: MfmValue>(
+    tags: &[&str],
+    target_input: ContentRef,
+    register_payload: bool,
+) -> Result<MatchProjection> {
     let mut builder = RuntimeAssemblyBuilder::new();
-    builder
-        .register_value::<AsymmetricPayload>()
-        .expect("payload codec");
+    if register_payload {
+        builder
+            .register_value::<AsymmetricPayload>()
+            .expect("payload codec");
+    }
     builder.register_value::<S>().expect("selector codec");
     let assembly = builder.finish().expect("assembly");
     let program = retained_match_program::<S>(tags, &target_input);
@@ -210,6 +220,19 @@ fn association_result<S: MfmValue>(
         program.declarations(),
         &assembly.inner,
     )
+}
+
+#[test]
+fn match_payload_codec_must_be_registered() {
+    let payload = nominal_contract_ref::<AsymmetricPayload>().expect("payload");
+    assert!(matches!(
+        association_result_with_payload::<GenericExternal<AsymmetricPayload>>(
+            &["selected"],
+            payload,
+            false,
+        ),
+        Err(RuntimeError::IncompatibleAssembly)
+    ));
 }
 
 fn retained_match_program<S: MfmValue>(tags: &[&str], target_input: &ContentRef) -> Program {

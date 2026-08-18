@@ -32,10 +32,8 @@ value!(Failure);
 #[derive(Debug, Clone, Serialize, Deserialize, MfmValue)]
 struct Tiny {}
 
-macro_rules! pure_state {
-    ($state:ident, $input:ty, $output:ty, $failure:ty, $id:literal) => {
-        struct $state;
-
+macro_rules! state {
+    ($state:ty, $input:ty, $output:ty, $failure:ty, $id:literal) => {
         impl State for $state {
             type Input = $input;
             type Output = $output;
@@ -45,12 +43,162 @@ macro_rules! pure_state {
                 StableId::new($id).map_err(|_| ProgramError::InvalidContract)
             }
         }
+    };
+}
+
+macro_rules! pure_state {
+    ($state:ident, $input:ty, $output:ty, $failure:ty, $id:literal, |$value:ident| $evaluate:expr) => {
+        struct $state;
+        state!($state, $input, $output, $failure, $id);
+
+        impl PureState for $state {
+            fn evaluate($value: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+                $evaluate
+            }
+        }
+    };
+    ($state:ident, $input:ty, $output:ty, $failure:ty, $id:literal) => {
+        struct $state;
+
+        state!($state, $input, $output, $failure, $id);
 
         impl PureState for $state {
             fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
                 ProposedStateOutcome::Success {
                     output: Self::Output { value: input.value },
                 }
+            }
+        }
+    };
+}
+
+macro_rules! operation {
+    ($operation:ty, $input:ty, $output:ty, $failure:ty, |$this:ident, $body:ident| $expand:expr) => {
+        impl Operation for $operation {
+            type Input = $input;
+            type Output = $output;
+            type Failure = $failure;
+
+            fn expand(
+                &self,
+                $body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+            ) -> mfm_program::Result<()> {
+                let $this = self;
+                $expand
+            }
+        }
+    };
+}
+
+macro_rules! read_capability {
+    ($capability:ident, $intent:ty, $evidence:ty, $id:literal) => {
+        struct $capability;
+
+        impl ReadCapabilityContract for $capability {
+            type Intent = $intent;
+            type Evidence = $evidence;
+
+            fn contract_id() -> mfm_capabilities::Result<StableId> {
+                StableId::new($id).map_err(|_| CapabilityError::InvalidContract)
+            }
+
+            fn bind_evidence(
+                _intent: &Self::Intent,
+                _evidence: &Self::Evidence,
+            ) -> mfm_capabilities::Result<()> {
+                Ok(())
+            }
+        }
+    };
+}
+
+macro_rules! read_state {
+    ($state:ident, $capability:ty, $input:ty, $output:ty, $failure:ty, $id:literal, |$input_value:ident, $evidence:ident| $interpret:expr) => {
+        struct $state;
+        state!($state, $input, $output, $failure, $id);
+
+        impl ReadState<$capability> for $state {
+            fn prepare(
+                input: &Self::Input,
+            ) -> Result<<$capability as ReadCapabilityContract>::Intent, ReadPreparationError> {
+                Ok(input.clone())
+            }
+
+            fn interpret(
+                $input_value: Self::Input,
+                $evidence: &<$capability as ReadCapabilityContract>::Evidence,
+            ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+                $interpret
+            }
+        }
+    };
+}
+
+macro_rules! counted_value {
+    ($value:ident, $descriptor_calls:ident, $semantic_calls:ident, $schema_name:literal, $semantic_name:literal, $digest_byte:literal) => {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[serde(transparent)]
+        struct $value(u8);
+
+        impl mfm_values::MfmValue for $value {
+            fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+                $descriptor_calls.fetch_add(1, Ordering::SeqCst);
+                framework_value_descriptor(
+                    "mfm-program",
+                    Self::semantic_id()?,
+                    $schema_name,
+                    SchemaShape::UnsignedInteger { bits: 8 },
+                    std::any::type_name::<Self>(),
+                )
+            }
+
+            fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
+                $semantic_calls.fetch_add(1, Ordering::SeqCst);
+                SemanticTypeId::new(
+                    "mfm.test.authoring",
+                    $semantic_name,
+                    "1",
+                    DigestAlgorithm::Sha256JcsV1,
+                    DigestBytes::from_array([$digest_byte; 32]),
+                )
+                .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+            }
+        }
+    };
+}
+
+macro_rules! injection {
+    (
+        $capability:ty => $state:ty,
+        $setup:ty,
+        $input:ty => $output:ty,
+        |$binding_setup:ident| $binding:expr,
+        |$before_setup:ident, $before_writer:ident| $before:expr,
+        |$after_setup:ident, $after_writer:ident| $after:expr
+    ) => {
+        impl CapabilityInjection<$state> for $capability {
+            type Setup = $setup;
+            type ExpandedInput = $input;
+            type ExpandedOutput = $output;
+
+            fn original_binding_ref(
+                $binding_setup: &Self::Setup,
+            ) -> mfm_program::Result<ContentRef> {
+                $binding
+            }
+
+            fn write_before(
+                $before_setup: &Self::Setup,
+                $before_writer: &mut InjectionWriter,
+            ) -> mfm_program::Result<()> {
+                $before
+            }
+
+            fn write_after(
+                $after_setup: &Self::Setup,
+                $after_writer: &mut InjectionWriter,
+            ) -> mfm_program::Result<()> {
+                $after
             }
         }
     };
@@ -63,25 +211,52 @@ pure_state!(DtoC, D, C, Never, "mfm.test.authoring/d-to-c@1");
 pure_state!(IdentityA, A, A, Never, "mfm.test.authoring/identity-a@1");
 pure_state!(BtoA, B, A, Never, "mfm.test.authoring/b-to-a@1");
 pure_state!(CtoD, C, D, Never, "mfm.test.authoring/c-to-d@1");
+pure_state!(
+    FallibleAtoBWithD,
+    A,
+    B,
+    D,
+    "mfm.test.authoring/fallible-a-to-b-with-d@1"
+);
+pure_state!(
+    FallibleBtoCWithFailure,
+    B,
+    C,
+    Failure,
+    "mfm.test.authoring/fallible-b-to-c@1"
+);
+pure_state!(DtoB, D, B, Never, "mfm.test.authoring/d-to-b@1");
+pure_state!(
+    FallibleIdentityB,
+    B,
+    B,
+    Failure,
+    "mfm.test.authoring/fallible-identity-b@1"
+);
+pure_state!(ForeignBtoC, B, C, A, "mfm.test.authoring/foreign-b-to-c@1");
+pure_state!(
+    SupportNever,
+    A,
+    A,
+    Never,
+    "mfm.test.authoring/support-never@1"
+);
+pure_state!(
+    SupportHandled,
+    A,
+    A,
+    Failure,
+    "mfm.test.authoring/support-handled@1"
+);
 
-struct IdentityTiny;
-
-impl State for IdentityTiny {
-    type Input = Tiny;
-    type Output = Tiny;
-    type Failure = Never;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.authoring/identity-tiny@1")
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl PureState for IdentityTiny {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success { output: input }
-    }
-}
+pure_state!(
+    IdentityTiny,
+    Tiny,
+    Tiny,
+    Never,
+    "mfm.test.authoring/identity-tiny@1",
+    |input| ProposedStateOutcome::Success { output: input }
+);
 pure_state!(
     FailureToB,
     Failure,
@@ -104,428 +279,197 @@ pure_state!(
     "mfm.test.authoring/failure-to-a@1"
 );
 
-struct FallibleAtoB;
-
-impl State for FallibleAtoB {
-    type Input = A;
-    type Output = B;
-    type Failure = Failure;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.authoring/fallible-a-to-b@1")
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl PureState for FallibleAtoB {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success {
-            output: B { value: input.value },
-        }
-    }
-}
+pure_state!(
+    FallibleAtoB,
+    A,
+    B,
+    Failure,
+    "mfm.test.authoring/fallible-a-to-b@1"
+);
 
 struct Empty;
-
-impl Operation for Empty {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        _body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        Ok(())
-    }
-}
+operation!(Empty, A, A, Never, |_this, _body| Ok(()));
 
 struct AtoBOperation;
-
-impl Operation for AtoBOperation {
-    type Input = A;
-    type Output = B;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.pure::<AtoB>()
-    }
-}
+operation!(AtoBOperation, A, B, Never, |_this, body| body
+    .pure::<AtoB>());
 
 struct Parent;
-
-impl Operation for Parent {
-    type Input = A;
-    type Output = C;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.operation(&AtoBOperation)?;
-        body.pure::<BtoC>()
-    }
-}
+operation!(Parent, A, C, Never, |_this, body| {
+    body.operation(&AtoBOperation)?;
+    body.pure::<BtoC>()
+});
 
 struct CountedRoot<'a> {
     calls: &'a Cell<usize>,
     fail: bool,
 }
 
-impl Operation for CountedRoot<'_> {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        _body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        self.calls.set(self.calls.get() + 1);
-        if self.fail {
-            Err(ProgramError::Canonical)
-        } else {
-            Ok(())
-        }
+operation!(CountedRoot<'_>, A, A, Never, |this, _body| {
+    this.calls.set(this.calls.get() + 1);
+    if this.fail {
+        Err(ProgramError::Canonical)
+    } else {
+        Ok(())
     }
-}
+});
 
 struct Recursive(u8);
-
-impl Operation for Recursive {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        if self.0 == 0 {
-            body.pure::<IdentityA>()
-        } else {
-            body.operation(&Self(self.0 - 1))
-        }
+operation!(Recursive, A, A, Never, |this, body| {
+    if this.0 == 0 {
+        body.pure::<IdentityA>()
+    } else {
+        body.operation(&Self(this.0 - 1))
     }
-}
+});
 
 struct MutualA(u8);
 struct MutualB(u8);
 
-impl Operation for MutualA {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        if self.0 == 0 {
-            body.pure::<IdentityA>()
-        } else {
-            body.operation(&MutualB(self.0 - 1))
-        }
+operation!(MutualA, A, A, Never, |this, body| {
+    if this.0 == 0 {
+        body.pure::<IdentityA>()
+    } else {
+        body.operation(&MutualB(this.0 - 1))
     }
-}
+});
 
-impl Operation for MutualB {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        if self.0 == 0 {
-            body.pure::<IdentityA>()
-        } else {
-            body.operation(&MutualA(self.0 - 1))
-        }
+operation!(MutualB, A, A, Never, |this, body| {
+    if this.0 == 0 {
+        body.pure::<IdentityA>()
+    } else {
+        body.operation(&MutualA(this.0 - 1))
     }
-}
+});
 
 struct InvalidEmpty;
-
-impl Operation for InvalidEmpty {
-    type Input = A;
-    type Output = B;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        _body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        Ok(())
-    }
-}
+operation!(InvalidEmpty, A, B, Never, |_this, _body| Ok(()));
 
 struct ConfiguredIdentity(usize);
-
-impl Operation for ConfiguredIdentity {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        for _ in 0..self.0 {
-            body.pure::<IdentityA>()?;
-        }
-        Ok(())
+operation!(ConfiguredIdentity, A, A, Never, |this, body| {
+    for _ in 0..this.0 {
+        body.pure::<IdentityA>()?;
     }
-}
+    Ok(())
+});
 
 struct RepeatedConfiguredChildren;
-
-impl Operation for RepeatedConfiguredChildren {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.operation(&ConfiguredIdentity(1))?;
-        body.operation(&ConfiguredIdentity(2))
-    }
-}
-
-struct EmptyChild;
-
-impl Operation for EmptyChild {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        _body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        Ok(())
-    }
-}
+operation!(RepeatedConfiguredChildren, A, A, Never, |_this, body| {
+    body.operation(&ConfiguredIdentity(1))?;
+    body.operation(&ConfiguredIdentity(2))
+});
 
 struct CallbackErrorChild<'a>(&'a Cell<usize>);
 
-impl Operation for CallbackErrorChild<'_> {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        self.0.set(self.0.get() + 1);
-        body.pure::<IdentityA>()?;
-        Err(ProgramError::Canonical)
-    }
-}
+operation!(CallbackErrorChild<'_>, A, A, Never, |this, body| {
+    this.0.set(this.0.get() + 1);
+    body.pure::<IdentityA>()?;
+    Err(ProgramError::Canonical)
+});
 
 struct AtomicChildren;
+operation!(AtomicChildren, A, A, Never, |_this, body| {
+    assert_eq!(body.operation(&Empty), Err(ProgramError::InvalidContract));
+    let calls = Cell::new(0);
+    assert_eq!(
+        body.operation(&CallbackErrorChild(&calls)),
+        Err(ProgramError::InvalidContract)
+    );
+    assert_eq!(calls.get(), 1);
+    body.pure::<IdentityA>()
+});
 
-impl Operation for AtomicChildren {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
+struct WrongInputChild<'a>(&'a Cell<usize>);
 
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        assert_eq!(
-            body.operation(&EmptyChild),
-            Err(ProgramError::InvalidContract)
-        );
-        let calls = Cell::new(0);
-        assert_eq!(
-            body.operation(&CallbackErrorChild(&calls)),
-            Err(ProgramError::InvalidContract)
-        );
-        assert_eq!(calls.get(), 1);
-        body.pure::<IdentityA>()
-    }
+operation!(WrongInputChild<'_>, B, B, Never, |this, _body| {
+    this.0.set(this.0.get() + 1);
+    panic!("wrong-input child callback must not run")
+});
+
+struct WrongOutputChild<'a>(&'a Cell<usize>);
+
+operation!(WrongOutputChild<'_>, A, B, Never, |this, body| {
+    this.0.set(this.0.get() + 1);
+    body.pure::<IdentityA>()
+});
+
+struct ChildBoundaryMatrix<'a> {
+    wrong_input_calls: &'a Cell<usize>,
+    wrong_output_calls: &'a Cell<usize>,
 }
 
-struct ReadCapability;
+operation!(ChildBoundaryMatrix<'_>, A, A, Never, |this, body| {
+    assert_eq!(
+        body.operation(&WrongInputChild(this.wrong_input_calls)),
+        Err(ProgramError::InvalidContract)
+    );
+    assert_eq!(
+        body.operation(&WrongOutputChild(this.wrong_output_calls)),
+        Err(ProgramError::InvalidContract)
+    );
+    body.pure::<IdentityA>()
+});
 
-impl ReadCapabilityContract for ReadCapability {
-    type Intent = B;
-    type Evidence = C;
-
-    fn contract_id() -> mfm_capabilities::Result<StableId> {
-        StableId::new("mfm.test.authoring/read@1").map_err(|_| CapabilityError::InvalidContract)
+struct CatchChildDepth(bool);
+operation!(CatchChildDepth, A, A, Never, |this, body| {
+    if this.0 {
+        assert_eq!(body.operation(&Recursive(63)), Err(ProgramError::Capacity));
     }
+    body.operation(&Recursive(62))
+});
 
-    fn bind_evidence(
-        _intent: &Self::Intent,
-        _evidence: &Self::Evidence,
-    ) -> mfm_capabilities::Result<()> {
-        Ok(())
+read_capability!(ReadCapability, B, C, "mfm.test.authoring/read@1");
+read_state!(
+    ReadBtoC,
+    ReadCapability,
+    B,
+    C,
+    Failure,
+    "mfm.test.authoring/read-b-to-c@1",
+    |input, _evidence| ProposedStateOutcome::Success {
+        output: C { value: input.value },
     }
-}
+);
 
-struct ReadBtoC;
+pure_state!(Before, A, B, Failure, "mfm.test.authoring/before@1");
+pure_state!(After, C, D, Never, "mfm.test.authoring/after@1");
 
-impl State for ReadBtoC {
-    type Input = B;
-    type Output = C;
-    type Failure = Failure;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.authoring/read-b-to-c@1").map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl ReadState<ReadCapability> for ReadBtoC {
-    fn prepare(input: &Self::Input) -> Result<B, ReadPreparationError> {
-        Ok(input.clone())
-    }
-
-    fn interpret(
-        input: Self::Input,
-        _evidence: &C,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success {
-            output: C { value: input.value },
-        }
-    }
-}
-
-struct Before;
-
-impl State for Before {
-    type Input = A;
-    type Output = B;
-    type Failure = Failure;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.authoring/before@1").map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl PureState for Before {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success {
-            output: B { value: input.value },
-        }
-    }
-}
-
-struct After;
-
-impl State for After {
-    type Input = C;
-    type Output = D;
-    type Failure = Never;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.authoring/after@1").map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl PureState for After {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success {
-            output: D { value: input.value },
-        }
-    }
-}
-
-impl CapabilityInjection<ReadBtoC> for ReadCapability {
-    type Setup = ContentRef;
-    type ExpandedInput = A;
-    type ExpandedOutput = D;
-
-    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
-        Ok(setup.clone())
-    }
-
-    fn write_before(_setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
-        writer.pure::<Before>()
-    }
-
-    fn write_after(_setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
-        writer.pure::<After>()
-    }
-}
+injection!(
+    ReadCapability => ReadBtoC,
+    ContentRef,
+    A => D,
+    |setup| Ok(setup.clone()),
+    |_setup, writer| writer.pure::<Before>(),
+    |_setup, writer| writer.pure::<After>()
+);
 
 struct ReadOperation {
     binding: ContentRef,
 }
 
-struct ControlledReadCapability;
+read_capability!(
+    ControlledReadCapability,
+    A,
+    A,
+    "mfm.test.authoring/controlled-read@1"
+);
 
-impl ReadCapabilityContract for ControlledReadCapability {
-    type Intent = A;
-    type Evidence = A;
-
-    fn contract_id() -> mfm_capabilities::Result<StableId> {
-        StableId::new("mfm.test.authoring/controlled-read@1")
-            .map_err(|_| CapabilityError::InvalidContract)
-    }
-
-    fn bind_evidence(
-        _intent: &Self::Intent,
-        _evidence: &Self::Evidence,
-    ) -> mfm_capabilities::Result<()> {
-        Ok(())
-    }
-}
-
-struct ControlledRead;
-
-impl State for ControlledRead {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.authoring/controlled-read-state@1")
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-struct ForeignBefore;
-
-impl State for ForeignBefore {
-    type Input = A;
-    type Output = A;
-    type Failure = D;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.authoring/foreign-before@1")
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl PureState for ForeignBefore {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success { output: input }
-    }
-}
-
-impl ReadState<ControlledReadCapability> for ControlledRead {
-    fn prepare(input: &Self::Input) -> Result<A, ReadPreparationError> {
-        Ok(input.clone())
-    }
-
-    fn interpret(
-        input: Self::Input,
-        _evidence: &A,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success { output: input }
-    }
-}
+read_state!(
+    ControlledRead,
+    ControlledReadCapability,
+    A,
+    A,
+    Never,
+    "mfm.test.authoring/controlled-read-state@1",
+    |input, _evidence| ProposedStateOutcome::Success { output: input }
+);
+pure_state!(
+    ForeignBefore,
+    A,
+    A,
+    D,
+    "mfm.test.authoring/foreign-before@1"
+);
 
 #[derive(Clone, Copy)]
 enum HookFailure {
@@ -554,21 +498,19 @@ impl HookCounts {
     }
 }
 
-impl CapabilityInjection<ControlledRead> for ControlledReadCapability {
-    type Setup = HookCounts;
-    type ExpandedInput = A;
-    type ExpandedOutput = A;
-
-    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
+injection!(
+    ControlledReadCapability => ControlledRead,
+    HookCounts,
+    A => A,
+    |setup| {
         setup.binding.set(setup.binding.get() + 1);
         if matches!(setup.failure, HookFailure::Binding) {
             Err(ProgramError::Canonical)
         } else {
             nominal_contract_ref::<A>()
         }
-    }
-
-    fn write_before(setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
+    },
+    |setup, writer| {
         setup.before.set(setup.before.get() + 1);
         if matches!(setup.failure, HookFailure::Before) {
             Err(ProgramError::Canonical)
@@ -577,9 +519,8 @@ impl CapabilityInjection<ControlledRead> for ControlledReadCapability {
         } else {
             writer.pure::<IdentityA>()
         }
-    }
-
-    fn write_after(setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
+    },
+    |setup, writer| {
         setup.after.set(setup.after.get() + 1);
         if matches!(setup.failure, HookFailure::After) {
             Err(ProgramError::Canonical)
@@ -587,59 +528,76 @@ impl CapabilityInjection<ControlledRead> for ControlledReadCapability {
             writer.pure::<IdentityA>()
         }
     }
-}
+);
 
 struct AtomicRead<'a> {
     setup: &'a HookCounts,
 }
 
-impl Operation for AtomicRead<'_> {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        assert_eq!(
-            body.read::<ControlledRead, ControlledReadCapability>(self.setup),
-            Err(ProgramError::InvalidContract)
-        );
-        body.pure::<IdentityA>()
-    }
-}
+operation!(AtomicRead<'_>, A, A, Never, |this, body| {
+    assert_eq!(
+        body.read::<ControlledRead, ControlledReadCapability>(this.setup),
+        Err(ProgramError::InvalidContract)
+    );
+    body.pure::<IdentityA>()
+});
 
 struct RepeatedReads<'a> {
     setup: &'a HookCounts,
 }
 
-impl Operation for RepeatedReads<'_> {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
+operation!(RepeatedReads<'_>, A, A, Never, |this, body| {
+    body.read::<ControlledRead, ControlledReadCapability>(this.setup)?;
+    body.read::<ControlledRead, ControlledReadCapability>(this.setup)
+});
 
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.read::<ControlledRead, ControlledReadCapability>(self.setup)?;
-        body.read::<ControlledRead, ControlledReadCapability>(self.setup)
+operation!(ReadOperation, A, D, Failure, |this, body| body
+    .read::<ReadBtoC, ReadCapability>(
+    &this.binding
+));
+
+read_capability!(
+    HandledReadCapability,
+    A,
+    A,
+    "mfm.test.authoring/handled-read@1"
+);
+
+read_state!(
+    HandledRead,
+    HandledReadCapability,
+    A,
+    A,
+    Failure,
+    "mfm.test.authoring/handled-read-state@1",
+    |input, _evidence| ProposedStateOutcome::Success { output: input }
+);
+
+injection!(
+    HandledReadCapability => HandledRead,
+    ContentRef,
+    A => A,
+    |setup| Ok(setup.clone()),
+    |_setup, writer| {
+        writer.pure::<SupportNever>()?;
+        writer.pure::<SupportHandled>()
+    },
+    |_setup, writer| {
+        writer.pure::<SupportNever>()
     }
+);
+
+struct HandledInjectedRead {
+    binding: ContentRef,
 }
 
-impl Operation for ReadOperation {
-    type Input = A;
-    type Output = D;
-    type Failure = Failure;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.read::<ReadBtoC, ReadCapability>(&self.binding)
-    }
-}
+operation!(HandledInjectedRead, A, B, Never, |this, body| {
+    body.with_failure_handler::<Failure, A>(
+        |protected| protected.read::<HandledRead, HandledReadCapability>(&this.binding),
+        |handler| handler.pure::<FailureToA>(),
+    )?;
+    body.pure::<AtoB>()
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
@@ -647,6 +605,52 @@ enum Choice {
     Left(A),
     Right(B),
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+enum HandlerChoice {
+    Recover(Failure),
+}
+
+pure_state!(
+    FallibleAtoBWithHandlerChoice,
+    A,
+    B,
+    HandlerChoice,
+    "mfm.test.authoring/fallible-a-to-b-with-handler-choice@1"
+);
+
+pure_state!(
+    HandlerChoiceToA,
+    HandlerChoice,
+    A,
+    Never,
+    "mfm.test.authoring/handler-choice-to-a@1",
+    |input| {
+        let HandlerChoice::Recover(failure) = input;
+        ProposedStateOutcome::Success {
+            output: A {
+                value: failure.value,
+            },
+        }
+    }
+);
+
+pure_state!(
+    HandlerChoiceToBForeign,
+    HandlerChoice,
+    B,
+    D,
+    "mfm.test.authoring/handler-choice-to-b-foreign@1",
+    |input| {
+        let HandlerChoice::Recover(failure) = input;
+        ProposedStateOutcome::Success {
+            output: B {
+                value: failure.value,
+            },
+        }
+    }
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
@@ -659,6 +663,25 @@ enum GenericExternal<T> {
 enum GenericAdjacent<T> {
     Selected(T),
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, MfmValue)]
+#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
+enum AdjacentChoice {
+    Left(A),
+    Right(B),
+}
+
+pure_state!(
+    GenericToA,
+    GenericExternal<A>,
+    A,
+    Never,
+    "mfm.test.authoring/generic-to-a@1",
+    |input| {
+        let GenericExternal::Selected(output) = input;
+        ProposedStateOutcome::Success { output }
+    }
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
@@ -737,185 +760,147 @@ impl<const N: usize> mfm_values::MfmValue for LargeSelector<N> {
 }
 
 struct MatchOperation;
-
-impl Operation for MatchOperation {
-    type Input = Choice;
-    type Output = C;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.match_join::<Choice, C>(|arms| {
-            arms.arm::<A>(
-                StableId::new("left").map_err(|_| ProgramError::InvalidContract)?,
-                |arm| {
-                    arm.pure::<AtoB>()?;
-                    arm.pure::<BtoC>()
-                },
-            )?;
-            arms.arm::<B>(
-                StableId::new("right").map_err(|_| ProgramError::InvalidContract)?,
-                |arm| {
-                    arm.pure::<BtoD>()?;
-                    arm.pure::<DtoC>()
-                },
-            )
+operation!(MatchOperation, Choice, C, Never, |_this, body| {
+    body.match_join::<Choice, C>(|arms| {
+        arms.arm::<A>(tag("left")?, |arm| {
+            arm.operation(&AtoBOperation)?;
+            arm.pure::<BtoC>()
+        })?;
+        arms.arm::<B>(tag("right")?, |arm| {
+            arm.pure::<BtoD>()?;
+            arm.pure::<DtoC>()
         })
-    }
+    })
+});
+
+macro_rules! selected_match_operation {
+    ($operation:ident, $selector:ty) => {
+        struct $operation;
+        operation!($operation, $selector, A, Never, |_this, body| {
+            body.match_join::<$selector, A>(|arms| {
+                arms.arm::<A>(tag("selected")?, |arm| arm.pure::<IdentityA>())
+            })
+        });
+    };
 }
 
-struct GenericExternalOperation;
+selected_match_operation!(GenericExternalOperation, GenericExternal<A>);
+selected_match_operation!(GenericAdjacentOperation, GenericAdjacent<A>);
 
-impl Operation for GenericExternalOperation {
-    type Input = GenericExternal<A>;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.match_join::<GenericExternal<A>, A>(|arms| {
-            arms.arm::<A>(
-                StableId::new("selected").map_err(|_| ProgramError::InvalidContract)?,
-                |arm| arm.pure::<IdentityA>(),
-            )
+struct AdjacentChoiceOperation;
+operation!(
+    AdjacentChoiceOperation,
+    AdjacentChoice,
+    C,
+    Never,
+    |_this, body| {
+        body.match_join::<AdjacentChoice, C>(|arms| {
+            arms.arm::<A>(tag("left")?, |arm| {
+                arm.pure::<AtoB>()?;
+                arm.pure::<BtoC>()
+            })?;
+            arms.arm::<B>(tag("right")?, |arm| arm.pure::<BtoC>())
         })
     }
-}
+);
 
-struct GenericAdjacentOperation;
-
-impl Operation for GenericAdjacentOperation {
-    type Input = GenericAdjacent<A>;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.match_join::<GenericAdjacent<A>, A>(|arms| {
-            arms.arm::<A>(
-                StableId::new("selected").map_err(|_| ProgramError::InvalidContract)?,
-                |arm| arm.pure::<IdentityA>(),
-            )
+struct RetryMatchFirst(bool);
+operation!(
+    RetryMatchFirst,
+    GenericExternal<GenericExternal<A>>,
+    A,
+    Never,
+    |this, body| {
+        body.match_join::<GenericExternal<GenericExternal<A>>, A>(|arms| {
+            let selected = tag("selected")?;
+            if this.0 {
+                assert_eq!(
+                    arms.arm::<GenericExternal<A>>(selected.clone(), |branch| {
+                        branch.match_join::<GenericExternal<A>, A>(|nested| {
+                            nested.arm::<A>(selected.clone(), |arm| arm.pure::<IdentityA>())
+                        })
+                    }),
+                    Err(ProgramError::InvalidContract)
+                );
+            }
+            arms.arm::<GenericExternal<A>>(selected, |branch| branch.pure::<GenericToA>())
         })
     }
-}
+);
+
+struct AllTerminalMatch;
+operation!(AllTerminalMatch, Choice, C, Never, |_this, body| {
+    body.match_join::<Choice, B>(|arms| {
+        arms.arm::<A>(tag("left")?, |arm| {
+            arm.pure::<AtoB>()?;
+            arm.pure::<BtoC>()
+        })?;
+        arms.arm::<B>(tag("right")?, |arm| arm.pure::<BtoC>())
+    })
+});
 
 struct UnsortedMatchOperation;
-
-impl Operation for UnsortedMatchOperation {
-    type Input = UnsortedChoice;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
+operation!(
+    UnsortedMatchOperation,
+    UnsortedChoice,
+    A,
+    Never,
+    |_this, body| {
         body.match_join::<UnsortedChoice, A>(|arms| {
-            arms.arm::<A>(
-                StableId::new("zed").map_err(|_| ProgramError::InvalidContract)?,
-                |arm| arm.pure::<IdentityA>(),
-            )?;
-            arms.arm::<B>(
-                StableId::new("alpha").map_err(|_| ProgramError::InvalidContract)?,
-                |arm| arm.pure::<BtoA>(),
-            )
+            arms.arm::<A>(tag("zed")?, |arm| arm.pure::<IdentityA>())?;
+            arms.arm::<B>(tag("alpha")?, |arm| arm.pure::<BtoA>())
         })
     }
-}
+);
 
 struct BadMatch(u8);
-
-impl Operation for BadMatch {
-    type Input = Choice;
-    type Output = C;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.match_join::<Choice, C>(|arms| match self.0 {
-            0 => arms.arm::<A>(
-                StableId::new("left").map_err(|_| ProgramError::InvalidContract)?,
-                |arm| {
-                    arm.pure::<AtoB>()?;
-                    arm.pure::<BtoC>()
-                },
-            ),
-            1 => arms.arm::<A>(
-                StableId::new("unknown").map_err(|_| ProgramError::InvalidContract)?,
-                |_| panic!("unknown arm callback must not run"),
-            ),
-            2 => {
-                let left = StableId::new("left").map_err(|_| ProgramError::InvalidContract)?;
-                arms.arm::<A>(left.clone(), |arm| {
-                    arm.pure::<AtoB>()?;
-                    arm.pure::<BtoC>()
-                })?;
-                arms.arm::<A>(left, |_| panic!("duplicate arm callback must not run"))
-            }
-            3 => arms.arm::<B>(
-                StableId::new("left").map_err(|_| ProgramError::InvalidContract)?,
-                |_| panic!("wrong payload callback must not run"),
-            ),
-            _ => unreachable!(),
-        })
-    }
-}
+operation!(BadMatch, Choice, C, Never, |this, body| {
+    body.match_join::<Choice, C>(|arms| match this.0 {
+        0 => arms.arm::<A>(tag("left")?, |arm| {
+            arm.pure::<AtoB>()?;
+            arm.pure::<BtoC>()
+        }),
+        1 => arms.arm::<A>(tag("unknown")?, |_| {
+            panic!("unknown arm callback must not run")
+        }),
+        2 => {
+            let left = tag("left")?;
+            arms.arm::<A>(left.clone(), |arm| {
+                arm.pure::<AtoB>()?;
+                arm.pure::<BtoC>()
+            })?;
+            arms.arm::<A>(left, |_| panic!("duplicate arm callback must not run"))
+        }
+        3 => arms.arm::<B>(tag("left")?, |_| {
+            panic!("wrong payload callback must not run")
+        }),
+        _ => unreachable!(),
+    })
+});
 
 struct AtomicMatch;
-
-impl Operation for AtomicMatch {
-    type Input = Choice;
-    type Output = C;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        assert_eq!(
-            body.match_join::<Choice, C>(|arms| {
-                arms.arm::<A>(
-                    StableId::new("left").map_err(|_| ProgramError::InvalidContract)?,
-                    |arm| {
-                        arm.pure::<AtoB>()?;
-                        arm.pure::<BtoC>()
-                    },
-                )?;
-                Err(ProgramError::Canonical)
-            }),
-            Err(ProgramError::InvalidContract)
-        );
-        body.operation(&MatchOperation)
-    }
-}
+operation!(AtomicMatch, Choice, C, Never, |_this, body| {
+    assert_eq!(
+        body.match_join::<Choice, C>(|arms| {
+            arms.arm::<A>(tag("left")?, |arm| {
+                arm.pure::<AtoB>()?;
+                arm.pure::<BtoC>()
+            })?;
+            Err(ProgramError::Canonical)
+        }),
+        Err(ProgramError::InvalidContract)
+    );
+    body.operation(&MatchOperation)
+});
 
 macro_rules! unsupported_selector_operation {
     ($operation:ident, $selector:ty) => {
         struct $operation;
-
-        impl Operation for $operation {
-            type Input = $selector;
-            type Output = A;
-            type Failure = Never;
-
-            fn expand(
-                &self,
-                body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-            ) -> mfm_program::Result<()> {
-                body.match_join::<$selector, A>(|_| {
-                    panic!("unsupported selector callback must not run")
-                })
-            }
-        }
+        operation!($operation, $selector, A, Never, |_this, body| {
+            body.match_join::<$selector, A>(|_| {
+                panic!("unsupported selector callback must not run")
+            })
+        });
     };
 }
 
@@ -950,316 +935,214 @@ impl<const N: usize> Operation for LargeMatch<N> {
 }
 
 struct EarlyChild;
-
-impl Operation for EarlyChild {
-    type Input = Choice;
-    type Output = C;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.match_join::<Choice, B>(|arms| {
-            arms.arm::<A>(
-                StableId::new("left").map_err(|_| ProgramError::InvalidContract)?,
-                |arm| arm.pure::<AtoB>(),
-            )?;
-            arms.arm::<B>(
-                StableId::new("right").map_err(|_| ProgramError::InvalidContract)?,
-                |arm| arm.pure::<BtoC>(),
-            )
-        })?;
-        body.pure::<BtoC>()
-    }
-}
+operation!(EarlyChild, Choice, C, Never, |_this, body| {
+    body.match_join::<Choice, B>(|arms| {
+        arms.arm::<A>(tag("left")?, |arm| arm.pure::<AtoB>())?;
+        arms.arm::<B>(tag("right")?, |arm| arm.pure::<BtoC>())
+    })?;
+    body.pure::<BtoC>()
+});
 
 struct EarlyParent;
+operation!(EarlyParent, Choice, D, Never, |_this, body| {
+    body.operation(&EarlyChild)?;
+    body.pure::<CtoD>()
+});
 
-impl Operation for EarlyParent {
-    type Input = Choice;
-    type Output = D;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.operation(&EarlyChild)?;
-        body.pure::<CtoD>()
-    }
-}
-
-struct RecoveringHandler;
-
-impl Operation for RecoveringHandler {
-    type Input = A;
-    type Output = C;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.with_failure_handler::<Failure, B>(
-            |protected| protected.pure::<FallibleAtoB>(),
-            |handler| handler.pure::<FailureToB>(),
-        )?;
-        body.pure::<BtoC>()
-    }
-}
-
-struct TerminalHandler;
-
-impl Operation for TerminalHandler {
-    type Input = A;
-    type Output = C;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.with_failure_handler::<Failure, B>(
-            |protected| protected.pure::<FallibleAtoB>(),
-            |handler| handler.pure::<FailureToC>(),
-        )?;
-        body.pure::<BtoC>()
-    }
-}
-
-struct FallibleFailureToB;
-
-impl State for FallibleFailureToB {
-    type Input = Failure;
-    type Output = B;
-    type Failure = Failure;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.authoring/fallible-failure-to-b@1")
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-struct FallibleAtoC;
-
-impl State for FallibleAtoC {
-    type Input = A;
-    type Output = C;
-    type Failure = Failure;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.authoring/fallible-a-to-c@1")
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl PureState for FallibleAtoC {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success {
-            output: C { value: input.value },
-        }
-    }
-}
-
-impl PureState for FallibleFailureToB {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Failure { failure: input }
-    }
-}
-
-struct NestedSameFailure;
-
-impl Operation for NestedSameFailure {
-    type Input = A;
-    type Output = C;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.with_failure_handler::<Failure, B>(
-            |outer| {
-                outer.with_failure_handler::<Failure, B>(
-                    |inner| inner.pure::<FallibleAtoB>(),
-                    |inner_handler| inner_handler.pure::<FallibleFailureToB>(),
-                )
-            },
-            |outer_handler| outer_handler.pure::<FailureToB>(),
-        )?;
-        body.pure::<BtoC>()
-    }
-}
-
-struct SelfFailingHandler;
-
-impl Operation for SelfFailingHandler {
-    type Input = A;
-    type Output = B;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.with_failure_handler::<Failure, B>(
-            |protected| protected.pure::<FallibleAtoB>(),
-            |handler| handler.pure::<FallibleFailureToB>(),
-        )
-    }
-}
-
-struct AtomicHandler;
-
-impl Operation for AtomicHandler {
-    type Input = A;
-    type Output = C;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        assert_eq!(
+macro_rules! handler_operation {
+    ($operation:ident, $handler:ty) => {
+        struct $operation;
+        operation!($operation, A, C, Never, |_this, body| {
             body.with_failure_handler::<Failure, B>(
                 |protected| protected.pure::<FallibleAtoB>(),
-                |handler| {
-                    handler.pure::<FailureToB>()?;
-                    Err(ProgramError::Canonical)
-                },
-            ),
-            Err(ProgramError::InvalidContract)
-        );
-        body.operation(&RecoveringHandler)
-    }
+                |handler| handler.pure::<$handler>(),
+            )?;
+            body.pure::<BtoC>()
+        });
+    };
 }
+
+handler_operation!(RecoveringHandler, FailureToB);
+handler_operation!(TerminalHandler, FailureToC);
+
+pure_state!(
+    FallibleFailureToB,
+    Failure,
+    B,
+    Failure,
+    "mfm.test.authoring/fallible-failure-to-b@1",
+    |input| ProposedStateOutcome::Failure { failure: input }
+);
+
+pure_state!(
+    FallibleAtoC,
+    A,
+    C,
+    Failure,
+    "mfm.test.authoring/fallible-a-to-c@1"
+);
+
+struct NestedSameFailure;
+operation!(NestedSameFailure, A, C, Never, |_this, body| {
+    body.with_failure_handler::<Failure, B>(
+        |outer| {
+            outer.with_failure_handler::<Failure, B>(
+                |inner| inner.pure::<FallibleAtoB>(),
+                |inner_handler| inner_handler.pure::<FallibleFailureToB>(),
+            )
+        },
+        |outer_handler| outer_handler.pure::<FailureToB>(),
+    )?;
+    body.pure::<BtoC>()
+});
+
+struct SelfFailingHandler;
+operation!(SelfFailingHandler, A, B, Never, |_this, body| {
+    body.with_failure_handler::<Failure, B>(
+        |protected| protected.pure::<FallibleAtoB>(),
+        |handler| handler.pure::<FallibleFailureToB>(),
+    )
+});
+
+struct AtomicHandler;
+operation!(AtomicHandler, A, C, Never, |_this, body| {
+    assert_eq!(
+        body.with_failure_handler::<Failure, B>(
+            |protected| protected.pure::<FallibleAtoB>(),
+            |handler| {
+                handler.pure::<FailureToB>()?;
+                Err(ProgramError::Canonical)
+            },
+        ),
+        Err(ProgramError::InvalidContract)
+    );
+    body.operation(&RecoveringHandler)
+});
 
 struct EqualRootFailure;
-
-impl Operation for EqualRootFailure {
-    type Input = A;
-    type Output = C;
-    type Failure = Failure;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.with_failure_handler::<Failure, B>(
-            |protected| protected.pure::<FallibleAtoB>(),
-            |handler| handler.pure::<FailureToB>(),
-        )?;
-        body.pure::<BtoC>()
-    }
-}
+operation!(EqualRootFailure, A, C, Failure, |_this, body| {
+    body.with_failure_handler::<Failure, B>(
+        |protected| protected.pure::<FallibleAtoB>(),
+        |handler| handler.pure::<FailureToB>(),
+    )?;
+    body.pure::<BtoC>()
+});
 
 struct DirectProtectedOutput;
-
-impl Operation for DirectProtectedOutput {
-    type Input = A;
-    type Output = C;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.with_failure_handler::<Failure, B>(
-            |protected| protected.pure::<FallibleAtoC>(),
-            |handler| handler.pure::<FailureToB>(),
-        )
-    }
-}
+operation!(DirectProtectedOutput, A, C, Never, |_this, body| {
+    body.with_failure_handler::<Failure, B>(
+        |protected| protected.pure::<FallibleAtoC>(),
+        |handler| handler.pure::<FailureToB>(),
+    )
+});
 
 struct EmptyHandler;
-
-impl Operation for EmptyHandler {
-    type Input = A;
-    type Output = B;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.with_failure_handler::<Failure, B>(
-            |protected| protected.pure::<FallibleAtoB>(),
-            |_| Ok(()),
-        )
-    }
-}
+operation!(EmptyHandler, A, B, Never, |_this, body| {
+    body.with_failure_handler::<Failure, B>(
+        |protected| protected.pure::<FallibleAtoB>(),
+        |_| Ok(()),
+    )
+});
 
 struct NeverHandler<'a> {
     protected_calls: &'a Cell<usize>,
     handler_calls: &'a Cell<usize>,
 }
 
-impl Operation for NeverHandler<'_> {
-    type Input = A;
-    type Output = A;
-    type Failure = Never;
+operation!(NeverHandler<'_>, A, A, Never, |this, body| {
+    body.with_failure_handler::<Never, A>(
+        |_| {
+            this.protected_calls.set(this.protected_calls.get() + 1);
+            Ok(())
+        },
+        |_| {
+            this.handler_calls.set(this.handler_calls.get() + 1);
+            Ok(())
+        },
+    )
+});
 
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.with_failure_handler::<Never, A>(
-            |_| {
-                self.protected_calls.set(self.protected_calls.get() + 1);
-                Ok(())
+enum HandlerMatrix<'a> {
+    NoReachable(&'a Cell<usize>),
+    OuterFailureBypass,
+    ForeignProtected,
+    Distinct,
+    Bad(u8),
+}
+
+operation!(HandlerMatrix<'_>, A, C, Failure, |this, body| {
+    match this {
+        Self::NoReachable(handler_calls) => body.with_failure_handler::<D, C>(
+            |protected| {
+                protected.pure::<AtoB>()?;
+                protected.pure::<BtoC>()
             },
-            |_| {
-                self.handler_calls.set(self.handler_calls.get() + 1);
-                Ok(())
+            |handler| {
+                handler_calls.set(handler_calls.get() + 1);
+                handler.pure::<DtoC>()
             },
-        )
+        ),
+        Self::OuterFailureBypass => body.with_failure_handler::<D, C>(
+            |protected| {
+                protected.pure::<FallibleAtoBWithD>()?;
+                protected.pure::<FallibleBtoCWithFailure>()
+            },
+            |handler| handler.pure::<DtoC>(),
+        ),
+        Self::ForeignProtected => body.with_failure_handler::<D, C>(
+            |protected| {
+                protected.pure::<FallibleAtoBWithD>()?;
+                protected.pure::<ForeignBtoC>()
+            },
+            |handler| handler.pure::<DtoC>(),
+        ),
+        Self::Distinct => {
+            body.with_failure_handler::<Failure, B>(
+                |outer| {
+                    outer.with_failure_handler::<D, B>(
+                        |inner| inner.pure::<FallibleAtoBWithD>(),
+                        |inner_handler| inner_handler.pure::<DtoB>(),
+                    )?;
+                    outer.pure::<FallibleIdentityB>()
+                },
+                |outer_handler| outer_handler.pure::<FailureToB>(),
+            )?;
+            body.pure::<BtoC>()
+        }
+        Self::Bad(mode) => {
+            body.with_failure_handler::<HandlerChoice, B>(
+                |protected| protected.pure::<FallibleAtoBWithHandlerChoice>(),
+                |handler| match mode {
+                    0 => handler.match_join::<HandlerChoice, B>(|arms| {
+                        arms.arm::<Failure>(tag("recover")?, |arm| arm.pure::<FailureToB>())
+                    }),
+                    1 => handler.pure::<FailureToB>(),
+                    2 => handler.pure::<HandlerChoiceToA>(),
+                    3 => handler.pure::<HandlerChoiceToBForeign>(),
+                    _ => unreachable!(),
+                },
+            )?;
+            body.pure::<BtoC>()
+        }
     }
-}
+});
 
-struct DepthCapability;
+read_capability!(
+    DepthCapability,
+    A,
+    A,
+    "mfm.test.authoring/depth-capability@1"
+);
 
-impl ReadCapabilityContract for DepthCapability {
-    type Intent = A;
-    type Evidence = A;
-
-    fn contract_id() -> mfm_capabilities::Result<StableId> {
-        StableId::new("mfm.test.authoring/depth-capability@1")
-            .map_err(|_| CapabilityError::InvalidContract)
-    }
-
-    fn bind_evidence(
-        _intent: &Self::Intent,
-        _evidence: &Self::Evidence,
-    ) -> mfm_capabilities::Result<()> {
-        Ok(())
-    }
-}
-
-struct DepthRead;
-
-impl State for DepthRead {
-    type Input = A;
-    type Output = A;
-    type Failure = Failure;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.authoring/depth-read@1").map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl ReadState<DepthCapability> for DepthRead {
-    fn prepare(input: &Self::Input) -> Result<A, ReadPreparationError> {
-        Ok(input.clone())
-    }
-
-    fn interpret(
-        input: Self::Input,
-        _evidence: &A,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success { output: input }
-    }
-}
+read_state!(
+    DepthRead,
+    DepthCapability,
+    A,
+    A,
+    Failure,
+    "mfm.test.authoring/depth-read@1",
+    |input, _evidence| ProposedStateOutcome::Success { output: input }
+);
 
 #[derive(Default)]
 struct DepthCounters {
@@ -1268,65 +1151,47 @@ struct DepthCounters {
     after: AtomicUsize,
 }
 
-impl CapabilityInjection<DepthRead> for DepthCapability {
-    type Setup = Arc<DepthCounters>;
-    type ExpandedInput = A;
-    type ExpandedOutput = A;
-
-    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
+injection!(
+    DepthCapability => DepthRead,
+    Arc<DepthCounters>,
+    A => A,
+    |setup| {
         setup.binding.fetch_add(1, Ordering::SeqCst);
         nominal_contract_ref::<A>()
-    }
-
-    fn write_before(setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
+    },
+    |setup, writer| {
         setup.before.fetch_add(1, Ordering::SeqCst);
         writer.pure::<IdentityA>()
-    }
-
-    fn write_after(setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
+    },
+    |setup, writer| {
         setup.after.fetch_add(1, Ordering::SeqCst);
         writer.pure::<IdentityA>()
     }
-}
+);
 
 struct MixedDepth<'a> {
     remaining: u8,
     setup: &'a Arc<DepthCounters>,
 }
 
-impl Operation for MixedDepth<'_> {
-    type Input = Choice;
-    type Output = A;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        if self.remaining > 0 {
-            return body.operation(&MixedDepth {
-                remaining: self.remaining - 1,
-                setup: self.setup,
-            });
-        }
-        body.match_join::<Choice, A>(|arms| {
-            arms.arm::<A>(
-                StableId::new("left").map_err(|_| ProgramError::InvalidContract)?,
-                |branch| {
-                    branch.with_failure_handler::<Failure, A>(
-                        |protected| protected.read::<DepthRead, DepthCapability>(self.setup),
-                        |handler| handler.pure::<FailureToA>(),
-                    )
-                },
-            )?;
-            arms.arm::<B>(
-                StableId::new("right").map_err(|_| ProgramError::InvalidContract)?,
-                |branch| branch.pure::<BtoA>(),
+operation!(MixedDepth<'_>, Choice, A, Never, |this, body| {
+    if this.remaining > 0 {
+        return body.operation(&MixedDepth {
+            remaining: this.remaining - 1,
+            setup: this.setup,
+        });
+    }
+    body.match_join::<Choice, A>(|arms| {
+        arms.arm::<A>(tag("left")?, |branch| {
+            branch.with_failure_handler::<Failure, A>(
+                |protected| protected.read::<DepthRead, DepthCapability>(this.setup),
+                |handler| handler.pure::<FailureToA>(),
             )
         })?;
-        body.pure::<IdentityA>()
-    }
-}
+        arms.arm::<B>(tag("right")?, |branch| branch.pure::<BtoA>())
+    })?;
+    body.pure::<IdentityA>()
+});
 
 static DIRECT_DESCRIPTOR_CALLS: AtomicUsize = AtomicUsize::new(0);
 static DIRECT_SEMANTIC_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -1336,34 +1201,14 @@ static MEMO_SEMANTIC_CALLS: AtomicUsize = AtomicUsize::new(0);
 static MEMO_STATE_CALLS: AtomicUsize = AtomicUsize::new(0);
 static MEMO_CAPABILITY_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(transparent)]
-struct DirectCountedValue(u8);
-
-impl mfm_values::MfmValue for DirectCountedValue {
-    fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
-        DIRECT_DESCRIPTOR_CALLS.fetch_add(1, Ordering::SeqCst);
-        framework_value_descriptor(
-            "mfm-program",
-            Self::semantic_id()?,
-            "mfm.test.authoring.direct-counted-value",
-            SchemaShape::UnsignedInteger { bits: 8 },
-            std::any::type_name::<Self>(),
-        )
-    }
-
-    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
-        DIRECT_SEMANTIC_CALLS.fetch_add(1, Ordering::SeqCst);
-        SemanticTypeId::new(
-            "mfm.test.authoring",
-            "direct-counted-value",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([0x41; 32]),
-        )
-        .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
-    }
-}
+counted_value!(
+    DirectCountedValue,
+    DIRECT_DESCRIPTOR_CALLS,
+    DIRECT_SEMANTIC_CALLS,
+    "mfm.test.authoring.direct-counted-value",
+    "direct-counted-value",
+    0x41
+);
 
 struct DirectCountedState;
 
@@ -1386,49 +1231,25 @@ impl PureState for DirectCountedState {
 }
 
 struct DirectCountedOperation;
-
-impl Operation for DirectCountedOperation {
-    type Input = DirectCountedValue;
-    type Output = DirectCountedValue;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
+operation!(
+    DirectCountedOperation,
+    DirectCountedValue,
+    DirectCountedValue,
+    Never,
+    |_this, body| {
         body.pure::<DirectCountedState>()?;
         body.pure::<DirectCountedState>()
     }
-}
+);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(transparent)]
-struct MemoValue(u8);
-
-impl mfm_values::MfmValue for MemoValue {
-    fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
-        MEMO_DESCRIPTOR_CALLS.fetch_add(1, Ordering::SeqCst);
-        framework_value_descriptor(
-            "mfm-program",
-            Self::semantic_id()?,
-            "mfm.test.authoring.memo-value",
-            SchemaShape::UnsignedInteger { bits: 8 },
-            std::any::type_name::<Self>(),
-        )
-    }
-
-    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
-        MEMO_SEMANTIC_CALLS.fetch_add(1, Ordering::SeqCst);
-        SemanticTypeId::new(
-            "mfm.test.authoring",
-            "memo-value",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([0x42; 32]),
-        )
-        .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
-    }
-}
+counted_value!(
+    MemoValue,
+    MEMO_DESCRIPTOR_CALLS,
+    MEMO_SEMANTIC_CALLS,
+    "mfm.test.authoring.memo-value",
+    "memo-value",
+    0x42
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
@@ -1456,39 +1277,19 @@ impl PureState for MemoIdentity {
     }
 }
 
-struct MemoFallibleIdentity;
-
-impl State for MemoFallibleIdentity {
-    type Input = MemoValue;
-    type Output = MemoValue;
-    type Failure = MemoValue;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.authoring/memo-fallible-identity@1")
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl PureState for MemoFallibleIdentity {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success { output: input }
-    }
-}
+pure_state!(
+    MemoFallibleIdentity,
+    MemoValue,
+    MemoValue,
+    MemoValue,
+    "mfm.test.authoring/memo-fallible-identity@1",
+    |input| ProposedStateOutcome::Success { output: input }
+);
 
 struct MemoChild;
-
-impl Operation for MemoChild {
-    type Input = MemoValue;
-    type Output = MemoValue;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.pure::<MemoIdentity>()
-    }
-}
+operation!(MemoChild, MemoValue, MemoValue, Never, |_this, body| {
+    body.pure::<MemoIdentity>()
+});
 
 struct MemoCapability;
 
@@ -1510,125 +1311,114 @@ impl ReadCapabilityContract for MemoCapability {
     }
 }
 
-struct MemoRead;
+read_state!(
+    MemoRead,
+    MemoCapability,
+    MemoValue,
+    MemoValue,
+    Never,
+    "mfm.test.authoring/memo-read@1",
+    |input, _evidence| ProposedStateOutcome::Success { output: input }
+);
 
-impl State for MemoRead {
-    type Input = MemoValue;
-    type Output = MemoValue;
-    type Failure = Never;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.authoring/memo-read@1").map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl ReadState<MemoCapability> for MemoRead {
-    fn prepare(input: &Self::Input) -> Result<MemoValue, ReadPreparationError> {
-        Ok(input.clone())
-    }
-
-    fn interpret(
-        input: Self::Input,
-        _evidence: &MemoValue,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success { output: input }
-    }
-}
-
-impl CapabilityInjection<MemoRead> for MemoCapability {
-    type Setup = ContentRef;
-    type ExpandedInput = MemoValue;
-    type ExpandedOutput = MemoValue;
-
-    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
-        Ok(setup.clone())
-    }
-
-    fn write_before(_setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
-        writer.pure::<MemoIdentity>()
-    }
-
-    fn write_after(_setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
-        writer.pure::<MemoIdentity>()
-    }
-}
+injection!(
+    MemoCapability => MemoRead,
+    ContentRef,
+    MemoValue => MemoValue,
+    |setup| Ok(setup.clone()),
+    |_setup, writer| writer.pure::<MemoIdentity>(),
+    |_setup, writer| writer.pure::<MemoIdentity>()
+);
 
 struct MemoAcrossScopes {
     binding: ContentRef,
 }
 
-impl Operation for MemoAcrossScopes {
-    type Input = MemoChoice;
-    type Output = MemoValue;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
+operation!(
+    MemoAcrossScopes,
+    MemoChoice,
+    MemoValue,
+    Never,
+    |this, body| {
         body.match_join::<MemoChoice, MemoValue>(|arms| {
-            arms.arm::<MemoValue>(
-                StableId::new("selected").map_err(|_| ProgramError::InvalidContract)?,
-                |arm| arm.operation(&MemoChild),
-            )
+            arms.arm::<MemoValue>(tag("selected")?, |arm| arm.operation(&MemoChild))
         })?;
         body.with_failure_handler::<MemoValue, MemoValue>(
             |protected| protected.pure::<MemoFallibleIdentity>(),
             |handler| handler.pure::<MemoIdentity>(),
         )?;
-        body.read::<MemoRead, MemoCapability>(&self.binding)?;
-        body.read::<MemoRead, MemoCapability>(&self.binding)
+        body.read::<MemoRead, MemoCapability>(&this.binding)?;
+        body.read::<MemoRead, MemoCapability>(&this.binding)
     }
-}
+);
 
 struct RetryWrongJoin(bool);
-
-impl Operation for RetryWrongJoin {
-    type Input = Choice;
-    type Output = C;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.match_join::<Choice, C>(|arms| {
-            let left = StableId::new("left").map_err(|_| ProgramError::InvalidContract)?;
-            if self.0 {
-                assert_eq!(
-                    arms.arm::<A>(left.clone(), |arm| arm.pure::<AtoB>()),
-                    Err(ProgramError::InvalidContract)
-                );
-            }
-            arms.arm::<A>(left, |arm| {
-                arm.pure::<AtoB>()?;
-                arm.pure::<BtoC>()
-            })?;
-            arms.arm::<B>(
-                StableId::new("right").map_err(|_| ProgramError::InvalidContract)?,
-                |arm| arm.pure::<BtoC>(),
-            )
-        })
-    }
-}
+operation!(RetryWrongJoin, Choice, C, Never, |this, body| {
+    body.match_join::<Choice, C>(|arms| {
+        let left = tag("left")?;
+        if this.0 {
+            assert_eq!(
+                arms.arm::<A>(left.clone(), |_| Ok(())),
+                Err(ProgramError::InvalidContract)
+            );
+            assert_eq!(
+                arms.arm::<A>(left.clone(), |arm| arm.pure::<AtoB>()),
+                Err(ProgramError::InvalidContract)
+            );
+        }
+        arms.arm::<A>(left, |arm| {
+            arm.pure::<AtoB>()?;
+            arm.pure::<BtoC>()
+        })?;
+        arms.arm::<B>(tag("right")?, |arm| arm.pure::<BtoC>())
+    })
+});
 
 struct WrongTerminalOutput;
-
-impl Operation for WrongTerminalOutput {
-    type Input = A;
-    type Output = C;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.pure::<AtoB>()
-    }
-}
+operation!(WrongTerminalOutput, A, C, Never, |_this, body| body
+    .pure::<AtoB>());
 
 fn entry() -> EntryPointId {
     EntryPointId::new("mfm.test/authoring@1").expect("entry")
+}
+
+fn tag(value: &str) -> mfm_program::Result<StableId> {
+    StableId::new(value).map_err(|_| ProgramError::InvalidContract)
+}
+
+fn valid_program<O: Operation>(operation: &O) -> mfm_program::Program {
+    expand_program(entry(), operation).expect("valid Program")
+}
+
+fn program_error<O: Operation>(operation: &O) -> ProgramError {
+    expand_program(entry(), operation).expect_err("invalid Program")
+}
+
+fn program_bytes<O: Operation>(operation: &O) -> Vec<u8> {
+    valid_program(operation).canonical_bytes().to_vec()
+}
+
+fn assert_invalid<O: Operation>(operation: &O) {
+    assert_eq!(program_error(operation), ProgramError::InvalidContract);
+}
+
+fn assert_same_program<L: Operation, R: Operation>(left: &L, right: &R) {
+    assert_eq!(program_bytes(left), program_bytes(right));
+}
+
+macro_rules! assert_states {
+    ($program:expr, $($state:ty),+ $(,)?) => {{
+        let actual = $program
+            .declarations()
+            .iter()
+            .filter_map(|declaration| match declaration {
+                Declaration::State(state) => Some(state.state_implementation_ref().clone()),
+                Declaration::Match(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let expected = vec![$(state_implementation_ref::<$state>().expect("State ref")),+];
+        assert_eq!(actual, expected);
+    }};
 }
 
 fn state(program: &mfm_program::Program, index: usize) -> &mfm_program::StateDeclaration {
@@ -1641,51 +1431,32 @@ fn state(program: &mfm_program::Program, index: usize) -> &mfm_program::StateDec
 #[test]
 fn root_and_child_callbacks_are_exact_and_depth_bounded() {
     let calls = Cell::new(0);
-    let empty = expand_program(
-        entry(),
-        &CountedRoot {
-            calls: &calls,
-            fail: false,
-        },
-    )
-    .expect("empty identity");
+    let empty = valid_program(&CountedRoot {
+        calls: &calls,
+        fail: false,
+    });
     assert!(empty.declarations().is_empty());
     assert_eq!(calls.get(), 1);
     assert_eq!(
-        expand_program(
-            entry(),
-            &CountedRoot {
-                calls: &calls,
-                fail: true,
-            },
-        ),
-        Err(ProgramError::InvalidContract)
+        program_error(&CountedRoot {
+            calls: &calls,
+            fail: true,
+        }),
+        ProgramError::InvalidContract
     );
     assert_eq!(calls.get(), 2);
 
-    let parent = expand_program(entry(), &Parent).expect("nested parent");
+    let parent = valid_program(&Parent);
     assert_eq!(parent.declarations().len(), 2);
     assert_eq!(state(&parent, 0).next_index(), Some(1));
     assert_eq!(state(&parent, 1).next_index(), None);
-    assert!(expand_program(entry(), &Recursive(63)).is_ok());
-    assert_eq!(
-        expand_program(entry(), &Recursive(64)),
-        Err(ProgramError::Capacity)
-    );
-    assert!(expand_program(entry(), &MutualA(63)).is_ok());
-    assert_eq!(
-        expand_program(entry(), &MutualA(64)),
-        Err(ProgramError::Capacity)
-    );
-    assert!(expand_program(entry(), &Empty).is_ok());
-    assert_eq!(
-        expand_program(entry(), &InvalidEmpty),
-        Err(ProgramError::InvalidContract)
-    );
-    assert_eq!(
-        expand_program(entry(), &WrongTerminalOutput),
-        Err(ProgramError::InvalidContract)
-    );
+    valid_program(&Recursive(63));
+    assert_eq!(program_error(&Recursive(64)), ProgramError::Capacity);
+    valid_program(&MutualA(63));
+    assert_eq!(program_error(&MutualA(64)), ProgramError::Capacity);
+    valid_program(&Empty);
+    assert_invalid(&InvalidEmpty);
+    assert_invalid(&WrongTerminalOutput);
 }
 
 #[test]
@@ -1694,12 +1465,12 @@ fn one_expansion_owns_one_top_level_identity_memo() {
     DIRECT_SEMANTIC_CALLS.store(0, Ordering::SeqCst);
     DIRECT_STATE_CALLS.store(0, Ordering::SeqCst);
 
-    expand_program(entry(), &DirectCountedOperation).expect("first counted expansion");
+    valid_program(&DirectCountedOperation);
     assert_eq!(DIRECT_DESCRIPTOR_CALLS.load(Ordering::SeqCst), 1);
     assert_eq!(DIRECT_SEMANTIC_CALLS.load(Ordering::SeqCst), 2);
     assert_eq!(DIRECT_STATE_CALLS.load(Ordering::SeqCst), 1);
 
-    expand_program(entry(), &DirectCountedOperation).expect("second counted expansion");
+    valid_program(&DirectCountedOperation);
     assert_eq!(DIRECT_DESCRIPTOR_CALLS.load(Ordering::SeqCst), 2);
     assert_eq!(DIRECT_SEMANTIC_CALLS.load(Ordering::SeqCst), 4);
     assert_eq!(DIRECT_STATE_CALLS.load(Ordering::SeqCst), 2);
@@ -1708,13 +1479,9 @@ fn one_expansion_owns_one_top_level_identity_memo() {
     MEMO_SEMANTIC_CALLS.store(0, Ordering::SeqCst);
     MEMO_STATE_CALLS.store(0, Ordering::SeqCst);
     MEMO_CAPABILITY_CALLS.store(0, Ordering::SeqCst);
-    let program = expand_program(
-        entry(),
-        &MemoAcrossScopes {
-            binding: nominal_contract_ref::<A>().expect("binding"),
-        },
-    )
-    .expect("memo shared across nested scopes");
+    let program = valid_program(&MemoAcrossScopes {
+        binding: nominal_contract_ref::<A>().expect("binding"),
+    });
     assert_eq!(program.declarations().len(), 10);
     assert_eq!(MEMO_DESCRIPTOR_CALLS.load(Ordering::SeqCst), 2);
     assert_eq!(MEMO_SEMANTIC_CALLS.load(Ordering::SeqCst), 4);
@@ -1724,49 +1491,40 @@ fn one_expansion_owns_one_top_level_identity_memo() {
 
 #[test]
 fn configured_children_repeat_without_parent_size_knowledge_and_fail_atomically() {
-    let repeated = expand_program(entry(), &RepeatedConfiguredChildren).expect("repeated children");
+    let repeated = valid_program(&RepeatedConfiguredChildren);
     assert_eq!(repeated.declarations().len(), 3);
     assert_eq!(state(&repeated, 0).next_index(), Some(1));
     assert_eq!(state(&repeated, 1).next_index(), Some(2));
     assert_eq!(state(&repeated, 2).next_index(), None);
 
-    let atomic = expand_program(entry(), &AtomicChildren).expect("atomic child failures");
+    let atomic = valid_program(&AtomicChildren);
     assert_eq!(atomic.declarations().len(), 1);
+    assert_states!(&atomic, IdentityA);
+    assert_same_program(&AtomicChildren, &ConfiguredIdentity(1));
+
+    let wrong_input_calls = Cell::new(0);
+    let wrong_output_calls = Cell::new(0);
+    let boundaries = valid_program(&ChildBoundaryMatrix {
+        wrong_input_calls: &wrong_input_calls,
+        wrong_output_calls: &wrong_output_calls,
+    });
+    assert_eq!(wrong_input_calls.get(), 0);
+    assert_eq!(wrong_output_calls.get(), 1);
     assert_eq!(
-        state(&atomic, 0).state_implementation_ref(),
-        &state_implementation_ref::<IdentityA>().expect("identity")
+        boundaries.canonical_bytes(),
+        program_bytes(&ConfiguredIdentity(1))
     );
-    assert_eq!(
-        atomic.canonical_bytes(),
-        expand_program(entry(), &ConfiguredIdentity(1))
-            .expect("clean child retry")
-            .canonical_bytes()
-    );
+    assert_same_program(&CatchChildDepth(true), &CatchChildDepth(false));
 }
 
 #[test]
 fn nonempty_injection_wraps_one_kernel_owned_read_in_exact_order() {
     let binding = nominal_contract_ref::<A>().expect("binding");
-    let program = expand_program(
-        entry(),
-        &ReadOperation {
-            binding: binding.clone(),
-        },
-    )
-    .expect("read program");
+    let program = valid_program(&ReadOperation {
+        binding: binding.clone(),
+    });
     assert_eq!(program.declarations().len(), 3);
-    assert_eq!(
-        state(&program, 0).state_implementation_ref(),
-        &state_implementation_ref::<Before>().expect("before")
-    );
-    assert_eq!(
-        state(&program, 1).state_implementation_ref(),
-        &state_implementation_ref::<ReadBtoC>().expect("read")
-    );
-    assert_eq!(
-        state(&program, 2).state_implementation_ref(),
-        &state_implementation_ref::<After>().expect("after")
-    );
+    assert_states!(&program, Before, ReadBtoC, After);
     assert!(state(&program, 0).execution().is_pure());
     assert_eq!(state(&program, 1).execution().binding_ref(), Some(&binding));
     assert!(state(&program, 2).execution().is_pure());
@@ -1775,25 +1533,42 @@ fn nonempty_injection_wraps_one_kernel_owned_read_in_exact_order() {
     assert_eq!(state(&program, 2).next_index(), None);
     assert_eq!(state(&program, 0).failure_next_index(), None);
     assert_eq!(state(&program, 1).failure_next_index(), None);
+
+    let handled = valid_program(&HandledInjectedRead {
+        binding: nominal_contract_ref::<A>().expect("handled binding"),
+    });
+    assert_eq!(handled.declarations().len(), 6);
+    assert_states!(
+        &handled,
+        SupportNever,
+        SupportHandled,
+        HandledRead,
+        SupportNever,
+        FailureToA,
+        AtoB,
+    );
+    assert_eq!(
+        state(&handled, 1).failure_contract_ref(),
+        state(&handled, 2).failure_contract_ref()
+    );
+    assert_eq!(state(&handled, 1).failure_next_index(), Some(4));
+    assert_eq!(state(&handled, 2).failure_next_index(), Some(4));
+    assert_eq!(state(&handled, 3).next_index(), Some(5));
+    assert_eq!(state(&handled, 4).next_index(), Some(5));
 }
 
 #[test]
 fn repeated_injection_is_exact_and_hook_failures_are_once_short_circuited_and_atomic() {
     let successful = HookCounts::new(HookFailure::None);
-    let first =
-        expand_program(entry(), &RepeatedReads { setup: &successful }).expect("repeated Reads");
+    let first = valid_program(&RepeatedReads { setup: &successful });
     assert_eq!(first.declarations().len(), 6);
     assert_eq!(successful.before.get(), 2);
     assert_eq!(successful.binding.get(), 2);
     assert_eq!(successful.after.get(), 2);
     let second_setup = HookCounts::new(HookFailure::None);
-    let second = expand_program(
-        entry(),
-        &RepeatedReads {
-            setup: &second_setup,
-        },
-    )
-    .expect("identical repeated Reads");
+    let second = valid_program(&RepeatedReads {
+        setup: &second_setup,
+    });
     assert_eq!(first.canonical_bytes(), second.canonical_bytes());
     assert_eq!(first.content_ref(), second.content_ref());
 
@@ -1804,8 +1579,7 @@ fn repeated_injection_is_exact_and_hook_failures_are_once_short_circuited_and_at
         (HookFailure::After, (1, 1, 1)),
     ] {
         let setup = HookCounts::new(failure);
-        let program = expand_program(entry(), &AtomicRead { setup: &setup })
-            .expect("failed injected occurrence leaves parent unchanged");
+        let program = valid_program(&AtomicRead { setup: &setup });
         assert_eq!(program.declarations().len(), 1);
         assert_eq!(
             (setup.before.get(), setup.binding.get(), setup.after.get()),
@@ -1816,7 +1590,7 @@ fn repeated_injection_is_exact_and_hook_failures_are_once_short_circuited_and_at
 
 #[test]
 fn structured_match_keeps_physical_arm_order_and_exact_join() {
-    let program = expand_program(entry(), &MatchOperation).expect("Match Program");
+    let program = valid_program(&MatchOperation);
     assert_eq!(program.declarations().len(), 5);
     let Declaration::Match(selector) = &program.declarations()[0] else {
         panic!("root must be Match");
@@ -1831,14 +1605,23 @@ fn structured_match_keeps_physical_arm_order_and_exact_join() {
     assert_eq!(state(&program, 2).next_index(), None);
     assert_eq!(state(&program, 3).next_index(), Some(4));
     assert_eq!(state(&program, 4).next_index(), None);
+
+    let adjacent = valid_program(&AdjacentChoiceOperation);
+    assert_eq!(adjacent.declarations().len(), 4);
+    assert_same_program(&RetryMatchFirst(true), &RetryMatchFirst(false));
+
+    let terminal = valid_program(&AllTerminalMatch);
+    assert_eq!(terminal.declarations().len(), 4);
+    assert_eq!(state(&terminal, 2).next_index(), None);
+    assert_eq!(state(&terminal, 3).next_index(), None);
 }
 
 #[test]
 fn generic_tagging_metadata_order_and_match_atomicity_are_exact() {
-    assert!(expand_program(entry(), &GenericExternalOperation).is_ok());
-    assert!(expand_program(entry(), &GenericAdjacentOperation).is_ok());
+    valid_program(&GenericExternalOperation);
+    valid_program(&GenericAdjacentOperation);
 
-    let unsorted = expand_program(entry(), &UnsortedMatchOperation).expect("unsorted callbacks");
+    let unsorted = valid_program(&UnsortedMatchOperation);
     let Declaration::Match(selector) = &unsorted.declarations()[0] else {
         panic!("root Match");
     };
@@ -1850,62 +1633,35 @@ fn generic_tagging_metadata_order_and_match_atomicity_are_exact() {
             .collect::<Vec<_>>(),
         [("alpha", 2), ("zed", 1)]
     );
-    assert_eq!(
-        state(&unsorted, 1).state_implementation_ref(),
-        &state_implementation_ref::<IdentityA>().expect("zed body")
-    );
-    assert_eq!(
-        state(&unsorted, 2).state_implementation_ref(),
-        &state_implementation_ref::<BtoA>().expect("alpha body")
-    );
+    assert_states!(&unsorted, IdentityA, BtoA);
 
     for mode in 0..=3 {
-        assert_eq!(
-            expand_program(entry(), &BadMatch(mode)),
-            Err(ProgramError::InvalidContract),
-            "hostile Match mode {mode}"
-        );
+        assert_invalid(&BadMatch(mode));
     }
     for result in [
-        expand_program(entry(), &NonEnumOperation),
-        expand_program(entry(), &InternalOperation),
-        expand_program(entry(), &UnitOperation),
-        expand_program(entry(), &NamedOperation),
-        expand_program(entry(), &MultiFieldOperation),
+        program_error(&NonEnumOperation),
+        program_error(&InternalOperation),
+        program_error(&UnitOperation),
+        program_error(&NamedOperation),
+        program_error(&MultiFieldOperation),
     ] {
-        assert_eq!(result, Err(ProgramError::InvalidContract));
+        assert_eq!(result, ProgramError::InvalidContract);
     }
-    assert!(expand_program(entry(), &LargeMatch::<1>).is_ok());
-    let large = expand_program(entry(), &LargeMatch::<128>).expect("large Match");
+    valid_program(&LargeMatch::<1>);
+    let large = valid_program(&LargeMatch::<128>);
     assert_eq!(large.declarations().len(), 129);
     // The existing 65,536-byte schema identity bound rejects this selector before
     // Program's raw 256-arm Match ceiling is reached.
-    assert_eq!(
-        expand_program(entry(), &LargeMatch::<257>),
-        Err(ProgramError::InvalidContract)
-    );
-    let atomic = expand_program(entry(), &AtomicMatch).expect("failed Match is atomic");
-    assert_eq!(
-        atomic.canonical_bytes(),
-        expand_program(entry(), &MatchOperation)
-            .expect("ordinary Match")
-            .canonical_bytes()
-    );
-    assert_eq!(
-        expand_program(entry(), &RetryWrongJoin(true))
-            .expect("wrong join can be retried")
-            .canonical_bytes(),
-        expand_program(entry(), &RetryWrongJoin(false))
-            .expect("clean Match")
-            .canonical_bytes()
-    );
+    assert_invalid(&LargeMatch::<257>);
+    assert_same_program(&AtomicMatch, &MatchOperation);
+    assert_same_program(&RetryWrongJoin(true), &RetryWrongJoin(false));
 }
 
 #[test]
 fn child_relative_terminal_success_reopens_for_the_parent_continuation() {
-    let child = expand_program(entry(), &EarlyChild).expect("early child root");
+    let child = valid_program(&EarlyChild);
     assert_eq!(child.declarations().len(), 4);
-    let program = expand_program(entry(), &EarlyParent).expect("early child success");
+    let program = valid_program(&EarlyParent);
     assert_eq!(program.declarations().len(), 5);
     assert_eq!(state(&program, 1).next_index(), Some(3));
     assert_eq!(state(&program, 2).next_index(), Some(4));
@@ -1915,14 +1671,14 @@ fn child_relative_terminal_success_reopens_for_the_parent_continuation() {
 
 #[test]
 fn failure_handlers_rejoin_or_terminate_without_entering_success_path() {
-    let recovered = expand_program(entry(), &RecoveringHandler).expect("recovering handler");
+    let recovered = valid_program(&RecoveringHandler);
     assert_eq!(recovered.declarations().len(), 3);
     assert_eq!(state(&recovered, 0).next_index(), Some(2));
     assert_eq!(state(&recovered, 0).failure_next_index(), Some(1));
     assert_eq!(state(&recovered, 1).next_index(), Some(2));
     assert_eq!(state(&recovered, 2).next_index(), None);
 
-    let terminal = expand_program(entry(), &TerminalHandler).expect("terminal handler");
+    let terminal = valid_program(&TerminalHandler);
     assert_eq!(terminal.declarations().len(), 3);
     assert_eq!(state(&terminal, 0).next_index(), Some(2));
     assert_eq!(state(&terminal, 0).failure_next_index(), Some(1));
@@ -1932,7 +1688,7 @@ fn failure_handlers_rejoin_or_terminate_without_entering_success_path() {
 
 #[test]
 fn nested_same_failure_uses_nearest_then_outer_handler_and_late_errors_are_atomic() {
-    let nested = expand_program(entry(), &NestedSameFailure).expect("nested same-E handlers");
+    let nested = valid_program(&NestedSameFailure);
     assert_eq!(nested.declarations().len(), 4);
     assert_eq!(state(&nested, 0).next_index(), Some(3));
     assert_eq!(state(&nested, 0).failure_next_index(), Some(1));
@@ -1942,57 +1698,55 @@ fn nested_same_failure_uses_nearest_then_outer_handler_and_late_errors_are_atomi
     assert_eq!(state(&nested, 2).failure_next_index(), None);
     assert_eq!(state(&nested, 3).next_index(), None);
 
-    assert_eq!(
-        expand_program(entry(), &SelfFailingHandler),
-        Err(ProgramError::InvalidContract),
-        "a handler cannot catch its own exact failure"
-    );
-    let atomic = expand_program(entry(), &AtomicHandler).expect("late handler error is atomic");
-    assert_eq!(
-        atomic.canonical_bytes(),
-        expand_program(entry(), &RecoveringHandler)
-            .expect("recovering handler")
-            .canonical_bytes()
-    );
+    assert_invalid(&SelfFailingHandler);
+    assert_same_program(&AtomicHandler, &RecoveringHandler);
 
-    let equal = expand_program(entry(), &EqualRootFailure).expect("E equals root F");
+    let equal = valid_program(&EqualRootFailure);
     assert_eq!(state(&equal, 0).failure_next_index(), Some(1));
-    assert_eq!(
-        expand_program(entry(), &DirectProtectedOutput),
-        Err(ProgramError::InvalidContract)
-    );
-    assert_eq!(
-        expand_program(entry(), &EmptyHandler),
-        Err(ProgramError::InvalidContract)
-    );
+    assert_invalid(&DirectProtectedOutput);
+    assert_invalid(&EmptyHandler);
 
     let protected_calls = Cell::new(0);
     let handler_calls = Cell::new(0);
     assert_eq!(
-        expand_program(
-            entry(),
-            &NeverHandler {
-                protected_calls: &protected_calls,
-                handler_calls: &handler_calls,
-            },
-        ),
-        Err(ProgramError::InvalidContract)
+        program_error(&NeverHandler {
+            protected_calls: &protected_calls,
+            handler_calls: &handler_calls,
+        }),
+        ProgramError::InvalidContract
     );
     assert_eq!(protected_calls.get(), 0);
     assert_eq!(handler_calls.get(), 0);
+
+    let unreachable_handler_calls = Cell::new(0);
+    assert_invalid(&HandlerMatrix::NoReachable(&unreachable_handler_calls));
+    assert_eq!(unreachable_handler_calls.get(), 0);
+
+    let bypass = valid_program(&HandlerMatrix::OuterFailureBypass);
+    assert_eq!(bypass.declarations().len(), 3);
+    assert_eq!(state(&bypass, 0).failure_next_index(), Some(2));
+    assert_eq!(state(&bypass, 1).failure_next_index(), None);
+    assert_invalid(&HandlerMatrix::ForeignProtected);
+
+    let distinct = valid_program(&HandlerMatrix::Distinct);
+    assert_eq!(distinct.declarations().len(), 5);
+    assert_eq!(state(&distinct, 0).failure_next_index(), Some(1));
+    assert_eq!(state(&distinct, 2).failure_next_index(), Some(3));
+    assert_eq!(state(&distinct, 1).next_index(), Some(2));
+    assert_eq!(state(&distinct, 3).next_index(), Some(4));
+
+    for mode in 0..=3 {
+        assert_invalid(&HandlerMatrix::Bad(mode));
+    }
 }
 
 #[test]
 fn callback_depth_is_shared_across_child_match_handler_and_injection_scopes() {
     let accepted = Arc::new(DepthCounters::default());
-    let accepted_program = expand_program(
-        entry(),
-        &MixedDepth {
-            remaining: 59,
-            setup: &accepted,
-        },
-    )
-    .expect("callback depth 64");
+    let accepted_program = valid_program(&MixedDepth {
+        remaining: 59,
+        setup: &accepted,
+    });
     assert_eq!(accepted.before.load(Ordering::SeqCst), 1);
     assert_eq!(accepted.binding.load(Ordering::SeqCst), 1);
     assert_eq!(accepted.after.load(Ordering::SeqCst), 1);
@@ -2013,14 +1767,11 @@ fn callback_depth_is_shared_across_child_match_handler_and_injection_scopes() {
 
     let rejected = Arc::new(DepthCounters::default());
     assert_eq!(
-        expand_program(
-            entry(),
-            &MixedDepth {
-                remaining: 60,
-                setup: &rejected,
-            },
-        ),
-        Err(ProgramError::Capacity)
+        program_error(&MixedDepth {
+            remaining: 60,
+            setup: &rejected,
+        }),
+        ProgramError::Capacity
     );
     assert_eq!(rejected.before.load(Ordering::SeqCst), 0);
     assert_eq!(rejected.binding.load(Ordering::SeqCst), 0);
@@ -2032,4 +1783,5 @@ fn unavailable_authoring_surfaces_do_not_compile() {
     let tests = trybuild::TestCases::new();
     tests.compile_fail("tests/ui/removed_program_api.rs");
     tests.compile_fail("tests/ui/scoped_authoring.rs");
+    tests.compile_fail("tests/ui/scoped_escape.rs");
 }
