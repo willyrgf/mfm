@@ -8,6 +8,7 @@ use mfm_portfolio::{
     PortfolioSnapshotSelector, ResumePortfolioCollection,
 };
 use mfm_program::{Declaration, PureState, State};
+use mfm_values::canonicalize_mfm_value;
 
 #[test]
 fn semantic_portfolio_states_preserve_exact_contracts() {
@@ -249,11 +250,24 @@ fn portfolio_program_and_c0_capacity_contract() {
 fn representative_program_identity_is_stable() {
     let config: PortfolioConfig =
         serde_json::from_value(config_with_sources(2)).expect("representative config");
-    let (program, _) =
+    let (program, c0) =
         plan_snapshot(selector(), &config, &[target(1, 2)]).expect("representative plan");
     assert_eq!(program.canonical_bytes().len(), 36_560);
     assert_eq!(
+        program.canonical_bytes(),
+        include_bytes!("fixtures/portfolio-program-two-sources-v2.json")
+    );
+    assert_eq!(
         serde_json::to_string(program.content_ref()).expect("content ref JSON"),
         r#"{"content_digest":"content:sha256-v1:59c503d1d8faa1a7afc33d9bb0bcad42d053e7cecb8571023bbc0cef42ab4beb","schema_id":"schema:mfm-program-document:2:sha256-jcs-v1:fc3c33ba3470e25a166df52597c4b45a723dd6d0823d1318938c29225323076c"}"#
+    );
+    let (c0_bytes, c0_ref) = canonicalize_mfm_value(&c0).expect("canonical C0");
+    assert_eq!(
+        c0_bytes.as_bytes(),
+        include_bytes!("fixtures/portfolio-c0-two-sources.json")
+    );
+    assert_eq!(
+        serde_json::to_string(&c0_ref).expect("C0 content ref JSON"),
+        r#"{"content_digest":"content:sha256-v1:9978162f8dd866fb6bf7fbaf4dfb5befdcdc3ad0e6610e1ae1021dfe5f4f9ceb","schema_id":"schema:mfm.derived.portfolio_snapshot_input:1:sha256-jcs-v1:ff213653ac2077708b3070efeeb358d5fc88b5d0d3857f6d4cf130cce556073c"}"#
     );
 }

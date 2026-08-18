@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
 //! Thin Portfolio-only Application facade over the typed Runtime.
 
-use mfm_evm::EvmPhysicalTarget;
+use mfm_evm::{EvmPhysicalTarget, EVM_BALANCE_SOURCE_LIMIT};
 use mfm_ids::RunId;
 use mfm_portfolio::{
     plan_snapshot, PortfolioConfig, PortfolioError, PortfolioSnapshotSelector,
@@ -45,8 +45,17 @@ impl Application {
         config: &PortfolioConfig,
         targets: &[EvmPhysicalTarget],
     ) -> Result<RunView> {
-        let (program, c0) =
-            plan_snapshot(selector, config, targets).map_err(map_portfolio_error)?;
+        if targets.len() > EVM_BALANCE_SOURCE_LIMIT {
+            return Err(ApplicationError::Internal);
+        }
+        let owned_config = config.clone();
+        let owned_targets = targets.to_vec();
+        let planned = tokio::task::spawn_blocking(move || {
+            plan_snapshot(selector, &owned_config, &owned_targets)
+        })
+        .await
+        .map_err(|_| ApplicationError::Internal)?;
+        let (program, c0) = planned.map_err(map_portfolio_error)?;
         if program.entry_point_id().as_str() != PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID {
             return Err(ApplicationError::Internal);
         }

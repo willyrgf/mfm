@@ -8,6 +8,7 @@ use mfm_evm::{
     CheckChainIdentity, ConfirmBalanceAnchor, ConsolidateBalanceCollection, EvmAnchorRead,
     EvmBalanceRead, EvmChainIdentityRead, EvmPhysicalTarget, EvmReadValue, ReadInitialAnchor,
     ReadNativeBalance, ReadTokenBalance, ReadTokenDecimals, SelectBalanceAsset,
+    EVM_BALANCE_SOURCE_LIMIT,
 };
 use mfm_evm_live::{register_evm_reads, EvmProvider, EvmProviderResponse};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId, StableId};
@@ -589,4 +590,52 @@ async fn application_error_ownership_is_exact() {
         Err(ApplicationError::Runtime(RuntimeError::Unavailable))
     ));
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn target_descriptor_bound_precedes_runtime_admission() {
+    let targets = (1..=EVM_BALANCE_SOURCE_LIMIT + 1)
+        .map(|chain_id| EvmPhysicalTarget::new(chain_id as u64, endpoint_ref()).expect("target"))
+        .collect::<Vec<_>>();
+    let provider = Arc::new(Provider {
+        calls: AtomicUsize::new(0),
+        reject_call: None,
+    });
+    let app = Application::new(Runtime::new(
+        assembly(targets[0].clone(), provider.clone()),
+        Arc::new(MemoryStore::new()),
+    ));
+
+    app.start_portfolio(
+        run_id_with(70),
+        selector("portfolio-example"),
+        &native_config(),
+        &targets[..EVM_BALANCE_SOURCE_LIMIT],
+    )
+    .await
+    .expect("64 target descriptors");
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+
+    let rejected_id = run_id_with(71);
+    assert!(matches!(
+        app.start_portfolio(
+            rejected_id.clone(),
+            selector("portfolio-example"),
+            &native_config(),
+            &targets,
+        )
+        .await,
+        Err(ApplicationError::Internal)
+    ));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+
+    app.start_portfolio(
+        rejected_id,
+        selector("portfolio-example"),
+        &native_config(),
+        &targets[..EVM_BALANCE_SOURCE_LIMIT],
+    )
+    .await
+    .expect("rejected RunId was never admitted");
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 8);
 }

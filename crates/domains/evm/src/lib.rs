@@ -1908,19 +1908,19 @@ fn advance_balance_context<K: MfmValueTrait>(
 
 /// Deterministically expands one checked EVM balance collection.
 pub struct CollectEvmBalances<K: MfmValueTrait> {
-    target: EvmPhysicalTarget,
+    binding_ref: ContentRef,
     source_count: usize,
     marker: PhantomData<fn() -> K>,
 }
 
 impl<K: MfmValueTrait> CollectEvmBalances<K> {
     /// Constructs one collection expansion with a checked source count.
-    pub fn new(target: EvmPhysicalTarget, source_count: usize) -> Result<Self, EvmDomainError> {
+    pub fn new(binding_ref: ContentRef, source_count: usize) -> Result<Self, EvmDomainError> {
         if !(1..=EVM_BALANCE_SOURCE_LIMIT).contains(&source_count) {
             return Err(EvmDomainError::Program);
         }
         Ok(Self {
-            target,
+            binding_ref,
             source_count,
             marker: PhantomData,
         })
@@ -1936,22 +1936,22 @@ impl<K: MfmValueTrait> Operation for CollectEvmBalances<K> {
         &self,
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
+        let native = StableId::new("native").map_err(|_| ProgramError::InvalidContract)?;
+        let token = StableId::new("token").map_err(|_| ProgramError::InvalidContract)?;
         for _ in 0..self.source_count {
-            body.read::<CheckChainIdentity<K>, EvmChainIdentityRead>(&self.target)?;
-            body.read::<ReadInitialAnchor<K>, EvmAnchorRead>(&self.target)?;
+            body.read::<CheckChainIdentity<K>, EvmChainIdentityRead>(&self.binding_ref)?;
+            body.read::<ReadInitialAnchor<K>, EvmAnchorRead>(&self.binding_ref)?;
             body.pure::<SelectBalanceAsset<K>>()?;
             body.match_join::<EvmBalanceAsset<K>, EvmBalanceContext<K>>(|arms| {
-                let native = StableId::new("native").map_err(|_| ProgramError::InvalidContract)?;
-                arms.arm::<EvmBalanceContext<K>>(native, |branch| {
-                    branch.read::<ReadNativeBalance<K>, EvmBalanceRead>(&self.target)
+                arms.arm::<EvmBalanceContext<K>>(native.clone(), |branch| {
+                    branch.read::<ReadNativeBalance<K>, EvmBalanceRead>(&self.binding_ref)
                 })?;
-                let token = StableId::new("token").map_err(|_| ProgramError::InvalidContract)?;
-                arms.arm::<EvmBalanceContext<K>>(token, |branch| {
-                    branch.read::<ReadTokenDecimals<K>, EvmBalanceRead>(&self.target)?;
-                    branch.read::<ReadTokenBalance<K>, EvmBalanceRead>(&self.target)
+                arms.arm::<EvmBalanceContext<K>>(token.clone(), |branch| {
+                    branch.read::<ReadTokenDecimals<K>, EvmBalanceRead>(&self.binding_ref)?;
+                    branch.read::<ReadTokenBalance<K>, EvmBalanceRead>(&self.binding_ref)
                 })
             })?;
-            body.read::<ConfirmBalanceAnchor<K>, EvmAnchorRead>(&self.target)?;
+            body.read::<ConfirmBalanceAnchor<K>, EvmAnchorRead>(&self.binding_ref)?;
         }
         body.pure::<ConsolidateBalanceCollection<K>>()
     }
@@ -1960,14 +1960,12 @@ impl<K: MfmValueTrait> Operation for CollectEvmBalances<K> {
 macro_rules! impl_identity_injection {
     ($capability:ty, $state:ident) => {
         impl<K: MfmValueTrait> CapabilityInjection<$state<K>> for $capability {
-            type Setup = EvmPhysicalTarget;
+            type Setup = ContentRef;
             type ExpandedInput = EvmBalanceContext<K>;
             type ExpandedOutput = EvmBalanceContext<K>;
 
             fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
-                setup
-                    .binding_ref()
-                    .map_err(|_| ProgramError::InvalidContract)
+                Ok(setup.clone())
             }
         }
     };
@@ -2331,8 +2329,9 @@ mod tests {
     #[test]
     fn balance_operation_derives_topology_without_external_indices() {
         let target = EvmPhysicalTarget::new(1, route()).expect("target");
+        let binding_ref = target.binding_ref().expect("binding");
         let operation =
-            CollectEvmBalances::<Continuation>::new(target.clone(), 2).expect("operation");
+            CollectEvmBalances::<Continuation>::new(binding_ref.clone(), 2).expect("operation");
         let program = expand_program(
             EntryPointId::new("mfm.test/evm-balance@1").expect("entry"),
             &operation,
@@ -2379,7 +2378,7 @@ mod tests {
                 Declaration::State(state) => state.execution().binding_ref(),
                 Declaration::Match(_) => None,
             })
-            .all(|binding| binding == &target.binding_ref().expect("binding")));
+            .all(|binding| binding == &binding_ref));
         assert_eq!(
             declarations
                 .iter()
@@ -2387,10 +2386,10 @@ mod tests {
                 .count(),
             12
         );
-        assert!(CollectEvmBalances::<Continuation>::new(target.clone(), 1).is_ok());
-        assert!(CollectEvmBalances::<Continuation>::new(target.clone(), 64).is_ok());
-        assert!(CollectEvmBalances::<Continuation>::new(target.clone(), 0).is_err());
-        assert!(CollectEvmBalances::<Continuation>::new(target, 65).is_err());
+        assert!(CollectEvmBalances::<Continuation>::new(binding_ref.clone(), 1).is_ok());
+        assert!(CollectEvmBalances::<Continuation>::new(binding_ref.clone(), 64).is_ok());
+        assert!(CollectEvmBalances::<Continuation>::new(binding_ref.clone(), 0).is_err());
+        assert!(CollectEvmBalances::<Continuation>::new(binding_ref, 65).is_err());
     }
 
     #[test]
