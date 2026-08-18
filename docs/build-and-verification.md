@@ -53,8 +53,7 @@ nix develop -c cargo check -p mfm -p mfm-rest-api --all-targets
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |
 | `nix run .#run -- --task capacity-envelope` | Compose the three capacity owners above. |
-| `nix run .#run -- --task negative-scan` | Run the scoped deletion manifest plus path/package/export/wire/SQL/docs canaries. |
-| `nix run .#ci` | Compose format, absence, Clippy, workspace check/tests, managed DB, docs, and capacity tasks. |
+| `nix run .#ci` | Compose format, Clippy, workspace check/tests, managed DB, docs, and capacity tasks. |
 
 Do not run broad component gates immediately before `.#ci` on the same tree. Once focused failures
 are resolved, run CI exactly once on the final candidate when the workflow requires the composed

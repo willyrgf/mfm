@@ -1,6 +1,10 @@
 # RFC: establish the core Runtime, Journal, and Store proof path
 
-Status: approved platform target; implementation handoff ready
+Status: implemented architecture record
+
+Implementation note: the deletion inventory and scanner in this RFC were one-time cutover gates.
+[`FIXES_IMPL_PLAN_RFC_FOLLOWUPS.md`](FIXES_IMPL_PLAN_RFC_FOLLOWUPS.md) retires the manifest, script,
+and task after semantic owner tests and current documentation became the maintained proof surface.
 
 Implementation handoff:
 [`IMPL_PLAN_RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md`](IMPL_PLAN_RFC_RUNTIME_STORE_JOURNAL_TYPED_PROOF.md)
@@ -13,13 +17,10 @@ contract.
 
 There is no compatibility period, legacy decoder, dual schema, or fallback execution path.
 
-Relationship to `RFC_FOLLOWUPS_FROM_REFACT_RUNTIME.md`: this RFC adopts only that document's
-durable failure product—typed failure propagation/handlers lower to ordinary State continuations,
-and entry points have exact root success/failure contracts. It deliberately does not import the
-deferred Operation/Application DSL, State-only Program proposal, or FailureNext::ByVariant. The
-follow-up remains non-authoritative rebase source, not implementation input, and must later rebase
-its authoring layer onto this retained State-or-Match graph. This RFC freezes the durable lowering target only; its
-implementation does not add OperationExpansion or a failure-policy authoring DSL.
+Relationship to `RFC_FOLLOWUPS_FROM_REFACT_RUNTIME.md`: this RFC established the retained
+State-or-Match Program graph and typed failure continuations. The implemented follow-up subsequently
+added `OperationExpansion` authoring and failure handlers that lower onto that unchanged Program v2
+target; it did not add `FailureNext::ByVariant` or change Runtime, Journal, or Store semantics.
 
 ## Decision
 

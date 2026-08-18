@@ -107,8 +107,8 @@ RFC.
 4. **Trusted open authoring callbacks**
    - **Choice:** treat `Operation::expand` and capability-injection hook implementations as trusted
      deterministic authoring code. Child composition must use `OperationExpansion::operation`, and
-     hooks may emit support topology only through `InjectionWriter`. The repository scanner
-     forbids direct hook-to-hook composition in supported production roots.
+     hooks may emit support topology only through `InjectionWriter`. Reviewed production code
+     forbids direct hook-to-hook composition.
    - **Why uncertain:** Rust cannot let downstream crates implement these open traits while also
      making direct calls to another public `expand`, `original_binding_ref`, `write_before`, or
      `write_after` method mechanically impossible.
@@ -467,8 +467,10 @@ by the typed input context; it cannot be captured invisibly in authoring code.
 `Operation` implementations are trusted deterministic authoring code, like State implementations.
 They must compose children only through `OperationExpansion::operation`. The open trait method
 cannot prevent a malicious implementation from directly calling another
-`Operation::expand` method or recursing in ordinary Rust. Supported-current production code must
-contain no such direct call outside `mfm-program`; the absence scanner enforces that boundary.
+`Operation::expand` method or recursing in ordinary Rust. Direct trait callback calls bypass kernel
+callback accounting and are forbidden in reviewed production code. This is not a security or
+authorization boundary. `Program::new` remains the persisted-graph boundary and validates the
+fully lowered graph.
 
 The private `MAX_AUTHORING_CALLBACK_DEPTH` is exactly 64 simultaneously active kernel-entered
 authoring callbacks. The root/child `Operation::expand`, Match definition/arm, protected/handler,
@@ -1260,25 +1262,17 @@ No production change belongs in:
 Runtime tests may change only where public Program source construction moves to `expand_program`.
 Execution behavior and proof assertions remain unchanged.
 
-### 10.6 Documentation and absence enforcement
+### 10.6 Documentation and owner-test enforcement
 
 Update `docs/design.md`, `docs/architecture.md`, Portfolio/EVM/Program READMEs, and directly
 affected examples. Document Operations as deterministic authoring-only composition, States as
 execution leaves, and Program as the only persisted graph.
 
-Extend the supported-current cutover manifest/scanner for the numeric families, `ProgramAuthor`,
-`ForwardLabel`, `label`, `place`, `_to` authoring methods, raw `select`, raw source constructors,
-direct declaration-vector authoring, direct `.expand(...)` or `Operation::expand(...)` composition
-outside the `mfm-program` owner, direct hook-to-hook `original_binding_ref`/`write_before`/
-`write_after` calls, and current docs teaching numeric indices or public routes.
-Refresh its fingerprint/coverage under the existing scanner contract. Trait implementations and
-narrow negative tests necessarily contain the `expand` spelling; the rule targets method-call
-syntax in supported production roots, not definitions. Hostile fixtures may name rejected inputs
-under narrow test scopes; production exports and current docs may not teach them.
-
-Generic spellings such as `label`, `place`, `select`, and `_to` are forbidden only as the removed
-`mfm-program` authoring exports/calls or exact retired owner-qualified symbols. The scanner must not
-globally reject unrelated domain prose or ordinary collection/API methods with the same words.
+Owner tests and compile-fail fixtures prove the scoped authoring types, callback lifetimes, private
+raw constructors, structured topology, and exact Program validation boundary. Reviewed production
+code follows the trusted callback rule: child Operations enter through `OperationExpansion`, and
+capability support States enter through `InjectionWriter`. Current docs teach no numeric indices,
+public routes, raw declaration construction, or alternate authoring path.
 
 ## 11. Ordered implementation commits
 
@@ -1474,7 +1468,6 @@ Commit 1:
 ```text
 nix develop -c cargo test \
   -p mfm-evm -p mfm-portfolio -p mfm-evm-live -p mfm-app --all-targets
-nix run .#run -- --task negative-scan
 ```
 
 Commit 2 while iterating:
@@ -1484,10 +1477,9 @@ nix develop -c cargo test -p mfm-program --all-targets
 nix develop -c cargo test \
   -p mfm-runtime -p mfm-evm -p mfm-portfolio -p mfm-evm-live -p mfm-app --all-targets
 nix run .#run -- --task capacity-app
-nix run .#run -- --task negative-scan
 ```
 
-Run `nix run .#model-check` if task or manifest integration changes. After focused checks are green,
+Run `nix run .#model-check` if task-graph integration changes. After focused checks are green,
 run `git diff --check` and exactly one final `nix run .#ci`; do not immediately precede CI with
 redundant broad component gates.
 
@@ -1554,7 +1546,7 @@ The RFC is implemented only when:
     or writable through a hook, while each ordinary repeated same-type Read independently applies
     its policy;
 19. expansion/injection failure is atomic, kernel-entered authoring callback depth accepts 64 and
-    rejects the 65th callback before invocation, and supported production code never composes
+    rejects the 65th callback before invocation, and reviewed production code never composes
     through direct `.expand(...)` or hook-to-hook calls;
 20. all six current EVM Read pairings use explicit identity injection;
 21. EVM/Portfolio authoring contains no declaration-index/count coordination;
@@ -1563,7 +1555,7 @@ The RFC is implemented only when:
 24. Runtime, Journal, Store, PostgreSQL, App production API, CLI, and REST behavior are unchanged;
 25. no Effect, nonce, submission, outbox, config/fact/replay/lifecycle/compatibility surface is
     reintroduced;
-26. current docs and the negative scanner teach only this authoring model;
+26. current docs and owner tests enforce only this authoring model;
 27. the combined complexity report achieves a non-positive production-authoring LOC delta or
     records the mandatory architect justification for every irreducible positive line; and
 28. both commit-level reviews, cumulative review, focused verification, and final CI are recorded

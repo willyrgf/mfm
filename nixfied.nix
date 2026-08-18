@@ -10,10 +10,7 @@ let
   cargoTools = [
     "rust-toolchain"
     pkgs.bash
-    pkgs.coreutils
-    pkgs.gawk
     pkgs.git
-    pkgs.ripgrep
     pkgs.pkg-config
     "cc"
   ]
@@ -142,14 +139,10 @@ in
         "capacity-store"
       ];
     };
-    negative-scan = cargoLeaf {
-      run = [ "bash" "scripts/check-cutover-manifest.sh" ];
-    };
     ci = {
       kind = "composite";
       steps = nixfiedLib.seq [
         "fmt"
-        "negative-scan"
         "clippy"
         "cargo-check"
         "cargo-test"

@@ -4,6 +4,10 @@
 //! A Program is the sole persisted control document. Runtime associates its
 //! immutable declarations with typed implementations. Authoring callbacks and
 //! capability injection are erased before construction; this crate performs no IO.
+//! Operation implementations compose children only through `OperationExpansion`, and capability
+//! policies emit support States only through `InjectionWriter`. Direct trait callback calls bypass
+//! kernel callback accounting and are forbidden in reviewed production code; checked Program
+//! construction, not this trusted-code rule, remains the persisted graph boundary.
 
 #[cfg(test)]
 extern crate self as mfm_program;
