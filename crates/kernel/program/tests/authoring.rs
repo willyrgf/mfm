@@ -1328,6 +1328,305 @@ impl Operation for MixedDepth<'_> {
     }
 }
 
+static DIRECT_DESCRIPTOR_CALLS: AtomicUsize = AtomicUsize::new(0);
+static DIRECT_SEMANTIC_CALLS: AtomicUsize = AtomicUsize::new(0);
+static DIRECT_STATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+static MEMO_DESCRIPTOR_CALLS: AtomicUsize = AtomicUsize::new(0);
+static MEMO_SEMANTIC_CALLS: AtomicUsize = AtomicUsize::new(0);
+static MEMO_STATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+static MEMO_CAPABILITY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+struct DirectCountedValue(u8);
+
+impl mfm_values::MfmValue for DirectCountedValue {
+    fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+        DIRECT_DESCRIPTOR_CALLS.fetch_add(1, Ordering::SeqCst);
+        framework_value_descriptor(
+            "mfm-program",
+            Self::semantic_id()?,
+            "mfm.test.authoring.direct-counted-value",
+            SchemaShape::UnsignedInteger { bits: 8 },
+            std::any::type_name::<Self>(),
+        )
+    }
+
+    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
+        DIRECT_SEMANTIC_CALLS.fetch_add(1, Ordering::SeqCst);
+        SemanticTypeId::new(
+            "mfm.test.authoring",
+            "direct-counted-value",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0x41; 32]),
+        )
+        .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+    }
+}
+
+struct DirectCountedState;
+
+impl State for DirectCountedState {
+    type Input = DirectCountedValue;
+    type Output = DirectCountedValue;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        DIRECT_STATE_CALLS.fetch_add(1, Ordering::SeqCst);
+        StableId::new("mfm.test.authoring/direct-counted-state@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for DirectCountedState {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+struct DirectCountedOperation;
+
+impl Operation for DirectCountedOperation {
+    type Input = DirectCountedValue;
+    type Output = DirectCountedValue;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.pure::<DirectCountedState>()?;
+        body.pure::<DirectCountedState>()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+struct MemoValue(u8);
+
+impl mfm_values::MfmValue for MemoValue {
+    fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+        MEMO_DESCRIPTOR_CALLS.fetch_add(1, Ordering::SeqCst);
+        framework_value_descriptor(
+            "mfm-program",
+            Self::semantic_id()?,
+            "mfm.test.authoring.memo-value",
+            SchemaShape::UnsignedInteger { bits: 8 },
+            std::any::type_name::<Self>(),
+        )
+    }
+
+    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
+        MEMO_SEMANTIC_CALLS.fetch_add(1, Ordering::SeqCst);
+        SemanticTypeId::new(
+            "mfm.test.authoring",
+            "memo-value",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0x42; 32]),
+        )
+        .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+enum MemoChoice {
+    Selected(MemoValue),
+}
+
+struct MemoIdentity;
+
+impl State for MemoIdentity {
+    type Input = MemoValue;
+    type Output = MemoValue;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        MEMO_STATE_CALLS.fetch_add(1, Ordering::SeqCst);
+        StableId::new("mfm.test.authoring/memo-identity@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for MemoIdentity {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+struct MemoFallibleIdentity;
+
+impl State for MemoFallibleIdentity {
+    type Input = MemoValue;
+    type Output = MemoValue;
+    type Failure = MemoValue;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.authoring/memo-fallible-identity@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl PureState for MemoFallibleIdentity {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+struct MemoChild;
+
+impl Operation for MemoChild {
+    type Input = MemoValue;
+    type Output = MemoValue;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.pure::<MemoIdentity>()
+    }
+}
+
+struct MemoCapability;
+
+impl ReadCapabilityContract for MemoCapability {
+    type Intent = MemoValue;
+    type Evidence = MemoValue;
+
+    fn contract_id() -> mfm_capabilities::Result<StableId> {
+        MEMO_CAPABILITY_CALLS.fetch_add(1, Ordering::SeqCst);
+        StableId::new("mfm.test.authoring/memo-capability@1")
+            .map_err(|_| CapabilityError::InvalidContract)
+    }
+
+    fn bind_evidence(
+        _intent: &Self::Intent,
+        _evidence: &Self::Evidence,
+    ) -> mfm_capabilities::Result<()> {
+        Ok(())
+    }
+}
+
+struct MemoRead;
+
+impl State for MemoRead {
+    type Input = MemoValue;
+    type Output = MemoValue;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.authoring/memo-read@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl ReadState<MemoCapability> for MemoRead {
+    fn prepare(input: &Self::Input) -> Result<MemoValue, ReadPreparationError> {
+        Ok(input.clone())
+    }
+
+    fn interpret(
+        input: Self::Input,
+        _evidence: &MemoValue,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+impl CapabilityInjection<MemoRead> for MemoCapability {
+    type Setup = ContentRef;
+    type ExpandedInput = MemoValue;
+    type ExpandedOutput = MemoValue;
+
+    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
+        Ok(setup.clone())
+    }
+
+    fn write_before(_setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
+        writer.pure::<MemoIdentity>()
+    }
+
+    fn write_after(_setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
+        writer.pure::<MemoIdentity>()
+    }
+}
+
+struct MemoAcrossScopes {
+    binding: ContentRef,
+}
+
+impl Operation for MemoAcrossScopes {
+    type Input = MemoChoice;
+    type Output = MemoValue;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.match_join::<MemoChoice, MemoValue>(|arms| {
+            arms.arm::<MemoValue>(
+                StableId::new("selected").map_err(|_| ProgramError::InvalidContract)?,
+                |arm| arm.operation(&MemoChild),
+            )
+        })?;
+        body.with_failure_handler::<MemoValue, MemoValue>(
+            |protected| protected.pure::<MemoFallibleIdentity>(),
+            |handler| handler.pure::<MemoIdentity>(),
+        )?;
+        body.read::<MemoRead, MemoCapability>(&self.binding)?;
+        body.read::<MemoRead, MemoCapability>(&self.binding)
+    }
+}
+
+struct RetryWrongJoin(bool);
+
+impl Operation for RetryWrongJoin {
+    type Input = Choice;
+    type Output = C;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.match_join::<Choice, C>(|arms| {
+            let left = StableId::new("left").map_err(|_| ProgramError::InvalidContract)?;
+            if self.0 {
+                assert_eq!(
+                    arms.arm::<A>(left.clone(), |arm| arm.pure::<AtoB>()),
+                    Err(ProgramError::InvalidContract)
+                );
+            }
+            arms.arm::<A>(left, |arm| {
+                arm.pure::<AtoB>()?;
+                arm.pure::<BtoC>()
+            })?;
+            arms.arm::<B>(
+                StableId::new("right").map_err(|_| ProgramError::InvalidContract)?,
+                |arm| arm.pure::<BtoC>(),
+            )
+        })
+    }
+}
+
+struct WrongTerminalOutput;
+
+impl Operation for WrongTerminalOutput {
+    type Input = A;
+    type Output = C;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.pure::<AtoB>()
+    }
+}
+
 fn entry() -> EntryPointId {
     EntryPointId::new("mfm.test/authoring@1").expect("entry")
 }
@@ -1383,6 +1682,44 @@ fn root_and_child_callbacks_are_exact_and_depth_bounded() {
         expand_program(entry(), &InvalidEmpty),
         Err(ProgramError::InvalidContract)
     );
+    assert_eq!(
+        expand_program(entry(), &WrongTerminalOutput),
+        Err(ProgramError::InvalidContract)
+    );
+}
+
+#[test]
+fn one_expansion_owns_one_top_level_identity_memo() {
+    DIRECT_DESCRIPTOR_CALLS.store(0, Ordering::SeqCst);
+    DIRECT_SEMANTIC_CALLS.store(0, Ordering::SeqCst);
+    DIRECT_STATE_CALLS.store(0, Ordering::SeqCst);
+
+    expand_program(entry(), &DirectCountedOperation).expect("first counted expansion");
+    assert_eq!(DIRECT_DESCRIPTOR_CALLS.load(Ordering::SeqCst), 1);
+    assert_eq!(DIRECT_SEMANTIC_CALLS.load(Ordering::SeqCst), 2);
+    assert_eq!(DIRECT_STATE_CALLS.load(Ordering::SeqCst), 1);
+
+    expand_program(entry(), &DirectCountedOperation).expect("second counted expansion");
+    assert_eq!(DIRECT_DESCRIPTOR_CALLS.load(Ordering::SeqCst), 2);
+    assert_eq!(DIRECT_SEMANTIC_CALLS.load(Ordering::SeqCst), 4);
+    assert_eq!(DIRECT_STATE_CALLS.load(Ordering::SeqCst), 2);
+
+    MEMO_DESCRIPTOR_CALLS.store(0, Ordering::SeqCst);
+    MEMO_SEMANTIC_CALLS.store(0, Ordering::SeqCst);
+    MEMO_STATE_CALLS.store(0, Ordering::SeqCst);
+    MEMO_CAPABILITY_CALLS.store(0, Ordering::SeqCst);
+    let program = expand_program(
+        entry(),
+        &MemoAcrossScopes {
+            binding: nominal_contract_ref::<A>().expect("binding"),
+        },
+    )
+    .expect("memo shared across nested scopes");
+    assert_eq!(program.declarations().len(), 10);
+    assert_eq!(MEMO_DESCRIPTOR_CALLS.load(Ordering::SeqCst), 2);
+    assert_eq!(MEMO_SEMANTIC_CALLS.load(Ordering::SeqCst), 4);
+    assert_eq!(MEMO_STATE_CALLS.load(Ordering::SeqCst), 1);
+    assert_eq!(MEMO_CAPABILITY_CALLS.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -1398,6 +1735,12 @@ fn configured_children_repeat_without_parent_size_knowledge_and_fail_atomically(
     assert_eq!(
         state(&atomic, 0).state_implementation_ref(),
         &state_implementation_ref::<IdentityA>().expect("identity")
+    );
+    assert_eq!(
+        atomic.canonical_bytes(),
+        expand_program(entry(), &ConfiguredIdentity(1))
+            .expect("clean child retry")
+            .canonical_bytes()
     );
 }
 
@@ -1546,6 +1889,14 @@ fn generic_tagging_metadata_order_and_match_atomicity_are_exact() {
         atomic.canonical_bytes(),
         expand_program(entry(), &MatchOperation)
             .expect("ordinary Match")
+            .canonical_bytes()
+    );
+    assert_eq!(
+        expand_program(entry(), &RetryWrongJoin(true))
+            .expect("wrong join can be retried")
+            .canonical_bytes(),
+        expand_program(entry(), &RetryWrongJoin(false))
+            .expect("clean Match")
             .canonical_bytes()
     );
 }
