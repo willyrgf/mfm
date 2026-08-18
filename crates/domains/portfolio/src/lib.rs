@@ -1009,11 +1009,11 @@ pub fn plan_snapshot(
         demand.push(PortfolioCollectionDemand::new(
             collection.correlation.clone(),
             collection.request.clone(),
-            route_ref,
+            route_ref.clone(),
         )?);
         checked_collections.push(
             CollectEvmBalances::<PortfolioContinuation>::new(
-                target.clone(),
+                route_ref,
                 collection.request.sources.len(),
             )
             .map_err(|_| PortfolioError::Program)?,
