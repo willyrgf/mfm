@@ -20,6 +20,12 @@ malformed unauthenticated ingress returns `Unavailable`. Accepted provider resul
 typed `Read`, `Rejected`, `SafeFailure`, and `IntegrityBlocked` cases. Only authenticated external
 integrity evidence becomes durable.
 
+`JsonRpcEvmProvider` applies that map exactly: transport, timeout, non-success status, an oversized
+body, and any undecodable result are `Unavailable`; a JSON-RPC error object and an `eth_call` result
+of exactly `"0x"` are definite `SafeFailure`; an undecodable or operation-mismatched intent and a
+locally malformed address are `Internal` before the first byte of IO. It never produces
+`IntegrityBlocked`.
+
 Endpoint identity changes the target ref and Program. Replacing credentials or a client handle
 under the same public target does not. Credentials are never target material.
 

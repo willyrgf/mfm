@@ -15,6 +15,10 @@ use mfm_evm::{
 use mfm_ids::StableId;
 use mfm_runtime::{ReadAdapterError, RuntimeAssemblyBuilder};
 
+mod json_rpc;
+
+pub use json_rpc::{EvmProviderBuildError, JsonRpcEvmProvider};
+
 const MAX_EVM_REQUEST_BYTES: usize = 512 * 1024;
 
 /// Typed provider response after bounded authenticated ingress.

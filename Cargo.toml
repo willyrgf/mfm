@@ -34,6 +34,9 @@ tokio = { version = "1.44", features = ["full"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres"] }
 clap = { version = "4.4", features = ["derive"] }
 thiserror = "2.0.18"
+# Live EVM transport and wire codecs. Only `mfm-evm-live` may depend on `alloy-*`.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+alloy-primitives = { version = "1.6.1", default-features = false, features = ["std"] }
 
 # Keep full debugger-quality DWARF without embedding a copy into every linked
 # test and integration-test executable.
