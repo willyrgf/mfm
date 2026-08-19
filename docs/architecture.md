@@ -13,7 +13,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
 | Live adapters | bounded provider ingress and direct typed callback registration | domain planning or State registration |
 | Application | trusted Portfolio assembly composition, Portfolio plan/start, and direct Runtime resume/read facade | sessions, frame inspection, status derivation |
-| Binaries | one-shot CLI help/version and REST unavailable diagnostic; future typed request parsing/rendering | execution lifecycle or a bound REST listener |
+| Binaries | CLI configuration parsing, one live Application composition, and one redacted view rendering; REST unavailable diagnostic | execution lifecycle, run semantics, or a bound REST listener |
 
 RuntimeAssemblyBuilder registers exact value codecs, Pure/Read State drivers, Match descriptors, and
 Read callbacks. `finish` freezes one immutable assembly. Program association pre-resolves every
