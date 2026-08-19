@@ -31,8 +31,10 @@ async fn native_snapshot_run_and_read_back_via_cli() {
         std::env::var("MFM_E2E_DATABASE_URL").expect("cli-e2e must supply MFM_E2E_DATABASE_URL");
     std::env::var("MFM_E2E_RPC_URL").expect("cli-e2e must supply MFM_E2E_RPC_URL");
 
-    // `postgres-test` leaves hostile schemas in this same database and service state survives
-    // task runs, so the store starts empty and `init` exercises the real install path.
+    // The managed database is slot state: it survives every task run and `postgres-test`
+    // shares it. Resetting is what makes this test hermetic, and it is what makes `init`
+    // exercise the real install path instead of only the verify path on every run but the
+    // first.
     reset_public_schema(&database_url).await;
 
     let unique = unique_suffix();
