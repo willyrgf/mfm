@@ -79,6 +79,14 @@ mfm_cli show     --config <PATH> --run-id <RUN_ID>
 
 - `--run-id` is the full explicit `run:sha256-jcs-v1:<64 hex>` string via
   `RunId::parse`. The CLI never derives or defaults a RunId (design invariant).
+- One EVM route per config file this wave: the CLI builds exactly one
+  `EvmPhysicalTarget` from the `evm` block, so a config whose sources span two chain
+  ids fails at planning as an invalid request. State this limitation in
+  `bin/cli/README.md`.
+- `show` requires the fully adapter-bound assembly (hence `rpc_url_env` even for
+  reads) — settled, not an uncertainty: `docs/architecture.md` states association
+  pre-resolves every implementation and callback, and the cold-read binding-failure
+  runtime contract test proves cold reads resolve bindings.
 - `init`: resolve `database_url_env` → `mfm_storage_postgres::install_schema`. Silent
   on success.
 - `snapshot`: full composition → `Application::start_portfolio(run_id, selector,
@@ -138,7 +146,21 @@ struct EvmRouteConfig { chain_id: u64, endpoint_id: String, rpc_url_env: String 
 struct StoreConfig { database_url_env: String }
 ```
 
-## New domain value: `EvmEndpoint` (`crates/domains/evm/src/lib.rs`)
+## Domain surface extension (`crates/domains/evm/src/lib.rs`)
+
+Two additions, one commit — both exist so live providers consume the domain's own
+typed contract instead of re-declaring it:
+
+**Typed intent access.** `EvmReadSubject` and `EvmBlockAnchor` become `pub` (a public
+enum cannot carry private types), `EvmReadIntent` gains
+`pub const fn subject(&self) -> &EvmReadSubject`, and `EvmBlockAnchor` gains
+`pub fn number(&self) -> &str` / `pub fn hash(&self) -> &str` (fields stay private;
+checked construction unchanged). The provider then deserializes the request bytes with
+the EXISTING checked `EvmReadIntent` deserializer and matches typed — no serde mirror
+in `mfm-evm-live`, no silent drift class. The wire was already public in practice: the
+adapter serializes the whole intent as every provider's request bytes.
+
+## New domain value: `EvmEndpoint` (same commit)
 
 Secret-free named endpoint identity, mirroring the `EvmPhysicalTarget` pattern
 (`Serialize + MfmValue + impl_checked_deserialize!`,
@@ -168,32 +190,18 @@ impl EvmProvider for JsonRpcEvmProvider { /* the fixed trait signature at src/li
 ```
 
 Everything else private: a ~40-line JSON-RPC 2.0 envelope
-(`{"jsonrpc":"2.0","id":1,method,params}` → `result`/`error`), a serde mirror of the
-intent wire (`EvmReadIntent` exposes no `subject` accessor; wire is
-`deny_unknown_fields`-stable):
+(`{"jsonrpc":"2.0","id":1,method,params}` → `result`/`error`) and conversions on
+`alloy_primitives`: `quantity_to_decimal` ("0x…" → exact decimal via `U256`),
+`block_tag` (decimal → `{:#x}`), `word_to_u8` (exactly 66 chars, ≤255). Addresses are
+parsed with `alloy_primitives::Address::from_str` and re-rendered — never spliced by
+string concatenation (`EvmBalanceSource` validates the address only as lowercase
+public text, not as 20 hex bytes; a malformed address must fail locally as `Internal`
+BEFORE any IO, not as a mis-classed node error). Request prologue: deserialize the
+bytes with the checked `serde_json::from_slice::<EvmReadIntent>` (failure →
+`Err(Internal)`); cross-check `operation_and_chain_id().0 == operation.as_str()`
+(mismatch → `Internal`); then match `intent.subject()`:
 
-```rust
-#[derive(serde::Deserialize)]
-struct WireIntent { operation: String, chain_id: u64, subject: WireSubject, route_ref: serde_json::Value }
-#[derive(serde::Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-enum WireSubject { ChainIdentity, InitialAnchor,
-    NativeBalance { source: WireSource, anchor: WireAnchor },
-    TokenDecimals { source: WireSource, anchor: WireAnchor },
-    TokenBalance  { source: WireSource, anchor: WireAnchor },
-    ConfirmAnchor { source: WireSource, anchor: WireAnchor } }
-#[derive(serde::Deserialize)]
-struct WireSource { source_id: String, chain_id: u64, address: String, token: Option<String> }
-#[derive(serde::Deserialize)]
-struct WireAnchor { number: String, hash: String }   // number is canonical DECIMAL
-```
-
-and conversions on `alloy_primitives::U256`: `quantity_to_decimal` ("0x…" → exact
-decimal string), `block_tag` (decimal → `{:#x}`), `word_to_u8` (exactly 66 chars,
-≤255). Request prologue: decode `WireIntent` (failure → `Err(Internal)`); cross-check
-`intent.operation == operation.as_str()` (mismatch → `Internal`); then map:
-
-| `WireSubject` | RPC call | `EvmReadValue` |
+| `EvmReadSubject` | RPC call | `EvmReadValue` |
 |---|---|---|
 | `ChainIdentity` | `eth_chainId []` | `ChainId(u64)` |
 | `InitialAnchor` | `eth_getBlockByNumber ["latest", false]` | `Anchor { number: decimal, hash }` |
@@ -242,9 +250,14 @@ pub fn portfolio_assembly(target: EvmPhysicalTarget, provider: Arc<dyn EvmProvid
 
 `mfm-evm-live` moves from dev-dependency to dependency of `mfm-app`.
 `portfolio_runtime.rs` drops its local `state_builder()`/`assembly()` and calls these
-(the missing-adapter negative test uses `register_portfolio_states` + `finish`). One
-composition site for CLI and tests. `docs/architecture.md` Application row gains
-"trusted Portfolio assembly composition".
+(the missing-adapter negative test uses `register_portfolio_states` + `finish`; give
+that fn a rustdoc line saying standalone use exists for adapterless composition, so it
+does not read as a general API). One composition site for CLI and tests.
+`docs/architecture.md` Application row gains "trusted Portfolio assembly composition".
+Recorded cost, not a defect: every `mfm-app` consumer now links reqwest and
+alloy-primitives transitively (`bin/cli` needs both anyway; `bin/rest-api` has zero
+dependencies today and is unaffected). Avoiding it would need a new crate split —
+rejected under the complexity rule.
 
 CLI composition line:
 
@@ -339,12 +352,15 @@ the `.#ci` row.
 
 # Commit sequence (each verifies before the next)
 
-1. `add named evm endpoint identity` — `EvmEndpoint` + test in
-   `crates/domains/evm/tests/target_contract.rs` + `docs/evm-rpc-routing.md`
-   derivation paragraph. Verify: `cargo test -p mfm-evm --all-targets`.
+1. `extend evm domain surface for live routing` — public `EvmReadSubject` +
+   `EvmBlockAnchor` with accessors, `EvmReadIntent::subject()`, `EvmEndpoint`; tests
+   in `crates/domains/evm/tests/target_contract.rs` + unit tests;
+   `docs/evm-rpc-routing.md` derivation paragraph.
+   Verify: `cargo test -p mfm-evm --all-targets`.
 2. `add production json-rpc evm provider` — workspace deps, `JsonRpcEvmProvider` +
-   `EvmProviderBuildError` + envelope/mirror/conversions + stub-server unit tests +
-   `crates/live/evm/README.md` (alloy-only-here rule) + routing-doc failure note.
+   `EvmProviderBuildError` + envelope/conversions (typed intent match, no mirror) +
+   stub-server unit tests + `crates/live/evm/README.md` (alloy-only-here rule) +
+   routing-doc failure note.
    Verify: `cargo test -p mfm-evm-live --all-targets`; the `cargo tree` gate;
    `nix run .#run -- --task cargo-check` once (sandbox resolves the new deps).
 3. `move portfolio runtime composition into application` —
@@ -357,16 +373,16 @@ the `.#ci` row.
    storage-crate entry that installs only into an empty store").
    Verify: `cargo test -p mfm-storage-postgres --lib`;
    `nix run .#run -- --task postgres-test`.
-5. `add cli live snapshot commands` — `bin/cli/src/main.rs` (init/snapshot/show),
-   deps, `bin/cli/README.md` transport contract, `docs/architecture.md` Binaries row.
+5. `add cli live snapshot commands` — `bin/cli/src/main.rs` (init/snapshot/show);
+   `bin/cli/Cargo.toml` dependencies made explicit: `mfm-app`, `mfm-evm`,
+   `mfm-evm-live`, `mfm-ids`, `mfm-portfolio`, `mfm-runtime`, `mfm-storage-postgres`,
+   `serde`, `serde_json`, `tokio` (for `#[tokio::main]`; also serves the test target
+   later — integration tests see normal dependencies, no tokio dev-dep needed), plus
+   existing `clap`; `bin/cli/README.md` transport contract (incl. the one-route
+   limitation), `docs/architecture.md` Binaries row.
    Verify: `cargo check -p mfm --all-targets`; manual smoke against a local pinned
    reth + postgres.
-6. `add cli e2e for native snapshot against managed services` —
-   `bin/cli/tests/cli_e2e.rs`, `[[test]]` entry, sqlx dev-dep.
-   Verify: `cargo test -p mfm --all-targets` (compiles, ignored); red-green loop
-   manually or after commit 8's task; pin `head_sequence`/totals strings from the
-   first green run.
-7. `replace mocked native run e2e with live coverage and fixture keeper` — delete
+6. `replace mocked native run e2e with live coverage and fixture keeper` — delete
    ONLY `portfolio_runtime.rs:149-227` (the native hot/cold test); add
    `frozen_snapshot_fixture_remains_exact_canonical_json` to
    `crates/domains/portfolio/tests/planning_contract.rs`: canonical validity via
@@ -376,10 +392,16 @@ the `.#ci` row.
    if the type implements `Deserialize`. The failure-fixture consumer
    (`portfolio_runtime.rs:533`) survives this wave.
    Verify: `cargo test -p mfm-app -p mfm-portfolio --all-targets`.
-8. `gate cli e2e in nixfied and verification docs` — nixfied edits + docs rows.
-   Verify: `nix run .#model-check`; `nix flake check --no-build`;
-   `nix run .#run -- --task cli-e2e`; one final `nix run .#ci` on the exact
-   candidate; no concurrent gates.
+7. `add gated cli e2e for native snapshot against managed services` — the test and
+   its gate land together: `bin/cli/tests/cli_e2e.rs`,
+   `[[test]] name = "cli_e2e" path = "tests/cli_e2e.rs"` (explicit path;
+   `autotests = false`), sqlx dev-dep; nixfied edits (imports, `cli-e2e` leaf, `ci`
+   seq); `docs/build-and-verification.md` rows. Pin `head_sequence`/totals strings
+   from the manual red-green loop BEFORE finalizing the commit. During development,
+   iterate with `nix run .#run -- --task cli-e2e`. Final-candidate verification, in
+   order and nothing else: `nix run .#model-check`, `nix flake check --no-build`, one
+   `nix run .#ci` (CI composes cli-e2e — do not run the task immediately before it);
+   no concurrent gates.
 
 Manual node for the red-green loop (repo-pinned rev, matches the CI service version):
 
@@ -393,7 +415,7 @@ nix build --no-link --print-out-paths \
 
 1. Requires-bearing leaf directly in the `ci` seq. Assumption: admits like the
    composite precedent. Consequence: model admission failure. Validate:
-   `nix run .#model-check` in commit 8; fallback single-step composite.
+   `nix run .#model-check` in commit 7; fallback single-step composite.
 2. reqwest 0.12 no-default-features graph. Assumption: pure Rust, no TLS, no cmake in
    the nix sandbox. Consequence: sandbox build failure. Validate: `cargo tree` +
    `cargo-check` task in commit 2.
@@ -401,16 +423,16 @@ nix build --no-link --print-out-paths \
    compiler, commit 2.
 4. Pinned e2e values (`head_sequence=11`, totals/amount strings). Assumption: live
    single-native-source Program shape matches the deleted mock. Consequence:
-   assertion churn. Validate: first green run; freeze thereafter.
-5. `show` requires the fully adapter-bound assembly (hence `rpc_url_env` even for
-   reads). Assumption: association pre-resolves callbacks for `read` as for `start`.
-   Consequence if wrong: `show` could drop the env requirement — docs simplification
-   only. Validate: commit 5 manual run.
-6. Warm-chain exactness of account 1's `10^24` wei (no fee credit ever). Consequence:
+   assertion churn. Validate: manual red-green loop in commit 7; freeze thereafter.
+5. Warm-chain exactness of account 1's `10^24` wei (no fee credit ever). Consequence:
    raw_units drift on warm slots. Validate: repeated `cli-e2e` on a warm slot;
    fallback: a higher-index never-used account.
-7. Sandbox resolution of newly added deps (reqwest/alloy/sqlx-dev). Consequence:
+6. Sandbox resolution of newly added deps (reqwest/alloy/sqlx-dev). Consequence:
    first task run fails on download. Validate: `cargo-check` task after commits 2
-   and 6.
-8. reth `--dev` serves anchored state for the seconds-old blocks the run touches.
+   and 7.
+7. reth `--dev` serves anchored state for the seconds-old blocks the run touches.
    Consequence: loud `SafeFailure`/`Unavailable`. Validate: first manual/e2e run.
+
+(Resolved, previously listed: `show` needing the fully bound assembly is settled by
+`docs/architecture.md` — association pre-resolves every callback — and the cold-read
+binding-failure runtime contract test.)
