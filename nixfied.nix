@@ -102,7 +102,8 @@ in
       run = [ "cargo" "test" "--workspace" "--all-targets" ];
     };
     postgres-test = (cargoLeaf {
-      run = [ "cargo" "test" "-p" "mfm-storage-postgres" "--lib" "--" "--include-ignored" ];
+      # Every ignored test owns the whole managed database, so they must not overlap.
+      run = [ "cargo" "test" "-p" "mfm-storage-postgres" "--lib" "--" "--include-ignored" "--test-threads=1" ];
       env = {
         DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
       };

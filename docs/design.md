@@ -38,7 +38,9 @@ tunable runtime policy.
 PostgreSQL is a fresh three-table baseline: `mfm_store_schema`, `mfm_run_frames`, and
 `mfm_run_heads`. Connection admission checks exact schema shape, logged tables, primary status,
 `fsync`, and `full_page_writes`. Loads use one read-only repeatable snapshot. Appends take the
-per-RunId advisory transaction lock before observing state and force synchronous COMMIT.
+per-RunId advisory transaction lock before observing state and force synchronous COMMIT. Schema
+provisioning is one idempotent storage-crate entry that installs only into an empty store: it
+verifies an existing installation, refuses to touch any incompatible one, and never migrates.
 
 EVM physical route identity is the domain-owned, secret-free `EvmPhysicalTarget { chain_id,
 endpoint_ref }`. Planning and adapter registration derive the same content ref. Credentials and

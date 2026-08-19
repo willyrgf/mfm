@@ -15,9 +15,7 @@ use mfm_journal::{
 };
 use mfm_store::{AppendResult, Store, StoreError};
 use sqlx::postgres::{PgArguments, PgConnectOptions, PgPoolOptions, PgRow};
-#[cfg(test)]
-use sqlx::Executor;
-use sqlx::{Arguments, Connection, PgConnection, PgPool, Row};
+use sqlx::{Arguments, Connection, Executor, PgConnection, PgPool, Row};
 
 const SCHEMA_CONTRACT: &str = "mfm.run-history-postgres.v1";
 
@@ -68,11 +66,59 @@ impl PostgresStore {
     }
 }
 
+/// Installs the fresh run-history schema when absent; verifies an existing installation.
+///
+/// The entry is idempotent and never modifies an incompatible existing installation: it
+/// executes the migration only when the durability posture already holds and the public
+/// schema owns no `mfm_`-prefixed relation at all.
+pub async fn install_schema(database_url: &str) -> std::result::Result<(), StoreOpenError> {
+    let options: PgConnectOptions = database_url
+        .parse()
+        .map_err(|_| StoreOpenError::Unavailable)?;
+    let mut connection = PgConnection::connect_with(&options)
+        .await
+        .map_err(|_| StoreOpenError::Unavailable)?;
+    verify_durability(&mut connection)
+        .await
+        .map_err(classify_gate_error)?;
+    match verify_connection(&mut connection).await {
+        Ok(()) => return Ok(()),
+        Err(GateError::Unavailable) => return Err(StoreOpenError::Unavailable),
+        Err(GateError::Incompatible) => {}
+    }
+    if mfm_relation_count(&mut connection)
+        .await
+        .map_err(classify_gate_error)?
+        != 0
+    {
+        return Err(StoreOpenError::Incompatible);
+    }
+    connection
+        .execute(MIGRATION_SQL)
+        .await
+        .map_err(|_| StoreOpenError::Unavailable)?;
+    verify_connection(&mut connection)
+        .await
+        .map_err(classify_gate_error)
+}
+
 const fn classify_gate_error(error: GateError) -> StoreOpenError {
     match error {
         GateError::Incompatible => StoreOpenError::Incompatible,
         GateError::Unavailable => StoreOpenError::Unavailable,
     }
+}
+
+/// Counts every `mfm_`-prefixed relation, indexes included, in the public schema.
+async fn mfm_relation_count(connection: &mut PgConnection) -> std::result::Result<i64, GateError> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND left(c.relname, 4) = 'mfm_'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)
 }
 
 impl Store for PostgresStore {
@@ -150,7 +196,7 @@ fn classify_open_error(error: sqlx::Error) -> StoreOpenError {
     }
 }
 
-async fn verify_connection(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
+async fn verify_durability(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
     let durable: (bool, String, String) = sqlx::query_as(
         "SELECT NOT pg_is_in_recovery(), current_setting('fsync'), \
          current_setting('full_page_writes')",
@@ -161,6 +207,11 @@ async fn verify_connection(connection: &mut PgConnection) -> std::result::Result
     if !durability_matches(durable.0, &durable.1, &durable.2) {
         return Err(GateError::Incompatible);
     }
+    Ok(())
+}
+
+async fn verify_connection(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
+    verify_durability(&mut *connection).await?;
 
     let relations: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT c.relname, c.relkind::text, c.relpersistence::text \
@@ -921,7 +972,7 @@ fn classify_precommit_sql(error: sqlx::Error) -> StoreError {
 
 fn assert_send_static<T: Send + 'static>() {}
 
-#[cfg(test)]
+/// The one static schema artifact `install_schema` executes into an empty store.
 const MIGRATION_SQL: &str = include_str!("../migrations/0001_runtime_journal_store.sql");
 
 #[cfg(test)]
@@ -931,13 +982,6 @@ mod store_scenarios;
 #[cfg(test)]
 #[path = "../../../kernel/store/tests/support/hostile.rs"]
 mod store_hostile;
-
-#[cfg(test)]
-async fn install_fresh_schema(
-    connection: &mut PgConnection,
-) -> std::result::Result<(), sqlx::Error> {
-    connection.execute(MIGRATION_SQL).await.map(|_| ())
-}
 
 #[cfg(test)]
 mod tests;
