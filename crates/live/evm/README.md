@@ -11,6 +11,12 @@ number for confirmation), `eth_getBalance`, and `eth_call` for `decimals()`/`bal
 It decodes the request bytes with the domain's own checked `EvmReadIntent` deserializer and matches
 `subject()`; it declares no serde mirror of that wire.
 
+The per-operation observation contract every `EvmProvider` owes the domain is on the `EvmProvider`
+trait rustdoc. Its one trap: `confirm-balance-anchor` re-observes the committed block its intent
+names and never the head. The domain compares that result to the anchor it pinned before the
+balance reads, so a head read would report ordinary chain progression as a reorg and fail every
+collection on a chain that produces blocks.
+
 Transport, status, bound, and undecodable-ingress failures are `Unavailable`; a JSON-RPC error
 object and an `eth_call` result of exactly `"0x"` are definite `SafeFailure`; an undecodable or
 operation-mismatched intent and a malformed address are `Internal` before any IO. The provider never

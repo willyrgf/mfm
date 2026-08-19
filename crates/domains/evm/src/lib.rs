@@ -1102,10 +1102,13 @@ impl EvmReadEvidence {
     }
 }
 
+/// Groups the operations one Read capability admits.
 #[derive(Debug, Clone, Copy)]
 enum ReadCapabilityFamily {
     ChainIdentity,
-    LatestAnchor,
+    /// Both anchor operations. `read-initial-anchor` observes the head; `confirm-balance-anchor`
+    /// re-observes the block its intent names. The family is not a "latest" family.
+    Anchor,
     Balance,
 }
 
@@ -1122,7 +1125,7 @@ fn validate_read_capability_intent(
                 EvmReadSubject::ChainIdentity
             )
         ),
-        ReadCapabilityFamily::LatestAnchor => matches!(
+        ReadCapabilityFamily::Anchor => matches!(
             (&intent.operation[..], &intent.subject),
             (
                 "mfm.evm.read-initial-anchor@1",
@@ -1184,11 +1187,7 @@ impl_read_capability!(
     "mfm.evm.capability.read-chain-identity@1",
     ChainIdentity
 );
-impl_read_capability!(
-    EvmAnchorRead,
-    "mfm.evm.capability.read-anchor@1",
-    LatestAnchor
-);
+impl_read_capability!(EvmAnchorRead, "mfm.evm.capability.read-anchor@1", Anchor);
 impl_read_capability!(EvmBalanceRead, "mfm.evm.capability.read-balance@1", Balance);
 
 /// Verifies that one balance collection targets the expected EVM chain.
