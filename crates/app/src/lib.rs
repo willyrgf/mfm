@@ -1,13 +1,54 @@
 #![warn(missing_docs)]
-//! Thin Portfolio-only Application facade over the typed Runtime.
+//! Thin Portfolio-only Application facade over the typed Runtime, plus the one trusted
+//! Portfolio assembly composition every binary and Runtime test shares.
 
-use mfm_evm::{EvmPhysicalTarget, EVM_BALANCE_SOURCE_LIMIT};
+use std::sync::Arc;
+
+use mfm_evm::{
+    CheckChainIdentity, ConfirmBalanceAnchor, ConsolidateBalanceCollection, EvmAnchorRead,
+    EvmBalanceRead, EvmChainIdentityRead, EvmPhysicalTarget, ReadInitialAnchor, ReadNativeBalance,
+    ReadTokenBalance, ReadTokenDecimals, SelectBalanceAsset, EVM_BALANCE_SOURCE_LIMIT,
+};
+use mfm_evm_live::{register_evm_reads, EvmProvider};
 use mfm_ids::RunId;
 use mfm_portfolio::{
-    plan_snapshot, PortfolioConfig, PortfolioError, PortfolioSnapshotSelector,
-    PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
+    plan_snapshot, ConsolidatePortfolio, EnterPortfolioCollection, InitializePortfolio,
+    MapEvmBalanceFailure, PortfolioConfig, PortfolioContinuation, PortfolioError,
+    PortfolioSnapshotSelector, ResumePortfolioCollection, PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
 };
-use mfm_runtime::{RunView, Runtime, RuntimeError};
+use mfm_runtime::{RunView, Runtime, RuntimeAssembly, RuntimeAssemblyBuilder, RuntimeError};
+
+/// Registers every Portfolio and EVM State implementation the snapshot Program declares.
+///
+/// [`portfolio_assembly`] is the composition trusted callers want. This entry stays public
+/// only for adapterless composition, where a caller deliberately finishes an assembly with
+/// no Read callback to prove association rejects the Program before any Store IO.
+pub fn register_portfolio_states(builder: &mut RuntimeAssemblyBuilder) -> mfm_runtime::Result<()> {
+    builder.register_pure::<InitializePortfolio>()?;
+    builder.register_pure::<EnterPortfolioCollection>()?;
+    builder.register_pure::<ResumePortfolioCollection>()?;
+    builder.register_pure::<MapEvmBalanceFailure>()?;
+    builder.register_pure::<ConsolidatePortfolio>()?;
+    builder.register_read::<CheckChainIdentity<PortfolioContinuation>, EvmChainIdentityRead>()?;
+    builder.register_read::<ReadInitialAnchor<PortfolioContinuation>, EvmAnchorRead>()?;
+    builder.register_pure::<SelectBalanceAsset<PortfolioContinuation>>()?;
+    builder.register_read::<ReadNativeBalance<PortfolioContinuation>, EvmBalanceRead>()?;
+    builder.register_read::<ReadTokenDecimals<PortfolioContinuation>, EvmBalanceRead>()?;
+    builder.register_read::<ReadTokenBalance<PortfolioContinuation>, EvmBalanceRead>()?;
+    builder.register_read::<ConfirmBalanceAnchor<PortfolioContinuation>, EvmAnchorRead>()?;
+    builder.register_pure::<ConsolidateBalanceCollection<PortfolioContinuation>>()
+}
+
+/// Composes the complete Portfolio assembly for one EVM route and its provider handle.
+pub fn portfolio_assembly(
+    target: EvmPhysicalTarget,
+    provider: Arc<dyn EvmProvider>,
+) -> mfm_runtime::Result<RuntimeAssembly> {
+    let mut builder = RuntimeAssemblyBuilder::new();
+    register_portfolio_states(&mut builder)?;
+    register_evm_reads(&mut builder, target, provider)?;
+    builder.finish()
+}
 
 /// Result type for Application operations.
 pub type Result<T> = std::result::Result<T, ApplicationError>;

@@ -12,6 +12,7 @@ binary-facing = true
 
 [dependencies]
 mfm-evm = { path = "../domains/evm" }
+mfm-evm-live = { path = "../live/evm" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-portfolio = { path = "../domains/portfolio" }
 mfm-runtime = { path = "../kernel/runtime" }
@@ -19,6 +20,5 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-mfm-evm-live = { path = "../live/evm" }
 mfm-store = { path = "../kernel/store" }
 serde_json = { workspace = true }
