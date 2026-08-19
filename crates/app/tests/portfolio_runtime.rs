@@ -3,19 +3,12 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use mfm_app::{Application, ApplicationError};
-use mfm_evm::{
-    CheckChainIdentity, ConfirmBalanceAnchor, ConsolidateBalanceCollection, EvmAnchorRead,
-    EvmBalanceRead, EvmChainIdentityRead, EvmPhysicalTarget, EvmReadValue, ReadInitialAnchor,
-    ReadNativeBalance, ReadTokenBalance, ReadTokenDecimals, SelectBalanceAsset,
-    EVM_BALANCE_SOURCE_LIMIT,
-};
-use mfm_evm_live::{register_evm_reads, EvmProvider, EvmProviderResponse};
+use mfm_app::{portfolio_assembly, register_portfolio_states, Application, ApplicationError};
+use mfm_evm::{EvmPhysicalTarget, EvmReadValue, EVM_BALANCE_SOURCE_LIMIT};
+use mfm_evm_live::{EvmProvider, EvmProviderResponse};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId, StableId};
 use mfm_portfolio::{
-    plan_snapshot, ConsolidatePortfolio, EnterPortfolioCollection, InitializePortfolio,
-    MapEvmBalanceFailure, PortfolioConfig, PortfolioContinuation, PortfolioSnapshotInput,
-    PortfolioSnapshotSelector, ResumePortfolioCollection,
+    plan_snapshot, PortfolioConfig, PortfolioSnapshotInput, PortfolioSnapshotSelector,
 };
 use mfm_runtime::{ReadAdapterError, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError};
 use mfm_store::MemoryStore;
@@ -97,53 +90,13 @@ fn assembly(
     target: EvmPhysicalTarget,
     provider: Arc<dyn EvmProvider>,
 ) -> mfm_runtime::RuntimeAssembly {
-    let mut builder = state_builder();
-    register_evm_reads(&mut builder, target, provider).expect("adapters");
-    builder.finish().expect("assembly")
+    portfolio_assembly(target, provider).expect("assembly")
 }
 
-fn state_builder() -> RuntimeAssemblyBuilder {
+fn adapterless_assembly() -> mfm_runtime::RuntimeAssembly {
     let mut builder = RuntimeAssemblyBuilder::new();
-    builder
-        .register_pure::<InitializePortfolio>()
-        .expect("initialize");
-    builder
-        .register_pure::<EnterPortfolioCollection>()
-        .expect("enter");
-    builder
-        .register_pure::<ResumePortfolioCollection>()
-        .expect("resume");
-    builder
-        .register_pure::<MapEvmBalanceFailure>()
-        .expect("failure mapper");
-    builder
-        .register_pure::<ConsolidatePortfolio>()
-        .expect("consolidate");
-    builder
-        .register_read::<CheckChainIdentity<PortfolioContinuation>, EvmChainIdentityRead>()
-        .expect("chain read");
-    builder
-        .register_read::<ReadInitialAnchor<PortfolioContinuation>, EvmAnchorRead>()
-        .expect("initial anchor");
-    builder
-        .register_pure::<SelectBalanceAsset<PortfolioContinuation>>()
-        .expect("asset selector");
-    builder
-        .register_read::<ReadNativeBalance<PortfolioContinuation>, EvmBalanceRead>()
-        .expect("native balance");
-    builder
-        .register_read::<ReadTokenDecimals<PortfolioContinuation>, EvmBalanceRead>()
-        .expect("token decimals");
-    builder
-        .register_read::<ReadTokenBalance<PortfolioContinuation>, EvmBalanceRead>()
-        .expect("token balance");
-    builder
-        .register_read::<ConfirmBalanceAnchor<PortfolioContinuation>, EvmAnchorRead>()
-        .expect("confirm anchor");
-    builder
-        .register_pure::<ConsolidateBalanceCollection<PortfolioContinuation>>()
-        .expect("collection consolidate");
-    builder
+    register_portfolio_states(&mut builder).expect("states");
+    builder.finish().expect("missing adapter assembly")
 }
 
 #[tokio::test]
@@ -401,10 +354,7 @@ async fn missing_or_wrong_live_association_is_rejected_before_store_io() {
     let planned_target = EvmPhysicalTarget::new(1, endpoint_ref()).expect("planned target");
     let config = native_config();
     for (byte, assembly) in [
-        (
-            54,
-            state_builder().finish().expect("missing adapter assembly"),
-        ),
+        (54, adapterless_assembly()),
         (
             55,
             assembly(

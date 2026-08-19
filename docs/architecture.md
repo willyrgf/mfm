@@ -12,7 +12,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Store | object-safe complete load and atomic append | Program, State, capability, or reducer semantics |
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
 | Live adapters | bounded provider ingress and direct typed callback registration | domain planning or State registration |
-| Application | Portfolio plan/start and direct Runtime resume/read facade | sessions, frame inspection, status derivation |
+| Application | trusted Portfolio assembly composition, Portfolio plan/start, and direct Runtime resume/read facade | sessions, frame inspection, status derivation |
 | Binaries | one-shot CLI help/version and REST unavailable diagnostic; future typed request parsing/rendering | execution lifecycle or a bound REST listener |
 
 RuntimeAssemblyBuilder registers exact value codecs, Pure/Read State drivers, Match descriptors, and
