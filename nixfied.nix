@@ -36,8 +36,9 @@ let
     CPATH = "${pkgs.libiconv}/include";
   };
   cargoLeaf =
-    { run
-    , env ? { }
+    {
+      run,
+      env ? { },
     }:
     {
       invocation = {
@@ -51,14 +52,18 @@ let
             exec "$@"
           ''
           "mfm-cargo"
-        ] ++ run;
+        ]
+        ++ run;
         env = cargoEnv // env;
         timeoutMs = 7200000;
       };
     };
 in
 {
-  imports = [ adapters.postgres ];
+  imports = [
+    adapters.postgres
+    adapters.reth
+  ];
 
   nixfied.project.projectId = "mfm";
   nixfied.project.name = "MFM";
@@ -73,7 +78,11 @@ in
   nixfied.closures.rust-toolchain = {
     package = rustToolchain;
     executable = "bin/cargo";
-    effects = [ "process" "source-read" "file-write" ];
+    effects = [
+      "process"
+      "source-read"
+      "file-write"
+    ];
   };
   nixfied.closures.cc = {
     package = pkgs.stdenv.cc;
@@ -88,48 +97,136 @@ in
 
   nixfied.tasks = {
     fmt = cargoLeaf {
-      run = [ "cargo" "fmt" "--all" "--" "--check" ];
+      run = [
+        "cargo"
+        "fmt"
+        "--all"
+        "--"
+        "--check"
+      ];
     };
     clippy = cargoLeaf {
       run = [
-        "cargo" "clippy" "--workspace" "--all-targets" "--all-features" "--" "-D" "warnings"
+        "cargo"
+        "clippy"
+        "--workspace"
+        "--all-targets"
+        "--all-features"
+        "--"
+        "-D"
+        "warnings"
       ];
     };
     cargo-check = cargoLeaf {
-      run = [ "cargo" "check" "--workspace" "--all-targets" ];
+      run = [
+        "cargo"
+        "check"
+        "--workspace"
+        "--all-targets"
+      ];
     };
     cargo-test = cargoLeaf {
-      run = [ "cargo" "test" "--workspace" "--all-targets" ];
+      run = [
+        "cargo"
+        "test"
+        "--workspace"
+        "--all-targets"
+      ];
     };
-    postgres-test = (cargoLeaf {
-      # Every ignored test owns the whole managed database, so they must not overlap.
-      run = [ "cargo" "test" "-p" "mfm-storage-postgres" "--lib" "--" "--include-ignored" "--test-threads=1" ];
-      env = {
-        DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
+    postgres-test =
+      (cargoLeaf {
+        # Every ignored test owns the whole managed database, so they must not overlap.
+        run = [
+          "cargo"
+          "test"
+          "-p"
+          "mfm-storage-postgres"
+          "--lib"
+          "--"
+          "--include-ignored"
+          "--test-threads=1"
+        ];
+        env = {
+          DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
+        };
+      })
+      // {
+        requires = [ "postgres" ];
       };
-    }) // {
-      requires = [ "postgres" ];
-    };
     test-db = {
       kind = "composite";
       steps = nixfiedLib.seq [ "postgres-test" ];
     };
+    cli-e2e =
+      (cargoLeaf {
+        run = [
+          "cargo"
+          "test"
+          "-p"
+          "mfm"
+          "--test"
+          "cli_e2e"
+          "--"
+          "--include-ignored"
+          "--test-threads=1"
+        ];
+        env = {
+          MFM_E2E_RPC_URL = "http://\${host:reth}:\${port:reth}";
+          MFM_E2E_DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
+        };
+      })
+      // {
+        requires = [
+          "postgres"
+          "reth"
+        ];
+      };
     doc-tests = cargoLeaf {
-      run = [ "cargo" "test" "--workspace" "--doc" ];
+      run = [
+        "cargo"
+        "test"
+        "--workspace"
+        "--doc"
+      ];
     };
     capacity-app = cargoLeaf {
       run = [
-        "cargo" "test" "-p" "mfm-evm" "-p" "mfm-portfolio" "-p" "mfm-app" "--all-targets" "--" "--nocapture"
+        "cargo"
+        "test"
+        "-p"
+        "mfm-evm"
+        "-p"
+        "mfm-portfolio"
+        "-p"
+        "mfm-app"
+        "--all-targets"
+        "--"
+        "--nocapture"
       ];
     };
     capacity-runtime = cargoLeaf {
       run = [
-        "cargo" "test" "-p" "mfm-runtime" "--test" "runtime_contract" "--" "--nocapture"
+        "cargo"
+        "test"
+        "-p"
+        "mfm-runtime"
+        "--test"
+        "runtime_contract"
+        "--"
+        "--nocapture"
       ];
     };
     capacity-store = cargoLeaf {
       run = [
-        "cargo" "test" "-p" "mfm-store" "-p" "mfm-journal" "--all-targets" "--" "--nocapture"
+        "cargo"
+        "test"
+        "-p"
+        "mfm-store"
+        "-p"
+        "mfm-journal"
+        "--all-targets"
+        "--"
+        "--nocapture"
       ];
     };
     capacity-envelope = {
@@ -147,9 +244,10 @@ in
         "clippy"
         "cargo-check"
         "cargo-test"
-        "test-db"
         "doc-tests"
         "capacity-envelope"
+        "test-db"
+        "cli-e2e"
       ];
     };
   };

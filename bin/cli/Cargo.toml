@@ -23,6 +23,13 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
+[dev-dependencies]
+sqlx = { workspace = true }
+
 [[bin]]
 name = "mfm_cli"
 path = "src/main.rs"
+
+[[test]]
+name = "cli_e2e"
+path = "tests/cli_e2e.rs"
