@@ -58,7 +58,7 @@ fn successor_for(run_id: &RunId, outcome: &[u8]) -> EncodedRunFrame {
         .expect("successor")
 }
 
-async fn reset_schema(connection: &mut PgConnection) {
+async fn reset_public_schema(connection: &mut PgConnection) {
     connection
         .execute("DROP SCHEMA IF EXISTS public CASCADE")
         .await
@@ -67,7 +67,12 @@ async fn reset_schema(connection: &mut PgConnection) {
         .execute("CREATE SCHEMA public")
         .await
         .expect("create managed test schema");
-    install_fresh_schema(connection)
+}
+
+async fn reset_schema(connection: &mut PgConnection) {
+    reset_public_schema(connection).await;
+    connection
+        .execute(MIGRATION_SQL)
         .await
         .expect("install schema");
 }
@@ -821,4 +826,49 @@ async fn managed_postgres_store_contract() {
     hostile_observed.push((Case::RunCapacity, Observation::Capacity));
 
     store_hostile::assert_hostile_matrix(&hostile_observed);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires the managed PostgreSQL service provided by the postgres-test task"]
+async fn managed_schema_provisioning_installs_only_into_an_empty_store() {
+    let database_url =
+        std::env::var("DATABASE_URL").expect("postgres-test must supply DATABASE_URL");
+    let mut connection = PgConnection::connect(&database_url)
+        .await
+        .expect("connect for provisioning");
+
+    reset_public_schema(&mut connection).await;
+    install_schema(&database_url)
+        .await
+        .expect("install into an empty store");
+    install_schema(&database_url)
+        .await
+        .expect("verifying an installed store is idempotent");
+    checked_store(&database_url).await;
+
+    // A hostile leftover is reported, never repaired and never overwritten.
+    reset_public_schema(&mut connection).await;
+    connection
+        .execute("CREATE TABLE public.mfm_run_frames (surprise text)")
+        .await
+        .expect("hostile leftover");
+    assert_eq!(
+        install_schema(&database_url).await,
+        Err(StoreOpenError::Incompatible)
+    );
+    let surviving: Vec<String> = sqlx::query_scalar(
+        "SELECT a.attname FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relname = 'mfm_run_frames' \
+           AND a.attnum > 0 AND NOT a.attisdropped \
+         ORDER BY a.attnum",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .expect("surviving leftover columns");
+    assert_eq!(surviving, ["surprise"]);
+    assert_incompatible(&database_url).await;
+
+    reset_schema(&mut connection).await;
 }
