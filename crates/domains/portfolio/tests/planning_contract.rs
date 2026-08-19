@@ -271,3 +271,17 @@ fn representative_program_identity_is_stable() {
         r#"{"content_digest":"content:sha256-v1:9978162f8dd866fb6bf7fbaf4dfb5befdcdc3ad0e6610e1ae1021dfe5f4f9ceb","schema_id":"schema:mfm.derived.portfolio_snapshot_input:1:sha256-jcs-v1:ff213653ac2077708b3070efeeb358d5fc88b5d0d3857f6d4cf130cce556073c"}"#
     );
 }
+
+#[test]
+fn frozen_snapshot_fixture_remains_exact_canonical_json() {
+    let fixture =
+        include_str!("../../../../docs/contracts/evm-portfolio/portfolio-snapshot.json").trim();
+    mfm_canonical::PlainCanonicalJsonBytes::from_canonical_json_slice(fixture.as_bytes())
+        .expect("canonical public success fixture");
+    assert_eq!(
+        mfm_canonical::raw_content_digest(fixture.as_bytes()).as_str(),
+        "content:sha256-v1:79fa722c25a7f5ea67f6aab45eaa4918d9dff3607aae418dc2092d959a1e9e2b"
+    );
+    // The checked deserializer, not the byte comparison alone, proves the projection agrees.
+    serde_json::from_str::<PortfolioSnapshotOutput>(fixture).expect("checked snapshot projection");
+}
