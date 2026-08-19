@@ -22,3 +22,12 @@ integrity evidence becomes durable.
 
 Endpoint identity changes the target ref and Program. Replacing credentials or a client handle
 under the same public target does not. Credentials are never target material.
+
+`EvmEndpoint { endpoint_id }` is the domain-owned derivation of that endpoint ref: trusted
+composition names the endpoint, `endpoint_ref` canonicalizes the name, and `EvmPhysicalTarget::new`
+binds it to the chain ID. The same name therefore derives the same route ref and the same Program in
+every process; an RPC URL, credential, or client handle never enters the derivation.
+
+The request bytes a provider receives are the serialized `EvmReadIntent`. A provider decodes them
+with the domain's own checked `EvmReadIntent` deserializer and matches `subject()`; it declares no
+serde mirror of the wire, so a domain subject change is a compile error rather than silent drift.

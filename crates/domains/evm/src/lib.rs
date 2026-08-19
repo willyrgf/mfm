@@ -95,6 +95,50 @@ impl EvmPhysicalTarget {
     }
 }
 
+/// Secret-free named identity of one physical EVM endpoint.
+///
+/// The name alone identifies the route: an RPC URL, credential, or client handle is never
+/// endpoint material, so replacing one under the same name leaves the derived reference,
+/// the `EvmPhysicalTarget`, and the planned Program byte-identical.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "endpoint",
+    version = "1",
+    schema = "mfm.evm-endpoint"
+)]
+pub struct EvmEndpoint {
+    endpoint_id: String,
+}
+
+impl_checked_deserialize!(EvmEndpoint {
+    endpoint_id: String,
+});
+
+impl EvmEndpoint {
+    /// Constructs one checked public endpoint identity.
+    pub fn new(endpoint_id: impl Into<String>) -> Result<Self, EvmDomainError> {
+        let endpoint = Self {
+            endpoint_id: endpoint_id.into(),
+        };
+        endpoint.validate().map(|_| endpoint)
+    }
+
+    /// Derives the exact canonical endpoint reference one `EvmPhysicalTarget` binds.
+    pub fn endpoint_ref(&self) -> Result<ContentRef, EvmDomainError> {
+        mfm_values::canonicalize_mfm_value(self)
+            .map(|(_, reference)| reference)
+            .map_err(|_| EvmDomainError::Program)
+    }
+
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        valid_public_text(&self.endpoint_id, 256)
+            .then_some(())
+            .ok_or(EvmDomainError::InvalidValue)
+    }
+}
+
 /// Maximum admitted EVM balance sources.
 pub const EVM_BALANCE_SOURCE_LIMIT: usize = 64;
 
@@ -234,9 +278,10 @@ impl EvmBalanceResultMetadata {
     }
 }
 
+/// Committed public block anchor of one bounded EVM observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
-struct EvmBlockAnchor {
+pub struct EvmBlockAnchor {
     number: String,
     hash: String,
 }
@@ -252,6 +297,16 @@ impl EvmBlockAnchor {
             return Err(EvmDomainError::InvalidValue);
         }
         Ok(Self { number, hash })
+    }
+
+    /// Returns the canonical decimal block number.
+    pub fn number(&self) -> &str {
+        &self.number
+    }
+
+    /// Returns the exact public block hash.
+    pub fn hash(&self) -> &str {
+        &self.hash
     }
 
     fn validate(&self) -> Result<(), EvmDomainError> {
@@ -842,6 +897,11 @@ pub enum EvmDomainError {
     Program,
 }
 
+/// Closed typed subject of one bounded EVM read.
+///
+/// The adapter serializes the whole intent as every provider's request bytes, so this
+/// sum is the provider's own request contract. A provider decodes it with the checked
+/// [`EvmReadIntent`] deserializer and matches these variants; it never mirrors the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(
     tag = "kind",
@@ -849,23 +909,37 @@ pub enum EvmDomainError {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-enum EvmReadSubject {
+pub enum EvmReadSubject {
+    /// The public chain identity of the target route.
     ChainIdentity,
+    /// The current chain head that anchors one collection.
     InitialAnchor,
+    /// The native balance of one source at its committed anchor.
     NativeBalance {
+        /// Public balance source.
         source: EvmBalanceSource,
+        /// Committed observation anchor.
         anchor: EvmBlockAnchor,
     },
+    /// The decimal scale of one source's token contract at its committed anchor.
     TokenDecimals {
+        /// Public balance source.
         source: EvmBalanceSource,
+        /// Committed observation anchor.
         anchor: EvmBlockAnchor,
     },
+    /// The token balance of one source at its committed anchor.
     TokenBalance {
+        /// Public balance source.
         source: EvmBalanceSource,
+        /// Committed observation anchor.
         anchor: EvmBlockAnchor,
     },
+    /// The committed anchor re-read by number for confirmation.
     ConfirmAnchor {
+        /// Public balance source.
         source: EvmBalanceSource,
+        /// Committed observation anchor.
         anchor: EvmBlockAnchor,
     },
 }
@@ -912,6 +986,11 @@ impl EvmReadIntent {
     /// Returns the exact planned physical route identity.
     pub const fn route_ref(&self) -> &ContentRef {
         &self.route_ref
+    }
+
+    /// Returns the exact typed subject this intent fixes.
+    pub const fn subject(&self) -> &EvmReadSubject {
+        &self.subject
     }
 
     fn validate(&self) -> Result<(), EvmDomainError> {
