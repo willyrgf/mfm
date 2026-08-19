@@ -40,7 +40,16 @@ nix develop -c cargo test -p mfm-storage-postgres --lib
 nix develop -c cargo test -p mfm-runtime --all-targets
 nix develop -c cargo test -p mfm-evm -p mfm-portfolio -p mfm-evm-live --all-targets
 nix develop -c cargo test -p mfm-app --all-targets
-nix develop -c cargo check -p mfm -p mfm-rest-api --all-targets
+nix develop -c cargo test -p mfm --all-targets
+nix develop -c cargo check -p mfm-rest-api --all-targets
+```
+
+The CLI e2e is ignored by default. Drive it directly only against a locally started pinned
+`reth --dev` plus PostgreSQL, and only serially:
+
+```bash
+MFM_E2E_RPC_URL=... MFM_E2E_DATABASE_URL=... nix develop -c cargo test \
+  -p mfm --test cli_e2e -- --include-ignored --test-threads=1
 ```
 
 ## Nixfied tasks
@@ -49,11 +58,12 @@ nix develop -c cargo check -p mfm -p mfm-rest-api --all-targets
 | --- | --- |
 | `nix run .#model-check` | Admit the compiled model without project tasks. |
 | `nix run .#run -- --task postgres-test` | Run private ignored same-crate PostgreSQL tests against the managed database; missing service/URL is a failure. |
+| `nix run .#run -- --task cli-e2e` | Run the ignored CLI-driven EVM snapshot e2e against the managed reth and postgres services; a missing service or URL is a failure. |
 | `nix run .#run -- --task capacity-app` | Exercise the exact 64/65-source Portfolio Program/C0 bound. |
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |
 | `nix run .#run -- --task capacity-envelope` | Compose the three capacity owners above. |
-| `nix run .#ci` | Compose format, Clippy, workspace check/tests, managed DB, docs, and capacity tasks. |
+| `nix run .#ci` | Compose format, Clippy, workspace check/tests, managed DB, the managed CLI e2e, docs, and capacity tasks. |
 
 Do not run broad component gates immediately before `.#ci` on the same tree. Once focused failures
 are resolved, run CI exactly once on the final candidate when the workflow requires the composed
