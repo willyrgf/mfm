@@ -4,6 +4,26 @@ Direct provider registration for the three surviving EVM Read capabilities. Each
 one domain-owned `EvmPhysicalTarget` and opaque provider handle, checks exact intent chain/route
 before IO, bounds request encoding, and returns typed evidence or `ReadAdapterError`.
 
+`JsonRpcEvmProvider` is the production provider behind that handle. It owns one endpoint URL, one
+10-second per-request deadline, a 512 KiB response bound, and the six frozen-wire calls the domain's
+Read subjects require: `eth_chainId`, `eth_getBlockByNumber` (latest for the initial anchor, by
+number for confirmation), `eth_getBalance`, and `eth_call` for `decimals()`/`balanceOf(address)`.
+It decodes the request bytes with the domain's own checked `EvmReadIntent` deserializer and matches
+`subject()`; it declares no serde mirror of that wire.
+
+Transport, status, bound, and undecodable-ingress failures are `Unavailable`; a JSON-RPC error
+object and an `eth_call` result of exactly `"0x"` are definite `SafeFailure`; an undecodable or
+operation-mismatched intent and a malformed address are `Internal` before any IO. The provider never
+produces `IntegrityBlocked`: only authenticated external evidence can durably represent an integrity
+block. The RPC URL is a credential-bearing handle, so the provider implements no `Debug` and no
+error, log, or value names it.
+
+This is the ONLY crate allowed to depend on `alloy-*`. Custody is option-invariant and the frozen
+wire codecs (U256/hex, ABI, RLP, keccak) live in alloy's stable pure-Rust core; the provider half of
+alloy churns and would drag a TLS/cmake build into the pinned Nix sandbox. `alloy-provider`,
+`alloy-network`, `alloy-rpc-types`, and `alloy-signer` are excluded. Verify with
+`cargo tree -e features -p mfm-evm-live`.
+
 The crate owns no State registration, planner, binding wrapper, live assembly contribution, call ID,
 response echo, signer, nonce, broadcast, or transaction-submission path.
 
