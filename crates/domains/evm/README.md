@@ -10,6 +10,12 @@ with C0 and its configured child Operation. Six exact `CapabilityInjection` pair
 binding for their designated Reads. The current policies add no support States and perform no
 provider IO or Runtime registration.
 
+Every source in one collection is observed at one pinned block. `ReadInitialAnchor` pins it,
+the balance and decimal reads carry it in their intent, and `ConfirmBalanceAnchor` re-reads the
+block that same anchor names. An equal number and hash prove the block still stands; a different
+hash proves a reorg replaced it. The confirmation depends on the adapter re-observing the named
+block rather than the head, which the `EvmProvider` trait rustdoc states as a provider contract.
+
 The domain validates chain/route binding, anchors, quantities, decimal scale, and closed evidence.
 Authenticated integrity evidence maps to the distinct `IntegrityBlocked` failure. This crate has no
 Runtime, Store, live client, signer, nonce, broadcast, or ambient IO dependency.
