@@ -35,12 +35,25 @@ The fixed limits are 8 MiB per canonical run object, 65,536 non-payload envelope
 bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. These are format bounds, not
 tunable runtime policy.
 
-PostgreSQL is a fresh three-table baseline: `mfm_store_schema`, `mfm_run_frames`, and
-`mfm_run_heads`. Connection admission checks exact schema shape, logged tables, primary status,
-`fsync`, and `full_page_writes`. Loads use one read-only repeatable snapshot. Appends take the
-per-RunId advisory transaction lock before observing state and force synchronous COMMIT. Schema
-provisioning is one idempotent storage-crate entry that installs only into an empty store: it
-verifies an existing installation, refuses to touch any incompatible one, and never migrates.
+PostgreSQL has two independent fresh baselines. Run history owns `mfm_store_schema`,
+`mfm_run_frames`, and `mfm_run_heads` in `public`; opaque named config custody owns
+`mfm_catalog_schema` and `config_entries` in `mfm_catalog`. Run heads also provide the mechanical
+RunIndex projection without parsing frames. Each connection admission gate checks only its schema's
+exact logged relations, constraints, ownership and privileges, plus primary status, `fsync`, and
+`full_page_writes`.
+
+Loads use one read-only repeatable snapshot. Appends take the per-RunId advisory transaction lock
+before observing state and force synchronous COMMIT. Catalog mutations take one global advisory
+transaction lock, enforce 256 live entries, and preserve ambiguous COMMIT acknowledgement. A
+short-lived admin provisioner accepts separate typed admin/runtime locators for one normalized
+target, installs only absent namespaces, and grants the fixed `mfm_runtime` role exact DML authority.
+Runtime connections have no ownership or DDL authority. Existing installations are verified and
+never migrated, repaired, re-owned, or reset.
+
+PostgreSQL network authority is one strict single-host URI with `sslmode=verify-full` and an exact
+TLS-root source. The private locator parser constructs SQLx options without environment, home,
+passfile, service, socket, client-certificate, or tracing-derived input. A content-pinned PEM bundle
+replaces compiled roots rather than extending them.
 
 EVM physical route identity is the domain-owned, secret-free `EvmPhysicalTarget { chain_id,
 endpoint_ref }`. Planning and adapter registration derive the same content ref. Credentials and

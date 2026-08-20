@@ -16,13 +16,17 @@ parser, open Journal DTO, portable codec, or independent semantic record hash is
 
 Store persists immutable frame bytes and one current head only. PostgreSQL owns exactly
 `mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads`; the static schema contract is
-`mfm.run-history-postgres.v1`.
+`mfm.run-history-postgres.v1`. Those three relations remain the complete run-history authority even
+when the independent `mfm_catalog` schema is installed.
 
 The separate catalog/index port defines a bounded named config custody record containing only a
 checked name, a `sha256-jcs-v1` digest, and opaque canonical bytes. It also defines a mechanical run
 summary containing only RunId, head sequence/digest, and cumulative bytes. Resource-specific
 unpadded-base64url cursors freeze ascending bytewise keyset traversal; pages are not snapshots across
 requests. Config interpretation belongs to Application, and run status remains a Runtime fold.
+PostgreSQL catalog custody owns exactly `mfm_catalog_schema` and `config_entries` under
+`mfm.config-catalog-postgres.v1`. The storage adapter checks schema, ownership, ACL, and durability
+independently for run history and catalog; the fixed runtime role owns neither surface.
 
 Public `RunView` contains RunId, durable sequence/head, and `Runnable`, typed `Succeeded`, or typed
 `Failed`. Terminal retained values expose contract ref, instance ref, and exact canonical bytes.

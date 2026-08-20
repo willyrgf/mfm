@@ -8,8 +8,6 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sqlx::{Connection, Executor, PgConnection};
-
 const CLI: &str = env!("CARGO_BIN_EXE_mfm_cli");
 
 const CONFIG: &str = r#"{
@@ -20,35 +18,42 @@ const CONFIG: &str = r#"{
         "decimals": 18 } }] },
   "selector": { "target": "portfolio-example", "quote": "usd" },
   "evm": { "chain_id": 1337, "endpoint_id": "reth-dev", "rpc_url_env": "MFM_E2E_RPC_URL" },
-  "store": { "database_url_env": "MFM_E2E_DATABASE_URL" }
+  "store": { "runtime_locator_env": "MFM_E2E_RUNTIME_STORE_LOCATOR" }
 }
 "#;
 
 #[tokio::test]
 #[ignore = "requires the managed postgres and reth services provided by the cli-e2e task"]
 async fn native_snapshot_run_and_read_back_via_cli() {
-    let database_url =
-        std::env::var("MFM_E2E_DATABASE_URL").expect("cli-e2e must supply MFM_E2E_DATABASE_URL");
     std::env::var("MFM_E2E_RPC_URL").expect("cli-e2e must supply MFM_E2E_RPC_URL");
-
-    // The managed database is slot state: it survives every task run and `postgres-test`
-    // shares it. Resetting is what makes this test hermetic, and it is what makes `init`
-    // exercise the real install path instead of only the verify path on every run but the
-    // first.
-    reset_public_schema(&database_url).await;
+    std::env::var("MFM_E2E_RUNTIME_STORE_LOCATOR")
+        .expect("cli-e2e must supply the runtime locator");
+    std::env::var("MFM_E2E_ADMIN_STORE_LOCATOR").expect("cli-e2e must supply the admin locator");
 
     let unique = unique_suffix();
     let config = write_config(unique);
     let run_id = format!("run:sha256-jcs-v1:{unique:064x}");
 
-    let first_init = run_cli(&["init", "--config", config.to_str().expect("config path")]);
+    let first_init = run_cli(&[
+        "init",
+        "--config",
+        config.to_str().expect("config path"),
+        "--admin-store-locator-env",
+        "MFM_E2E_ADMIN_STORE_LOCATOR",
+    ]);
     assert_success(&first_init, "init");
     assert!(
         first_init.stdout.is_empty(),
         "init prints nothing on success"
     );
     assert_success(
-        &run_cli(&["init", "--config", config.to_str().expect("config path")]),
+        &run_cli(&[
+            "init",
+            "--config",
+            config.to_str().expect("config path"),
+            "--admin-store-locator-env",
+            "MFM_E2E_ADMIN_STORE_LOCATOR",
+        ]),
         "idempotent init",
     );
 
@@ -114,20 +119,6 @@ async fn native_snapshot_run_and_read_back_via_cli() {
     assert_eq!(shown.stdout, snapshot.stdout);
 
     std::fs::remove_file(&config).expect("remove config");
-}
-
-async fn reset_public_schema(database_url: &str) {
-    let mut connection = PgConnection::connect(database_url)
-        .await
-        .expect("connect to the managed database");
-    connection
-        .execute("DROP SCHEMA IF EXISTS public CASCADE")
-        .await
-        .expect("drop managed schema");
-    connection
-        .execute("CREATE SCHEMA public")
-        .await
-        .expect("create managed schema");
 }
 
 /// Returns one value unique per execution: the store is durable and the chain stays warm.

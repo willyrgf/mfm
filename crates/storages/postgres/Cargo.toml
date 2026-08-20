@@ -17,12 +17,18 @@ path = "src/lib.rs"
 
 [dependencies]
 mfm-canonical = { path = "../../kernel/canonical" }
+mfm-catalog = { path = "../../catalog" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-journal = { path = "../../kernel/journal" }
 mfm-store = { path = "../../kernel/store" }
+mfm-transport-security = { path = "../../transport-security" }
+percent-encoding = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

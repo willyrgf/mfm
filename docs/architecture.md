@@ -12,6 +12,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Store | object-safe complete load and atomic append | enumeration, Program, State, capability, reducer, or config semantics |
 | Catalog / index port | conditional named custody of opaque canonical config bytes and mechanical current-head enumeration | config-wire parsing, run folds/status, Program semantics, or config merging |
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
+| Transport security | checked TLS-root specs and exact immutable root-store loading | endpoint URLs, credentials, protocol clients, or ambient resolution |
 | Live adapters | bounded provider ingress and direct typed callback registration | domain planning or State registration |
 | Application | trusted Portfolio assembly composition, Portfolio plan/start, and direct Runtime resume/read facade | sessions, frame inspection, status derivation |
 | Binaries | CLI configuration parsing, one live Application composition, and one redacted view rendering; REST unavailable diagnostic | execution lifecycle, run semantics, or a bound REST listener |
@@ -34,6 +35,11 @@ Concrete storage backends may implement both `Store` and the separate `RunIndex`
 receives only `dyn Store`. Config custody and run enumeration therefore cannot widen Runtime's
 append-only storage authority. Both indexes use ascending keyset pages and make no cross-request
 snapshot claim.
+
+PostgreSQL owns its private locator grammar, target equivalence, TLS/SQLx wiring, split-role
+provisioner, and two independent gates. The shared transport-security primitive supplies only exact
+TLS roots; it cannot resolve an endpoint or construct a protocol client. Administrative database
+authority exists only in the CLI provisioning path and is never retained by Application.
 
 The source-authoring sequence is separate from progression:
 
