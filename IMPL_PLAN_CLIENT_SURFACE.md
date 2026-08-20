@@ -9,9 +9,9 @@ adapter composition, entry-point planning, and rendering, while REST is a stub. 
 typed, transport-neutral Application surface, with CLI and REST as two thin renderings of the same
 user use cases.
 
-This revision was reviewed by four independent architects (architecture ownership, API/product,
-security/custody, and implementation feasibility) on 2026-08-20. The coordinating agent checked
-their findings against the current tree and resolved their disagreements below.
+The foundational target was reviewed by four independent architects (architecture ownership,
+API/product, security/custody, and implementation feasibility) on 2026-08-20. The coordinating
+agent checked their findings against the current tree and resolved their disagreements below.
 
 ## User inputs and architecture rulings that bind this design
 
@@ -22,6 +22,8 @@ their findings against the current tree and resolved their disagreements below.
    receive architecture/security approval; the target below uses an owner-only Unix socket and
    remains pending explicit user confirmation.
 3. This wave produces a design document only. No implementation follows in this wave.
+4. Deployment is a strict TOML operator bootstrap found through the conventional XDG/HOME path or
+   an argv override. It contains environment resolver names only and has no product lifecycle.
 
 ---
 
@@ -54,6 +56,8 @@ their findings against the current tree and resolved their disagreements below.
 11. `reqwest` currently follows redirects, permits implicit system-proxy resolution unless
     explicitly disabled, and has no TLS feature. `sqlx` is built with `tls-none`. A shared
     deployment composer must not claim exact endpoint authority while those paths remain implicit.
+12. EVM domain chain ids are `u64`, but the implemented production path and fixtures use only small
+    positive values; no current requirement exercises the range above TOML's positive `i64` limit.
 
 ## Architect review record
 
@@ -65,8 +69,9 @@ their findings against the current tree and resolved their disagreements below.
 | Stored config shape | complete, versioned config document | One catalog works for every entry point without generic merging or per-entry-point storage code. |
 | Config reference at execution | name plus **mandatory** JCS digest | Delete/re-import makes a name a mutable alias. The digest closes the ABA race and identifies exact bytes. |
 | Config deletion | atomic compare-and-delete by name and digest | An unconditional delete can delete a newer re-imported revision observed by a stale caller. |
-| Multi-route representation | physical routes in deployment; a route array in the config document | Runtime assembly must know `(chain_id, endpoint_id)` before freeze, and Portfolio planning may use several chains. |
-| Public deployment discovery | public tagged bindings, never deployment/env metadata | Clients need selectable capability identities, not environment resolver names, URLs, or socket configuration. |
+| Multi-route representation | public binding mappings in Deployment; a route array in the config document | Runtime assembly must know `(chain_id, endpoint_id)` before freeze, and Portfolio planning may use several chains. |
+| Deployment role | strict operator-only `deployment.toml` bootstrap | It composes private authority but has no product identity, API, or lifecycle. |
+| Public binding discovery | public tagged bindings, never Deployment/env metadata | Clients need selectable capability identities, not environment resolver names, URLs, or socket configuration. |
 | Run listing | cheap mechanical heads only | Status, entry point, recency, and config provenance require semantic folds or a separate derived projection. |
 | Run JSON | preserve the `RunViewState` sum | A status string plus correlated optional fields violates the code-quality policy and loses terminal contract/value refs. |
 | Keystore | separate custody RFC; CLI administration only | The current in-memory owner cannot persist across CLI invocations, and unauthenticated HTTP must not carry custody mutation. |
@@ -101,13 +106,14 @@ This rejects two tempting but incorrect interpretations:
 - Application does not accept arbitrary transport strings. Binaries own argv/path/header/query
   parsing; checked shared constructors own the actual value/document grammar.
 
-## 2. Deployment material versus stored config material
+## 2. Deployment bootstrap versus stored config material
 
 The split is semantic, not based on whether a string happens to resemble a URL:
 
-- **Deployment material** introduces ambient authority: database and RPC locators, environment
-  resolver names, provider handles, and process policy. It is local, operator-authored, never stored
-  in the catalog, never returned by REST, and never admitted into Program/C0/history.
+- **Deployment bootstrap material** contains only environment resolver names for the runtime store
+  and public-binding-to-private-adapter mappings. Composition resolves those names into database/RPC
+  locators and provider handles. It is local, operator-authored, never stored in the catalog, never
+  returned by REST, and never admitted into Program/C0/history.
 - **Config material** is deterministic, bounded, secret-free domain input plus stable public
   references that select pre-bound capabilities. It is safe to canonicalize, digest, persist, list,
   and admit.
@@ -116,34 +122,50 @@ A stored field is safe because no code interprets it as an environment name, URL
 host, port, or socket address. Field-name rejection cannot prove that arbitrary public text contains
 no secret; the guarantee is the absence of any ambient resolver behavior on the stored path.
 
-### Deployment document
+### Deployment bootstrap
 
-The path is always explicit: `--deployment <PATH>`. There is no `$MFM_DEPLOYMENT` fallback and
-therefore no hidden second environment-resolution path. The binary reads at most
-`MAX_DEPLOYMENT_DOCUMENT_BYTES + 1`, where the initial fixed maximum is 256 KiB, then calls the
-checked `Deployment::parse` constructor. Unknown fields are rejected at every level.
+Deployment is one narrow, operator-only bootstrap input to Application composition. It is not a
+product resource: it has no public identity or digest, is never catalogued, and has no import, list,
+show, update, delete, or REST lifecycle. The conventional filename is `deployment.toml`.
 
-```json
-{
-  "format": "mfm.deployment.v1",
-  "store": {
-    "runtime_database_url_env": "MFM_RUNTIME_DATABASE_URL",
-    "tls_roots": { "kind": "webpki" }
-  },
-  "evm_routes": [
-    {
-      "chain_id": 1337,
-      "endpoint_id": "reth-dev",
-      "rpc_url_env": "MFM_RPC_URL_RETH_DEV",
-      "tls_roots": {
-        "kind": "pem-file",
-        "path": "/etc/mfm/dev-ca.pem",
-        "digest": "content:sha256-v1:<64 hex>"
-      }
-    }
-  ]
-}
+Both binaries pass an optional argv override to the one app-owned path resolver:
+
+1. `--deployment <PATH>` uses exactly that caller-supplied path and does not inspect XDG or HOME;
+2. otherwise, an absolute, non-empty `$XDG_CONFIG_HOME` resolves to
+   `$XDG_CONFIG_HOME/mfm/deployment.toml`;
+3. if XDG is unset, empty, or relative, an absolute, non-empty `$HOME` resolves to
+   `$HOME/.config/mfm/deployment.toml`; and
+4. if neither default base is usable, composition fails with one redacted local bootstrap error.
+
+Fallback is based only on whether the XDG base value is usable, not on file existence. Once a path
+is selected, a missing or unreadable file fails; the resolver never probes the HOME path afterward.
+
+There is deliberately no `$MFM_DEPLOYMENT`, current-directory search, system-wide fallback, or
+automatic file creation. `Deployment::load(override_path)` performs this resolution, reads at most
+`MAX_DEPLOYMENT_DOCUMENT_BYTES + 1` asynchronously, then moves owned bytes into one immediately
+awaited pure blocking parse/validation job. Path/environment/filesystem IO stays outside that job;
+a join failure is one redacted `ComposeError`. The initial encoded maximum is 256 KiB.
+
+The file is UTF-8 strict TOML 1.0 with one current schema. There is no format/version marker, include,
+profile inheritance, merge, environment interpolation, or string substitution. TOML duplicate
+keys/tables fail parsing; `deny_unknown_fields` applies at every typed table; and only the following
+runtime store reference and public-binding-to-private-adapter mappings exist:
+
+```toml
+[store]
+runtime_locator_env = "MFM_RUNTIME_STORE_LOCATOR"
+
+[[evm_routes]]
+chain_id = 1337
+endpoint_id = "reth-dev"
+adapter_locator_env = "MFM_EVM_ADAPTER_RETH_DEV"
 ```
+
+A direct, pinned TOML parser dependency in `mfm-app` is justified by this operator boundary; the
+implementation does not hand-roll TOML or enable editing/merge features.
+
+`store` is required exactly once. `evm_routes` is the only optional collection and defaults to an
+empty list when no array-of-table is present.
 
 `evm_routes` contains at most 256 entries and is strictly sorted and unique by
 `(chain_id, endpoint_id)`. More than one endpoint may be bound for one chain, but a single Portfolio
@@ -152,25 +174,35 @@ targets. The same order is the stable `BindingList` order and assembly-registrat
 deployment route list is valid: it can serve catalog/discovery use cases, while run start fails
 `BindingUnbound` before Store IO.
 
-Environment names are 1–64 ASCII characters matching `[A-Z_][A-Z0-9_]*`. Their values enter
-non-`Debug`, non-`Display`, non-serializable secret-bearing wrappers and are consumed only by the
-PostgreSQL and provider constructors. Application errors may name a checked environment **name** on
-local stderr; they never contain its value.
+TOML integers are signed 64-bit values. The checked deployment chain-id type therefore accepts
+exactly `1..=i64::MAX` and converts that positive value losslessly to the domain's `u64`; zero,
+negative values, and out-of-range TOML integers are rejected. The EVM domain remains `u64` for
+library use. No current production path or fixture requires its upper half, so the bootstrap does
+not add a quoted-string alternative. If a concrete deployment needs it, the one current TOML schema
+changes to a checked unsigned decimal string rather than supporting integer and string forms in
+parallel.
 
-A PEM-root path is an absolute UTF-8 string of 1–4096 encoded bytes with no NUL. It is deployment
-authority, never a config field or public view. The required exact-byte digest makes parent-path
-retargeting fail closed even though normal absolute-path traversal may follow parent directories;
-the leaf itself is opened without following links.
+This limit belongs only to the production Deployment parser. Domain values and JSON config
+documents retain `u64`; an upper-half config remains valid for an injected library composer but is
+necessarily `BindingUnbound` under the current TOML-backed production composer.
 
-The REST listen address, concurrency, and deadline are REST-binary options, not fields in the shared
-deployment document. Application owns no socket.
+Environment names are 1–64 ASCII characters matching `[A-Z_][A-Z0-9_]*`. The TOML contains only
+these resolver names, never a database URL, RPC URL, credential, TLS-root path, or other locator
+value. Each value is resolved once into a bounded, adapter-specific, non-`Debug`, non-`Display`,
+non-serializable private locator wrapper and consumed only by the PostgreSQL or provider
+constructor. There is no recursive resolution: text such as `${OTHER_ENV}` inside TOML is not
+expanded and is invalid as an environment name. Local errors may name the checked resolver name;
+they never contain its value.
 
-The deployment grants only runtime database authority, authenticated as the fixed PostgreSQL role
-`mfm_runtime`. `store init` additionally receives one checked
-`--admin-database-url-env <NAME>` argument and calls a separate CLI-only provisioner. Before
-mutation, the provisioner parses both single-host locators, proves that their secret-free
-server/database target is identical, and rejects ambiguous target forms. The dedicated runtime role
-must already exist; the provisioner never creates or interpolates a credential-bearing URL username.
+The REST socket, concurrency, and deadline remain REST-binary options rather than Deployment fields.
+Application owns no socket.
+
+The runtime store locator authenticates as the fixed PostgreSQL role `mfm_runtime`. `store init`
+additionally receives one checked `--admin-store-locator-env <NAME>` argument and calls a separate
+CLI-only provisioner. Before mutation, the provisioner parses both single-host locators, proves that
+their secret-free server/database target is identical, and rejects ambiguous target forms. The
+dedicated runtime role must already exist; the provisioner never creates or interpolates a
+credential-bearing URL username.
 
 The admin connection installs/owns the independently gated run-history and catalog objects and
 grants `mfm_runtime` only `CONNECT`, schema `USAGE`, marker/table `SELECT`, frame/config `INSERT`,
@@ -184,8 +216,8 @@ database/schema CREATE or database TEMPORARY authority, no database/schema/objec
 excess MFM-object privileges. The role name is a fixed SQL identifier, never derived from the URL.
 
 Provisioning finishes by opening the runtime connection and proving both independent gates.
-`Application::open` resolves only `runtime_database_url_env`; the admin credential has no
-listener-held code path and need not be present in the daemon environment.
+`Application::open` resolves the checked `runtime_locator_env` and each `adapter_locator_env`; the
+admin locator has no listener-held code path and need not be present in the daemon environment.
 
 ### Exact endpoint authority
 
@@ -193,9 +225,9 @@ The composition cut closes every hidden network-authority path with one delibera
 profile:
 
 - EVM RPC always requires `https` with hostname/IP verification through Rustls against the route's
-  checked `tls_roots`. Plaintext loopback is not an exception: a local process could impersonate the
-  endpoint, forge observational evidence, or receive locator credentials. URL fragments, client
-  certificates, and non-HTTP schemes are rejected.
+  private locator's checked TLS roots. Plaintext loopback is not an exception: a local process could
+  impersonate the endpoint, forge observational evidence, or receive locator credentials. URL
+  fragments, client certificates, and non-HTTP schemes are rejected.
 - `JsonRpcEvmProvider` explicitly applies `.no_proxy()`, redirect `Policy::none()`,
   `.referer(false)`, `.retry(reqwest::retry::never())`, and `.https_only(true)`. With pinned reqwest
   0.12.28, both modes disable every reqwest aggregate/native/WebPKI root source and use
@@ -206,26 +238,28 @@ profile:
   root source can exercise different authority.
 - PostgreSQL admits one single-host TCP URI and always requires `sslmode=verify-full`; even loopback
   plaintext is rejected because an impersonating local listener could request cleartext password
-  authentication. Rustls verifies the exact hostname/IP against the deployment's checked
-  `tls_roots` and retains the resulting immutable root store. Missing, opportunistic,
-  verify-CA-only, multi-host,
-  service/passfile, client-certificate, and unpinned custom-root profiles are rejected in v1.
+  authentication. Rustls verifies the exact hostname/IP against the private locator's checked TLS
+  roots and retains the resulting immutable root store. Missing, opportunistic, verify-CA-only,
+  multi-host, service/passfile, client-certificate, and unpinned custom-root profiles are rejected.
 - URLs and TLS-root paths remain absent from every error, log, public view, and stored value; and
   provider construction has its own redacted `ComposeError` class.
 
-`tls_roots` has the same exhaustive shape for a store or EVM route:
-`{"kind":"webpki"}` or
-`{"kind":"pem-file","path":"/absolute/path","digest":"content:sha256-v1:<64 hex>"}`.
-A small reusable live transport-security primitive owns this checked spec and the exact immutable
-Rustls root-store loader, so PostgreSQL and EVM cannot implement different path, bound, pin, or PEM
-rules. It opens the path as a no-follow regular file, reads at most 256 KiB, verifies the exact-byte
-digest before parsing, and returns either compiled WebPKI anchors or exclusively the PEM anchors,
-never their union. The public certificate material is not secret, but the pin prevents a path
-replacement from silently changing connection authority.
+Each resolved private locator is a bounded, versioned adapter-owned value containing its endpoint
+URL and an exhaustive TLS-root choice: public WebPKI or an absolute PEM-file path plus required
+`content:sha256-v1` exact-byte digest. That entire locator value comes from the named environment
+variable; none of its fields appear in `deployment.toml`.
+
+A small reusable live transport-security primitive owns the checked TLS-root spec and exact
+immutable Rustls root-store loader, so PostgreSQL and EVM cannot implement different path, bound,
+pin, or PEM rules. A PEM path is absolute UTF-8, 1–4096 encoded bytes, and contains no NUL. The
+loader opens it as a no-follow regular file, reads at most 256 KiB, verifies the digest before
+parsing, and returns either compiled WebPKI anchors or exclusively the PEM anchors, never their
+union. The public certificate material is not secret, but the pin prevents a path replacement from
+silently changing connection authority.
 
 PostgreSQL connection authority belongs wholly to `mfm-storage-postgres`, not `mfm-app`.
-`Application::open` resolves the checked deployment environment name once and passes its opaque,
-non-`Debug`/non-`Display` value to a checked storage constructor. The storage crate's private raw-URI
+`Application::open` resolves `runtime_locator_env` once and passes its opaque,
+non-`Debug`/non-`Display` value to a checked storage constructor. The storage crate's private locator
 parser never calls `PgConnectOptions::from_str`: SQLx seeds that path from `PG*`, may read `.pgpass`,
 retains certificate/options inputs, and tracing-warns unknown query values. The parser exhaustively
 requires scheme, username, an explicit non-empty password component, one host, database, and the
@@ -253,7 +287,8 @@ that file itself. Tests mutate hostile `PG*`/home/passfile state concurrently an
 without access, authority change, or value leak.
 
 Supporting cloud aliases, client certificates, or operating-system root discovery later adds a
-separately checked deployment variant; it does not loosen this profile implicitly.
+separately checked private-locator variant; it does not widen Deployment or loosen this profile
+implicitly.
 
 ## 3. Checked config documents
 
@@ -296,8 +331,8 @@ enum ConfigDocumentWire {
 ```
 
 `EvmRouteSelection` contains 1–64 entries, is strictly sorted, and is unique by chain id. Each item
-is `{chain_id, endpoint_id}` and derives the same `EvmPhysicalTarget` identity as deployment
-composition, without resolving a URL. For Portfolio `@1`, its chains must exactly equal the distinct
+is `{chain_id, endpoint_id}` and derives the same `EvmPhysicalTarget` identity as the corresponding
+Deployment binding, without resolving a URL. For Portfolio `@1`, its chains must exactly equal the distinct
 chains demanded by the contained sources; neither a missing nor unused route is admitted. Import
 never consults the current deployment; run start requires every selected target to be bound.
 
@@ -470,6 +505,11 @@ injectable.
 ```rust
 pub struct ComposedRuntime { /* private Runtime plus exact PublicBindingSet */ }
 pub struct Application { /* ComposedRuntime, RunIndex, ConfigCatalog */ }
+
+impl Deployment {
+    pub async fn load(override_path: Option<&std::path::Path>)
+        -> Result<Self, ComposeError>;
+}
 
 impl ComposedRuntime {
     pub fn compose<B>(
@@ -680,26 +720,28 @@ information present in REST.
 
 ## 8. CLI grammar
 
-`--deployment` is required for every command that opens/provisions deployment authority.
-`entry-point list` is static and needs none.
+`entry-point list` is static, does not accept `--deployment`, and never resolves Deployment. Every
+other command accepts an optional
+`--deployment <PATH>` override; without it, the shared XDG/HOME resolver loads the conventional
+`deployment.toml` path above.
 
 ```text
 mfm_cli [--output text|json] entry-point list
 
-mfm_cli --deployment <PATH> [--output text|json] store init \
-    --admin-database-url-env <NAME>
-mfm_cli --deployment <PATH> [--output text|json] binding list
+mfm_cli [--deployment <PATH>] [--output text|json] store init \
+    --admin-store-locator-env <NAME>
+mfm_cli [--deployment <PATH>] [--output text|json] binding list
 
-mfm_cli --deployment <PATH> [--output text|json] config import <NAME> --from <PATH|->
-mfm_cli --deployment <PATH> [--output text|json] config list [--cursor <C>] [--limit <N>]
-mfm_cli --deployment <PATH> [--output text|json] config show <NAME>
-mfm_cli --deployment <PATH> [--output text|json] config delete <NAME> --digest <DIGEST>
+mfm_cli [--deployment <PATH>] [--output text|json] config import <NAME> --from <PATH|->
+mfm_cli [--deployment <PATH>] [--output text|json] config list [--cursor <C>] [--limit <N>]
+mfm_cli [--deployment <PATH>] [--output text|json] config show <NAME>
+mfm_cli [--deployment <PATH>] [--output text|json] config delete <NAME> --digest <DIGEST>
 
-mfm_cli --deployment <PATH> [--output text|json] run start \
+mfm_cli [--deployment <PATH>] [--output text|json] run start \
     --run-id <RUN_ID> --config <NAME> --digest <DIGEST>
-mfm_cli --deployment <PATH> [--output text|json] run progress --run-id <RUN_ID>
-mfm_cli --deployment <PATH> [--output text|json] run show --run-id <RUN_ID>
-mfm_cli --deployment <PATH> [--output text|json] run list [--cursor <C>] [--limit <N>]
+mfm_cli [--deployment <PATH>] [--output text|json] run progress --run-id <RUN_ID>
+mfm_cli [--deployment <PATH>] [--output text|json] run show --run-id <RUN_ID>
+mfm_cli [--deployment <PATH>] [--output text|json] run list [--cursor <C>] [--limit <N>]
 ```
 
 `--from -` reads stdin through `MAX_CONFIG_DOCUMENT_BYTES + 1`; a regular file is also read
@@ -718,12 +760,13 @@ The old `init | snapshot | show --config` grammar and combined config document a
 The daemon starts as:
 
 ```text
-mfm_rest_api serve --deployment <PATH> \
+mfm_rest_api serve [--deployment <PATH>] \
     --unix-socket <PATH> [--recover-stale-socket] \
     [--max-in-flight-runs <N>] [--run-timeout <SECONDS>]
 ```
 
-It fully composes Application before binding. `ComposeError` prints one reviewed local stderr line
+It resolves the override or conventional `deployment.toml` path and fully composes Application
+before binding. `ComposeError` prints one reviewed local stderr line
 and exits 2; it has no HTTP mapping. The socket parent is opened without following links and must be
 a directory owned by the effective user with no group/other permission bits; it must grant the owner
 read, write, and search. All leaf operations are relative to that held directory descriptor. The
@@ -896,7 +939,7 @@ separate execution capability.
 | --- | --- | --- |
 | Store | complete-prefix load and atomic exact-head append | enumeration, Program/State/capability/reducer/config semantics |
 | Catalog/index port | conditional named custody of opaque canonical config bytes; mechanical current-head enumeration | config-wire parsing, run folds/status, Program semantics, config merging, run→config authority |
-| Transport-security primitive | checked TLS-root specs and exact immutable root-store loading | endpoint URLs, protocol clients, deployment composition, credentials |
+| Transport-security primitive | checked TLS-root specs and exact immutable root-store loading | endpoint URLs, protocol clients, locator resolution, credentials |
 | Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
 | Binaries | bounded transport parsing, one Application call, transport policy, redacted rendering | composition, domain planning, environment resolution, execution lifecycle, run semantics |
 
@@ -927,12 +970,15 @@ Deleted outright in the implementation wave:
 
 Added/changed:
 
+- strict XDG/HOME-resolved `deployment.toml` bootstrap with an optional argv override and no
+  `$MFM_DEPLOYMENT` or locator values in the file;
 - new `mfm-catalog` and `mfm-transport-security` crates with workspace/model placement;
 - `mfm-store` implements the separate `RunIndex` port without changing `Store`;
 - PostgreSQL implements independently gated config custody and mechanical run paging;
-- `mfm-app` gains config/deployment/failure modules, injected construction, and live composer;
+- `mfm-app` gains config/deployment/failure modules, the strict TOML/XDG bootstrap loader, injected
+  construction, and live composer;
 - Portfolio config rustdoc/README stop calling material process-local;
-- EVM composition accepts all deployment-bound physical routes;
+- EVM composition accepts all Deployment-declared binding mappings;
 - provider/PostgreSQL transport authority is explicit and TLS-capable;
 - CLI and REST READMEs become their complete current contracts;
 - `docs/design.md`, `docs/architecture.md`, `docs/persisted-public-surfaces.md`, and
@@ -967,23 +1013,34 @@ Tests land with the boundary they prove.
    idempotent and never migrate. Provisioning rejects unequal admin/runtime targets; the runtime
    role passes both gates and DML tests but cannot create, alter, drop, or own either schema/table.
 6. **Application contract** — multi-route assembly/start; bound/unbound route mapping before Store
-   IO; immediately-awaited blocking planning on import and start; caller-invalid versus trusted
+   IO, including an otherwise valid upper-half-`u64` config that TOML cannot bind;
+   immediately-awaited blocking planning on import and start; caller-invalid versus trusted
    planner mapping; mandatory digest; deleting a config never damages retained read/progress; every
    Runtime and catalog error maps exhaustively to the frozen code/message table; injected Memory
    construction needs no PostgreSQL and cannot pair Runtime/RunIndex/binding sets from different
    composers.
-7. **Endpoint authority/redaction** — proxy environment ignored; redirects not followed; nonlocal
+7. **Deployment bootstrap** — strict TOML accepts only the exact tables above; malformed UTF-8,
+   duplicate/unknown keys or tables, include/profile/interpolation attempts, invalid environment
+   names, zero/negative/non-integer/out-of-range chain ids, unsorted/duplicate/257 routes, and
+   encoded oversize are rejected. `i64::MAX` is accepted and converts exactly to `u64`. Path tests
+   prove explicit override precedence/failure without XDG/HOME reads, absolute XDG selection,
+   unset/empty/relative XDG
+   fallback to absolute HOME, no file-existence fallback after valid XDG selection, failure without
+   a usable base, the two exact conventional paths, and complete indifference to hostile
+   `$MFM_DEPLOYMENT`. Fixtures prove no locator or resolved bootstrap-path value appears in TOML,
+   redacted errors, or views.
+8. **Endpoint authority/redaction** — proxy environment ignored; redirects not followed; nonlocal
    plaintext rejected; retry/referer disabled; exact production mode/root-store selection is tested.
    PostgreSQL and EVM real hermetic TLS handshakes both use the production checked PEM-root variant
    and reject a wrong pin, alternate unpinned CA, and wrong hostname; exact WebPKI mode selection is
-   separately asserted. Maximum deployment fits its encoded bound; oversize/unknown/unsorted/
-   duplicate/257-route and environment-name rejection; hostile `PG*`/home/passfile authority is
-   ignored without access or value logging; database/RPC credentials remain absent from startup stderr,
-   request errors, stdout, HTTP body/headers, and debug output.
-8. **CLI e2e** — provision, import, capture digest, start, re-start, progress/show, delete config,
-   show retained run, paginate configs/runs, and check text/JSON exit behavior against managed reth
-   and PostgreSQL.
-9. **REST boundary without services** — exact routed
+   separately asserted. Hostile `PG*`/home/passfile authority is ignored without access or value
+   logging; resolved private-locator contents and database/RPC credentials remain absent from
+   startup stderr, request errors, stdout, HTTP body/headers, and debug output.
+9. **CLI e2e** — exercise both the XDG default and explicit deployment override; provision, import,
+   capture digest, start, re-start, progress/show, delete config, show the retained run, paginate
+   configs/runs, and check text/JSON exit behavior against managed reth and PostgreSQL.
+10. **REST boundary without services** — prove the `serve` grammar passes absent/present
+   `--deployment` values to the shared default/override loader before bind; exercise exact routed
    400/403/404/405/409/413/415/422/428/429/500/503/504 envelopes; conditional digest headers;
    bounded extractor plus constructor re-check; strict query grammar; Host/Origin/media policy;
    raw terminal value bytes;
@@ -992,11 +1049,12 @@ Tests land with the boundary they prove.
    owner/mode enforcement, active and stale leaves, mismatched markers/inodes, explicit recovery,
    graceful cleanup, and refusal to unlink foreign paths. Pre-router HTTP parser errors are not
    asserted to use the JSON envelope.
-10. **Cross-transport managed parity** — build both binaries explicitly, pass the REST binary path
-    to the harness/Nixfied task, and compare CLI JSON with REST for entry points, bindings, config
+11. **Cross-transport managed parity** — build both binaries explicitly, install one strict TOML
+    fixture under an isolated XDG default, pass the REST binary path to the harness/Nixfied task,
+    and compare CLI JSON with REST for entry points, bindings, config
     summary/document/digest, run heads, and full `RunView` including raw terminal bytes. Do not rely
     on `CARGO_BIN_EXE_mfm_rest_api` from another package.
-11. **Custody dependency boundary** — REST and shared request types contain no keystore-admin or
+12. **Custody dependency boundary** — REST and shared request types contain no keystore-admin or
     secret parser dependency. Existing keystore `!Send/!Sync` compile-fail tests remain correctly
     described; no duplicate listener test claims more than they prove.
 
@@ -1025,11 +1083,11 @@ Direct Cargo commands always run in the default Nix development shell.
    provisioner, checked raw-URI parser, ambient-input exclusion, target equivalence, TLS profile,
    shared checked TLS-root primitive, narrow SQLx patch, and exact runtime connection gate inside
    `mfm-storage-postgres`. Adapt every current `init`, `snapshot`, and `show` PostgreSQL caller plus
-   the current combined CLI config/e2e to the split credentials and required TLS-root input, and
+   the current combined CLI config/e2e to the split private locator environment inputs, and
    reject old owner-connected installations. Update design, storage/persisted-surface, CLI, Nixfied,
    and build-and-verification contracts in this commit. Add schema/role/connection-authority tests.
-   The managed PostgreSQL
-   task tests a real TLS handshake through the production content-pinned PEM-root variant, including
+   The managed PostgreSQL task tests a real TLS handshake through the production content-pinned
+   PEM-root private-locator variant, including
    wrong-pin, an alternate unpinned CA, and wrong-host rejection. Patch-level tests prove that the
    exclusive store contains exactly the parsed PEM anchors and no compiled WebPKI roots.
    Verify `nix run .#model-check`, focused crates, `nix run .#run -- --task postgres-test`, and
@@ -1040,23 +1098,25 @@ Direct Cargo commands always run in the default Nix development shell.
    entry points remain unchanged. Update domain/app/CLI docs for that current intermediate design.
    Verify:
    `nix develop -c cargo test -p mfm-app -p mfm-portfolio -p mfm-evm -p mfm --all-targets`.
-4. **`cut over application and cli to stored configs`** — add checked deployment/live composer
-   and injected construction, consume the shared TLS-root primitive to harden exact EVM RPC
+4. **`cut over application and cli to stored configs`** — add the strict `deployment.toml` parser,
+   XDG/HOME/override loader, checked live composer, and injected construction; consume the shared
+   TLS-root primitive to harden exact EVM RPC
    authority in its adapter, add the async opaque `ConfigDocument` constructor, pure planner,
    digest/Program/C0 fixtures, exact planner-error mapping, and complete typed Application surface;
-   enable `serde_json/raw_value` for the shared exact raw-value serializer, rebuild CLI and its e2e,
-   and atomically delete every superseded Application
-   and CLI grammar/config/composition path. Update design/architecture/known-gap and
+   enable `serde_json/raw_value` for the shared exact raw-value serializer, rebuild CLI and its e2e
+   across default and overridden bootstrap paths, and atomically delete every superseded
+   Application and CLI grammar/config/composition path. Update design/architecture/known-gap and
    CLI/live/storage/build-and-verification docs here, not later.
    Add a managed EVM `transport-authority-test` task with real TLS servers through the production
-   content-pinned PEM-root path. Verify `nix run .#model-check`, focused affected crates,
+   content-pinned PEM-root path. Verify `nix run .#model-check`,
+   `nix develop -c cargo test -p mfm-app -p mfm-evm-live -p mfm --all-targets`,
    `nix run .#run -- --task postgres-test`,
    `nix run .#run -- --task transport-authority-test`, and
    `nix run .#run -- --task cli-e2e` while iterating.
 5. **`serve the application contract over rest`** — add Axum, REST routes, sum rendering,
    conditional digest headers, normalized routed errors, socket/media/bounds/backpressure/deadline
-   controls, REST README, and hermetic boundary tests; consume the shared raw-value serializer from
-   commit 4 without adding a second representation.
+   controls, default/overridden bootstrap-path tests, REST README, and hermetic boundary tests;
+   consume the shared raw-value serializer from commit 4 without adding a second representation.
    Verify: `nix develop -c cargo test -p mfm-rest-api --all-targets`.
 6. **`prove cli and rest parity`** — add the explicit two-binary managed harness, Nixfied
    `rest-e2e`/CI composition, cross-transport assertions, and build-and-verification documentation.
@@ -1081,7 +1141,11 @@ as a partial seventh commit.
 | Server-derived RunId | RunId remains explicit caller authority. |
 | Status/entry point/timestamp in mechanical run listing | Requires semantic folds or a separately designed derived projection. |
 | Planner registry / erased C0 | Adds runtime extensibility while defeating Runtime's typed start contract. |
+| Deployment CRUD, identity, or catalog | Bootstrap authority is operator input, not a product resource or lifecycle. |
 | Deployment/env inspection over REST | Exposes ambient-authority metadata clients do not need. |
+| `$MFM_DEPLOYMENT`, directory search, includes, or interpolation | Creates hidden bootstrap precedence and additional ambient-resolution paths. |
+| Locator values in `deployment.toml` | Risks persisting credentials/private authority and turns the bootstrap map into adapter configuration. |
+| Integer-or-string deployment chain ids | Creates two representations; positive TOML `i64` is sufficient until a concrete upper-half `u64` requirement exists. |
 | One PostgreSQL owner credential for provisioning and the daemon | Leaves the network process with unnecessary DDL authority. |
 | Plaintext loopback PostgreSQL or EVM | A local listener can impersonate the endpoint, steal credentials, or forge evidence; every TCP backend is certificate verified. |
 | Keystore import/list/delete over unauthenticated REST | Secret custody and metadata are outside the network surface. |
@@ -1119,10 +1183,11 @@ as a partial seventh commit.
    *Assumption:* single-host TLS with either WebPKI or one content-pinned PEM CA bundle covers
    intended EVM and PostgreSQL deployments. *Why uncertain:* client certificates, cloud aliases,
    operating-system trust discovery, or PostgreSQL service files may be required operationally.
-   *Consequence if wrong:* the deliberately narrow checked profile rejects a legitimate deployment;
+   *Consequence if wrong:* the deliberately narrow checked profile rejects a legitimate backend;
    it never falls back to plaintext. *Validate:* exercise intended PostgreSQL endpoint classes
    before commit 2 and EVM endpoint classes before commit 4, retain the pinned Rustls verification
-   audit, and add a separate checked deployment variant if required.
+   audit, and add a separate checked private-locator variant if required without widening
+   `deployment.toml`.
 
 5. **Admin/runtime database target equivalence.**
    *Assumption:* the supported PostgreSQL locator grammar can derive one unambiguous secret-free
@@ -1171,3 +1236,12 @@ as a partial seventh commit.
     additive roots is forbidden. *Validate:* before commit 2, compile a minimal connector spike for
     both clients, inspect the resolved dependency graph/source, and run hostile-ambient plus
     alternate-CA handshakes against the exact lockfile.
+
+11. **Deployment chain-id range.**
+    *Assumption:* no intended EVM deployment needs a chain id above `i64::MAX`.
+    *Why uncertain:* the domain intentionally stores chain ids as `u64`, while TOML integers are
+    signed and current production fixtures exercise only small positive values.
+    *Consequence if wrong:* `deployment.toml` cannot bind the upper half of the domain range, so
+    such a config can never run through the production composer. *Validate:* inventory intended
+    chain ids before commit 4; if an upper-half value is real, replace the TOML integer with one
+    checked unsigned decimal-string representation and update fixtures/tests atomically.
