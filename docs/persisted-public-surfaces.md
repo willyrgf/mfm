@@ -39,5 +39,7 @@ Public `RunView` contains RunId, durable sequence/head, and `Runnable`, typed `S
 `Failed`. Terminal retained values expose contract ref, instance ref, and exact canonical bytes.
 Client JSON preserves that sum and embeds the terminal canonical bytes as a raw JSON value rather
 than a quoted string.
+Ambiguous start/progress acknowledgement is the only public error carrying data; both client
+transports use the exact recovery envelopes frozen under `docs/contracts/client-surface/`.
 Public surfaces never contain credentials, private keys, raw provider material, or unreviewed error
 details.

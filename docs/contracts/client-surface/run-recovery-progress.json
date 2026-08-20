@@ -1,0 +1,8 @@
+{
+  "code": "run_append_indeterminate",
+  "message": "run append outcome is indeterminate",
+  "recovery": {
+    "kind": "progress",
+    "run_id": "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111"
+  }
+}

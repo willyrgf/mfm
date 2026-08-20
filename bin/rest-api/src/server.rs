@@ -1223,6 +1223,13 @@ mod tests {
         assert_eq!(start["code"], "run_append_indeterminate");
         assert_eq!(start["recovery"]["kind"], "start");
         assert_eq!(start["recovery"]["config"]["name"], "daily");
+        assert_eq!(
+            start,
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../../../docs/contracts/client-surface/run-recovery-start.json"
+            ))
+            .expect("start recovery fixture")
+        );
 
         let progress = run_request_error(RunRequestError::AppendIndeterminate {
             recovery: RunRecovery::Progress { run_id },
@@ -1230,6 +1237,13 @@ mod tests {
         let progress = body(progress).await;
         assert_eq!(progress["recovery"]["kind"], "progress");
         assert!(progress["recovery"].get("config").is_none());
+        assert_eq!(
+            progress,
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../../../docs/contracts/client-surface/run-recovery-progress.json"
+            ))
+            .expect("progress recovery fixture")
+        );
     }
 
     #[tokio::test]

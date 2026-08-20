@@ -1,0 +1,13 @@
+{
+  "code": "run_append_indeterminate",
+  "message": "run append outcome is indeterminate",
+  "recovery": {
+    "kind": "start",
+    "run_id": "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
+    "config": {
+      "name": "daily",
+      "digest": "content:sha256-jcs-v1:0723d5ccf638cfcf6bb85d96de269e93adcef0847147ace563d09464c8c12250",
+      "entry_point": "mfm.portfolio/snapshot@1"
+    }
+  }
+}

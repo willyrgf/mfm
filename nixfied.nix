@@ -542,6 +542,42 @@ in
           "evm-tls"
         ];
       };
+    rest-e2e =
+      (cargoLeaf {
+        run = [
+          "bash"
+          "-c"
+          (securePostgresRun (secureEvmRun ''
+            env -u PGSERVICE -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE \
+              -u PGPASSWORD -u PGPASSFILE \
+              psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+            DROP SCHEMA IF EXISTS mfm_catalog CASCADE;
+            DROP SCHEMA IF EXISTS public CASCADE;
+            CREATE SCHEMA public AUTHORIZATION CURRENT_USER;
+            SQL
+            export MFM_E2E_ADMIN_STORE_LOCATOR="$MFM_TEST_ADMIN_STORE_LOCATOR"
+            export MFM_E2E_RUNTIME_STORE_LOCATOR="$MFM_TEST_RUNTIME_STORE_LOCATOR"
+            export MFM_E2E_EVM_ADAPTER_LOCATOR="$MFM_TEST_EVM_ADAPTER_LOCATOR"
+            cargo build -p mfm -p mfm-rest-api --bins
+            export MFM_E2E_CLI_BIN="$CARGO_TARGET_DIR/debug/mfm_cli"
+            export MFM_E2E_REST_BIN="$CARGO_TARGET_DIR/debug/mfm_rest_api"
+            test -x "$MFM_E2E_CLI_BIN" -a -x "$MFM_E2E_REST_BIN"
+            exec cargo test -p mfm-rest-api --test parity_e2e -- \
+              --include-ignored --test-threads=1
+          ''))
+        ];
+        tools = [
+          "pg-psql"
+          pkgs.coreutils
+          pkgs.openssl
+        ];
+      })
+      // {
+        requires = [
+          "postgres"
+          "evm-tls"
+        ];
+      };
     doc-tests = cargoLeaf {
       run = [
         "cargo"
@@ -610,6 +646,7 @@ in
         "test-db"
         "transport-authority-test"
         "cli-e2e"
+        "rest-e2e"
       ];
     };
   };
