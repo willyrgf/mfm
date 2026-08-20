@@ -41,7 +41,7 @@ nix develop -c cargo test -p mfm-runtime --all-targets
 nix develop -c cargo test -p mfm-evm -p mfm-portfolio -p mfm-evm-live --all-targets
 nix develop -c cargo test -p mfm-app --all-targets
 nix develop -c cargo test -p mfm --all-targets
-nix develop -c cargo check -p mfm-rest-api --all-targets
+nix develop -c cargo test -p mfm-rest-api --all-targets
 ```
 
 The CLI e2e is ignored by default. Drive it directly only against a locally started pinned
