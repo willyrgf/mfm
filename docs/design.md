@@ -81,6 +81,17 @@ RunId; ambiguous append acknowledgement carries the exact start or progress reco
 Transaction submission requires a future durable transaction-authority/outbox design and is not
 part of this system.
 
+CLI and REST are thin renderings of that single surface. REST binds no TCP authority: it serves
+HTTP/1 on one mode-0600 Unix socket inside an owner-only, no-follow directory, holds an exclusive
+sibling lock, and durably records the socket inode for conservative explicit crash recovery. Exact
+Host and Origin policy, bounded bodies/queries, process-local run backpressure, and deadlines are
+REST transport concerns. Schema provisioning and optional RunId generation remain CLI-only; REST
+requires the caller's RunId in the path and exposes no administrative or secret-custody route.
+
 Secrets do not enter Program, C0, frames, Store metadata, RunView, outputs, logs, or error details.
 Writable restoration behind acknowledged state is unsupported; a new writable timeline requires
 fresh external authority and fresh RunIds.
+
+## Material uncertainties
+
+none

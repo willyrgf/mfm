@@ -10,6 +10,23 @@ autotests = false
 layer = "binary"
 
 [dependencies]
+mfm-app = { path = "../../crates/app" }
+mfm-catalog = { path = "../../crates/catalog" }
+mfm-ids = { path = "../../crates/kernel/ids" }
+axum = { workspace = true }
+clap = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+mfm-evm = { path = "../../crates/domains/evm" }
+mfm-evm-live = { path = "../../crates/live/evm" }
+mfm-runtime = { path = "../../crates/kernel/runtime" }
+mfm-store = { path = "../../crates/kernel/store" }
+tower = { version = "=0.5.3", features = ["util"] }
 
 [[bin]]
 name = "mfm_rest_api"

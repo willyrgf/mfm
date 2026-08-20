@@ -9,8 +9,9 @@
   authority and outbox semantics.
 - The standalone CLI exposes no token or contract deployment, configuration effects, transaction
   submission, or keystore administration.
-- The REST binary only prints an unavailable diagnostic and exits; it binds no listener and exposes
-  no route.
+- REST's run semaphore and same-run active set are process-local amplification controls. A CLI or
+  second daemon can bypass them, and sequential fresh RunIds can grow retained history without a
+  product quota.
 
 ## Deferred Effect symmetry
 

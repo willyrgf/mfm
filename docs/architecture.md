@@ -15,7 +15,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Transport security | checked TLS-root specs and exact immutable root-store loading | endpoint URLs, credentials, protocol clients, or ambient resolution |
 | Live adapters | bounded provider ingress and direct typed callback registration | domain planning or State registration |
 | Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
-| Binaries | bounded transport parsing, client-side RunId entropy where offered, one Application call, transport policy, and redacted rendering; REST is not yet served | composition, domain planning, environment resolution, execution lifecycle, or run semantics |
+| Binaries | bounded transport parsing, client-side RunId entropy where offered, one Application call, transport policy, and redacted rendering | composition, domain planning, environment resolution, execution lifecycle, or run semantics |
 
 RuntimeAssemblyBuilder registers exact value codecs, Pure/Read State drivers, Match descriptors, and
 Read callbacks. `finish` freezes one immutable assembly. Program association pre-resolves every
@@ -46,12 +46,18 @@ typed EVM targets and provider handles in stable order; composition derives both
 registrations and public binding views from it. The same concrete backend is coerced to `Store` and
 `RunIndex`, so run execution and enumeration cannot observe different repositories.
 
-A shared Application request contains only bounded, secret-free data and stable selectors for
-pre-bound capabilities. It cannot introduce environment resolution, a filesystem or network
-locator, secret custody, schema authority, or an unbounded durable effect. The CLI owns argv,
-bounded file/stdin input, optional RunId entropy, exit status, and rendering. Schema provisioning is
-CLI-only and stays outside listener-held Application state; any future REST exposure must add its
-own bounded rendering and explicit local trust boundary.
+CLI and REST render one typed Application use-case surface. Binaries own bounded transport
+parsing/rendering and transport policy only. A shared Application request contains only bounded,
+secret-free data and stable selectors for pre-bound capabilities. It cannot introduce environment
+resolution, a filesystem or network locator, secret custody, schema authority, or an unbounded
+durable effect.
+
+The CLI owns argv, bounded file/stdin input, optional client-side RunId entropy, exit status, and
+schema provisioning outside listener-held Application state. REST owns liveness, exact
+Host/Origin/media admission, process-local backpressure, deadlines, and an owner-only Unix socket;
+it exposes neither schema nor secret administration. REST requires a caller-owned path RunId and
+returns HTTP 200 for a durably failed run, while the CLI may generate an identity and uses exit 1
+for Runnable or Failed. These are named transport asymmetries, not second use-case implementations.
 
 The source-authoring sequence is separate from progression:
 
@@ -79,3 +85,7 @@ next complete reload resolves it.
 The domain graph is one-way: Portfolio depends on EVM domain contracts; EVM depends on foundations
 and Program; live EVM depends on EVM plus Runtime. Neither domain depends on Runtime, Store, live IO,
 or Application.
+
+## Material uncertainties
+
+none
