@@ -48,7 +48,8 @@ The CLI e2e is ignored by default. Drive it directly only against a locally star
 `reth --dev` plus PostgreSQL, and only serially:
 
 ```bash
-MFM_E2E_RPC_URL=... MFM_E2E_DATABASE_URL=... nix develop -c cargo test \
+MFM_E2E_RPC_URL=... \
+MFM_E2E_RUNTIME_STORE_LOCATOR=... MFM_E2E_ADMIN_STORE_LOCATOR=... nix develop -c cargo test \
   -p mfm --test cli_e2e -- --include-ignored --test-threads=1
 ```
 
@@ -57,8 +58,8 @@ MFM_E2E_RPC_URL=... MFM_E2E_DATABASE_URL=... nix develop -c cargo test \
 | Command | Contract |
 | --- | --- |
 | `nix run .#model-check` | Admit the compiled model without project tasks. |
-| `nix run .#run -- --task postgres-test` | Run private ignored same-crate PostgreSQL tests against the managed database; missing service/URL is a failure. |
-| `nix run .#run -- --task cli-e2e` | Run the ignored CLI-driven EVM snapshot e2e against the managed reth and postgres services; a missing service or URL is a failure. |
+| `nix run .#run -- --task postgres-test` | Run private ignored PostgreSQL tests through real hostname-verified TLS, exact pinned roots, hostile ambient settings, and the split runtime role; wrong pin/CA/host are rejected. |
+| `nix run .#run -- --task cli-e2e` | Run the ignored CLI-driven EVM snapshot e2e against managed reth and the same TLS/split-authority PostgreSQL fixture. |
 | `nix run .#run -- --task capacity-app` | Exercise the exact 64/65-source Portfolio Program/C0 bound. |
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |

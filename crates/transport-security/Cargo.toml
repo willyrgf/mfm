@@ -1,0 +1,30 @@
+[package]
+name = "mfm-transport-security"
+version = "0.1.0"
+edition = "2021"
+description = "Exact checked TLS root authority for MFM live transports"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[package.metadata.mfm]
+layer = "transport"
+domain-facing = false
+binary-facing = false
+
+[lib]
+name = "mfm_transport_security"
+path = "src/lib.rs"
+
+[dependencies]
+libc = { workspace = true }
+mfm-canonical = { path = "../kernel/canonical" }
+mfm-ids = { path = "../kernel/ids" }
+rustls = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+webpki-roots = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

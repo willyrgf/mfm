@@ -15,7 +15,10 @@ use mfm_evm_live::JsonRpcEvmProvider;
 use mfm_ids::RunId;
 use mfm_portfolio::{PortfolioConfig, PortfolioSnapshotSelector};
 use mfm_runtime::{RunView, RunViewState, Runtime, RuntimeError};
-use mfm_storage_postgres::{install_schema, PostgresStore, StoreOpenError};
+use mfm_storage_postgres::{
+    provision_schemas, AdminPostgresLocator, PostgresLocatorError, PostgresStore, ProvisionError,
+    RuntimePostgresLocator, StoreOpenError,
+};
 
 /// Standalone MFM Portfolio snapshot surface.
 #[derive(Parser)]
@@ -32,6 +35,9 @@ enum Command {
         /// Path to the JSON configuration file.
         #[arg(long)]
         config: PathBuf,
+        /// Environment variable naming the checked administrative store locator.
+        #[arg(long = "admin-store-locator-env")]
+        admin_store_locator_env: String,
     },
     /// Plans, admits, and progresses one Portfolio snapshot under the supplied RunId.
     Snapshot {
@@ -62,6 +68,10 @@ enum CliError {
     Configuration,
     #[error("environment variable {0} is not set")]
     Environment(String),
+    #[error("{0}")]
+    Locator(#[source] PostgresLocatorError),
+    #[error("{0}")]
+    Provision(#[source] ProvisionError),
     #[error("run id is invalid")]
     RunId,
     #[error("{0}")]
@@ -95,7 +105,7 @@ struct EvmRouteConfig {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoreConfig {
-    database_url_env: String,
+    runtime_locator_env: String,
 }
 
 #[tokio::main]
@@ -111,11 +121,19 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<ExitCode, CliError> {
     match Cli::parse().command {
-        Command::Init { config } => {
+        Command::Init {
+            config,
+            admin_store_locator_env,
+        } => {
             let config = load_config(&config)?;
-            install_schema(&environment(&config.store.database_url_env)?)
+            let runtime =
+                RuntimePostgresLocator::parse(environment(&config.store.runtime_locator_env)?)
+                    .map_err(CliError::Locator)?;
+            let admin = AdminPostgresLocator::parse(environment(&admin_store_locator_env)?)
+                .map_err(CliError::Locator)?;
+            provision_schemas(&admin, &runtime)
                 .await
-                .map_err(CliError::Store)?;
+                .map_err(CliError::Provision)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Snapshot { config, run_id } => {
@@ -154,19 +172,34 @@ fn load_config(path: &Path) -> Result<CliConfig, CliError> {
 }
 
 fn environment(name: &str) -> Result<String, CliError> {
+    if !environment_name_is_valid(name) {
+        return Err(CliError::Configuration);
+    }
     std::env::var(name).map_err(|_| CliError::Environment(name.to_owned()))
+}
+
+fn environment_name_is_valid(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && matches!(bytes[0], b'A'..=b'Z' | b'_')
+        && !bytes[1..]
+            .iter()
+            .any(|byte| !matches!(byte, b'A'..=b'Z' | b'0'..=b'9' | b'_'))
 }
 
 /// Builds the one live composition both `snapshot` and `show` use.
 async fn compose(config: &CliConfig) -> Result<(Application, EvmPhysicalTarget), CliError> {
-    let database_url = environment(&config.store.database_url_env)?;
+    let store_locator =
+        RuntimePostgresLocator::parse(environment(&config.store.runtime_locator_env)?)
+            .map_err(CliError::Locator)?;
     let rpc_url = environment(&config.evm.rpc_url_env)?;
     let endpoint_ref = EvmEndpoint::new(config.evm.endpoint_id.as_str())
         .and_then(|endpoint| endpoint.endpoint_ref())
         .map_err(|_| CliError::Configuration)?;
     let target = EvmPhysicalTarget::new(config.evm.chain_id, endpoint_ref)
         .map_err(|_| CliError::Configuration)?;
-    let store = PostgresStore::connect(&database_url)
+    let store = PostgresStore::connect(&store_locator)
         .await
         .map_err(CliError::Store)?;
     let provider = Arc::new(JsonRpcEvmProvider::new(rpc_url).map_err(|_| CliError::Provider)?);
@@ -216,5 +249,28 @@ fn emit(view: &RunView) -> ExitCode {
     match view.state() {
         RunViewState::Succeeded(_) => ExitCode::SUCCESS,
         RunViewState::Runnable | RunViewState::Failed(_) => ExitCode::from(1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::environment_name_is_valid;
+
+    #[test]
+    fn environment_names_are_bounded_and_safe_to_render() {
+        for accepted in ["A", "_", "MFM_STORE_1", &"A".repeat(64)] {
+            assert!(environment_name_is_valid(accepted));
+        }
+        for rejected in [
+            "",
+            "lowercase",
+            "1MFM",
+            "MFM-STORE",
+            "MFM STORE",
+            "MFM_STORE=value",
+            &"A".repeat(65),
+        ] {
+            assert!(!environment_name_is_valid(rejected));
+        }
     }
 }

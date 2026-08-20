@@ -1,18 +1,19 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use mfm_canonical::raw_content_digest;
-use mfm_ids::{ContentRef, DigestBytes, SchemaId};
+use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
+use mfm_catalog::{
+    CatalogDeleteResult, CatalogEntry, CatalogError, CatalogInsertResult, ConfigCatalog,
+    ConfigDigest, ConfigName, PageLimit, RunIndex, MAX_CONFIG_ENTRIES,
+};
+use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_journal::{JournalHistory, OutcomeKind};
 use mfm_store::AppendResult;
+use sqlx::{Connection, Executor};
 
 use super::*;
 
-fn run_id() -> RunId {
-    RunId::from_digest(DigestBytes::from_array([7; 32]))
-}
-
-fn run(byte: u8) -> RunId {
+fn run_id(byte: u8) -> RunId {
     RunId::from_digest(DigestBytes::from_array([byte; 32]))
 }
 
@@ -30,12 +31,9 @@ fn reference(name: &str, bytes: &[u8]) -> ContentRef {
     .expect("reference")
 }
 
-fn genesis() -> EncodedRunFrame {
-    genesis_for(&run_id(), br#"{"value":1}"#)
-}
-
-fn genesis_for(run_id: &RunId, context: &[u8]) -> EncodedRunFrame {
+fn genesis(run_id: &RunId) -> EncodedRunFrame {
     let program = b"{}";
+    let context = br#"{"value":1}"#;
     EncodedRunFrame::admission(
         run_id,
         &reference("mfm.test.program", program),
@@ -46,72 +44,102 @@ fn genesis_for(run_id: &RunId, context: &[u8]) -> EncodedRunFrame {
     .expect("genesis")
 }
 
-fn successor_for(run_id: &RunId, outcome: &[u8]) -> EncodedRunFrame {
-    let genesis = genesis_for(run_id, br#"{"value":1}"#);
-    let history = JournalHistory::from_genesis(genesis).expect("history");
+fn successor(run_id: &RunId) -> EncodedRunFrame {
+    let history = JournalHistory::from_genesis(genesis(run_id)).expect("history");
+    let output = br#"{"value":2}"#;
     history
         .encode_pure_conclusion(
             OutcomeKind::Success,
-            &reference("mfm.test.output", outcome),
-            outcome,
+            &reference("mfm.test.output", output),
+            output,
         )
         .expect("successor")
 }
 
-async fn reset_public_schema(connection: &mut PgConnection) {
-    connection
-        .execute("DROP SCHEMA IF EXISTS public CASCADE")
-        .await
-        .expect("drop managed test schema");
-    connection
-        .execute("CREATE SCHEMA public")
-        .await
-        .expect("create managed test schema");
-}
-
-async fn reset_schema(connection: &mut PgConnection) {
-    reset_public_schema(connection).await;
-    connection
-        .execute(MIGRATION_SQL)
-        .await
-        .expect("install schema");
-}
-
-async fn checked_store(database_url: &str) -> Arc<PostgresStore> {
-    Arc::new(
-        PostgresStore::connect(database_url)
-            .await
-            .expect("checked store"),
-    )
-}
-
-async fn assert_incompatible(database_url: &str) {
-    assert!(matches!(
-        PostgresStore::connect(database_url).await,
-        Err(StoreOpenError::Incompatible)
-    ));
-}
-
-fn observe_store<T>(result: std::result::Result<T, StoreError>) -> store_hostile::Observation {
+fn observe_store<T>(result: Result<T, StoreError>) -> store_hostile::Observation {
     match result {
         Ok(_) => panic!("expected Store error"),
         Err(StoreError::Capacity) => store_hostile::Observation::Capacity,
         Err(StoreError::CorruptPhysicalState) => store_hostile::Observation::Corrupt,
-        Err(StoreError::Unavailable) => store_hostile::Observation::Unavailable,
-        Err(StoreError::Indeterminate) => store_hostile::Observation::Unavailable,
+        Err(StoreError::Unavailable | StoreError::Indeterminate) => {
+            store_hostile::Observation::Unavailable
+        }
     }
+}
+
+fn catalog_entry(name: &str, value: u8) -> CatalogEntry {
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&format!(r#"{{"value":{value}}}"#))
+        .expect("canonical JSON");
+    CatalogEntry::new(
+        ConfigName::new(name).expect("config name"),
+        ConfigDigest::new(canonical.content_digest()).expect("config digest"),
+        canonical.to_vec(),
+    )
+    .expect("catalog entry")
+}
+
+fn managed_locators() -> (AdminPostgresLocator, RuntimePostgresLocator) {
+    let admin = std::env::var("MFM_TEST_ADMIN_STORE_LOCATOR")
+        .expect("postgres-test must supply the admin locator");
+    let runtime = std::env::var("MFM_TEST_RUNTIME_STORE_LOCATOR")
+        .expect("postgres-test must supply the runtime locator");
+    (
+        AdminPostgresLocator::parse(admin).expect("admin locator"),
+        RuntimePostgresLocator::parse(runtime).expect("runtime locator"),
+    )
+}
+
+async fn admin_connection(locator: &AdminPostgresLocator) -> PgConnection {
+    let (options, roots) = locator
+        .connect_options("mfm-postgres-contract-test")
+        .await
+        .expect("admin connection options");
+    let connection = PgConnection::connect_with(&options)
+        .await
+        .expect("admin connection");
+    drop(roots);
+    connection
+}
+
+async fn runtime_connection(locator: &RuntimePostgresLocator) -> PgConnection {
+    let (options, roots) = locator
+        .connect_options("mfm-postgres-authority-test")
+        .await
+        .expect("runtime connection options");
+    let connection = PgConnection::connect_with(&options)
+        .await
+        .expect("runtime connection");
+    drop(roots);
+    connection
+}
+
+async fn reset_schemas(connection: &mut PgConnection) {
+    connection
+        .execute("DROP SCHEMA IF EXISTS mfm_catalog CASCADE")
+        .await
+        .expect("drop catalog schema");
+    connection
+        .execute("DROP SCHEMA IF EXISTS public CASCADE")
+        .await
+        .expect("drop run schema");
+    connection
+        .execute("CREATE SCHEMA public AUTHORIZATION CURRENT_USER")
+        .await
+        .expect("create run schema");
 }
 
 #[test]
 fn migration_and_classifier_contracts_are_exact() {
     assert_eq!(SCHEMA_CONTRACT, "mfm.run-history-postgres.v1");
-    assert!(MIGRATION_SQL.contains("CREATE TABLE public.mfm_store_schema"));
-    assert!(MIGRATION_SQL.contains("CREATE TABLE public.mfm_run_frames"));
-    assert!(MIGRATION_SQL.contains("CREATE TABLE public.mfm_run_heads"));
-    assert!(!MIGRATION_SQL.contains("UNLOGGED"));
-    assert!(!MIGRATION_SQL.contains("predecessor"));
+    assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_store_schema"));
+    assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_frames"));
+    assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_heads"));
+    assert!(CATALOG_SCHEMA_SQL.contains("CREATE SCHEMA mfm_catalog"));
+    assert!(CATALOG_SCHEMA_SQL.contains("CREATE TABLE mfm_catalog.config_entries"));
+    assert!(!RUN_SCHEMA_SQL.contains("UNLOGGED"));
+    assert!(!CATALOG_SCHEMA_SQL.contains("UNLOGGED"));
     assert_eq!(
-        advisory_lock_key(run_id().as_str()),
+        advisory_lock_key(run_id(7).as_str()),
         -9_027_535_993_765_170_775
     );
     assert_eq!(
@@ -134,153 +162,28 @@ fn migration_and_classifier_contracts_are_exact() {
     assert!(!durability_matches(true, "on", "off"));
 }
 
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "requires the managed PostgreSQL service provided by the postgres-test task"]
-async fn managed_postgres_store_contract() {
-    use store_hostile::{HostileCase as Case, Observation};
-
-    let mut hostile_observed = Vec::new();
-    let database_url =
-        std::env::var("DATABASE_URL").expect("postgres-test must supply DATABASE_URL");
-    let mut connection = PgConnection::connect(&database_url)
-        .await
-        .expect("connect for schema install");
-    reset_schema(&mut connection).await;
-
-    let relations: Vec<String> = sqlx::query_scalar(
-        "SELECT c.relname FROM pg_catalog.pg_class c \
-             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = 'public' AND c.relname LIKE 'mfm_%' \
-               AND c.relkind = 'r' ORDER BY c.relname",
-    )
-    .fetch_all(&mut connection)
-    .await
-    .expect("schema inventory");
+#[tokio::test]
+async fn provisioning_rejects_unequal_targets_before_loading_roots_or_connecting() {
+    let authority = run_id(41).as_str().replace(':', "");
+    let roots = r#"{"kind":"pem-file","path":"/not/a/real/authority.pem","digest":"content:sha256-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#;
+    let admin = AdminPostgresLocator::parse(format!(
+        r#"{{"v":1,"url":"postgresql://operator:{authority}@127.0.0.1:1/one?sslmode=verify-full","tls_roots":{roots}}}"#
+    ))
+    .expect("synthetic admin locator");
+    let runtime = RuntimePostgresLocator::parse(format!(
+        r#"{{"v":1,"url":"postgresql://mfm_runtime:{authority}@127.0.0.1:1/two?sslmode=verify-full","tls_roots":{roots}}}"#
+    ))
+    .expect("synthetic runtime locator");
     assert_eq!(
-        relations,
-        ["mfm_run_frames", "mfm_run_heads", "mfm_store_schema"]
+        provision_schemas(&admin, &runtime).await,
+        Err(ProvisionError::Incompatible)
     );
+}
 
-    let store = Arc::new(
-        PostgresStore::connect(&database_url)
-            .await
-            .expect("checked store"),
-    );
-    store_scenarios::exercise_store(store.as_ref(), &store_scenarios::run(9)).await;
-    hostile_observed.push((
-        Case::Absence,
-        if store
-            .load_run(&run_id())
-            .await
-            .expect("absent load")
-            .is_none()
-        {
-            Observation::None
-        } else {
-            panic!("absent PostgreSQL run returned a transfer")
-        },
-    ));
-
-    let first = Arc::new(genesis());
-    let left = {
-        let store = Arc::clone(&store);
-        let first = Arc::clone(&first);
-        tokio::spawn(async move { store.append_run(&first).await })
-    };
-    let right = {
-        let store = Arc::clone(&store);
-        let first = Arc::clone(&first);
-        tokio::spawn(async move { store.append_run(&first).await })
-    };
-    let results = [
-        left.await.expect("left join").expect("left append"),
-        right.await.expect("right join").expect("right append"),
-    ];
-    assert_eq!(
-        results
-            .iter()
-            .filter(|result| **result == AppendResult::Inserted)
-            .count(),
-        1
-    );
-    assert_eq!(
-        results
-            .iter()
-            .filter(|result| **result == AppendResult::NotInserted)
-            .count(),
-        1
-    );
-
-    let retained = store
-        .load_run(&run_id())
-        .await
-        .expect("load")
-        .expect("present");
-    let mut history = JournalHistory::qualify(&run_id(), retained).expect("history");
-    let second_bytes = br#"{"value":2}"#;
-    let second = history
-        .encode_pure_conclusion(
-            OutcomeKind::Success,
-            &reference("mfm.test.output", second_bytes),
-            second_bytes,
-        )
-        .expect("second");
-    assert_eq!(
-        store.append_run(&second).await.expect("append second"),
-        AppendResult::Inserted
-    );
-    history.extend_inserted(second).expect("extend second");
-    let third_bytes = br#"{"value":3}"#;
-    let third = history
-        .encode_pure_conclusion(
-            OutcomeKind::Failure,
-            &reference("mfm.test.failure", third_bytes),
-            third_bytes,
-        )
-        .expect("third");
-    assert_eq!(
-        store.append_run(&third).await.expect("append third"),
-        AppendResult::Inserted
-    );
-    let historical_retry = store.append_run(&first).await.expect("historical retry");
-    assert_eq!(historical_retry, AppendResult::NotInserted);
-    hostile_observed.push((Case::NotInsertedBypass, Observation::NotInserted));
-
-    let exact_bytes: Vec<u8> = sqlx::query_scalar(
-        "SELECT frame_bytes FROM public.mfm_run_frames \
-             WHERE run_id = $1 AND run_sequence = 1",
-    )
-    .bind(run_id().as_str())
-    .fetch_one(&mut connection)
-    .await
-    .expect("exact BYTEA");
-    assert_eq!(exact_bytes, first.canonical_bytes());
-
-    let mut append_transaction = connection.begin().await.expect("append transaction");
-    configure_append_transaction(&mut append_transaction)
-        .await
-        .expect("configure append transaction");
-    let transaction_settings: (String, String, String) = sqlx::query_as(
-        "SELECT current_setting('transaction_isolation'), \
-                    current_setting('transaction_read_only'), \
-                    current_setting('synchronous_commit')",
-    )
-    .fetch_one(&mut *append_transaction)
-    .await
-    .expect("transaction-local settings");
-    assert_eq!(
-        transaction_settings,
-        (
-            "read committed".to_owned(),
-            "off".to_owned(),
-            "on".to_owned()
-        )
-    );
-    append_transaction.rollback().await.expect("rollback probe");
-
-    let snapshot_id = run(10);
-    let snapshot_genesis = genesis_for(&snapshot_id, br#"{"value":1}"#);
-    let snapshot_successor = successor_for(&snapshot_id, br#"{"value":2}"#);
+async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresStore>) {
+    let snapshot_id = run_id(30);
+    let snapshot_genesis = genesis(&snapshot_id);
+    let snapshot_successor = successor(&snapshot_id);
     assert_eq!(
         store
             .append_run(&snapshot_genesis)
@@ -288,13 +191,13 @@ async fn managed_postgres_store_contract() {
             .expect("snapshot genesis"),
         AppendResult::Inserted
     );
-    let snapshot_entered = Arc::new(tokio::sync::Notify::new());
-    let snapshot_release = Arc::new(tokio::sync::Notify::new());
-    let snapshot_load = {
-        let store = Arc::clone(&store);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let load = {
+        let store = Arc::clone(store);
         let run_id = snapshot_id.clone();
-        let entered = Arc::clone(&snapshot_entered);
-        let release = Arc::clone(&snapshot_release);
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
         tokio::spawn(async move {
             load_run(
                 &store.pool,
@@ -304,7 +207,7 @@ async fn managed_postgres_store_contract() {
             .await
         })
     };
-    snapshot_entered.notified().await;
+    entered.notified().await;
     assert_eq!(
         store
             .append_run(&snapshot_successor)
@@ -312,357 +215,44 @@ async fn managed_postgres_store_contract() {
             .expect("concurrent append"),
         AppendResult::Inserted
     );
-    snapshot_release.notify_one();
-    let raced = snapshot_load
+    release.notify_one();
+    let raced = load
         .await
-        .expect("snapshot load join")
+        .expect("snapshot join")
         .expect("snapshot load")
         .expect("snapshot present");
     assert_eq!(
         JournalHistory::qualify(&snapshot_id, raced)
-            .expect("qualified raced snapshot")
+            .expect("snapshot history")
             .head_sequence(),
         1
     );
-    let complete = store
-        .load_run(&snapshot_id)
-        .await
-        .expect("complete post-race load")
-        .expect("present");
-    assert_eq!(
-        JournalHistory::qualify(&snapshot_id, complete)
-            .expect("qualified")
-            .head_sequence(),
-        2
-    );
 
-    let mut lock_left = PgConnection::connect(&database_url)
-        .await
-        .expect("left lock connection");
-    let mut lock_right = PgConnection::connect(&database_url)
-        .await
-        .expect("right lock connection");
-    let mut left_transaction = lock_left.begin().await.expect("left lock transaction");
-    let mut right_transaction = lock_right.begin().await.expect("right lock transaction");
-    let lock_key = advisory_lock_key(snapshot_id.as_str());
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(lock_key)
-        .execute(&mut *left_transaction)
-        .await
-        .expect("take independent lock");
-    let competing_lock: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(lock_key)
-        .fetch_one(&mut *right_transaction)
-        .await
-        .expect("try independent lock");
-    assert!(!competing_lock);
-    left_transaction.rollback().await.expect("left rollback");
-    right_transaction.rollback().await.expect("right rollback");
-
-    sqlx::query("DELETE FROM public.mfm_run_frames WHERE run_id = $1 AND run_sequence = 2")
-        .bind(run_id().as_str())
-        .execute(&mut connection)
-        .await
-        .expect("create interior gap");
-    assert!(matches!(
-        store.load_run(&run_id()).await,
-        Err(StoreError::CorruptPhysicalState)
-    ));
-
-    drop(first);
-    drop(store);
-
-    for (byte, fault, expected, committed) in [
-        (
-            60,
-            CommitFault::BeforeSubmission,
-            StoreError::Unavailable,
-            false,
-        ),
-        (61, CommitFault::Rejected, StoreError::Unavailable, false),
-        (
-            62,
-            CommitFault::UnknownRolledBack,
-            StoreError::Indeterminate,
-            false,
-        ),
-        (
-            63,
-            CommitFault::UnknownCommitted,
-            StoreError::Indeterminate,
-            true,
-        ),
-    ] {
-        reset_schema(&mut connection).await;
-        let fault_store = checked_store(&database_url).await;
-        if byte == 61 {
-            connection
-                .execute(
-                    "ALTER TABLE public.mfm_run_heads \
-                     DROP CONSTRAINT mfm_run_heads_frame_fkey, \
-                     ADD CONSTRAINT mfm_run_heads_frame_fkey \
-                     FOREIGN KEY (run_id, head_sequence) \
-                     REFERENCES public.mfm_run_frames (run_id, run_sequence) \
-                     DEFERRABLE INITIALLY DEFERRED",
-                )
-                .await
-                .expect("defer FK for COMMIT rejection");
-        }
-        let fault_run = run(byte);
-        let frame = genesis_for(&fault_run, br#"{"fault":true}"#);
-        let fault_result = append_run(&fault_store.pool, &frame, fault).await;
-        assert_eq!(fault_result, Err(expected));
-        if byte == 60 {
-            hostile_observed.push((Case::AtomicFault, observe_store(fault_result)));
-        }
-        if byte == 61 {
-            connection
-                .execute(
-                    "ALTER TABLE public.mfm_run_heads \
-                     DROP CONSTRAINT mfm_run_heads_frame_fkey, \
-                     ADD CONSTRAINT mfm_run_heads_frame_fkey \
-                     FOREIGN KEY (run_id, head_sequence) \
-                     REFERENCES public.mfm_run_frames (run_id, run_sequence) \
-                     ON UPDATE NO ACTION ON DELETE NO ACTION",
-                )
-                .await
-                .expect("restore exact FK after COMMIT rejection");
-        }
-        assert_eq!(
-            fault_store
-                .load_run(&fault_run)
-                .await
-                .expect("resolve ambiguous append")
-                .is_some(),
-            committed
-        );
-        drop(fault_store);
-    }
-
-    reset_schema(&mut connection).await;
-    connection
-        .execute("DROP TABLE public.mfm_store_schema")
-        .await
-        .expect("drop marker table");
-    connection
-        .execute("CREATE TABLE public.mfm_store_schema (schema_contract BIGINT PRIMARY KEY)")
-        .await
-        .expect("install wrong marker type");
-    connection
-        .execute("INSERT INTO public.mfm_store_schema (schema_contract) VALUES (1)")
-        .await
-        .expect("insert wrong marker");
-    assert_incompatible(&database_url).await;
-
-    reset_schema(&mut connection).await;
-    connection
-        .execute("DELETE FROM public.mfm_store_schema")
-        .await
-        .expect("remove marker");
-    assert_incompatible(&database_url).await;
-
-    reset_schema(&mut connection).await;
-    connection
-        .execute("ALTER TABLE public.mfm_store_schema SET UNLOGGED")
-        .await
-        .expect("make authority unlogged");
-    assert_incompatible(&database_url).await;
-
-    reset_schema(&mut connection).await;
-    connection
-        .execute("CREATE TABLE public.mfm_old_receipts (id BIGINT PRIMARY KEY)")
-        .await
-        .expect("create old authority table");
-    assert_incompatible(&database_url).await;
-
-    reset_schema(&mut connection).await;
-    connection
-        .execute(
-            "CREATE INDEX mfm_run_heads_legacy_idx \
-                 ON public.mfm_run_heads (head_sequence)",
-        )
-        .await
-        .expect("create old authority index");
-    assert_incompatible(&database_url).await;
-
-    reset_schema(&mut connection).await;
-    connection
-        .execute(
-            "ALTER TABLE public.mfm_run_frames \
-                 DROP CONSTRAINT mfm_run_frames_bytes_check, \
-                 ADD CONSTRAINT mfm_run_frames_bytes_check \
-                 CHECK (octet_length(frame_bytes) >= 1)",
-        )
-        .await
-        .expect("weaken constraint");
-    assert_incompatible(&database_url).await;
-
-    reset_schema(&mut connection).await;
-    connection
-        .execute("CREATE TABLE public.operator_owned (id BIGINT PRIMARY KEY)")
-        .await
-        .expect("operator table");
-    connection
-        .execute("CREATE TABLE public.\"mfmXoperator\" (id BIGINT PRIMARY KEY)")
-        .await
-        .expect("non-reserved mfm operator table");
-    drop(checked_store(&database_url).await);
-
-    reset_schema(&mut connection).await;
-    let reconnect_store = checked_store(&database_url).await;
-    reconnect_store
-        .pool
-        .acquire()
-        .await
-        .expect("pooled connection")
-        .close()
-        .await
-        .expect("retire checked physical connection");
-    connection
-        .execute("DELETE FROM public.mfm_store_schema")
-        .await
-        .expect("break reconnect marker");
-    assert!(matches!(
-        reconnect_store.load_run(&run(64)).await,
-        Err(StoreError::Unavailable)
-    ));
-    drop(reconnect_store);
-
-    reset_schema(&mut connection).await;
-    let orphan_store = checked_store(&database_url).await;
-    let orphan_id = run(65);
-    let orphan = genesis_for(&orphan_id, br#"{"orphan":true}"#);
-    sqlx::query(
-        "INSERT INTO public.mfm_run_frames \
-             (run_id, run_sequence, frame_bytes, head_digest) VALUES ($1,1,$2,$3)",
-    )
-    .bind(orphan_id.as_str())
-    .bind(orphan.canonical_bytes())
-    .bind(orphan.head_digest().as_str())
-    .execute(&mut connection)
-    .await
-    .expect("orphan frame");
-    let orphan_result = orphan_store.load_run(&orphan_id).await;
-    hostile_observed.push((Case::AbsentHeadOrphan, observe_store(orphan_result)));
-    drop(orphan_store);
-
-    for (byte, mutation) in [
-            (
-                66,
-                "UPDATE public.mfm_run_frames SET frame_bytes = '{}'::bytea WHERE run_id = $1",
-            ),
-            (
-                67,
-                "UPDATE public.mfm_run_frames SET head_digest = 'content:sha256-v1:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' WHERE run_id = $1",
-            ),
-            (
-                68,
-                "UPDATE public.mfm_run_heads SET total_bytes = total_bytes + 1 WHERE run_id = $1",
-            ),
-        ] {
-            reset_schema(&mut connection).await;
-            let corrupt_store = checked_store(&database_url).await;
-            let corrupt_id = run(byte);
-            let frame = genesis_for(&corrupt_id, br#"{"value":1}"#);
-            assert_eq!(
-                corrupt_store
-                    .append_run(&frame)
-                    .await
-                    .expect("seed corrupt case"),
-                AppendResult::Inserted
-            );
-            sqlx::query(mutation)
-                .bind(corrupt_id.as_str())
-                .execute(&mut connection)
-                .await
-                .expect("corrupt physical row");
-            let corrupt_result = corrupt_store.load_run(&corrupt_id).await;
-            let case = match byte {
-                66 => Case::CorruptBytes,
-                67 => Case::CorruptDigest,
-                68 => Case::CorruptTotal,
-                _ => unreachable!(),
-            };
-            hostile_observed.push((case, observe_store(corrupt_result)));
-            drop(corrupt_store);
-        }
-
-    reset_schema(&mut connection).await;
-    let broken_join_store = checked_store(&database_url).await;
-    let broken_join_id = run(69);
-    let broken_join = genesis_for(&broken_join_id, br#"{"value":1}"#);
-    assert_eq!(
-        broken_join_store
-            .append_run(&broken_join)
-            .await
-            .expect("seed broken join"),
-        AppendResult::Inserted
-    );
-    connection
-        .execute(
-            "ALTER TABLE public.mfm_run_heads \
-                 DROP CONSTRAINT mfm_run_heads_frame_fkey",
-        )
-        .await
-        .expect("drop test FK");
-    sqlx::query("DELETE FROM public.mfm_run_frames WHERE run_id = $1")
-        .bind(broken_join_id.as_str())
-        .execute(&mut connection)
-        .await
-        .expect("break head join");
-    hostile_observed.push((
-        Case::CorruptHead,
-        observe_store(broken_join_store.load_run(&broken_join_id).await),
-    ));
-    drop(broken_join_store);
-
-    reset_schema(&mut connection).await;
-    let target_store = checked_store(&database_url).await;
-    let target_id = run(70);
-    let target_genesis = genesis_for(&target_id, br#"{"value":1}"#);
-    let target_successor = successor_for(&target_id, br#"{"value":2}"#);
-    assert_eq!(
-        target_store
-            .append_run(&target_genesis)
-            .await
-            .expect("target genesis"),
-        AppendResult::Inserted
-    );
-    assert_eq!(
-        target_store
-            .append_run(&target_successor)
-            .await
-            .expect("target successor"),
-        AppendResult::Inserted
-    );
-    sqlx::query("DELETE FROM public.mfm_run_frames WHERE run_id = $1 AND run_sequence = 1")
-        .bind(target_id.as_str())
-        .execute(&mut connection)
-        .await
-        .expect("remove historical target");
-    hostile_observed.push((
-        Case::CorruptTarget,
-        observe_store(target_store.append_run(&target_genesis).await),
-    ));
-    drop(target_store);
-
-    reset_schema(&mut connection).await;
-    let large_store = checked_store(&database_url).await;
-    let large_id = run(71);
+    let large_id = run_id(31);
     let mut large_context = Vec::with_capacity(4 * 1024 * 1024 + 2);
     large_context.push(b'"');
     large_context.resize(4 * 1024 * 1024 + 1, b'a');
     large_context.push(b'"');
-    let large = genesis_for(&large_id, &large_context);
+    let large = {
+        let program = b"{}";
+        EncodedRunFrame::admission(
+            &large_id,
+            &reference("mfm.test.program", program),
+            program,
+            &reference("mfm.test.context", &large_context),
+            &large_context,
+        )
+        .expect("large genesis")
+    };
     assert_eq!(
-        large_store.append_run(&large).await.expect("large append"),
+        store.append_run(&large).await.expect("large append"),
         AppendResult::Inserted
     );
     let heartbeat_count = Arc::new(AtomicUsize::new(0));
     let blocking_entered = Arc::new(tokio::sync::Notify::new());
     let blocking_release = Arc::new(AtomicBool::new(false));
-    let load_task = {
-        let store = Arc::clone(&large_store);
+    let load = {
+        let store = Arc::clone(store);
         let run_id = large_id.clone();
         let entered = Arc::clone(&blocking_entered);
         let release = Arc::clone(&blocking_release);
@@ -687,12 +277,11 @@ async fn managed_postgres_store_contract() {
             }
         })
     };
-    let before_blocking_progress = heartbeat_count.load(Ordering::SeqCst);
-    while heartbeat_count.load(Ordering::SeqCst) == before_blocking_progress {
+    while heartbeat_count.load(Ordering::SeqCst) == 0 {
         tokio::task::yield_now().await;
     }
     blocking_release.store(true, Ordering::SeqCst);
-    let large_retained = load_task
+    let retained = load
         .await
         .expect("large load join")
         .expect("large load")
@@ -701,174 +290,651 @@ async fn managed_postgres_store_contract() {
     heartbeat.await.expect("heartbeat join");
     assert!(heartbeat_count.load(Ordering::SeqCst) > 0);
     assert_eq!(
-        JournalHistory::qualify(&large_id, large_retained)
-            .expect("qualify large transfer")
+        JournalHistory::qualify(&large_id, retained)
+            .expect("large history")
             .head_sequence(),
         1
     );
-    drop(large_store);
+}
 
-    reset_schema(&mut connection).await;
+async fn assert_commit_and_hostile_contract(
+    store: &Arc<PostgresStore>,
+    connection: &mut PgConnection,
+) {
+    use store_hostile::{HostileCase as Case, Observation};
+
+    let mut observed = Vec::new();
+    observed.push((
+        Case::Absence,
+        if store
+            .load_run(&run_id(40))
+            .await
+            .expect("absent load")
+            .is_none()
+        {
+            Observation::None
+        } else {
+            panic!("absent run returned retained bytes")
+        },
+    ));
+
+    for (byte, fault, expected, committed) in [
+        (
+            41,
+            CommitFault::BeforeSubmission,
+            StoreError::Unavailable,
+            false,
+        ),
+        (42, CommitFault::Rejected, StoreError::Unavailable, false),
+        (
+            43,
+            CommitFault::UnknownRolledBack,
+            StoreError::Indeterminate,
+            false,
+        ),
+        (
+            44,
+            CommitFault::UnknownCommitted,
+            StoreError::Indeterminate,
+            true,
+        ),
+    ] {
+        if matches!(fault, CommitFault::Rejected) {
+            connection
+                .execute(
+                    "ALTER TABLE public.mfm_run_heads \
+                     DROP CONSTRAINT mfm_run_heads_frame_fkey, \
+                     ADD CONSTRAINT mfm_run_heads_frame_fkey \
+                     FOREIGN KEY (run_id, head_sequence) \
+                     REFERENCES public.mfm_run_frames (run_id, run_sequence) \
+                     DEFERRABLE INITIALLY DEFERRED",
+                )
+                .await
+                .expect("defer head constraint");
+        }
+        let fault_id = run_id(byte);
+        let result = append_run(&store.pool, &genesis(&fault_id), fault).await;
+        assert_eq!(result, Err(expected));
+        if matches!(fault, CommitFault::BeforeSubmission) {
+            observed.push((Case::AtomicFault, observe_store(result)));
+        }
+        if matches!(fault, CommitFault::Rejected) {
+            connection
+                .execute(
+                    "ALTER TABLE public.mfm_run_heads \
+                     DROP CONSTRAINT mfm_run_heads_frame_fkey, \
+                     ADD CONSTRAINT mfm_run_heads_frame_fkey \
+                     FOREIGN KEY (run_id, head_sequence) \
+                     REFERENCES public.mfm_run_frames (run_id, run_sequence) \
+                     ON UPDATE NO ACTION ON DELETE NO ACTION",
+                )
+                .await
+                .expect("restore head constraint");
+        }
+        assert_eq!(
+            store
+                .load_run(&fault_id)
+                .await
+                .expect("resolve fault")
+                .is_some(),
+            committed
+        );
+    }
+
+    let retry_id = run_id(45);
+    let retry = genesis(&retry_id);
+    assert_eq!(
+        store.append_run(&retry).await.expect("insert retry target"),
+        AppendResult::Inserted
+    );
+    assert_eq!(
+        store.append_run(&retry).await.expect("retry target"),
+        AppendResult::NotInserted
+    );
+    observed.push((Case::NotInsertedBypass, Observation::NotInserted));
+
+    let orphan_id = run_id(46);
+    let orphan = genesis(&orphan_id);
+    sqlx::query(
+        "INSERT INTO public.mfm_run_frames \
+         (run_id, run_sequence, frame_bytes, head_digest) VALUES ($1,1,$2,$3)",
+    )
+    .bind(orphan_id.as_str())
+    .bind(orphan.canonical_bytes())
+    .bind(orphan.head_digest().as_str())
+    .execute(&mut *connection)
+    .await
+    .expect("insert orphan frame");
+    observed.push((
+        Case::AbsentHeadOrphan,
+        observe_store(store.load_run(&orphan_id).await),
+    ));
+
+    for (byte, mutation, case) in [
+        (
+            47,
+            "UPDATE public.mfm_run_frames SET frame_bytes = '{}'::bytea WHERE run_id = $1",
+            Case::CorruptBytes,
+        ),
+        (
+            48,
+            "UPDATE public.mfm_run_frames SET head_digest = 'content:sha256-v1:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' WHERE run_id = $1",
+            Case::CorruptDigest,
+        ),
+        (
+            49,
+            "UPDATE public.mfm_run_heads SET total_bytes = total_bytes + 1 WHERE run_id = $1",
+            Case::CorruptTotal,
+        ),
+    ] {
+        let corrupt_id = run_id(byte);
+        store
+            .append_run(&genesis(&corrupt_id))
+            .await
+            .expect("seed corruption");
+        sqlx::query(mutation)
+            .bind(corrupt_id.as_str())
+            .execute(&mut *connection)
+            .await
+            .expect("mutate retained row");
+        observed.push((case, observe_store(store.load_run(&corrupt_id).await)));
+    }
+
+    let target_id = run_id(50);
+    store
+        .append_run(&genesis(&target_id))
+        .await
+        .expect("target genesis");
+    store
+        .append_run(&successor(&target_id))
+        .await
+        .expect("target successor");
+    sqlx::query("DELETE FROM public.mfm_run_frames WHERE run_id = $1 AND run_sequence = 1")
+        .bind(target_id.as_str())
+        .execute(&mut *connection)
+        .await
+        .expect("remove historical target");
+    observed.push((
+        Case::CorruptTarget,
+        observe_store(store.append_run(&genesis(&target_id)).await),
+    ));
+
+    let broken_head_id = run_id(51);
+    store
+        .append_run(&genesis(&broken_head_id))
+        .await
+        .expect("head genesis");
+    connection
+        .execute("ALTER TABLE public.mfm_run_heads DROP CONSTRAINT mfm_run_heads_frame_fkey")
+        .await
+        .expect("drop head constraint");
+    sqlx::query("DELETE FROM public.mfm_run_frames WHERE run_id = $1")
+        .bind(broken_head_id.as_str())
+        .execute(&mut *connection)
+        .await
+        .expect("remove head frame");
+    observed.push((
+        Case::CorruptHead,
+        observe_store(store.load_run(&broken_head_id).await),
+    ));
+    connection
+        .execute(
+            "ALTER TABLE public.mfm_run_heads \
+             ADD CONSTRAINT mfm_run_heads_frame_fkey \
+             FOREIGN KEY (run_id, head_sequence) \
+             REFERENCES public.mfm_run_frames (run_id, run_sequence) \
+             ON UPDATE NO ACTION ON DELETE NO ACTION NOT VALID",
+        )
+        .await
+        .expect("restore unvalidated head constraint");
+    sqlx::query("DELETE FROM public.mfm_run_heads WHERE run_id = $1")
+        .bind(broken_head_id.as_str())
+        .execute(&mut *connection)
+        .await
+        .expect("remove broken head");
+    connection
+        .execute("ALTER TABLE public.mfm_run_heads VALIDATE CONSTRAINT mfm_run_heads_frame_fkey")
+        .await
+        .expect("validate restored head constraint");
+
     let valid_digest =
         "content:sha256-v1:0000000000000000000000000000000000000000000000000000000000000000";
-    let boundary_id = run(72);
+    let maximum_sequence_id = run_id(52);
     sqlx::query(
         "INSERT INTO public.mfm_run_frames \
-             (run_id, run_sequence, frame_bytes, head_digest) VALUES ($1,65536,$2,$3)",
+         (run_id, run_sequence, frame_bytes, head_digest) VALUES ($1,65536,$2,$3)",
     )
-    .bind(boundary_id.as_str())
+    .bind(maximum_sequence_id.as_str())
     .bind([0_u8])
     .bind(valid_digest)
-    .execute(&mut connection)
+    .execute(&mut *connection)
     .await
     .expect("maximum sequence");
-    let count_capacity = sqlx::query(
-        "INSERT INTO public.mfm_run_frames \
-             (run_id, run_sequence, frame_bytes, head_digest) VALUES ($1,65537,$2,$3)",
-    )
-    .bind(run(73).as_str())
-    .bind([0_u8])
-    .bind(valid_digest)
-    .execute(&mut connection)
-    .await;
-    assert!(count_capacity.is_err());
-    hostile_observed.push((Case::CountCapacity, Observation::Capacity));
     assert!(sqlx::query(
         "INSERT INTO public.mfm_run_frames \
-             (run_id, run_sequence, frame_bytes, head_digest) VALUES ($1,1,$2,$3)",
+         (run_id, run_sequence, frame_bytes, head_digest) VALUES ($1,65537,$2,$3)",
     )
-    .bind("run:sha256-v1:0000000000000000000000000000000000000000000000000000000000000000")
+    .bind(run_id(53).as_str())
     .bind([0_u8])
     .bind(valid_digest)
-    .execute(&mut connection)
+    .execute(&mut *connection)
     .await
     .is_err());
-    assert!(sqlx::query(
-        "INSERT INTO public.mfm_run_frames \
-             (run_id, run_sequence, frame_bytes, head_digest) VALUES ($1,1,$2,$3)",
-    )
-    .bind(run(74).as_str())
-    .bind([0_u8])
-    .bind("content:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000")
-    .execute(&mut connection)
-    .await
-    .is_err());
-    assert!(sqlx::query(
-        "INSERT INTO public.mfm_run_frames \
-             (run_id, run_sequence, frame_bytes, head_digest) VALUES ($1,1,$2,$3)",
-    )
-    .bind(run(75).as_str())
-    .bind(Vec::<u8>::new())
-    .bind(valid_digest)
-    .execute(&mut connection)
-    .await
-    .is_err());
+    observed.push((Case::CountCapacity, Observation::Capacity));
 
-    let frame_limit_id = run(76);
+    let maximum_frame_id = run_id(54);
     sqlx::query(
         "INSERT INTO public.mfm_run_frames \
-             (run_id, run_sequence, frame_bytes, head_digest) \
-             VALUES ($1,1,decode(repeat('00',$2),'hex'),$3)",
+         (run_id, run_sequence, frame_bytes, head_digest) \
+         VALUES ($1,1,decode(repeat('00',$2),'hex'),$3)",
     )
-    .bind(frame_limit_id.as_str())
+    .bind(maximum_frame_id.as_str())
     .bind(i32::try_from(MAX_FRAME_BYTES).expect("frame bound"))
     .bind(valid_digest)
-    .execute(&mut connection)
+    .execute(&mut *connection)
     .await
     .expect("maximum frame bytes");
-    let frame_capacity = sqlx::query(
+    assert!(sqlx::query(
         "INSERT INTO public.mfm_run_frames \
-             (run_id, run_sequence, frame_bytes, head_digest) \
-             VALUES ($1,1,decode(repeat('00',$2),'hex'),$3)",
+         (run_id, run_sequence, frame_bytes, head_digest) \
+         VALUES ($1,1,decode(repeat('00',$2),'hex'),$3)",
     )
-    .bind(run(77).as_str())
+    .bind(run_id(55).as_str())
     .bind(i32::try_from(MAX_FRAME_BYTES + 1).expect("frame plus one"))
     .bind(valid_digest)
-    .execute(&mut connection)
-    .await;
-    assert!(frame_capacity.is_err());
-    hostile_observed.push((Case::FrameCapacity, Observation::Capacity));
+    .execute(&mut *connection)
+    .await
+    .is_err());
+    observed.push((Case::FrameCapacity, Observation::Capacity));
 
-    let total_id = run(78);
+    let total_id = run_id(56);
     sqlx::query(
         "INSERT INTO public.mfm_run_frames \
-             (run_id, run_sequence, frame_bytes, head_digest) VALUES ($1,1,$2,$3)",
+         (run_id, run_sequence, frame_bytes, head_digest) VALUES ($1,1,$2,$3)",
     )
     .bind(total_id.as_str())
     .bind([0_u8])
     .bind(valid_digest)
-    .execute(&mut connection)
+    .execute(&mut *connection)
     .await
     .expect("total frame");
-    sqlx::query(
-        "INSERT INTO public.mfm_run_heads (run_id, head_sequence, total_bytes) \
-             VALUES ($1,1,$2)",
-    )
-    .bind(total_id.as_str())
-    .bind(i64::try_from(MAX_RUN_BYTES).expect("run bound"))
-    .execute(&mut connection)
-    .await
-    .expect("maximum total bytes");
-    sqlx::query("DELETE FROM public.mfm_run_heads WHERE run_id = $1")
-        .bind(total_id.as_str())
-        .execute(&mut connection)
-        .await
-        .expect("remove maximum head");
-    let run_capacity = sqlx::query(
-        "INSERT INTO public.mfm_run_heads (run_id, head_sequence, total_bytes) \
-             VALUES ($1,1,$2)",
+    assert!(sqlx::query(
+        "INSERT INTO public.mfm_run_heads (run_id, head_sequence, total_bytes) VALUES ($1,1,$2)",
     )
     .bind(total_id.as_str())
     .bind(i64::try_from(MAX_RUN_BYTES + 1).expect("run plus one"))
-    .execute(&mut connection)
-    .await;
-    assert!(run_capacity.is_err());
-    hostile_observed.push((Case::RunCapacity, Observation::Capacity));
+    .execute(&mut *connection)
+    .await
+    .is_err());
+    observed.push((Case::RunCapacity, Observation::Capacity));
 
-    store_hostile::assert_hostile_matrix(&hostile_observed);
+    store_hostile::assert_hostile_matrix(&observed);
+}
+
+async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresCatalog>) {
+    use catalog::MutationCommitFault as Fault;
+
+    let before = catalog_entry("ambiguous-before", 1);
+    assert_eq!(
+        catalog::insert_config_with_fault(catalog.test_pool(), &before, Fault::BeforeSubmission)
+            .await,
+        Err(CatalogError::Unavailable)
+    );
+    assert!(catalog
+        .load_config(before.name())
+        .await
+        .expect("resolve before-submission insert")
+        .is_none());
+
+    let rolled_back = catalog_entry("ambiguous-rollback", 2);
+    assert_eq!(
+        catalog::insert_config_with_fault(
+            catalog.test_pool(),
+            &rolled_back,
+            Fault::UnknownRolledBack,
+        )
+        .await,
+        Err(CatalogError::Indeterminate)
+    );
+    assert!(catalog
+        .load_config(rolled_back.name())
+        .await
+        .expect("resolve rolled-back insert")
+        .is_none());
+
+    let committed = catalog_entry("ambiguous-insert", 3);
+    assert_eq!(
+        catalog::insert_config_with_fault(
+            catalog.test_pool(),
+            &committed,
+            Fault::UnknownCommitted,
+        )
+        .await,
+        Err(CatalogError::Indeterminate)
+    );
+    assert_eq!(
+        catalog
+            .load_config(committed.name())
+            .await
+            .expect("resolve committed insert")
+            .expect("committed entry")
+            .digest(),
+        committed.digest()
+    );
+
+    let deleted = catalog_entry("ambiguous-delete", 4);
+    assert_eq!(
+        catalog.insert_config(&deleted).await.expect("delete seed"),
+        CatalogInsertResult::Inserted
+    );
+    assert_eq!(
+        catalog::delete_config_with_fault(
+            catalog.test_pool(),
+            deleted.name(),
+            deleted.digest(),
+            Fault::UnknownCommitted,
+        )
+        .await,
+        Err(CatalogError::Indeterminate)
+    );
+    assert!(catalog
+        .load_config(deleted.name())
+        .await
+        .expect("resolve committed delete")
+        .is_none());
+
+    let race_left = catalog_entry("race", 5);
+    let race_right = catalog_entry("race", 6);
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let left = {
+        let catalog = Arc::clone(catalog);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            catalog.insert_config(&race_left).await
+        })
+    };
+    let right = {
+        let catalog = Arc::clone(catalog);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            catalog.insert_config(&race_right).await
+        })
+    };
+    let outcomes = [
+        left.await.expect("left catalog join").expect("left insert"),
+        right
+            .await
+            .expect("right catalog join")
+            .expect("right insert"),
+    ];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == CatalogInsertResult::Inserted)
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == CatalogInsertResult::Conflict)
+            .count(),
+        1
+    );
+
+    for (name, value) in [("beta", 7), ("gamma", 8)] {
+        assert_eq!(
+            catalog
+                .insert_config(&catalog_entry(name, value))
+                .await
+                .expect("page seed"),
+            CatalogInsertResult::Inserted
+        );
+    }
+    for index in 0..(MAX_CONFIG_ENTRIES - 4) {
+        assert_eq!(
+            catalog
+                .insert_config(&catalog_entry(
+                    &format!("quota-{index:03}"),
+                    u8::try_from(index).expect("quota value"),
+                ))
+                .await
+                .expect("quota insert"),
+            CatalogInsertResult::Inserted
+        );
+    }
+    assert_eq!(
+        catalog
+            .insert_config(&catalog_entry("quota-overflow", 9))
+            .await,
+        Err(CatalogError::Capacity)
+    );
+
+    let mut cursor = None;
+    let mut names = Vec::new();
+    loop {
+        let page = catalog
+            .list_configs(
+                cursor.as_ref(),
+                PageLimit::new(17).expect("catalog page limit"),
+            )
+            .await
+            .expect("catalog page");
+        names.extend(page.items().iter().map(|entry| entry.name().clone()));
+        let Some(next) = page.next_cursor().cloned() else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    assert_eq!(names.len(), MAX_CONFIG_ENTRIES);
+    assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires the managed PostgreSQL service provided by the postgres-test task"]
-async fn managed_schema_provisioning_installs_only_into_an_empty_store() {
-    let database_url =
-        std::env::var("DATABASE_URL").expect("postgres-test must supply DATABASE_URL");
-    let mut connection = PgConnection::connect(&database_url)
-        .await
-        .expect("connect for provisioning");
+#[ignore = "requires the managed TLS PostgreSQL service provided by postgres-test"]
+async fn managed_postgres_persistence_authority_contract() {
+    let (admin, runtime) = managed_locators();
+    let mut connection = admin_connection(&admin).await;
+    reset_schemas(&mut connection).await;
 
-    reset_public_schema(&mut connection).await;
-    install_schema(&database_url)
+    provision_schemas(&admin, &runtime)
         .await
-        .expect("install into an empty store");
-    install_schema(&database_url)
+        .expect("initial provisioning");
+    provision_schemas(&admin, &runtime)
         .await
-        .expect("verifying an installed store is idempotent");
-    checked_store(&database_url).await;
+        .expect("idempotent provisioning verification");
 
-    // A hostile leftover is reported, never repaired and never overwritten.
-    reset_public_schema(&mut connection).await;
+    let store = Arc::new(PostgresStore::connect(&runtime).await.expect("run store"));
+    let catalog = Arc::new(PostgresCatalog::connect(&runtime).await.expect("catalog"));
+    let (_, exact_roots) = runtime
+        .connect_options("mfm-root-store-contract-test")
+        .await
+        .expect("production root store");
+    assert!(!exact_roots.is_webpki());
+    assert_eq!(exact_roots.len(), 1);
+    store_scenarios::exercise_store(store.as_ref(), &store_scenarios::run(9)).await;
+
+    let first_run_id = run_id(21);
+    let second_run_id = run_id(22);
+    assert_eq!(
+        store
+            .append_run(&genesis(&second_run_id))
+            .await
+            .expect("append second run"),
+        AppendResult::Inserted
+    );
+    assert_eq!(
+        store
+            .append_run(&genesis(&first_run_id))
+            .await
+            .expect("append first run"),
+        AppendResult::Inserted
+    );
+    let page = store
+        .list_runs(None, PageLimit::new(1).expect("page limit"))
+        .await
+        .expect("first run page");
+    assert_eq!(page.items().len(), 1);
+    let cursor = page.next_cursor().expect("run cursor").clone();
+    let next = store
+        .list_runs(Some(&cursor), PageLimit::new(1).expect("page limit"))
+        .await
+        .expect("second run page");
+    assert_eq!(next.items().len(), 1);
+    assert!(page.items()[0].run_id() < next.items()[0].run_id());
+
+    let first = catalog_entry("alpha", 1);
+    let replacement = catalog_entry("alpha", 2);
+    assert_eq!(
+        catalog.insert_config(&first).await.expect("insert config"),
+        CatalogInsertResult::Inserted
+    );
+    assert_eq!(
+        catalog.insert_config(&first).await.expect("retry config"),
+        CatalogInsertResult::Unchanged
+    );
+    assert_eq!(
+        catalog
+            .insert_config(&replacement)
+            .await
+            .expect("conflicting config"),
+        CatalogInsertResult::Conflict
+    );
+    assert_eq!(
+        catalog
+            .delete_config(first.name(), replacement.digest())
+            .await
+            .expect("digest mismatch"),
+        CatalogDeleteResult::DigestMismatch
+    );
+    let retained = catalog
+        .load_config(first.name())
+        .await
+        .expect("load config")
+        .expect("retained config");
+    assert_eq!(retained.digest(), first.digest());
+    assert_eq!(retained.canonical_bytes(), first.canonical_bytes());
+    assert_eq!(
+        catalog
+            .delete_config(first.name(), first.digest())
+            .await
+            .expect("delete config"),
+        CatalogDeleteResult::Deleted
+    );
+
+    assert_snapshot_and_blocking_contract(&store).await;
+    assert_commit_and_hostile_contract(&store, &mut connection).await;
+    assert_catalog_mutation_contract(&catalog).await;
+
+    let mut runtime_connection = runtime_connection(&runtime).await;
+    assert!(
+        sqlx::query("CREATE TABLE public.runtime_must_not_own_ddl (id bigint)")
+            .execute(&mut runtime_connection)
+            .await
+            .is_err()
+    );
+    assert!(sqlx::query("DELETE FROM public.mfm_run_frames")
+        .execute(&mut runtime_connection)
+        .await
+        .is_err());
+    assert!(
+        sqlx::query("UPDATE mfm_catalog.config_entries SET canonical = canonical")
+            .execute(&mut runtime_connection)
+            .await
+            .is_err()
+    );
+
+    connection
+        .execute("GRANT TRUNCATE ON public.mfm_run_frames TO mfm_runtime")
+        .await
+        .expect("grant excess run privilege");
+    assert!(matches!(
+        PostgresStore::connect(&runtime).await,
+        Err(StoreOpenError::Incompatible)
+    ));
+    connection
+        .execute("REVOKE TRUNCATE ON public.mfm_run_frames FROM mfm_runtime")
+        .await
+        .expect("revoke excess run privilege");
+    assert!(PostgresStore::connect(&runtime).await.is_ok());
+
+    connection
+        .execute("GRANT CREATE ON SCHEMA mfm_catalog TO mfm_runtime")
+        .await
+        .expect("grant excess catalog privilege");
+    assert!(matches!(
+        PostgresCatalog::connect(&runtime).await,
+        Err(StoreOpenError::Incompatible)
+    ));
+    assert!(PostgresStore::connect(&runtime).await.is_ok());
+    connection
+        .execute("REVOKE CREATE ON SCHEMA mfm_catalog FROM mfm_runtime")
+        .await
+        .expect("revoke excess catalog privilege");
+
+    drop((store, catalog));
+    connection
+        .execute("DELETE FROM mfm_catalog.mfm_catalog_schema")
+        .await
+        .expect("break catalog marker");
+    assert!(PostgresStore::connect(&runtime).await.is_ok());
+    assert!(matches!(
+        PostgresCatalog::connect(&runtime).await,
+        Err(StoreOpenError::Incompatible)
+    ));
+
+    reset_schemas(&mut connection).await;
+    provision_schemas(&admin, &runtime)
+        .await
+        .expect("restore schemas");
+    connection
+        .execute("DELETE FROM public.mfm_store_schema")
+        .await
+        .expect("break run marker");
+    assert!(PostgresCatalog::connect(&runtime).await.is_ok());
+    assert!(matches!(
+        PostgresStore::connect(&runtime).await,
+        Err(StoreOpenError::Incompatible)
+    ));
+
+    reset_schemas(&mut connection).await;
     connection
         .execute("CREATE TABLE public.mfm_run_frames (surprise text)")
         .await
-        .expect("hostile leftover");
+        .expect("partial schema");
     assert_eq!(
-        install_schema(&database_url).await,
-        Err(StoreOpenError::Incompatible)
+        provision_schemas(&admin, &runtime).await,
+        Err(ProvisionError::Incompatible)
     );
-    let surviving: Vec<String> = sqlx::query_scalar(
+    let columns: Vec<String> = sqlx::query_scalar(
         "SELECT a.attname FROM pg_catalog.pg_attribute a \
          JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = 'public' AND c.relname = 'mfm_run_frames' \
-           AND a.attnum > 0 AND NOT a.attisdropped \
-         ORDER BY a.attnum",
+           AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum",
     )
     .fetch_all(&mut connection)
     .await
-    .expect("surviving leftover columns");
-    assert_eq!(surviving, ["surprise"]);
-    assert_incompatible(&database_url).await;
+    .expect("partial schema columns");
+    assert_eq!(columns, ["surprise"]);
+    reset_schemas(&mut connection).await;
+}
 
-    reset_schema(&mut connection).await;
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires the managed TLS PostgreSQL service provided by postgres-test"]
+async fn managed_postgres_rejects_untrusted_or_mismatched_tls_authority() {
+    for variable in [
+        "MFM_TEST_WRONG_PIN_STORE_LOCATOR",
+        "MFM_TEST_ALTERNATE_CA_STORE_LOCATOR",
+        "MFM_TEST_WRONG_HOST_STORE_LOCATOR",
+    ] {
+        let encoded = std::env::var(variable).expect("postgres-test must supply negative locator");
+        let locator = RuntimePostgresLocator::parse(encoded).expect("negative locator grammar");
+        assert!(matches!(
+            PostgresStore::connect(&locator).await,
+            Err(StoreOpenError::Unavailable)
+        ));
+    }
 }
