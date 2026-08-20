@@ -90,6 +90,7 @@ error: postgres locator is invalid or unavailable
 error: postgres provisioning target is incompatible
 error: postgres provisioning target is unavailable
 error: postgres provisioning outcome is indeterminate
+error: application composition is invalid
 error: postgres store is unavailable
 error: postgres store is incompatible
 error: evm provider transport could not be constructed
@@ -105,3 +106,5 @@ single-host `postgresql` URI with `sslmode=verify-full` plus either WebPKI roots
 content-pinned PEM root bundle. `init` separately resolves the named administrative locator, proves
 that its secret-free server/database target equals the runtime target, and provisions through that
 short-lived authority. Snapshot and show retain only the fixed `mfm_runtime` DML role.
+The current one-route JSON surface converts its `evm` block into a one-element checked
+`BoundCapabilitySet`; live assembly no longer has a singular route constructor.

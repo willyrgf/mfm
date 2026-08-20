@@ -1796,12 +1796,14 @@ dependencies = [
 name = "mfm-app"
 version = "0.1.0"
 dependencies = [
+ "mfm-catalog",
  "mfm-evm",
  "mfm-evm-live",
  "mfm-ids",
  "mfm-portfolio",
  "mfm-runtime",
  "mfm-store",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",

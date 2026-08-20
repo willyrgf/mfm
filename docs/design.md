@@ -60,6 +60,11 @@ endpoint_ref }`. Planning and adapter registration derive the same content ref. 
 client handles are process-local and never persisted. Wrong local route/chain is `Internal` before
 provider entry; only authenticated external evidence may become `IntegrityBlocked`.
 
+Live composition accepts an empty or strictly sorted, unique set of at most 256 EVM bindings.
+Multiple endpoints may bind one chain. One `ComposedRuntime` derives its immutable assembly,
+planning targets, public `(chain_id, endpoint_id, binding_ref)` views, Store, and RunIndex from that
+single checked input and concrete backend; there is no singular one-route assembly constructor.
+
 Application supports Portfolio snapshot planning/start plus Runtime resume/read. Callers provide the
 RunId explicitly. Transaction submission requires a future durable transaction-authority/outbox
 design and is not part of this system.

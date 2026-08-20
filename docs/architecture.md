@@ -14,7 +14,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
 | Transport security | checked TLS-root specs and exact immutable root-store loading | endpoint URLs, credentials, protocol clients, or ambient resolution |
 | Live adapters | bounded provider ingress and direct typed callback registration | domain planning or State registration |
-| Application | trusted Portfolio assembly composition, Portfolio plan/start, and direct Runtime resume/read facade | sessions, frame inspection, status derivation |
+| Application | one checked multi-route Runtime/RunIndex/binding composition, Portfolio plan/start, and direct Runtime resume/read facade | sessions, frame inspection, status derivation |
 | Binaries | CLI configuration parsing, one live Application composition, and one redacted view rendering; REST unavailable diagnostic | execution lifecycle, run semantics, or a bound REST listener |
 
 RuntimeAssemblyBuilder registers exact value codecs, Pure/Read State drivers, Match descriptors, and
@@ -40,6 +40,11 @@ PostgreSQL owns its private locator grammar, target equivalence, TLS/SQLx wiring
 provisioner, and two independent gates. The shared transport-security primitive supplies only exact
 TLS roots; it cannot resolve an endpoint or construct a protocol client. Administrative database
 authority exists only in the CLI provisioning path and is never retained by Application.
+
+`ComposedRuntime` is the only live Portfolio assembly constructor. One opaque binding set supplies
+typed EVM targets and provider handles in stable order; composition derives both adapter
+registrations and public binding views from it. The same concrete backend is coerced to `Store` and
+`RunIndex`, so run execution and enumeration cannot observe different repositories.
 
 The source-authoring sequence is separate from progression:
 
