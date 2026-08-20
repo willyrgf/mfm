@@ -6,6 +6,7 @@ members = [
 	"bin/cli",
 	"bin/rest-api",
 	"crates/app",
+	"crates/catalog",
 	"crates/live/evm",
 	"crates/keystore",
 	"crates/kernel/canonical",

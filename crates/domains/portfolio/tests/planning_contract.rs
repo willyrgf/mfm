@@ -1,5 +1,6 @@
-use mfm_evm::EvmPhysicalTarget;
+use mfm_catalog::MAX_CONFIG_DOCUMENT_BYTES;
 use mfm_evm::{EvmBalanceCollectionCompletion, EvmBalanceContext, EvmBalanceFailure};
+use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_portfolio::{
     plan_snapshot, ConsolidatePortfolio, EnterPortfolioCollection, InitializePortfolio,
@@ -244,6 +245,85 @@ fn portfolio_program_and_c0_capacity_contract() {
     let (program, _) = plan_snapshot(selector(), &maximum, &[target(1, 2)]).expect("maximum plan");
     assert_eq!(program.declarations().len(), 518);
     assert!(serde_json::from_value::<PortfolioConfig>(config_with_sources(65)).is_err());
+}
+
+fn maximal_public_text(prefix: &str, width: usize, ordinal: usize) -> String {
+    let suffix = format!("-{ordinal:03}");
+    assert!(prefix.len() + suffix.len() <= width);
+    format!(
+        "{prefix}{}{suffix}",
+        "\\".repeat(width - prefix.len() - suffix.len())
+    )
+}
+
+#[test]
+fn maximum_current_config_document_fits_the_shared_custody_bound() {
+    let portfolio_id = maximal_public_text("portfolio", 256, 0);
+    let mut collections = Vec::new();
+    let mut routes = Vec::new();
+    let mut targets = Vec::new();
+    for ordinal in 0..64_u64 {
+        let endpoint_id = maximal_public_text("endpoint", 256, ordinal as usize);
+        collections.push(serde_json::json!({
+            "correlation": maximal_public_text("collection", 256, ordinal as usize),
+            "request": {
+                "sources": [{
+                    "source_id": maximal_public_text("source", 256, ordinal as usize),
+                    "chain_id": u64::MAX - 63 + ordinal,
+                    "address": maximal_public_text("address", 128, ordinal as usize),
+                    "token": maximal_public_text("token", 128, ordinal as usize)
+                }],
+                "decimals": 30
+            }
+        }));
+        routes.push(serde_json::json!({
+            "chain_id": u64::MAX - 63 + ordinal,
+            "endpoint_id": endpoint_id
+        }));
+        let endpoint = EvmEndpoint::new(
+            routes.last().expect("route")["endpoint_id"]
+                .as_str()
+                .expect("endpoint id"),
+        )
+        .expect("endpoint");
+        targets.push(
+            EvmPhysicalTarget::new(
+                u64::MAX - 63 + ordinal,
+                endpoint.endpoint_ref().expect("endpoint ref"),
+            )
+            .expect("target"),
+        );
+    }
+    let document = serde_json::json!({
+        "entry_point": "mfm.portfolio/snapshot@1",
+        "input": {
+            "portfolio": {
+                "portfolio_id": portfolio_id.clone(),
+                "quotes": ["usd", "eur"],
+                "collections": collections
+            },
+            "routes": routes,
+            "selector": {
+                "target": portfolio_id,
+                "quote": "eur"
+            }
+        }
+    });
+    let config: PortfolioConfig =
+        serde_json::from_value(document["input"]["portfolio"].clone()).expect("maximum config");
+    let selector: PortfolioSnapshotSelector =
+        serde_json::from_value(document["input"]["selector"].clone()).expect("maximum selector");
+    plan_snapshot(selector, &config, &targets).expect("maximum document plans");
+
+    let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&document).expect("serialize fixture"),
+    )
+    .expect("canonical fixture");
+    assert!(
+        canonical.as_bytes().len() <= MAX_CONFIG_DOCUMENT_BYTES,
+        "maximum accepted document is {} bytes",
+        canonical.as_bytes().len()
+    );
 }
 
 #[test]

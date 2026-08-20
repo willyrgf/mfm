@@ -4,11 +4,13 @@
 //! Store owns physical atomicity and complete-prefix snapshots. Journal alone
 //! qualifies the returned bytes; Store has no Program or domain semantics.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::future::Future;
+use std::ops::Bound::{Excluded, Unbounded};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use mfm_catalog::{PageLimit, RunCursor, RunIndex, RunIndexError, RunPage, RunSummary};
 use mfm_ids::{ContentDigest, RunId};
 use mfm_journal::{
     frame_head_digest, EncodedRunFrame, StoredRunBytes, MAX_FRAME_BYTES, MAX_RUN_BYTES,
@@ -65,7 +67,7 @@ pub trait Store: Send + Sync {
 
 /// In-memory Store with per-run append serialization.
 pub struct MemoryStore {
-    runs: Mutex<HashMap<RunId, Arc<Mutex<MemoryRun>>>>,
+    runs: Mutex<BTreeMap<RunId, Arc<Mutex<MemoryRun>>>>,
 }
 
 struct MemoryRun {
@@ -88,7 +90,7 @@ impl MemoryStore {
     /// Constructs an empty Store.
     pub fn new() -> Self {
         Self {
-            runs: Mutex::new(HashMap::new()),
+            runs: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -192,6 +194,60 @@ impl Store for MemoryStore {
                     Ok(AppendResult::Inserted)
                 }
             }
+        })
+    }
+}
+
+impl RunIndex for MemoryStore {
+    fn list_runs<'a>(
+        &'a self,
+        cursor: Option<&'a RunCursor>,
+        limit: PageLimit,
+    ) -> Pin<Box<dyn Future<Output = Result<RunPage, RunIndexError>> + Send + 'a>> {
+        Box::pin(async move {
+            let runs = self.runs.lock().await;
+            let start = cursor.map_or(Unbounded, |cursor| Excluded(cursor.after()));
+            let mut page = Vec::with_capacity(limit.get() + 1);
+            for (run_id, run) in runs.range::<RunId, _>((start, Unbounded)) {
+                let run = run.lock().await;
+                let Some(head) = &run.head else {
+                    if run.frames.is_empty() {
+                        continue;
+                    }
+                    return Err(RunIndexError::Corrupt);
+                };
+                if head.sequence == 0
+                    || head.sequence > MAX_RUN_FRAMES
+                    || usize::try_from(head.sequence).ok() != Some(run.frames.len())
+                    || head.total_bytes == 0
+                    || head.total_bytes > MAX_RUN_BYTES
+                {
+                    return Err(RunIndexError::Corrupt);
+                }
+                let current = run.frames.last().ok_or(RunIndexError::Corrupt)?;
+                let summary = RunSummary::new(
+                    run_id.clone(),
+                    head.sequence,
+                    current.head_digest.clone(),
+                    head.total_bytes,
+                )
+                .map_err(|_| RunIndexError::Corrupt)?;
+                page.push(summary);
+                if page.len() > limit.get() {
+                    break;
+                }
+            }
+            let has_more = page.len() > limit.get();
+            if has_more {
+                page.pop();
+            }
+            let next_cursor = if has_more {
+                page.last()
+                    .map(|summary| RunCursor::after_run(summary.run_id().clone()))
+            } else {
+                None
+            };
+            RunPage::new(page, next_cursor)
         })
     }
 }
