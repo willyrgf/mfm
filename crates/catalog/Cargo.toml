@@ -1,0 +1,29 @@
+[package]
+name = "mfm-catalog"
+version = "0.1.0"
+edition = "2021"
+description = "Opaque config custody and mechanical run indexes for MFM"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[package.metadata.mfm]
+layer = "port"
+domain-facing = false
+binary-facing = true
+
+[lib]
+name = "mfm_catalog"
+path = "src/lib.rs"
+
+[dependencies]
+mfm-canonical = { path = "../kernel/canonical" }
+mfm-ids = { path = "../kernel/ids" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true }

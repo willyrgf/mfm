@@ -18,6 +18,12 @@ Store persists immutable frame bytes and one current head only. PostgreSQL owns 
 `mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads`; the static schema contract is
 `mfm.run-history-postgres.v1`.
 
+The separate catalog/index port defines a bounded named config custody record containing only a
+checked name, a `sha256-jcs-v1` digest, and opaque canonical bytes. It also defines a mechanical run
+summary containing only RunId, head sequence/digest, and cumulative bytes. Resource-specific
+unpadded-base64url cursors freeze ascending bytewise keyset traversal; pages are not snapshots across
+requests. Config interpretation belongs to Application, and run status remains a Runtime fold.
+
 Public `RunView` contains RunId, durable sequence/head, and `Runnable`, typed `Succeeded`, or typed
 `Failed`. Terminal retained values expose contract ref, instance ref, and exact canonical bytes.
 Public surfaces never contain credentials, private keys, raw provider material, or unreviewed error

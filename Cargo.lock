@@ -1831,6 +1831,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-catalog"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-ids",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "mfm-evm"
 version = "0.1.0"
 dependencies = [
@@ -1896,6 +1908,7 @@ name = "mfm-portfolio"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
+ "mfm-catalog",
  "mfm-evm",
  "mfm-ids",
  "mfm-program",
@@ -1986,6 +1999,7 @@ name = "mfm-store"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
+ "mfm-catalog",
  "mfm-ids",
  "mfm-journal",
  "thiserror",

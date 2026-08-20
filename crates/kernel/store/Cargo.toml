@@ -17,6 +17,7 @@ name = "mfm_store"
 path = "src/lib.rs"
 
 [dependencies]
+mfm-catalog = { path = "../../catalog" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
 thiserror = { workspace = true }

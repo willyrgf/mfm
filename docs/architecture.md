@@ -9,7 +9,8 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Program | typed Operation authoring, sole private lowering draft, checked v2 State/Match graph, `State`, `PureState`, `ReadState`, `Never` | registries, IO, scheduling |
 | Runtime | immutable assembly, Program association, sole fold, typed execution/progression | persisted wire or physical storage |
 | Journal | exact frame encoding and complete-history qualification | domain interpretation or persistence IO |
-| Store | object-safe complete load and atomic append | Program, State, capability, or reducer semantics |
+| Store | object-safe complete load and atomic append | enumeration, Program, State, capability, reducer, or config semantics |
+| Catalog / index port | conditional named custody of opaque canonical config bytes and mechanical current-head enumeration | config-wire parsing, run folds/status, Program semantics, or config merging |
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
 | Live adapters | bounded provider ingress and direct typed callback registration | domain planning or State registration |
 | Application | trusted Portfolio assembly composition, Portfolio plan/start, and direct Runtime resume/read facade | sessions, frame inspection, status derivation |
@@ -28,6 +29,11 @@ caller -> Application -> Runtime -> Journal frame -> Store append
                                   -> Read adapter -> provider
 Store load -> Journal qualify -> Runtime fold -> RunView
 ```
+
+Concrete storage backends may implement both `Store` and the separate `RunIndex`, but Runtime
+receives only `dyn Store`. Config custody and run enumeration therefore cannot widen Runtime's
+append-only storage authority. Both indexes use ascending keyset pages and make no cross-request
+snapshot claim.
 
 The source-authoring sequence is separate from progression:
 
