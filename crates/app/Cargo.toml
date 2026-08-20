@@ -11,14 +11,16 @@ layer = "assembly"
 binary-facing = true
 
 [dependencies]
+mfm-catalog = { path = "../catalog" }
 mfm-evm = { path = "../domains/evm" }
 mfm-evm-live = { path = "../live/evm" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-portfolio = { path = "../domains/portfolio" }
 mfm-runtime = { path = "../kernel/runtime" }
+mfm-store = { path = "../kernel/store" }
+serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-mfm-store = { path = "../kernel/store" }
 serde_json = { workspace = true }

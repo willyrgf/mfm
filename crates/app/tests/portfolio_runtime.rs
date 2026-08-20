@@ -3,10 +3,13 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use mfm_app::{portfolio_assembly, register_portfolio_states, Application, ApplicationError};
-use mfm_evm::{EvmPhysicalTarget, EvmReadValue, EVM_BALANCE_SOURCE_LIMIT};
-use mfm_evm_live::{EvmProvider, EvmProviderResponse};
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId, StableId};
+use mfm_app::{
+    register_portfolio_states, Application, ApplicationError, BoundCapabilitySet, ComposedRuntime,
+    PublicBindingView, MAX_EVM_BINDINGS,
+};
+use mfm_evm::{EvmEndpoint, EvmPhysicalTarget, EvmReadValue, EVM_BALANCE_SOURCE_LIMIT};
+use mfm_evm_live::{register_evm_reads, EvmProvider, EvmProviderResponse};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId, StableId};
 use mfm_portfolio::{
     plan_snapshot, PortfolioConfig, PortfolioSnapshotInput, PortfolioSnapshotSelector,
 };
@@ -65,17 +68,9 @@ impl EvmProvider for Provider {
 }
 
 fn endpoint_ref() -> ContentRef {
-    ContentRef::new(
-        SchemaId::new(
-            "mfm.test.endpoint",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([1; 32]),
-        )
-        .expect("schema"),
-        ContentDigest::from_digest(DigestAlgorithm::Sha256V1, DigestBytes::from_array([2; 32])),
-    )
-    .expect("content ref")
+    EvmEndpoint::new("test-endpoint")
+        .and_then(|endpoint| endpoint.endpoint_ref())
+        .expect("endpoint ref")
 }
 
 fn run_id() -> RunId {
@@ -90,7 +85,23 @@ fn assembly(
     target: EvmPhysicalTarget,
     provider: Arc<dyn EvmProvider>,
 ) -> mfm_runtime::RuntimeAssembly {
-    portfolio_assembly(target, provider).expect("assembly")
+    let mut builder = RuntimeAssemblyBuilder::new();
+    register_portfolio_states(&mut builder).expect("states");
+    register_evm_reads(&mut builder, target, provider).expect("reads");
+    builder.finish().expect("assembly")
+}
+
+fn application(target: EvmPhysicalTarget, provider: Arc<dyn EvmProvider>) -> Application {
+    assert_eq!(target.endpoint_ref(), &endpoint_ref());
+    let bindings = BoundCapabilitySet::new(vec![(
+        target.chain_id(),
+        EvmEndpoint::new("test-endpoint").expect("endpoint"),
+        provider,
+    )])
+    .expect("bindings");
+    let composed =
+        ComposedRuntime::compose(Arc::new(MemoryStore::new()), bindings).expect("composed runtime");
+    Application::new(composed)
 }
 
 fn adapterless_assembly() -> mfm_runtime::RuntimeAssembly {
@@ -102,6 +113,101 @@ fn adapterless_assembly() -> mfm_runtime::RuntimeAssembly {
 struct FixedProvider {
     calls: AtomicUsize,
     response: std::result::Result<EvmProviderResponse, ReadAdapterError>,
+}
+
+fn provider_handle() -> Arc<dyn EvmProvider> {
+    Arc::new(Provider {
+        calls: AtomicUsize::new(0),
+        reject_call: None,
+    })
+}
+
+#[test]
+fn composed_runtime_owns_one_checked_multi_route_truth() {
+    let routes = vec![
+        (
+            1,
+            EvmEndpoint::new("alpha").expect("endpoint"),
+            provider_handle(),
+        ),
+        (
+            1,
+            EvmEndpoint::new("beta").expect("endpoint"),
+            provider_handle(),
+        ),
+        (
+            2,
+            EvmEndpoint::new("alpha").expect("endpoint"),
+            provider_handle(),
+        ),
+    ];
+    let bindings = BoundCapabilitySet::new(routes).expect("ordered bindings");
+    let app = Application::new(
+        ComposedRuntime::compose(Arc::new(MemoryStore::new()), bindings).expect("composition"),
+    );
+    assert_eq!(app.bindings().len(), 3);
+    for (view, expected_chain, expected_endpoint) in app
+        .bindings()
+        .iter()
+        .zip([1, 1, 2])
+        .zip(["alpha", "beta", "alpha"])
+        .map(|((view, chain), endpoint)| (view, chain, endpoint))
+    {
+        let PublicBindingView::Evm {
+            chain_id,
+            endpoint_id,
+            binding_ref,
+        } = view;
+        assert_eq!(*chain_id, expected_chain);
+        assert_eq!(endpoint_id, expected_endpoint);
+        let endpoint_ref = EvmEndpoint::new(expected_endpoint)
+            .and_then(|endpoint| endpoint.endpoint_ref())
+            .expect("endpoint ref");
+        let target = EvmPhysicalTarget::new(expected_chain, endpoint_ref).expect("target");
+        assert_eq!(binding_ref, &target.binding_ref().expect("binding ref"));
+    }
+
+    let duplicate = vec![
+        (
+            1,
+            EvmEndpoint::new("alpha").expect("endpoint"),
+            provider_handle(),
+        ),
+        (
+            1,
+            EvmEndpoint::new("alpha").expect("endpoint"),
+            provider_handle(),
+        ),
+    ];
+    assert!(BoundCapabilitySet::new(duplicate).is_err());
+    let unsorted = vec![
+        (
+            2,
+            EvmEndpoint::new("alpha").expect("endpoint"),
+            provider_handle(),
+        ),
+        (
+            1,
+            EvmEndpoint::new("alpha").expect("endpoint"),
+            provider_handle(),
+        ),
+    ];
+    assert!(BoundCapabilitySet::new(unsorted).is_err());
+    let over_capacity = (0..=MAX_EVM_BINDINGS)
+        .map(|offset| {
+            (
+                u64::try_from(offset + 1).expect("chain id"),
+                EvmEndpoint::new("endpoint").expect("endpoint"),
+                provider_handle(),
+            )
+        })
+        .collect();
+    assert!(BoundCapabilitySet::new(over_capacity).is_err());
+    assert!(ComposedRuntime::compose(
+        Arc::new(MemoryStore::new()),
+        BoundCapabilitySet::new(Vec::new()).expect("empty bindings"),
+    )
+    .is_ok());
 }
 
 impl EvmProvider for FixedProvider {
@@ -206,10 +312,7 @@ async fn token_and_mixed_source_runs_are_hot_cold_equivalent() {
         calls: AtomicUsize::new(0),
         reject_call: None,
     });
-    let app = Application::new(Runtime::new(
-        assembly(target.clone(), provider.clone()),
-        Arc::new(MemoryStore::new()),
-    ));
+    let app = application(target.clone(), provider.clone());
 
     for (byte, config, expected_calls) in [
         (51, token_config(), 5_usize),
@@ -247,10 +350,7 @@ async fn second_source_typed_failure_reaches_the_root_without_a_third_provider_c
         calls: AtomicUsize::new(0),
         reject_call: Some(5),
     });
-    let app = Application::new(Runtime::new(
-        assembly(target.clone(), provider.clone()),
-        Arc::new(MemoryStore::new()),
-    ));
+    let app = application(target.clone(), provider.clone());
     let view = app
         .start_portfolio(
             run_id_with(53),
@@ -380,10 +480,7 @@ async fn every_authenticated_failure_evidence_reaches_the_exact_root_failure() {
             calls: AtomicUsize::new(0),
             response: Ok(response),
         });
-        let app = Application::new(Runtime::new(
-            assembly(target.clone(), provider.clone()),
-            Arc::new(MemoryStore::new()),
-        ));
+        let app = application(target.clone(), provider.clone());
         let view = app
             .start_portfolio(
                 run_id_with(byte),
@@ -420,10 +517,7 @@ async fn application_error_ownership_is_exact() {
         calls: AtomicUsize::new(0),
         response: Err(ReadAdapterError::Unavailable),
     });
-    let app = Application::new(Runtime::new(
-        assembly(target.clone(), provider.clone()),
-        Arc::new(MemoryStore::new()),
-    ));
+    let app = application(target.clone(), provider.clone());
 
     assert!(matches!(
         app.read(&run_id()).await,
@@ -471,10 +565,20 @@ async fn target_descriptor_bound_precedes_runtime_admission() {
         calls: AtomicUsize::new(0),
         reject_call: None,
     });
-    let app = Application::new(Runtime::new(
-        assembly(targets[0].clone(), provider.clone()),
-        Arc::new(MemoryStore::new()),
-    ));
+    let routes = targets
+        .iter()
+        .map(|target| {
+            (
+                target.chain_id(),
+                EvmEndpoint::new("test-endpoint").expect("endpoint"),
+                provider.clone() as Arc<dyn EvmProvider>,
+            )
+        })
+        .collect();
+    let bindings = BoundCapabilitySet::new(routes).expect("bindings");
+    let app = Application::new(
+        ComposedRuntime::compose(Arc::new(MemoryStore::new()), bindings).expect("composition"),
+    );
 
     app.start_portfolio(
         run_id_with(70),

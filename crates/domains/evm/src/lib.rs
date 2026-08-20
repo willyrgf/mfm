@@ -125,6 +125,11 @@ impl EvmEndpoint {
         endpoint.validate().map(|_| endpoint)
     }
 
+    /// Returns the checked public endpoint name.
+    pub fn endpoint_id(&self) -> &str {
+        &self.endpoint_id
+    }
+
     /// Derives the exact canonical endpoint reference one `EvmPhysicalTarget` binds.
     pub fn endpoint_ref(&self) -> Result<ContentRef, EvmDomainError> {
         mfm_values::canonicalize_mfm_value(self)

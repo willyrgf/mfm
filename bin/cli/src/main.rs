@@ -9,12 +9,12 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use mfm_app::{portfolio_assembly, Application, ApplicationError};
+use mfm_app::{Application, ApplicationError, BoundCapabilitySet, ComposeError, ComposedRuntime};
 use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
 use mfm_evm_live::JsonRpcEvmProvider;
 use mfm_ids::RunId;
 use mfm_portfolio::{PortfolioConfig, PortfolioSnapshotSelector};
-use mfm_runtime::{RunView, RunViewState, Runtime, RuntimeError};
+use mfm_runtime::{RunView, RunViewState, RuntimeError};
 use mfm_storage_postgres::{
     provision_schemas, AdminPostgresLocator, PostgresLocatorError, PostgresStore, ProvisionError,
     RuntimePostgresLocator, StoreOpenError,
@@ -72,6 +72,8 @@ enum CliError {
     Locator(#[source] PostgresLocatorError),
     #[error("{0}")]
     Provision(#[source] ProvisionError),
+    #[error("{0}")]
+    Composition(#[source] ComposeError),
     #[error("run id is invalid")]
     RunId,
     #[error("{0}")]
@@ -194,20 +196,23 @@ async fn compose(config: &CliConfig) -> Result<(Application, EvmPhysicalTarget),
         RuntimePostgresLocator::parse(environment(&config.store.runtime_locator_env)?)
             .map_err(CliError::Locator)?;
     let rpc_url = environment(&config.evm.rpc_url_env)?;
-    let endpoint_ref = EvmEndpoint::new(config.evm.endpoint_id.as_str())
-        .and_then(|endpoint| endpoint.endpoint_ref())
+    let endpoint =
+        EvmEndpoint::new(config.evm.endpoint_id.as_str()).map_err(|_| CliError::Configuration)?;
+    let endpoint_ref = endpoint
+        .endpoint_ref()
         .map_err(|_| CliError::Configuration)?;
     let target = EvmPhysicalTarget::new(config.evm.chain_id, endpoint_ref)
         .map_err(|_| CliError::Configuration)?;
     let store = PostgresStore::connect(&store_locator)
         .await
         .map_err(CliError::Store)?;
-    let provider = Arc::new(JsonRpcEvmProvider::new(rpc_url).map_err(|_| CliError::Provider)?);
-    let assembly = portfolio_assembly(target.clone(), provider).map_err(CliError::Runtime)?;
-    Ok((
-        Application::new(Runtime::new(assembly, Arc::new(store))),
-        target,
-    ))
+    let provider: Arc<dyn mfm_evm_live::EvmProvider> =
+        Arc::new(JsonRpcEvmProvider::new(rpc_url).map_err(|_| CliError::Provider)?);
+    let bindings = BoundCapabilitySet::new(vec![(config.evm.chain_id, endpoint, provider)])
+        .map_err(CliError::Composition)?;
+    let composed =
+        ComposedRuntime::compose(Arc::new(store), bindings).map_err(CliError::Composition)?;
+    Ok((Application::new(composed), target))
 }
 
 const fn map_application_error(error: ApplicationError) -> CliError {
