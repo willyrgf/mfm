@@ -24,6 +24,9 @@ agent checked their findings against the current tree and resolved their disagre
 3. This wave produces a design document only. No implementation follows in this wave.
 4. Deployment is a strict TOML operator bootstrap found through the conventional XDG/HOME path or
    an argv override. It contains environment resolver names only and has no product lifecycle.
+5. Config import selects the entry point through the document's required tag. Run start selects a
+   stored config revision, never an entry point. CLI may generate a RunId before the Application
+   call; REST, Application, and Runtime continue to require an explicit caller-provided RunId.
 
 ---
 
@@ -67,7 +70,7 @@ agent checked their findings against the current tree and resolved their disagre
 | Catalog/index port owner | new `mfm-catalog` crate | Named mutable custody and enumeration have their own errors, atomicity, capacity, and persistence lifecycle. They do not belong to append-only `Store`. |
 | `Store` changes | none | Runtime must continue to receive only complete-prefix load and exact-head append authority. |
 | Stored config shape | complete, versioned config document | One catalog works for every entry point without generic merging or per-entry-point storage code. |
-| Config reference at execution | name plus **mandatory** JCS digest | Delete/re-import makes a name a mutable alias. The digest closes the ABA race and identifies exact bytes. |
+| Config selection at execution | exhaustive `Current` or `Exact` selection | Interactive CLI use may atomically select the name's current revision; retrying/scheduled callers can pin the exact JCS digest. |
 | Config deletion | atomic compare-and-delete by name and digest | An unconditional delete can delete a newer re-imported revision observed by a stale caller. |
 | Multi-route representation | public binding mappings in Deployment; a route array in the config document | Runtime assembly must know `(chain_id, endpoint_id)` before freeze, and Portfolio planning may use several chains. |
 | Deployment role | strict operator-only `deployment.toml` bootstrap | It composes private authority but has no product identity, API, or lifecycle. |
@@ -90,7 +93,8 @@ There are three user-facing nouns:
   `mfm.portfolio/snapshot@1`. The repository's source-authoring `Operation` remains an internal type
   erased during Program expansion; it is not a transport resource.
 - **Config** — a named catalog entry containing one complete canonical config document.
-- **Run** — one durable execution identified by one explicit caller-supplied `RunId`.
+- **Run** — one durable execution identified by one explicit `RunId` at the Application/Runtime
+  boundary. A client transport may create that identity before making the call.
 
 CLI and REST are symmetric at the Application use-case boundary, not byte-identical protocols:
 
@@ -330,6 +334,11 @@ enum ConfigDocumentWire {
 }
 ```
 
+The required `entry_point` tag is the sole entry-point selector. Import validates it and derives
+the `ConfigSummary.entry_point`; `Application::entry_points()` reports exactly the tags accepted by
+the current document enum. Neither `ConfigSelection`, CLI `run start`, nor the REST start body has a
+second entry-point field that could disagree with the retained document.
+
 `EvmRouteSelection` contains 1–64 entries, is strictly sorted, and is unique by chain id. Each item
 is `{chain_id, endpoint_id}` and derives the same `EvmPhysicalTarget` identity as the corresponding
 Deployment binding, without resolving a URL. For Portfolio `@1`, its chains must exactly equal the distinct
@@ -376,12 +385,17 @@ enumerate runs or access configs structurally. A concrete store may separately i
 | Import absent name | Atomically insert; return `Created`. |
 | Import same name and canonical document | Write nothing; return `Unchanged`. |
 | Import same name, different canonical document | Write nothing; return `Conflict`. |
-| Start run | Atomically load one `(name, digest, canonical)` snapshot and require the caller's digest to match before planning or Store IO. |
+| Start `Current` | Atomically load and own the one `(name, digest, canonical)` snapshot currently bound to the name before planning or Store IO. |
+| Start `Exact` | Perform the same atomic snapshot load and require its digest to equal the selected digest before planning or Store IO. |
 | Delete | Atomically delete only when both name and caller-supplied digest match. Absence and digest mismatch are distinct; no run history is touched. |
 | Ambiguous COMMIT | Return `Indeterminate`; the caller must re-read the name/digest to resolve the outcome. |
 
-Names may be reused after deletion. They are mutable locators, never content identity. The mandatory
-digest on start and delete is what makes reuse safe. There is no generic update or merge path.
+Names may be reused after deletion. They are mutable locators, never content identity. `Current`
+deliberately means “the revision atomically observed now”; `Exact` is the revision assertion for
+retries and schedulers, while delete always remains conditional on a digest. A concurrent
+delete/re-import after either start selection cannot change the owned canonical snapshot used by
+that call. There is no generic update or merge path and no transaction spanning catalog selection
+and Runtime execution.
 
 Deleting a config cannot damage a retained run: genesis already owns the exact Program and C0, and
 Runtime `read`/`resume` never consults the catalog. No run→config annotation is added to Journal or
@@ -486,6 +500,48 @@ claimed.
 Changing the default order later is a wire change. A future recency view adds an explicit sort and a
 separate non-authoritative projection; it does not silently reinterpret current cursors.
 
+### Interoperable RunId generation
+
+RunId generation is a client helper, never an Application or Runtime behavior. The algorithm is
+`mfm.run-id.random.v1`:
+
+1. obtain exactly 32 independently uniform octets from an operating-system cryptographic random
+   source;
+2. encode those octets as 64 lowercase hexadecimal characters;
+3. construct the following exact UTF-8 JCS bytes, with no whitespace or trailing newline:
+   `{"entropy":"<64 lowercase hex>","purpose":"mfm.run-id.random","v":1}`;
+4. compute SHA-256 over those bytes; and
+5. construct `run:sha256-jcs-v1:<64 lowercase digest hex>` from the 32 digest bytes.
+
+The CLI fills the 32-byte array through a direct, pinned OS-random dependency and fails closed on
+entropy-source failure. It never falls back to time, process id, counters, environment, machine
+identity, config content, or provider data. `mfm-app` exposes the pure, IO-free
+`derive_run_id([u8; 32]) -> RunId` helper used by the CLI and its fixtures; Application methods do
+not call it. The direct dependency is justified because fresh caller authority must not depend on a
+transitive RNG API or an ad-hoc uniqueness recipe. Non-Rust clients implement the five frozen steps
+and verify against both vectors:
+
+```text
+entropy = 0000000000000000000000000000000000000000000000000000000000000000
+canonical =
+{"entropy":"0000000000000000000000000000000000000000000000000000000000000000","purpose":"mfm.run-id.random","v":1}
+run_id = run:sha256-jcs-v1:1ffc529adb99fb0f91d2c1712affb64a6d57fcdc9ac78c31c9681449e9c9f79a
+
+entropy = 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+canonical =
+{"entropy":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"mfm.run-id.random","v":1}
+run_id = run:sha256-jcs-v1:4412ec646bc21fee7eb806a97dccf2ec412ce38b33f9c3d7ea25e83fac13339e
+```
+
+The RunId wire reveals no entropy preimage, so Application can enforce only the existing checked
+identity grammar; official client helpers and client conformance tests enforce generation
+provenance. Explicit IDs remain accepted for interoperability and retries.
+
+The fixed-entropy vectors prove derivation and do not authorize deterministic entropy in
+production. Generation does no existence preflight: uniqueness comes from 256 random bits, while a
+collision is handled by Runtime's existing exact-admission rule—converging only for the same
+Program/C0 and returning `RunAdmissionConflict` otherwise—rather than a racy list/read check.
+
 ## 6. `mfm-app`: one typed use-case surface
 
 Application remains one non-generic struct and preserves injected construction for library users
@@ -503,6 +559,26 @@ provider handle it consumes; no caller supplies a second view. Catalog custody r
 injectable.
 
 ```rust
+pub enum ConfigSelection {
+    Current { name: ConfigName },
+    Exact { name: ConfigName, digest: ConfigDigest },
+}
+
+pub struct StartRunResult {
+    pub config: ConfigSummary,
+    pub run: RunView,
+}
+
+pub enum RunRecovery {
+    Start { run_id: RunId, config: ConfigSummary },
+    Progress { run_id: RunId },
+}
+
+pub enum RunRequestError {
+    Request(RequestError),
+    AppendIndeterminate { recovery: RunRecovery },
+}
+
 pub struct ComposedRuntime { /* private Runtime plus exact PublicBindingSet */ }
 pub struct Application { /* ComposedRuntime, RunIndex, ConfigCatalog */ }
 
@@ -543,16 +619,27 @@ impl Application {
     pub async fn delete_config(&self, name: &ConfigName, digest: &ConfigDigest)
         -> Result<(), RequestError>;
 
-    pub async fn start_run(&self, run_id: RunId, config: &ConfigRef)
-        -> Result<RunView, RequestError>;
+    pub async fn start_run(&self, run_id: RunId, config: &ConfigSelection)
+        -> Result<StartRunResult, RunRequestError>;
     pub async fn progress_run(&self, run_id: &RunId)
-        -> Result<RunView, RequestError>;
+        -> Result<RunView, RunRequestError>;
     pub async fn read_run(&self, run_id: &RunId)
         -> Result<RunView, RequestError>;
     pub async fn list_runs(&self, page: &RunPageRequest)
         -> Result<RunPage, RequestError>;
 }
 ```
+
+`ConfigSelection` is the sole shared start selector. `Current` and `Exact` both produce one
+validated, owned `ConfigSummary` plus its canonical bytes from the same catalog snapshot; only
+`Exact` compares a caller assertion. `StartRunResult` returns that resolved summary alongside the
+`RunView`, so both transports expose the actual digest even when the caller selected `Current`.
+
+Every Application call and the underlying `Runtime::start` receive the already constructed RunId.
+Neither layer owns randomness or an optional/server-generated identity branch. `RunRequestError`
+wraps ordinary data-free `RequestError` values and carries checked public recovery identity only for
+an ambiguous run append. Its exhaustive `RunRecovery` sum avoids a nullable config field:
+`Start` retains the resolved config summary, while `Progress` needs only its already explicit RunId.
 
 Schema provisioning is a separate CLI-only composition entry, not a method on listener-held
 Application state. `Application::start_portfolio`, `resume`, `read`, and the one-target
@@ -580,14 +667,17 @@ There are four disjoint failure owners:
   page requests. They remain separate from Application so typed method signatures have no
   unreachable invalid-scalar variants.
 - `RequestError`: data-free, redaction-safe shared use-case failures. It owns stable `code()` and
-  `Display`; both transports render the same code/message for these variants.
+  `Display`; both transports render the same code/message for these variants. `RunRequestError`
+  wraps it and adds only the frozen, public `RunRecovery` payload when append acknowledgement is
+  ambiguous.
 - CLI/REST boundary errors: argv/usage or HTTP media type, body framing, fallback 404/405, local
   busy/deadline, Host/Origin, and pre-routing server rejection. They never create unreachable
   Application error variants.
 
 Every Runtime variant has an explicit shared mapping, including `IncompatibleAssembly`. Catalog
-mutation `Indeterminate` is not collapsed into unavailable. Adding a shared variant causes compile
-errors in both transport mappings.
+mutation `Indeterminate` is not collapsed into unavailable, and Runtime append `Indeterminate` maps
+only to `RunRequestError::AppendIndeterminate`. Adding a shared variant causes compile errors in
+both transport mappings.
 
 The complete checked-input rendering is:
 
@@ -616,7 +706,6 @@ The complete `RequestError` rendering is:
 | `InvalidCatalog` | `invalid_config_catalog` | `retained config catalog is invalid` | 500 |
 | `RunAbsent` | `run_absent` | `run is absent` | 404 |
 | `RunAdmissionConflict` | `run_admission_conflict` | `run admission conflicts with retained history` | 409 |
-| `RunAppendIndeterminate` | `run_append_indeterminate` | `run append outcome is indeterminate` | 503 |
 | `InvalidRunHistory` | `invalid_run_history` | `retained run history is invalid` | 500 |
 | `IncompatibleAssembly` | `incompatible_assembly` | `runtime assembly is incompatible` | 500 |
 | `RunCapacity` | `run_capacity` | `run capacity exceeded` | 422 |
@@ -624,6 +713,27 @@ The complete `RequestError` rendering is:
 | `InvalidRunIndex` | `invalid_run_index` | `retained run index is invalid` | 500 |
 | `DependencyUnavailable` | `dependency_unavailable` | `application dependency is unavailable` | 503 |
 | `Internal` | `internal` | `application internal failure` | 500 |
+
+`RunRequestError::Request` delegates to that table. Its one additional variant is:
+
+| Variant | Code | Exact message | HTTP |
+| --- | --- | --- | --- |
+| `AppendIndeterminate { recovery }` | `run_append_indeterminate` | `run append outcome is indeterminate` | 503 |
+
+Normal shared errors have exactly `{"code":"...","message":"..."}`. The indeterminate variant
+instead has the exhaustive shape
+`{"code":"run_append_indeterminate","message":"run append outcome is indeterminate",`
+`"recovery":RunRecovery}` where:
+
+```text
+RunRecovery = {"kind":"start", "run_id":RunId, "config":ConfigSummary}
+            | {"kind":"progress", "run_id":RunId}
+```
+
+CLI and REST serialize this same recovery object. For an indeterminate generated-ID CLI start, it
+is the stable automation handoff: the caller uses `run show --run-id <ID>` and, if a retry is
+required, the recovered digest selects `Exact` with the same RunId. Mechanical run listing is never
+used to rediscover an identity whose append acknowledgement was ambiguous.
 
 REST adds only these routed boundary codes; CLI never grows unreachable arms for them:
 
@@ -641,6 +751,12 @@ REST adds only these routed boundary codes; CLI never grows unreachable arms for
 | Same RunId already active | `run_busy` | `run already has an active request` | 409 |
 | Global run semaphore full | `too_many_requests` | `run request limit is reached` | 429 |
 | REST run deadline expires | `deadline_exceeded` | `run request deadline exceeded` | 504 |
+
+CLI adds one boundary failure that is impossible after a RunId exists:
+
+| Condition | Code | Exact message | Exit |
+| --- | --- | --- | --- |
+| OS entropy source fails | `run_id_generation_failed` | `run id generation failed` | 2 |
 
 CLI exit behavior remains:
 
@@ -660,9 +776,9 @@ with a `Failed` state.
 ### Shared result models
 
 The JSON field model is frozen independently of CLI text formatting. `EntryPointList`,
-`BindingList`, `ImportOutcome`, `StoredConfigView`, `ConfigPage`, and `RunPage` have exactly these
-structural shapes; no timestamp, status, deployment resolver, or correlated optional field is
-added:
+`BindingList`, `ImportOutcome`, `StoredConfigView`, `ConfigPage`, `StartRunResult`, and `RunPage`
+have exactly these structural shapes; no timestamp, status, deployment resolver, or correlated
+optional field is added:
 
 ```text
 EntryPointList   = {"items":[{"entry_point": EntryPointId}]}
@@ -676,6 +792,7 @@ ConfigSummary    = {"name": ConfigName,
 ImportOutcome    = {"outcome":"created"|"unchanged", "config": ConfigSummary}
 StoredConfigView = {"config": ConfigSummary, "document": RawCanonicalJson}
 ConfigPage       = {"items":[ConfigSummary], "next_cursor": ConfigCursor|null}
+StartRunResult   = {"config":ConfigSummary, "run":RunView}
 RunPage          = {"items":[RunSummary], "next_cursor": RunCursor|null}
 ```
 
@@ -684,6 +801,12 @@ above. `ContentRef` uses its existing `{schema_id, content_digest}` representati
 is an exhaustive tagged sum: a future non-EVM capability adds a variant rather than borrowing EVM
 fields. The canonical config document and terminal value occupy one raw JSON value position, not a
 quoted JSON string.
+
+`StartRunResult.run.run_id` is the explicit or CLI-generated identity passed to Application;
+`StartRunResult.config.digest` is the revision actually selected. Both are present for `Current`
+and `Exact`. A successful CLI text rendering includes `run_id`, `config_name`, `config_digest`, and
+`entry_point` lines before the ordinary run-state fields. Its JSON rendering is exactly
+`StartRunResult`.
 
 ### Run JSON preserves the sum
 
@@ -716,12 +839,15 @@ CLI gains `--output text|json`, default `text`. JSON uses this exact model, whic
 cross-transport comparison and stable automation surface. Text is explicitly human presentation,
 not a parseable compatibility contract; scripts must select JSON. It remains line-oriented and
 includes terminal contract ref, value ref, and exact canonical value, so human mode does not hide
-information present in REST.
+information present in REST. An indeterminate run mutation renders the shared recovery object in
+JSON on stderr. Text mode prints its `recovery.kind`, `recovery.run_id`, and all start-config summary
+fields when present, so a generated RunId is recoverable in either output mode.
 
 ## 8. CLI grammar
 
-`entry-point list` is static, does not accept `--deployment`, and never resolves Deployment. Every
-other command accepts an optional
+`entry-point list` is static, does not accept `--deployment`, and never resolves Deployment. Its
+items are the exact valid `entry_point` document tags; it is discovery for config authors, not a
+second start selector. Every other command accepts an optional
 `--deployment <PATH>` override; without it, the shared XDG/HOME resolver loads the conventional
 `deployment.toml` path above.
 
@@ -737,21 +863,36 @@ mfm_cli [--deployment <PATH>] [--output text|json] config list [--cursor <C>] [-
 mfm_cli [--deployment <PATH>] [--output text|json] config show <NAME>
 mfm_cli [--deployment <PATH>] [--output text|json] config delete <NAME> --digest <DIGEST>
 
-mfm_cli [--deployment <PATH>] [--output text|json] run start \
-    --run-id <RUN_ID> --config <NAME> --digest <DIGEST>
+mfm_cli [--deployment <PATH>] [--output text|json] run start --config <NAME> \
+    [--config-digest <DIGEST>] [--run-id <RUN_ID>]
 mfm_cli [--deployment <PATH>] [--output text|json] run progress --run-id <RUN_ID>
 mfm_cli [--deployment <PATH>] [--output text|json] run show --run-id <RUN_ID>
 mfm_cli [--deployment <PATH>] [--output text|json] run list [--cursor <C>] [--limit <N>]
 ```
+
+`run start` accepts no `--entry-point`. Without `--config-digest`, the CLI constructs
+`ConfigSelection::Current { name }`; with it, the CLI constructs
+`ConfigSelection::Exact { name, digest }`. Without `--run-id`, the CLI obtains 32 bytes from the OS
+cryptographic random source, calls the frozen pure derivation helper, and passes that fresh RunId to
+Application exactly as though the user supplied it. An explicit `--run-id` is parsed without
+generation and supports idempotent retries, schedulers, and cross-process coordination. A caller
+that needs revision-stable retry supplies both `--run-id` and `--config-digest`; retrying `Current`
+intentionally re-observes the name if no admission was retained.
+
+Random-source failure occurs before the Application call and has no recovery identity. After a
+generated RunId exists, the CLI retains it through the call and includes it in every successful
+`StartRunResult` or `RunRecovery::Start` indeterminate error. Ordinary determinate start failures
+need no recovery field because no ambiguous append occurred.
 
 `--from -` reads stdin through `MAX_CONFIG_DOCUMENT_BYTES + 1`; a regular file is also read
 through the same bound before allocation. A private key, mnemonic, passphrase, database URL, or RPC
 URL is never accepted on argv or emitted.
 
 JSON config/run/list results are the same shapes REST returns. Text formatting is documented with
-examples in the current CLI README but may evolve as human presentation; exit meanings and JSON do
-not. Shared request errors render as `error: <message>` in text mode and the two-field error object
-on stderr in JSON mode; clap's own usage diagnostics remain CLI-local.
+examples in the current CLI README but may evolve as human presentation; required recovery fields,
+exit meanings, and JSON do not. Shared request errors render as `error: <message>` in text mode and
+the two-field error object on stderr in JSON mode, except the frozen indeterminate recovery sum
+above; clap's own usage diagnostics remain CLI-local.
 
 The old `init | snapshot | show --config` grammar and combined config document are deleted outright.
 
@@ -803,7 +944,7 @@ and connection tests cover the listener lifecycle.
 | GET | `/v1/configs/{name}` | none | `StoredConfigView` |
 | DELETE | `/v1/configs/{name}` | required `MFM-Config-Digest` header | 204 |
 | GET | `/v1/runs` | `cursor`, `limit` | mechanical `RunPage` |
-| POST | `/v1/runs/{run_id}/start` | `{"config":{"name":"...","digest":"..."}}` | 200 `RunView` |
+| POST | `/v1/runs/{run_id}/start` | tagged `ConfigSelection` below | 200 `StartRunResult` |
 | POST | `/v1/runs/{run_id}/progress` | strict empty JSON object | 200 `RunView` |
 | GET | `/v1/runs/{run_id}` | none | 200 `RunView` |
 
@@ -811,18 +952,34 @@ and connection tests cover the listener lifecycle.
 schema-provisioning route, deployment view, inline run document, server-derived RunId, config update,
 keystore route, or placeholder replay/trace/audit/export/effect route.
 
+REST clients always generate and retain the checked `{run_id}` before issuing the mutating request;
+the daemon never calls the RunId derivation helper. The strict start body is exactly one of:
+
+```json
+{"config":{"kind":"current","name":"daily"}}
+{"config":{"kind":"exact","name":"daily","digest":"content:sha256-jcs-v1:<64 hex>"}}
+```
+
+This wire is the exhaustive `ConfigSelection` sum, not a nullable digest field. Missing/unknown
+`kind`, a digest on `current`, a missing digest on `exact`, duplicate/unknown fields, and any
+`entry_point` field are `invalid_request_body`. The entry point remains selected solely by the
+stored tagged document. A successful response includes the selected `ConfigSummary` and RunId in
+`StartRunResult`; an ambiguous append includes the same shared `RunRecovery::Start` object as CLI.
+Retrying/scheduled REST clients reuse the path RunId and send the recovered or previously observed
+digest through `exact`.
+
 DELETE carries the bare checked `ConfigDigest` in the dedicated `MFM-Config-Digest` header. A
 missing header is 428 `precondition_required`, malformed input is 400 `invalid_config_digest`, an
 absent name is 404, and an atomically observed digest mismatch is the same shared
-`config_digest_mismatch` code/message and 409 status as CLI/start. No endpoint emits ETag: PUT
+`config_digest_mismatch` code/message and 409 status as CLI `Exact`/REST `exact` start. No endpoint emits ETag: PUT
 canonicalizes its submitted representation, and every relevant digest already appears in the body.
 Both successful PUT outcomes set `Location: /v1/configs/{name}`.
 
 All mutating requests require the `application/json` media type, optionally with only a UTF-8
 charset parameter, except bodyless conditional DELETE, which requires the custom digest header.
 The daemon emits no permissive CORS headers and normalizes all routed Axum rejections, fallbacks,
-and method failures
-into exactly `{"code":"...","message":"..."}`. HTTP parser failures that occur before Axum routing
+and method failures into exactly `{"code":"...","message":"..."}`. Shared indeterminate run
+errors use the one frozen recovery-envelope sum above. HTTP parser failures that occur before Axum routing
 (for example an overlarge request line) are explicitly outside that JSON contract.
 
 Axum's implicit HEAD behavior is retained deliberately for every GET route: HEAD performs the same
@@ -846,7 +1003,7 @@ no body or content type.
 | List configs | `Application::list_configs` | `config list` | `GET /v1/configs` |
 | Read a config | `Application::read_config` | `config show` | `GET /v1/configs/{name}` |
 | Conditional config delete | `Application::delete_config` | `config delete --digest` | `DELETE /v1/configs/{name}` + digest header |
-| Start a run | `Application::start_run` | `run start` | `POST /v1/runs/{run_id}/start` |
+| Start a run | `Application::start_run` with explicit RunId and `ConfigSelection` | `run start`; optional CLI-only generation | `POST /v1/runs/{run_id}/start`; client-generated id |
 | Progress a run | `Application::progress_run` | `run progress` | `POST /v1/runs/{run_id}/progress` |
 | Read a run | `Application::read_run` | `run show` | `GET /v1/runs/{run_id}` |
 | List run heads | `Application::list_runs` | `run list` | `GET /v1/runs` |
@@ -941,7 +1098,7 @@ separate execution capability.
 | Catalog/index port | conditional named custody of opaque canonical config bytes; mechanical current-head enumeration | config-wire parsing, run folds/status, Program semantics, config merging, run→config authority |
 | Transport-security primitive | checked TLS-root specs and exact immutable root-store loading | endpoint URLs, protocol clients, locator resolution, credentials |
 | Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
-| Binaries | bounded transport parsing, one Application call, transport policy, redacted rendering | composition, domain planning, environment resolution, execution lifecycle, run semantics |
+| Binaries | bounded transport parsing, client-side RunId entropy where offered, one Application call, transport policy, redacted rendering | composition, domain planning, environment resolution, execution lifecycle, run semantics |
 
 ### Named asymmetries
 
@@ -950,6 +1107,7 @@ separate execution capability.
 | `store init` is CLI-only and outside listener-held Application state | A network caller must not provision schemas. |
 | Keystore administration is CLI-only in its future custody RFC | Secrets/passphrases and irreversible custody mutation do not cross unauthenticated HTTP. |
 | REST owns liveness, Host/Origin/media checks, backpressure, and deadline | These are listener policies, not use-case outcomes. |
+| CLI may generate a RunId when omitted; REST requires it in the path | Generation is client convenience completed before the shared call; Application and Runtime always receive explicit identity. |
 | CLI exit 1 reflects Runnable/Failed; HTTP returns 200 for a durably Failed run | Shell status represents run outcome; HTTP status represents request outcome. |
 
 ---
@@ -962,6 +1120,7 @@ Deleted outright in the implementation wave:
 - `CliConfig`, `EvmRouteConfig`, `StoreConfig`, CLI environment resolution, concrete composition,
   Application error adapter, and ad-hoc output DTO logic;
 - `Application::start_portfolio`, `resume`, and `read` public names;
+- the mandatory-only `ConfigRef` start shape and any start-time entry-point selector;
 - one-target `portfolio_assembly`;
 - REST unavailable stub;
 - `MemoryStore`'s `HashMap` run index;
@@ -977,6 +1136,8 @@ Added/changed:
 - PostgreSQL implements independently gated config custody and mechanical run paging;
 - `mfm-app` gains config/deployment/failure modules, the strict TOML/XDG bootstrap loader, injected
   construction, and live composer;
+- `mfm-app` owns `ConfigSelection`, `StartRunResult`, indeterminate `RunRecovery`, and the pure
+  interoperable RunId derivation helper while both Application and Runtime retain explicit RunIds;
 - Portfolio config rustdoc/README stop calling material process-local;
 - EVM composition accepts all Deployment-declared binding mappings;
 - provider/PostgreSQL transport authority is explicit and TLS-capable;
@@ -998,16 +1159,20 @@ Tests land with the boundary they prove.
    field corpus; singular/missing/unsorted/duplicate routes rejected; selector/quote/route coverage
    planned at import; `InvalidValue` renders 422 while trusted `InvalidContinuation`/`Program`
    failures render 500; key reordering canonicalizes identically; config digest is exactly
-   `sha256-jcs-v1`; representative Program/C0 fixtures stay frozen.
+   `sha256-jcs-v1`; representative Program/C0 fixtures stay frozen. The compiled entry-point list
+   is exactly the accepted document-tag set, and an unknown tag fails import rather than becoming a
+   start-time choice.
 2. **Worst-case config bound** — generate maximum accepted current Portfolio public strings,
    routes, collections, and 64 total sources; prove its canonical bytes fit the selected bound.
 3. **Catalog contract** — Created/Unchanged/Conflict; atomic 256-entry admission across concurrent
    callers; compare-and-delete; delete/re-import ABA resistance; ambiguous import/delete COMMIT;
-   canonical/digest disagreement rejected on load; no semantic entry-point column; Application
-   derives the checked entry point from every returned document; static page ordering/cursors.
+   each read returns one internally consistent owned `(name, digest, canonical)` snapshot across a
+   concurrent delete/re-import; canonical/digest disagreement rejected on load; no semantic
+   entry-point column; Application derives the checked entry point from every returned document;
+   static page ordering/cursors.
 4. **Run index contract** — Memory/PostgreSQL identical static pages with four exact fields; cursor
    type/version rejection; no status parsing; explicitly demonstrate a concurrent earlier-key insert
-   may be missed rather than asserting snapshot pagination.
+   may be missed rather than asserting snapshot pagination or generated-RunId recovery.
 5. **Schema isolation** — installed `mfm_catalog` is invisible to all `public` run gates; either
    schema may be incompatible without resetting the other; both provisioning entries are
    idempotent and never migrate. Provisioning rejects unequal admin/runtime targets; the runtime
@@ -1015,11 +1180,23 @@ Tests land with the boundary they prove.
 6. **Application contract** — multi-route assembly/start; bound/unbound route mapping before Store
    IO, including an otherwise valid upper-half-`u64` config that TOML cannot bind;
    immediately-awaited blocking planning on import and start; caller-invalid versus trusted
-   planner mapping; mandatory digest; deleting a config never damages retained read/progress; every
-   Runtime and catalog error maps exhaustively to the frozen code/message table; injected Memory
+   planner mapping. `Current` selects one atomic snapshot and returns its digest; `Exact` accepts the
+   same revision and rejects a mismatch before Store IO; a rebind after selection cannot change
+   either call. Both paths pass the caller's exact RunId to Runtime and return `StartRunResult`; no
+   Application request accepts an entry point or optional RunId. Start/progress append ambiguity
+   maps exhaustively to the corresponding `RunRecovery` shape, including generated-id and resolved
+   digest recovery for start. Deleting a config never damages retained read/progress; every Runtime
+   and catalog error maps exhaustively to the frozen code/message table; injected Memory
    construction needs no PostgreSQL and cannot pair Runtime/RunIndex/binding sets from different
    composers.
-7. **Deployment bootstrap** — strict TOML accepts only the exact tables above; malformed UTF-8,
+7. **RunId generation contract** — both frozen entropy/preimage/digest vectors pass through the pure
+   helper and an independent test implementation; explicit IDs bypass entropy completely; an
+   injected entropy source proves exactly 32 bytes are consumed and failure maps to the CLI-only
+   code before Application. Source/dependency review proves there is no time/PID/counter/ambient
+   fallback or existence preflight. CLI renderer fixtures prove successful generated starts expose
+   RunId plus resolved digest and an indeterminate start emits the same recoverable RunId/config
+   summary in text and JSON.
+8. **Deployment bootstrap** — strict TOML accepts only the exact tables above; malformed UTF-8,
    duplicate/unknown keys or tables, include/profile/interpolation attempts, invalid environment
    names, zero/negative/non-integer/out-of-range chain ids, unsorted/duplicate/257 routes, and
    encoded oversize are rejected. `i64::MAX` is accepted and converts exactly to `u64`. Path tests
@@ -1029,19 +1206,24 @@ Tests land with the boundary they prove.
    a usable base, the two exact conventional paths, and complete indifference to hostile
    `$MFM_DEPLOYMENT`. Fixtures prove no locator or resolved bootstrap-path value appears in TOML,
    redacted errors, or views.
-8. **Endpoint authority/redaction** — proxy environment ignored; redirects not followed; nonlocal
+9. **Endpoint authority/redaction** — proxy environment ignored; redirects not followed; nonlocal
    plaintext rejected; retry/referer disabled; exact production mode/root-store selection is tested.
    PostgreSQL and EVM real hermetic TLS handshakes both use the production checked PEM-root variant
    and reject a wrong pin, alternate unpinned CA, and wrong hostname; exact WebPKI mode selection is
    separately asserted. Hostile `PG*`/home/passfile authority is ignored without access or value
    logging; resolved private-locator contents and database/RPC credentials remain absent from
    startup stderr, request errors, stdout, HTTP body/headers, and debug output.
-9. **CLI e2e** — exercise both the XDG default and explicit deployment override; provision, import,
-   capture digest, start, re-start, progress/show, delete config, show the retained run, paginate
-   configs/runs, and check text/JSON exit behavior against managed reth and PostgreSQL.
-10. **REST boundary without services** — prove the `serve` grammar passes absent/present
+10. **CLI e2e** — exercise both the XDG default and explicit deployment override; provision and
+    import; prove `entry-point list` reports the imported tag and `run start` rejects
+    `--entry-point`; start `Current` without a RunId and capture the generated id/digest; re-start
+    `Exact` with an explicit id, exercise exact mismatch after rebind, progress/show, delete config,
+    show the retained run, paginate configs/runs, and check text/JSON exit behavior against managed
+    reth and PostgreSQL.
+11. **REST boundary without services** — prove the `serve` grammar passes absent/present
    `--deployment` values to the shared default/override loader before bind; exercise exact routed
    400/403/404/405/409/413/415/422/428/429/500/503/504 envelopes; conditional digest headers;
+   both tagged start selections and rejection of nullable/untagged/entry-point forms; caller-owned
+   path RunId with no server generation; `StartRunResult` and both indeterminate recovery envelopes;
    bounded extractor plus constructor re-check; strict query grammar; Host/Origin/media policy;
    raw terminal value bytes;
    semantically empty progress objects including whitespace; GET-equivalent HEAD admission,
@@ -1049,12 +1231,13 @@ Tests land with the boundary they prove.
    owner/mode enforcement, active and stale leaves, mismatched markers/inodes, explicit recovery,
    graceful cleanup, and refusal to unlink foreign paths. Pre-router HTTP parser errors are not
    asserted to use the JSON envelope.
-11. **Cross-transport managed parity** — build both binaries explicitly, install one strict TOML
+12. **Cross-transport managed parity** — build both binaries explicitly, install one strict TOML
     fixture under an isolated XDG default, pass the REST binary path to the harness/Nixfied task,
-    and compare CLI JSON with REST for entry points, bindings, config
-    summary/document/digest, run heads, and full `RunView` including raw terminal bytes. Do not rely
-    on `CARGO_BIN_EXE_mfm_rest_api` from another package.
-12. **Custody dependency boundary** — REST and shared request types contain no keystore-admin or
+    and compare CLI JSON with REST for entry points, bindings, config summary/document/digest,
+    `Current`/`Exact` start results under explicit RunIds, indeterminate recovery shapes, run heads,
+    and full `RunView` including raw terminal bytes. CLI-only generated-id tests remain a named
+    asymmetry. Do not rely on `CARGO_BIN_EXE_mfm_rest_api` from another package.
+13. **Custody dependency boundary** — REST and shared request types contain no keystore-admin or
     secret parser dependency. Existing keystore `!Send/!Sync` compile-fail tests remain correctly
     described; no duplicate listener test claims more than they prove.
 
@@ -1071,10 +1254,11 @@ Direct Cargo commands always run in the default Nix development shell.
 
 1. **`add config catalog and index contracts`** — add `mfm-catalog`, checked names/digests/cursors,
    opaque custody records, catalog/index traits and outcomes, MemoryCatalog, and MemoryStore
-   RunIndex/BTreeMap. A test-only exhaustive wire fixture built from maximum accepted current domain
-   values proves the shared 256 KiB custody bound before any SQL constraint uses it; no dormant
-   ConfigDocument or parallel Application API lands yet. Add workspace placement and the owning
-   architecture/domain/catalog docs.
+   RunIndex/BTreeMap. Catalog reads return one owned name/digest/canonical snapshot. A test-only
+   exhaustive wire fixture built from maximum accepted current domain values proves the shared 256
+   KiB custody bound before any SQL constraint uses it; no dormant ConfigDocument or parallel
+   Application API lands yet. Add workspace placement and the owning architecture/domain/catalog
+   docs.
    Verify:
    `nix develop -c cargo test -p mfm-catalog -p mfm-store -p mfm-portfolio --all-targets`.
 2. **`implement postgres client persistence authority`** — add the independent catalog baseline
@@ -1102,11 +1286,13 @@ Direct Cargo commands always run in the default Nix development shell.
    XDG/HOME/override loader, checked live composer, and injected construction; consume the shared
    TLS-root primitive to harden exact EVM RPC
    authority in its adapter, add the async opaque `ConfigDocument` constructor, pure planner,
-   digest/Program/C0 fixtures, exact planner-error mapping, and complete typed Application surface;
-   enable `serde_json/raw_value` for the shared exact raw-value serializer, rebuild CLI and its e2e
-   across default and overridden bootstrap paths, and atomically delete every superseded
-   Application and CLI grammar/config/composition path. Update design/architecture/known-gap and
-   CLI/live/storage/build-and-verification docs here, not later.
+   digest/Program/C0 fixtures, `ConfigSelection`, exact planner-error mapping, `StartRunResult`,
+   indeterminate recovery sums, and the complete typed Application surface. Add the pure RunId
+   derivation helper/vectors and CLI-only OS entropy adapter; enable `serde_json/raw_value` for the
+   shared exact raw-value serializer; rebuild CLI and its e2e across generated/explicit RunIds,
+   `Current`/`Exact`, and default/overridden bootstrap paths; then atomically delete every
+   superseded Application and CLI grammar/config/composition path. Update
+   design/architecture/known-gap and CLI/live/storage/build-and-verification docs here, not later.
    Add a managed EVM `transport-authority-test` task with real TLS servers through the production
    content-pinned PEM-root path. Verify `nix run .#model-check`,
    `nix develop -c cargo test -p mfm-app -p mfm-evm-live -p mfm --all-targets`,
@@ -1114,12 +1300,15 @@ Direct Cargo commands always run in the default Nix development shell.
    `nix run .#run -- --task transport-authority-test`, and
    `nix run .#run -- --task cli-e2e` while iterating.
 5. **`serve the application contract over rest`** — add Axum, REST routes, sum rendering,
-   conditional digest headers, normalized routed errors, socket/media/bounds/backpressure/deadline
-   controls, default/overridden bootstrap-path tests, REST README, and hermetic boundary tests;
-   consume the shared raw-value serializer from commit 4 without adding a second representation.
+   tagged `ConfigSelection` start bodies, caller-supplied path RunIds, `StartRunResult` and recovery
+   rendering, conditional delete-digest headers, normalized routed errors,
+   socket/media/bounds/backpressure/deadline controls, default/overridden bootstrap-path tests, REST
+   README, and hermetic boundary tests; consume the shared serializers from commit 4 without adding
+   a second representation.
    Verify: `nix develop -c cargo test -p mfm-rest-api --all-targets`.
 6. **`prove cli and rest parity`** — add the explicit two-binary managed harness, Nixfied
-   `rest-e2e`/CI composition, cross-transport assertions, and build-and-verification documentation.
+   `rest-e2e`/CI composition, cross-transport start-result/recovery assertions, and
+   build-and-verification documentation.
    Iterate with the one focused managed task; on the exact final candidate run
    `nix run .#model-check`, `nix flake check --no-build`, then one `nix run .#ci` and no redundant
    broad gates immediately before it.
@@ -1134,11 +1323,14 @@ as a partial seventh commit.
 | Refused | Reason |
 | --- | --- |
 | Inline config documents on run start | Duplicates bounds/parsing and bypasses the durable catalog decision. |
-| Name-only or optional-digest execution | Unsafe under delete/re-import ABA. |
+| `--entry-point` or an entry-point field on run start | The retained tagged document already selects it; a second selector can disagree. |
+| Nullable digest in the shared start request | Hides two different assertions in correlated optional state; `ConfigSelection::Current/Exact` is exhaustive. |
 | Unconditional config delete | A stale client can delete a newer revision. |
 | Generic config merging/overrides | Creates per-entry-point partial schemas and ambiguous hashing. |
 | Runs nested under configs | Retained runs survive config deletion and therefore are not config children. |
-| Server-derived RunId | RunId remains explicit caller authority. |
+| Application-, Runtime-, or REST-server-derived RunId | Shared execution always receives explicit caller identity; only the CLI client boundary offers generation convenience. |
+| Time/PID/counter RunId generation or random bytes used directly as a digest | Weak/ambient uniqueness or false `sha256-jcs-v1` provenance; the frozen random-preimage derivation is interoperable. |
+| Run listing as generated-RunId recovery | Pagination and concurrency cannot prove which id belongs to an ambiguous attempt; the error carries exact recovery identity. |
 | Status/entry point/timestamp in mechanical run listing | Requires semantic folds or a separately designed derived projection. |
 | Planner registry / erased C0 | Adds runtime extensibility while defeating Runtime's typed start contract. |
 | Deployment CRUD, identity, or catalog | Bootstrap authority is operator input, not a product resource or lifecycle. |
@@ -1168,9 +1360,11 @@ as a partial seventh commit.
 
 2. **Head-only run listing.**
    *Assumption:* RunId, head sequence/digest, total bytes, and individual `run show` are enough for
-   the first operator surface. *Why uncertain:* failed/recent/by-entry-point queries are common.
+   the first discovery surface; generated-id and indeterminate recovery use the exact start output,
+   never listing. *Why uncertain:* failed/recent/by-entry-point queries are common.
    *Consequence if wrong:* a separate non-authoritative run projection is needed. *Validate:* obtain
-   the concrete listing questions before commit 1; never move status folding into Store.
+   the concrete listing questions before commit 1; never move status folding or recovery inference
+   into Store.
 
 3. **Owner-only REST socket approval.**
    *Assumption:* the user will accept replacing the earlier documented-only TCP bind with the
