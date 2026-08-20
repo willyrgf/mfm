@@ -31,3 +31,7 @@ tower = { version = "=0.5.3", features = ["util"] }
 [[bin]]
 name = "mfm_rest_api"
 path = "src/main.rs"
+
+[[test]]
+name = "parity_e2e"
+path = "tests/parity_e2e.rs"

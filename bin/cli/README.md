@@ -67,3 +67,7 @@ bodies, and provider details are never rendered.
 
 The old `init`, `snapshot`, and `show --config` grammar and combined configuration file do not
 exist. Keystore administration and transaction submission remain outside this surface.
+
+The managed `rest-e2e` task builds both binaries explicitly and compares this JSON surface with the
+Unix-socket REST rendering over the same stored configs and retained runs. Both renderers also match
+the frozen start/progress recovery envelopes in `docs/contracts/client-surface/`.

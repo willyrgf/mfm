@@ -655,7 +655,17 @@ fn run_exit(view: &RunView) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use mfm_app::{BoundCapabilitySet, ComposedRuntime};
+    use mfm_catalog::MemoryCatalog;
+    use mfm_store::MemoryStore;
+
     use super::*;
+
+    const DOCUMENT: &[u8] = br#"{
+      "input":{"portfolio":{"quotes":["usd"],"portfolio_id":"portfolio-example","collections":[{"request":{"sources":[{"token":null,"source_id":"wallet-0.native","chain_id":1,"address":"0x1111111111111111111111111111111111111111"}],"decimals":18},"correlation":"native-0"}]},"selector":{"quote":"usd","target":"portfolio-example"},"routes":[{"endpoint_id":"alpha","chain_id":1}]},
+      "entry_point":"mfm.portfolio/snapshot@1"}"#;
 
     #[test]
     fn page_limit_and_checked_scalar_errors_are_stable() {
@@ -683,5 +693,49 @@ mod tests {
             }),
             Err(CliError::RunIdGeneration)
         ));
+    }
+
+    #[tokio::test]
+    async fn recovery_json_matches_the_cross_transport_fixtures() {
+        let store = Arc::new(MemoryStore::new());
+        let bindings = BoundCapabilitySet::new(Vec::new()).expect("bindings");
+        let composed = ComposedRuntime::compose(store, bindings).expect("composition");
+        let application =
+            Application::from_parts(composed, Arc::new(MemoryCatalog::new())).expect("application");
+        let document = ConfigDocument::new(DOCUMENT.to_vec())
+            .await
+            .expect("document");
+        let outcome = application
+            .import_config(ConfigName::new("daily").expect("name"), document)
+            .await
+            .expect("import");
+        let run_id = RunId::parse(
+            "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
+        )
+        .expect("run id");
+        let start = CliError::from(RunRequestError::AppendIndeterminate {
+            recovery: RunRecovery::Start {
+                run_id: run_id.clone(),
+                config: outcome.config().clone(),
+            },
+        });
+        assert_fixture(
+            &ErrorView { error: &start },
+            include_str!("../../../docs/contracts/client-surface/run-recovery-start.json"),
+        );
+        let progress = CliError::from(RunRequestError::AppendIndeterminate {
+            recovery: RunRecovery::Progress { run_id },
+        });
+        assert_fixture(
+            &ErrorView { error: &progress },
+            include_str!("../../../docs/contracts/client-surface/run-recovery-progress.json"),
+        );
+    }
+
+    fn assert_fixture(actual: &impl Serialize, expected: &str) {
+        assert_eq!(
+            serde_json::to_value(actual).expect("actual JSON"),
+            serde_json::from_str::<serde_json::Value>(expected).expect("fixture JSON")
+        );
     }
 }
