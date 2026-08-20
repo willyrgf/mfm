@@ -167,6 +167,125 @@ let
     export PGSERVICE=ambient SSL_CERT_FILE="$alternate_ca_path"
     ${cargoArgs}
   '';
+  evmTlsPrepare = pkgs.writeShellApplication {
+    name = "mfm-evm-tls-prepare";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.openssl
+    ];
+    text = ''
+      state_dir=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --state-dir)
+            state_dir="''${2:?missing --state-dir value}"
+            shift 2
+            ;;
+          *)
+            echo "unknown evm tls prepare argument" >&2
+            exit 64
+            ;;
+        esac
+      done
+      if [[ -z "$state_dir" || "$state_dir" == "/" ]]; then
+        echo "missing or unsafe --state-dir argument" >&2
+        exit 64
+      fi
+      tls_dir="$state_dir/evm-tls"
+      if [[ ! -s "$tls_dir/ca.pem" || ! -s "$tls_dir/server.pem" || ! -s "$tls_dir/server.key" || ! -s "$tls_dir/alternate-ca.pem" ]]; then
+        rm -rf "$tls_dir"
+        mkdir -p "$tls_dir"
+        chmod 700 "$tls_dir"
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+          -subj "/CN=mfm-evm-test-ca" \
+          -keyout "$tls_dir/ca.key" -out "$tls_dir/ca.pem" >/dev/null 2>&1
+        openssl req -newkey rsa:2048 -nodes \
+          -subj "/CN=127.0.0.1" \
+          -keyout "$tls_dir/server.key" -out "$tls_dir/server.csr" >/dev/null 2>&1
+        printf '%s\n' 'subjectAltName=IP:127.0.0.1' > "$tls_dir/server.ext"
+        openssl x509 -req -days 3650 -sha256 \
+          -in "$tls_dir/server.csr" -CA "$tls_dir/ca.pem" -CAkey "$tls_dir/ca.key" \
+          -CAcreateserial -extfile "$tls_dir/server.ext" -out "$tls_dir/server.pem" \
+          >/dev/null 2>&1
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+          -subj "/CN=mfm-evm-alternate-ca" \
+          -keyout "$tls_dir/alternate-ca.key" -out "$tls_dir/alternate-ca.pem" \
+          >/dev/null 2>&1
+        chmod 600 "$tls_dir/server.key" "$tls_dir/ca.key" "$tls_dir/alternate-ca.key"
+      fi
+    '';
+  };
+  evmTlsProxy = pkgs.writeShellApplication {
+    name = "mfm-evm-tls-proxy";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.nginx
+    ];
+    text = ''
+      state_dir="" listen_host="" listen_port="" upstream_host="" upstream_port=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --state-dir) state_dir="''${2:?missing value}"; shift 2 ;;
+          --listen-host) listen_host="''${2:?missing value}"; shift 2 ;;
+          --listen-port) listen_port="''${2:?missing value}"; shift 2 ;;
+          --upstream-host) upstream_host="''${2:?missing value}"; shift 2 ;;
+          --upstream-port) upstream_port="''${2:?missing value}"; shift 2 ;;
+          *) echo "unknown evm tls proxy argument" >&2; exit 64 ;;
+        esac
+      done
+      if [[ -z "$state_dir" || "$state_dir" == "/" || -z "$listen_host" || -z "$listen_port" || -z "$upstream_host" || -z "$upstream_port" ]]; then
+        echo "missing or unsafe evm tls proxy argument" >&2
+        exit 64
+      fi
+      tls_dir="$state_dir/evm-tls"
+      config="$tls_dir/nginx.conf"
+      {
+        printf '%s\n' 'daemon off;'
+        printf 'pid %s;\n' "$tls_dir/nginx.pid"
+        printf '%s\n' 'error_log stderr warn;' 'events {}' 'http {' '  access_log off;' '  server {'
+        printf '    listen %s:%s ssl;\n' "$listen_host" "$listen_port"
+        printf '    ssl_certificate %s;\n' "$tls_dir/server.pem"
+        printf '    ssl_certificate_key %s;\n' "$tls_dir/server.key"
+        printf '%s\n' '    ssl_protocols TLSv1.2 TLSv1.3;' '    location = /redirect {'
+        printf '      return 302 https://%s:%s/;\n' "$listen_host" "$listen_port"
+        printf '%s\n' '    }' '    location / {'
+        printf '      proxy_pass http://%s:%s;\n' "$upstream_host" "$upstream_port"
+        printf '%s\n' "      proxy_set_header Host \$host;" '    }' '  }' '}'
+      } > "$config"
+      exec nginx -c "$config" -p "$tls_dir"
+    '';
+  };
+  evmTlsProbe = pkgs.writeShellApplication {
+    name = "mfm-evm-tls-probe";
+    runtimeInputs = [ pkgs.curl ];
+    text = ''
+      exec curl --fail --silent --show-error \
+        --cacert "''${1:?missing CA path}" \
+        --header 'content-type: application/json' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+        "''${2:?missing endpoint}"
+    '';
+  };
+  secureEvmRun = cargoArgs: ''
+    set -euo pipefail
+    tls_dir="''${stateDir}/evm-tls"
+    ca_path="$tls_dir/ca.pem"
+    alternate_ca_path="$tls_dir/alternate-ca.pem"
+    ca_hex="$(sha256sum "$ca_path" | cut -d ' ' -f 1)"
+    alternate_ca_hex="$(sha256sum "$alternate_ca_path" | cut -d ' ' -f 1)"
+    rpc_url="https://''${host:evm-tls}:''${port:evm-tls}"
+    wrong_host_url="https://localhost:''${port:evm-tls}"
+    root_spec="{\"kind\":\"pem-file\",\"path\":\"$ca_path\",\"digest\":\"content:sha256-v1:$ca_hex\"}"
+    alternate_spec="{\"kind\":\"pem-file\",\"path\":\"$alternate_ca_path\",\"digest\":\"content:sha256-v1:$alternate_ca_hex\"}"
+    wrong_pin_spec="{\"kind\":\"pem-file\",\"path\":\"$ca_path\",\"digest\":\"content:sha256-v1:0000000000000000000000000000000000000000000000000000000000000000\"}"
+    export MFM_TEST_EVM_ADAPTER_LOCATOR="{\"v\":1,\"url\":\"$rpc_url\",\"tls_roots\":$root_spec}"
+    export MFM_TEST_EVM_REDIRECT_LOCATOR="{\"v\":1,\"url\":\"$rpc_url/redirect\",\"tls_roots\":$root_spec}"
+    export MFM_TEST_EVM_WRONG_PIN_LOCATOR="{\"v\":1,\"url\":\"$rpc_url\",\"tls_roots\":$wrong_pin_spec}"
+    export MFM_TEST_EVM_ALTERNATE_CA_LOCATOR="{\"v\":1,\"url\":\"$rpc_url\",\"tls_roots\":$alternate_spec}"
+    export MFM_TEST_EVM_WRONG_HOST_LOCATOR="{\"v\":1,\"url\":\"$wrong_host_url\",\"tls_roots\":$root_spec}"
+    export HTTPS_PROXY=http://127.0.0.1:1 HTTP_PROXY=http://127.0.0.1:1 ALL_PROXY=http://127.0.0.1:1
+    ${cargoArgs}
+  '';
 in
 {
   imports = [
@@ -206,6 +325,31 @@ in
       "file-write"
     ];
   };
+  nixfied.closures.evm-tls-prepare = {
+    package = evmTlsPrepare;
+    executable = "bin/mfm-evm-tls-prepare";
+    effects = [
+      "process"
+      "file-write"
+    ];
+  };
+  nixfied.closures.evm-tls-proxy = {
+    package = evmTlsProxy;
+    executable = "bin/mfm-evm-tls-proxy";
+    effects = [
+      "process"
+      "network-listener"
+      "file-write"
+    ];
+  };
+  nixfied.closures.evm-tls-probe = {
+    package = evmTlsProbe;
+    executable = "bin/mfm-evm-tls-probe";
+    effects = [
+      "process"
+      "network-listener"
+    ];
+  };
 
   nixfied.tasks.pg-init = lib.mkForce {
     invocation = {
@@ -217,6 +361,72 @@ in
       ];
       timeoutMs = 60000;
     };
+  };
+  nixfied.tasks.evm-tls-init = {
+    invocation = {
+      tools = [ "evm-tls-prepare" ];
+      run = [
+        "mfm-evm-tls-prepare"
+        "--state-dir"
+        "\${stateDir}"
+      ];
+      timeoutMs = 60000;
+    };
+  };
+  nixfied.services.evm-tls = {
+    connectsTo = [ "reth" ];
+    lifecycle = {
+      prepare.task = "evm-tls-init";
+      start.invocation = {
+        tools = [ "evm-tls-proxy" ];
+        run = [
+          "mfm-evm-tls-proxy"
+          "--state-dir"
+          "\${stateDir}"
+          "--listen-host"
+          "127.0.0.1"
+          "--listen-port"
+          "\${port}"
+          "--upstream-host"
+          "\${host:reth}"
+          "--upstream-port"
+          "\${port:reth}"
+        ];
+      };
+      ready.probe = {
+        kind = "exec";
+        invocation = {
+          tools = [ "evm-tls-probe" ];
+          run = [
+            "mfm-evm-tls-probe"
+            "\${stateDir}/evm-tls/ca.pem"
+            "https://\${host}:\${port}"
+          ];
+        };
+        timeoutMs = 2000;
+        retryIntervalMs = 250;
+        maxAttempts = 120;
+      };
+      health.probe = {
+        kind = "exec";
+        invocation = {
+          tools = [ "evm-tls-probe" ];
+          run = [
+            "mfm-evm-tls-probe"
+            "\${stateDir}/evm-tls/ca.pem"
+            "https://\${host}:\${port}"
+          ];
+        };
+        timeoutMs = 2000;
+        retryIntervalMs = 250;
+        maxAttempts = 120;
+      };
+      stop.timeoutMs = 10000;
+    };
+    endpoint.endpointId = "evm-json-rpc-tls";
+    stateRefs = [ "slot" ];
+    logRefs = [ "service.evm-tls" ];
+    containment = "process-tree";
   };
   nixfied.closures.ldd = lib.mkIf pkgs.stdenv.hostPlatform.isLinux {
     package = pkgs.glibc.bin;
@@ -281,6 +491,22 @@ in
       // {
         requires = [ "postgres" ];
       };
+    transport-authority-test =
+      (cargoLeaf {
+        run = [
+          "bash"
+          "-c"
+          (secureEvmRun ''
+            exec cargo test -p mfm-evm-live managed_tls_authority -- --include-ignored --test-threads=1
+          '')
+        ];
+        tools = [
+          pkgs.coreutils
+        ];
+      })
+      // {
+        requires = [ "evm-tls" ];
+      };
     test-db = {
       kind = "composite";
       steps = nixfiedLib.seq [ "postgres-test" ];
@@ -290,7 +516,7 @@ in
         run = [
           "bash"
           "-c"
-          (securePostgresRun ''
+          (securePostgresRun (secureEvmRun ''
             env -u PGSERVICE -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE \
               -u PGPASSWORD -u PGPASSFILE \
               psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
@@ -300,12 +526,10 @@ in
             SQL
             export MFM_E2E_ADMIN_STORE_LOCATOR="$MFM_TEST_ADMIN_STORE_LOCATOR"
             export MFM_E2E_RUNTIME_STORE_LOCATOR="$MFM_TEST_RUNTIME_STORE_LOCATOR"
+            export MFM_E2E_EVM_ADAPTER_LOCATOR="$MFM_TEST_EVM_ADAPTER_LOCATOR"
             exec cargo test -p mfm --test cli_e2e -- --include-ignored --test-threads=1
-          '')
+          ''))
         ];
-        env = {
-          MFM_E2E_RPC_URL = "http://\${host:reth}:\${port:reth}";
-        };
         tools = [
           "pg-psql"
           pkgs.coreutils
@@ -315,7 +539,7 @@ in
       // {
         requires = [
           "postgres"
-          "reth"
+          "evm-tls"
         ];
       };
     doc-tests = cargoLeaf {
@@ -384,6 +608,7 @@ in
         "doc-tests"
         "capacity-envelope"
         "test-db"
+        "transport-authority-test"
         "cli-e2e"
       ];
     };

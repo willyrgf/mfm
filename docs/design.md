@@ -65,9 +65,21 @@ Multiple endpoints may bind one chain. One `ComposedRuntime` derives its immutab
 planning targets, public `(chain_id, endpoint_id, binding_ref)` views, Store, and RunIndex from that
 single checked input and concrete backend; there is no singular one-route assembly constructor.
 
-Application supports Portfolio snapshot planning/start plus Runtime resume/read. Callers provide the
-RunId explicitly. Transaction submission requires a future durable transaction-authority/outbox
-design and is not part of this system.
+Application owns the transport-neutral client surface. A strict XDG/HOME- or override-selected
+`deployment.toml` names environment resolvers for the runtime PostgreSQL locator and stable public
+EVM bindings; it contains no locator values and has no product lifecycle. Production composition
+resolves each private locator once, constructs exact TLS clients, and derives Runtime registrations,
+planning targets, public binding views, Store, and RunIndex from the same checked binding set.
+
+The named config catalog retains complete, bounded canonical config documents tagged by the exact
+entry point. Import validates and plans the document before conditional custody. Run start selects
+either the name's current revision or an exact `sha256-jcs-v1` revision, checks every requested
+binding before Runtime Store IO, and returns the selected config summary with the run view. The
+shared surface also owns entry-point/binding discovery, config read/list/conditional delete, run
+progress/read, and mechanical run-head listing. Every execution receives an explicit caller-owned
+RunId; ambiguous append acknowledgement carries the exact start or progress recovery identity.
+Transaction submission requires a future durable transaction-authority/outbox design and is not
+part of this system.
 
 Secrets do not enter Program, C0, frames, Store metadata, RunView, outputs, logs, or error details.
 Writable restoration behind acknowledged state is unsupported; a new writable timeline requires

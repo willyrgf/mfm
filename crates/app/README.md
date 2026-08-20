@@ -1,28 +1,38 @@
 # mfm-app
 
-Portfolio-only facade over one `ComposedRuntime`. The sole composer accepts the same backend as both
-`Store` and `RunIndex`, plus one opaque checked `BoundCapabilitySet`; it builds the immutable Runtime
-assembly, planning targets, and public binding views together. Callers cannot pair a Runtime, run
-index, and discovery list from unrelated sources.
+`mfm-app` owns the typed, transport-neutral config, run, and discovery use cases shared by client
+surfaces. `Application::from_parts` keeps hermetic library composition available; `Application::open`
+is the production convenience that resolves one strict `Deployment`, opens PostgreSQL config/run
+custody, constructs exact EVM TLS clients, and delegates to the same injected constructor.
 
-Bindings are empty or strictly sorted and unique by `(chain_id, endpoint_id)`, with at most 256 EVM
-routes. Multiple named endpoints may bind one chain. Each public `PublicBindingView` is derived from
-the exact `EvmPhysicalTarget` used to register the provider handle; it accepts no locator or second
-caller-authored view.
+`Deployment::load` selects an explicit override or exactly
+`$XDG_CONFIG_HOME/mfm/deployment.toml`, falling back to `$HOME/.config/mfm/deployment.toml` only when
+the XDG base is unset, empty, or relative. The bounded strict TOML contains environment resolver
+names, never locator values. Its EVM routes are empty or strictly ordered and unique by
+`(chain_id, endpoint_id)`, with at most 256 bindings.
 
-`start_portfolio` plans checked Program/C0 from selector, process-local config, and a bounded subset
-of the composed targets, then calls Runtime with the caller's explicit RunId. `resume` and `read`
-return Runtime RunView directly.
+`ConfigDocument` is an opaque async checked value. It bounds input at 256 KiB, rejects malformed
+UTF-8/JSON, duplicate keys, floats, excess depth, unknown fields, and invalid domain values, then
+owns canonical JSON plus its `sha256-jcs-v1` digest. The required entry-point tag is
+`mfm.portfolio/snapshot@1`; its route array has 1–64 entries, is strictly chain-ordered, and must
+exactly cover the Portfolio source chains when Application runs the planner during import.
 
-`start_portfolio` rejects more than 64 target descriptors before cloning, planning, or Runtime
-entry. It moves only bounded, secret-free planning inputs into an immediately awaited blocking
-task; Runtime execution remains asynchronous.
+One `ComposedRuntime` derives Runtime adapter registration, public binding discovery, planning
+targets, Store, and RunIndex from the same checked inputs. Config catalog custody is independently
+injected. The complete Application surface is:
 
-`ComposedRuntime::compose` is the one trusted live composition: it registers the thirteen Portfolio
-and EVM State implementations the snapshot Program declares, binds the three EVM Read callbacks for
-every route, and freezes the assembly. `register_portfolio_states` is public only for adapterless
-composition tests that prove association rejects a Program before Store IO.
+- static entry-point and composed-binding discovery;
+- config import, read, keyset list, and conditional delete;
+- stored-config run start through exhaustive `Current` or `Exact` selection;
+- run progress, semantic read, and mechanical keyset list.
 
-Invalid selector is `InvalidRequest`; trusted planner/composition failure is `Internal`; typed
-Runtime failures pass through `ApplicationError::Runtime`. Application owns no session, frame fold,
-status projection, provider handle, configuration service, or transaction submission.
+Every execution receives an explicit caller-owned `RunId`. The pure `derive_run_id([u8; 32])`
+helper implements `mfm.run-id.random.v1`; it performs no IO and Application never calls it.
+`StartRunResult` reports the actual selected config revision. An ambiguously acknowledged append is
+the only `RunRequestError` carrying data, through the exact `RunRecovery::Start` or
+`RunRecovery::Progress` sum.
+
+`RequestError` owns stable redaction-safe codes and messages. Catalog rows are revalidated as
+canonical documents on every read/start/list. Unbound routes fail before Runtime Store IO;
+deleting or rebinding a config never changes retained run genesis. Shared serializers preserve the
+`RunViewState` sum and embed terminal canonical bytes as a raw JSON value.

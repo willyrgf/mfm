@@ -28,7 +28,16 @@ PostgreSQL catalog custody owns exactly `mfm_catalog_schema` and `config_entries
 `mfm.config-catalog-postgres.v1`. The storage adapter checks schema, ownership, ACL, and durability
 independently for run history and catalog; the fixed runtime role owns neither surface.
 
+Application interprets catalog bytes as one strict, complete, versioned config document. Its public
+JSON contains only the entry-point tag, stable route selectors, and checked secret-free domain
+input. Config summaries expose the checked name, canonical-document digest, and entry point;
+config reads embed the retained canonical document as a raw JSON value. Current and exact run-start
+selection never add config provenance to Journal or the mechanical RunIndex: the exact Program and
+C0 remain the durable execution admission.
+
 Public `RunView` contains RunId, durable sequence/head, and `Runnable`, typed `Succeeded`, or typed
 `Failed`. Terminal retained values expose contract ref, instance ref, and exact canonical bytes.
+Client JSON preserves that sum and embeds the terminal canonical bytes as a raw JSON value rather
+than a quoted string.
 Public surfaces never contain credentials, private keys, raw provider material, or unreviewed error
 details.

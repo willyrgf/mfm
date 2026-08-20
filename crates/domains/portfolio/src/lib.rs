@@ -901,7 +901,7 @@ struct PortfolioCollectionConfig {
     pub request: EvmBalanceRequest,
 }
 
-/// Checked process-local Portfolio snapshot authoring input.
+/// Checked secret-free Portfolio snapshot authoring input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioConfig {
@@ -989,7 +989,22 @@ pub fn plan_snapshot(
             .windows(2)
             .any(|pair| pair[0].chain_id() >= pair[1].chain_id())
     {
-        return Err(PortfolioError::Program);
+        return Err(PortfolioError::InvalidValue);
+    }
+
+    let required_chains = config
+        .collections
+        .iter()
+        .filter_map(|collection| collection.request.sources.first())
+        .map(|source| source.chain_id)
+        .collect::<BTreeSet<_>>();
+    if required_chains.len() != targets.len()
+        || !required_chains
+            .iter()
+            .copied()
+            .eq(targets.iter().map(EvmPhysicalTarget::chain_id))
+    {
+        return Err(PortfolioError::InvalidValue);
     }
 
     let mut demand = Vec::with_capacity(config.collections.len());

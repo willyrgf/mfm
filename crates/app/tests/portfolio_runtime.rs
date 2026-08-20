@@ -4,23 +4,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use mfm_app::{
-    register_portfolio_states, Application, ApplicationError, BoundCapabilitySet, ComposedRuntime,
-    PublicBindingView, MAX_EVM_BINDINGS,
+    Application, BoundCapabilitySet, ComposedRuntime, ConfigDocument, ConfigDocumentError,
+    ConfigPageRequest, ConfigSelection, PublicBindingView, RequestError, RunPageRequest,
+    RunRecovery, SerializableRunView, MAX_EVM_BINDINGS,
 };
-use mfm_evm::{EvmEndpoint, EvmPhysicalTarget, EvmReadValue, EVM_BALANCE_SOURCE_LIMIT};
-use mfm_evm_live::{register_evm_reads, EvmProvider, EvmProviderResponse};
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId, StableId};
-use mfm_portfolio::{
-    plan_snapshot, PortfolioConfig, PortfolioSnapshotInput, PortfolioSnapshotSelector,
-};
-use mfm_runtime::{ReadAdapterError, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError};
-use mfm_store::MemoryStore;
+use mfm_catalog::{ConfigDigest, ConfigName, MemoryCatalog, PageLimit, MAX_CONFIG_DOCUMENT_BYTES};
+use mfm_evm::{EvmEndpoint, EvmReadValue};
+use mfm_evm_live::{EvmProvider, EvmProviderResponse};
+use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, RunId, StableId};
+use mfm_runtime::{ReadAdapterError, RunViewState};
+use mfm_store::{AppendResult, MemoryStore, Store, StoreError};
 
 const ANCHOR: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 struct Provider {
+    chain_id: u64,
     calls: AtomicUsize,
-    reject_call: Option<usize>,
+    available: std::sync::atomic::AtomicBool,
 }
 
 impl EvmProvider for Provider {
@@ -28,17 +28,12 @@ impl EvmProvider for Provider {
         &'a self,
         operation: StableId,
         request_bytes: Vec<u8>,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = std::result::Result<EvmProviderResponse, ReadAdapterError>>
-                + Send
-                + 'a,
-        >,
-    > {
+    ) -> Pin<Box<dyn Future<Output = Result<EvmProviderResponse, ReadAdapterError>> + Send + 'a>>
+    {
         Box::pin(async move {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-            if self.reject_call == Some(call) {
-                return Ok(EvmProviderResponse::Rejected);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if !self.available.load(Ordering::SeqCst) {
+                return Err(ReadAdapterError::Unavailable);
             }
             let request: serde_json::Value =
                 serde_json::from_slice(&request_bytes).map_err(|_| ReadAdapterError::Internal)?;
@@ -48,7 +43,7 @@ impl EvmProvider for Provider {
                 return Err(ReadAdapterError::Internal);
             }
             let value = match operation.as_str() {
-                "mfm.evm.read-chain-identity@1" => EvmReadValue::ChainId(1),
+                "mfm.evm.read-chain-identity@1" => EvmReadValue::ChainId(self.chain_id),
                 "mfm.evm.read-initial-anchor@1" | "mfm.evm.confirm-balance-anchor@1" => {
                     EvmReadValue::Anchor {
                         number: "100".to_owned(),
@@ -67,91 +62,172 @@ impl EvmProvider for Provider {
     }
 }
 
-fn endpoint_ref() -> ContentRef {
-    EvmEndpoint::new("test-endpoint")
-        .and_then(|endpoint| endpoint.endpoint_ref())
-        .expect("endpoint ref")
+fn provider(chain_id: u64) -> Arc<Provider> {
+    Arc::new(Provider {
+        chain_id,
+        calls: AtomicUsize::new(0),
+        available: std::sync::atomic::AtomicBool::new(true),
+    })
 }
 
-fn run_id() -> RunId {
-    run_id_with(3)
-}
-
-fn run_id_with(byte: u8) -> RunId {
+fn run_id(byte: u8) -> RunId {
     RunId::from_digest(DigestBytes::from_array([byte; 32]))
 }
 
-fn assembly(
-    target: EvmPhysicalTarget,
-    provider: Arc<dyn EvmProvider>,
-) -> mfm_runtime::RuntimeAssembly {
-    let mut builder = RuntimeAssemblyBuilder::new();
-    register_portfolio_states(&mut builder).expect("states");
-    register_evm_reads(&mut builder, target, provider).expect("reads");
-    builder.finish().expect("assembly")
+fn config_name(value: &str) -> ConfigName {
+    ConfigName::new(value).expect("config name")
 }
 
-fn application(target: EvmPhysicalTarget, provider: Arc<dyn EvmProvider>) -> Application {
-    assert_eq!(target.endpoint_ref(), &endpoint_ref());
-    let bindings = BoundCapabilitySet::new(vec![(
-        target.chain_id(),
-        EvmEndpoint::new("test-endpoint").expect("endpoint"),
-        provider,
-    )])
-    .expect("bindings");
-    let composed =
-        ComposedRuntime::compose(Arc::new(MemoryStore::new()), bindings).expect("composed runtime");
-    Application::new(composed)
-}
-
-fn adapterless_assembly() -> mfm_runtime::RuntimeAssembly {
-    let mut builder = RuntimeAssemblyBuilder::new();
-    register_portfolio_states(&mut builder).expect("states");
-    builder.finish().expect("missing adapter assembly")
-}
-
-struct FixedProvider {
-    calls: AtomicUsize,
-    response: std::result::Result<EvmProviderResponse, ReadAdapterError>,
-}
-
-fn provider_handle() -> Arc<dyn EvmProvider> {
-    Arc::new(Provider {
-        calls: AtomicUsize::new(0),
-        reject_call: None,
+fn native_collection(chain_id: u64, suffix: &str) -> serde_json::Value {
+    serde_json::json!({
+        "correlation": format!("native-{suffix}"),
+        "request": {
+            "sources": [{
+                "source_id": format!("wallet-{suffix}.native"),
+                "chain_id": chain_id,
+                "address": "0x1111111111111111111111111111111111111111",
+                "token": null
+            }],
+            "decimals": 18
+        }
     })
+}
+
+fn document_value(routes: Vec<(u64, &str)>, portfolio_id: &str) -> serde_json::Value {
+    let collections = routes
+        .iter()
+        .enumerate()
+        .map(|(index, (chain_id, _))| native_collection(*chain_id, &index.to_string()))
+        .collect::<Vec<_>>();
+    let routes = routes
+        .into_iter()
+        .map(|(chain_id, endpoint_id)| {
+            serde_json::json!({ "chain_id": chain_id, "endpoint_id": endpoint_id })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "entry_point": "mfm.portfolio/snapshot@1",
+        "input": {
+            "routes": routes,
+            "selector": { "target": portfolio_id, "quote": "usd" },
+            "portfolio": {
+                "portfolio_id": "portfolio-example",
+                "quotes": ["usd"],
+                "collections": collections
+            }
+        }
+    })
+}
+
+async fn document(routes: Vec<(u64, &str)>) -> ConfigDocument {
+    ConfigDocument::new(
+        serde_json::to_vec(&document_value(routes, "portfolio-example")).expect("document JSON"),
+    )
+    .await
+    .expect("config document")
+}
+
+fn application(routes: &[(u64, &str, Arc<Provider>)]) -> Application {
+    application_with_backend(routes, Arc::new(FaultStore::new()))
+}
+
+fn application_with_backend(
+    routes: &[(u64, &str, Arc<Provider>)],
+    backend: Arc<FaultStore>,
+) -> Application {
+    let bindings = routes
+        .iter()
+        .map(|(chain_id, endpoint_id, provider)| {
+            (
+                *chain_id,
+                EvmEndpoint::new(*endpoint_id).expect("endpoint"),
+                provider.clone() as Arc<dyn EvmProvider>,
+            )
+        })
+        .collect();
+    let composed = ComposedRuntime::compose(
+        backend,
+        BoundCapabilitySet::new(bindings).expect("bindings"),
+    )
+    .expect("composition");
+    Application::from_parts(composed, Arc::new(MemoryCatalog::new())).expect("application")
+}
+
+struct FaultStore {
+    inner: MemoryStore,
+    indeterminate_next_append: std::sync::atomic::AtomicBool,
+}
+
+impl FaultStore {
+    fn new() -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            indeterminate_next_append: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn fail_next_append(&self) {
+        self.indeterminate_next_append.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Store for FaultStore {
+    fn load_run<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Option<mfm_journal::StoredRunBytes>, StoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.inner.load_run(run_id)
+    }
+
+    fn append_run<'a>(
+        &'a self,
+        frame: &'a mfm_journal::EncodedRunFrame,
+    ) -> Pin<Box<dyn Future<Output = Result<AppendResult, StoreError>> + Send + 'a>> {
+        if self.indeterminate_next_append.swap(false, Ordering::SeqCst) {
+            Box::pin(async { Err(StoreError::Indeterminate) })
+        } else {
+            self.inner.append_run(frame)
+        }
+    }
+}
+
+impl mfm_catalog::RunIndex for FaultStore {
+    fn list_runs<'a>(
+        &'a self,
+        cursor: Option<&'a mfm_catalog::RunCursor>,
+        limit: PageLimit,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<mfm_catalog::RunPage, mfm_catalog::RunIndexError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        mfm_catalog::RunIndex::list_runs(&self.inner, cursor, limit)
+    }
 }
 
 #[test]
 fn composed_runtime_owns_one_checked_multi_route_truth() {
-    let routes = vec![
-        (
-            1,
-            EvmEndpoint::new("alpha").expect("endpoint"),
-            provider_handle(),
-        ),
-        (
-            1,
-            EvmEndpoint::new("beta").expect("endpoint"),
-            provider_handle(),
-        ),
-        (
-            2,
-            EvmEndpoint::new("alpha").expect("endpoint"),
-            provider_handle(),
-        ),
-    ];
-    let bindings = BoundCapabilitySet::new(routes).expect("ordered bindings");
-    let app = Application::new(
-        ComposedRuntime::compose(Arc::new(MemoryStore::new()), bindings).expect("composition"),
-    );
+    let first = provider(1);
+    let second = provider(1);
+    let third = provider(2);
+    let app = application(&[
+        (1, "alpha", first),
+        (1, "beta", second),
+        (2, "alpha", third),
+    ]);
     assert_eq!(app.bindings().len(), 3);
-    for (view, expected_chain, expected_endpoint) in app
-        .bindings()
-        .iter()
-        .zip([1, 1, 2])
-        .zip(["alpha", "beta", "alpha"])
-        .map(|((view, chain), endpoint)| (view, chain, endpoint))
+    for (view, (expected_chain, expected_endpoint)) in
+        app.bindings()
+            .iter()
+            .zip([(1, "alpha"), (1, "beta"), (2, "alpha")])
     {
         let PublicBindingView::Evm {
             chain_id,
@@ -163,7 +239,7 @@ fn composed_runtime_owns_one_checked_multi_route_truth() {
         let endpoint_ref = EvmEndpoint::new(expected_endpoint)
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("endpoint ref");
-        let target = EvmPhysicalTarget::new(expected_chain, endpoint_ref).expect("target");
+        let target = mfm_evm::EvmPhysicalTarget::new(expected_chain, endpoint_ref).expect("target");
         assert_eq!(binding_ref, &target.binding_ref().expect("binding ref"));
     }
 
@@ -171,445 +247,286 @@ fn composed_runtime_owns_one_checked_multi_route_truth() {
         (
             1,
             EvmEndpoint::new("alpha").expect("endpoint"),
-            provider_handle(),
+            provider(1) as Arc<dyn EvmProvider>,
         ),
         (
             1,
             EvmEndpoint::new("alpha").expect("endpoint"),
-            provider_handle(),
+            provider(1) as Arc<dyn EvmProvider>,
         ),
     ];
     assert!(BoundCapabilitySet::new(duplicate).is_err());
-    let unsorted = vec![
-        (
-            2,
-            EvmEndpoint::new("alpha").expect("endpoint"),
-            provider_handle(),
-        ),
-        (
-            1,
-            EvmEndpoint::new("alpha").expect("endpoint"),
-            provider_handle(),
-        ),
-    ];
-    assert!(BoundCapabilitySet::new(unsorted).is_err());
     let over_capacity = (0..=MAX_EVM_BINDINGS)
-        .map(|offset| {
+        .map(|index| {
             (
-                u64::try_from(offset + 1).expect("chain id"),
+                (index + 1) as u64,
                 EvmEndpoint::new("endpoint").expect("endpoint"),
-                provider_handle(),
+                provider((index + 1) as u64) as Arc<dyn EvmProvider>,
             )
         })
         .collect();
     assert!(BoundCapabilitySet::new(over_capacity).is_err());
-    assert!(ComposedRuntime::compose(
-        Arc::new(MemoryStore::new()),
-        BoundCapabilitySet::new(Vec::new()).expect("empty bindings"),
-    )
-    .is_ok());
-}
-
-impl EvmProvider for FixedProvider {
-    fn request<'a>(
-        &'a self,
-        _operation: StableId,
-        _request_bytes: Vec<u8>,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = std::result::Result<EvmProviderResponse, ReadAdapterError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            self.response.clone()
-        })
-    }
-}
-
-fn native_config() -> PortfolioConfig {
-    serde_json::from_value(serde_json::json!({
-        "portfolio_id": "portfolio-example",
-        "quotes": ["usd"],
-        "collections": [{
-            "correlation": "native-collection",
-            "request": {
-                "sources": [{
-                    "source_id": "wallet-a.native",
-                    "chain_id": 1,
-                    "address": "0x1111111111111111111111111111111111111111",
-                    "token": null
-                }],
-                "decimals": 18
-            }
-        }]
-    }))
-    .expect("config")
-}
-
-fn token_config() -> PortfolioConfig {
-    serde_json::from_value(serde_json::json!({
-        "portfolio_id": "portfolio-example",
-        "quotes": ["usd"],
-        "collections": [{
-            "correlation": "token-collection",
-            "request": {
-                "sources": [{
-                    "source_id": "wallet.token",
-                    "chain_id": 1,
-                    "address": "0x2222222222222222222222222222222222222222",
-                    "token": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                }],
-                "decimals": 18
-            }
-        }]
-    }))
-    .expect("token config")
-}
-
-fn mixed_config() -> PortfolioConfig {
-    serde_json::from_value(serde_json::json!({
-        "portfolio_id": "portfolio-example",
-        "quotes": ["usd"],
-        "collections": [{
-            "correlation": "mixed-collection",
-            "request": {
-                "sources": [
-                    {
-                        "source_id": "wallet.native",
-                        "chain_id": 1,
-                        "address": "0x1111111111111111111111111111111111111111",
-                        "token": null
-                    },
-                    {
-                        "source_id": "wallet.token",
-                        "chain_id": 1,
-                        "address": "0x2222222222222222222222222222222222222222",
-                        "token": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                    }
-                ],
-                "decimals": 18
-            }
-        }]
-    }))
-    .expect("mixed config")
-}
-
-fn selector(target: &str) -> PortfolioSnapshotSelector {
-    serde_json::from_value(serde_json::json!({
-        "target": target,
-        "quote": "usd"
-    }))
-    .expect("selector")
 }
 
 #[tokio::test]
-async fn token_and_mixed_source_runs_are_hot_cold_equivalent() {
-    let target = EvmPhysicalTarget::new(1, endpoint_ref()).expect("target");
-    let provider = Arc::new(Provider {
-        calls: AtomicUsize::new(0),
-        reject_call: None,
-    });
-    let app = application(target.clone(), provider.clone());
+async fn config_document_boundary_is_strict_and_canonical() {
+    let reordered = br#"{
+      "input":{"portfolio":{"quotes":["usd"],"portfolio_id":"portfolio-example","collections":[{"request":{"sources":[{"token":null,"source_id":"wallet-0.native","chain_id":1,"address":"0x1111111111111111111111111111111111111111"}],"decimals":18},"correlation":"native-0"}]},"selector":{"quote":"usd","target":"portfolio-example"},"routes":[{"endpoint_id":"alpha","chain_id":1}]},
+      "entry_point":"mfm.portfolio/snapshot@1"}"#;
+    let checked = ConfigDocument::new(reordered.to_vec())
+        .await
+        .expect("reordered document");
+    let app = application(&[(1, "alpha", provider(1))]);
+    let imported = app
+        .import_config(config_name("daily"), checked)
+        .await
+        .expect("import");
+    assert_eq!(
+        imported.config().digest().as_str(),
+        "content:sha256-jcs-v1:0723d5ccf638cfcf6bb85d96de269e93adcef0847147ace563d09464c8c12250"
+    );
+    let shown = app.read_config(&config_name("daily")).await.expect("show");
+    assert_eq!(shown.config(), imported.config());
+    assert_eq!(
+        ConfigDigest::parse(shown.config().digest().as_str()).expect("digest"),
+        *shown.config().digest()
+    );
+    assert!(!shown.canonical_bytes().contains(&b'\n'));
 
-    for (byte, config, expected_calls) in [
-        (51, token_config(), 5_usize),
-        (52, mixed_config(), 14_usize),
+    for malformed in [
+        br#"{"entry_point":"x","entry_point":"y"}"#.as_slice(),
+        br#"{"value":1.5}"#,
+        b"\xff",
     ] {
-        let id = run_id_with(byte);
-        let hot = app
-            .start_portfolio(
-                id.clone(),
-                selector("portfolio-example"),
-                &config,
-                std::slice::from_ref(&target),
-            )
-            .await
-            .expect("portfolio success");
-        let RunViewState::Succeeded(output) = hot.state() else {
-            panic!("portfolio must succeed");
-        };
-        let output = std::str::from_utf8(output.canonical_bytes()).expect("utf8");
-        assert!(output.contains("wallet.token"));
-        if byte == 52 {
-            assert!(output.contains("wallet.native"));
-        }
-        assert_eq!(provider.calls.load(Ordering::SeqCst), expected_calls);
-        let cold = app.read(&id).await.expect("cold read");
-        assert_eq!(cold.head_digest(), hot.head_digest());
-        assert_eq!(provider.calls.load(Ordering::SeqCst), expected_calls);
+        assert_eq!(
+            ConfigDocument::new(malformed.to_vec()).await.err(),
+            Some(ConfigDocumentError::Malformed)
+        );
     }
-}
-
-#[tokio::test]
-async fn second_source_typed_failure_reaches_the_root_without_a_third_provider_call() {
-    let target = EvmPhysicalTarget::new(1, endpoint_ref()).expect("target");
-    let provider = Arc::new(Provider {
-        calls: AtomicUsize::new(0),
-        reject_call: Some(5),
-    });
-    let app = application(target.clone(), provider.clone());
-    let view = app
-        .start_portfolio(
-            run_id_with(53),
-            selector("portfolio-example"),
-            &mixed_config(),
-            &[target],
+    assert_eq!(
+        ConfigDocument::new(vec![b'x'; MAX_CONFIG_DOCUMENT_BYTES + 1])
+            .await
+            .err(),
+        Some(ConfigDocumentError::TooLarge)
+    );
+    let mut unknown = document_value(vec![(1, "alpha")], "portfolio-example");
+    unknown["input"]["unknown"] = serde_json::json!(true);
+    assert_eq!(
+        ConfigDocument::new(serde_json::to_vec(&unknown).expect("JSON"))
+            .await
+            .err(),
+        Some(ConfigDocumentError::Invalid)
+    );
+    for routes in [
+        vec![],
+        vec![(2, "beta"), (1, "alpha")],
+        vec![(1, "a"), (1, "b")],
+    ] {
+        assert!(ConfigDocument::new(
+            serde_json::to_vec(&document_value(routes, "portfolio-example")).expect("JSON")
         )
         .await
-        .expect("durable typed failure");
-    let RunViewState::Failed(failure) = view.state() else {
-        panic!("second-source rejection must reach root failure");
-    };
-    assert!(std::str::from_utf8(failure.canonical_bytes())
-        .expect("utf8")
-        .contains("chain_identity_unavailable"));
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 5);
-}
-
-#[tokio::test]
-async fn missing_or_wrong_live_association_is_rejected_before_store_io() {
-    let planned_target = EvmPhysicalTarget::new(1, endpoint_ref()).expect("planned target");
-    let config = native_config();
-    for (byte, assembly) in [
-        (54, adapterless_assembly()),
-        (
-            55,
-            assembly(
-                EvmPhysicalTarget::new(
-                    1,
-                    ContentRef::new(
-                        endpoint_ref().schema_id().clone(),
-                        ContentDigest::from_digest(
-                            DigestAlgorithm::Sha256V1,
-                            DigestBytes::from_array([9; 32]),
-                        ),
-                    )
-                    .expect("other endpoint"),
-                )
-                .expect("other target"),
-                Arc::new(Provider {
-                    calls: AtomicUsize::new(0),
-                    reject_call: None,
-                }),
-            ),
-        ),
-    ] {
-        let (program, input) = plan_snapshot(
-            selector("portfolio-example"),
-            &config,
-            std::slice::from_ref(&planned_target),
-        )
-        .expect("plan");
-        let runtime = Runtime::new(assembly, Arc::new(MemoryStore::new()));
-        let id = run_id_with(byte);
-        assert!(matches!(
-            runtime.start(id.clone(), program, input).await,
-            Err(RuntimeError::IncompatibleAssembly)
-        ));
-        assert!(matches!(runtime.read(&id).await, Err(RuntimeError::Absent)));
+        .is_err());
     }
 }
 
 #[tokio::test]
-async fn wrong_chain_and_wrong_route_fail_inside_adapter_without_provider_or_conclusion() {
-    let target = EvmPhysicalTarget::new(1, endpoint_ref()).expect("target");
-    for (byte, mutate) in [(56, "chain"), (57, "route")] {
-        let provider = Arc::new(Provider {
-            calls: AtomicUsize::new(0),
-            reject_call: None,
-        });
-        let (program, input) = plan_snapshot(
-            selector("portfolio-example"),
-            &native_config(),
-            std::slice::from_ref(&target),
+async fn stored_config_lifecycle_drives_current_exact_and_retained_runs() {
+    let first = provider(1);
+    let second = provider(2);
+    let app = application(&[(1, "alpha", first.clone()), (2, "beta", second.clone())]);
+    let name = config_name("daily");
+    let created = app
+        .import_config(
+            name.clone(),
+            document(vec![(1, "alpha"), (2, "beta")]).await,
         )
-        .expect("plan");
-        let mut input = serde_json::to_value(input).expect("input json");
-        if mutate == "chain" {
-            input["collections"][0]["request"]["sources"][0]["chain_id"] = serde_json::json!(2);
-        } else {
-            input["collections"][0]["route_ref"]["content_digest"] = serde_json::json!(
-                "content:sha256-v1:9999999999999999999999999999999999999999999999999999999999999999"
-            );
-        }
-        let input: PortfolioSnapshotInput = serde_json::from_value(input).expect("checked input");
-        let runtime = Runtime::new(
-            assembly(target.clone(), provider.clone()),
-            Arc::new(MemoryStore::new()),
-        );
-        let id = run_id_with(byte);
-        assert!(matches!(
-            runtime.start(id.clone(), program, input).await,
-            Err(RuntimeError::Internal)
-        ));
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
-        let view = runtime.read(&id).await.expect("admission only");
-        assert_eq!(
-            view.head_sequence(),
-            3,
-            "only the pre-read Pure prefix exists"
-        );
-        assert!(matches!(view.state(), RunViewState::Runnable));
-    }
-}
-
-#[tokio::test]
-async fn every_authenticated_failure_evidence_reaches_the_exact_root_failure() {
-    let target = EvmPhysicalTarget::new(1, endpoint_ref()).expect("target");
-    for (byte, response, expected_code) in [
-        (
-            61,
-            EvmProviderResponse::Rejected,
-            "chain_identity_unavailable",
-        ),
-        (
-            62,
-            EvmProviderResponse::SafeFailure,
-            "chain_identity_unavailable",
-        ),
-        (
-            63,
-            EvmProviderResponse::IntegrityBlocked,
-            "integrity_blocked",
-        ),
-    ] {
-        let provider = Arc::new(FixedProvider {
-            calls: AtomicUsize::new(0),
-            response: Ok(response),
-        });
-        let app = application(target.clone(), provider.clone());
-        let view = app
-            .start_portfolio(
-                run_id_with(byte),
-                selector("portfolio-example"),
-                &native_config(),
-                std::slice::from_ref(&target),
-            )
-            .await
-            .expect("durable domain failure");
-        let RunViewState::Failed(failure) = view.state() else {
-            panic!("evidence must reach the root failure");
-        };
-        if byte == 61 {
-            assert_eq!(
-                failure.canonical_bytes(),
-                include_str!(
-                    "../../../docs/contracts/evm-portfolio/portfolio-snapshot-failure.json"
-                )
-                .trim()
-                .as_bytes()
-            );
-        }
-        assert!(std::str::from_utf8(failure.canonical_bytes())
-            .expect("utf8")
-            .contains(expected_code));
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
-    }
-}
-
-#[tokio::test]
-async fn application_error_ownership_is_exact() {
-    let target = EvmPhysicalTarget::new(1, endpoint_ref()).expect("target");
-    let provider = Arc::new(FixedProvider {
-        calls: AtomicUsize::new(0),
-        response: Err(ReadAdapterError::Unavailable),
-    });
-    let app = application(target.clone(), provider.clone());
-
-    assert!(matches!(
-        app.read(&run_id()).await,
-        Err(ApplicationError::Runtime(RuntimeError::Absent))
-    ));
-    assert!(matches!(
-        app.start_portfolio(
-            run_id(),
-            selector("not-the-configured-portfolio"),
-            &native_config(),
-            std::slice::from_ref(&target),
+        .await
+        .expect("created");
+    let digest = created.config().digest().clone();
+    let unchanged = app
+        .import_config(
+            name.clone(),
+            document(vec![(1, "alpha"), (2, "beta")]).await,
         )
-        .await,
-        Err(ApplicationError::InvalidRequest)
-    ));
-    assert!(matches!(
-        app.start_portfolio(
-            run_id(),
-            selector("portfolio-example"),
-            &native_config(),
-            &[],
-        )
-        .await,
-        Err(ApplicationError::Internal)
-    ));
-    assert!(matches!(
-        app.start_portfolio(
-            run_id(),
-            selector("portfolio-example"),
-            &native_config(),
-            &[target],
-        )
-        .await,
-        Err(ApplicationError::Runtime(RuntimeError::Unavailable))
-    ));
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn target_descriptor_bound_precedes_runtime_admission() {
-    let targets = (1..=EVM_BALANCE_SOURCE_LIMIT + 1)
-        .map(|chain_id| EvmPhysicalTarget::new(chain_id as u64, endpoint_ref()).expect("target"))
-        .collect::<Vec<_>>();
-    let provider = Arc::new(Provider {
-        calls: AtomicUsize::new(0),
-        reject_call: None,
-    });
-    let routes = targets
-        .iter()
-        .map(|target| {
-            (
-                target.chain_id(),
-                EvmEndpoint::new("test-endpoint").expect("endpoint"),
-                provider.clone() as Arc<dyn EvmProvider>,
-            )
-        })
-        .collect();
-    let bindings = BoundCapabilitySet::new(routes).expect("bindings");
-    let app = Application::new(
-        ComposedRuntime::compose(Arc::new(MemoryStore::new()), bindings).expect("composition"),
+        .await
+        .expect("unchanged");
+    assert_eq!(unchanged.config(), created.config());
+    assert_eq!(
+        app.import_config(name.clone(), document(vec![(1, "alpha")]).await)
+            .await,
+        Err(RequestError::ConfigConflict)
     );
 
-    app.start_portfolio(
-        run_id_with(70),
-        selector("portfolio-example"),
-        &native_config(),
-        &targets[..EVM_BALANCE_SOURCE_LIMIT],
-    )
-    .await
-    .expect("64 target descriptors");
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    let started = app
+        .start_run(run_id(10), &ConfigSelection::Current { name: name.clone() })
+        .await
+        .expect("current start");
+    assert_eq!(started.config().digest(), &digest);
+    assert!(matches!(started.run().state(), RunViewState::Succeeded(_)));
+    assert_eq!(first.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(second.calls.load(Ordering::SeqCst), 4);
 
-    let rejected_id = run_id_with(71);
+    let exact = app
+        .start_run(
+            run_id(11),
+            &ConfigSelection::Exact {
+                name: name.clone(),
+                digest: digest.clone(),
+            },
+        )
+        .await
+        .expect("exact start");
+    assert_eq!(exact.config(), created.config());
+    let wrong = ConfigDigest::new(ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([9; 32]),
+    ))
+    .expect("digest");
     assert!(matches!(
-        app.start_portfolio(
-            rejected_id.clone(),
-            selector("portfolio-example"),
-            &native_config(),
-            &targets,
+        app.start_run(
+            run_id(12),
+            &ConfigSelection::Exact {
+                name: name.clone(),
+                digest: wrong,
+            },
         )
         .await,
-        Err(ApplicationError::Internal)
+        Err(mfm_app::RunRequestError::Request(
+            RequestError::ConfigDigestMismatch
+        ))
     ));
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
 
-    app.start_portfolio(
-        rejected_id,
-        selector("portfolio-example"),
-        &native_config(),
-        &targets[..EVM_BALANCE_SOURCE_LIMIT],
+    let configs = app
+        .list_configs(&ConfigPageRequest::new(None, PageLimit::default()))
+        .await
+        .expect("config page");
+    assert_eq!(configs.items(), std::slice::from_ref(created.config()));
+    let runs = app
+        .list_runs(&RunPageRequest::new(None, PageLimit::default()))
+        .await
+        .expect("run page");
+    assert_eq!(runs.items().len(), 2);
+
+    app.delete_config(&name, &digest).await.expect("delete");
+    assert_eq!(
+        app.read_config(&name).await.err(),
+        Some(RequestError::ConfigAbsent)
+    );
+    let retained = app.read_run(&run_id(10)).await.expect("retained run");
+    assert_eq!(retained.head_digest(), started.run().head_digest());
+}
+
+#[tokio::test]
+async fn invalid_or_unbound_config_fails_before_run_store_io() {
+    let app = application(&[(1, "alpha", provider(1))]);
+    let invalid_name = config_name("invalid");
+    let invalid = ConfigDocument::new(
+        serde_json::to_vec(&document_value(vec![(1, "alpha")], "other-portfolio")).expect("JSON"),
     )
     .await
-    .expect("rejected RunId was never admitted");
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 8);
+    .expect("typed document");
+    assert_eq!(
+        app.import_config(invalid_name, invalid).await,
+        Err(RequestError::InvalidConfigDocument)
+    );
+
+    let unbound_name = config_name("unbound");
+    app.import_config(
+        unbound_name.clone(),
+        document(vec![(u64::MAX, "upper-half")]).await,
+    )
+    .await
+    .expect("deployment-independent import");
+    assert!(matches!(
+        app.start_run(run_id(20), &ConfigSelection::Current { name: unbound_name },)
+            .await,
+        Err(mfm_app::RunRequestError::Request(
+            RequestError::BindingUnbound
+        ))
+    ));
+    assert!(app
+        .list_runs(&RunPageRequest::new(None, PageLimit::default()))
+        .await
+        .expect("run page")
+        .items()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn shared_run_serializer_preserves_the_state_sum_and_raw_value() {
+    let app = application(&[(1, "alpha", provider(1))]);
+    let name = config_name("serial");
+    app.import_config(name.clone(), document(vec![(1, "alpha")]).await)
+        .await
+        .expect("import");
+    let result = app
+        .start_run(run_id(30), &ConfigSelection::Current { name })
+        .await
+        .expect("start");
+    let rendered = serde_json::to_value(SerializableRunView::new(result.run())).expect("JSON");
+    assert_eq!(rendered["state"]["kind"], "succeeded");
+    assert!(rendered["state"]["contract_ref"].is_object());
+    assert!(rendered["state"]["value_ref"].is_object());
+    assert!(rendered["state"]["value"].is_object());
+}
+
+#[tokio::test]
+async fn ambiguous_run_appends_carry_exact_start_and_progress_recovery_sums() {
+    let start_backend = Arc::new(FaultStore::new());
+    let start_app =
+        application_with_backend(&[(1, "alpha", provider(1))], Arc::clone(&start_backend));
+    let start_name = config_name("start-recovery");
+    let imported = start_app
+        .import_config(start_name.clone(), document(vec![(1, "alpha")]).await)
+        .await
+        .expect("import");
+    start_backend.fail_next_append();
+    let Err(error) = start_app
+        .start_run(run_id(40), &ConfigSelection::Current { name: start_name })
+        .await
+    else {
+        panic!("start append must be ambiguous");
+    };
+    assert_eq!(error.code(), "run_append_indeterminate");
+    assert!(matches!(
+        error.recovery(),
+        Some(RunRecovery::Start { run_id: retained, config })
+            if retained == &run_id(40) && config == imported.config()
+    ));
+
+    let progress_backend = Arc::new(FaultStore::new());
+    let progress_provider = provider(1);
+    progress_provider.available.store(false, Ordering::SeqCst);
+    let progress_app = application_with_backend(
+        &[(1, "alpha", Arc::clone(&progress_provider))],
+        Arc::clone(&progress_backend),
+    );
+    let progress_name = config_name("progress-recovery");
+    progress_app
+        .import_config(progress_name.clone(), document(vec![(1, "alpha")]).await)
+        .await
+        .expect("import");
+    assert!(matches!(
+        progress_app
+            .start_run(
+                run_id(41),
+                &ConfigSelection::Current {
+                    name: progress_name,
+                },
+            )
+            .await,
+        Err(mfm_app::RunRequestError::Request(
+            RequestError::DependencyUnavailable
+        ))
+    ));
+    progress_provider.available.store(true, Ordering::SeqCst);
+    progress_backend.fail_next_append();
+    let Err(error) = progress_app.progress_run(&run_id(41)).await else {
+        panic!("progress append must be ambiguous");
+    };
+    assert!(matches!(
+        error.recovery(),
+        Some(RunRecovery::Progress { run_id: retained }) if retained == &run_id(41)
+    ));
 }

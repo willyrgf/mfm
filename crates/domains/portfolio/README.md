@@ -1,6 +1,6 @@
 # mfm-portfolio
 
-Portfolio owns checked secret-free selector/config authoring, target resolution, Program/C0
+Portfolio owns checked secret-free selector/config authoring, exact target-set resolution, Program/C0
 planning, cumulative aggregation, EVM child-failure mapping, and frozen snapshot/report values.
 Targets must be sorted and unique by chain ID; total sources are bounded at 64.
 

@@ -12,7 +12,9 @@ use alloy_primitives::{hex, Address, U256};
 use mfm_evm::{EvmBalanceSource, EvmBlockAnchor, EvmReadIntent, EvmReadSubject, EvmReadValue};
 use mfm_ids::StableId;
 use mfm_runtime::ReadAdapterError;
+use mfm_transport_security::{LoadedTlsRoots, TlsRootSpec};
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use crate::{EvmProvider, EvmProviderResponse};
 
@@ -20,6 +22,8 @@ use crate::{EvmProvider, EvmProviderResponse};
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 /// Complete per-request deadline covering connect, send, and body.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Largest admitted private EVM adapter locator.
+pub const MAX_EVM_ADAPTER_LOCATOR_BYTES: usize = 16 * 1024;
 /// ERC-20 `decimals()` selector.
 const DECIMALS_SELECTOR: &str = "313ce567";
 /// ERC-20 `balanceOf(address)` selector.
@@ -32,24 +36,104 @@ const BALANCE_OF_SELECTOR: &str = "70a08231";
 #[error("evm provider transport could not be constructed")]
 pub struct EvmProviderBuildError;
 
+/// Checked private EVM connection authority.
+///
+/// This value deliberately implements neither `Debug`, `Display`, nor serialization.
+pub struct EvmAdapterLocator {
+    url: Url,
+    tls_roots: TlsRootSpec,
+}
+
+impl EvmAdapterLocator {
+    /// Parses one bounded HTTPS locator with one exhaustive TLS-root source.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, EvmProviderBuildError> {
+        let value = value.as_ref();
+        if value.is_empty() || value.len() > MAX_EVM_ADAPTER_LOCATOR_BYTES {
+            return Err(EvmProviderBuildError);
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            v: u8,
+            url: String,
+            tls_roots: TlsRootSpec,
+        }
+        let wire: Wire = serde_json::from_str(value).map_err(|_| EvmProviderBuildError)?;
+        if wire.v != 1
+            || wire.url.is_empty()
+            || wire.url.len() > MAX_EVM_ADAPTER_LOCATOR_BYTES
+            || wire.url.chars().any(char::is_control)
+        {
+            return Err(EvmProviderBuildError);
+        }
+        let url = Url::parse(&wire.url).map_err(|_| EvmProviderBuildError)?;
+        if url.scheme() != "https"
+            || url.cannot_be_a_base()
+            || !url.has_host()
+            || url.fragment().is_some()
+        {
+            return Err(EvmProviderBuildError);
+        }
+        Ok(Self {
+            url,
+            tls_roots: wire.tls_roots,
+        })
+    }
+}
+
 /// Bounded JSON-RPC EVM provider bound to one endpoint URL.
 pub struct JsonRpcEvmProvider {
     url: reqwest::Url,
     http: reqwest::Client,
+    _roots: Option<LoadedTlsRoots>,
 }
 
 impl JsonRpcEvmProvider {
-    /// Builds one provider for the supplied RPC URL.
+    /// Builds one provider from checked exact endpoint authority.
     ///
-    /// The URL is a handle, never route or value material: it stays inside this provider and
-    /// appears in no intent, evidence, log, or error.
-    pub fn new(rpc_url: String) -> Result<Self, EvmProviderBuildError> {
-        let url = reqwest::Url::parse(&rpc_url).map_err(|_| EvmProviderBuildError)?;
+    /// The URL and roots stay inside this provider and appear in no intent, evidence, log, or
+    /// error. Proxy discovery, redirects, referers, retries, plaintext, native roots, and additive
+    /// compiled roots are disabled.
+    pub async fn connect(locator: &EvmAdapterLocator) -> Result<Self, EvmProviderBuildError> {
+        let roots = LoadedTlsRoots::load(&locator.tls_roots)
+            .await
+            .map_err(|_| EvmProviderBuildError)?;
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(roots.root_store().as_ref().clone())
+            .with_no_client_auth();
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .referer(false)
+            .retry(reqwest::retry::never())
+            .https_only(true)
+            .use_preconfigured_tls(tls)
             .build()
             .map_err(|_| EvmProviderBuildError)?;
-        Ok(Self { url, http })
+        Ok(Self {
+            url: locator.url.clone(),
+            http,
+            _roots: Some(roots),
+        })
+    }
+
+    #[cfg(test)]
+    fn new_http_for_test(url: String) -> Result<Self, EvmProviderBuildError> {
+        let url = reqwest::Url::parse(&url).map_err(|_| EvmProviderBuildError)?;
+        let http = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .referer(false)
+            .retry(reqwest::retry::never())
+            .build()
+            .map_err(|_| EvmProviderBuildError)?;
+        Ok(Self {
+            url,
+            http,
+            _roots: None,
+        })
     }
 
     /// Performs one JSON-RPC call.

@@ -59,12 +59,13 @@ MFM_E2E_RUNTIME_STORE_LOCATOR=... MFM_E2E_ADMIN_STORE_LOCATOR=... nix develop -c
 | --- | --- |
 | `nix run .#model-check` | Admit the compiled model without project tasks. |
 | `nix run .#run -- --task postgres-test` | Run private ignored PostgreSQL tests through real hostname-verified TLS, exact pinned roots, hostile ambient settings, and the split runtime role; wrong pin/CA/host are rejected. |
-| `nix run .#run -- --task cli-e2e` | Run the ignored CLI-driven EVM snapshot e2e against managed reth and the same TLS/split-authority PostgreSQL fixture. |
+| `nix run .#run -- --task transport-authority-test` | Exercise the production EVM HTTPS client through exact pinned roots and prove proxy, redirect, wrong-pin, alternate-CA, and wrong-host authority are rejected. |
+| `nix run .#run -- --task cli-e2e` | Exercise the complete stored-config CLI lifecycle against managed TLS EVM and split-authority TLS PostgreSQL fixtures. |
 | `nix run .#run -- --task capacity-app` | Exercise the exact 64/65-source Portfolio Program/C0 bound. |
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |
 | `nix run .#run -- --task capacity-envelope` | Compose the three capacity owners above. |
-| `nix run .#ci` | Compose format, Clippy, workspace check/tests, managed DB, the managed CLI e2e, docs, and capacity tasks. |
+| `nix run .#ci` | Compose format, Clippy, workspace check/tests, managed DB, EVM transport authority, the managed CLI e2e, docs, and capacity tasks. |
 
 Do not run broad component gates immediately before `.#ci` on the same tree. Once focused failures
 are resolved, run CI exactly once on the final candidate when the workflow requires the composed
