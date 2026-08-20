@@ -1,25 +1,49 @@
 #![warn(missing_docs)]
-//! Thin Portfolio-only Application facade over the typed Runtime, plus the one trusted
-//! Portfolio assembly composition every binary and Runtime test shares.
+//! Typed transport-neutral client use cases over one checked live composition.
 
+use std::fmt;
 use std::sync::Arc;
 
-use mfm_catalog::RunIndex;
+use mfm_canonical::sha256_digest_bytes;
+use mfm_catalog::{
+    CatalogDeleteResult, CatalogError, CatalogInsertResult, ConfigCatalog, ConfigCursor,
+    ConfigDigest, ConfigName, PageLimit, RunCursor, RunIndex, RunIndexError,
+};
 use mfm_evm::{
     CheckChainIdentity, ConfirmBalanceAnchor, ConsolidateBalanceCollection, EvmAnchorRead,
     EvmBalanceRead, EvmChainIdentityRead, EvmEndpoint, EvmPhysicalTarget, ReadInitialAnchor,
     ReadNativeBalance, ReadTokenBalance, ReadTokenDecimals, SelectBalanceAsset,
-    EVM_BALANCE_SOURCE_LIMIT,
 };
-use mfm_evm_live::{register_evm_reads, EvmProvider};
+use mfm_evm_live::{register_evm_reads, EvmAdapterLocator, EvmProvider, JsonRpcEvmProvider};
 use mfm_ids::{ContentRef, RunId};
 use mfm_portfolio::{
-    plan_snapshot, ConsolidatePortfolio, EnterPortfolioCollection, InitializePortfolio,
-    MapEvmBalanceFailure, PortfolioConfig, PortfolioContinuation, PortfolioError,
-    PortfolioSnapshotSelector, ResumePortfolioCollection, PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
+    ConsolidatePortfolio, EnterPortfolioCollection, InitializePortfolio, MapEvmBalanceFailure,
+    PortfolioContinuation, PortfolioError, ResumePortfolioCollection,
 };
-use mfm_runtime::{RunView, Runtime, RuntimeAssemblyBuilder, RuntimeError};
+use mfm_runtime::{
+    RetainedValueView, RunView, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError,
+};
+use mfm_storage_postgres::{
+    provision_schemas, AdminPostgresLocator, PostgresCatalog, PostgresStore, RuntimePostgresLocator,
+};
 use mfm_store::Store;
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
+use serde_json::value::RawValue;
+
+mod config;
+mod deployment;
+
+pub use config::{
+    ConfigDocument, ConfigDocumentError, ConfigSummary, EntryPointSummary, ImportOutcome,
+    StoredConfigView,
+};
+pub use deployment::{
+    Deployment, EnvironmentName, EnvironmentNameError, MAX_DEPLOYMENT_DOCUMENT_BYTES,
+};
+
+use config::ENTRY_POINTS;
+use deployment::resolve_environment;
 
 /// Maximum number of EVM capability bindings in one composed Runtime.
 pub const MAX_EVM_BINDINGS: usize = 256;
@@ -27,8 +51,7 @@ pub const MAX_EVM_BINDINGS: usize = 256;
 /// Registers every Portfolio and EVM State implementation the snapshot Program declares.
 ///
 /// [`ComposedRuntime`] is the composition trusted callers want. This entry stays public only for
-/// adapterless composition, where a caller deliberately finishes an assembly with no Read callback
-/// to prove association rejects the Program before any Store IO.
+/// adapterless tests that prove association rejects a Program before Store IO.
 pub fn register_portfolio_states(builder: &mut RuntimeAssemblyBuilder) -> mfm_runtime::Result<()> {
     builder.register_pure::<InitializePortfolio>()?;
     builder.register_pure::<EnterPortfolioCollection>()?;
@@ -46,12 +69,36 @@ pub fn register_portfolio_states(builder: &mut RuntimeAssemblyBuilder) -> mfm_ru
 }
 
 /// Redaction-safe live composition failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("application composition is invalid")]
-pub struct ComposeError;
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ComposeError {
+    /// Deployment path, bytes, or strict TOML were invalid or unavailable.
+    #[error("deployment bootstrap is invalid or unavailable")]
+    Deployment,
+    /// A checked environment resolver had no usable value.
+    #[error("environment variable {0} is not set")]
+    Environment(EnvironmentName),
+    /// The runtime PostgreSQL locator was invalid.
+    #[error("postgres locator is invalid or unavailable")]
+    StoreLocator,
+    /// PostgreSQL provisioning failed.
+    #[error("postgres provisioning failed")]
+    Provision,
+    /// The append-only run store could not be opened.
+    #[error("postgres run store is invalid or unavailable")]
+    Store,
+    /// The config catalog could not be opened.
+    #[error("postgres config catalog is invalid or unavailable")]
+    Catalog,
+    /// An EVM locator or exact TLS client could not be constructed.
+    #[error("evm provider transport could not be constructed")]
+    Provider,
+    /// Typed binding or immutable Runtime assembly construction failed.
+    #[error("application composition is invalid")]
+    Assembly,
+}
 
 /// One public capability binding derived from the exact typed live binding.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PublicBindingView {
     /// One EVM observational route.
@@ -72,9 +119,6 @@ struct BoundEvmRoute {
 }
 
 /// Checked typed capability bindings consumed by one [`ComposedRuntime`].
-///
-/// The set is opaque so callers cannot supply public discovery views independently from the typed
-/// targets and provider handles used to register Runtime adapters.
 pub struct BoundCapabilitySet {
     evm: Vec<BoundEvmRoute>,
 }
@@ -82,25 +126,26 @@ pub struct BoundCapabilitySet {
 impl BoundCapabilitySet {
     /// Checks one stable, strictly ordered EVM route set.
     ///
-    /// Each tuple contains the public chain id, checked endpoint identity, and its private provider
-    /// handle. Empty sets are valid; at most 256 routes are accepted.
+    /// Empty sets are valid; at most 256 routes are accepted.
     pub fn new(
         routes: Vec<(u64, EvmEndpoint, Arc<dyn EvmProvider>)>,
-    ) -> std::result::Result<Self, ComposeError> {
+    ) -> Result<Self, ComposeError> {
         if routes.len() > MAX_EVM_BINDINGS
             || routes.windows(2).any(|pair| {
                 (pair[0].0, pair[0].1.endpoint_id()) >= (pair[1].0, pair[1].1.endpoint_id())
             })
         {
-            return Err(ComposeError);
+            return Err(ComposeError::Assembly);
         }
         let mut evm = Vec::new();
         evm.try_reserve_exact(routes.len())
-            .map_err(|_| ComposeError)?;
+            .map_err(|_| ComposeError::Assembly)?;
         for (chain_id, endpoint, provider) in routes {
-            let endpoint_ref = endpoint.endpoint_ref().map_err(|_| ComposeError)?;
-            let target =
-                EvmPhysicalTarget::new(chain_id, endpoint_ref).map_err(|_| ComposeError)?;
+            let endpoint_ref = endpoint
+                .endpoint_ref()
+                .map_err(|_| ComposeError::Assembly)?;
+            let target = EvmPhysicalTarget::new(chain_id, endpoint_ref)
+                .map_err(|_| ComposeError::Assembly)?;
             evm.push(BoundEvmRoute {
                 target,
                 endpoint_id: endpoint.endpoint_id().to_owned(),
@@ -114,32 +159,32 @@ impl BoundCapabilitySet {
 /// One Runtime, RunIndex, typed planning targets, and exact public binding views built together.
 pub struct ComposedRuntime {
     runtime: Runtime,
-    _run_index: Arc<dyn RunIndex>,
+    run_index: Arc<dyn RunIndex>,
     targets: Vec<EvmPhysicalTarget>,
     bindings: Vec<PublicBindingView>,
 }
 
 impl ComposedRuntime {
     /// Builds the complete Portfolio assembly from one backend and checked binding set.
-    pub fn compose<B>(
-        backend: Arc<B>,
-        bindings: BoundCapabilitySet,
-    ) -> std::result::Result<Self, ComposeError>
+    pub fn compose<B>(backend: Arc<B>, bindings: BoundCapabilitySet) -> Result<Self, ComposeError>
     where
         B: Store + RunIndex + 'static,
     {
         let mut builder = RuntimeAssemblyBuilder::new();
-        register_portfolio_states(&mut builder).map_err(|_| ComposeError)?;
+        register_portfolio_states(&mut builder).map_err(|_| ComposeError::Assembly)?;
         let mut targets = Vec::new();
         let mut views = Vec::new();
         targets
             .try_reserve_exact(bindings.evm.len())
-            .map_err(|_| ComposeError)?;
+            .map_err(|_| ComposeError::Assembly)?;
         views
             .try_reserve_exact(bindings.evm.len())
-            .map_err(|_| ComposeError)?;
+            .map_err(|_| ComposeError::Assembly)?;
         for binding in bindings.evm {
-            let binding_ref = binding.target.binding_ref().map_err(|_| ComposeError)?;
+            let binding_ref = binding
+                .target
+                .binding_ref()
+                .map_err(|_| ComposeError::Assembly)?;
             views.push(PublicBindingView::Evm {
                 chain_id: binding.target.chain_id(),
                 endpoint_id: binding.endpoint_id,
@@ -147,113 +192,782 @@ impl ComposedRuntime {
             });
             targets.push(binding.target.clone());
             register_evm_reads(&mut builder, binding.target, binding.provider)
-                .map_err(|_| ComposeError)?;
+                .map_err(|_| ComposeError::Assembly)?;
         }
-        let assembly = builder.finish().map_err(|_| ComposeError)?;
+        let assembly = builder.finish().map_err(|_| ComposeError::Assembly)?;
         let store: Arc<dyn Store> = backend.clone();
         let run_index: Arc<dyn RunIndex> = backend;
         Ok(Self {
             runtime: Runtime::new(assembly, store),
-            _run_index: run_index,
+            run_index,
             targets,
             bindings: views,
         })
     }
 
-    /// Returns the stable public binding list derived during composition.
-    pub fn bindings(&self) -> &[PublicBindingView] {
-        &self.bindings
+    fn has_targets(&self, targets: &[EvmPhysicalTarget]) -> bool {
+        targets.iter().all(|target| self.targets.contains(target))
     }
 }
 
-/// Result type for Application operations.
-pub type Result<T> = std::result::Result<T, ApplicationError>;
-
-/// Redaction-safe Application failure.
-#[derive(Debug, thiserror::Error)]
-pub enum ApplicationError {
-    /// Caller selector or selector/config matching was invalid.
-    #[error("application request is invalid")]
-    InvalidRequest,
-    /// Trusted composition or Program authoring failed.
+/// Stable request-level application failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RequestError {
+    /// The selected config name is absent.
+    #[error("config is absent")]
+    ConfigAbsent,
+    /// The selected config name retains different content.
+    #[error("config name is bound to different content")]
+    ConfigConflict,
+    /// A caller's revision assertion differs from current content.
+    #[error("config digest does not match current content")]
+    ConfigDigestMismatch,
+    /// The complete config cannot be planned.
+    #[error("config document is invalid")]
+    InvalidConfigDocument,
+    /// The fixed live config capacity was reached.
+    #[error("config catalog capacity exceeded")]
+    CatalogCapacity,
+    /// A catalog mutation may have committed.
+    #[error("config mutation outcome is indeterminate")]
+    CatalogIndeterminate,
+    /// Retained catalog bytes are invalid.
+    #[error("retained config catalog is invalid")]
+    InvalidCatalog,
+    /// The run is absent.
+    #[error("run is absent")]
+    RunAbsent,
+    /// Admission differs from retained genesis.
+    #[error("run admission conflicts with retained history")]
+    RunAdmissionConflict,
+    /// Retained run history is invalid.
+    #[error("retained run history is invalid")]
+    InvalidRunHistory,
+    /// The immutable assembly cannot execute retained history.
+    #[error("runtime assembly is incompatible")]
+    IncompatibleAssembly,
+    /// A run capacity was exceeded.
+    #[error("run capacity exceeded")]
+    RunCapacity,
+    /// A config selects a capability not present in the composition.
+    #[error("required capability binding is unavailable")]
+    BindingUnbound,
+    /// Retained mechanical run heads are invalid.
+    #[error("retained run index is invalid")]
+    InvalidRunIndex,
+    /// A required store, catalog, or provider is unavailable.
+    #[error("application dependency is unavailable")]
+    DependencyUnavailable,
+    /// A trusted local invariant failed.
     #[error("application internal failure")]
     Internal,
-    /// Runtime returned its reviewed typed failure.
-    #[error("runtime operation failed")]
-    Runtime(#[source] RuntimeError),
 }
 
-/// Portfolio-only facade with no independent execution lifecycle.
+impl RequestError {
+    /// Returns the stable machine-readable error code.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ConfigAbsent => "config_absent",
+            Self::ConfigConflict => "config_conflict",
+            Self::ConfigDigestMismatch => "config_digest_mismatch",
+            Self::InvalidConfigDocument => "invalid_config_document",
+            Self::CatalogCapacity => "config_catalog_capacity",
+            Self::CatalogIndeterminate => "config_mutation_indeterminate",
+            Self::InvalidCatalog => "invalid_config_catalog",
+            Self::RunAbsent => "run_absent",
+            Self::RunAdmissionConflict => "run_admission_conflict",
+            Self::InvalidRunHistory => "invalid_run_history",
+            Self::IncompatibleAssembly => "incompatible_assembly",
+            Self::RunCapacity => "run_capacity",
+            Self::BindingUnbound => "binding_unbound",
+            Self::InvalidRunIndex => "invalid_run_index",
+            Self::DependencyUnavailable => "dependency_unavailable",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+/// Exhaustive stored-config selection for one run start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConfigSelection {
+    /// Atomically select the revision currently bound to the name.
+    Current {
+        /// Catalog name.
+        name: ConfigName,
+    },
+    /// Require the current revision to equal the supplied digest.
+    Exact {
+        /// Catalog name.
+        name: ConfigName,
+        /// Required canonical-document digest.
+        digest: ConfigDigest,
+    },
+}
+
+impl ConfigSelection {
+    fn name(&self) -> &ConfigName {
+        match self {
+            Self::Current { name } | Self::Exact { name, .. } => name,
+        }
+    }
+}
+
+/// Public recovery identity for an ambiguously acknowledged run append.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunRecovery {
+    /// Recover or retry one start using the exact selected revision.
+    Start {
+        /// Explicit caller-owned run identity.
+        run_id: RunId,
+        /// Exact config revision selected before the append.
+        config: ConfigSummary,
+    },
+    /// Read or retry progression for an already admitted run.
+    Progress {
+        /// Explicit run identity.
+        run_id: RunId,
+    },
+}
+
+/// Run mutation failure with exact recovery identity for ambiguous append acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+// The public recovery sum deliberately retains its checked fields inline; append ambiguity is an
+// exceptional path and changing the variant to an allocation-shaped API would weaken that contract.
+#[allow(clippy::large_enum_variant)]
+pub enum RunRequestError {
+    /// Ordinary shared request failure.
+    #[error("{0}")]
+    Request(RequestError),
+    /// The append may have committed.
+    #[error("run append outcome is indeterminate")]
+    AppendIndeterminate {
+        /// Checked public recovery identity.
+        recovery: RunRecovery,
+    },
+}
+
+impl RunRequestError {
+    /// Returns the stable machine-readable error code.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Request(error) => error.code(),
+            Self::AppendIndeterminate { .. } => "run_append_indeterminate",
+        }
+    }
+
+    /// Returns recovery identity only for an ambiguously acknowledged append.
+    pub const fn recovery(&self) -> Option<&RunRecovery> {
+        match self {
+            Self::Request(_) => None,
+            Self::AppendIndeterminate { recovery } => Some(recovery),
+        }
+    }
+}
+
+impl From<RequestError> for RunRequestError {
+    fn from(error: RequestError) -> Self {
+        Self::Request(error)
+    }
+}
+
+/// One selected config revision and its resulting run view.
+pub struct StartRunResult {
+    config: ConfigSummary,
+    run: RunView,
+}
+
+impl StartRunResult {
+    /// Returns the exact selected config revision.
+    pub const fn config(&self) -> &ConfigSummary {
+        &self.config
+    }
+
+    /// Returns the resulting durable run view.
+    pub const fn run(&self) -> &RunView {
+        &self.run
+    }
+}
+
+impl Serialize for StartRunResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("StartRunResult", 2)?;
+        state.serialize_field("config", &self.config)?;
+        state.serialize_field("run", &SerializableRunView::new(&self.run))?;
+        state.end()
+    }
+}
+
+/// Borrowed exact JSON serializer for one [`RunView`].
+pub struct SerializableRunView<'a> {
+    view: &'a RunView,
+}
+
+impl<'a> SerializableRunView<'a> {
+    /// Wraps one run view without changing its retained bytes.
+    pub const fn new(view: &'a RunView) -> Self {
+        Self { view }
+    }
+}
+
+impl Serialize for SerializableRunView<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("RunView", 4)?;
+        state.serialize_field("run_id", self.view.run_id())?;
+        state.serialize_field("head_sequence", &self.view.head_sequence())?;
+        state.serialize_field("head_digest", self.view.head_digest())?;
+        match self.view.state() {
+            RunViewState::Runnable => {
+                state.serialize_field("state", &RunnableState { kind: "runnable" })?
+            }
+            RunViewState::Succeeded(value) => {
+                state.serialize_field("state", &TerminalState::new("succeeded", value))?
+            }
+            RunViewState::Failed(value) => {
+                state.serialize_field("state", &TerminalState::new("failed", value))?
+            }
+        }
+        state.end()
+    }
+}
+
+#[derive(Serialize)]
+struct RunnableState {
+    kind: &'static str,
+}
+
+struct TerminalState<'a> {
+    kind: &'static str,
+    value: &'a RetainedValueView,
+}
+
+impl<'a> TerminalState<'a> {
+    const fn new(kind: &'static str, value: &'a RetainedValueView) -> Self {
+        Self { kind, value }
+    }
+}
+
+impl Serialize for TerminalState<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let raw = std::str::from_utf8(self.value.canonical_bytes())
+            .ok()
+            .and_then(|value| RawValue::from_string(value.to_owned()).ok())
+            .ok_or_else(|| serde::ser::Error::custom("retained canonical value is invalid"))?;
+        let mut state = serializer.serialize_struct("RunViewState", 4)?;
+        state.serialize_field("kind", self.kind)?;
+        state.serialize_field("contract_ref", self.value.contract_ref())?;
+        state.serialize_field("value_ref", self.value.value_ref())?;
+        state.serialize_field("value", &raw)?;
+        state.end()
+    }
+}
+
+/// Checked config list request.
+pub struct ConfigPageRequest {
+    cursor: Option<ConfigCursor>,
+    limit: PageLimit,
+}
+
+impl ConfigPageRequest {
+    /// Constructs one checked keyset-page request.
+    pub const fn new(cursor: Option<ConfigCursor>, limit: PageLimit) -> Self {
+        Self { cursor, limit }
+    }
+}
+
+/// Checked run-head list request.
+pub struct RunPageRequest {
+    cursor: Option<RunCursor>,
+    limit: PageLimit,
+}
+
+impl RunPageRequest {
+    /// Constructs one checked keyset-page request.
+    pub const fn new(cursor: Option<RunCursor>, limit: PageLimit) -> Self {
+        Self { cursor, limit }
+    }
+}
+
+/// One validated page of public config summaries.
+#[derive(Serialize)]
+pub struct ConfigPage {
+    items: Vec<ConfigSummary>,
+    next_cursor: Option<ConfigCursor>,
+}
+
+impl ConfigPage {
+    /// Returns the ordered config summaries.
+    pub fn items(&self) -> &[ConfigSummary] {
+        &self.items
+    }
+
+    /// Returns the exclusive next cursor when another row was observed.
+    pub const fn next_cursor(&self) -> Option<&ConfigCursor> {
+        self.next_cursor.as_ref()
+    }
+}
+
+/// One mechanical page of run heads.
+#[derive(Serialize)]
+pub struct RunPage {
+    items: Vec<mfm_catalog::RunSummary>,
+    next_cursor: Option<RunCursor>,
+}
+
+impl RunPage {
+    /// Returns the ordered mechanical run summaries.
+    pub fn items(&self) -> &[mfm_catalog::RunSummary] {
+        &self.items
+    }
+
+    /// Returns the exclusive next cursor when another row was observed.
+    pub const fn next_cursor(&self) -> Option<&RunCursor> {
+        self.next_cursor.as_ref()
+    }
+}
+
+/// Borrowed entry-point list JSON model shared by client transports.
+#[derive(Serialize)]
+pub struct EntryPointList<'a> {
+    items: &'a [EntryPointSummary],
+}
+
+impl<'a> EntryPointList<'a> {
+    /// Wraps one ordered entry-point slice.
+    pub const fn new(items: &'a [EntryPointSummary]) -> Self {
+        Self { items }
+    }
+}
+
+/// Borrowed public binding-list JSON model shared by client transports.
+#[derive(Serialize)]
+pub struct BindingList<'a> {
+    items: &'a [PublicBindingView],
+}
+
+impl<'a> BindingList<'a> {
+    /// Wraps one ordered binding slice.
+    pub const fn new(items: &'a [PublicBindingView]) -> Self {
+        Self { items }
+    }
+}
+
+/// Transport-neutral application use-case surface.
 pub struct Application {
     composed: ComposedRuntime,
+    catalog: Arc<dyn ConfigCatalog>,
 }
 
 impl Application {
-    /// Constructs the facade from one checked composed Runtime.
-    pub fn new(composed: ComposedRuntime) -> Self {
-        Self { composed }
+    /// Constructs an Application from one checked Runtime/index composition and config catalog.
+    pub fn from_parts(
+        composed: ComposedRuntime,
+        catalog: Arc<dyn ConfigCatalog>,
+    ) -> Result<Self, ComposeError> {
+        Ok(Self { composed, catalog })
     }
 
-    /// Returns the stable public binding list derived during composition.
-    pub fn bindings(&self) -> &[PublicBindingView] {
-        self.composed.bindings()
-    }
-
-    /// Plans, admits, and progresses one Portfolio snapshot.
-    pub async fn start_portfolio(
-        &self,
-        run_id: RunId,
-        selector: PortfolioSnapshotSelector,
-        config: &PortfolioConfig,
-        targets: &[EvmPhysicalTarget],
-    ) -> Result<RunView> {
-        if targets.len() > EVM_BALANCE_SOURCE_LIMIT
-            || targets
-                .iter()
-                .any(|target| !self.composed.targets.contains(target))
-        {
-            return Err(ApplicationError::Internal);
+    /// Resolves private locators once and constructs the production PostgreSQL/EVM Application.
+    pub async fn open(deployment: &Deployment) -> Result<Self, ComposeError> {
+        let store_value = resolve_environment(deployment.runtime_locator_env())?;
+        let store_locator =
+            RuntimePostgresLocator::parse(store_value).map_err(|_| ComposeError::StoreLocator)?;
+        let mut routes = Vec::new();
+        routes
+            .try_reserve_exact(deployment.evm_routes().len())
+            .map_err(|_| ComposeError::Assembly)?;
+        for route in deployment.evm_routes() {
+            let locator_value = resolve_environment(route.adapter_locator_env())?;
+            let locator =
+                EvmAdapterLocator::parse(locator_value).map_err(|_| ComposeError::Provider)?;
+            let provider: Arc<dyn EvmProvider> = Arc::new(
+                JsonRpcEvmProvider::connect(&locator)
+                    .await
+                    .map_err(|_| ComposeError::Provider)?,
+            );
+            routes.push((route.chain_id(), route.endpoint().clone(), provider));
         }
-        let owned_config = config.clone();
-        let owned_targets = targets.to_vec();
-        let planned = tokio::task::spawn_blocking(move || {
-            plan_snapshot(selector, &owned_config, &owned_targets)
+        let store = Arc::new(
+            PostgresStore::connect(&store_locator)
+                .await
+                .map_err(|_| ComposeError::Store)?,
+        );
+        let catalog: Arc<dyn ConfigCatalog> = Arc::new(
+            PostgresCatalog::connect(&store_locator)
+                .await
+                .map_err(|_| ComposeError::Catalog)?,
+        );
+        let bindings = BoundCapabilitySet::new(routes)?;
+        let composed = ComposedRuntime::compose(store, bindings)?;
+        Self::from_parts(composed, catalog)
+    }
+
+    /// Returns the strictly ordered compiled entry points.
+    pub const fn entry_points() -> &'static [EntryPointSummary] {
+        &ENTRY_POINTS
+    }
+
+    /// Returns stable public bindings derived from the exact composed adapter targets.
+    pub fn bindings(&self) -> &[PublicBindingView] {
+        &self.composed.bindings
+    }
+
+    /// Validates and conditionally imports one complete config revision.
+    pub async fn import_config(
+        &self,
+        name: ConfigName,
+        document: ConfigDocument,
+    ) -> Result<ImportOutcome, RequestError> {
+        let document = tokio::task::spawn_blocking(move || match document.plan() {
+            Ok(_) => Ok(document),
+            Err(PortfolioError::InvalidValue) => Err(RequestError::InvalidConfigDocument),
+            Err(PortfolioError::InvalidContinuation | PortfolioError::Program) => {
+                Err(RequestError::Internal)
+            }
         })
         .await
-        .map_err(|_| ApplicationError::Internal)?;
-        let (program, c0) = planned.map_err(map_portfolio_error)?;
-        if program.entry_point_id().as_str() != PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID {
-            return Err(ApplicationError::Internal);
-        }
-        self.composed
-            .runtime
-            .start(run_id, program, c0)
+        .map_err(|_| RequestError::Internal)??;
+        let summary = document.summary(name.clone());
+        let entry = document
+            .catalog_entry(name)
+            .map_err(|_| RequestError::Internal)?;
+        match self
+            .catalog
+            .insert_config(&entry)
             .await
-            .map_err(ApplicationError::Runtime)
+            .map_err(map_catalog_error)?
+        {
+            CatalogInsertResult::Inserted => Ok(ImportOutcome::Created { config: summary }),
+            CatalogInsertResult::Unchanged => Ok(ImportOutcome::Unchanged { config: summary }),
+            CatalogInsertResult::Conflict => Err(RequestError::ConfigConflict),
+        }
     }
 
-    /// Resumes and progresses one retained run.
-    pub async fn resume(&self, run_id: &RunId) -> Result<RunView> {
-        self.composed
-            .runtime
-            .resume(run_id)
+    /// Reads and revalidates one retained config revision.
+    pub async fn read_config(&self, name: &ConfigName) -> Result<StoredConfigView, RequestError> {
+        let entry = self
+            .catalog
+            .load_config(name)
             .await
-            .map_err(ApplicationError::Runtime)
+            .map_err(map_catalog_error)?
+            .ok_or(RequestError::ConfigAbsent)?;
+        tokio::task::spawn_blocking(move || {
+            let (name, digest, canonical) = entry.into_parts();
+            ConfigDocument::parse_retained(canonical, &digest)
+                .and_then(|document| document.stored_view(name))
+                .map_err(|_| RequestError::InvalidCatalog)
+        })
+        .await
+        .map_err(|_| RequestError::Internal)?
+    }
+
+    /// Lists and revalidates one keyset page of config summaries.
+    pub async fn list_configs(&self, page: &ConfigPageRequest) -> Result<ConfigPage, RequestError> {
+        let page = self
+            .catalog
+            .list_configs(page.cursor.as_ref(), page.limit)
+            .await
+            .map_err(map_catalog_error)?;
+        tokio::task::spawn_blocking(move || {
+            let (entries, next_cursor) = page.into_parts();
+            let items = entries
+                .into_iter()
+                .map(|entry| {
+                    let (name, digest, canonical) = entry.into_parts();
+                    ConfigDocument::parse_retained(canonical, &digest)
+                        .map(|document| document.summary(name))
+                        .map_err(|_| RequestError::InvalidCatalog)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ConfigPage { items, next_cursor })
+        })
+        .await
+        .map_err(|_| RequestError::Internal)?
+    }
+
+    /// Atomically deletes one exact named config revision.
+    pub async fn delete_config(
+        &self,
+        name: &ConfigName,
+        digest: &ConfigDigest,
+    ) -> Result<(), RequestError> {
+        match self
+            .catalog
+            .delete_config(name, digest)
+            .await
+            .map_err(map_catalog_error)?
+        {
+            CatalogDeleteResult::Deleted => Ok(()),
+            CatalogDeleteResult::Absent => Err(RequestError::ConfigAbsent),
+            CatalogDeleteResult::DigestMismatch => Err(RequestError::ConfigDigestMismatch),
+        }
+    }
+
+    /// Selects a stored config, plans it, admits the exact RunId, and progresses the run.
+    pub async fn start_run(
+        &self,
+        run_id: RunId,
+        selection: &ConfigSelection,
+    ) -> Result<StartRunResult, RunRequestError> {
+        let entry = self
+            .catalog
+            .load_config(selection.name())
+            .await
+            .map_err(map_catalog_error)?
+            .ok_or(RequestError::ConfigAbsent)?;
+        if let ConfigSelection::Exact { digest, .. } = selection {
+            if entry.digest() != digest {
+                return Err(RequestError::ConfigDigestMismatch.into());
+            }
+        }
+        let (name, digest, canonical) = entry.into_parts();
+        let document = tokio::task::spawn_blocking(move || {
+            ConfigDocument::parse_retained(canonical, &digest)
+                .map_err(|_| RequestError::InvalidCatalog)
+        })
+        .await
+        .map_err(|_| RequestError::Internal)??;
+        let config = document.summary(name);
+        if !self.composed.has_targets(document.targets()) {
+            return Err(RequestError::BindingUnbound.into());
+        }
+        let (program, c0) = tokio::task::spawn_blocking(move || match document.plan() {
+            Ok(planned) => Ok(planned),
+            Err(PortfolioError::InvalidValue) => Err(RequestError::InvalidCatalog),
+            Err(PortfolioError::InvalidContinuation | PortfolioError::Program) => {
+                Err(RequestError::Internal)
+            }
+        })
+        .await
+        .map_err(|_| RequestError::Internal)??;
+        match self
+            .composed
+            .runtime
+            .start(run_id.clone(), program, c0)
+            .await
+        {
+            Ok(run) => Ok(StartRunResult { config, run }),
+            Err(RuntimeError::Indeterminate) => Err(RunRequestError::AppendIndeterminate {
+                recovery: RunRecovery::Start { run_id, config },
+            }),
+            Err(error) => Err(map_runtime_error(error).into()),
+        }
+    }
+
+    /// Progresses one retained run under its exact immutable assembly.
+    pub async fn progress_run(&self, run_id: &RunId) -> Result<RunView, RunRequestError> {
+        match self.composed.runtime.resume(run_id).await {
+            Ok(view) => Ok(view),
+            Err(RuntimeError::Indeterminate) => Err(RunRequestError::AppendIndeterminate {
+                recovery: RunRecovery::Progress {
+                    run_id: run_id.clone(),
+                },
+            }),
+            Err(error) => Err(map_runtime_error(error).into()),
+        }
     }
 
     /// Reads one retained run without progression.
-    pub async fn read(&self, run_id: &RunId) -> Result<RunView> {
+    pub async fn read_run(&self, run_id: &RunId) -> Result<RunView, RequestError> {
         self.composed
             .runtime
             .read(run_id)
             .await
-            .map_err(ApplicationError::Runtime)
+            .map_err(map_runtime_error)
+    }
+
+    /// Lists one mechanical keyset page of current run heads.
+    pub async fn list_runs(&self, page: &RunPageRequest) -> Result<RunPage, RequestError> {
+        let page = self
+            .composed
+            .run_index
+            .list_runs(page.cursor.as_ref(), page.limit)
+            .await
+            .map_err(map_run_index_error)?;
+        let (items, next_cursor) = page.into_parts();
+        Ok(RunPage { items, next_cursor })
     }
 }
 
-fn map_portfolio_error(error: PortfolioError) -> ApplicationError {
+/// Provisions both PostgreSQL schemas through short-lived CLI-only administrative authority.
+pub async fn provision_store(
+    deployment: &Deployment,
+    admin_locator_env: &EnvironmentName,
+) -> Result<(), ComposeError> {
+    let runtime_value = resolve_environment(deployment.runtime_locator_env())?;
+    let admin_value = resolve_environment(admin_locator_env)?;
+    let runtime =
+        RuntimePostgresLocator::parse(runtime_value).map_err(|_| ComposeError::StoreLocator)?;
+    let admin = AdminPostgresLocator::parse(admin_value).map_err(|_| ComposeError::StoreLocator)?;
+    provision_schemas(&admin, &runtime)
+        .await
+        .map_err(|_| ComposeError::Provision)
+}
+
+/// Derives `mfm.run-id.random.v1` from exactly 32 caller-supplied entropy octets.
+pub fn derive_run_id(entropy: [u8; 32]) -> RunId {
+    use fmt::Write as _;
+
+    let mut hex = String::with_capacity(64);
+    for byte in entropy {
+        write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    let preimage = format!("{{\"entropy\":\"{hex}\",\"purpose\":\"mfm.run-id.random\",\"v\":1}}");
+    RunId::from_digest(sha256_digest_bytes(preimage.as_bytes()))
+}
+
+const fn map_catalog_error(error: CatalogError) -> RequestError {
     match error {
-        PortfolioError::InvalidValue => ApplicationError::InvalidRequest,
-        PortfolioError::InvalidContinuation | PortfolioError::Program => ApplicationError::Internal,
+        CatalogError::Capacity => RequestError::CatalogCapacity,
+        CatalogError::Corrupt => RequestError::InvalidCatalog,
+        CatalogError::Unavailable => RequestError::DependencyUnavailable,
+        CatalogError::Indeterminate => RequestError::CatalogIndeterminate,
+    }
+}
+
+const fn map_run_index_error(error: RunIndexError) -> RequestError {
+    match error {
+        RunIndexError::Corrupt => RequestError::InvalidRunIndex,
+        RunIndexError::Unavailable => RequestError::DependencyUnavailable,
+    }
+}
+
+const fn map_runtime_error(error: RuntimeError) -> RequestError {
+    match error {
+        RuntimeError::Absent => RequestError::RunAbsent,
+        RuntimeError::AdmissionConflict => RequestError::RunAdmissionConflict,
+        RuntimeError::Indeterminate => RequestError::Internal,
+        RuntimeError::InvalidHistory => RequestError::InvalidRunHistory,
+        RuntimeError::IncompatibleAssembly => RequestError::IncompatibleAssembly,
+        RuntimeError::Capacity => RequestError::RunCapacity,
+        RuntimeError::Unavailable => RequestError::DependencyUnavailable,
+        RuntimeError::Internal => RequestError::Internal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_id_derivation_matches_both_interoperable_vectors() {
+        assert_eq!(
+            derive_run_id([0; 32]).as_str(),
+            "run:sha256-jcs-v1:1ffc529adb99fb0f91d2c1712affb64a6d57fcdc9ac78c31c9681449e9c9f79a"
+        );
+        let mut ascending = [0; 32];
+        for (value, byte) in ascending.iter_mut().zip(0_u8..) {
+            *value = byte;
+        }
+        assert_eq!(
+            derive_run_id(ascending).as_str(),
+            "run:sha256-jcs-v1:4412ec646bc21fee7eb806a97dccf2ec412ce38b33f9c3d7ea25e83fac13339e"
+        );
+    }
+
+    #[test]
+    fn compiled_entry_points_are_checked_and_sorted() {
+        assert!(Application::entry_points()
+            .windows(2)
+            .all(|pair| pair[0].entry_point() < pair[1].entry_point()));
+        for entry in Application::entry_points() {
+            assert!(mfm_ids::EntryPointId::new(entry.entry_point()).is_ok());
+        }
+    }
+
+    #[test]
+    fn request_error_codes_and_messages_are_frozen() {
+        let cases = [
+            (
+                RequestError::ConfigAbsent,
+                "config_absent",
+                "config is absent",
+            ),
+            (
+                RequestError::ConfigConflict,
+                "config_conflict",
+                "config name is bound to different content",
+            ),
+            (
+                RequestError::ConfigDigestMismatch,
+                "config_digest_mismatch",
+                "config digest does not match current content",
+            ),
+            (
+                RequestError::InvalidConfigDocument,
+                "invalid_config_document",
+                "config document is invalid",
+            ),
+            (
+                RequestError::CatalogCapacity,
+                "config_catalog_capacity",
+                "config catalog capacity exceeded",
+            ),
+            (
+                RequestError::CatalogIndeterminate,
+                "config_mutation_indeterminate",
+                "config mutation outcome is indeterminate",
+            ),
+            (
+                RequestError::InvalidCatalog,
+                "invalid_config_catalog",
+                "retained config catalog is invalid",
+            ),
+            (RequestError::RunAbsent, "run_absent", "run is absent"),
+            (
+                RequestError::RunAdmissionConflict,
+                "run_admission_conflict",
+                "run admission conflicts with retained history",
+            ),
+            (
+                RequestError::InvalidRunHistory,
+                "invalid_run_history",
+                "retained run history is invalid",
+            ),
+            (
+                RequestError::IncompatibleAssembly,
+                "incompatible_assembly",
+                "runtime assembly is incompatible",
+            ),
+            (
+                RequestError::RunCapacity,
+                "run_capacity",
+                "run capacity exceeded",
+            ),
+            (
+                RequestError::BindingUnbound,
+                "binding_unbound",
+                "required capability binding is unavailable",
+            ),
+            (
+                RequestError::InvalidRunIndex,
+                "invalid_run_index",
+                "retained run index is invalid",
+            ),
+            (
+                RequestError::DependencyUnavailable,
+                "dependency_unavailable",
+                "application dependency is unavailable",
+            ),
+            (
+                RequestError::Internal,
+                "internal",
+                "application internal failure",
+            ),
+        ];
+        for (error, code, message) in cases {
+            assert_eq!(error.code(), code);
+            assert_eq!(error.to_string(), message);
+        }
     }
 }

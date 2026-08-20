@@ -7,9 +7,8 @@
 - The current product entry point is `mfm.portfolio/snapshot@1`.
 - EVM transaction submission remains unsupported until a future RFC defines durable transaction
   authority and outbox semantics.
-- The standalone CLI admits one EVM route per configuration file, so a configuration whose
-  collections span two chain IDs cannot be planned. It exposes no `resume` command, no token or
-  contract deployment, no configuration effects, and no keystore import.
+- The standalone CLI exposes no token or contract deployment, configuration effects, transaction
+  submission, or keystore administration.
 - The REST binary only prints an unavailable diagnostic and exits; it binds no listener and exposes
   no route.
 

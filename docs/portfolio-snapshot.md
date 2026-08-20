@@ -1,9 +1,9 @@
 # Portfolio snapshot
 
 `plan_snapshot(selector, config, targets)` returns the checked Program and typed C0. Selector and
-configuration are checked process-local authoring inputs, not persisted generic configuration.
-Targets are strictly sorted/unique by chain ID and each selected target ref is retained in Program
-and C0.
+configuration are checked secret-free authoring inputs. Targets are nonempty, strictly
+sorted/unique by chain ID, and exactly cover the distinct chains selected by configuration; each
+selected target ref is retained in Program and C0.
 
 Planning constructs checked owned `CollectEvmBalances<PortfolioContinuation>` values, then expands
 one private Portfolio root Operation. The root composes each child through a scoped exact

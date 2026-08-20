@@ -4,12 +4,18 @@ Direct provider registration for the three surviving EVM Read capabilities. Each
 one domain-owned `EvmPhysicalTarget` and opaque provider handle, checks exact intent chain/route
 before IO, bounds request encoding, and returns typed evidence or `ReadAdapterError`.
 
-`JsonRpcEvmProvider` is the production provider behind that handle. It owns one endpoint URL, one
-10-second per-request deadline, a 512 KiB response bound, and the six frozen-wire calls the domain's
-Read subjects require: `eth_chainId`, `eth_getBlockByNumber` (latest for the initial anchor, by
-number for confirmation), `eth_getBalance`, and `eth_call` for `decimals()`/`balanceOf(address)`.
-It decodes the request bytes with the domain's own checked `EvmReadIntent` deserializer and matches
-`subject()`; it declares no serde mirror of that wire.
+`EvmAdapterLocator` is a bounded private JSON value containing `v:1`, one HTTPS URL, and exactly one
+TLS-root source: compiled WebPKI or an exclusive absolute content-pinned PEM bundle. It implements
+neither `Debug`, `Display`, nor serialization. Plaintext, non-HTTP schemes, fragments, unknown
+fields, wrong versions, bad pins, alternate roots, and wrong hostnames are rejected.
+
+`JsonRpcEvmProvider` is the production provider behind that handle. It owns one endpoint URL, the
+loaded immutable roots, one 10-second per-request deadline, a 512 KiB response bound, and the six
+frozen-wire calls the domain's Read subjects require. Its reqwest client disables proxy discovery,
+redirects, referers, retries, plaintext, native roots, and additive compiled roots, then injects one
+version-matched Rustls config. A managed real-TLS test exercises the production pinned-PEM path.
+The provider decodes request bytes with the domain's checked `EvmReadIntent` deserializer and
+declares no serde mirror of that wire.
 
 The per-operation observation contract every `EvmProvider` owes the domain is on the `EvmProvider`
 trait rustdoc. Its one trap: `confirm-balance-anchor` re-observes the committed block its intent

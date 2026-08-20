@@ -11,13 +11,11 @@ layer = "binary"
 
 [dependencies]
 mfm-app = { path = "../../crates/app" }
-mfm-evm = { path = "../../crates/domains/evm" }
-mfm-evm-live = { path = "../../crates/live/evm" }
+mfm-catalog = { path = "../../crates/catalog" }
 mfm-ids = { path = "../../crates/kernel/ids" }
-mfm-portfolio = { path = "../../crates/domains/portfolio" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
-mfm-storage-postgres = { path = "../../crates/storages/postgres" }
 clap = { workspace = true }
+getrandom = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

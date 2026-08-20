@@ -14,8 +14,8 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
 | Transport security | checked TLS-root specs and exact immutable root-store loading | endpoint URLs, credentials, protocol clients, or ambient resolution |
 | Live adapters | bounded provider ingress and direct typed callback registration | domain planning or State registration |
-| Application | one checked multi-route Runtime/RunIndex/binding composition, Portfolio plan/start, and direct Runtime resume/read facade | sessions, frame inspection, status derivation |
-| Binaries | CLI configuration parsing, one live Application composition, and one redacted view rendering; REST unavailable diagnostic | execution lifecycle, run semantics, or a bound REST listener |
+| Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
+| Binaries | bounded transport parsing, client-side RunId entropy where offered, one Application call, transport policy, and redacted rendering; REST is not yet served | composition, domain planning, environment resolution, execution lifecycle, or run semantics |
 
 RuntimeAssemblyBuilder registers exact value codecs, Pure/Read State drivers, Match descriptors, and
 Read callbacks. `finish` freezes one immutable assembly. Program association pre-resolves every
@@ -45,6 +45,13 @@ authority exists only in the CLI provisioning path and is never retained by Appl
 typed EVM targets and provider handles in stable order; composition derives both adapter
 registrations and public binding views from it. The same concrete backend is coerced to `Store` and
 `RunIndex`, so run execution and enumeration cannot observe different repositories.
+
+A shared Application request contains only bounded, secret-free data and stable selectors for
+pre-bound capabilities. It cannot introduce environment resolution, a filesystem or network
+locator, secret custody, schema authority, or an unbounded durable effect. The CLI owns argv,
+bounded file/stdin input, optional RunId entropy, exit status, and rendering. Schema provisioning is
+CLI-only and stays outside listener-held Application state; any future REST exposure must add its
+own bounded rendering and explicit local trust boundary.
 
 The source-authoring sequence is separate from progression:
 

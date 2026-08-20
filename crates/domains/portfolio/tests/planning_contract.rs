@@ -212,15 +212,15 @@ fn planner_rejects_missing_unsorted_and_duplicate_targets() {
     let config: PortfolioConfig = serde_json::from_value(config_with_sources(1)).expect("config");
     assert!(matches!(
         plan_snapshot(selector(), &config, &[]),
-        Err(PortfolioError::Program)
+        Err(PortfolioError::InvalidValue)
     ));
     assert!(matches!(
         plan_snapshot(selector(), &config, &[target(2, 2), target(1, 3)]),
-        Err(PortfolioError::Program)
+        Err(PortfolioError::InvalidValue)
     ));
     assert!(matches!(
         plan_snapshot(selector(), &config, &[target(1, 2), target(1, 3)]),
-        Err(PortfolioError::Program)
+        Err(PortfolioError::InvalidValue)
     ));
 }
 

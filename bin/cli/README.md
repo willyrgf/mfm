@@ -1,110 +1,69 @@
 # MFM CLI
 
-`mfm_cli` is the one current transport for driving a Portfolio snapshot against a live EVM route and
-the durable PostgreSQL run history. It parses one JSON configuration file, renders one view format,
-and owns no session, no cached state, and no output DTO.
+`mfm_cli` is the command-line rendering of the typed Application client surface. It owns bounded
+argv/file/stdin parsing, optional client-side RunId generation, text/JSON rendering, and CLI-only
+schema provisioning. It does not parse deployment TOML, resolve locator environments, construct
+providers, plan domain Programs, or interpret run history.
 
 ## Commands
 
-```
-mfm_cli init     --config <PATH> --admin-store-locator-env <NAME>
-mfm_cli snapshot --config <PATH> --run-id <RUN_ID>
-mfm_cli show     --config <PATH> --run-id <RUN_ID>
-```
+```text
+mfm_cli [--output text|json] entry-point list
 
-- `init` installs the independently gated run-history and config-catalog schemas when their
-  namespaces are absent and verifies existing installations. It is idempotent, never modifies an
-  incompatible installation, and prints nothing on success.
-- `snapshot` plans, admits, and progresses one Portfolio snapshot under the supplied RunId. Repeating
-  it with the same RunId and configuration re-admits the retained run and renders the same bytes.
-- `show` reads one retained run without progressing it.
+mfm_cli [--deployment <PATH>] [--output text|json] store init \
+    --admin-store-locator-env <NAME>
+mfm_cli [--deployment <PATH>] [--output text|json] binding list
 
-`--run-id` is the complete explicit `run:sha256-jcs-v1:<64 hex>` identity. The CLI never derives,
-defaults, or invents a RunId.
+mfm_cli [--deployment <PATH>] [--output text|json] config import <NAME> --from <PATH|->
+mfm_cli [--deployment <PATH>] [--output text|json] config list [--cursor <C>] [--limit <N>]
+mfm_cli [--deployment <PATH>] [--output text|json] config show <NAME>
+mfm_cli [--deployment <PATH>] [--output text|json] config delete <NAME> --digest <DIGEST>
 
-`show` builds the same fully bound composition as `snapshot`, so it needs `rpc_url_env` too: Program
-association pre-resolves every implementation and Read callback before the fold reads one frame.
-
-## Configuration
-
-One JSON file. Every level rejects unknown fields. URLs are supplied only through environment
-variable NAMES, never as values in the file.
-Names are 1–64 ASCII characters matching `[A-Z_][A-Z0-9_]*`; only a checked name may appear in a
-missing-environment error.
-
-```json
-{
-  "portfolio": { "portfolio_id": "portfolio-example", "quotes": ["usd"],
-    "collections": [{ "correlation": "native-collection",
-      "request": { "sources": [{ "source_id": "wallet.native", "chain_id": 1337,
-        "address": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", "token": null }],
-        "decimals": 18 } }] },
-  "selector": { "target": "portfolio-example", "quote": "usd" },
-  "evm": { "chain_id": 1337, "endpoint_id": "reth-dev", "rpc_url_env": "MFM_E2E_RPC_URL" },
-  "store": { "runtime_locator_env": "MFM_RUNTIME_STORE_LOCATOR" }
-}
+mfm_cli [--deployment <PATH>] [--output text|json] run start --config <NAME> \
+    [--config-digest <DIGEST>] [--run-id <RUN_ID>]
+mfm_cli [--deployment <PATH>] [--output text|json] run progress --run-id <RUN_ID>
+mfm_cli [--deployment <PATH>] [--output text|json] run show --run-id <RUN_ID>
+mfm_cli [--deployment <PATH>] [--output text|json] run list [--cursor <C>] [--limit <N>]
 ```
 
-`portfolio` and `selector` deserialize directly into the Portfolio domain's checked types, which own
-all domain validation.
+`entry-point list` is static and rejects `--deployment`. Every other command loads the override or
+the conventional XDG/HOME `deployment.toml`. `store init` additionally resolves the checked admin
+locator name and retains no administrative handle after provisioning.
 
-`endpoint_id` is the only route material: the same name derives the same route reference, the same
-Program, and the same run identity in every process. Changing the URL VALUE behind `rpc_url_env`
-never changes any of them; changing `endpoint_id` changes all of them.
+`config import` reads at most 256 KiB plus one byte from a file or stdin. The stored document is a
+complete tagged execution config; `run start` accepts no entry-point or inline document. Without
+`--config-digest`, start selects the revision currently bound to the name. Supplying it asserts the
+exact current digest.
 
-**One EVM route per configuration file.** The CLI builds exactly one route from the `evm` block, so a
-configuration whose collections use any chain id other than `evm.chain_id` cannot be planned and
-fails before admission.
+Without `--run-id`, only the CLI obtains exactly 32 bytes from the OS cryptographic random source
+and passes them to the frozen pure derivation helper. Entropy failure is
+`run_id_generation_failed`; there is no time, PID, counter, environment, provider, or existence
+fallback. Explicit RunIds bypass generation and support deterministic retries.
 
 ## Output
 
-`snapshot` and `show` write the identical view rendering to stdout:
+`--output text` is the default human presentation. Config summaries include `config_name`,
+`config_digest`, and `entry_point`. Start prints those fields before the run fields. Terminal run
+text includes `contract_ref`, `value_ref`, and exact canonical `value`.
 
-```
-run_id=run:sha256-jcs-v1:<64 hex>
-head_sequence=<u64>
-head_digest=content:sha256-v1:<64 hex>
-state=runnable|succeeded|failed
-<exact canonical retained bytes, one line, only for succeeded and failed>
-```
+`--output json` is the stable automation surface shared with REST. It preserves the documented
+Application models: entry-point and binding lists, config summaries/documents/pages, start results,
+mechanical run pages, and the full tagged RunView. Canonical config and terminal values occupy raw
+JSON positions rather than quoted strings. Successful bodyless operations emit `{}` in JSON mode
+and nothing in text mode.
 
-The same retained run therefore renders byte-identically across independent invocations.
+Ordinary JSON errors are exactly `{"code":"...","message":"..."}`. An ambiguous run append adds
+the shared `recovery` sum. Text mode prints `error: <message>` plus the same recovery RunId and
+selected config summary when present. Locator values, URLs, credentials, TLS-root paths, config
+bodies, and provider details are never rendered.
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| 0 | `init` succeeded, or a view was rendered with `state=succeeded` |
-| 1 | A view was rendered with `state=runnable` or `state=failed` |
-| 2 | No view: usage, configuration, environment, store, provider, or Application failure |
+| 0 | A non-run command succeeded, or a run view is `succeeded`. |
+| 1 | A run view is `runnable` or durably `failed`. |
+| 2 | No run view: usage, checked input, composition, entropy, request, or output failure. |
 
-## Redaction
-
-Every failure prints exactly one reviewed line to stderr:
-
-```
-error: configuration is invalid
-error: environment variable <NAME> is not set
-error: run id is invalid
-error: postgres locator is invalid or unavailable
-error: postgres provisioning target is incompatible
-error: postgres provisioning target is unavailable
-error: postgres provisioning outcome is indeterminate
-error: application composition is invalid
-error: postgres store is unavailable
-error: postgres store is incompatible
-error: evm provider transport could not be constructed
-error: configuration cannot be planned for the configured evm route
-error: runtime operation failed: <reviewed runtime failure>
-```
-
-Environment variable NAMES appear. A database URL, an RPC URL, a credential, or an unreviewed
-provider or driver detail never appears in stdout, stderr, or an exit code.
-
-The runtime locator environment value is a bounded private JSON document containing one strict
-single-host `postgresql` URI with `sslmode=verify-full` plus either WebPKI roots or an absolute,
-content-pinned PEM root bundle. `init` separately resolves the named administrative locator, proves
-that its secret-free server/database target equals the runtime target, and provisions through that
-short-lived authority. Snapshot and show retain only the fixed `mfm_runtime` DML role.
-The current one-route JSON surface converts its `evm` block into a one-element checked
-`BoundCapabilitySet`; live assembly no longer has a singular route constructor.
+The old `init`, `snapshot`, and `show --config` grammar and combined configuration file do not
+exist. Keystore administration and transaction submission remain outside this surface.

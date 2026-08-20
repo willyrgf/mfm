@@ -1,146 +1,312 @@
-//! CLI-driven end-to-end verification of live EVM native-balance collection.
-//!
-//! The test operates the binary exactly as a user does: one configuration file, `init`,
-//! `snapshot` under an explicit RunId, and a second independent process reading the same run
-//! back with `show`. Everything it asserts is observable from the transport contract alone.
+//! CLI-driven end-to-end verification of the stored-config client surface.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CLI: &str = env!("CARGO_BIN_EXE_mfm_cli");
 
-const CONFIG: &str = r#"{
-  "portfolio": { "portfolio_id": "portfolio-example", "quotes": ["usd"],
-    "collections": [{ "correlation": "native-collection",
-      "request": { "sources": [{ "source_id": "wallet.native", "chain_id": 1337,
-        "address": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", "token": null }],
-        "decimals": 18 } }] },
-  "selector": { "target": "portfolio-example", "quote": "usd" },
-  "evm": { "chain_id": 1337, "endpoint_id": "reth-dev", "rpc_url_env": "MFM_E2E_RPC_URL" },
-  "store": { "runtime_locator_env": "MFM_E2E_RUNTIME_STORE_LOCATOR" }
+fn config_document(portfolio_id: &str) -> String {
+    format!(
+        r#"{{
+  "entry_point": "mfm.portfolio/snapshot@1",
+  "input": {{
+    "routes": [{{"chain_id": 1337, "endpoint_id": "reth-dev"}}],
+    "selector": {{"target": "{portfolio_id}", "quote": "usd"}},
+    "portfolio": {{"portfolio_id": "{portfolio_id}", "quotes": ["usd"],
+      "collections": [{{"correlation": "native-collection",
+        "request": {{"sources": [{{"source_id": "wallet.native", "chain_id": 1337,
+          "address": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", "token": null}}],
+          "decimals": 18}}}}]}}
+  }}
+}}"#
+    )
 }
-"#;
 
 #[tokio::test]
-#[ignore = "requires the managed postgres and reth services provided by the cli-e2e task"]
-async fn native_snapshot_run_and_read_back_via_cli() {
-    std::env::var("MFM_E2E_RPC_URL").expect("cli-e2e must supply MFM_E2E_RPC_URL");
-    std::env::var("MFM_E2E_RUNTIME_STORE_LOCATOR")
-        .expect("cli-e2e must supply the runtime locator");
-    std::env::var("MFM_E2E_ADMIN_STORE_LOCATOR").expect("cli-e2e must supply the admin locator");
-
-    let unique = unique_suffix();
-    let config = write_config(unique);
-    let run_id = format!("run:sha256-jcs-v1:{unique:064x}");
-
-    let first_init = run_cli(&[
-        "init",
-        "--config",
-        config.to_str().expect("config path"),
-        "--admin-store-locator-env",
+#[ignore = "requires the managed PostgreSQL and TLS-wrapped reth services from cli-e2e"]
+async fn stored_config_lifecycle_and_runs_are_cli_complete() {
+    for name in [
+        "MFM_E2E_RUNTIME_STORE_LOCATOR",
         "MFM_E2E_ADMIN_STORE_LOCATOR",
-    ]);
-    assert_success(&first_init, "init");
-    assert!(
-        first_init.stdout.is_empty(),
-        "init prints nothing on success"
-    );
-    assert_success(
-        &run_cli(&[
-            "init",
-            "--config",
-            config.to_str().expect("config path"),
-            "--admin-store-locator-env",
-            "MFM_E2E_ADMIN_STORE_LOCATOR",
-        ]),
-        "idempotent init",
-    );
-
-    let snapshot = run_cli(&[
-        "snapshot",
-        "--config",
-        config.to_str().expect("config path"),
-        "--run-id",
-        &run_id,
-    ]);
-    assert_success(&snapshot, "snapshot");
-    let rendered = String::from_utf8(snapshot.stdout.clone()).expect("utf8 view");
-    let lines = rendered.lines().collect::<Vec<_>>();
-    assert_eq!(
-        lines.len(),
-        5,
-        "rendered view is four fields plus one value"
-    );
-    assert_eq!(lines[0], format!("run_id={run_id}"));
-    // The single-native-source Program: admission, three Pure States, four Reads, and the
-    // consolidations, all fused into eleven durable frames.
-    assert_eq!(lines[1], "head_sequence=11");
-    assert!(
-        lines[2].starts_with("head_digest=content:sha256-v1:"),
-        "unexpected head digest line: {}",
-        lines[2]
-    );
-    assert_eq!(lines[3], "state=succeeded");
-    for expected in [
-        r#""chain_id":1337"#,
-        r#""kind":"native""#,
-        r#""decimals":18"#,
-        r#""raw_units":"1000000000000000000000000""#,
-        r#""total_value_dec":"1000000""#,
+        "MFM_E2E_EVM_ADAPTER_LOCATOR",
     ] {
-        assert!(
-            lines[4].contains(expected),
-            "canonical output is missing {expected}: {}",
-            lines[4]
-        );
+        std::env::var(name).unwrap_or_else(|_| panic!("cli-e2e must supply {name}"));
     }
 
-    // Re-admitting the exact same run across processes returns the retained bytes unchanged.
-    let readmitted = run_cli(&[
-        "snapshot",
-        "--config",
-        config.to_str().expect("config path"),
-        "--run-id",
-        &run_id,
-    ]);
-    assert_success(&readmitted, "durable re-admission");
-    assert_eq!(readmitted.stdout, snapshot.stdout);
+    let root = temporary_root();
+    let xdg = root.join("xdg");
+    let default_deployment = xdg.join("mfm/deployment.toml");
+    let override_deployment = root.join("override.toml");
+    std::fs::create_dir_all(default_deployment.parent().expect("deployment parent"))
+        .expect("create XDG tree");
+    let deployment = r#"[store]
+runtime_locator_env = "MFM_E2E_RUNTIME_STORE_LOCATOR"
 
-    // One independent process reads the identical run back out of the durable store.
-    let shown = run_cli(&[
-        "show",
-        "--config",
-        config.to_str().expect("config path"),
-        "--run-id",
-        &run_id,
-    ]);
-    assert_success(&shown, "show");
-    assert_eq!(shown.stdout, snapshot.stdout);
+[[evm_routes]]
+chain_id = 1337
+endpoint_id = "reth-dev"
+adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
+"#;
+    std::fs::write(&default_deployment, deployment).expect("default deployment");
+    std::fs::write(&override_deployment, deployment).expect("override deployment");
+    let original_document = root.join("original.json");
+    let rebound_document = root.join("rebound.json");
+    std::fs::write(&original_document, config_document("portfolio-example"))
+        .expect("original config");
+    std::fs::write(&rebound_document, config_document("portfolio-rebound"))
+        .expect("rebound config");
 
-    std::fs::remove_file(&config).expect("remove config");
+    let entry_points = run_cli(&["--output", "json", "entry-point", "list"], &xdg);
+    assert_success(&entry_points, "entry-point list");
+    assert_eq!(
+        json(&entry_points)["items"][0]["entry_point"],
+        "mfm.portfolio/snapshot@1"
+    );
+    let rejected_deployment = run_cli(
+        &[
+            "--deployment",
+            path(&override_deployment),
+            "entry-point",
+            "list",
+        ],
+        &xdg,
+    );
+    assert_eq!(rejected_deployment.status.code(), Some(2));
+
+    for label in ["first init", "idempotent init"] {
+        let initialized = run_cli(
+            &[
+                "--deployment",
+                path(&override_deployment),
+                "store",
+                "init",
+                "--admin-store-locator-env",
+                "MFM_E2E_ADMIN_STORE_LOCATOR",
+            ],
+            &xdg,
+        );
+        assert_success(&initialized, label);
+        assert!(initialized.stdout.is_empty());
+    }
+
+    let bindings = run_cli(&["--output", "json", "binding", "list"], &xdg);
+    assert_success(&bindings, "binding list through XDG default");
+    assert_eq!(json(&bindings)["items"][0]["kind"], "evm");
+    assert_eq!(json(&bindings)["items"][0]["chain_id"], 1337);
+    assert_eq!(json(&bindings)["items"][0]["endpoint_id"], "reth-dev");
+
+    for name in ["daily", "weekly"] {
+        let imported = run_cli(
+            &[
+                "--output",
+                "json",
+                "config",
+                "import",
+                name,
+                "--from",
+                path(&original_document),
+            ],
+            &xdg,
+        );
+        assert_success(&imported, "config import");
+        assert_eq!(json(&imported)["outcome"], "created");
+    }
+    let unchanged = run_cli(
+        &[
+            "--output",
+            "json",
+            "config",
+            "import",
+            "daily",
+            "--from",
+            path(&original_document),
+        ],
+        &xdg,
+    );
+    assert_success(&unchanged, "unchanged import");
+    assert_eq!(json(&unchanged)["outcome"], "unchanged");
+    let digest = json(&unchanged)["config"]["digest"]
+        .as_str()
+        .expect("config digest")
+        .to_owned();
+
+    let first_page = run_cli(
+        &["--output", "json", "config", "list", "--limit", "1"],
+        &xdg,
+    );
+    assert_success(&first_page, "first config page");
+    let first_page = json(&first_page);
+    assert_eq!(first_page["items"][0]["name"], "daily");
+    let config_cursor = first_page["next_cursor"]
+        .as_str()
+        .expect("config cursor")
+        .to_owned();
+    let second_page = run_cli(
+        &[
+            "--output",
+            "json",
+            "config",
+            "list",
+            "--cursor",
+            &config_cursor,
+            "--limit",
+            "1",
+        ],
+        &xdg,
+    );
+    assert_success(&second_page, "second config page");
+    assert_eq!(json(&second_page)["items"][0]["name"], "weekly");
+
+    let started = run_cli(
+        &["--output", "json", "run", "start", "--config", "daily"],
+        &xdg,
+    );
+    assert_success(&started, "generated-id Current start");
+    let started_json = json(&started);
+    let generated_id = started_json["run"]["run_id"]
+        .as_str()
+        .expect("generated run id")
+        .to_owned();
+    assert!(generated_id.starts_with("run:sha256-jcs-v1:"));
+    assert_eq!(started_json["config"]["digest"], digest);
+    assert_eq!(started_json["run"]["state"]["kind"], "succeeded");
+    assert_eq!(started_json["run"]["head_sequence"], 11);
+    assert_eq!(
+        started_json["run"]["state"]["value"]["report"]["quote"],
+        "usd"
+    );
+
+    let explicit_id = format!("run:sha256-jcs-v1:{:064x}", unique_suffix());
+    let exact = run_cli(
+        &[
+            "--output",
+            "json",
+            "run",
+            "start",
+            "--config",
+            "daily",
+            "--config-digest",
+            &digest,
+            "--run-id",
+            &explicit_id,
+        ],
+        &xdg,
+    );
+    assert_success(&exact, "explicit-id Exact start");
+    assert_eq!(json(&exact)["run"]["run_id"], explicit_id);
+
+    let progressed = run_cli(
+        &[
+            "--output",
+            "json",
+            "run",
+            "progress",
+            "--run-id",
+            &explicit_id,
+        ],
+        &xdg,
+    );
+    assert_success(&progressed, "progress terminal run");
+    assert_eq!(json(&progressed), json(&exact)["run"]);
+
+    let shown = run_cli(&["run", "show", "--run-id", &generated_id], &xdg);
+    assert_success(&shown, "text run show");
+    let shown = String::from_utf8(shown.stdout).expect("text UTF-8");
+    for field in ["run_id=", "contract_ref=", "value_ref=", "value="] {
+        assert!(shown.contains(field), "missing {field}: {shown}");
+    }
+
+    let run_page = run_cli(&["--output", "json", "run", "list", "--limit", "1"], &xdg);
+    assert_success(&run_page, "run page");
+    let run_page = json(&run_page);
+    assert_eq!(run_page["items"].as_array().expect("items").len(), 1);
+    assert!(run_page["items"][0].get("state").is_none());
+    assert!(run_page["next_cursor"].is_string());
+
+    let deleted = run_cli(&["config", "delete", "daily", "--digest", &digest], &xdg);
+    assert_success(&deleted, "delete original revision");
+    let rebound = run_cli(
+        &[
+            "--output",
+            "json",
+            "config",
+            "import",
+            "daily",
+            "--from",
+            path(&rebound_document),
+        ],
+        &xdg,
+    );
+    assert_success(&rebound, "rebind name");
+    let rebound_digest = json(&rebound)["config"]["digest"]
+        .as_str()
+        .expect("rebound digest")
+        .to_owned();
+    assert_ne!(rebound_digest, digest);
+
+    let mismatch = run_cli(
+        &[
+            "--output",
+            "json",
+            "run",
+            "start",
+            "--config",
+            "daily",
+            "--config-digest",
+            &digest,
+            "--run-id",
+            &format!("run:sha256-jcs-v1:{:064x}", unique_suffix() + 1),
+        ],
+        &xdg,
+    );
+    assert_eq!(mismatch.status.code(), Some(2));
+    assert_eq!(json_stderr(&mismatch)["code"], "config_digest_mismatch");
+
+    let retained = run_cli(
+        &["--output", "json", "run", "show", "--run-id", &generated_id],
+        &xdg,
+    );
+    assert_success(&retained, "retained run after config rebind");
+    assert_eq!(json(&retained)["run_id"], generated_id);
+
+    let old_grammar = run_cli(&["snapshot"], &xdg);
+    assert_eq!(old_grammar.status.code(), Some(2));
+    std::fs::remove_dir_all(&root).expect("remove isolated e2e tree");
 }
 
-/// Returns one value unique per execution: the store is durable and the chain stays warm.
+fn temporary_root() -> PathBuf {
+    std::env::temp_dir().join(format!("mfm-cli-e2e-{:032x}", unique_suffix()))
+}
+
 fn unique_suffix() -> u128 {
-    let nanos = SystemTime::now()
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("wall clock")
-        .as_nanos();
-    nanos ^ u128::from(std::process::id())
+        .as_nanos()
+        ^ u128::from(std::process::id())
 }
 
-fn write_config(unique: u128) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("mfm-cli-e2e-{unique:032x}.json"));
-    std::fs::write(&path, CONFIG).expect("write config");
-    path
+fn path(path: &Path) -> &str {
+    path.to_str().expect("UTF-8 fixture path")
 }
 
-fn run_cli(arguments: &[&str]) -> Output {
+fn run_cli(arguments: &[&str], xdg: &Path) -> Output {
     Command::new(CLI)
         .args(arguments)
+        .env("XDG_CONFIG_HOME", xdg)
+        .env("HOME", "/nonexistent-hostile-home")
+        .env("MFM_DEPLOYMENT", "/nonexistent-hostile-deployment")
         .output()
-        .expect("run the cli binary")
+        .expect("run CLI")
+}
+
+fn json(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).expect("stdout JSON")
+}
+
+fn json_stderr(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stderr).expect("stderr JSON")
 }
 
 fn assert_success(output: &Output, label: &str) {

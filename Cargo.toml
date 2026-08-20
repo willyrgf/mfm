@@ -31,7 +31,7 @@ members = [
 ring = "0.17.14"
 # Common dependencies
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.108"
+serde_json = { version = "1.0.108", features = ["raw_value"] }
 tokio = { version = "1.44", features = ["full"] }
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres"] }
 clap = { version = "4.4", features = ["derive"] }
@@ -42,8 +42,10 @@ url = "=2.5.8"
 percent-encoding = "=2.3.2"
 libc = "=0.2.186"
 # Live EVM transport and wire codecs. Only `mfm-evm-live` may depend on `alloy-*`.
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls-manual-roots"] }
 alloy-primitives = { version = "1.6.1", default-features = false, features = ["std"] }
+toml = "=0.8.23"
+getrandom = "=0.3.4"
 
 # Keep full debugger-quality DWARF without embedding a copy into every linked
 # test and integration-test executable.

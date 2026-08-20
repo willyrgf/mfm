@@ -40,7 +40,7 @@ impl Stub {
     }
 
     fn provider(&self) -> JsonRpcEvmProvider {
-        JsonRpcEvmProvider::new(self.url.clone()).expect("provider")
+        JsonRpcEvmProvider::new_http_for_test(self.url.clone()).expect("provider")
     }
 
     /// Returns the exact JSON body the provider sent.
@@ -353,7 +353,7 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
     let unbound = TcpListener::bind("127.0.0.1:0").expect("bind");
     let url = format!("http://{}", unbound.local_addr().expect("address"));
     drop(unbound);
-    let response = JsonRpcEvmProvider::new(url)
+    let response = JsonRpcEvmProvider::new_http_for_test(url)
         .expect("provider")
         .request(
             operation("mfm.evm.read-chain-identity@1"),
@@ -369,7 +369,8 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
 #[tokio::test]
 async fn undecodable_or_mismatched_intent_is_internal_and_never_enters_transport() {
     // No stub is bound: an Internal outcome proves nothing reached a transport.
-    let provider = JsonRpcEvmProvider::new("http://127.0.0.1:1".to_owned()).expect("provider");
+    let provider =
+        JsonRpcEvmProvider::new_http_for_test("http://127.0.0.1:1".to_owned()).expect("provider");
     assert_eq!(
         provider
             .request(operation("mfm.evm.read-chain-identity@1"), b"{}".to_vec())
@@ -393,11 +394,100 @@ async fn undecodable_or_mismatched_intent_is_internal_and_never_enters_transport
 #[test]
 fn an_unusable_url_fails_construction_without_naming_it() {
     // The provider implements no `Debug`, so no accident can print the URL it holds.
-    let Err(error) = JsonRpcEvmProvider::new("not-a-url".to_owned()) else {
+    let Err(error) = JsonRpcEvmProvider::new_http_for_test("not-a-url".to_owned()) else {
         panic!("an unusable url must fail construction");
     };
     assert_eq!(
         error.to_string(),
         "evm provider transport could not be constructed"
     );
+}
+
+fn managed_locator(name: &str) -> EvmAdapterLocator {
+    EvmAdapterLocator::parse(std::env::var(name).expect("managed locator environment"))
+        .expect("checked managed locator")
+}
+
+#[tokio::test]
+#[ignore = "requires the managed TLS reverse proxy provided by transport-authority-test"]
+async fn managed_tls_authority_uses_only_the_selected_endpoint_and_roots() {
+    for rejected in [
+        r#"{"v":1,"url":"http://127.0.0.1:8545","tls_roots":{"kind":"webpki"}}"#,
+        r#"{"v":1,"url":"ftp://127.0.0.1/x","tls_roots":{"kind":"webpki"}}"#,
+        r#"{"v":1,"url":"https://127.0.0.1/x#fragment","tls_roots":{"kind":"webpki"}}"#,
+        r#"{"v":2,"url":"https://127.0.0.1/x","tls_roots":{"kind":"webpki"}}"#,
+        r#"{"v":1,"url":"https://127.0.0.1/x","tls_roots":{"kind":"webpki"},"extra":true}"#,
+    ] {
+        assert!(EvmAdapterLocator::parse(rejected).is_err());
+    }
+
+    let provider = JsonRpcEvmProvider::connect(&managed_locator("MFM_TEST_EVM_ADAPTER_LOCATOR"))
+        .await
+        .expect("production provider");
+    let response = provider
+        .request(
+            operation("mfm.evm.read-chain-identity@1"),
+            intent_bytes(
+                "mfm.evm.read-chain-identity@1",
+                serde_json::json!({ "kind": "chain_identity" }),
+            ),
+        )
+        .await
+        .expect("hostname-verified request despite hostile proxy environment");
+    assert_eq!(
+        response,
+        EvmProviderResponse::Read(EvmReadValue::ChainId(1337))
+    );
+
+    assert!(
+        JsonRpcEvmProvider::connect(&managed_locator("MFM_TEST_EVM_WRONG_PIN_LOCATOR"))
+            .await
+            .is_err()
+    );
+    for name in [
+        "MFM_TEST_EVM_ALTERNATE_CA_LOCATOR",
+        "MFM_TEST_EVM_WRONG_HOST_LOCATOR",
+    ] {
+        let provider = JsonRpcEvmProvider::connect(&managed_locator(name))
+            .await
+            .expect("valid locator and root file");
+        assert_eq!(
+            provider
+                .request(
+                    operation("mfm.evm.read-chain-identity@1"),
+                    intent_bytes(
+                        "mfm.evm.read-chain-identity@1",
+                        serde_json::json!({ "kind": "chain_identity" }),
+                    ),
+                )
+                .await,
+            Err(ReadAdapterError::Unavailable),
+            "{name} must not authenticate the endpoint"
+        );
+    }
+
+    let redirect = JsonRpcEvmProvider::connect(&managed_locator("MFM_TEST_EVM_REDIRECT_LOCATOR"))
+        .await
+        .expect("redirect locator");
+    assert_eq!(
+        redirect
+            .request(
+                operation("mfm.evm.read-chain-identity@1"),
+                intent_bytes(
+                    "mfm.evm.read-chain-identity@1",
+                    serde_json::json!({ "kind": "chain_identity" }),
+                ),
+            )
+            .await,
+        Err(ReadAdapterError::Unavailable),
+        "the client must not follow a redirect to the successful root route"
+    );
+
+    let webpki = EvmAdapterLocator::parse(
+        r#"{"v":1,"url":"https://example.com","tls_roots":{"kind":"webpki"}}"#,
+    )
+    .expect("WebPKI locator");
+    JsonRpcEvmProvider::connect(&webpki)
+        .await
+        .expect("exact compiled WebPKI mode");
 }

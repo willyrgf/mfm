@@ -17,7 +17,9 @@ use mfm_runtime::{ReadAdapterError, RuntimeAssemblyBuilder};
 
 mod json_rpc;
 
-pub use json_rpc::{EvmProviderBuildError, JsonRpcEvmProvider};
+pub use json_rpc::{
+    EvmAdapterLocator, EvmProviderBuildError, JsonRpcEvmProvider, MAX_EVM_ADAPTER_LOCATOR_BYTES,
+};
 
 const MAX_EVM_REQUEST_BYTES: usize = 512 * 1024;
 
