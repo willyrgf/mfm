@@ -1,6 +1,6 @@
-use mfm_catalog::{RunIndexError, RunPage, RunPageLimit, RunSummary};
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId};
 use mfm_journal::{MAX_RUN_BYTES, MAX_RUN_FRAMES};
+use mfm_store::{RunIndexError, RunPage, RunPageLimit, RunSummary};
 use sqlx::{PgPool, Row};
 
 pub(super) async fn list_runs(

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_catalog::{
     CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigDigest, ConfigName,
-    MemoryCatalog, RunPageLimit, MAX_CONFIG_DOCUMENT_BYTES, MAX_CONFIG_ENTRIES, MAX_RUN_PAGE_ITEMS,
+    MemoryCatalog, MAX_CONFIG_DOCUMENT_BYTES, MAX_CONFIG_ENTRIES,
 };
 use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
 use tokio::sync::Barrier;
@@ -198,10 +198,4 @@ async fn memory_catalog_lists_every_entry_in_bytewise_name_order() {
             "config-004"
         ]
     );
-}
-
-#[test]
-fn run_page_limits_are_bounded() {
-    assert!(RunPageLimit::new(0).is_err());
-    assert!(RunPageLimit::new(MAX_RUN_PAGE_ITEMS + 1).is_err());
 }

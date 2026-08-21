@@ -1,14 +1,13 @@
 #![warn(missing_docs)]
-//! Opaque named config custody and mechanical run-head enumeration.
+//! Opaque named config custody.
 //!
-//! The catalog never interprets config documents, and the run index never
-//! parses Journal frames or derives semantic run state.
+//! The catalog never interprets config documents.
 
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
-use mfm_ids::{ContentDigest, DigestAlgorithm, RunId};
+use mfm_ids::{ContentDigest, DigestAlgorithm};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 mod memory;
@@ -19,10 +18,6 @@ pub use memory::MemoryCatalog;
 pub const MAX_CONFIG_DOCUMENT_BYTES: usize = 256 * 1024;
 /// Maximum number of live named config entries.
 pub const MAX_CONFIG_ENTRIES: usize = 256;
-/// Maximum number of items returned by one run-index page.
-pub const MAX_RUN_PAGE_ITEMS: usize = 200;
-/// Default number of run heads requested by client surfaces.
-pub const DEFAULT_RUN_PAGE_ITEMS: usize = 50;
 
 /// Error returned when a config name violates its public grammar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -212,36 +207,6 @@ impl CatalogEntry {
     }
 }
 
-/// Checked run-page size error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("page limit is invalid")]
-pub struct RunPageLimitError;
-
-/// A run-head page size in the inclusive range 1 through 200.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RunPageLimit(usize);
-
-impl RunPageLimit {
-    /// Checks a requested page size.
-    pub const fn new(value: usize) -> Result<Self, RunPageLimitError> {
-        if value == 0 || value > MAX_RUN_PAGE_ITEMS {
-            return Err(RunPageLimitError);
-        }
-        Ok(Self(value))
-    }
-
-    /// Returns the checked page size.
-    pub const fn get(self) -> usize {
-        self.0
-    }
-}
-
-impl Default for RunPageLimit {
-    fn default() -> Self {
-        Self(DEFAULT_RUN_PAGE_ITEMS)
-    }
-}
-
 /// Atomic config custody outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogPutResult {
@@ -315,121 +280,4 @@ pub trait ConfigCatalog: Send + Sync {
     fn list_configs<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<CatalogEntries, CatalogError>> + Send + 'a>>;
-}
-
-/// Error returned when one run-head projection is structurally invalid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("run summary is invalid")]
-pub struct RunSummaryError;
-
-/// Mechanical current-head projection for one run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RunSummary {
-    run_id: RunId,
-    head_sequence: u64,
-    head_digest: ContentDigest,
-    total_bytes: u64,
-}
-
-impl RunSummary {
-    /// Constructs a structurally checked current-head projection.
-    pub fn new(
-        run_id: RunId,
-        head_sequence: u64,
-        head_digest: ContentDigest,
-        total_bytes: u64,
-    ) -> Result<Self, RunSummaryError> {
-        if head_sequence == 0
-            || head_digest.algorithm() != DigestAlgorithm::Sha256V1
-            || total_bytes == 0
-        {
-            return Err(RunSummaryError);
-        }
-        Ok(Self {
-            run_id,
-            head_sequence,
-            head_digest,
-            total_bytes,
-        })
-    }
-
-    /// Returns the run identity.
-    pub const fn run_id(&self) -> &RunId {
-        &self.run_id
-    }
-
-    /// Returns the current retained frame sequence.
-    pub const fn head_sequence(&self) -> u64 {
-        self.head_sequence
-    }
-
-    /// Returns the exact current frame digest.
-    pub const fn head_digest(&self) -> &ContentDigest {
-        &self.head_digest
-    }
-
-    /// Returns cumulative retained frame bytes.
-    pub const fn total_bytes(&self) -> u64 {
-        self.total_bytes
-    }
-}
-
-/// Redaction-safe mechanical run-index failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum RunIndexError {
-    /// Retained head rows were inconsistent.
-    #[error("run index is corrupt")]
-    Corrupt,
-    /// The index could not be read.
-    #[error("run index is unavailable")]
-    Unavailable,
-}
-
-/// One bounded mechanical run-head page with an exclusive continuation identity.
-#[derive(Serialize)]
-pub struct RunPage {
-    items: Vec<RunSummary>,
-    next_after: Option<RunId>,
-}
-
-impl RunPage {
-    /// Constructs a structurally checked run page.
-    pub fn new(items: Vec<RunSummary>, next_after: Option<RunId>) -> Result<Self, RunIndexError> {
-        if items.len() > MAX_RUN_PAGE_ITEMS
-            || items
-                .windows(2)
-                .any(|pair| pair[0].run_id >= pair[1].run_id)
-            || next_after
-                .as_ref()
-                .is_some_and(|after| items.last().is_none_or(|summary| after != summary.run_id()))
-        {
-            return Err(RunIndexError::Corrupt);
-        }
-        Ok(Self { items, next_after })
-    }
-
-    /// Returns the ordered summaries.
-    pub fn items(&self) -> &[RunSummary] {
-        &self.items
-    }
-
-    /// Returns the last returned RunId when another run was observed.
-    pub const fn next_after(&self) -> Option<&RunId> {
-        self.next_after.as_ref()
-    }
-
-    /// Consumes the page into owned items and continuation identity.
-    pub fn into_parts(self) -> (Vec<RunSummary>, Option<RunId>) {
-        (self.items, self.next_after)
-    }
-}
-
-/// Object-safe mechanical current-head index.
-pub trait RunIndex: Send + Sync {
-    /// Lists one ascending keyset page without parsing run history.
-    fn list_runs<'a>(
-        &'a self,
-        after: Option<&'a RunId>,
-        limit: RunPageLimit,
-    ) -> Pin<Box<dyn Future<Output = Result<RunPage, RunIndexError>> + Send + 'a>>;
 }

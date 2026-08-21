@@ -1,10 +1,9 @@
 use mfm_canonical::raw_content_digest;
-use mfm_catalog::{RunIndex, RunPageLimit};
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId};
 use mfm_journal::{
     EncodedRunFrame, JournalHistory, OutcomeKind, MAX_FRAME_BYTES, MAX_RUN_BYTES, MAX_RUN_FRAMES,
 };
-use mfm_store::{AppendResult, MemoryStore, Store};
+use mfm_store::{AppendResult, MemoryStore, RunIndex, RunPageLimit, Store};
 
 #[path = "support/scenarios.rs"]
 mod scenarios;
@@ -107,6 +106,12 @@ fn store_capacity_constants_are_the_frozen_format_bounds() {
     assert_eq!(MAX_FRAME_BYTES, 3 * 8_388_608 + 65_536);
     assert_eq!(MAX_RUN_FRAMES, 65_536);
     assert_eq!(MAX_RUN_BYTES, 512 * 1024 * 1024);
+}
+
+#[test]
+fn run_page_limits_are_bounded() {
+    assert!(RunPageLimit::new(0).is_err());
+    assert!(RunPageLimit::new(mfm_store::MAX_RUN_PAGE_ITEMS + 1).is_err());
 }
 
 #[tokio::test]

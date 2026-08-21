@@ -19,12 +19,13 @@ Store persists immutable frame bytes and one current head only. PostgreSQL owns 
 `mfm.run-history-postgres.v1`. Those three relations remain the complete run-history authority even
 when the independent `mfm_catalog` schema is installed.
 
-The separate catalog/index port defines a bounded named config custody record containing only a
-checked name, a `sha256-jcs-v1` digest, and opaque canonical bytes. It also defines a mechanical run
-summary containing only RunId, head sequence/digest, and cumulative bytes. Config listing returns
-the complete fixed-capacity catalog in ascending name order. Run listing uses the last returned
-RunId directly as its exclusive ascending keyset continuation; pages are not snapshots across
-requests. Config interpretation belongs to Application, and run status remains a Runtime fold.
+The catalog port defines a bounded named config custody record containing only a checked name, a
+`sha256-jcs-v1` digest, and opaque canonical bytes. The sibling RunIndex port beside Store defines a
+mechanical run summary containing only RunId, head sequence/digest, and cumulative bytes. Config
+listing returns the complete fixed-capacity catalog in ascending name order. Run listing uses the
+last returned RunId directly as its exclusive ascending keyset continuation; pages are not snapshots
+across requests. Config interpretation belongs to Application, and run status remains a Runtime
+fold.
 PostgreSQL catalog custody owns exactly `mfm_catalog_schema` and `config_entries` under
 `mfm.config-catalog-postgres.v2`. The storage adapter checks schema, ownership, ACL, and durability
 independently for run history and catalog; the fixed runtime role owns neither surface.

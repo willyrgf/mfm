@@ -9,8 +9,8 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Program | typed Operation authoring, sole private lowering draft, checked v2 State/Match graph, `State`, `PureState`, `ReadState`, `Never` | registries, IO, scheduling |
 | Runtime | immutable assembly, Program association, sole fold, typed execution/progression | persisted wire or physical storage |
 | Journal | exact frame encoding and complete-history qualification | domain interpretation or persistence IO |
-| Store | object-safe complete load and atomic append | enumeration, Program, State, capability, reducer, or config semantics |
-| Catalog / index port | atomic named custody of opaque canonical config bytes and mechanical current-head enumeration | config-wire parsing, run folds/status, Program semantics, or config merging |
+| Store / run index ports | object-safe complete load and atomic append; separate mechanical current-head enumeration | Program, State, capability, reducer, config semantics, or run-status derivation |
+| Catalog port | atomic named custody of opaque canonical config bytes | config-wire parsing, Program semantics, or config merging |
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
 | Live adapters | bounded provider ingress and direct typed callback registration | domain planning or State registration |
 | Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |

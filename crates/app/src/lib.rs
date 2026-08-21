@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use mfm_canonical::sha256_digest_bytes;
-use mfm_catalog::{CatalogError, CatalogPutResult, ConfigCatalog, RunIndex, RunIndexError};
+use mfm_catalog::{CatalogError, CatalogPutResult, ConfigCatalog};
 use mfm_evm::{
     CheckChainIdentity, ConfirmBalanceAnchor, ConsolidateBalanceCollection, EvmAnchorRead,
     EvmBalanceRead, EvmChainIdentityRead, EvmEndpoint, EvmPhysicalTarget, ReadInitialAnchor,
@@ -23,7 +23,7 @@ use mfm_runtime::{
 use mfm_storage_postgres::{
     provision_schemas, AdminPostgresLocator, PostgresCatalog, PostgresStore, RuntimePostgresLocator,
 };
-use mfm_store::Store;
+use mfm_store::{RunIndex, RunIndexError, Store};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::value::RawValue;
@@ -38,7 +38,8 @@ pub use config::{
 pub use deployment::{
     Deployment, EnvironmentName, EnvironmentNameError, MAX_DEPLOYMENT_DOCUMENT_BYTES,
 };
-pub use mfm_catalog::{ConfigDigest, ConfigName, RunPage, RunPageLimit, MAX_CONFIG_DOCUMENT_BYTES};
+pub use mfm_catalog::{ConfigDigest, ConfigName, MAX_CONFIG_DOCUMENT_BYTES};
+pub use mfm_store::{RunPage, RunPageLimit};
 
 use config::ENTRY_POINTS;
 use deployment::resolve_environment;
