@@ -15,13 +15,13 @@ mfm-catalog = { path = "../../crates/catalog" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 axum = { workspace = true }
 clap = { workspace = true }
-libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+libc = { workspace = true }
 mfm-evm = { path = "../../crates/domains/evm" }
 mfm-evm-live = { path = "../../crates/live/evm" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }

@@ -6,9 +6,8 @@ use std::time::Duration;
 use axum::body::{to_bytes, Body};
 use axum::extract::rejection::PathRejection;
 use axum::extract::{OriginalUri, Path, Request, State};
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HOST, LOCATION, ORIGIN};
+use axum::http::header::{CONTENT_TYPE, LOCATION};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
-use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::Router;
@@ -59,38 +58,14 @@ pub(crate) fn router(
         .route("/v1/runs/{run_id}", get(read_run))
         .fallback(route_not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .layer(middleware::from_fn(authority_boundary))
         .with_state(state)
-}
-
-async fn authority_boundary(request: Request, next: Next) -> Response {
-    if request.headers().contains_key(ORIGIN) {
-        return boundary_error(
-            StatusCode::FORBIDDEN,
-            "origin_forbidden",
-            "request origin is forbidden",
-        );
-    }
-    let mut hosts = request.headers().get_all(HOST).iter();
-    if hosts
-        .next()
-        .is_none_or(|host| host.as_bytes() != b"mfm.local")
-        || hosts.next().is_some()
-    {
-        return boundary_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_host",
-            "request host is invalid",
-        );
-    }
-    next.run(request).await
 }
 
 async fn health(request: Request) -> Response {
     if let Err(error) = require_empty_body(request).await {
         return error;
     }
-    json_response(StatusCode::OK, &Health { status: "ok" }, false)
+    json_response(StatusCode::OK, &Health { status: "ok" })
 }
 
 async fn entry_points(request: Request) -> Response {
@@ -100,7 +75,6 @@ async fn entry_points(request: Request) -> Response {
     json_response(
         StatusCode::OK,
         &EntryPointList::new(Application::entry_points()),
-        false,
     )
 }
 
@@ -111,7 +85,6 @@ async fn bindings(State(state): State<ServerState>, request: Request) -> Respons
     json_response(
         StatusCode::OK,
         &BindingList::new(state.application.bindings()),
-        false,
     )
 }
 
@@ -146,7 +119,7 @@ async fn import_config(
                 ImportOutcome::Created { .. } => StatusCode::CREATED,
                 ImportOutcome::Unchanged { .. } => StatusCode::OK,
             };
-            let mut response = json_response(status, &outcome, true);
+            let mut response = json_response(status, &outcome);
             let location = format!("/v1/configs/{}", name.as_str());
             match HeaderValue::from_str(&location) {
                 Ok(location) => {
@@ -178,7 +151,7 @@ async fn list_configs(
     };
     let page = ConfigPageRequest::new(cursor, query.limit);
     match state.application.list_configs(&page).await {
-        Ok(page) => json_response(StatusCode::OK, &page, true),
+        Ok(page) => json_response(StatusCode::OK, &page),
         Err(error) => request_error(error),
     }
 }
@@ -197,7 +170,7 @@ async fn read_config(
         Err(error) => return error.response(),
     };
     match state.application.read_config(&name).await {
-        Ok(config) => json_response(StatusCode::OK, &config, true),
+        Ok(config) => json_response(StatusCode::OK, &config),
         Err(error) => request_error(error),
     }
 }
@@ -243,7 +216,7 @@ async fn list_runs(
     };
     let page = RunPageRequest::new(cursor, query.limit);
     match state.application.list_runs(&page).await {
-        Ok(page) => json_response(StatusCode::OK, &page, true),
+        Ok(page) => json_response(StatusCode::OK, &page),
         Err(error) => request_error(error),
     }
 }
@@ -278,7 +251,7 @@ async fn start_run(
         )
         .await;
     match result {
-        Ok(Ok(result)) => json_response(StatusCode::OK, &result, true),
+        Ok(Ok(result)) => json_response(StatusCode::OK, &result),
         Ok(Err(error)) => run_request_error(error),
         Err(error) => control_error(error),
     }
@@ -309,7 +282,7 @@ async fn progress_run(
         .execute(&run_id, true, state.application.progress_run(&run_id))
         .await;
     match result {
-        Ok(Ok(view)) => json_response(StatusCode::OK, &SerializableRunView::new(&view), true),
+        Ok(Ok(view)) => json_response(StatusCode::OK, &SerializableRunView::new(&view)),
         Ok(Err(error)) => run_request_error(error),
         Err(error) => control_error(error),
     }
@@ -333,7 +306,7 @@ async fn read_run(
         .execute(&run_id, false, state.application.read_run(&run_id))
         .await;
     match result {
-        Ok(Ok(view)) => json_response(StatusCode::OK, &SerializableRunView::new(&view), true),
+        Ok(Ok(view)) => json_response(StatusCode::OK, &SerializableRunView::new(&view)),
         Ok(Err(error)) => request_error(error),
         Err(error) => control_error(error),
     }
@@ -681,7 +654,6 @@ fn run_request_error(error: RunRequestError) -> Response {
                 message: "run append outcome is indeterminate",
                 recovery,
             },
-            true,
         ),
     }
 }
@@ -761,10 +733,10 @@ struct RecoveryError {
 }
 
 fn boundary_error(status: StatusCode, code: &'static str, message: &str) -> Response {
-    json_response(status, &ErrorBody { code, message }, true)
+    json_response(status, &ErrorBody { code, message })
 }
 
-fn json_response(status: StatusCode, value: &impl Serialize, no_store: bool) -> Response {
+fn json_response(status: StatusCode, value: &impl Serialize) -> Response {
     let bytes = match serde_json::to_vec(value) {
         Ok(bytes) => bytes,
         Err(_) if status != StatusCode::INTERNAL_SERVER_ERROR => return internal_error(),
@@ -775,15 +747,6 @@ fn json_response(status: StatusCode, value: &impl Serialize, no_store: bool) -> 
     response
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    response.headers_mut().insert(
-        HeaderName::from_static("x-content-type-options"),
-        HeaderValue::from_static("nosniff"),
-    );
-    if no_store {
-        response
-            .headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    }
     response
 }
 
@@ -876,7 +839,6 @@ mod tests {
         Request::builder()
             .method(method)
             .uri(uri)
-            .header(HOST, "mfm.local")
             .body(body.into())
             .expect("request")
     }
@@ -889,28 +851,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authority_fallback_method_and_media_errors_are_normalized() {
+    async fn host_and_origin_are_not_admission_inputs() {
         let service = router(application(), 2, Duration::from_secs(1));
-        let missing_host = Request::builder()
-            .uri("/healthz")
-            .body(Body::empty())
-            .expect("request");
         let response = service
             .clone()
-            .oneshot(missing_host)
+            .oneshot(request(Method::GET, "/healthz", Body::empty()))
             .await
             .expect("response");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(body(response).await["code"], "invalid_host");
+        assert_eq!(response.status(), StatusCode::OK);
 
         let mut origin = request(Method::GET, "/healthz", Body::empty());
         origin
             .headers_mut()
-            .insert(ORIGIN, HeaderValue::from_static("null"));
+            .insert("origin", HeaderValue::from_static("https://example.com"));
         let response = service.clone().oneshot(origin).await.expect("response");
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(body(response).await["code"], "origin_forbidden");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
+    #[tokio::test]
+    async fn fallback_method_and_media_errors_are_normalized() {
+        let service = router(application(), 2, Duration::from_secs(1));
         let response = service
             .clone()
             .oneshot(request(Method::GET, "/missing", Body::empty()))

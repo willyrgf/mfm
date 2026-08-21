@@ -1,12 +1,11 @@
 # MFM REST API
 
 `mfm_rest_api` is the local REST rendering of the typed Application client surface. It composes the
-complete Application before binding and listens only on an owner-only Unix socket:
+complete Application before binding and listens only on a caller-selected Unix socket:
 
 ```text
 mfm_rest_api serve [--deployment <PATH>] --unix-socket <PATH> \
-    [--recover-stale-socket] [--max-in-flight-runs <N>] \
-    [--run-timeout <SECONDS>]
+    [--max-in-flight-runs <N>] [--run-timeout <SECONDS>]
 ```
 
 The default maximum is 8 active run requests and the default timeout is 120 seconds. Accepted
@@ -14,23 +13,15 @@ ranges are 1–256 requests and 1–3,600 seconds. Deployment selection is the s
 override/XDG/HOME bootstrap used by the CLI. Composition failures occur before bind and reach only
 local stderr.
 
-## Local socket boundary
+## Local socket
 
-The socket parent must already exist, be owned by the effective user, grant owner read/write/search,
-and grant no group or other permissions. Every path component is opened without following links.
-The daemon takes an exclusive nonblocking lock on the owner-only sibling
-`<socket>.mfm-rest.lock`, creates the socket as mode `0600`, and durably records its device/inode.
-Normal shutdown removes only that still-matching socket and clears the marker.
+The socket parent must already exist and the socket leaf must be absent. Normal graceful shutdown
+removes the socket. There is no TCP listener.
 
-An existing leaf is refused by default. `--recover-stale-socket` removes it only when the held lock,
-valid marker, owner/type/mode/device/inode, and a Linux `ECONNREFUSED` connection result all agree.
-Active, foreign, symlinked, missing-marker, malformed-marker, and mismatched leaves are never
-removed. There is no TCP listener. The socket enforces same-user locality; it is not authentication
-against code already running as that user or root.
-
-Every request requires exactly `Host: mfm.local` and forbids `Origin`. Responses emit no permissive
-CORS headers. Config/run bodies and routed errors use `Cache-Control: no-store`; JSON responses use
-`X-Content-Type-Options: nosniff`.
+The server performs no authentication or authorization. It does not inspect peer credentials,
+filesystem ownership, `Host`, or `Origin`, and it has no token, cookie, session, or CORS policy.
+Access isolation, socket cleanup after a crash, and filesystem permissions belong to the enclosing
+deployment environment.
 
 ## Routes
 
@@ -79,9 +70,9 @@ read/retry.
 
 Ordinary routed errors are exactly `{"code":"...","message":"..."}` with the shared stable
 Application code/message mapping. Ambiguous run appends add the shared tagged `recovery` object.
-REST-local errors cover invalid Host/Origin/body/query/media/path/header, fallback 404/405, body
-size, run pressure, and deadlines. HTTP parser failures before Axum routing are outside that JSON
-contract. A durably failed run remains a successful HTTP request with status 200 and tagged
+REST-local errors cover invalid body/query/media/path/header, fallback 404/405, body size, run
+pressure, and deadlines. HTTP parser failures before Axum routing are outside that JSON contract. A
+durably failed run remains a successful HTTP request with status 200 and tagged
 `state.kind:"failed"`.
 
 The CLI-only asymmetries are intentional: `store init` retains schema authority outside the daemon,
@@ -89,6 +80,6 @@ and only the CLI may generate a RunId. HTTP status represents request success, w
 represent a runnable or durably failed run.
 
 `nix run .#run -- --task rest-e2e` builds the CLI and REST binaries explicitly, starts this real
-listener against managed TLS EVM and local PostgreSQL, and compares discovery, config,
-Current/Exact start, run-head, full RunView, and shared-error JSON. The two renderers also match the
-same frozen start/progress indeterminate recovery fixtures under `docs/contracts/client-surface/`.
+listener against local Reth and PostgreSQL, and compares discovery, config, Current/Exact start,
+run-head, full RunView, and shared-error JSON. The two renderers also match the same frozen
+start/progress indeterminate recovery fixtures under `docs/contracts/client-surface/`.
