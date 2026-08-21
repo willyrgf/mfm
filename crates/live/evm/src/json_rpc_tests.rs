@@ -403,91 +403,22 @@ fn an_unusable_url_fails_construction_without_naming_it() {
     );
 }
 
-fn managed_locator(name: &str) -> EvmAdapterLocator {
-    EvmAdapterLocator::parse(std::env::var(name).expect("managed locator environment"))
-        .expect("checked managed locator")
-}
+#[test]
+fn locator_accepts_plain_or_stock_tls_http_and_rejects_non_http_wires() {
+    for accepted in [
+        r#"{"v":1,"url":"http://127.0.0.1:8545"}"#,
+        r#"{"v":1,"url":"https://example.com"}"#,
+    ] {
+        let locator = EvmAdapterLocator::parse(accepted).expect("HTTP locator");
+        JsonRpcEvmProvider::connect(&locator).expect("provider");
+    }
 
-#[tokio::test]
-#[ignore = "requires the managed TLS reverse proxy provided by transport-authority-test"]
-async fn managed_tls_authority_uses_only_the_selected_endpoint_and_roots() {
     for rejected in [
-        r#"{"v":1,"url":"http://127.0.0.1:8545","tls_roots":{"kind":"webpki"}}"#,
-        r#"{"v":1,"url":"ftp://127.0.0.1/x","tls_roots":{"kind":"webpki"}}"#,
-        r#"{"v":1,"url":"https://127.0.0.1/x#fragment","tls_roots":{"kind":"webpki"}}"#,
-        r#"{"v":2,"url":"https://127.0.0.1/x","tls_roots":{"kind":"webpki"}}"#,
-        r#"{"v":1,"url":"https://127.0.0.1/x","tls_roots":{"kind":"webpki"},"extra":true}"#,
+        r#"{"v":1,"url":"ftp://127.0.0.1/x"}"#,
+        r#"{"v":1,"url":"https://127.0.0.1/x#fragment"}"#,
+        r#"{"v":2,"url":"https://127.0.0.1/x"}"#,
+        r#"{"v":1,"url":"https://127.0.0.1/x","tls_roots":{"kind":"webpki"}}"#,
     ] {
-        assert!(EvmAdapterLocator::parse(rejected).is_err());
+        assert!(EvmAdapterLocator::parse(rejected).is_err(), "{rejected}");
     }
-
-    let provider = JsonRpcEvmProvider::connect(&managed_locator("MFM_TEST_EVM_ADAPTER_LOCATOR"))
-        .await
-        .expect("production provider");
-    let response = provider
-        .request(
-            operation("mfm.evm.read-chain-identity@1"),
-            intent_bytes(
-                "mfm.evm.read-chain-identity@1",
-                serde_json::json!({ "kind": "chain_identity" }),
-            ),
-        )
-        .await
-        .expect("hostname-verified request despite hostile proxy environment");
-    assert_eq!(
-        response,
-        EvmProviderResponse::Read(EvmReadValue::ChainId(1337))
-    );
-
-    assert!(
-        JsonRpcEvmProvider::connect(&managed_locator("MFM_TEST_EVM_WRONG_PIN_LOCATOR"))
-            .await
-            .is_err()
-    );
-    for name in [
-        "MFM_TEST_EVM_ALTERNATE_CA_LOCATOR",
-        "MFM_TEST_EVM_WRONG_HOST_LOCATOR",
-    ] {
-        let provider = JsonRpcEvmProvider::connect(&managed_locator(name))
-            .await
-            .expect("valid locator and root file");
-        assert_eq!(
-            provider
-                .request(
-                    operation("mfm.evm.read-chain-identity@1"),
-                    intent_bytes(
-                        "mfm.evm.read-chain-identity@1",
-                        serde_json::json!({ "kind": "chain_identity" }),
-                    ),
-                )
-                .await,
-            Err(ReadAdapterError::Unavailable),
-            "{name} must not authenticate the endpoint"
-        );
-    }
-
-    let redirect = JsonRpcEvmProvider::connect(&managed_locator("MFM_TEST_EVM_REDIRECT_LOCATOR"))
-        .await
-        .expect("redirect locator");
-    assert_eq!(
-        redirect
-            .request(
-                operation("mfm.evm.read-chain-identity@1"),
-                intent_bytes(
-                    "mfm.evm.read-chain-identity@1",
-                    serde_json::json!({ "kind": "chain_identity" }),
-                ),
-            )
-            .await,
-        Err(ReadAdapterError::Unavailable),
-        "the client must not follow a redirect to the successful root route"
-    );
-
-    let webpki = EvmAdapterLocator::parse(
-        r#"{"v":1,"url":"https://example.com","tls_roots":{"kind":"webpki"}}"#,
-    )
-    .expect("WebPKI locator");
-    JsonRpcEvmProvider::connect(&webpki)
-        .await
-        .expect("exact compiled WebPKI mode");
 }

@@ -12,7 +12,6 @@ use alloy_primitives::{hex, Address, U256};
 use mfm_evm::{EvmBalanceSource, EvmBlockAnchor, EvmReadIntent, EvmReadSubject, EvmReadValue};
 use mfm_ids::StableId;
 use mfm_runtime::ReadAdapterError;
-use mfm_transport_security::{LoadedTlsRoots, TlsRootSpec};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -36,16 +35,15 @@ const BALANCE_OF_SELECTOR: &str = "70a08231";
 #[error("evm provider transport could not be constructed")]
 pub struct EvmProviderBuildError;
 
-/// Checked private EVM connection authority.
+/// Private EVM connection locator.
 ///
 /// This value deliberately implements neither `Debug`, `Display`, nor serialization.
 pub struct EvmAdapterLocator {
     url: Url,
-    tls_roots: TlsRootSpec,
 }
 
 impl EvmAdapterLocator {
-    /// Parses one bounded HTTPS locator with one exhaustive TLS-root source.
+    /// Parses one bounded HTTP(S) locator.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, EvmProviderBuildError> {
         let value = value.as_ref();
         if value.is_empty() || value.len() > MAX_EVM_ADAPTER_LOCATOR_BYTES {
@@ -56,7 +54,6 @@ impl EvmAdapterLocator {
         struct Wire {
             v: u8,
             url: String,
-            tls_roots: TlsRootSpec,
         }
         let wire: Wire = serde_json::from_str(value).map_err(|_| EvmProviderBuildError)?;
         if wire.v != 1
@@ -67,17 +64,14 @@ impl EvmAdapterLocator {
             return Err(EvmProviderBuildError);
         }
         let url = Url::parse(&wire.url).map_err(|_| EvmProviderBuildError)?;
-        if url.scheme() != "https"
+        if !matches!(url.scheme(), "http" | "https")
             || url.cannot_be_a_base()
             || !url.has_host()
             || url.fragment().is_some()
         {
             return Err(EvmProviderBuildError);
         }
-        Ok(Self {
-            url,
-            tls_roots: wire.tls_roots,
-        })
+        Ok(Self { url })
     }
 }
 
@@ -85,36 +79,20 @@ impl EvmAdapterLocator {
 pub struct JsonRpcEvmProvider {
     url: reqwest::Url,
     http: reqwest::Client,
-    _roots: Option<LoadedTlsRoots>,
 }
 
 impl JsonRpcEvmProvider {
-    /// Builds one provider from checked exact endpoint authority.
+    /// Builds one provider from its endpoint locator.
     ///
-    /// The URL and roots stay inside this provider and appear in no intent, evidence, log, or
-    /// error. Proxy discovery, redirects, referers, retries, plaintext, native roots, and additive
-    /// compiled roots are disabled.
-    pub async fn connect(locator: &EvmAdapterLocator) -> Result<Self, EvmProviderBuildError> {
-        let roots = LoadedTlsRoots::load(&locator.tls_roots)
-            .await
-            .map_err(|_| EvmProviderBuildError)?;
-        let tls = rustls::ClientConfig::builder()
-            .with_root_certificates(roots.root_store().as_ref().clone())
-            .with_no_client_auth();
+    /// The URL stays inside this provider and appears in no intent, evidence, log, or error.
+    pub fn connect(locator: &EvmAdapterLocator) -> Result<Self, EvmProviderBuildError> {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .referer(false)
-            .retry(reqwest::retry::never())
-            .https_only(true)
-            .use_preconfigured_tls(tls)
             .build()
             .map_err(|_| EvmProviderBuildError)?;
         Ok(Self {
             url: locator.url.clone(),
             http,
-            _roots: Some(roots),
         })
     }
 
@@ -123,17 +101,9 @@ impl JsonRpcEvmProvider {
         let url = reqwest::Url::parse(&url).map_err(|_| EvmProviderBuildError)?;
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .referer(false)
-            .retry(reqwest::retry::never())
             .build()
             .map_err(|_| EvmProviderBuildError)?;
-        Ok(Self {
-            url,
-            http,
-            _roots: None,
-        })
+        Ok(Self { url, http })
     }
 
     /// Performs one JSON-RPC call.

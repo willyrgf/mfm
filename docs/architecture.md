@@ -12,7 +12,6 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Store | object-safe complete load and atomic append | enumeration, Program, State, capability, reducer, or config semantics |
 | Catalog / index port | conditional named custody of opaque canonical config bytes and mechanical current-head enumeration | config-wire parsing, run folds/status, Program semantics, or config merging |
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
-| Transport security | checked TLS-root specs and exact immutable root-store loading for live EVM | endpoint URLs, credentials, protocol clients, or ambient resolution |
 | Live adapters | bounded provider ingress and direct typed callback registration | domain planning or State registration |
 | Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
 | Binaries | bounded transport parsing, client-side RunId entropy where offered, one Application call, transport policy, and redacted rendering | composition, domain planning, environment resolution, execution lifecycle, or run semantics |
@@ -38,8 +37,8 @@ snapshot claim.
 
 PostgreSQL owns its private locator grammar, target equivalence, SQLx wiring, split-role provisioner,
 loopback-only plaintext policy, ambient-input exclusion, and two independent gates. It uses stock
-SQLx directly and has no dependency on transport security. Administrative database
-authority exists only in the CLI provisioning path and is never retained by Application.
+SQLx directly. Administrative database authority exists only in the CLI provisioning path and is
+never retained by Application.
 
 `ComposedRuntime` is the only live Portfolio assembly constructor. One opaque binding set supplies
 typed EVM targets and provider handles in stable order; composition derives both adapter

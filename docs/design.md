@@ -70,7 +70,7 @@ single checked input and concrete backend; there is no singular one-route assemb
 Application owns the transport-neutral client surface. A strict XDG/HOME- or override-selected
 `deployment.toml` names environment resolvers for the runtime PostgreSQL locator and stable public
 EVM bindings; it contains no locator values and has no product lifecycle. Production composition
-resolves each private locator once, constructs local PostgreSQL and checked EVM TLS clients, and
+resolves each private locator once, constructs local PostgreSQL and stock EVM HTTP(S) clients, and
 derives Runtime registrations, planning targets, public binding views, Store, and RunIndex from the
 same checked binding set.
 

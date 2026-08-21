@@ -591,9 +591,7 @@ impl Application {
             let locator =
                 EvmAdapterLocator::parse(locator_value).map_err(|_| ComposeError::Provider)?;
             let provider: Arc<dyn EvmProvider> = Arc::new(
-                JsonRpcEvmProvider::connect(&locator)
-                    .await
-                    .map_err(|_| ComposeError::Provider)?,
+                JsonRpcEvmProvider::connect(&locator).map_err(|_| ComposeError::Provider)?,
             );
             routes.push((route.chain_id(), route.endpoint().clone(), provider));
         }
