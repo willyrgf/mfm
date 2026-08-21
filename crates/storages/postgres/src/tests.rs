@@ -4,11 +4,11 @@ use std::sync::Arc;
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_catalog::{
     CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigDigest, ConfigName,
-    RunIndex, RunPageLimit, MAX_CONFIG_ENTRIES,
+    MAX_CONFIG_ENTRIES,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_journal::{JournalHistory, OutcomeKind};
-use mfm_store::AppendResult;
+use mfm_store::{AppendResult, RunIndex, RunPageLimit};
 use sqlx::postgres::PgSslMode;
 use sqlx::{Connection, Executor};
 

@@ -8,13 +8,12 @@ use std::future::Future;
 use std::time::Duration;
 
 use mfm_canonical::sha256_digest_bytes;
-use mfm_catalog::{RunIndex, RunIndexError, RunPage};
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId};
 use mfm_journal::{
     frame_head_digest, EncodedRunFrame, StoredRunBytes, MAX_FRAME_BYTES, MAX_RUN_BYTES,
     MAX_RUN_FRAMES,
 };
-use mfm_store::{AppendResult, Store, StoreError};
+use mfm_store::{AppendResult, RunIndex, RunIndexError, RunPage, RunPageLimit, Store, StoreError};
 use sqlx::postgres::{PgArguments, PgPoolOptions, PgRow};
 use sqlx::{Arguments, Connection, PgConnection, PgPool, Row};
 
@@ -126,7 +125,7 @@ impl RunIndex for PostgresStore {
     fn list_runs<'a>(
         &'a self,
         after: Option<&'a RunId>,
-        limit: mfm_catalog::RunPageLimit,
+        limit: RunPageLimit,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<RunPage, RunIndexError>> + Send + 'a>> {
         Box::pin(async move { index::list_runs(&self.pool, after, limit).await })
     }

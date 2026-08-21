@@ -236,19 +236,15 @@ impl Store for FaultStore {
     }
 }
 
-impl mfm_catalog::RunIndex for FaultStore {
+impl mfm_store::RunIndex for FaultStore {
     fn list_runs<'a>(
         &'a self,
         after: Option<&'a RunId>,
         limit: RunPageLimit,
     ) -> Pin<
-        Box<
-            dyn Future<Output = Result<mfm_catalog::RunPage, mfm_catalog::RunIndexError>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn Future<Output = Result<mfm_store::RunPage, mfm_store::RunIndexError>> + Send + 'a>,
     > {
-        mfm_catalog::RunIndex::list_runs(&self.inner, after, limit)
+        mfm_store::RunIndex::list_runs(&self.inner, after, limit)
     }
 }
 

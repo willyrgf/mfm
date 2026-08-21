@@ -2,7 +2,7 @@
 name = "mfm-catalog"
 version = "0.1.0"
 edition = "2021"
-description = "Opaque config custody and mechanical run indexes for MFM"
+description = "Opaque named config custody for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"

@@ -2121,9 +2121,9 @@ name = "mfm-store"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
- "mfm-catalog",
  "mfm-ids",
  "mfm-journal",
+ "serde",
  "thiserror",
  "tokio",
 ]
