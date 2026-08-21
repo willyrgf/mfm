@@ -45,8 +45,9 @@ surface is:
 - stored-config run start through one exact name/digest selection;
 - run progress, semantic read, and mechanical `RunId`-keyset list.
 
-Every execution receives an explicit caller-owned `RunId`. The pure `derive_run_id([u8; 32])`
-helper implements `mfm.run-id.random.v1`; it performs no IO and Application never calls it.
+Every execution receives an explicit caller-owned `RunId`. The shared `generate_run_id()` client
+primitive obtains exactly 32 bytes of OS cryptographic entropy and applies
+`mfm.run-id.random.v1`; an entropy failure is the stable `RunIdGenerationError`.
 `StartRunResult` reports the actual selected config revision. An ambiguously acknowledged append is
 the only `RunRequestError` carrying data, through the exact `RunRecovery::Start` or
 `RunRecovery::Progress` sum.

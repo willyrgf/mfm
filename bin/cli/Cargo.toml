@@ -14,7 +14,6 @@ mfm-app = { path = "../../crates/app" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 clap = { workspace = true }
-getrandom = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

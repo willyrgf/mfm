@@ -47,11 +47,12 @@ Start accepts exactly one revision selection and an optional explicit identity:
 {"config":{"name":"daily","digest":"content:sha256-jcs-v1:<64 hex>"}}
 ```
 
-When `run_id` is absent, REST obtains exactly 32 bytes from the OS cryptographic random source and
-derives the identity before calling Application. An explicit `"run_id":"run:sha256-jcs-v1:..."`
-bypasses generation and supports deterministic retry. Successful starts return the selected identity
-inside `run.run_id`; ordinary start errors after identity selection add `run_id` to the error body so
-a durably interrupted run remains addressable. Entropy failure is `run_id_generation_failed`.
+When `run_id` is absent, REST uses the same Application client primitive as the CLI to obtain exactly
+32 bytes from the OS cryptographic random source and derive the identity. An explicit
+`"run_id":"run:sha256-jcs-v1:..."` bypasses generation and supports deterministic retry. Successful
+starts return the selected identity inside `run.run_id`; ordinary start errors after identity
+selection add `run_id` to the error body so a durably interrupted run remains addressable. Entropy
+failure is `run_id_generation_failed`.
 Mutating routes use Axum's JSON media-type admission, accepting `application/json` and application
 media types with a `+json` suffix.
 

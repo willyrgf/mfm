@@ -6,10 +6,10 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mfm_app::{
-    derive_run_id, provision_postgres, Application, ConfigDigest, ConfigDocument,
+    generate_run_id, provision_postgres, Application, ConfigDigest, ConfigDocument,
     ConfigDocumentError, ConfigName, ConfigSelection, Deployment, EnvironmentName, ItemList,
-    RequestError, RunPageLimit, RunRecovery, RunRequestError, SerializableRunView, StartRunResult,
-    MAX_CONFIG_DOCUMENT_BYTES,
+    RequestError, RunIdGenerationError, RunPageLimit, RunRecovery, RunRequestError,
+    SerializableRunView, StartRunResult, MAX_CONFIG_DOCUMENT_BYTES,
 };
 use mfm_ids::RunId;
 use mfm_runtime::{RunView, RunViewState};
@@ -156,7 +156,7 @@ enum CliError {
     ConfigInput,
     Request(RequestError),
     RunRequest(Box<RunRequestError>),
-    RunIdGeneration,
+    RunIdGeneration(RunIdGenerationError),
     Output,
     Usage,
 }
@@ -173,7 +173,7 @@ impl CliError {
             Self::ConfigInput => "config_input_unavailable",
             Self::Request(error) => error.code(),
             Self::RunRequest(error) => error.code(),
-            Self::RunIdGeneration => "run_id_generation_failed",
+            Self::RunIdGeneration(error) => error.code(),
             Self::Output => "output_failed",
             Self::Usage => "invalid_usage",
         }
@@ -190,7 +190,7 @@ impl CliError {
             Self::ConfigInput => "config input is unavailable".to_owned(),
             Self::Request(error) => error.to_string(),
             Self::RunRequest(error) => error.to_string(),
-            Self::RunIdGeneration => "run id generation failed".to_owned(),
+            Self::RunIdGeneration(error) => error.to_string(),
             Self::Output => "output could not be written".to_owned(),
             Self::Usage => "command usage is invalid".to_owned(),
         }
@@ -327,7 +327,7 @@ async fn run_run(
             );
             let run_id = match run_id {
                 Some(value) => RunId::parse(value).map_err(|_| CliError::RunId)?,
-                None => generate_run_id()?,
+                None => generate_run_id().map_err(CliError::RunIdGeneration)?,
             };
             let application = open(deployment).await?;
             let result = application.start_run(run_id, &selection).await?;
@@ -399,18 +399,6 @@ async fn read_config_input(path: &Path) -> Result<Vec<u8>, CliError> {
             .map_err(|_| CliError::ConfigInput)?;
     }
     Ok(bytes)
-}
-
-fn generate_run_id() -> Result<RunId, CliError> {
-    generate_run_id_with(getrandom::fill)
-}
-
-fn generate_run_id_with<E>(
-    fill: impl FnOnce(&mut [u8]) -> Result<(), E>,
-) -> Result<RunId, CliError> {
-    let mut entropy = [0; 32];
-    fill(&mut entropy).map_err(|_| CliError::RunIdGeneration)?;
-    Ok(derive_run_id(entropy))
 }
 
 fn emit_entry_points(output: OutputFormat) -> Result<ExitCode, CliError> {
@@ -628,25 +616,10 @@ mod tests {
         assert!(matches!(page_limit(Some(201)), Err(CliError::PageLimit)));
         assert_eq!(CliError::ConfigName.code(), "invalid_config_name");
         assert_eq!(CliError::RunId.code(), "invalid_run_id");
-        assert_eq!(CliError::RunIdGeneration.code(), "run_id_generation_failed");
-    }
-
-    #[test]
-    fn run_id_generation_consumes_exactly_32_bytes_and_fails_closed() {
-        let generated = generate_run_id_with(|entropy| {
-            assert_eq!(entropy.len(), 32);
-            entropy.copy_from_slice(&[7; 32]);
-            Ok::<(), ()>(())
-        })
-        .expect("generated id");
-        assert_eq!(generated, derive_run_id([7; 32]));
-        assert!(matches!(
-            generate_run_id_with(|entropy| {
-                assert_eq!(entropy.len(), 32);
-                Err::<(), ()>(())
-            }),
-            Err(CliError::RunIdGeneration)
-        ));
+        assert_eq!(
+            CliError::RunIdGeneration(RunIdGenerationError).code(),
+            "run_id_generation_failed"
+        );
     }
 
     #[tokio::test]

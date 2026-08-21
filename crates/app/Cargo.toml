@@ -21,6 +21,7 @@ mfm-program = { path = "../kernel/program" }
 mfm-runtime = { path = "../kernel/runtime" }
 mfm-storage-postgres = { path = "../storages/postgres" }
 mfm-store = { path = "../kernel/store" }
+getrandom = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
