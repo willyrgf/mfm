@@ -1,14 +1,13 @@
 //! Managed two-binary parity verification over the production Unix-socket listener.
 
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[test]
-#[ignore = "requires explicit CLI/REST binaries and managed PostgreSQL/TLS EVM services"]
+#[ignore = "requires explicit CLI/REST binaries and managed PostgreSQL/Reth services"]
 fn cli_and_rest_are_one_live_application_surface() {
     let cli = required_path("MFM_E2E_CLI_BIN");
     let rest = required_path("MFM_E2E_REST_BIN");
@@ -28,8 +27,6 @@ fn cli_and_rest_are_one_live_application_surface() {
     std::fs::create_dir_all(deployment.parent().expect("deployment parent"))
         .expect("create XDG tree");
     std::fs::create_dir(&socket_dir).expect("create socket directory");
-    std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700))
-        .expect("set socket directory mode");
     std::fs::write(
         &deployment,
         r#"[store]
@@ -294,7 +291,7 @@ fn http(
     let (body, content_type) = body.unwrap_or(("", ""));
     write!(
         stream,
-        "{method} {target} HTTP/1.1\r\nHost: mfm.local\r\nConnection: close\r\nContent-Length: {}\r\n",
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
     )?;
     if !content_type.is_empty() {

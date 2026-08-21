@@ -7,7 +7,6 @@ use clap::{Parser, Subcommand};
 use mfm_app::{Application, Deployment};
 
 mod server;
-mod socket;
 
 const DEFAULT_MAX_IN_FLIGHT_RUNS: usize = 8;
 const MAX_MAX_IN_FLIGHT_RUNS: usize = 256;
@@ -28,8 +27,6 @@ enum Command {
         deployment: Option<PathBuf>,
         #[arg(long)]
         unix_socket: PathBuf,
-        #[arg(long)]
-        recover_stale_socket: bool,
         #[arg(
             long,
             default_value_t = DEFAULT_MAX_IN_FLIGHT_RUNS,
@@ -77,7 +74,6 @@ async fn run(cli: Cli) -> Result<(), MainError> {
         Command::Serve {
             deployment,
             unix_socket,
-            recover_stale_socket,
             max_in_flight_runs,
             run_timeout,
         } => {
@@ -89,19 +85,19 @@ async fn run(cli: Cli) -> Result<(), MainError> {
                     .await
                     .map_err(MainError::Composition)?,
             );
-            let bound = socket::BoundSocket::bind(&unix_socket, recover_stale_socket)
-                .map_err(|_| MainError::Socket)?;
+            let listener =
+                tokio::net::UnixListener::bind(&unix_socket).map_err(|_| MainError::Socket)?;
             let router = server::router(
                 application,
                 max_in_flight_runs,
                 Duration::from_secs(run_timeout),
             );
-            let (listener, cleanup) = bound.into_parts();
             let result = axum::serve(listener, router)
                 .with_graceful_shutdown(shutdown_signal())
                 .await;
-            cleanup.cleanup().map_err(|_| MainError::Socket)?;
-            result.map_err(|_| MainError::Serve)
+            let cleanup = tokio::fs::remove_file(&unix_socket).await;
+            result.map_err(|_| MainError::Serve)?;
+            cleanup.map_err(|_| MainError::Socket)
         }
     }
 }

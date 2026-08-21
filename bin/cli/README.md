@@ -5,6 +5,9 @@ argv/file/stdin parsing, optional client-side RunId generation, text/JSON render
 schema provisioning. It does not parse deployment TOML, resolve locator environments, construct
 providers, plan domain Programs, or interpret run history.
 
+The CLI adds no authentication or authorization layer. Process execution, environment access, and
+database credentials belong to the enclosing deployment.
+
 ## Commands
 
 ```text
