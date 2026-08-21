@@ -1,7 +1,4 @@
-use std::collections::HashSet;
-use std::future::Future;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::extract::rejection::PathRejection;
@@ -28,21 +25,7 @@ const QUERY_ENCODED_MAX: usize = 1024;
 const RUN_BODY_MAX: usize = 4 * 1024;
 const CONFIG_DIGEST_HEADER: HeaderName = HeaderName::from_static("mfm-config-digest");
 
-#[derive(Clone)]
-struct ServerState {
-    application: Arc<Application>,
-    controls: Arc<RunControls>,
-}
-
-pub(crate) fn router(
-    application: Arc<Application>,
-    max_in_flight_runs: usize,
-    run_timeout: Duration,
-) -> Router {
-    let state = ServerState {
-        application,
-        controls: Arc::new(RunControls::new(max_in_flight_runs, run_timeout)),
-    };
+pub(crate) fn router(application: Arc<Application>) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .route("/v1/entry-points", get(entry_points))
@@ -58,7 +41,7 @@ pub(crate) fn router(
         .route("/v1/runs/{run_id}", get(read_run))
         .fallback(route_not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .with_state(state)
+        .with_state(application)
 }
 
 async fn health(request: Request) -> Response {
@@ -78,18 +61,15 @@ async fn entry_points(request: Request) -> Response {
     )
 }
 
-async fn bindings(State(state): State<ServerState>, request: Request) -> Response {
+async fn bindings(State(application): State<Arc<Application>>, request: Request) -> Response {
     if let Err(error) = require_empty_body(request).await {
         return error;
     }
-    json_response(
-        StatusCode::OK,
-        &BindingList::new(state.application.bindings()),
-    )
+    json_response(StatusCode::OK, &BindingList::new(application.bindings()))
 }
 
 async fn import_config(
-    State(state): State<ServerState>,
+    State(application): State<Arc<Application>>,
     OriginalUri(uri): OriginalUri,
     path: Result<Path<String>, PathRejection>,
     request: Request,
@@ -109,11 +89,7 @@ async fn import_config(
         Ok(document) => document,
         Err(error) => return config_document_error(error),
     };
-    match state
-        .application
-        .import_config(name.clone(), document)
-        .await
-    {
+    match application.import_config(name.clone(), document).await {
         Ok(outcome) => {
             let status = match outcome {
                 ImportOutcome::Created { .. } => StatusCode::CREATED,
@@ -134,7 +110,7 @@ async fn import_config(
 }
 
 async fn list_configs(
-    State(state): State<ServerState>,
+    State(application): State<Arc<Application>>,
     OriginalUri(uri): OriginalUri,
     request: Request,
 ) -> Response {
@@ -150,14 +126,14 @@ async fn list_configs(
         Err(_) => return checked_error("invalid_cursor", "cursor is invalid"),
     };
     let page = ConfigPageRequest::new(cursor, query.limit);
-    match state.application.list_configs(&page).await {
+    match application.list_configs(&page).await {
         Ok(page) => json_response(StatusCode::OK, &page),
         Err(error) => request_error(error),
     }
 }
 
 async fn read_config(
-    State(state): State<ServerState>,
+    State(application): State<Arc<Application>>,
     OriginalUri(uri): OriginalUri,
     path: Result<Path<String>, PathRejection>,
     request: Request,
@@ -169,14 +145,14 @@ async fn read_config(
         Ok(name) => name,
         Err(error) => return error.response(),
     };
-    match state.application.read_config(&name).await {
+    match application.read_config(&name).await {
         Ok(config) => json_response(StatusCode::OK, &config),
         Err(error) => request_error(error),
     }
 }
 
 async fn delete_config(
-    State(state): State<ServerState>,
+    State(application): State<Arc<Application>>,
     OriginalUri(uri): OriginalUri,
     path: Result<Path<String>, PathRejection>,
     request: Request,
@@ -192,14 +168,14 @@ async fn delete_config(
     if let Err(error) = require_empty_body(request).await {
         return error;
     }
-    match state.application.delete_config(&name, &digest).await {
+    match application.delete_config(&name, &digest).await {
         Ok(()) => empty_response(StatusCode::NO_CONTENT),
         Err(error) => request_error(error),
     }
 }
 
 async fn list_runs(
-    State(state): State<ServerState>,
+    State(application): State<Arc<Application>>,
     OriginalUri(uri): OriginalUri,
     request: Request,
 ) -> Response {
@@ -215,14 +191,14 @@ async fn list_runs(
         Err(_) => return checked_error("invalid_cursor", "cursor is invalid"),
     };
     let page = RunPageRequest::new(cursor, query.limit);
-    match state.application.list_runs(&page).await {
+    match application.list_runs(&page).await {
         Ok(page) => json_response(StatusCode::OK, &page),
         Err(error) => request_error(error),
     }
 }
 
 async fn start_run(
-    State(state): State<ServerState>,
+    State(application): State<Arc<Application>>,
     OriginalUri(uri): OriginalUri,
     path: Result<Path<String>, PathRejection>,
     request: Request,
@@ -242,23 +218,14 @@ async fn start_run(
         Ok(body) => body,
         Err(_) => return invalid_request_body(),
     };
-    let result = state
-        .controls
-        .execute(
-            &run_id,
-            true,
-            state.application.start_run(run_id.clone(), &body.config),
-        )
-        .await;
-    match result {
-        Ok(Ok(result)) => json_response(StatusCode::OK, &result),
-        Ok(Err(error)) => run_request_error(error),
-        Err(error) => control_error(error),
+    match application.start_run(run_id, &body.config).await {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => run_request_error(error),
     }
 }
 
 async fn progress_run(
-    State(state): State<ServerState>,
+    State(application): State<Arc<Application>>,
     OriginalUri(uri): OriginalUri,
     path: Result<Path<String>, PathRejection>,
     request: Request,
@@ -277,19 +244,14 @@ async fn progress_run(
     if serde_json::from_slice::<EmptyBody>(&bytes).is_err() {
         return invalid_request_body();
     }
-    let result = state
-        .controls
-        .execute(&run_id, true, state.application.progress_run(&run_id))
-        .await;
-    match result {
-        Ok(Ok(view)) => json_response(StatusCode::OK, &SerializableRunView::new(&view)),
-        Ok(Err(error)) => run_request_error(error),
-        Err(error) => control_error(error),
+    match application.progress_run(&run_id).await {
+        Ok(view) => json_response(StatusCode::OK, &SerializableRunView::new(&view)),
+        Err(error) => run_request_error(error),
     }
 }
 
 async fn read_run(
-    State(state): State<ServerState>,
+    State(application): State<Arc<Application>>,
     OriginalUri(uri): OriginalUri,
     path: Result<Path<String>, PathRejection>,
     request: Request,
@@ -301,14 +263,9 @@ async fn read_run(
         Ok(run_id) => run_id,
         Err(error) => return error.response(),
     };
-    let result = state
-        .controls
-        .execute(&run_id, false, state.application.read_run(&run_id))
-        .await;
-    match result {
-        Ok(Ok(view)) => json_response(StatusCode::OK, &SerializableRunView::new(&view)),
-        Ok(Err(error)) => request_error(error),
-        Err(error) => control_error(error),
+    match application.read_run(&run_id).await {
+        Ok(view) => json_response(StatusCode::OK, &SerializableRunView::new(&view)),
+        Err(error) => request_error(error),
     }
 }
 
@@ -519,99 +476,6 @@ async fn require_empty_body(request: Request) -> Result<(), Response> {
     }
 }
 
-struct RunControls {
-    permits: Arc<tokio::sync::Semaphore>,
-    active: Arc<Mutex<HashSet<RunId>>>,
-    timeout: Duration,
-}
-
-impl RunControls {
-    fn new(max_in_flight: usize, timeout: Duration) -> Self {
-        Self {
-            permits: Arc::new(tokio::sync::Semaphore::new(max_in_flight)),
-            active: Arc::new(Mutex::new(HashSet::new())),
-            timeout,
-        }
-    }
-
-    async fn execute<F, T, E>(
-        &self,
-        run_id: &RunId,
-        exclusive: bool,
-        future: F,
-    ) -> Result<Result<T, E>, ControlError>
-    where
-        F: Future<Output = Result<T, E>>,
-    {
-        let _permit = self
-            .permits
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ControlError::Capacity)?;
-        let _active = exclusive
-            .then(|| ActiveRun::enter(self.active.clone(), run_id.clone()))
-            .transpose()?;
-        tokio::time::timeout(self.timeout, future)
-            .await
-            .map_err(|_| ControlError::Deadline)
-    }
-}
-
-struct ActiveRun {
-    runs: Arc<Mutex<HashSet<RunId>>>,
-    run_id: RunId,
-}
-
-impl ActiveRun {
-    fn enter(runs: Arc<Mutex<HashSet<RunId>>>, run_id: RunId) -> Result<Self, ControlError> {
-        let inserted = runs
-            .lock()
-            .map_err(|_| ControlError::Internal)?
-            .insert(run_id.clone());
-        if !inserted {
-            return Err(ControlError::Busy);
-        }
-        Ok(Self { runs, run_id })
-    }
-}
-
-impl Drop for ActiveRun {
-    fn drop(&mut self) {
-        if let Ok(mut runs) = self.runs.lock() {
-            runs.remove(&self.run_id);
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ControlError {
-    Busy,
-    Capacity,
-    Deadline,
-    Internal,
-}
-
-fn control_error(error: ControlError) -> Response {
-    match error {
-        ControlError::Busy => boundary_error(
-            StatusCode::CONFLICT,
-            "run_busy",
-            "run already has an active request",
-        ),
-        ControlError::Capacity => boundary_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too_many_requests",
-            "run request limit is reached",
-        ),
-        ControlError::Deadline => boundary_error(
-            StatusCode::GATEWAY_TIMEOUT,
-            "deadline_exceeded",
-            "run request deadline exceeded",
-        ),
-        ControlError::Internal => internal_error(),
-    }
-}
-
 fn config_document_error(error: ConfigDocumentError) -> Response {
     let status = match error {
         ConfigDocumentError::Malformed => StatusCode::BAD_REQUEST,
@@ -776,7 +640,8 @@ mod tests {
     const DOCUMENT: &[u8] = br#"{
       "input":{"portfolio":{"quotes":["usd"],"portfolio_id":"portfolio-example","collections":[{"request":{"sources":[{"token":null,"source_id":"wallet-0.native","chain_id":1,"address":"0x1111111111111111111111111111111111111111"}],"decimals":18},"correlation":"native-0"}]},"selector":{"quote":"usd","target":"portfolio-example"},"routes":[{"endpoint_id":"alpha","chain_id":1}]},
       "entry_point":"mfm.portfolio/snapshot@1"}"#;
-
+    const RUN_ID: &str =
+        "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111";
     const ANCHOR: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     struct Provider;
@@ -800,8 +665,6 @@ mod tests {
                     "mfm.evm.read-native-balance@1" => {
                         EvmReadValue::RawUnits("1000000000000000000".to_owned())
                     }
-                    "mfm.evm.read-token-decimals@1" => EvmReadValue::TokenDecimals(6),
-                    "mfm.evm.read-token-balance@1" => EvmReadValue::RawUnits("2500000".to_owned()),
                     _ => return Err(ReadAdapterError::Internal),
                 };
                 Ok(EvmProviderResponse::Read(value))
@@ -810,25 +673,13 @@ mod tests {
     }
 
     fn application() -> Arc<Application> {
-        application_with_routes(false)
-    }
-
-    fn bound_application() -> Arc<Application> {
-        application_with_routes(true)
-    }
-
-    fn application_with_routes(bound: bool) -> Arc<Application> {
         let store = Arc::new(MemoryStore::new());
-        let routes = if bound {
-            vec![(
-                1,
-                EvmEndpoint::new("alpha").expect("endpoint"),
-                Arc::new(Provider) as Arc<dyn EvmProvider>,
-            )]
-        } else {
-            Vec::new()
-        };
-        let bindings = BoundCapabilitySet::new(routes).expect("bindings");
+        let bindings = BoundCapabilitySet::new(vec![(
+            1,
+            EvmEndpoint::new("alpha").expect("endpoint"),
+            Arc::new(Provider) as Arc<dyn EvmProvider>,
+        )])
+        .expect("bindings");
         let composed = ComposedRuntime::compose(store, bindings).expect("composition");
         Arc::new(
             Application::from_parts(composed, Arc::new(MemoryCatalog::new())).expect("application"),
@@ -843,454 +694,235 @@ mod tests {
             .expect("request")
     }
 
-    async fn body(response: Response) -> serde_json::Value {
+    fn json_request(method: Method, uri: &str, body: impl Into<Body>) -> Request<Body> {
+        let mut request = request(method, uri, body);
+        request
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        request
+    }
+
+    async fn send(service: &Router, request: Request<Body>) -> Response {
+        service.clone().oneshot(request).await.expect("response")
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
         let bytes = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("response body");
         serde_json::from_slice(&bytes).expect("JSON response")
     }
 
-    #[tokio::test]
-    async fn host_and_origin_are_not_admission_inputs() {
-        let service = router(application(), 2, Duration::from_secs(1));
-        let response = service
-            .clone()
-            .oneshot(request(Method::GET, "/healthz", Body::empty()))
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
+    async fn assert_error(
+        service: &Router,
+        request: Request<Body>,
+        status: StatusCode,
+        code: &str,
+    ) {
+        let response = send(service, request).await;
+        assert_eq!(response.status(), status, "{code}");
+        assert_eq!(response_json(response).await["code"], code);
+    }
 
-        let mut origin = request(Method::GET, "/healthz", Body::empty());
-        origin
+    #[tokio::test]
+    async fn router_contract_covers_transport_models_and_recovery() {
+        let application = application();
+        let service = router(Arc::clone(&application));
+
+        let mut health = request(Method::GET, "/healthz", Body::empty());
+        health
             .headers_mut()
             .insert("origin", HeaderValue::from_static("https://example.com"));
-        let response = service.clone().oneshot(origin).await.expect("response");
+        let response = send(&service, health).await;
         assert_eq!(response.status(), StatusCode::OK);
-    }
+        assert_eq!(response_json(response).await["status"], "ok");
 
-    #[tokio::test]
-    async fn fallback_method_and_media_errors_are_normalized() {
-        let service = router(application(), 2, Duration::from_secs(1));
-        let response = service
-            .clone()
-            .oneshot(request(Method::GET, "/missing", Body::empty()))
+        let head = send(
+            &service,
+            request(Method::HEAD, "/v1/entry-points", Body::empty()),
+        )
+        .await;
+        assert_eq!(head.status(), StatusCode::OK);
+        assert_eq!(head.headers()[CONTENT_TYPE], "application/json");
+        assert!(to_bytes(head.into_body(), usize::MAX)
             .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(body(response).await["code"], "route_not_found");
+            .expect("HEAD body")
+            .is_empty());
 
-        let response = service
-            .clone()
-            .oneshot(request(Method::POST, "/healthz", Body::empty()))
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-        assert_eq!(body(response).await["code"], "method_not_allowed");
+        for (request, status, code) in [
+            (
+                request(Method::GET, "/missing", Body::empty()),
+                StatusCode::NOT_FOUND,
+                "route_not_found",
+            ),
+            (
+                request(Method::POST, "/healthz", Body::empty()),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+            ),
+            (
+                request(Method::GET, "/healthz", Body::from("x")),
+                StatusCode::BAD_REQUEST,
+                "invalid_request_body",
+            ),
+            (
+                request(Method::GET, "/v1/configs/UPPER", Body::empty()),
+                StatusCode::BAD_REQUEST,
+                "invalid_config_name",
+            ),
+            (
+                request(Method::GET, "/v1/configs?limit=201", Body::empty()),
+                StatusCode::BAD_REQUEST,
+                "invalid_page_limit",
+            ),
+            (
+                request(
+                    Method::POST,
+                    &format!("/v1/runs/{RUN_ID}/start"),
+                    Body::from("{}"),
+                ),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_media_type",
+            ),
+            (
+                json_request(
+                    Method::POST,
+                    &format!("/v1/runs/{RUN_ID}/progress"),
+                    Body::from("{}"),
+                ),
+                StatusCode::NOT_FOUND,
+                "run_absent",
+            ),
+            (
+                json_request(
+                    Method::PUT,
+                    "/v1/configs/invalid",
+                    Body::from(r#"{"entry_point":"unknown","input":{}}"#),
+                ),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_config_document",
+            ),
+            (
+                json_request(
+                    Method::PUT,
+                    "/v1/configs/large",
+                    Body::from(vec![b'x'; MAX_CONFIG_DOCUMENT_BYTES + 1]),
+                ),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request_body_too_large",
+            ),
+        ] {
+            assert_error(&service, request, status, code).await;
+        }
 
-        let response = service
-            .oneshot(request(
-                Method::POST,
-                "/v1/runs/not-a-run/start",
-                Body::from("{}"),
-            ))
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        assert_eq!(body(response).await["code"], "unsupported_media_type");
-    }
-
-    #[tokio::test]
-    async fn config_routes_share_exact_models_and_conditional_delete() {
-        let service = router(application(), 2, Duration::from_secs(1));
-        let mut import = request(Method::PUT, "/v1/configs/daily", Body::from(DOCUMENT));
-        import
-            .headers_mut()
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let response = service.clone().oneshot(import).await.expect("response");
+        let response = send(
+            &service,
+            json_request(Method::PUT, "/v1/configs/daily", Body::from(DOCUMENT)),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(response.headers()[LOCATION], "/v1/configs/daily");
-        let imported = body(response).await;
-        assert_eq!(imported["outcome"], "created");
+        let imported = response_json(response).await;
         let digest = imported["config"]["digest"]
             .as_str()
             .expect("digest")
             .to_owned();
 
-        let response = service
-            .clone()
-            .oneshot(request(Method::GET, "/v1/configs/daily", Body::empty()))
-            .await
-            .expect("response");
+        let response = send(
+            &service,
+            json_request(
+                Method::POST,
+                &format!("/v1/runs/{RUN_ID}/start"),
+                Body::from(r#"{"config":{"kind":"current","name":"daily"}}"#),
+            ),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let shown = body(response).await;
-        assert!(shown["document"].is_object());
-        assert_eq!(shown["config"]["digest"], digest);
+        let started = response_json(response).await;
+        assert_eq!(started["config"]["digest"], digest);
+        assert_eq!(started["run"]["run_id"], RUN_ID);
+        assert_eq!(started["run"]["state"]["kind"], "succeeded");
+        assert!(started["run"]["state"]["value"].is_object());
 
-        let response = service
-            .clone()
-            .oneshot(request(Method::GET, "/v1/configs?limit=1", Body::empty()))
+        let shown = response_json(
+            send(
+                &service,
+                request(Method::GET, &format!("/v1/runs/{RUN_ID}"), Body::empty()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(shown, started["run"]);
+
+        let progressed = response_json(
+            send(
+                &service,
+                json_request(
+                    Method::POST,
+                    &format!("/v1/runs/{RUN_ID}/progress"),
+                    Body::from("{}"),
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(progressed, started["run"]);
+
+        let runs = response_json(
+            send(
+                &service,
+                request(Method::GET, "/v1/runs?limit=1", Body::empty()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(runs["items"][0]["run_id"], RUN_ID);
+
+        assert_error(
+            &service,
+            request(Method::DELETE, "/v1/configs/daily", Body::empty()),
+            StatusCode::PRECONDITION_REQUIRED,
+            "precondition_required",
+        )
+        .await;
+
+        let config = application
+            .read_config(&ConfigName::new("daily").expect("name"))
             .await
-            .expect("response");
-        assert_eq!(body(response).await["items"][0]["name"], "daily");
-
-        let run_id =
-            "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111";
-        let mut start = request(
-            Method::POST,
-            &format!("/v1/runs/{run_id}/start"),
-            Body::from(r#"{"config":{"kind":"current","name":"daily"}}"#),
-        );
-        start
-            .headers_mut()
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let response = service.clone().oneshot(start).await.expect("response");
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert_eq!(body(response).await["code"], "binding_unbound");
-
-        let response = service
-            .clone()
-            .oneshot(request(Method::DELETE, "/v1/configs/daily", Body::empty()))
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
+            .expect("stored config");
+        let run_id = RunId::parse(RUN_ID).expect("run id");
+        for (actual, fixture) in [
+            (
+                run_request_error(RunRequestError::AppendIndeterminate {
+                    recovery: RunRecovery::Start {
+                        run_id: run_id.clone(),
+                        config: config.config().clone(),
+                    },
+                }),
+                include_str!("../../../docs/contracts/client-surface/run-recovery-start.json"),
+            ),
+            (
+                run_request_error(RunRequestError::AppendIndeterminate {
+                    recovery: RunRecovery::Progress { run_id },
+                }),
+                include_str!("../../../docs/contracts/client-surface/run-recovery-progress.json"),
+            ),
+        ] {
+            assert_eq!(actual.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                response_json(actual).await,
+                serde_json::from_str::<serde_json::Value>(fixture).expect("recovery fixture")
+            );
+        }
 
         let mut delete = request(Method::DELETE, "/v1/configs/daily", Body::empty());
         delete.headers_mut().insert(
             &CONFIG_DIGEST_HEADER,
             HeaderValue::from_str(&digest).expect("digest header"),
         );
-        let response = service.oneshot(delete).await.expect("response");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert!(!response.headers().contains_key(CONTENT_TYPE));
-    }
-
-    #[tokio::test]
-    async fn checked_paths_queries_bodies_and_shared_errors_are_exact() {
-        let service = router(application(), 2, Duration::from_secs(1));
-        let response = service
-            .clone()
-            .oneshot(request(Method::GET, "/v1/configs/UPPER", Body::empty()))
-            .await
-            .expect("response");
-        assert_eq!(body(response).await["code"], "invalid_config_name");
-
-        let response = service
-            .clone()
-            .oneshot(request(
-                Method::GET,
-                "/v1/configs?limit=0&limit=1",
-                Body::empty(),
-            ))
-            .await
-            .expect("response");
-        assert_eq!(body(response).await["code"], "invalid_query");
-
-        let response = service
-            .clone()
-            .oneshot(request(
-                Method::GET,
-                "/v1/configs?limit=many",
-                Body::empty(),
-            ))
-            .await
-            .expect("response");
-        assert_eq!(body(response).await["code"], "invalid_query");
-
-        let response = service
-            .clone()
-            .oneshot(request(Method::GET, "/v1/configs?limit=201", Body::empty()))
-            .await
-            .expect("response");
-        assert_eq!(body(response).await["code"], "invalid_page_limit");
-
-        let run_id =
-            "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111";
-        let mut start = request(
-            Method::POST,
-            &format!("/v1/runs/{run_id}/start"),
-            Body::from(r#"{"config":{"kind":"current","name":"daily"},"entry_point":"x"}"#),
-        );
-        start
-            .headers_mut()
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let response = service.clone().oneshot(start).await.expect("response");
-        assert_eq!(body(response).await["code"], "invalid_request_body");
-
-        let mut progress = request(
-            Method::POST,
-            &format!("/v1/runs/{run_id}/progress"),
-            Body::from(" { } \n"),
-        );
-        progress.headers_mut().insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/json; charset=UTF-8"),
-        );
-        let response = service.oneshot(progress).await.expect("response");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(body(response).await["code"], "run_absent");
-    }
-
-    #[tokio::test]
-    async fn current_and_exact_start_use_shared_results_and_terminal_raw_values() {
-        let service = router(bound_application(), 2, Duration::from_secs(10));
-        let mut import = request(Method::PUT, "/v1/configs/daily", Body::from(DOCUMENT));
-        import
-            .headers_mut()
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let response = service.clone().oneshot(import).await.expect("response");
-        let imported = body(response).await;
-        let digest = imported["config"]["digest"]
-            .as_str()
-            .expect("digest")
-            .to_owned();
-
-        let current_id =
-            "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111";
-        let mut start = request(
-            Method::POST,
-            &format!("/v1/runs/{current_id}/start"),
-            Body::from(r#"{"config":{"kind":"current","name":"daily"}}"#),
-        );
-        start
-            .headers_mut()
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let response = service.clone().oneshot(start).await.expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let started = body(response).await;
-        assert_eq!(started["config"]["digest"], digest);
-        assert_eq!(started["run"]["run_id"], current_id);
-
-        let mut terminal = started["run"].clone();
-        for _ in 0..20 {
-            if terminal["state"]["kind"] == "succeeded" {
-                break;
-            }
-            let mut progress = request(
-                Method::POST,
-                &format!("/v1/runs/{current_id}/progress"),
-                Body::from("{}"),
-            );
-            progress
-                .headers_mut()
-                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            let response = service.clone().oneshot(progress).await.expect("response");
-            assert_eq!(response.status(), StatusCode::OK);
-            terminal = body(response).await;
-        }
-        assert_eq!(terminal["state"]["kind"], "succeeded");
-        assert!(terminal["state"]["value"].is_object());
-
-        let exact_id =
-            "run:sha256-jcs-v1:2222222222222222222222222222222222222222222222222222222222222222";
-        let mut exact = request(
-            Method::POST,
-            &format!("/v1/runs/{exact_id}/start"),
-            Body::from(format!(
-                r#"{{"config":{{"kind":"exact","name":"daily","digest":"{digest}"}}}}"#
-            )),
-        );
-        exact
-            .headers_mut()
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let response = service.oneshot(exact).await.expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let exact = body(response).await;
-        assert_eq!(exact["config"]["digest"], digest);
-        assert_eq!(exact["run"]["run_id"], exact_id);
-    }
-
-    #[tokio::test]
-    async fn head_body_size_and_bodyless_admission_are_normalized() {
-        let service = router(application(), 2, Duration::from_secs(1));
-        let response = service
-            .clone()
-            .oneshot(request(Method::HEAD, "/v1/entry-points", Body::empty()))
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
-        assert!(to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body")
-            .is_empty());
-
-        let response = service
-            .clone()
-            .oneshot(request(Method::GET, "/healthz", Body::from("x")))
-            .await
-            .expect("response");
-        assert_eq!(body(response).await["code"], "invalid_request_body");
-
-        let invalid_run = request(Method::HEAD, "/v1/runs/not-a-run", Body::empty());
-        let response = service
-            .clone()
-            .oneshot(invalid_run)
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body")
-            .is_empty());
-
-        let mut oversized = request(
-            Method::PUT,
-            "/v1/configs/daily",
-            Body::from(vec![b'x'; MAX_CONFIG_DOCUMENT_BYTES + 1]),
-        );
-        oversized
-            .headers_mut()
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let response = service.clone().oneshot(oversized).await.expect("response");
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(body(response).await["code"], "request_body_too_large");
-
-        let mut invalid = request(
-            Method::PUT,
-            "/v1/configs/daily",
-            Body::from(r#"{"entry_point":"unknown","input":{}}"#),
-        );
-        invalid
-            .headers_mut()
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let response = service.oneshot(invalid).await.expect("response");
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(body(response).await["code"], "invalid_config_document");
-    }
-
-    #[tokio::test]
-    async fn both_indeterminate_recovery_sums_use_the_shared_envelope() {
-        let application = bound_application();
-        let document = ConfigDocument::new(DOCUMENT.to_vec())
-            .await
-            .expect("document");
-        let outcome = application
-            .import_config(ConfigName::new("daily").expect("name"), document)
-            .await
-            .expect("import");
-        let run_id = RunId::parse(
-            "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
-        )
-        .expect("run id");
-        let start = run_request_error(RunRequestError::AppendIndeterminate {
-            recovery: RunRecovery::Start {
-                run_id: run_id.clone(),
-                config: outcome.config().clone(),
-            },
-        });
-        assert_eq!(start.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let start = body(start).await;
-        assert_eq!(start["code"], "run_append_indeterminate");
-        assert_eq!(start["recovery"]["kind"], "start");
-        assert_eq!(start["recovery"]["config"]["name"], "daily");
         assert_eq!(
-            start,
-            serde_json::from_str::<serde_json::Value>(include_str!(
-                "../../../docs/contracts/client-surface/run-recovery-start.json"
-            ))
-            .expect("start recovery fixture")
+            send(&service, delete).await.status(),
+            StatusCode::NO_CONTENT
         );
-
-        let progress = run_request_error(RunRequestError::AppendIndeterminate {
-            recovery: RunRecovery::Progress { run_id },
-        });
-        let progress = body(progress).await;
-        assert_eq!(progress["recovery"]["kind"], "progress");
-        assert!(progress["recovery"].get("config").is_none());
-        assert_eq!(
-            progress,
-            serde_json::from_str::<serde_json::Value>(include_str!(
-                "../../../docs/contracts/client-surface/run-recovery-progress.json"
-            ))
-            .expect("progress recovery fixture")
-        );
-    }
-
-    #[tokio::test]
-    async fn run_controls_drop_guards_on_deadline_and_report_pressure() {
-        let run_id = RunId::parse(
-            "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
-        )
-        .expect("run id");
-        let controls = RunControls::new(1, Duration::from_millis(10));
-        let deadline = controls
-            .execute(&run_id, true, std::future::pending::<Result<(), ()>>())
-            .await;
-        assert!(matches!(deadline, Err(ControlError::Deadline)));
-        assert!(controls.active.lock().expect("active set").is_empty());
-
-        let permit = controls
-            .permits
-            .clone()
-            .try_acquire_owned()
-            .expect("permit");
-        let capacity = controls
-            .execute(&run_id, false, async { Ok::<_, ()>(()) })
-            .await;
-        assert!(matches!(capacity, Err(ControlError::Capacity)));
-        drop(permit);
-
-        let active = ActiveRun::enter(controls.active.clone(), run_id.clone()).expect("active");
-        let busy = controls
-            .execute(&run_id, true, async { Ok::<_, ()>(()) })
-            .await;
-        assert!(matches!(busy, Err(ControlError::Busy)));
-        drop(active);
-
-        let capacity = control_error(ControlError::Capacity);
-        assert_eq!(capacity.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(body(capacity).await["code"], "too_many_requests");
-        let deadline = control_error(ControlError::Deadline);
-        assert_eq!(deadline.status(), StatusCode::GATEWAY_TIMEOUT);
-        assert_eq!(body(deadline).await["code"], "deadline_exceeded");
-    }
-
-    #[test]
-    fn request_error_status_table_is_exhaustive() {
-        let cases = [
-            (RequestError::ConfigAbsent, StatusCode::NOT_FOUND),
-            (RequestError::ConfigConflict, StatusCode::CONFLICT),
-            (RequestError::ConfigDigestMismatch, StatusCode::CONFLICT),
-            (
-                RequestError::InvalidConfigDocument,
-                StatusCode::UNPROCESSABLE_ENTITY,
-            ),
-            (
-                RequestError::CatalogCapacity,
-                StatusCode::UNPROCESSABLE_ENTITY,
-            ),
-            (
-                RequestError::CatalogIndeterminate,
-                StatusCode::SERVICE_UNAVAILABLE,
-            ),
-            (
-                RequestError::InvalidCatalog,
-                StatusCode::INTERNAL_SERVER_ERROR,
-            ),
-            (RequestError::RunAbsent, StatusCode::NOT_FOUND),
-            (RequestError::RunAdmissionConflict, StatusCode::CONFLICT),
-            (
-                RequestError::InvalidRunHistory,
-                StatusCode::INTERNAL_SERVER_ERROR,
-            ),
-            (
-                RequestError::IncompatibleAssembly,
-                StatusCode::INTERNAL_SERVER_ERROR,
-            ),
-            (RequestError::RunCapacity, StatusCode::UNPROCESSABLE_ENTITY),
-            (RequestError::BindingUnbound, StatusCode::CONFLICT),
-            (
-                RequestError::InvalidRunIndex,
-                StatusCode::INTERNAL_SERVER_ERROR,
-            ),
-            (
-                RequestError::DependencyUnavailable,
-                StatusCode::SERVICE_UNAVAILABLE,
-            ),
-            (RequestError::Internal, StatusCode::INTERNAL_SERVER_ERROR),
-        ];
-        for (error, status) in cases {
-            assert_eq!(request_error(error).status(), status);
-        }
     }
 }
