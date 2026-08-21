@@ -27,7 +27,3 @@ mfm-store = { path = "../../crates/kernel/store" }
 [[bin]]
 name = "mfm_cli"
 path = "src/main.rs"
-
-[[test]]
-name = "cli_e2e"
-path = "tests/cli_e2e.rs"

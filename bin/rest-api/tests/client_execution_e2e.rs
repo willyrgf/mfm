@@ -29,7 +29,7 @@ fn historical_run_survives_deletion_and_cold_resumes_to_exact_live_snapshot() {
         "MFM_E2E_ADMIN_POSTGRES_LOCATOR",
         "MFM_E2E_EVM_ADAPTER_LOCATOR",
     ] {
-        std::env::var(name).unwrap_or_else(|_| panic!("rest-e2e must supply {name}"));
+        std::env::var(name).unwrap_or_else(|_| panic!("client-e2e must supply {name}"));
     }
 
     let root = temporary_root();
@@ -628,7 +628,7 @@ fn temporary_root() -> PathBuf {
 }
 
 fn required_path(name: &str) -> PathBuf {
-    let value = std::env::var_os(name).unwrap_or_else(|| panic!("rest-e2e must supply {name}"));
+    let value = std::env::var_os(name).unwrap_or_else(|| panic!("client-e2e must supply {name}"));
     let path = PathBuf::from(value);
     assert!(path.is_absolute(), "{name} must be absolute");
     path
