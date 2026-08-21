@@ -5,8 +5,9 @@ custody for named opaque canonical config bytes. `RunIndex` enumerates current r
 loading frames or interpreting run state.
 
 Config names are mutable locators. Canonical config digests and run head digests are content
-identities. Both indexes use bounded, resource-specific keyset cursors and ascending bytewise
-identity order; pages are not snapshots across requests.
+identities. The config catalog returns its complete fixed-capacity set in ascending bytewise name
+order. The run index uses bounded ascending keyset pages with the last returned `RunId` as its
+exclusive continuation; pages are not snapshots across requests.
 
 The crate deliberately has no config schema, Program, Runtime, Journal parser, provider, or IO
 locator dependency. `MemoryCatalog` is the hermetic custody implementation; concrete durable

@@ -1,5 +1,5 @@
 use mfm_canonical::raw_content_digest;
-use mfm_catalog::{PageLimit, RunIndex};
+use mfm_catalog::{RunIndex, RunPageLimit};
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId};
 use mfm_journal::{
     EncodedRunFrame, JournalHistory, OutcomeKind, MAX_FRAME_BYTES, MAX_RUN_BYTES, MAX_RUN_FRAMES,
@@ -130,7 +130,7 @@ async fn memory_run_index_pages_only_mechanical_heads_in_run_id_order() {
         );
     }
 
-    let limit = PageLimit::new(2).expect("limit");
+    let limit = RunPageLimit::new(2).expect("limit");
     let first = store.list_runs(None, limit).await.expect("first page");
     assert_eq!(
         first
@@ -146,10 +146,10 @@ async fn memory_run_index_pages_only_mechanical_heads_in_run_id_order() {
         assert_eq!(summary.head_digest().algorithm(), DigestAlgorithm::Sha256V1);
     }
     let second = store
-        .list_runs(first.next_cursor(), limit)
+        .list_runs(first.next_after(), limit)
         .await
         .expect("second page");
     assert_eq!(second.items().len(), 1);
     assert_eq!(second.items()[0].run_id(), &run_with_byte(5));
-    assert!(second.next_cursor().is_none());
+    assert!(second.next_after().is_none());
 }

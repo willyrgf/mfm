@@ -18,14 +18,14 @@ mfm_cli [--deployment <PATH>] [--output text|json] store init \
 mfm_cli [--deployment <PATH>] [--output text|json] binding list
 
 mfm_cli [--deployment <PATH>] [--output text|json] config import <NAME> --from <PATH|->
-mfm_cli [--deployment <PATH>] [--output text|json] config list [--cursor <C>] [--limit <N>]
+mfm_cli [--deployment <PATH>] [--output text|json] config list
 mfm_cli [--deployment <PATH>] [--output text|json] config show <NAME>
 
 mfm_cli [--deployment <PATH>] [--output text|json] run start --config <NAME> \
     [--config-digest <DIGEST>] [--run-id <RUN_ID>]
 mfm_cli [--deployment <PATH>] [--output text|json] run progress --run-id <RUN_ID>
 mfm_cli [--deployment <PATH>] [--output text|json] run show --run-id <RUN_ID>
-mfm_cli [--deployment <PATH>] [--output text|json] run list [--cursor <C>] [--limit <N>]
+mfm_cli [--deployment <PATH>] [--output text|json] run list [--after <RUN_ID>] [--limit <N>]
 ```
 
 `entry-point list` is static and rejects `--deployment`. Every other command loads the override or
@@ -50,8 +50,8 @@ fallback. Explicit RunIds bypass generation and support deterministic retries.
 text includes `contract_ref`, `value_ref`, and exact canonical `value`.
 
 `--output json` is the stable automation surface shared with REST. It preserves the documented
-Application models: entry-point and binding lists, config summaries/documents/pages, start results,
-mechanical run pages, and the full tagged RunView. Canonical config and terminal values occupy raw
+Application models: generic item lists, config summaries/documents, start results, mechanical run
+pages, and the full tagged RunView. Canonical config and terminal values occupy raw
 JSON positions rather than quoted strings. Successful bodyless operations emit `{}` in JSON mode
 and nothing in text mode.
 

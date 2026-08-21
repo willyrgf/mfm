@@ -32,8 +32,8 @@ Store load -> Journal qualify -> Runtime fold -> RunView
 
 Concrete storage backends may implement both `Store` and the separate `RunIndex`, but Runtime
 receives only `dyn Store`. Config custody and run enumeration therefore cannot widen Runtime's
-append-only storage authority. Both indexes use ascending keyset pages and make no cross-request
-snapshot claim.
+append-only storage authority. Config listing is complete within its fixed 256-entry bound. Run
+enumeration uses ascending `RunId` keyset pages and makes no cross-request snapshot claim.
 
 PostgreSQL owns its private locator grammar, target equivalence, SQLx wiring, split-role provisioner,
 loopback-only plaintext policy, ambient-input exclusion, and two independent gates. It uses stock

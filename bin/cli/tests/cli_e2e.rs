@@ -134,32 +134,11 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
         .expect("config digest")
         .to_owned();
 
-    let first_page = run_cli(
-        &["--output", "json", "config", "list", "--limit", "1"],
-        &xdg,
-    );
-    assert_success(&first_page, "first config page");
-    let first_page = json(&first_page);
-    assert_eq!(first_page["items"][0]["name"], "daily");
-    let config_cursor = first_page["next_cursor"]
-        .as_str()
-        .expect("config cursor")
-        .to_owned();
-    let second_page = run_cli(
-        &[
-            "--output",
-            "json",
-            "config",
-            "list",
-            "--cursor",
-            &config_cursor,
-            "--limit",
-            "1",
-        ],
-        &xdg,
-    );
-    assert_success(&second_page, "second config page");
-    assert_eq!(json(&second_page)["items"][0]["name"], "weekly");
+    let configs = run_cli(&["--output", "json", "config", "list"], &xdg);
+    assert_success(&configs, "complete config list");
+    let configs = json(&configs);
+    assert_eq!(configs["items"][0]["name"], "daily");
+    assert_eq!(configs["items"][1]["name"], "weekly");
 
     let started = run_cli(
         &["--output", "json", "run", "start", "--config", "daily"],
@@ -225,7 +204,32 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
     let run_page = json(&run_page);
     assert_eq!(run_page["items"].as_array().expect("items").len(), 1);
     assert!(run_page["items"][0].get("state").is_none());
-    assert!(run_page["next_cursor"].is_string());
+    let next_after = run_page["next_after"]
+        .as_str()
+        .expect("next run id")
+        .to_owned();
+    assert_eq!(next_after, run_page["items"][0]["run_id"]);
+    let next_run_page = run_cli(
+        &[
+            "--output",
+            "json",
+            "run",
+            "list",
+            "--after",
+            &next_after,
+            "--limit",
+            "1",
+        ],
+        &xdg,
+    );
+    assert_success(&next_run_page, "next run page");
+    assert_eq!(
+        json(&next_run_page)["items"]
+            .as_array()
+            .expect("next items")
+            .len(),
+        1
+    );
 
     let updated = run_cli(
         &[

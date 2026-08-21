@@ -22,9 +22,9 @@ targets, Store, and RunIndex from the same checked inputs. Config catalog custod
 injected. The complete Application surface is:
 
 - static entry-point and composed-binding discovery;
-- atomic config import/replace, read, and keyset list;
+- atomic config import/replace, read, and complete bounded list;
 - stored-config run start through exhaustive `Current` or `Exact` selection;
-- run progress, semantic read, and mechanical keyset list.
+- run progress, semantic read, and mechanical `RunId`-keyset list.
 
 Every execution receives an explicit caller-owned `RunId`. The pure `derive_run_id([u8; 32])`
 helper implements `mfm.run-id.random.v1`; it performs no IO and Application never calls it.

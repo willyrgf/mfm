@@ -11,7 +11,6 @@ layer = "binary"
 
 [dependencies]
 mfm-app = { path = "../../crates/app" }
-mfm-catalog = { path = "../../crates/catalog" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 clap = { workspace = true }
@@ -22,6 +21,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+mfm-catalog = { path = "../../crates/catalog" }
 mfm-store = { path = "../../crates/kernel/store" }
 
 [[bin]]

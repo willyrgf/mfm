@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use mfm_app::{
     Application, BoundCapabilitySet, ComposedRuntime, ConfigDocument, ConfigDocumentError,
-    ConfigPageRequest, ConfigSelection, ImportOutcome, PublicBindingView, RequestError,
-    RunPageRequest, RunRecovery, SerializableRunView, MAX_EVM_BINDINGS,
+    ConfigSelection, ImportOutcome, PublicBindingView, RequestError, RunPageLimit, RunRecovery,
+    SerializableRunView, MAX_EVM_BINDINGS,
 };
-use mfm_catalog::{ConfigDigest, ConfigName, MemoryCatalog, PageLimit, MAX_CONFIG_DOCUMENT_BYTES};
+use mfm_catalog::{ConfigDigest, ConfigName, MemoryCatalog, MAX_CONFIG_DOCUMENT_BYTES};
 use mfm_evm::{EvmEndpoint, EvmReadValue};
 use mfm_evm_live::{EvmProvider, EvmProviderResponse};
 use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, RunId, StableId};
@@ -200,8 +200,8 @@ impl Store for FaultStore {
 impl mfm_catalog::RunIndex for FaultStore {
     fn list_runs<'a>(
         &'a self,
-        cursor: Option<&'a mfm_catalog::RunCursor>,
-        limit: PageLimit,
+        after: Option<&'a RunId>,
+        limit: RunPageLimit,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<mfm_catalog::RunPage, mfm_catalog::RunIndexError>>
@@ -209,7 +209,7 @@ impl mfm_catalog::RunIndex for FaultStore {
                 + 'a,
         >,
     > {
-        mfm_catalog::RunIndex::list_runs(&self.inner, cursor, limit)
+        mfm_catalog::RunIndex::list_runs(&self.inner, after, limit)
     }
 }
 
@@ -413,13 +413,10 @@ async fn stored_config_lifecycle_drives_current_exact_and_retained_runs() {
         ))
     ));
 
-    let configs = app
-        .list_configs(&ConfigPageRequest::new(None, PageLimit::default()))
-        .await
-        .expect("config page");
-    assert_eq!(configs.items(), std::slice::from_ref(updated.config()));
+    let configs = app.list_configs().await.expect("configs");
+    assert_eq!(configs.as_slice(), std::slice::from_ref(updated.config()));
     let runs = app
-        .list_runs(&RunPageRequest::new(None, PageLimit::default()))
+        .list_runs(None, RunPageLimit::default())
         .await
         .expect("run page");
     assert_eq!(runs.items().len(), 2);
@@ -457,7 +454,7 @@ async fn invalid_or_unbound_config_fails_before_run_store_io() {
         ))
     ));
     assert!(app
-        .list_runs(&RunPageRequest::new(None, PageLimit::default()))
+        .list_runs(None, RunPageLimit::default())
         .await
         .expect("run page")
         .items()

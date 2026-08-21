@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
-use mfm_canonical::{CanonicalBytes, PlainCanonicalJsonBytes};
+use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_catalog::{
-    CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigCursor, ConfigDigest,
-    ConfigName, MemoryCatalog, PageLimit, RunCursor, MAX_CONFIG_DOCUMENT_BYTES, MAX_CONFIG_ENTRIES,
-    MAX_CURSOR_ENCODED_BYTES, MAX_PAGE_ITEMS,
+    CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigDigest, ConfigName,
+    MemoryCatalog, RunPageLimit, MAX_CONFIG_DOCUMENT_BYTES, MAX_CONFIG_ENTRIES, MAX_RUN_PAGE_ITEMS,
 };
-use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, RunId};
+use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
 use tokio::sync::Barrier;
 
 fn config_name(index: usize) -> ConfigName {
@@ -91,40 +90,6 @@ fn custody_records_enforce_only_the_shared_mechanical_bound() {
     );
 }
 
-#[test]
-fn cursor_wires_are_exact_resource_specific_and_bounded() {
-    let config = ConfigCursor::after_name(ConfigName::new("alpha").expect("name"));
-    let decoded = CanonicalBytes::from_base64url_no_pad(config.as_str().to_owned())
-        .expect("base64url")
-        .into_bytes();
-    assert_eq!(
-        decoded,
-        br#"{"after":"alpha","order":"name-asc","resource":"configs","v":1}"#
-    );
-    assert_eq!(ConfigCursor::parse(config.as_str()).expect("parse"), config);
-    assert!(RunCursor::parse(config.as_str()).is_err());
-
-    let run_id = RunId::from_digest(DigestBytes::from_array([9; 32]));
-    let run = RunCursor::after_run(run_id.clone());
-    assert_eq!(
-        RunCursor::parse(run.as_str()).expect("parse").after(),
-        &run_id
-    );
-    assert!(ConfigCursor::parse(run.as_str()).is_err());
-
-    for decoded in [
-        br#"{"after":"alpha","order":"name-asc","resource":"configs","v":2}"#.as_slice(),
-        br#"{"after":"alpha","extra":0,"order":"name-asc","resource":"configs","v":1}"#,
-        br#"{"after":"alpha","after":"beta","order":"name-asc","resource":"configs","v":1}"#,
-        br#"{"resource":"configs","order":"name-asc","after":"alpha","v":1}"#,
-    ] {
-        let encoded = CanonicalBytes::new(decoded.to_vec());
-        assert!(ConfigCursor::parse(encoded.encoded()).is_err());
-    }
-    assert!(ConfigCursor::parse("a".repeat(MAX_CURSOR_ENCODED_BYTES + 1)).is_err());
-    assert!(ConfigCursor::parse("====").is_err());
-}
-
 #[tokio::test]
 async fn memory_catalog_put_is_atomic_and_replaces_complete_content() {
     let catalog = MemoryCatalog::new();
@@ -188,9 +153,9 @@ async fn concurrent_absent_inserts_cannot_exceed_capacity() {
     let canonical = PlainCanonicalJsonBytes::from_json_str(r#"{"value":"replacement"}"#)
         .expect("replacement canonical");
     let retained_name = catalog
-        .list_configs(None, PageLimit::new(1).expect("single item"))
+        .list_configs()
         .await
-        .expect("catalog page")
+        .expect("catalog entries")
         .items()[0]
         .name()
         .clone();
@@ -210,7 +175,7 @@ async fn concurrent_absent_inserts_cannot_exceed_capacity() {
 }
 
 #[tokio::test]
-async fn memory_catalog_pages_in_bytewise_name_order() {
+async fn memory_catalog_lists_every_entry_in_bytewise_name_order() {
     let catalog = MemoryCatalog::new();
     for index in (0..5).rev() {
         assert_eq!(
@@ -218,34 +183,25 @@ async fn memory_catalog_pages_in_bytewise_name_order() {
             CatalogPutResult::Inserted
         );
     }
-    let limit = PageLimit::new(2).expect("limit");
-    let first = catalog.list_configs(None, limit).await.expect("first");
+    let entries = catalog.list_configs().await.expect("entries");
     assert_eq!(
-        first
+        entries
             .items()
             .iter()
             .map(|item| item.name().as_str())
             .collect::<Vec<_>>(),
-        ["config-000", "config-001"]
+        [
+            "config-000",
+            "config-001",
+            "config-002",
+            "config-003",
+            "config-004"
+        ]
     );
-    let second = catalog
-        .list_configs(first.next_cursor(), limit)
-        .await
-        .expect("second");
-    assert_eq!(
-        second
-            .items()
-            .iter()
-            .map(|item| item.name().as_str())
-            .collect::<Vec<_>>(),
-        ["config-002", "config-003"]
-    );
-    let third = catalog
-        .list_configs(second.next_cursor(), limit)
-        .await
-        .expect("third");
-    assert_eq!(third.items()[0].name().as_str(), "config-004");
-    assert!(third.next_cursor().is_none());
-    assert!(PageLimit::new(0).is_err());
-    assert!(PageLimit::new(MAX_PAGE_ITEMS + 1).is_err());
+}
+
+#[test]
+fn run_page_limits_are_bounded() {
+    assert!(RunPageLimit::new(0).is_err());
+    assert!(RunPageLimit::new(MAX_RUN_PAGE_ITEMS + 1).is_err());
 }

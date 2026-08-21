@@ -90,8 +90,8 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
         rest_json(&socket, "GET", "/v1/configs/daily", None).1
     );
     assert_eq!(
-        cli_json(&cli, &xdg, &["config", "list", "--limit", "50"]),
-        rest_json(&socket, "GET", "/v1/configs?limit=50", None).1
+        cli_json(&cli, &xdg, &["config", "list"]),
+        rest_json(&socket, "GET", "/v1/configs", None).1
     );
 
     let current_id = run_id(0x11);
