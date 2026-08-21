@@ -3,7 +3,7 @@
 `mfm-app` owns the typed, transport-neutral config, run, and discovery use cases shared by client
 surfaces. `Application::from_parts` keeps hermetic library composition available; `Application::open`
 is the production convenience that resolves one strict `Deployment`, opens PostgreSQL config/run
-custody, constructs exact EVM TLS clients, and delegates to the same injected constructor.
+custody, constructs stock EVM HTTP(S) clients, and delegates to the same injected constructor.
 
 `Deployment::load` selects an explicit override or exactly
 `$XDG_CONFIG_HOME/mfm/deployment.toml`, falling back to `$HOME/.config/mfm/deployment.toml` only when

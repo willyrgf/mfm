@@ -54,8 +54,8 @@ and nothing in text mode.
 
 Ordinary JSON errors are exactly `{"code":"...","message":"..."}`. An ambiguous run append adds
 the shared `recovery` sum. Text mode prints `error: <message>` plus the same recovery RunId and
-selected config summary when present. Locator values, URLs, credentials, TLS-root paths, config
-bodies, and provider details are never rendered.
+selected config summary when present. Locator values, URLs, credentials, config bodies, and provider
+details are never rendered.
 
 ## Exit codes
 

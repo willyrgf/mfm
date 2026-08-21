@@ -22,7 +22,6 @@ members = [
 	"crates/domains/portfolio",
 	"crates/signing",
 	"crates/storages/postgres",
-	"crates/transport-security",
 ]
 
 # Core dependencies
@@ -36,13 +35,11 @@ tokio = { version = "1.44", features = ["full"] }
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "postgres"] }
 clap = { version = "4.4", features = ["derive"] }
 thiserror = "2.0.18"
-rustls = { version = "=0.23.42", default-features = false, features = ["std", "ring", "tls12"] }
-webpki-roots = "=1.0.9"
 url = "=2.5.8"
 percent-encoding = "=2.3.2"
 libc = "=0.2.186"
 # Live EVM transport and wire codecs. Only `mfm-evm-live` may depend on `alloy-*`.
-reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls-manual-roots"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
 alloy-primitives = { version = "1.6.1", default-features = false, features = ["std"] }
 toml = "=0.8.23"
 getrandom = "=0.3.4"

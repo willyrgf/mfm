@@ -59,14 +59,13 @@ MFM_E2E_RUNTIME_STORE_LOCATOR=... MFM_E2E_ADMIN_STORE_LOCATOR=... nix develop -c
 | --- | --- |
 | `nix run .#model-check` | Admit the compiled model without project tasks. |
 | `nix run .#run -- --task postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
-| `nix run .#run -- --task transport-authority-test` | Exercise the production EVM HTTPS client through exact pinned roots and prove proxy, redirect, wrong-pin, alternate-CA, and wrong-host authority are rejected. |
-| `nix run .#run -- --task cli-e2e` | Exercise the complete stored-config CLI lifecycle against managed TLS EVM and local split-authority PostgreSQL fixtures. |
-| `nix run .#run -- --task rest-e2e` | Build both client binaries explicitly and compare their shared JSON models through the production Unix-socket REST listener against managed TLS EVM and local PostgreSQL. |
+| `nix run .#run -- --task cli-e2e` | Exercise the complete stored-config CLI lifecycle against local Reth and split-role PostgreSQL fixtures. |
+| `nix run .#run -- --task rest-e2e` | Build both client binaries explicitly and compare their shared JSON models through the production Unix-socket REST listener against local Reth and PostgreSQL. |
 | `nix run .#run -- --task capacity-app` | Exercise the exact 64/65-source Portfolio Program/C0 bound. |
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |
 | `nix run .#run -- --task capacity-envelope` | Compose the three capacity owners above. |
-| `nix run .#ci` | Compose format, Clippy, workspace check/tests, managed DB, EVM transport authority, both managed client e2es, docs, and capacity tasks. |
+| `nix run .#ci` | Compose format, Clippy, workspace check/tests, managed DB, both managed client e2es, docs, and capacity tasks. |
 
 Do not run broad component gates immediately before `.#ci` on the same tree. Once focused failures
 are resolved, run CI exactly once on the final candidate when the workflow requires the composed
