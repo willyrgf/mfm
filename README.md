@@ -7,7 +7,7 @@ provides only complete-prefix load and atomic exact-head append.
 The current product composition is Portfolio snapshot execution over secret-free EVM balance Reads.
 Application owns a typed stored-config, discovery, and run surface over one checked multi-route
 composition. Callers supply an explicit `RunId`; the CLI may generate one at its client boundary.
-The CLI drives config import/list/show/delete and run start/progress/show/list, documented in
+The CLI drives config import/list/show and run start/progress/show/list, documented in
 [bin/cli/README.md](bin/cli/README.md). [The REST API](bin/rest-api/README.md) serves the same typed
 use cases over an unauthenticated Unix socket.
 

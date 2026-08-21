@@ -25,7 +25,7 @@ summary containing only RunId, head sequence/digest, and cumulative bytes. Resou
 unpadded-base64url cursors freeze ascending bytewise keyset traversal; pages are not snapshots across
 requests. Config interpretation belongs to Application, and run status remains a Runtime fold.
 PostgreSQL catalog custody owns exactly `mfm_catalog_schema` and `config_entries` under
-`mfm.config-catalog-postgres.v1`. The storage adapter checks schema, ownership, ACL, and durability
+`mfm.config-catalog-postgres.v2`. The storage adapter checks schema, ownership, ACL, and durability
 independently for run history and catalog; the fixed runtime role owns neither surface.
 
 Application interprets catalog bytes as one strict, complete, versioned config document. Its public

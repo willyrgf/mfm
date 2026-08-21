@@ -90,7 +90,7 @@ enum BindingCommand {
 
 #[derive(Subcommand)]
 enum ConfigCommand {
-    /// Imports one complete config under an absent name.
+    /// Imports or replaces one complete named config.
     Import {
         /// Durable catalog name.
         name: String,
@@ -111,14 +111,6 @@ enum ConfigCommand {
     Show {
         /// Durable catalog name.
         name: String,
-    },
-    /// Deletes one exact named revision.
-    Delete {
-        /// Durable catalog name.
-        name: String,
-        /// Required canonical-document digest.
-        #[arg(long)]
-        digest: String,
     },
 }
 
@@ -339,13 +331,6 @@ async fn run_config(
                 text.push('\n');
                 text
             })
-        }
-        ConfigCommand::Delete { name, digest } => {
-            let name = ConfigName::new(name).map_err(|_| CliError::ConfigName)?;
-            let digest = ConfigDigest::parse(digest).map_err(|_| CliError::ConfigDigest)?;
-            let application = open(deployment).await?;
-            application.delete_config(&name, &digest).await?;
-            emit_empty(output)
         }
     }
 }

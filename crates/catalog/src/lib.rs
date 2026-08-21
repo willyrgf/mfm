@@ -244,26 +244,15 @@ impl Default for PageLimit {
     }
 }
 
-/// Atomic config insertion outcome.
+/// Atomic config custody outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CatalogInsertResult {
+pub enum CatalogPutResult {
     /// The absent name was bound to the supplied entry.
     Inserted,
     /// The name already retained the exact same digest and bytes.
     Unchanged,
-    /// The name retained different content and nothing was written.
-    Conflict,
-}
-
-/// Atomic conditional config deletion outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CatalogDeleteResult {
-    /// The matching name and digest were deleted.
-    Deleted,
-    /// The name was absent.
-    Absent,
-    /// The name was present with a different digest.
-    DigestMismatch,
+    /// The name retained different content and was atomically replaced.
+    Updated,
 }
 
 /// Redaction-safe config catalog failure.
@@ -326,11 +315,11 @@ impl CatalogPage {
 
 /// Object-safe named config custody contract.
 pub trait ConfigCatalog: Send + Sync {
-    /// Atomically inserts one absent name, or compares it with retained content.
-    fn insert_config<'a>(
+    /// Atomically inserts, compares, or replaces one named config.
+    fn put_config<'a>(
         &'a self,
         entry: &'a CatalogEntry,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogInsertResult, CatalogError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<CatalogPutResult, CatalogError>> + Send + 'a>>;
 
     /// Loads one internally consistent owned name/digest/bytes snapshot.
     fn load_config<'a>(
@@ -344,13 +333,6 @@ pub trait ConfigCatalog: Send + Sync {
         cursor: Option<&'a ConfigCursor>,
         limit: PageLimit,
     ) -> Pin<Box<dyn Future<Output = Result<CatalogPage, CatalogError>> + Send + 'a>>;
-
-    /// Atomically deletes only the observed name/digest pair.
-    fn delete_config<'a>(
-        &'a self,
-        name: &'a ConfigName,
-        digest: &'a ConfigDigest,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogDeleteResult, CatalogError>> + Send + 'a>>;
 }
 
 /// Error returned when one run-head projection is structurally invalid.

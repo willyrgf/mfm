@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_catalog::{
-    CatalogDeleteResult, CatalogError, CatalogInsertResult, ConfigCatalog, ConfigCursor,
-    ConfigDigest, ConfigName, PageLimit, RunCursor, RunIndex, RunIndexError,
+    CatalogError, CatalogPutResult, ConfigCatalog, ConfigCursor, ConfigDigest, ConfigName,
+    PageLimit, RunCursor, RunIndex, RunIndexError,
 };
 use mfm_evm::{
     CheckChainIdentity, ConfirmBalanceAnchor, ConsolidateBalanceCollection, EvmAnchorRead,
@@ -216,9 +216,6 @@ pub enum RequestError {
     /// The selected config name is absent.
     #[error("config is absent")]
     ConfigAbsent,
-    /// The selected config name retains different content.
-    #[error("config name is bound to different content")]
-    ConfigConflict,
     /// A caller's revision assertion differs from current content.
     #[error("config digest does not match current content")]
     ConfigDigestMismatch,
@@ -268,7 +265,6 @@ impl RequestError {
     pub const fn code(self) -> &'static str {
         match self {
             Self::ConfigAbsent => "config_absent",
-            Self::ConfigConflict => "config_conflict",
             Self::ConfigDigestMismatch => "config_digest_mismatch",
             Self::InvalidConfigDocument => "invalid_config_document",
             Self::CatalogCapacity => "config_catalog_capacity",
@@ -641,13 +637,13 @@ impl Application {
             .map_err(|_| RequestError::Internal)?;
         match self
             .catalog
-            .insert_config(&entry)
+            .put_config(&entry)
             .await
             .map_err(map_catalog_error)?
         {
-            CatalogInsertResult::Inserted => Ok(ImportOutcome::Created { config: summary }),
-            CatalogInsertResult::Unchanged => Ok(ImportOutcome::Unchanged { config: summary }),
-            CatalogInsertResult::Conflict => Err(RequestError::ConfigConflict),
+            CatalogPutResult::Inserted => Ok(ImportOutcome::Created { config: summary }),
+            CatalogPutResult::Unchanged => Ok(ImportOutcome::Unchanged { config: summary }),
+            CatalogPutResult::Updated => Ok(ImportOutcome::Updated { config: summary }),
         }
     }
 
@@ -691,24 +687,6 @@ impl Application {
         })
         .await
         .map_err(|_| RequestError::Internal)?
-    }
-
-    /// Atomically deletes one exact named config revision.
-    pub async fn delete_config(
-        &self,
-        name: &ConfigName,
-        digest: &ConfigDigest,
-    ) -> Result<(), RequestError> {
-        match self
-            .catalog
-            .delete_config(name, digest)
-            .await
-            .map_err(map_catalog_error)?
-        {
-            CatalogDeleteResult::Deleted => Ok(()),
-            CatalogDeleteResult::Absent => Err(RequestError::ConfigAbsent),
-            CatalogDeleteResult::DigestMismatch => Err(RequestError::ConfigDigestMismatch),
-        }
     }
 
     /// Selects a stored config, plans it, admits the exact RunId, and progresses the run.
@@ -890,11 +868,6 @@ mod tests {
                 RequestError::ConfigAbsent,
                 "config_absent",
                 "config is absent",
-            ),
-            (
-                RequestError::ConfigConflict,
-                "config_conflict",
-                "config name is bound to different content",
             ),
             (
                 RequestError::ConfigDigestMismatch,

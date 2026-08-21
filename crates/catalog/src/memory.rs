@@ -6,8 +6,8 @@ use std::pin::Pin;
 use tokio::sync::Mutex;
 
 use crate::{
-    CatalogDeleteResult, CatalogEntry, CatalogError, CatalogInsertResult, CatalogPage,
-    ConfigCatalog, ConfigCursor, ConfigDigest, ConfigName, PageLimit, MAX_CONFIG_ENTRIES,
+    CatalogEntry, CatalogError, CatalogPage, CatalogPutResult, ConfigCatalog, ConfigCursor,
+    ConfigName, PageLimit, MAX_CONFIG_ENTRIES,
 };
 
 /// In-memory atomic config custody for hermetic composition and tests.
@@ -31,28 +31,26 @@ impl Default for MemoryCatalog {
 }
 
 impl ConfigCatalog for MemoryCatalog {
-    fn insert_config<'a>(
+    fn put_config<'a>(
         &'a self,
         entry: &'a CatalogEntry,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogInsertResult, CatalogError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<CatalogPutResult, CatalogError>> + Send + 'a>> {
         Box::pin(async move {
             let mut entries = self.entries.lock().await;
             if let Some(retained) = entries.get(entry.name()) {
-                return Ok(
-                    if retained.digest() == entry.digest()
-                        && retained.canonical_bytes() == entry.canonical_bytes()
-                    {
-                        CatalogInsertResult::Unchanged
-                    } else {
-                        CatalogInsertResult::Conflict
-                    },
-                );
+                if retained.digest() == entry.digest()
+                    && retained.canonical_bytes() == entry.canonical_bytes()
+                {
+                    return Ok(CatalogPutResult::Unchanged);
+                }
+                entries.insert(entry.name().clone(), entry.clone());
+                return Ok(CatalogPutResult::Updated);
             }
             if entries.len() >= MAX_CONFIG_ENTRIES {
                 return Err(CatalogError::Capacity);
             }
             entries.insert(entry.name().clone(), entry.clone());
-            Ok(CatalogInsertResult::Inserted)
+            Ok(CatalogPutResult::Inserted)
         })
     }
 
@@ -87,24 +85,6 @@ impl ConfigCatalog for MemoryCatalog {
                 None
             };
             CatalogPage::new(page, next_cursor)
-        })
-    }
-
-    fn delete_config<'a>(
-        &'a self,
-        name: &'a ConfigName,
-        digest: &'a ConfigDigest,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogDeleteResult, CatalogError>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut entries = self.entries.lock().await;
-            let Some(retained) = entries.get(name) else {
-                return Ok(CatalogDeleteResult::Absent);
-            };
-            if retained.digest() != digest {
-                return Ok(CatalogDeleteResult::DigestMismatch);
-            }
-            entries.remove(name);
-            Ok(CatalogDeleteResult::Deleted)
         })
     }
 }

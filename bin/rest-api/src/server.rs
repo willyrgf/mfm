@@ -4,7 +4,7 @@ use axum::body::{to_bytes, Body};
 use axum::extract::rejection::PathRejection;
 use axum::extract::{OriginalUri, Path, Request, State};
 use axum::http::header::{CONTENT_TYPE, LOCATION};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::Router;
@@ -13,9 +13,7 @@ use mfm_app::{
     ConfigSelection, EntryPointList, ImportOutcome, RequestError, RunPageRequest, RunRequestError,
     SerializableRunView,
 };
-use mfm_catalog::{
-    ConfigCursor, ConfigDigest, ConfigName, PageLimit, RunCursor, MAX_CONFIG_DOCUMENT_BYTES,
-};
+use mfm_catalog::{ConfigCursor, ConfigName, PageLimit, RunCursor, MAX_CONFIG_DOCUMENT_BYTES};
 use mfm_ids::RunId;
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +21,6 @@ const CONFIG_PATH_ENCODED_MAX: usize = 192;
 const RUN_PATH_ENCODED_MAX: usize = 300;
 const QUERY_ENCODED_MAX: usize = 1024;
 const RUN_BODY_MAX: usize = 4 * 1024;
-const CONFIG_DIGEST_HEADER: HeaderName = HeaderName::from_static("mfm-config-digest");
 
 pub(crate) fn router(application: Arc<Application>) -> Router {
     Router::new()
@@ -31,10 +28,7 @@ pub(crate) fn router(application: Arc<Application>) -> Router {
         .route("/v1/entry-points", get(entry_points))
         .route("/v1/bindings", get(bindings))
         .route("/v1/configs", get(list_configs))
-        .route(
-            "/v1/configs/{name}",
-            put(import_config).get(read_config).delete(delete_config),
-        )
+        .route("/v1/configs/{name}", put(import_config).get(read_config))
         .route("/v1/runs", get(list_runs))
         .route("/v1/runs/{run_id}/start", post(start_run))
         .route("/v1/runs/{run_id}/progress", post(progress_run))
@@ -93,7 +87,7 @@ async fn import_config(
         Ok(outcome) => {
             let status = match outcome {
                 ImportOutcome::Created { .. } => StatusCode::CREATED,
-                ImportOutcome::Unchanged { .. } => StatusCode::OK,
+                ImportOutcome::Unchanged { .. } | ImportOutcome::Updated { .. } => StatusCode::OK,
             };
             let mut response = json_response(status, &outcome);
             let location = format!("/v1/configs/{}", name.as_str());
@@ -147,29 +141,6 @@ async fn read_config(
     };
     match application.read_config(&name).await {
         Ok(config) => json_response(StatusCode::OK, &config),
-        Err(error) => request_error(error),
-    }
-}
-
-async fn delete_config(
-    State(application): State<Arc<Application>>,
-    OriginalUri(uri): OriginalUri,
-    path: Result<Path<String>, PathRejection>,
-    request: Request,
-) -> Response {
-    let name = match config_name(&uri, path) {
-        Ok(name) => name,
-        Err(error) => return error.response(),
-    };
-    let digest = match digest_header(request.headers()) {
-        Ok(digest) => digest,
-        Err(error) => return error.response(),
-    };
-    if let Err(error) = require_empty_body(request).await {
-        return error;
-    }
-    match application.delete_config(&name, &digest).await {
-        Ok(()) => empty_response(StatusCode::NO_CONTENT),
         Err(error) => request_error(error),
     }
 }
@@ -409,28 +380,6 @@ fn raw_tail(uri: &Uri) -> &str {
     uri.path().rsplit('/').next().unwrap_or_default()
 }
 
-fn digest_header(headers: &HeaderMap) -> Result<ConfigDigest, RestFailure> {
-    let mut values = headers.get_all(&CONFIG_DIGEST_HEADER).iter();
-    let Some(value) = values.next() else {
-        return Err(RestFailure::new(
-            StatusCode::PRECONDITION_REQUIRED,
-            "precondition_required",
-            "config digest header is required",
-        ));
-    };
-    if values.next().is_some() {
-        return Err(checked_failure(
-            "invalid_config_digest",
-            "config digest is invalid",
-        ));
-    }
-    let value = value
-        .to_str()
-        .map_err(|_| checked_failure("invalid_config_digest", "config digest is invalid"))?;
-    ConfigDigest::parse(value)
-        .map_err(|_| checked_failure("invalid_config_digest", "config digest is invalid"))
-}
-
 fn is_json(headers: &HeaderMap) -> bool {
     let mut values = headers.get_all(CONTENT_TYPE).iter();
     let Some(value) = values.next().and_then(|value| value.to_str().ok()) else {
@@ -489,8 +438,7 @@ fn config_document_error(error: ConfigDocumentError) -> Response {
 fn request_error(error: RequestError) -> Response {
     let status = match error {
         RequestError::ConfigAbsent | RequestError::RunAbsent => StatusCode::NOT_FOUND,
-        RequestError::ConfigConflict
-        | RequestError::ConfigDigestMismatch
+        RequestError::ConfigDigestMismatch
         | RequestError::RunAdmissionConflict
         | RequestError::BindingUnbound => StatusCode::CONFLICT,
         RequestError::InvalidConfigDocument
@@ -611,12 +559,6 @@ fn json_response(status: StatusCode, value: &impl Serialize) -> Response {
     response
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    response
-}
-
-fn empty_response(status: StatusCode) -> Response {
-    let mut response = Response::new(Body::empty());
-    *response.status_mut() = status;
     response
 }
 
@@ -878,14 +820,6 @@ mod tests {
         .await;
         assert_eq!(runs["items"][0]["run_id"], RUN_ID);
 
-        assert_error(
-            &service,
-            request(Method::DELETE, "/v1/configs/daily", Body::empty()),
-            StatusCode::PRECONDITION_REQUIRED,
-            "precondition_required",
-        )
-        .await;
-
         let config = application
             .read_config(&ConfigName::new("daily").expect("name"))
             .await
@@ -915,14 +849,14 @@ mod tests {
             );
         }
 
-        let mut delete = request(Method::DELETE, "/v1/configs/daily", Body::empty());
-        delete.headers_mut().insert(
-            &CONFIG_DIGEST_HEADER,
-            HeaderValue::from_str(&digest).expect("digest header"),
-        );
         assert_eq!(
-            send(&service, delete).await.status(),
-            StatusCode::NO_CONTENT
+            send(
+                &service,
+                request(Method::DELETE, "/v1/configs/daily", Body::empty()),
+            )
+            .await
+            .status(),
+            StatusCode::METHOD_NOT_ALLOWED
         );
     }
 }

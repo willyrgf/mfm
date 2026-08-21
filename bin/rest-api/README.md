@@ -27,10 +27,9 @@ deployment environment.
 | GET | `/healthz` | empty | `{"status":"ok"}` |
 | GET | `/v1/entry-points` | empty | shared `EntryPointList` |
 | GET | `/v1/bindings` | empty | shared `BindingList` |
-| PUT | `/v1/configs/{name}` | raw config JSON | shared `ImportOutcome`; 201 created or 200 unchanged |
+| PUT | `/v1/configs/{name}` | raw config JSON | shared `ImportOutcome`; 201 created or 200 unchanged/updated |
 | GET | `/v1/configs?cursor=&limit=` | empty | shared `ConfigPage` |
 | GET | `/v1/configs/{name}` | empty | shared `StoredConfigView` |
-| DELETE | `/v1/configs/{name}` | empty plus `MFM-Config-Digest` | 204 |
 | GET | `/v1/runs?cursor=&limit=` | empty | shared mechanical `RunPage` |
 | POST | `/v1/runs/{run_id}/start` | strict selection JSON | shared `StartRunResult` |
 | POST | `/v1/runs/{run_id}/progress` | `{}` | shared `RunView` |
@@ -48,10 +47,9 @@ Start accepts exactly one exhaustive selection:
 {"config":{"kind":"exact","name":"daily","digest":"content:sha256-jcs-v1:<64 hex>"}}
 ```
 
-The path RunId is always caller-owned. Conditional DELETE requires one bare checked digest header;
-successful PUT responses set `Location: /v1/configs/{name}`. Mutating JSON routes require
-`application/json`, optionally with only `charset=UTF-8`; DELETE is bodyless and uses its digest
-header.
+The path RunId is always caller-owned. Successful PUT responses set
+`Location: /v1/configs/{name}`. Mutating JSON routes require `application/json`, optionally with
+only `charset=UTF-8`.
 
 ## Bounds and failures
 

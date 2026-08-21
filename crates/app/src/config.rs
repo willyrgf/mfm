@@ -268,13 +268,20 @@ pub enum ImportOutcome {
         /// Existing revision identity.
         config: ConfigSummary,
     },
+    /// The name's prior revision was atomically replaced.
+    Updated {
+        /// Replacement revision identity.
+        config: ConfigSummary,
+    },
 }
 
 impl ImportOutcome {
     /// Returns the imported or retained config summary.
     pub const fn config(&self) -> &ConfigSummary {
         match self {
-            Self::Created { config } | Self::Unchanged { config } => config,
+            Self::Created { config } | Self::Unchanged { config } | Self::Updated { config } => {
+                config
+            }
         }
     }
 }

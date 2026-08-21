@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_catalog::{
-    CatalogDeleteResult, CatalogEntry, CatalogError, CatalogInsertResult, ConfigCatalog,
-    ConfigDigest, ConfigName, PageLimit, RunIndex, MAX_CONFIG_ENTRIES,
+    CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigDigest, ConfigName,
+    PageLimit, RunIndex, MAX_CONFIG_ENTRIES,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_journal::{JournalHistory, OutcomeKind};
@@ -570,8 +570,7 @@ async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresCatalog>) {
 
     let before = catalog_entry("ambiguous-before", 1);
     assert_eq!(
-        catalog::insert_config_with_fault(catalog.test_pool(), &before, Fault::BeforeSubmission)
-            .await,
+        catalog::put_config_with_fault(catalog.test_pool(), &before, Fault::BeforeSubmission).await,
         Err(CatalogError::Unavailable)
     );
     assert!(catalog
@@ -582,7 +581,7 @@ async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresCatalog>) {
 
     let rolled_back = catalog_entry("ambiguous-rollback", 2);
     assert_eq!(
-        catalog::insert_config_with_fault(
+        catalog::put_config_with_fault(
             catalog.test_pool(),
             &rolled_back,
             Fault::UnknownRolledBack,
@@ -598,12 +597,8 @@ async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresCatalog>) {
 
     let committed = catalog_entry("ambiguous-insert", 3);
     assert_eq!(
-        catalog::insert_config_with_fault(
-            catalog.test_pool(),
-            &committed,
-            Fault::UnknownCommitted,
-        )
-        .await,
+        catalog::put_config_with_fault(catalog.test_pool(), &committed, Fault::UnknownCommitted,)
+            .await,
         Err(CatalogError::Indeterminate)
     );
     assert_eq!(
@@ -616,26 +611,21 @@ async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresCatalog>) {
         committed.digest()
     );
 
-    let deleted = catalog_entry("ambiguous-delete", 4);
+    let replacement = catalog_entry("ambiguous-insert", 4);
     assert_eq!(
-        catalog.insert_config(&deleted).await.expect("delete seed"),
-        CatalogInsertResult::Inserted
-    );
-    assert_eq!(
-        catalog::delete_config_with_fault(
-            catalog.test_pool(),
-            deleted.name(),
-            deleted.digest(),
-            Fault::UnknownCommitted,
-        )
-        .await,
+        catalog::put_config_with_fault(catalog.test_pool(), &replacement, Fault::UnknownCommitted,)
+            .await,
         Err(CatalogError::Indeterminate)
     );
-    assert!(catalog
-        .load_config(deleted.name())
-        .await
-        .expect("resolve committed delete")
-        .is_none());
+    assert_eq!(
+        catalog
+            .load_config(replacement.name())
+            .await
+            .expect("resolve committed update")
+            .expect("updated entry")
+            .digest(),
+        replacement.digest()
+    );
 
     let race_left = catalog_entry("race", 5);
     let race_right = catalog_entry("race", 6);
@@ -645,7 +635,7 @@ async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresCatalog>) {
         let barrier = Arc::clone(&barrier);
         tokio::spawn(async move {
             barrier.wait().await;
-            catalog.insert_config(&race_left).await
+            catalog.put_config(&race_left).await
         })
     };
     let right = {
@@ -653,7 +643,7 @@ async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresCatalog>) {
         let barrier = Arc::clone(&barrier);
         tokio::spawn(async move {
             barrier.wait().await;
-            catalog.insert_config(&race_right).await
+            catalog.put_config(&race_right).await
         })
     };
     let outcomes = [
@@ -666,14 +656,14 @@ async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresCatalog>) {
     assert_eq!(
         outcomes
             .iter()
-            .filter(|outcome| **outcome == CatalogInsertResult::Inserted)
+            .filter(|outcome| **outcome == CatalogPutResult::Inserted)
             .count(),
         1
     );
     assert_eq!(
         outcomes
             .iter()
-            .filter(|outcome| **outcome == CatalogInsertResult::Conflict)
+            .filter(|outcome| **outcome == CatalogPutResult::Updated)
             .count(),
         1
     );
@@ -681,29 +671,36 @@ async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresCatalog>) {
     for (name, value) in [("beta", 7), ("gamma", 8)] {
         assert_eq!(
             catalog
-                .insert_config(&catalog_entry(name, value))
+                .put_config(&catalog_entry(name, value))
                 .await
                 .expect("page seed"),
-            CatalogInsertResult::Inserted
+            CatalogPutResult::Inserted
         );
     }
-    for index in 0..(MAX_CONFIG_ENTRIES - 4) {
+    for index in 0..(MAX_CONFIG_ENTRIES - 5) {
         assert_eq!(
             catalog
-                .insert_config(&catalog_entry(
+                .put_config(&catalog_entry(
                     &format!("quota-{index:03}"),
                     u8::try_from(index).expect("quota value"),
                 ))
                 .await
                 .expect("quota insert"),
-            CatalogInsertResult::Inserted
+            CatalogPutResult::Inserted
         );
     }
     assert_eq!(
         catalog
-            .insert_config(&catalog_entry("quota-overflow", 9))
+            .put_config(&catalog_entry("quota-overflow", 9))
             .await,
         Err(CatalogError::Capacity)
+    );
+    assert_eq!(
+        catalog
+            .put_config(&catalog_entry("quota-000", u8::MAX))
+            .await
+            .expect("replace at capacity"),
+        CatalogPutResult::Updated
     );
 
     let mut cursor = None;
@@ -780,41 +777,27 @@ async fn managed_postgres_persistence_authority_contract() {
     let first = catalog_entry("alpha", 1);
     let replacement = catalog_entry("alpha", 2);
     assert_eq!(
-        catalog.insert_config(&first).await.expect("insert config"),
-        CatalogInsertResult::Inserted
+        catalog.put_config(&first).await.expect("insert config"),
+        CatalogPutResult::Inserted
     );
     assert_eq!(
-        catalog.insert_config(&first).await.expect("retry config"),
-        CatalogInsertResult::Unchanged
-    );
-    assert_eq!(
-        catalog
-            .insert_config(&replacement)
-            .await
-            .expect("conflicting config"),
-        CatalogInsertResult::Conflict
+        catalog.put_config(&first).await.expect("retry config"),
+        CatalogPutResult::Unchanged
     );
     assert_eq!(
         catalog
-            .delete_config(first.name(), replacement.digest())
+            .put_config(&replacement)
             .await
-            .expect("digest mismatch"),
-        CatalogDeleteResult::DigestMismatch
+            .expect("replacement config"),
+        CatalogPutResult::Updated
     );
     let retained = catalog
         .load_config(first.name())
         .await
         .expect("load config")
         .expect("retained config");
-    assert_eq!(retained.digest(), first.digest());
-    assert_eq!(retained.canonical_bytes(), first.canonical_bytes());
-    assert_eq!(
-        catalog
-            .delete_config(first.name(), first.digest())
-            .await
-            .expect("delete config"),
-        CatalogDeleteResult::Deleted
-    );
+    assert_eq!(retained.digest(), replacement.digest());
+    assert_eq!(retained.canonical_bytes(), replacement.canonical_bytes());
 
     assert_snapshot_and_blocking_contract(&store).await;
     assert_commit_and_hostile_contract(&store, &mut connection).await;
@@ -831,12 +814,10 @@ async fn managed_postgres_persistence_authority_contract() {
         .execute(&mut runtime_connection)
         .await
         .is_err());
-    assert!(
-        sqlx::query("UPDATE mfm_catalog.config_entries SET canonical = canonical")
-            .execute(&mut runtime_connection)
-            .await
-            .is_err()
-    );
+    assert!(sqlx::query("DELETE FROM mfm_catalog.config_entries")
+        .execute(&mut runtime_connection)
+        .await
+        .is_err());
 
     connection
         .execute("GRANT TRUNCATE ON public.mfm_run_frames TO mfm_runtime")

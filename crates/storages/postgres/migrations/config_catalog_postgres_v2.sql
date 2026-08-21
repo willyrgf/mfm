@@ -4,11 +4,11 @@ CREATE TABLE mfm_catalog.mfm_catalog_schema (
     schema_contract TEXT COLLATE "C" NOT NULL,
     CONSTRAINT mfm_catalog_schema_pkey PRIMARY KEY (schema_contract),
     CONSTRAINT mfm_catalog_schema_contract_check
-        CHECK (schema_contract = 'mfm.config-catalog-postgres.v1')
+        CHECK (schema_contract = 'mfm.config-catalog-postgres.v2')
 );
 
 INSERT INTO mfm_catalog.mfm_catalog_schema (schema_contract)
-VALUES ('mfm.config-catalog-postgres.v1');
+VALUES ('mfm.config-catalog-postgres.v2');
 
 CREATE TABLE mfm_catalog.config_entries (
     config_name   TEXT COLLATE "C" NOT NULL,
@@ -30,4 +30,4 @@ REVOKE ALL ON TABLE mfm_catalog.mfm_catalog_schema FROM PUBLIC, mfm_runtime;
 REVOKE ALL ON TABLE mfm_catalog.config_entries FROM PUBLIC, mfm_runtime;
 GRANT USAGE ON SCHEMA mfm_catalog TO mfm_runtime;
 GRANT SELECT ON TABLE mfm_catalog.mfm_catalog_schema TO mfm_runtime;
-GRANT SELECT, INSERT, DELETE ON TABLE mfm_catalog.config_entries TO mfm_runtime;
+GRANT SELECT, INSERT, UPDATE ON TABLE mfm_catalog.config_entries TO mfm_runtime;

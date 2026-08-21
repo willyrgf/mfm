@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use mfm_app::{
     Application, BoundCapabilitySet, ComposedRuntime, ConfigDocument, ConfigDocumentError,
-    ConfigPageRequest, ConfigSelection, PublicBindingView, RequestError, RunPageRequest,
-    RunRecovery, SerializableRunView, MAX_EVM_BINDINGS,
+    ConfigPageRequest, ConfigSelection, ImportOutcome, PublicBindingView, RequestError,
+    RunPageRequest, RunRecovery, SerializableRunView, MAX_EVM_BINDINGS,
 };
 use mfm_catalog::{ConfigDigest, ConfigName, MemoryCatalog, PageLimit, MAX_CONFIG_DOCUMENT_BYTES};
 use mfm_evm::{EvmEndpoint, EvmReadValue};
@@ -351,12 +351,8 @@ async fn stored_config_lifecycle_drives_current_exact_and_retained_runs() {
         )
         .await
         .expect("unchanged");
+    assert!(matches!(unchanged, ImportOutcome::Unchanged { .. }));
     assert_eq!(unchanged.config(), created.config());
-    assert_eq!(
-        app.import_config(name.clone(), document(vec![(1, "alpha")]).await)
-            .await,
-        Err(RequestError::ConfigConflict)
-    );
 
     let started = app
         .start_run(run_id(10), &ConfigSelection::Current { name: name.clone() })
@@ -367,17 +363,37 @@ async fn stored_config_lifecycle_drives_current_exact_and_retained_runs() {
     assert_eq!(first.calls.load(Ordering::SeqCst), 4);
     assert_eq!(second.calls.load(Ordering::SeqCst), 4);
 
+    let updated = app
+        .import_config(name.clone(), document(vec![(1, "alpha")]).await)
+        .await
+        .expect("updated");
+    assert!(matches!(updated, ImportOutcome::Updated { .. }));
+    assert_ne!(updated.config().digest(), &digest);
+
     let exact = app
         .start_run(
             run_id(11),
             &ConfigSelection::Exact {
                 name: name.clone(),
-                digest: digest.clone(),
+                digest: updated.config().digest().clone(),
             },
         )
         .await
         .expect("exact start");
-    assert_eq!(exact.config(), created.config());
+    assert_eq!(exact.config(), updated.config());
+    assert!(matches!(
+        app.start_run(
+            run_id(12),
+            &ConfigSelection::Exact {
+                name: name.clone(),
+                digest,
+            },
+        )
+        .await,
+        Err(mfm_app::RunRequestError::Request(
+            RequestError::ConfigDigestMismatch
+        ))
+    ));
     let wrong = ConfigDigest::new(ContentDigest::from_digest(
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([9; 32]),
@@ -385,7 +401,7 @@ async fn stored_config_lifecycle_drives_current_exact_and_retained_runs() {
     .expect("digest");
     assert!(matches!(
         app.start_run(
-            run_id(12),
+            run_id(13),
             &ConfigSelection::Exact {
                 name: name.clone(),
                 digest: wrong,
@@ -401,18 +417,13 @@ async fn stored_config_lifecycle_drives_current_exact_and_retained_runs() {
         .list_configs(&ConfigPageRequest::new(None, PageLimit::default()))
         .await
         .expect("config page");
-    assert_eq!(configs.items(), std::slice::from_ref(created.config()));
+    assert_eq!(configs.items(), std::slice::from_ref(updated.config()));
     let runs = app
         .list_runs(&RunPageRequest::new(None, PageLimit::default()))
         .await
         .expect("run page");
     assert_eq!(runs.items().len(), 2);
 
-    app.delete_config(&name, &digest).await.expect("delete");
-    assert_eq!(
-        app.read_config(&name).await.err(),
-        Some(RequestError::ConfigAbsent)
-    );
     let retained = app.read_run(&run_id(10)).await.expect("retained run");
     assert_eq!(retained.head_digest(), started.run().head_digest());
 }

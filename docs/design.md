@@ -75,10 +75,10 @@ derives Runtime registrations, planning targets, public binding views, Store, an
 same checked binding set.
 
 The named config catalog retains complete, bounded canonical config documents tagged by the exact
-entry point. Import validates and plans the document before conditional custody. Run start selects
+entry point. Import validates and plans the document before atomic insert or replacement. Run start selects
 either the name's current revision or an exact `sha256-jcs-v1` revision, checks every requested
 binding before Runtime Store IO, and returns the selected config summary with the run view. The
-shared surface also owns entry-point/binding discovery, config read/list/conditional delete, run
+shared surface also owns entry-point/binding discovery, config read/list, run
 progress/read, and mechanical run-head listing. Every execution receives an explicit caller-owned
 RunId; ambiguous append acknowledgement carries the exact start or progress recovery identity.
 Transaction submission requires a future durable transaction-authority/outbox design and is not

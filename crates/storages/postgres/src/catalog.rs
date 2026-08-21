@@ -2,8 +2,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use mfm_catalog::{
-    CatalogDeleteResult, CatalogEntry, CatalogError, CatalogInsertResult, CatalogPage,
-    ConfigCatalog, ConfigCursor, ConfigDigest, ConfigName, PageLimit, MAX_CONFIG_ENTRIES,
+    CatalogEntry, CatalogError, CatalogPage, CatalogPutResult, ConfigCatalog, ConfigCursor,
+    ConfigDigest, ConfigName, PageLimit, MAX_CONFIG_ENTRIES,
 };
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{Connection, PgConnection, PgPool, Row};
@@ -52,11 +52,11 @@ impl PostgresCatalog {
 }
 
 impl ConfigCatalog for PostgresCatalog {
-    fn insert_config<'a>(
+    fn put_config<'a>(
         &'a self,
         entry: &'a CatalogEntry,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogInsertResult, CatalogError>> + Send + 'a>> {
-        Box::pin(async move { insert_config(&self.pool, entry, MutationCommitFault::None).await })
+    ) -> Pin<Box<dyn Future<Output = Result<CatalogPutResult, CatalogError>> + Send + 'a>> {
+        Box::pin(async move { put_config(&self.pool, entry, MutationCommitFault::None).await })
     }
 
     fn load_config<'a>(
@@ -72,16 +72,6 @@ impl ConfigCatalog for PostgresCatalog {
         limit: PageLimit,
     ) -> Pin<Box<dyn Future<Output = Result<CatalogPage, CatalogError>> + Send + 'a>> {
         Box::pin(async move { list_configs(&self.pool, cursor, limit).await })
-    }
-
-    fn delete_config<'a>(
-        &'a self,
-        name: &'a ConfigName,
-        digest: &'a ConfigDigest,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogDeleteResult, CatalogError>> + Send + 'a>> {
-        Box::pin(
-            async move { delete_config(&self.pool, name, digest, MutationCommitFault::None).await },
-        )
     }
 }
 
@@ -134,11 +124,11 @@ async fn list_configs(
     CatalogPage::new(items, next_cursor)
 }
 
-async fn insert_config(
+async fn put_config(
     pool: &PgPool,
     entry: &CatalogEntry,
     fault: MutationCommitFault,
-) -> Result<CatalogInsertResult, CatalogError> {
+) -> Result<CatalogPutResult, CatalogError> {
     let mut transaction = pool.begin().await.map_err(|_| CatalogError::Unavailable)?;
     configure_mutation(&mut transaction).await?;
     lock_catalog(&mut transaction).await?;
@@ -153,16 +143,29 @@ async fn insert_config(
     .map(decode_entry)
     .transpose()?;
     if let Some(retained) = retained {
-        let _ = transaction.rollback().await;
-        return Ok(
-            if retained.digest() == entry.digest()
-                && retained.canonical_bytes() == entry.canonical_bytes()
-            {
-                CatalogInsertResult::Unchanged
-            } else {
-                CatalogInsertResult::Conflict
-            },
-        );
+        if retained.digest() == entry.digest()
+            && retained.canonical_bytes() == entry.canonical_bytes()
+        {
+            let _ = transaction.rollback().await;
+            return Ok(CatalogPutResult::Unchanged);
+        }
+        let affected = sqlx::query(
+            "UPDATE mfm_catalog.config_entries SET config_digest = $2, canonical = $3 \
+             WHERE config_name = $1",
+        )
+        .bind(entry.name().as_str())
+        .bind(entry.digest().as_str())
+        .bind(entry.canonical_bytes())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| CatalogError::Unavailable)?
+        .rows_affected();
+        if affected != 1 {
+            let _ = transaction.rollback().await;
+            return Err(CatalogError::Corrupt);
+        }
+        commit_mutation(transaction, fault).await?;
+        return Ok(CatalogPutResult::Updated);
     }
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM mfm_catalog.config_entries")
         .fetch_one(&mut *transaction)
@@ -186,50 +189,7 @@ async fn insert_config(
     .await
     .map_err(|_| CatalogError::Unavailable)?;
     commit_mutation(transaction, fault).await?;
-    Ok(CatalogInsertResult::Inserted)
-}
-
-async fn delete_config(
-    pool: &PgPool,
-    name: &ConfigName,
-    digest: &ConfigDigest,
-    fault: MutationCommitFault,
-) -> Result<CatalogDeleteResult, CatalogError> {
-    let mut transaction = pool.begin().await.map_err(|_| CatalogError::Unavailable)?;
-    configure_mutation(&mut transaction).await?;
-    lock_catalog(&mut transaction).await?;
-    let retained: Option<String> = sqlx::query_scalar(
-        "SELECT config_digest FROM mfm_catalog.config_entries WHERE config_name = $1",
-    )
-    .bind(name.as_str())
-    .fetch_optional(&mut *transaction)
-    .await
-    .map_err(|_| CatalogError::Unavailable)?;
-    let Some(retained) = retained else {
-        let _ = transaction.rollback().await;
-        return Ok(CatalogDeleteResult::Absent);
-    };
-    let retained = ConfigDigest::parse(retained).map_err(|_| CatalogError::Corrupt)?;
-    if &retained != digest {
-        let _ = transaction.rollback().await;
-        return Ok(CatalogDeleteResult::DigestMismatch);
-    }
-    let affected = sqlx::query(
-        "DELETE FROM mfm_catalog.config_entries \
-         WHERE config_name = $1 AND config_digest = $2",
-    )
-    .bind(name.as_str())
-    .bind(digest.as_str())
-    .execute(&mut *transaction)
-    .await
-    .map_err(|_| CatalogError::Unavailable)?
-    .rows_affected();
-    if affected != 1 {
-        let _ = transaction.rollback().await;
-        return Err(CatalogError::Corrupt);
-    }
-    commit_mutation(transaction, fault).await?;
-    Ok(CatalogDeleteResult::Deleted)
+    Ok(CatalogPutResult::Inserted)
 }
 
 fn decode_entry(row: PgRow) -> Result<CatalogEntry, CatalogError> {
@@ -286,22 +246,12 @@ pub(crate) enum MutationCommitFault {
 }
 
 #[cfg(test)]
-pub(crate) async fn insert_config_with_fault(
+pub(crate) async fn put_config_with_fault(
     pool: &PgPool,
     entry: &CatalogEntry,
     fault: MutationCommitFault,
-) -> Result<CatalogInsertResult, CatalogError> {
-    insert_config(pool, entry, fault).await
-}
-
-#[cfg(test)]
-pub(crate) async fn delete_config_with_fault(
-    pool: &PgPool,
-    name: &ConfigName,
-    digest: &ConfigDigest,
-    fault: MutationCommitFault,
-) -> Result<CatalogDeleteResult, CatalogError> {
-    delete_config(pool, name, digest, fault).await
+) -> Result<CatalogPutResult, CatalogError> {
+    put_config(pool, entry, fault).await
 }
 
 async fn commit_mutation(

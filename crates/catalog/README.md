@@ -1,6 +1,6 @@
 # mfm-catalog
 
-`mfm-catalog` owns two mechanical persistence ports. `ConfigCatalog` provides bounded, conditional
+`mfm-catalog` owns two mechanical persistence ports. `ConfigCatalog` provides bounded, atomic
 custody for named opaque canonical config bytes. `RunIndex` enumerates current run heads without
 loading frames or interpreting run state.
 

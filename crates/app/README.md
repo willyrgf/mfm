@@ -22,7 +22,7 @@ targets, Store, and RunIndex from the same checked inputs. Config catalog custod
 injected. The complete Application surface is:
 
 - static entry-point and composed-binding discovery;
-- config import, read, keyset list, and conditional delete;
+- atomic config import/replace, read, and keyset list;
 - stored-config run start through exhaustive `Current` or `Exact` selection;
 - run progress, semantic read, and mechanical keyset list.
 
@@ -34,5 +34,5 @@ the only `RunRequestError` carrying data, through the exact `RunRecovery::Start`
 
 `RequestError` owns stable redaction-safe codes and messages. Catalog rows are revalidated as
 canonical documents on every read/start/list. Unbound routes fail before Runtime Store IO;
-deleting or rebinding a config never changes retained run genesis. Shared serializers preserve the
+replacing a config never changes retained run genesis. Shared serializers preserve the
 `RunViewState` sum and embed terminal canonical bytes as a raw JSON value.
