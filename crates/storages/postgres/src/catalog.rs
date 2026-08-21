@@ -5,7 +5,6 @@ use mfm_catalog::{
     CatalogDeleteResult, CatalogEntry, CatalogError, CatalogInsertResult, CatalogPage,
     ConfigCatalog, ConfigCursor, ConfigDigest, ConfigName, PageLimit, MAX_CONFIG_ENTRIES,
 };
-use mfm_transport_security::LoadedTlsRoots;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{Connection, PgConnection, PgPool, Row};
 
@@ -16,15 +15,13 @@ use crate::{
 /// PostgreSQL config catalog after its independent connection gate succeeds.
 pub struct PostgresCatalog {
     pool: PgPool,
-    _roots: LoadedTlsRoots,
 }
 
 impl PostgresCatalog {
     /// Connects and verifies the independent config-catalog schema and runtime authority.
     pub async fn connect(locator: &RuntimePostgresLocator) -> Result<Self, StoreOpenError> {
-        let (options, roots) = locator
+        let options = locator
             .connect_options("mfm-runtime-catalog")
-            .await
             .map_err(|_| StoreOpenError::Unavailable)?;
         let mut gate_connection = PgConnection::connect_with(&options)
             .await
@@ -45,10 +42,7 @@ impl PostgresCatalog {
             .connect_with(options)
             .await
             .map_err(classify_open_error)?;
-        Ok(Self {
-            pool,
-            _roots: roots,
-        })
+        Ok(Self { pool })
     }
 
     #[cfg(test)]

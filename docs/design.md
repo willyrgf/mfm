@@ -50,10 +50,12 @@ target, installs only absent namespaces, and grants the fixed `mfm_runtime` role
 Runtime connections have no ownership or DDL authority. Existing installations are verified and
 never migrated, repaired, re-owned, or reset.
 
-PostgreSQL network authority is one strict single-host URI with `sslmode=verify-full` and an exact
-TLS-root source. The private locator parser constructs SQLx options without environment, home,
-passfile, service, socket, client-certificate, or tracing-derived input. A content-pinned PEM bundle
-replaces compiled roots rather than extending them.
+PostgreSQL network authority is one strict URI with an explicit password, numeric `127.0.0.1` or
+`::1` host, and `sslmode=disable`. PostgreSQL traffic is intentionally plaintext inside the trusted
+shared network namespace; remote database targets are unsupported. The private locator uses stock
+SQLx, overwrites every ambient-derived value that can affect this plaintext connection, and rejects
+`PGOPTIONS`, whose startup effects SQLx cannot clear. Home/passfile and service-file inputs cannot
+influence the resulting authority.
 
 EVM physical route identity is the domain-owned, secret-free `EvmPhysicalTarget { chain_id,
 endpoint_ref }`. Planning and adapter registration derive the same content ref. Credentials and
@@ -68,8 +70,9 @@ single checked input and concrete backend; there is no singular one-route assemb
 Application owns the transport-neutral client surface. A strict XDG/HOME- or override-selected
 `deployment.toml` names environment resolvers for the runtime PostgreSQL locator and stable public
 EVM bindings; it contains no locator values and has no product lifecycle. Production composition
-resolves each private locator once, constructs exact TLS clients, and derives Runtime registrations,
-planning targets, public binding views, Store, and RunIndex from the same checked binding set.
+resolves each private locator once, constructs local PostgreSQL and checked EVM TLS clients, and
+derives Runtime registrations, planning targets, public binding views, Store, and RunIndex from the
+same checked binding set.
 
 The named config catalog retains complete, bounded canonical config documents tagged by the exact
 entry point. Import validates and plans the document before conditional custody. Run start selects

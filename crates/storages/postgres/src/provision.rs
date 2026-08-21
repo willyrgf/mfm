@@ -39,9 +39,8 @@ pub async fn provision_schemas(
     if admin.target() != runtime.target() {
         return Err(ProvisionError::Incompatible);
     }
-    let (admin_options, _admin_roots) = admin
+    let admin_options = admin
         .connect_options("mfm-schema-provisioner")
-        .await
         .map_err(|_| ProvisionError::Unavailable)?;
     let mut connection = PgConnection::connect_with(&admin_options)
         .await

@@ -9,6 +9,7 @@ use mfm_catalog::{
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_journal::{JournalHistory, OutcomeKind};
 use mfm_store::AppendResult;
+use sqlx::postgres::PgSslMode;
 use sqlx::{Connection, Executor};
 
 use super::*;
@@ -90,27 +91,21 @@ fn managed_locators() -> (AdminPostgresLocator, RuntimePostgresLocator) {
 }
 
 async fn admin_connection(locator: &AdminPostgresLocator) -> PgConnection {
-    let (options, roots) = locator
+    let options = locator
         .connect_options("mfm-postgres-contract-test")
-        .await
         .expect("admin connection options");
-    let connection = PgConnection::connect_with(&options)
+    PgConnection::connect_with(&options)
         .await
-        .expect("admin connection");
-    drop(roots);
-    connection
+        .expect("admin connection")
 }
 
 async fn runtime_connection(locator: &RuntimePostgresLocator) -> PgConnection {
-    let (options, roots) = locator
+    let options = locator
         .connect_options("mfm-postgres-authority-test")
-        .await
         .expect("runtime connection options");
-    let connection = PgConnection::connect_with(&options)
+    PgConnection::connect_with(&options)
         .await
-        .expect("runtime connection");
-    drop(roots);
-    connection
+        .expect("runtime connection")
 }
 
 async fn reset_schemas(connection: &mut PgConnection) {
@@ -163,15 +158,14 @@ fn migration_and_classifier_contracts_are_exact() {
 }
 
 #[tokio::test]
-async fn provisioning_rejects_unequal_targets_before_loading_roots_or_connecting() {
+async fn provisioning_rejects_unequal_targets_before_connecting() {
     let authority = run_id(41).as_str().replace(':', "");
-    let roots = r#"{"kind":"pem-file","path":"/not/a/real/authority.pem","digest":"content:sha256-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#;
     let admin = AdminPostgresLocator::parse(format!(
-        r#"{{"v":1,"url":"postgresql://operator:{authority}@127.0.0.1:1/one?sslmode=verify-full","tls_roots":{roots}}}"#
+        r#"{{"v":1,"url":"postgresql://operator:{authority}@127.0.0.1:1/one?sslmode=disable"}}"#
     ))
     .expect("synthetic admin locator");
     let runtime = RuntimePostgresLocator::parse(format!(
-        r#"{{"v":1,"url":"postgresql://mfm_runtime:{authority}@127.0.0.1:1/two?sslmode=verify-full","tls_roots":{roots}}}"#
+        r#"{{"v":1,"url":"postgresql://mfm_runtime:{authority}@127.0.0.1:1/two?sslmode=disable"}}"#
     ))
     .expect("synthetic runtime locator");
     assert_eq!(
@@ -733,7 +727,7 @@ async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresCatalog>) {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires the managed TLS PostgreSQL service provided by postgres-test"]
+#[ignore = "requires the managed local PostgreSQL service provided by postgres-test"]
 async fn managed_postgres_persistence_authority_contract() {
     let (admin, runtime) = managed_locators();
     let mut connection = admin_connection(&admin).await;
@@ -748,12 +742,10 @@ async fn managed_postgres_persistence_authority_contract() {
 
     let store = Arc::new(PostgresStore::connect(&runtime).await.expect("run store"));
     let catalog = Arc::new(PostgresCatalog::connect(&runtime).await.expect("catalog"));
-    let (_, exact_roots) = runtime
-        .connect_options("mfm-root-store-contract-test")
-        .await
-        .expect("production root store");
-    assert!(!exact_roots.is_webpki());
-    assert_eq!(exact_roots.len(), 1);
+    let options = runtime
+        .connect_options("mfm-local-transport-contract-test")
+        .expect("production connection options");
+    assert!(matches!(options.get_ssl_mode(), PgSslMode::Disable));
     store_scenarios::exercise_store(store.as_ref(), &store_scenarios::run(9)).await;
 
     let first_run_id = run_id(21);
@@ -922,19 +914,17 @@ async fn managed_postgres_persistence_authority_contract() {
     reset_schemas(&mut connection).await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "requires the managed TLS PostgreSQL service provided by postgres-test"]
-async fn managed_postgres_rejects_untrusted_or_mismatched_tls_authority() {
-    for variable in [
-        "MFM_TEST_WRONG_PIN_STORE_LOCATOR",
-        "MFM_TEST_ALTERNATE_CA_STORE_LOCATOR",
-        "MFM_TEST_WRONG_HOST_STORE_LOCATOR",
-    ] {
-        let encoded = std::env::var(variable).expect("postgres-test must supply negative locator");
-        let locator = RuntimePostgresLocator::parse(encoded).expect("negative locator grammar");
-        assert!(matches!(
-            PostgresStore::connect(&locator).await,
-            Err(StoreOpenError::Unavailable)
-        ));
-    }
+#[test]
+#[ignore = "requires an isolated postgres-test subprocess with PGOPTIONS"]
+fn managed_postgres_rejects_pgoptions() {
+    let Ok(variable) = std::env::var("MFM_TEST_BLOCKED_POSTGRES_ENV") else {
+        return;
+    };
+    assert_eq!(variable, "PGOPTIONS");
+    assert!(std::env::var_os("PGOPTIONS").is_some());
+    let (_, runtime) = managed_locators();
+    assert!(matches!(
+        runtime.connect_options("mfm-blocked-environment-test"),
+        Err(PostgresLocatorError)
+    ));
 }
