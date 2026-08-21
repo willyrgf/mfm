@@ -8,7 +8,11 @@ use mfm_app::{
     ConfigSelection, ImportOutcome, PublicBindingView, RequestError, RunPageLimit, RunRecovery,
     SerializableRunView, MAX_EVM_BINDINGS,
 };
-use mfm_catalog::{ConfigDigest, ConfigName, MemoryCatalog, MAX_CONFIG_DOCUMENT_BYTES};
+use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_catalog::{
+    CatalogEntries, CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigDigest,
+    ConfigName, MemoryCatalog, MAX_CONFIG_DOCUMENT_BYTES,
+};
 use mfm_evm::{EvmEndpoint, EvmReadValue};
 use mfm_evm_live::{EvmProvider, EvmProviderResponse};
 use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, RunId, StableId};
@@ -150,7 +154,42 @@ fn application_with_backend(
         BoundCapabilitySet::new(bindings).expect("bindings"),
     )
     .expect("composition");
-    Application::from_parts(composed, Arc::new(MemoryCatalog::new())).expect("application")
+    Application::from_parts(composed, Arc::new(MemoryCatalog::new()))
+}
+
+struct HostileCatalog {
+    entry: CatalogEntry,
+}
+
+impl ConfigCatalog for HostileCatalog {
+    fn put_config<'a>(
+        &'a self,
+        _entry: &'a CatalogEntry,
+    ) -> Pin<Box<dyn Future<Output = Result<CatalogPutResult, CatalogError>> + Send + 'a>> {
+        Box::pin(async { Err(CatalogError::Corrupt) })
+    }
+
+    fn load_config<'a>(
+        &'a self,
+        _name: &'a ConfigName,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<CatalogEntry>, CatalogError>> + Send + 'a>> {
+        Box::pin(async { Ok(Some(self.entry.clone())) })
+    }
+
+    fn list_configs<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<CatalogEntries, CatalogError>> + Send + 'a>> {
+        Box::pin(async { Err(CatalogError::Corrupt) })
+    }
+}
+
+fn application_with_catalog(entry: CatalogEntry) -> Application {
+    let composed = ComposedRuntime::compose(
+        Arc::new(FaultStore::new()),
+        BoundCapabilitySet::new(Vec::new()).expect("bindings"),
+    )
+    .expect("composition");
+    Application::from_parts(composed, Arc::new(HostileCatalog { entry }))
 }
 
 struct FaultStore {
@@ -423,6 +462,54 @@ async fn stored_config_lifecycle_drives_current_exact_and_retained_runs() {
 
     let retained = app.read_run(&run_id(10)).await.expect("retained run");
     assert_eq!(retained.head_digest(), started.run().head_digest());
+}
+
+#[tokio::test]
+async fn start_revalidates_hostile_catalog_rows_before_caller_or_binding_errors() {
+    let name = config_name("hostile-digest");
+    let canonical = PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&document_value(vec![(1, "alpha")], "portfolio-example"))
+            .expect("JSON"),
+    )
+    .expect("canonical document");
+    let actual_digest = ConfigDigest::new(canonical.content_digest()).expect("actual digest");
+    let false_digest = ConfigDigest::new(ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([9; 32]),
+    ))
+    .expect("false digest");
+    let entry = CatalogEntry::new(name.clone(), false_digest, canonical.to_vec()).expect("entry");
+    assert!(matches!(
+        application_with_catalog(entry)
+            .start_run(
+                run_id(14),
+                &ConfigSelection::Exact {
+                    name,
+                    digest: actual_digest,
+                },
+            )
+            .await,
+        Err(mfm_app::RunRequestError::Request(
+            RequestError::InvalidCatalog
+        ))
+    ));
+
+    let name = config_name("hostile-plan");
+    let canonical = PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&document_value(vec![(1, "alpha")], "other-portfolio"))
+            .expect("JSON"),
+    )
+    .expect("canonical document");
+    let digest = ConfigDigest::new(canonical.content_digest()).expect("digest");
+    let entry = CatalogEntry::new(name.clone(), digest, canonical.to_vec()).expect("entry");
+    assert!(matches!(
+        application_with_catalog(entry)
+            .start_run(run_id(15), &ConfigSelection::Current { name })
+            .await,
+        Err(mfm_app::RunRequestError::Request(
+            RequestError::InvalidCatalog
+        ))
+    ));
 }
 
 #[tokio::test]

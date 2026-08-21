@@ -660,8 +660,7 @@ mod tests {
         let store = Arc::new(MemoryStore::new());
         let bindings = BoundCapabilitySet::new(Vec::new()).expect("bindings");
         let composed = ComposedRuntime::compose(store, bindings).expect("composition");
-        let application =
-            Application::from_parts(composed, Arc::new(MemoryCatalog::new())).expect("application");
+        let application = Application::from_parts(composed, Arc::new(MemoryCatalog::new()));
         let document = ConfigDocument::new(DOCUMENT.to_vec())
             .await
             .expect("document");
