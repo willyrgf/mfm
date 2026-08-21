@@ -7,8 +7,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use mfm_app::{
-    Application, ConfigDocument, ConfigDocumentError, ConfigName, ConfigSelection, ImportOutcome,
-    ItemList, RequestError, RunPageLimit, RunRequestError, SerializableRunView,
+    derive_run_id, Application, ConfigDocument, ConfigDocumentError, ConfigName, ConfigSelection,
+    ImportOutcome, ItemList, RequestError, RunPageLimit, RunRequestError, SerializableRunView,
     MAX_CONFIG_DOCUMENT_BYTES,
 };
 use mfm_ids::RunId;
@@ -33,7 +33,7 @@ pub(crate) fn router(application: Arc<Application>) -> Router {
         )
         .route("/v1/runs", get(list_runs))
         .route(
-            "/v1/runs/{run_id}/start",
+            "/v1/runs/start",
             post(start_run).layer(DefaultBodyLimit::max(RUN_BODY_MAX)),
         )
         .route(
@@ -120,12 +120,17 @@ async fn list_runs(
 
 async fn start_run(
     State(application): State<Arc<Application>>,
-    path: Result<Path<RunId>, PathRejection>,
     body: Result<Json<StartBody>, JsonRejection>,
 ) -> Result<Response, RestError> {
-    let Path(run_id) = path.map_err(|_| RestError(invalid_run_id()))?;
     let Json(body) = body.map_err(|error| RestError(json_rejection(error)))?;
-    let result = application.start_run(run_id, &body.config).await?;
+    let run_id = match body.run_id {
+        Some(run_id) => run_id,
+        None => generate_run_id()?,
+    };
+    let result = application
+        .start_run(run_id.clone(), &body.config)
+        .await
+        .map_err(|error| RestError(start_run_error(&run_id, error)))?;
     Ok(json_response(StatusCode::OK, &result))
 }
 
@@ -180,6 +185,7 @@ struct Health {
 #[serde(deny_unknown_fields)]
 struct StartBody {
     config: ConfigSelection,
+    run_id: Option<RunId>,
 }
 
 #[derive(Deserialize)]
@@ -234,7 +240,15 @@ fn config_document_error(error: ConfigDocumentError) -> Response {
 }
 
 fn request_error(error: RequestError) -> Response {
-    let status = match error {
+    boundary_error(
+        request_error_status(error),
+        error.code(),
+        &error.to_string(),
+    )
+}
+
+const fn request_error_status(error: RequestError) -> StatusCode {
+    match error {
         RequestError::ConfigAbsent | RequestError::RunAbsent => StatusCode::NOT_FOUND,
         RequestError::RunAdmissionConflict | RequestError::BindingUnbound => StatusCode::CONFLICT,
         RequestError::InvalidConfigDocument | RequestError::RunCapacity => {
@@ -248,8 +262,23 @@ fn request_error(error: RequestError) -> Response {
         | RequestError::IncompatibleAssembly
         | RequestError::InvalidRunIndex
         | RequestError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    boundary_error(status, error.code(), &error.to_string())
+    }
+}
+
+fn start_run_error(run_id: &RunId, error: RunRequestError) -> Response {
+    match error {
+        RunRequestError::Request(error) => json_response(
+            request_error_status(error),
+            &IdentifiedError {
+                code: error.code(),
+                message: &error.to_string(),
+                run_id,
+            },
+        ),
+        RunRequestError::AppendIndeterminate { recovery } => {
+            run_request_error(RunRequestError::AppendIndeterminate { recovery })
+        }
+    }
 }
 
 fn run_request_error(error: RunRequestError) -> Response {
@@ -322,6 +351,24 @@ fn invalid_run_id() -> Response {
     checked_error("invalid_run_id", "run id is invalid")
 }
 
+fn generate_run_id() -> Result<RunId, RestError> {
+    generate_run_id_with(getrandom::fill).map_err(|_| RestError(run_id_generation_failed()))
+}
+
+fn generate_run_id_with<E>(fill: impl FnOnce(&mut [u8]) -> Result<(), E>) -> Result<RunId, E> {
+    let mut entropy = [0; 32];
+    fill(&mut entropy)?;
+    Ok(derive_run_id(entropy))
+}
+
+fn run_id_generation_failed() -> Response {
+    boundary_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "run_id_generation_failed",
+        "run id generation failed",
+    )
+}
+
 fn invalid_query() -> Response {
     boundary_error(
         StatusCode::BAD_REQUEST,
@@ -334,6 +381,13 @@ fn invalid_query() -> Response {
 struct ErrorBody<'a> {
     code: &'a str,
     message: &'a str,
+}
+
+#[derive(Serialize)]
+struct IdentifiedError<'a> {
+    code: &'a str,
+    message: &'a str,
+    run_id: &'a RunId,
 }
 
 #[derive(Serialize)]
@@ -515,13 +569,18 @@ mod tests {
                 "invalid_run_id",
             ),
             (
-                request(
+                request(Method::POST, "/v1/runs/start", Body::from("{}")),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_media_type",
+            ),
+            (
+                json_request(
                     Method::POST,
                     &format!("/v1/runs/{RUN_ID}/start"),
                     Body::from("{}"),
                 ),
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "unsupported_media_type",
+                StatusCode::NOT_FOUND,
+                "route_not_found",
             ),
             (
                 json_request(Method::PUT, "/v1/configs/malformed", Body::from("{")),
@@ -571,11 +630,21 @@ mod tests {
             .expect("digest")
             .to_owned();
 
+        let entropy_error = run_id_generation_failed();
+        assert_eq!(entropy_error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response_json(entropy_error).await,
+            serde_json::json!({
+                "code": "run_id_generation_failed",
+                "message": "run id generation failed"
+            })
+        );
+
         assert_error(
             &service,
             json_request(
                 Method::POST,
-                &format!("/v1/runs/{RUN_ID}/start"),
+                "/v1/runs/start",
                 Body::from(r#"{"config":{"kind":"current","name":"daily"}}"#),
             ),
             StatusCode::BAD_REQUEST,
@@ -583,11 +652,32 @@ mod tests {
         )
         .await;
 
+        let identified_error = send(
+            &service,
+            json_request(
+                Method::POST,
+                "/v1/runs/start",
+                Body::from(format!(
+                    r#"{{"config":{{"name":"absent","digest":"{digest}"}},"run_id":"{RUN_ID}"}}"#
+                )),
+            ),
+        )
+        .await;
+        assert_eq!(identified_error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response_json(identified_error).await,
+            serde_json::json!({
+                "code": "config_absent",
+                "message": "config is absent",
+                "run_id": RUN_ID
+            })
+        );
+
         let response = send(
             &service,
             json_request(
                 Method::POST,
-                &format!("/v1/runs/{RUN_ID}/start"),
+                "/v1/runs/start",
                 Body::from(format!(
                     r#"{{"config":{{"name":"daily","digest":"{digest}"}}}}"#
                 )),
@@ -597,14 +687,21 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let started = response_json(response).await;
         assert_eq!(started["config"]["digest"], digest);
-        assert_eq!(started["run"]["run_id"], RUN_ID);
+        let generated_run_id = started["run"]["run_id"]
+            .as_str()
+            .and_then(|value| RunId::parse(value).ok())
+            .expect("generated run id");
         assert_eq!(started["run"]["state"]["kind"], "succeeded");
         assert!(started["run"]["state"]["value"].is_object());
 
         let shown = response_json(
             send(
                 &service,
-                request(Method::GET, &format!("/v1/runs/{RUN_ID}"), Body::empty()),
+                request(
+                    Method::GET,
+                    &format!("/v1/runs/{generated_run_id}"),
+                    Body::empty(),
+                ),
             )
             .await,
         )
@@ -616,7 +713,7 @@ mod tests {
                 &service,
                 json_request(
                     Method::POST,
-                    &format!("/v1/runs/{RUN_ID}/progress"),
+                    &format!("/v1/runs/{generated_run_id}/progress"),
                     Body::from("{}"),
                 ),
             )
@@ -633,7 +730,7 @@ mod tests {
             .await,
         )
         .await;
-        assert_eq!(runs["items"][0]["run_id"], RUN_ID);
+        assert_eq!(runs["items"][0]["run_id"], generated_run_id.as_str());
 
         let config = application
             .import_config(
@@ -707,11 +804,32 @@ mod tests {
         assert_eq!(
             send(
                 &service,
-                request(Method::GET, &format!("/v1/runs/{RUN_ID}"), Body::empty()),
+                request(
+                    Method::GET,
+                    &format!("/v1/runs/{generated_run_id}"),
+                    Body::empty(),
+                ),
             )
             .await
             .status(),
             StatusCode::OK
         );
+    }
+
+    #[test]
+    fn run_id_generation_consumes_exactly_32_bytes_and_fails_closed() {
+        let generated = generate_run_id_with(|entropy| {
+            assert_eq!(entropy.len(), 32);
+            entropy.fill(7);
+            Ok::<_, ()>(())
+        })
+        .expect("generated run id");
+        assert_eq!(generated, derive_run_id([7; 32]));
+
+        assert!(generate_run_id_with(|entropy| {
+            entropy.fill(9);
+            Err::<(), _>(())
+        })
+        .is_err());
     }
 }

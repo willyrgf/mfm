@@ -9,7 +9,7 @@
   authority and outbox semantics.
 - The standalone CLI exposes no token or contract deployment, configuration effects, transaction
   submission, or keystore administration.
-- Sequential fresh caller-owned RunIds can grow retained history without a product quota.
+- Sequential fresh RunIds can grow retained history without a product quota.
 
 ## Deferred Effect symmetry
 

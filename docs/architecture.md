@@ -53,12 +53,12 @@ shared Application request contains only bounded, secret-free data and stable se
 pre-bound capabilities. It cannot introduce environment resolution, a filesystem or network
 locator, secret custody, schema authority, or an unbounded durable effect.
 
-The CLI owns argv, bounded file/stdin input, optional client-side RunId entropy, exit status, and
-schema provisioning outside listener-held Application state. REST owns liveness, bounded HTTP
-admission, and an unauthenticated Unix socket; it exposes neither schema nor secret administration.
-REST requires a caller-owned path RunId and returns HTTP 200 for a durably failed run, while the CLI
-may generate an identity and uses exit 1 for Runnable or Failed. These are named transport
-asymmetries, not second use-case implementations.
+The CLI owns argv, bounded file/stdin input, optional RunId entropy, exit status, and schema
+provisioning outside listener-held Application state. REST owns liveness, bounded HTTP admission,
+optional RunId entropy, and an unauthenticated Unix socket; it exposes neither schema nor secret
+administration. Both select an explicit or generated identity before their one Application call.
+REST returns HTTP 200 for a durably failed run, while the CLI uses exit 1 for Runnable or Failed.
+These are named transport asymmetries, not second use-case implementations.
 
 The source-authoring sequence is separate from progression:
 

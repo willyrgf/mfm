@@ -39,8 +39,8 @@ remain independent. `config delete` idempotently removes only the exact name/dig
 document is a complete tagged execution config; `run start` accepts no entry-point or inline
 document and always requires one exact retained digest.
 
-Without `--run-id`, only the CLI obtains exactly 32 bytes from the OS cryptographic random source
-and passes them to the frozen pure derivation helper. Entropy failure is
+Without `--run-id`, the CLI obtains exactly 32 bytes from the OS cryptographic random source and
+passes them to the frozen pure derivation helper. Entropy failure is
 `run_id_generation_failed`; there is no time, PID, counter, environment, provider, or existence
 fallback. Explicit RunIds bypass generation and support deterministic retries.
 

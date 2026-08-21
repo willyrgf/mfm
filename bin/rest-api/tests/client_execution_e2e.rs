@@ -21,7 +21,7 @@ const OUTPUT_SCHEMA_ID: &str = "schema:mfm.derived.portfolio_snapshot_output:1:s
 
 #[test]
 #[ignore = "requires explicit CLI/REST binaries and managed PostgreSQL/Reth services"]
-fn historical_run_survives_deletion_and_cold_resumes_to_exact_live_snapshot() {
+fn generated_rest_run_survives_deletion_and_cold_resumes_to_exact_live_snapshot() {
     let cli = required_path("MFM_E2E_CLI_BIN");
     let rest = required_path("MFM_E2E_REST_BIN");
     for name in [
@@ -102,20 +102,25 @@ fn historical_run_survives_deletion_and_cold_resumes_to_exact_live_snapshot() {
     );
     fault_daemon.wait_ready();
 
-    let run_id = run_id(0x44);
     let start_body = format!(r#"{{"config":{{"name":"daily","digest":"{historical_digest}"}}}}"#);
     let interrupted = rest_json(
         &socket,
         "POST",
-        &format!("/v1/runs/{run_id}/start"),
+        "/v1/runs/start",
         Some((&start_body, "application/json")),
     );
     assert_eq!(interrupted.0, 503);
+    let run_id = interrupted.1["run_id"]
+        .as_str()
+        .expect("generated REST run id")
+        .to_owned();
+    assert_digest(&interrupted.1["run_id"], "run:sha256-jcs-v1:");
     assert_eq!(
         interrupted.1,
         serde_json::json!({
             "code": "dependency_unavailable",
-            "message": "application dependency is unavailable"
+            "message": "application dependency is unavailable",
+            "run_id": run_id
         })
     );
     unavailable.assert_chain_identity_request();
@@ -612,10 +617,6 @@ fn command(binary: &Path, xdg: &Path) -> Command {
             std::env::var("MFM_E2E_EVM_ADAPTER_LOCATOR").expect("EVM locator"),
         );
     command
-}
-
-fn run_id(byte: u8) -> String {
-    format!("run:sha256-jcs-v1:{byte:02x}{}", "0".repeat(62))
 }
 
 fn temporary_root() -> PathBuf {
