@@ -24,16 +24,16 @@ deployment environment.
 
 | Method | Path | Request | Success body |
 | --- | --- | --- | --- |
-| GET | `/healthz` | empty | `{"status":"ok"}` |
-| GET | `/v1/entry-points` | empty | shared `ItemList` |
-| GET | `/v1/bindings` | empty | shared `ItemList` |
+| GET | `/healthz` | none | `{"status":"ok"}` |
+| GET | `/v1/entry-points` | none | shared `ItemList` |
+| GET | `/v1/bindings` | none | shared `ItemList` |
 | PUT | `/v1/configs/{name}` | raw config JSON | shared `ImportOutcome`; 201 created or 200 unchanged/updated |
-| GET | `/v1/configs` | empty | complete bounded shared `ItemList` |
-| GET | `/v1/configs/{name}` | empty | shared `StoredConfigView` |
-| GET | `/v1/runs?after=&limit=` | empty | shared mechanical `RunPage` |
+| GET | `/v1/configs` | none | complete bounded shared `ItemList` |
+| GET | `/v1/configs/{name}` | none | shared `StoredConfigView` |
+| GET | `/v1/runs?after=&limit=` | none | shared mechanical `RunPage` |
 | POST | `/v1/runs/{run_id}/start` | strict selection JSON | shared `StartRunResult` |
 | POST | `/v1/runs/{run_id}/progress` | `{}` | shared `RunView` |
-| GET | `/v1/runs/{run_id}` | empty | shared `RunView` |
+| GET | `/v1/runs/{run_id}` | none | shared `RunView` |
 
 GET routes retain HTTP HEAD semantics: they perform the same Application admission and return the
 same status and headers with no body. All other routed methods receive the normalized 405 envelope.
@@ -48,15 +48,15 @@ Start accepts exactly one exhaustive selection:
 ```
 
 The path RunId is always caller-owned. Successful PUT responses set
-`Location: /v1/configs/{name}`. Mutating JSON routes require `application/json`, optionally with
-only `charset=UTF-8`.
+`Location: /v1/configs/{name}`. Mutating routes use Axum's JSON media-type admission, accepting
+`application/json` and application media types with a `+json` suffix.
 
 ## Bounds and failures
 
 Config request bodies are limited to 256 KiB and checked again by `ConfigDocument`. Run action
-bodies are limited to 4 KiB. Bodyless routes accept exactly zero bytes. Config listing accepts no
-query and returns all at most 256 entries. Run-list query strings are limited to 1 KiB, accept only
-one `after` RunId and one `limit`, and use the shared 1–200 page bound with default 50.
+bodies are limited to 4 KiB. Config listing accepts no query fields and returns all at most 256
+entries. Typed run-list extraction accepts only one `after` RunId and one `limit`, rejects unknown
+or duplicate fields, and uses the shared 1–200 page bound with default 50.
 
 Ordinary routed errors are exactly `{"code":"...","message":"..."}` with the shared stable
 Application code/message mapping. Ambiguous run appends add the shared tagged `recovery` object.
