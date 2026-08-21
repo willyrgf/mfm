@@ -51,11 +51,14 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
     std::fs::write(&default_deployment, deployment).expect("default deployment");
     std::fs::write(&override_deployment, deployment).expect("override deployment");
     let original_document = root.join("original.json");
-    let rebound_document = root.join("rebound.json");
+    let replacement_document = root.join("replacement.json");
     std::fs::write(&original_document, config_document("portfolio-example"))
         .expect("original config");
-    std::fs::write(&rebound_document, config_document("portfolio-rebound"))
-        .expect("rebound config");
+    std::fs::write(
+        &replacement_document,
+        config_document("portfolio-replacement"),
+    )
+    .expect("replacement config");
 
     let entry_points = run_cli(&["--output", "json", "entry-point", "list"], &xdg);
     assert_success(&entry_points, "entry-point list");
@@ -224,9 +227,7 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
     assert!(run_page["items"][0].get("state").is_none());
     assert!(run_page["next_cursor"].is_string());
 
-    let deleted = run_cli(&["config", "delete", "daily", "--digest", &digest], &xdg);
-    assert_success(&deleted, "delete original revision");
-    let rebound = run_cli(
+    let updated = run_cli(
         &[
             "--output",
             "json",
@@ -234,16 +235,17 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
             "import",
             "daily",
             "--from",
-            path(&rebound_document),
+            path(&replacement_document),
         ],
         &xdg,
     );
-    assert_success(&rebound, "rebind name");
-    let rebound_digest = json(&rebound)["config"]["digest"]
+    assert_success(&updated, "replace name");
+    assert_eq!(json(&updated)["outcome"], "updated");
+    let replacement_digest = json(&updated)["config"]["digest"]
         .as_str()
-        .expect("rebound digest")
+        .expect("replacement digest")
         .to_owned();
-    assert_ne!(rebound_digest, digest);
+    assert_ne!(replacement_digest, digest);
 
     let mismatch = run_cli(
         &[
@@ -267,11 +269,13 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
         &["--output", "json", "run", "show", "--run-id", &generated_id],
         &xdg,
     );
-    assert_success(&retained, "retained run after config rebind");
+    assert_success(&retained, "retained run after config replacement");
     assert_eq!(json(&retained)["run_id"], generated_id);
 
     let old_grammar = run_cli(&["snapshot"], &xdg);
     assert_eq!(old_grammar.status.code(), Some(2));
+    let removed_delete = run_cli(&["config", "delete", "daily"], &xdg);
+    assert_eq!(removed_delete.status.code(), Some(2));
     std::fs::remove_dir_all(&root).expect("remove isolated e2e tree");
 }
 

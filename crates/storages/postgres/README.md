@@ -1,7 +1,7 @@
 # mfm-storage-postgres
 
 Durable PostgreSQL implementations of the append-only Store, mechanical RunIndex, and opaque config
-catalog. The run-history and `mfm.config-catalog-postgres.v1` catalog schemas have independent
+catalog. The run-history and `mfm.config-catalog-postgres.v2` catalog schemas have independent
 connection gates, so either surface remains usable when the other is incompatible.
 
 Production constructors accept only a bounded private locator. It contains one `postgresql` URI
@@ -23,8 +23,8 @@ validate head/target, insert immutable bytes, update the head, and COMMIT.
 Pre-COMMIT failures are definite typed capacity/corruption/unavailability. Only an IO/protocol loss
 after COMMIT submission is `Indeterminate`.
 
-Catalog insert and conditional delete serialize the fixed 256-entry quota, force synchronous
-COMMIT, and distinguish definite failure from ambiguous acknowledgement. Listing uses bytewise
+Catalog insert and replacement serialize the fixed 256-entry quota, force synchronous COMMIT, and
+distinguish definite failure from ambiguous acknowledgement. Listing uses bytewise
 ascending keyset pages; it does not claim a snapshot across requests.
 
 `provision_schemas` is the one public provisioning entry and is not held by runtime composition. It

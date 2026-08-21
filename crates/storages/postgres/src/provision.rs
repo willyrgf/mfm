@@ -3,8 +3,8 @@ use sqlx::{Connection, PgConnection};
 use crate::{
     mfm_relation_count, runtime_table_privilege_mask, verify_catalog_schema, verify_durability,
     verify_run_schema, AdminPostgresLocator, GateError, PostgresCatalog, PostgresStore,
-    RuntimePostgresLocator, CATALOG_SCHEMA_SQL, RUN_SCHEMA_SQL, TABLE_DELETE, TABLE_INSERT,
-    TABLE_SELECT, TABLE_UPDATE,
+    RuntimePostgresLocator, CATALOG_SCHEMA_SQL, RUN_SCHEMA_SQL, TABLE_INSERT, TABLE_SELECT,
+    TABLE_UPDATE,
 };
 
 /// Redaction-safe split-authority schema provisioning failure.
@@ -289,7 +289,7 @@ async fn verify_runtime_table_grants(
         [
             (
                 "mfm_catalog.config_entries",
-                TABLE_SELECT | TABLE_INSERT | TABLE_DELETE,
+                TABLE_SELECT | TABLE_INSERT | TABLE_UPDATE,
             ),
             ("mfm_catalog.mfm_catalog_schema", TABLE_SELECT),
         ]

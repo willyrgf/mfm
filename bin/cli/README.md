@@ -20,7 +20,6 @@ mfm_cli [--deployment <PATH>] [--output text|json] binding list
 mfm_cli [--deployment <PATH>] [--output text|json] config import <NAME> --from <PATH|->
 mfm_cli [--deployment <PATH>] [--output text|json] config list [--cursor <C>] [--limit <N>]
 mfm_cli [--deployment <PATH>] [--output text|json] config show <NAME>
-mfm_cli [--deployment <PATH>] [--output text|json] config delete <NAME> --digest <DIGEST>
 
 mfm_cli [--deployment <PATH>] [--output text|json] run start --config <NAME> \
     [--config-digest <DIGEST>] [--run-id <RUN_ID>]
@@ -33,8 +32,9 @@ mfm_cli [--deployment <PATH>] [--output text|json] run list [--cursor <C>] [--li
 the conventional XDG/HOME `deployment.toml`. `store init` additionally resolves the checked admin
 locator name and retains no administrative handle after provisioning.
 
-`config import` reads at most 256 KiB plus one byte from a file or stdin. The stored document is a
-complete tagged execution config; `run start` accepts no entry-point or inline document. Without
+`config import` reads at most 256 KiB plus one byte from a file or stdin. It creates an absent name,
+leaves identical content unchanged, or atomically replaces different content. The stored document
+is a complete tagged execution config; `run start` accepts no entry-point or inline document. Without
 `--config-digest`, start selects the revision currently bound to the name. Supplying it asserts the
 exact current digest.
 

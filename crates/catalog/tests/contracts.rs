@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use mfm_canonical::{CanonicalBytes, PlainCanonicalJsonBytes};
 use mfm_catalog::{
-    CatalogDeleteResult, CatalogEntry, CatalogError, CatalogInsertResult, ConfigCatalog,
-    ConfigCursor, ConfigDigest, ConfigName, MemoryCatalog, PageLimit, RunCursor,
-    MAX_CONFIG_DOCUMENT_BYTES, MAX_CONFIG_ENTRIES, MAX_CURSOR_ENCODED_BYTES, MAX_PAGE_ITEMS,
+    CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigCursor, ConfigDigest,
+    ConfigName, MemoryCatalog, PageLimit, RunCursor, MAX_CONFIG_DOCUMENT_BYTES, MAX_CONFIG_ENTRIES,
+    MAX_CURSOR_ENCODED_BYTES, MAX_PAGE_ITEMS,
 };
 use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, RunId};
 use tokio::sync::Barrier;
@@ -126,16 +126,16 @@ fn cursor_wires_are_exact_resource_specific_and_bounded() {
 }
 
 #[tokio::test]
-async fn memory_catalog_lifecycle_is_atomic_and_aba_safe() {
+async fn memory_catalog_put_is_atomic_and_replaces_complete_content() {
     let catalog = MemoryCatalog::new();
     let first = entry(1);
     assert_eq!(
-        catalog.insert_config(&first).await.expect("insert"),
-        CatalogInsertResult::Inserted
+        catalog.put_config(&first).await.expect("insert"),
+        CatalogPutResult::Inserted
     );
     assert_eq!(
-        catalog.insert_config(&first).await.expect("retry"),
-        CatalogInsertResult::Unchanged
+        catalog.put_config(&first).await.expect("retry"),
+        CatalogPutResult::Unchanged
     );
 
     let second_bytes = PlainCanonicalJsonBytes::from_json_str(r#"{"value":2}"#).expect("canonical");
@@ -146,33 +146,8 @@ async fn memory_catalog_lifecycle_is_atomic_and_aba_safe() {
     )
     .expect("entry");
     assert_eq!(
-        catalog.insert_config(&second).await.expect("conflict"),
-        CatalogInsertResult::Conflict
-    );
-    assert_eq!(
-        catalog
-            .delete_config(first.name(), second.digest())
-            .await
-            .expect("mismatch"),
-        CatalogDeleteResult::DigestMismatch
-    );
-    assert_eq!(
-        catalog
-            .delete_config(first.name(), first.digest())
-            .await
-            .expect("delete"),
-        CatalogDeleteResult::Deleted
-    );
-    assert_eq!(
-        catalog.insert_config(&second).await.expect("reuse"),
-        CatalogInsertResult::Inserted
-    );
-    assert_eq!(
-        catalog
-            .delete_config(first.name(), first.digest())
-            .await
-            .expect("stale delete"),
-        CatalogDeleteResult::DigestMismatch
+        catalog.put_config(&second).await.expect("update"),
+        CatalogPutResult::Updated
     );
     let retained = catalog
         .load_config(first.name())
@@ -195,20 +170,43 @@ async fn concurrent_absent_inserts_cannot_exceed_capacity() {
         tasks.spawn(async move {
             let entry = entry(index);
             barrier.wait().await;
-            catalog.insert_config(&entry).await
+            catalog.put_config(&entry).await
         });
     }
     let mut inserted = 0;
     let mut capacity = 0;
     while let Some(result) = tasks.join_next().await {
         match result.expect("task") {
-            Ok(CatalogInsertResult::Inserted) => inserted += 1,
+            Ok(CatalogPutResult::Inserted) => inserted += 1,
             Err(CatalogError::Capacity) => capacity += 1,
             other => panic!("unexpected outcome: {other:?}"),
         }
     }
     assert_eq!(inserted, MAX_CONFIG_ENTRIES);
     assert_eq!(capacity, callers - MAX_CONFIG_ENTRIES);
+
+    let canonical = PlainCanonicalJsonBytes::from_json_str(r#"{"value":"replacement"}"#)
+        .expect("replacement canonical");
+    let retained_name = catalog
+        .list_configs(None, PageLimit::new(1).expect("single item"))
+        .await
+        .expect("catalog page")
+        .items()[0]
+        .name()
+        .clone();
+    let replacement = CatalogEntry::new(
+        retained_name,
+        ConfigDigest::new(canonical.content_digest()).expect("replacement digest"),
+        canonical.to_vec(),
+    )
+    .expect("replacement entry");
+    assert_eq!(
+        catalog
+            .put_config(&replacement)
+            .await
+            .expect("replace at capacity"),
+        CatalogPutResult::Updated
+    );
 }
 
 #[tokio::test]
@@ -216,8 +214,8 @@ async fn memory_catalog_pages_in_bytewise_name_order() {
     let catalog = MemoryCatalog::new();
     for index in (0..5).rev() {
         assert_eq!(
-            catalog.insert_config(&entry(index)).await.expect("insert"),
-            CatalogInsertResult::Inserted
+            catalog.put_config(&entry(index)).await.expect("insert"),
+            CatalogPutResult::Inserted
         );
     }
     let limit = PageLimit::new(2).expect("limit");

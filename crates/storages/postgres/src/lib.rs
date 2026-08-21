@@ -450,13 +450,12 @@ async fn verify_catalog_privileges(
 ) -> std::result::Result<bool, GateError> {
     let marker = runtime_table_privilege_mask(connection, "mfm_catalog.mfm_catalog_schema").await?;
     let entries = runtime_table_privilege_mask(connection, "mfm_catalog.config_entries").await?;
-    Ok(marker == TABLE_SELECT && entries == TABLE_SELECT | TABLE_INSERT | TABLE_DELETE)
+    Ok(marker == TABLE_SELECT && entries == TABLE_SELECT | TABLE_INSERT | TABLE_UPDATE)
 }
 
 const TABLE_SELECT: i32 = 1;
 const TABLE_INSERT: i32 = 2;
 const TABLE_UPDATE: i32 = 4;
-const TABLE_DELETE: i32 = 8;
 
 async fn runtime_table_privilege_mask(
     connection: &mut PgConnection,
@@ -583,7 +582,7 @@ async fn verify_catalog_schema(
                     GateError::Unavailable
                 }
             })?;
-    if markers != ["mfm.config-catalog-postgres.v1"] {
+    if markers != ["mfm.config-catalog-postgres.v2"] {
         return Err(GateError::Incompatible);
     }
     let indexes: Vec<(String, String, String)> = sqlx::query_as(
@@ -630,7 +629,7 @@ async fn verify_catalog_schema(
         constraint("config_entries", "mfm_catalog_config_entries_name_grammar_check", "c", "CHECK (((config_name ~ '^[a-z0-9][a-z0-9-]*$'::text) AND (\"right\"(config_name, 1) <> '-'::text)))"),
         constraint("config_entries", "mfm_catalog_config_entries_name_length_check", "c", "CHECK (((octet_length(config_name) >= 1) AND (octet_length(config_name) <= 64)))"),
         constraint("config_entries", "mfm_catalog_config_entries_pkey", "p", "PRIMARY KEY (config_name)"),
-        constraint("mfm_catalog_schema", "mfm_catalog_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.config-catalog-postgres.v1'::text))"),
+        constraint("mfm_catalog_schema", "mfm_catalog_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.config-catalog-postgres.v2'::text))"),
         constraint("mfm_catalog_schema", "mfm_catalog_schema_pkey", "p", "PRIMARY KEY (schema_contract)"),
     ];
     if constraints != expected {
@@ -1273,7 +1272,7 @@ fn classify_precommit_sql(error: sqlx::Error) -> StoreError {
 fn assert_send_static<T: Send + 'static>() {}
 
 const RUN_SCHEMA_SQL: &str = include_str!("../migrations/run_history_postgres_v1.sql");
-const CATALOG_SCHEMA_SQL: &str = include_str!("../migrations/config_catalog_postgres_v1.sql");
+const CATALOG_SCHEMA_SQL: &str = include_str!("../migrations/config_catalog_postgres_v2.sql");
 
 #[cfg(test)]
 #[path = "../../../kernel/store/tests/support/scenarios.rs"]
