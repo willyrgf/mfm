@@ -44,9 +44,9 @@ primary status, `fsync`, and `full_page_writes`; a partially compatible installa
 exposed.
 
 Loads use one read-only repeatable snapshot. Appends take the per-RunId advisory transaction lock
-before observing state and force synchronous COMMIT. Configuration imports take one global advisory
-transaction lock, retain immutable `(name, digest)` revisions, move one current marker per name, and
-preserve ambiguous COMMIT acknowledgement. There is no revision-count limit or delete operation. A
+before observing state and force synchronous COMMIT. Configuration imports use the `(name, digest)`
+primary key to create or compare immutable revisions. Import and exact idempotent delete force
+synchronous COMMIT and preserve ambiguous acknowledgement. There is no revision-count limit. A
 short-lived admin provisioner accepts separate typed admin/runtime locators for one normalized
 target, installs only absent namespaces, and grants the fixed `mfm_runtime` role exact DML authority.
 Runtime connections have no ownership or DDL authority. Existing installations are verified and
@@ -79,10 +79,10 @@ automatic retry.
 
 The configuration repository retains complete, individually bounded canonical documents tagged by
 the exact entry point. Import validates and plans the document before atomically creating or
-reactivating one immutable revision. Run start selects either the name's current revision or any
-exact retained `sha256-jcs-v1` revision, checks every requested binding before Runtime Store IO,
-and returns the selected config summary with the run view. The management surface exposes only
-config import and a complete unpaginated revision list with one current marker per name. The shared
+comparing one immutable revision. Run start requires an exact retained name and `sha256-jcs-v1`
+digest, checks every requested binding before Runtime Store IO, and returns the selected config
+summary with the run view. The management surface exposes import, complete unpaginated listing, and
+idempotent exact delete. Deletion does not revoke runs already admitted from that revision. The shared
 surface also owns entry-point/binding discovery, run progress/read, and mechanical run-head listing.
 Every execution receives an explicit caller-owned RunId; ambiguous append acknowledgement carries
 the exact start or progress recovery identity.

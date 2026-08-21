@@ -41,8 +41,8 @@ same PostgreSQL backend into Store, RunIndex, and configuration-repository ports
 surface is:
 
 - static entry-point and composed-binding discovery;
-- atomic config import/current selection and complete retained-revision list;
-- stored-config run start through exhaustive `Current` or `Exact` selection;
+- immutable exact-revision config import, complete list, and idempotent delete;
+- stored-config run start through one exact name/digest selection;
 - run progress, semantic read, and mechanical `RunId`-keyset list.
 
 Every execution receives an explicit caller-owned `RunId`. The pure `derive_run_id([u8; 32])`
@@ -52,6 +52,6 @@ the only `RunRequestError` carrying data, through the exact `RunRecovery::Start`
 `RunRecovery::Progress` sum.
 
 `RequestError` owns stable redaction-safe codes and messages. Retained revisions are revalidated as
-canonical documents on every start/list. Unbound routes fail before Runtime Store IO; importing a
-new revision never changes retained run genesis. Shared serializers preserve the
+canonical documents on every start/list. Unbound routes fail before Runtime Store IO; deleting a
+revision does not revoke already admitted runs. Shared serializers preserve the
 `RunViewState` sum and embed terminal canonical bytes as a raw JSON value.

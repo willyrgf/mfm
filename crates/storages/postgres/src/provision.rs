@@ -3,7 +3,7 @@ use sqlx::{Connection, PgConnection};
 use crate::{
     mfm_relation_count, runtime_table_privilege_mask, verify_config_schema, verify_durability,
     verify_run_schema, AdminPostgresLocator, GateError, PostgresBackend, RuntimePostgresLocator,
-    CONFIG_SCHEMA_SQL, RUN_SCHEMA_SQL, TABLE_INSERT, TABLE_SELECT, TABLE_UPDATE,
+    CONFIG_SCHEMA_SQL, RUN_SCHEMA_SQL, TABLE_DELETE, TABLE_INSERT, TABLE_SELECT, TABLE_UPDATE,
 };
 
 /// Redaction-safe split-authority schema provisioning failure.
@@ -285,7 +285,7 @@ async fn verify_runtime_table_grants(
         [
             (
                 "mfm_config.config_revisions",
-                TABLE_SELECT | TABLE_INSERT | TABLE_UPDATE,
+                TABLE_SELECT | TABLE_INSERT | TABLE_DELETE,
             ),
             ("mfm_config.mfm_config_schema", TABLE_SELECT),
         ]

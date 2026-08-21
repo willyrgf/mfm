@@ -90,38 +90,10 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
         cli_configs,
         rest_json(&socket, "GET", "/v1/configs", None).1
     );
-    assert_eq!(cli_configs["items"][0]["current"], true);
+    assert!(cli_configs["items"][0].get("current").is_none());
 
-    let current_id = run_id(0x11);
-    let cli_current = cli_json(
-        &cli,
-        &xdg,
-        &["run", "start", "--config", "daily", "--run-id", &current_id],
-    );
-    let current_body = r#"{"config":{"kind":"current","name":"daily"}}"#;
-    let rest_current = rest_json(
-        &socket,
-        "POST",
-        &format!("/v1/runs/{current_id}/start"),
-        Some((current_body, "application/json")),
-    );
-    assert_eq!(rest_current.0, 200);
-    assert_eq!(rest_current.1, cli_current);
-    assert_eq!(rest_current.1["config"]["digest"], digest);
-    assert_eq!(rest_current.1["run"]["state"]["kind"], "succeeded");
-    assert!(rest_current.1["run"]["state"]["value"].is_object());
-
-    let exact_id = run_id(0x22);
-    let exact_body =
-        format!(r#"{{"config":{{"kind":"exact","name":"daily","digest":"{digest}"}}}}"#);
-    let rest_exact = rest_json(
-        &socket,
-        "POST",
-        &format!("/v1/runs/{exact_id}/start"),
-        Some((&exact_body, "application/json")),
-    );
-    assert_eq!(rest_exact.0, 200);
-    let cli_exact = cli_json(
+    let first_id = run_id(0x11);
+    let cli_first = cli_json(
         &cli,
         &xdg,
         &[
@@ -132,14 +104,25 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
             "--config-digest",
             &digest,
             "--run-id",
-            &exact_id,
+            &first_id,
         ],
     );
-    assert_eq!(rest_exact.1, cli_exact);
+    let first_body = format!(r#"{{"config":{{"name":"daily","digest":"{digest}"}}}}"#);
+    let rest_first = rest_json(
+        &socket,
+        "POST",
+        &format!("/v1/runs/{first_id}/start"),
+        Some((&first_body, "application/json")),
+    );
+    assert_eq!(rest_first.0, 200);
+    assert_eq!(rest_first.1, cli_first);
+    assert_eq!(rest_first.1["config"]["digest"], digest);
+    assert_eq!(rest_first.1["run"]["state"]["kind"], "succeeded");
+    assert!(rest_first.1["run"]["state"]["value"].is_object());
 
     assert_eq!(
-        cli_json(&cli, &xdg, &["run", "show", "--run-id", &current_id]),
-        rest_json(&socket, "GET", &format!("/v1/runs/{current_id}"), None).1
+        cli_json(&cli, &xdg, &["run", "show", "--run-id", &first_id]),
+        rest_json(&socket, "GET", &format!("/v1/runs/{first_id}"), None).1
     );
     assert_eq!(
         cli_json(&cli, &xdg, &["run", "list", "--limit", "50"]),
@@ -167,7 +150,7 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
     );
     assert_eq!(cli_absent_revision.status.code(), Some(2));
     let rest_absent_revision_body =
-        format!(r#"{{"config":{{"kind":"exact","name":"daily","digest":"{wrong_digest}"}}}}"#);
+        format!(r#"{{"config":{{"name":"daily","digest":"{wrong_digest}"}}}}"#);
     let rest_absent_revision = rest_json(
         &socket,
         "POST",
@@ -179,6 +162,26 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
         serde_json::from_slice::<serde_json::Value>(&cli_absent_revision.stderr)
             .expect("CLI error JSON"),
         rest_absent_revision.1
+    );
+
+    let cli_delete = run_cli(
+        &cli,
+        &xdg,
+        &["config", "delete", "daily", "--digest", &digest],
+    );
+    assert_success(&cli_delete, "CLI exact delete");
+    let rest_delete = http(
+        &socket,
+        "DELETE",
+        &format!("/v1/configs/daily/revisions/{digest}"),
+        None,
+    )
+    .expect("REST delete");
+    assert_eq!(rest_delete.status, 204);
+    assert!(rest_delete.body.is_empty());
+    assert_eq!(
+        cli_json(&cli, &xdg, &["run", "show", "--run-id", &first_id]),
+        rest_json(&socket, "GET", &format!("/v1/runs/{first_id}"), None).1
     );
 
     daemon.stop();

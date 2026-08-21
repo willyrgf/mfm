@@ -10,8 +10,8 @@ use mfm_app::{
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_config::{
-    ConfigDigest, ConfigImportResult, ConfigName, ConfigRepository, ConfigRepositoryError,
-    ConfigRevision, ConfigRevisions, MemoryConfigRepository, MAX_CONFIG_DOCUMENT_BYTES,
+    ConfigDigest, ConfigFuture, ConfigImportResult, ConfigName, ConfigRepository,
+    ConfigRepositoryError, ConfigRevision, MemoryConfigRepository, MAX_CONFIG_DOCUMENT_BYTES,
 };
 use mfm_evm::{EvmEndpoint, EvmReadValue};
 use mfm_evm_live::{EvmProvider, EvmProviderResponse};
@@ -80,6 +80,13 @@ fn run_id(byte: u8) -> RunId {
 
 fn config_name(value: &str) -> ConfigName {
     ConfigName::new(value).expect("config name")
+}
+
+fn selection(outcome: &ImportOutcome) -> ConfigSelection {
+    ConfigSelection::new(
+        outcome.config().name().clone(),
+        outcome.config().digest().clone(),
+    )
 }
 
 fn native_collection(chain_id: u64, suffix: &str) -> serde_json::Value {
@@ -154,7 +161,7 @@ fn application_with_backend(
         BoundCapabilitySet::new(bindings).expect("bindings"),
     )
     .expect("composition");
-    Application::from_parts(composed, Arc::new(MemoryConfigRepository::new()))
+    Application::from_parts(composed, Arc::new(MemoryConfigRepository::default()))
 }
 
 struct HostileConfigRepository {
@@ -165,25 +172,27 @@ impl ConfigRepository for HostileConfigRepository {
     fn import_config<'a>(
         &'a self,
         _revision: &'a ConfigRevision,
-    ) -> Pin<Box<dyn Future<Output = Result<ConfigImportResult, ConfigRepositoryError>> + Send + 'a>>
-    {
+    ) -> ConfigFuture<'a, ConfigImportResult> {
         Box::pin(async { Err(ConfigRepositoryError::Corrupt) })
     }
 
     fn load_config<'a>(
         &'a self,
         _name: &'a ConfigName,
-        _digest: Option<&'a ConfigDigest>,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<Option<ConfigRevision>, ConfigRepositoryError>> + Send + 'a>,
-    > {
+        _digest: &'a ConfigDigest,
+    ) -> ConfigFuture<'a, Option<ConfigRevision>> {
         Box::pin(async { Ok(Some(self.revision.clone())) })
     }
 
-    fn list_configs<'a>(
+    fn list_configs(&self) -> ConfigFuture<'_, Vec<ConfigRevision>> {
+        Box::pin(async { Err(ConfigRepositoryError::Corrupt) })
+    }
+
+    fn delete_config<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<ConfigRevisions, ConfigRepositoryError>> + Send + 'a>>
-    {
+        _name: &'a ConfigName,
+        _digest: &'a ConfigDigest,
+    ) -> ConfigFuture<'a, ()> {
         Box::pin(async { Err(ConfigRepositoryError::Corrupt) })
     }
 }
@@ -331,7 +340,6 @@ async fn config_document_boundary_is_strict_and_canonical() {
         ConfigDigest::parse(listed[0].digest().as_str()).expect("digest"),
         *listed[0].digest()
     );
-    assert!(listed[0].is_current());
 
     for malformed in [
         br#"{"entry_point":"x","entry_point":"y"}"#.as_slice(),
@@ -371,7 +379,7 @@ async fn config_document_boundary_is_strict_and_canonical() {
 }
 
 #[tokio::test]
-async fn stored_config_lifecycle_drives_current_exact_and_retained_runs() {
+async fn stored_config_lifecycle_uses_exact_revisions_and_preserves_admitted_runs() {
     let first = provider(1);
     let second = provider(2);
     let app = application(&[(1, "alpha", first.clone()), (2, "beta", second.clone())]);
@@ -395,57 +403,42 @@ async fn stored_config_lifecycle_drives_current_exact_and_retained_runs() {
     assert_eq!(unchanged.config(), created.config());
 
     let started = app
-        .start_run(run_id(10), &ConfigSelection::Current { name: name.clone() })
+        .start_run(run_id(10), &selection(&created))
         .await
-        .expect("current start");
+        .expect("exact start");
     assert_eq!(started.config().digest(), &digest);
     assert!(matches!(started.run().state(), RunViewState::Succeeded(_)));
     assert_eq!(first.calls.load(Ordering::SeqCst), 4);
     assert_eq!(second.calls.load(Ordering::SeqCst), 4);
 
-    let updated = app
+    let second_revision = app
         .import_config(name.clone(), document(vec![(1, "alpha")]).await)
         .await
-        .expect("updated");
-    assert!(matches!(updated, ImportOutcome::Updated { .. }));
-    assert_ne!(updated.config().digest(), &digest);
+        .expect("second revision");
+    assert!(matches!(second_revision, ImportOutcome::Created { .. }));
+    assert_ne!(second_revision.config().digest(), &digest);
 
-    let exact_current = app
-        .start_run(
-            run_id(11),
-            &ConfigSelection::Exact {
-                name: name.clone(),
-                digest: updated.config().digest().clone(),
-            },
-        )
+    let exact_second = app
+        .start_run(run_id(11), &selection(&second_revision))
         .await
         .expect("exact start");
-    assert_eq!(exact_current.config(), updated.config());
-    let exact_historical = app
+    assert_eq!(exact_second.config(), second_revision.config());
+    let exact_first = app
         .start_run(
             run_id(12),
-            &ConfigSelection::Exact {
-                name: name.clone(),
-                digest: digest.clone(),
-            },
+            &ConfigSelection::new(name.clone(), digest.clone()),
         )
         .await
-        .expect("historical exact start");
-    assert_eq!(exact_historical.config().digest(), &digest);
+        .expect("first exact start");
+    assert_eq!(exact_first.config().digest(), &digest);
     let wrong = ConfigDigest::new(ContentDigest::from_digest(
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([9; 32]),
     ))
     .expect("digest");
     assert!(matches!(
-        app.start_run(
-            run_id(13),
-            &ConfigSelection::Exact {
-                name: name.clone(),
-                digest: wrong,
-            },
-        )
-        .await,
+        app.start_run(run_id(13), &ConfigSelection::new(name.clone(), wrong),)
+            .await,
         Err(mfm_app::RunRequestError::Request(
             RequestError::ConfigAbsent
         ))
@@ -453,23 +446,34 @@ async fn stored_config_lifecycle_drives_current_exact_and_retained_runs() {
 
     let configs = app.list_configs().await.expect("configs");
     assert_eq!(configs.len(), 2);
-    assert_eq!(
-        configs.iter().filter(|config| config.is_current()).count(),
-        1
-    );
     assert!(configs
         .iter()
-        .any(|config| config.digest() == updated.config().digest() && config.is_current()));
-    assert!(configs
-        .iter()
-        .any(|config| config.digest() == &digest && !config.is_current()));
+        .any(|config| config.digest() == second_revision.config().digest()));
+    assert!(configs.iter().any(|config| config.digest() == &digest));
+    app.delete_config(&name, &digest)
+        .await
+        .expect("delete first");
+    app.delete_config(&name, &digest)
+        .await
+        .expect("idempotent delete");
+    assert!(matches!(
+        app.start_run(run_id(14), &ConfigSelection::new(name, digest.clone()),)
+            .await,
+        Err(mfm_app::RunRequestError::Request(
+            RequestError::ConfigAbsent
+        ))
+    ));
+    assert_eq!(app.list_configs().await.expect("retained configs").len(), 1);
     let runs = app
         .list_runs(None, RunPageLimit::default())
         .await
         .expect("run page");
     assert_eq!(runs.items().len(), 3);
 
-    let retained = app.read_run(&run_id(10)).await.expect("retained run");
+    let retained = app
+        .read_run(&run_id(10))
+        .await
+        .expect("admitted run survives config deletion");
     assert_eq!(retained.head_digest(), started.run().head_digest());
 }
 
@@ -491,13 +495,7 @@ async fn start_revalidates_hostile_config_rows_before_binding_errors() {
         ConfigRevision::new(name.clone(), false_digest, canonical.to_vec()).expect("revision");
     assert!(matches!(
         application_with_config_repository(revision)
-            .start_run(
-                run_id(14),
-                &ConfigSelection::Exact {
-                    name,
-                    digest: actual_digest,
-                },
-            )
+            .start_run(run_id(14), &ConfigSelection::new(name, actual_digest),)
             .await,
         Err(mfm_app::RunRequestError::Request(
             RequestError::InvalidRetainedConfig
@@ -511,10 +509,11 @@ async fn start_revalidates_hostile_config_rows_before_binding_errors() {
     )
     .expect("canonical document");
     let digest = ConfigDigest::new(canonical.content_digest()).expect("digest");
-    let revision = ConfigRevision::new(name.clone(), digest, canonical.to_vec()).expect("revision");
+    let revision =
+        ConfigRevision::new(name.clone(), digest.clone(), canonical.to_vec()).expect("revision");
     assert!(matches!(
         application_with_config_repository(revision)
-            .start_run(run_id(15), &ConfigSelection::Current { name })
+            .start_run(run_id(15), &ConfigSelection::new(name, digest))
             .await,
         Err(mfm_app::RunRequestError::Request(
             RequestError::InvalidRetainedConfig
@@ -537,15 +536,15 @@ async fn invalid_or_unbound_config_fails_before_run_store_io() {
     );
 
     let unbound_name = config_name("unbound");
-    app.import_config(
-        unbound_name.clone(),
-        document(vec![(u64::MAX, "upper-half")]).await,
-    )
-    .await
-    .expect("deployment-independent import");
+    let imported = app
+        .import_config(
+            unbound_name.clone(),
+            document(vec![(u64::MAX, "upper-half")]).await,
+        )
+        .await
+        .expect("deployment-independent import");
     assert!(matches!(
-        app.start_run(run_id(20), &ConfigSelection::Current { name: unbound_name },)
-            .await,
+        app.start_run(run_id(20), &selection(&imported)).await,
         Err(mfm_app::RunRequestError::Request(
             RequestError::BindingUnbound
         ))
@@ -562,11 +561,12 @@ async fn invalid_or_unbound_config_fails_before_run_store_io() {
 async fn shared_run_serializer_preserves_the_state_sum_and_raw_value() {
     let app = application(&[(1, "alpha", provider(1))]);
     let name = config_name("serial");
-    app.import_config(name.clone(), document(vec![(1, "alpha")]).await)
+    let imported = app
+        .import_config(name, document(vec![(1, "alpha")]).await)
         .await
         .expect("import");
     let result = app
-        .start_run(run_id(30), &ConfigSelection::Current { name })
+        .start_run(run_id(30), &selection(&imported))
         .await
         .expect("start");
     let rendered = serde_json::to_value(SerializableRunView::new(result.run())).expect("JSON");
@@ -587,10 +587,7 @@ async fn ambiguous_run_appends_carry_exact_start_and_progress_recovery_sums() {
         .await
         .expect("import");
     start_backend.fail_next_append();
-    let Err(error) = start_app
-        .start_run(run_id(40), &ConfigSelection::Current { name: start_name })
-        .await
-    else {
+    let Err(error) = start_app.start_run(run_id(40), &selection(&imported)).await else {
         panic!("start append must be ambiguous");
     };
     assert_eq!(error.code(), "run_append_indeterminate");
@@ -608,18 +605,13 @@ async fn ambiguous_run_appends_carry_exact_start_and_progress_recovery_sums() {
         Arc::clone(&progress_backend),
     );
     let progress_name = config_name("progress-recovery");
-    progress_app
+    let progress_config = progress_app
         .import_config(progress_name.clone(), document(vec![(1, "alpha")]).await)
         .await
         .expect("import");
     assert!(matches!(
         progress_app
-            .start_run(
-                run_id(41),
-                &ConfigSelection::Current {
-                    name: progress_name,
-                },
-            )
+            .start_run(run_id(41), &selection(&progress_config))
             .await,
         Err(mfm_app::RunRequestError::Request(
             RequestError::DependencyUnavailable

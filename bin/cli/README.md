@@ -19,9 +19,10 @@ mfm_cli [--deployment <PATH>] [--output text|json] binding list
 
 mfm_cli [--deployment <PATH>] [--output text|json] config import <NAME> --from <PATH|->
 mfm_cli [--deployment <PATH>] [--output text|json] config list
+mfm_cli [--deployment <PATH>] [--output text|json] config delete <NAME> --digest <DIGEST>
 
 mfm_cli [--deployment <PATH>] [--output text|json] run start --config <NAME> \
-    [--config-digest <DIGEST>] [--run-id <RUN_ID>]
+    --config-digest <DIGEST> [--run-id <RUN_ID>]
 mfm_cli [--deployment <PATH>] [--output text|json] run progress --run-id <RUN_ID>
 mfm_cli [--deployment <PATH>] [--output text|json] run show --run-id <RUN_ID>
 mfm_cli [--deployment <PATH>] [--output text|json] run list [--after <RUN_ID>] [--limit <N>]
@@ -32,12 +33,11 @@ the conventional XDG/HOME `deployment.toml`. `postgres init` additionally resolv
 locator name and retains no administrative handle after provisioning. The complete deployment
 grammar, bounds, and example are documented by [`mfm-app`](../../crates/app/README.md).
 
-`config import` reads at most 256 KiB plus one byte from a file or stdin. It creates an absent name,
-leaves an identical current revision unchanged, or atomically makes a new or retained historical
-revision current. All revisions remain retained. The stored document is a complete tagged execution
-config; `run start` accepts no entry-point or inline document. Without `--config-digest`, start
-selects the revision currently bound to the name. Supplying it selects that exact retained digest,
-whether or not it is current.
+`config import` reads at most 256 KiB plus one byte from a file or stdin. It creates one immutable
+name/digest revision or leaves identical retained bytes unchanged. Different digests under one name
+remain independent. `config delete` idempotently removes only the exact name/digest pair. The stored
+document is a complete tagged execution config; `run start` accepts no entry-point or inline
+document and always requires one exact retained digest.
 
 Without `--run-id`, only the CLI obtains exactly 32 bytes from the OS cryptographic random source
 and passes them to the frozen pure derivation helper. Entropy failure is
@@ -47,8 +47,7 @@ fallback. Explicit RunIds bypass generation and support deterministic retries.
 ## Output
 
 `--output text` is the default human presentation. Listed config revisions include `config_name`,
-`config_digest`, `entry_point`, and `current`. Import/start summaries omit the mutable current
-marker. Start prints those fields before the run fields. Terminal run
+`config_digest`, and `entry_point`. Start prints those fields before the run fields. Terminal run
 text includes `contract_ref`, `value_ref`, and exact canonical `value`.
 
 `--output json` is the stable automation surface shared with REST. It preserves the documented
