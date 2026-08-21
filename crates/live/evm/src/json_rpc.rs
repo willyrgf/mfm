@@ -1,7 +1,7 @@
 //! Production JSON-RPC 2.0 provider for the bounded EVM Read capabilities.
 //!
 //! The provider owns exactly one endpoint URL and the six frozen-wire RPC calls the EVM
-//! domain's Read subjects require. It holds no key, nonce, broadcast path, or retry policy.
+//! domain's Read subjects require. It holds no key, nonce, broadcast path, or automatic retry.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -46,24 +46,13 @@ impl EvmAdapterLocator {
     /// Parses one bounded HTTP(S) locator.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, EvmProviderBuildError> {
         let value = value.as_ref();
-        if value.is_empty() || value.len() > MAX_EVM_ADAPTER_LOCATOR_BYTES {
-            return Err(EvmProviderBuildError);
-        }
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            v: u8,
-            url: String,
-        }
-        let wire: Wire = serde_json::from_str(value).map_err(|_| EvmProviderBuildError)?;
-        if wire.v != 1
-            || wire.url.is_empty()
-            || wire.url.len() > MAX_EVM_ADAPTER_LOCATOR_BYTES
-            || wire.url.chars().any(char::is_control)
+        if value.is_empty()
+            || value.len() > MAX_EVM_ADAPTER_LOCATOR_BYTES
+            || value.chars().any(char::is_control)
         {
             return Err(EvmProviderBuildError);
         }
-        let url = Url::parse(&wire.url).map_err(|_| EvmProviderBuildError)?;
+        let url = Url::parse(value).map_err(|_| EvmProviderBuildError)?;
         if !matches!(url.scheme(), "http" | "https")
             || url.cannot_be_a_base()
             || !url.has_host()
@@ -86,24 +75,19 @@ impl JsonRpcEvmProvider {
     ///
     /// The URL stays inside this provider and appears in no intent, evidence, log, or error.
     pub fn connect(locator: &EvmAdapterLocator) -> Result<Self, EvmProviderBuildError> {
-        let http = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|_| EvmProviderBuildError)?;
         Ok(Self {
             url: locator.url.clone(),
-            http,
+            http: http_client()?,
         })
     }
 
     #[cfg(test)]
     fn new_http_for_test(url: String) -> Result<Self, EvmProviderBuildError> {
         let url = reqwest::Url::parse(&url).map_err(|_| EvmProviderBuildError)?;
-        let http = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|_| EvmProviderBuildError)?;
-        Ok(Self { url, http })
+        Ok(Self {
+            url,
+            http: http_client()?,
+        })
     }
 
     /// Performs one JSON-RPC call.
@@ -258,6 +242,17 @@ impl JsonRpcEvmProvider {
             }
         }
     }
+}
+
+fn http_client() -> Result<reqwest::Client, EvmProviderBuildError> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .referer(false)
+        .retry(reqwest::retry::never())
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|_| EvmProviderBuildError)
 }
 
 impl EvmProvider for JsonRpcEvmProvider {

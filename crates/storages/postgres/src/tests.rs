@@ -161,11 +161,11 @@ fn migration_and_classifier_contracts_are_exact() {
 async fn provisioning_rejects_unequal_targets_before_connecting() {
     let authority = run_id(41).as_str().replace(':', "");
     let admin = AdminPostgresLocator::parse(format!(
-        r#"{{"v":1,"url":"postgresql://operator:{authority}@127.0.0.1:1/one?sslmode=disable"}}"#
+        "postgresql://operator:{authority}@127.0.0.1:1/one?sslmode=disable"
     ))
     .expect("synthetic admin locator");
     let runtime = RuntimePostgresLocator::parse(format!(
-        r#"{{"v":1,"url":"postgresql://mfm_runtime:{authority}@127.0.0.1:1/two?sslmode=disable"}}"#
+        "postgresql://mfm_runtime:{authority}@127.0.0.1:1/two?sslmode=disable"
     ))
     .expect("synthetic runtime locator");
     assert_eq!(

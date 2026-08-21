@@ -124,8 +124,8 @@ let
 
     runtime_url="postgresql://mfm_runtime:$runtime_password@''${host:postgres}:''${port:postgres}/postgres?sslmode=disable"
     admin_url="postgresql://postgres:$ambient_password@''${host:postgres}:''${port:postgres}/postgres?sslmode=disable"
-    export MFM_TEST_ADMIN_STORE_LOCATOR="{\"v\":1,\"url\":\"$admin_url\"}"
-    export MFM_TEST_RUNTIME_STORE_LOCATOR="{\"v\":1,\"url\":\"$runtime_url\"}"
+    export MFM_TEST_ADMIN_STORE_LOCATOR="$admin_url"
+    export MFM_TEST_RUNTIME_STORE_LOCATOR="$runtime_url"
     export PGHOST=192.0.2.1 PGPORT=1 PGUSER=ambient PGDATABASE=ambient
     export PGPASSWORD="$ambient_password" PGPASSFILE="''${stateDir}/absent-pgpass"
     export PGSERVICE=ambient PGSSLMODE=verify-full
@@ -134,7 +134,11 @@ let
   localEvmRun = cargoArgs: ''
     set -euo pipefail
     rpc_url="http://''${host:reth}:''${port:reth}"
-    export MFM_TEST_EVM_ADAPTER_LOCATOR="{\"v\":1,\"url\":\"$rpc_url\"}"
+    export MFM_TEST_EVM_ADAPTER_LOCATOR="$rpc_url"
+    export HTTP_PROXY="http://127.0.0.1:1" HTTPS_PROXY="http://127.0.0.1:1"
+    export ALL_PROXY="http://127.0.0.1:1" http_proxy="http://127.0.0.1:1"
+    export https_proxy="http://127.0.0.1:1" all_proxy="http://127.0.0.1:1"
+    export NO_PROXY="" no_proxy=""
     ${cargoArgs}
   '';
 in

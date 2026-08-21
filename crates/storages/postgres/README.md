@@ -4,13 +4,13 @@ Durable PostgreSQL implementations of the append-only Store, mechanical RunIndex
 catalog. The run-history and `mfm.config-catalog-postgres.v2` catalog schemas have independent
 connection gates, so either surface remains usable when the other is incompatible.
 
-Production constructors accept only a bounded private locator. It contains one `postgresql` URI
-with an explicit password, numeric `127.0.0.1` or `::1` host, and `sslmode=disable`. PostgreSQL is
+Production constructors accept only one bounded private `postgresql` URI with an explicit password,
+numeric `127.0.0.1` or `::1` host, and `sslmode=disable`. PostgreSQL is
 intentionally plaintext inside the trusted shared network namespace and no remote database target
 is supported. The parser uses stock SQLx, overwrites every ambient-derived connection value that
 can affect this plaintext connection, and rejects `PGOPTIONS`, whose startup effects SQLx cannot
-clear. Home/passfile and service-file inputs cannot influence the resulting authority. The complete
-v1 wire is `{"v":1,"url":"..."}`. SQLx remains an unmodified crates.io dependency so its
+clear. Home/passfile and service-file inputs cannot influence the resulting authority. SQLx remains
+an unmodified crates.io dependency so its
 compile-time query macros can be enabled when the query surface adopts them.
 Every runtime connection must authenticate as the fixed `mfm_runtime` role and pass the exact role,
 ownership, database/schema, table-privilege, durability, and schema gate.

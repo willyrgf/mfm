@@ -4,16 +4,16 @@ Direct provider registration for the three surviving EVM Read capabilities. Each
 one domain-owned `EvmPhysicalTarget` and opaque provider handle, checks exact intent chain/route
 before IO, bounds request encoding, and returns typed evidence or `ReadAdapterError`.
 
-`EvmAdapterLocator` is a bounded private JSON value containing only `v:1` and one HTTP(S) URL. It
-implements neither `Debug`, `Display`, nor serialization. Non-HTTP schemes, fragments, unknown
-fields, and wrong versions are rejected.
+`EvmAdapterLocator` is one bounded private HTTP(S) URL. It implements neither `Debug`, `Display`,
+nor serialization. Non-HTTP schemes, fragments, and control characters are rejected.
 
-`JsonRpcEvmProvider` is the production provider behind that handle. It owns one endpoint URL, the
-stock Reqwest client, one 10-second per-request deadline, a 512 KiB response bound, and the six
-frozen-wire calls the domain's Read subjects require. HTTPS uses Reqwest's compiled WebPKI roots;
-local managed tests connect directly to Reth over HTTP. MFM owns no TLS-root configuration or
-transport-security abstraction. The provider decodes request bytes with the domain's checked
-`EvmReadIntent` deserializer and declares no serde mirror of that wire.
+`JsonRpcEvmProvider` is the production provider behind that handle. It owns one endpoint URL, one
+10-second per-request deadline, a 512 KiB response bound, and the six frozen-wire calls the domain's
+Read subjects require. Its stock Reqwest client uses no ambient proxy, redirect, referer propagation,
+or automatic retry. HTTPS uses Reqwest's compiled WebPKI roots; local managed tests connect directly
+to Reth over HTTP. MFM owns no TLS-root configuration or transport-security abstraction. The provider
+decodes request bytes with the domain's checked `EvmReadIntent` deserializer and declares no serde
+mirror of that wire.
 
 The per-operation observation contract every `EvmProvider` owes the domain is on the `EvmProvider`
 trait rustdoc. Its one trap: `confirm-balance-anchor` re-observes the committed block its intent

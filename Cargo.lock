@@ -2110,8 +2110,6 @@ dependencies = [
  "mfm-journal",
  "mfm-store",
  "percent-encoding",
- "serde",
- "serde_json",
  "sqlx",
  "thiserror",
  "tokio",

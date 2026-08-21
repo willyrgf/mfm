@@ -1,5 +1,4 @@
 use percent_encoding::percent_decode_str;
-use serde::Deserialize;
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use sqlx::ConnectOptions;
 use url::Url;
@@ -87,18 +86,8 @@ impl PostgresLocator {
         if value.is_empty() || value.len() > MAX_POSTGRES_LOCATOR_BYTES {
             return Err(PostgresLocatorError);
         }
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            v: u8,
-            url: String,
-        }
-        let wire: Wire = serde_json::from_str(value).map_err(|_| PostgresLocatorError)?;
-        if wire.v != 1 || wire.url.is_empty() || wire.url.len() > MAX_POSTGRES_LOCATOR_BYTES {
-            return Err(PostgresLocatorError);
-        }
-        verify_raw_uri_shape(&wire.url)?;
-        let url = Url::parse(&wire.url).map_err(|_| PostgresLocatorError)?;
+        verify_raw_uri_shape(value)?;
+        let url = Url::parse(value).map_err(|_| PostgresLocatorError)?;
         if url.scheme() != "postgresql"
             || url.cannot_be_a_base()
             || url.fragment().is_some()
@@ -213,10 +202,6 @@ fn decode_database(path: &str) -> Result<String, PostgresLocatorError> {
 mod tests {
     use super::*;
 
-    fn locator(url: &str) -> String {
-        format!(r#"{{"v":1,"url":{url:?}}}"#)
-    }
-
     fn authority(byte: char) -> String {
         byte.to_string().repeat(32)
     }
@@ -231,26 +216,22 @@ mod tests {
         let right = authority('b');
         let encoded_authority = format!("{left}%40{right}");
         let runtime_url = strict_url("mfm_runtime", &encoded_authority, "127.0.0.1:5433", "mfm");
-        let runtime = locator(&runtime_url);
-        let runtime = RuntimePostgresLocator::parse(&runtime).expect("runtime locator");
+        let runtime = RuntimePostgresLocator::parse(&runtime_url).expect("runtime locator");
         assert_eq!(runtime.0.username, "mfm_runtime");
         assert_eq!(runtime.0.password, format!("{left}@{right}"));
         assert_eq!(runtime.0.target.host, "127.0.0.1");
         assert_eq!(runtime.0.target.port, 5433);
         assert_eq!(runtime.0.target.database, "mfm");
-        assert!(AdminPostgresLocator::parse(locator(&strict_url(
-            "admin",
-            &authority('c'),
-            "[::1]",
-            "mfm",
-        )))
-        .is_ok());
-        assert!(AdminPostgresLocator::parse(locator(&strict_url(
+        assert!(
+            AdminPostgresLocator::parse(strict_url("admin", &authority('c'), "[::1]", "mfm",))
+                .is_ok()
+        );
+        assert!(AdminPostgresLocator::parse(strict_url(
             "mfm_runtime",
             &authority('d'),
             "127.0.0.1",
             "mfm",
-        )))
+        ))
         .is_err());
     }
 
@@ -277,12 +258,12 @@ mod tests {
             valid.replace("127.0.0.1", "127.0.0.2"),
             valid.replace("127.0.0.1", "[::2]"),
         ] {
-            assert!(RuntimePostgresLocator::parse(locator(&url)).is_err());
+            assert!(RuntimePostgresLocator::parse(url).is_err());
         }
         for rejected in [
-            format!(r#"{{"v":1,"url":{valid:?},"extra":true}}"#),
-            format!(r#"{{"v":1,"url":{valid:?},"tls_roots":{{"kind":"webpki"}}}}"#),
-            format!(r#"{{"v":1,"url":{valid:?},"tls_trust":{{"kind":"webpki"}}}}"#),
+            format!(r#"{{"v":1,"url":{valid:?}}}"#),
+            format!(" {valid}"),
+            format!("{valid}\n"),
         ] {
             assert!(RuntimePostgresLocator::parse(rejected).is_err());
         }
@@ -290,27 +271,23 @@ mod tests {
 
     #[test]
     fn target_equivalence_ignores_only_credentials() {
-        let admin = AdminPostgresLocator::parse(locator(&strict_url(
-            "admin",
-            &authority('f'),
-            "127.0.0.1",
-            "mfm",
-        )))
-        .expect("admin");
-        let runtime = RuntimePostgresLocator::parse(locator(&strict_url(
+        let admin =
+            AdminPostgresLocator::parse(strict_url("admin", &authority('f'), "127.0.0.1", "mfm"))
+                .expect("admin");
+        let runtime = RuntimePostgresLocator::parse(strict_url(
             "mfm_runtime",
             &authority('0'),
             "127.0.0.1:5432",
             "mfm",
-        )))
+        ))
         .expect("runtime");
         assert!(admin.target() == runtime.target());
-        let other = RuntimePostgresLocator::parse(locator(&strict_url(
+        let other = RuntimePostgresLocator::parse(strict_url(
             "mfm_runtime",
             &authority('1'),
             "127.0.0.1:5432",
             "other",
-        )))
+        ))
         .expect("other");
         assert!(admin.target() != other.target());
     }
