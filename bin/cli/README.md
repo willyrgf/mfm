@@ -13,8 +13,8 @@ database credentials belong to the enclosing deployment.
 ```text
 mfm_cli [--output text|json] entry-point list
 
-mfm_cli [--deployment <PATH>] [--output text|json] store init \
-    --admin-store-locator-env <NAME>
+mfm_cli [--deployment <PATH>] [--output text|json] postgres init \
+    --admin-locator-env <NAME>
 mfm_cli [--deployment <PATH>] [--output text|json] binding list
 
 mfm_cli [--deployment <PATH>] [--output text|json] config import <NAME> --from <PATH|->
@@ -29,7 +29,7 @@ mfm_cli [--deployment <PATH>] [--output text|json] run list [--after <RUN_ID>] [
 ```
 
 `entry-point list` is static and rejects `--deployment`. Every other command loads the override or
-the conventional XDG/HOME `deployment.toml`. `store init` additionally resolves the checked admin
+the conventional XDG/HOME `deployment.toml`. `postgres init` additionally resolves the checked admin
 locator name and retains no administrative handle after provisioning. The complete deployment
 grammar, bounds, and example are documented by [`mfm-app`](../../crates/app/README.md).
 

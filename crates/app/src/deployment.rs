@@ -69,7 +69,7 @@ impl<'de> Deserialize<'de> for EnvironmentName {
 
 /// Strict operator bootstrap used only to compose private live authority.
 pub struct Deployment {
-    store: StoreDeployment,
+    postgres: PostgresDeployment,
     evm_routes: Vec<EvmRouteDeployment>,
 }
 
@@ -93,8 +93,8 @@ impl Deployment {
             .map_err(|_| ComposeError::Deployment)?
     }
 
-    pub(crate) const fn runtime_locator_env(&self) -> &EnvironmentName {
-        &self.store.runtime_locator_env
+    pub(crate) const fn runtime_postgres_locator_env(&self) -> &EnvironmentName {
+        &self.postgres.runtime_locator_env
     }
 
     pub(crate) fn evm_routes(&self) -> &[EvmRouteDeployment] {
@@ -122,21 +122,21 @@ impl EvmRouteDeployment {
     }
 }
 
-struct StoreDeployment {
+struct PostgresDeployment {
     runtime_locator_env: EnvironmentName,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeploymentWire {
-    store: StoreWire,
+    postgres: PostgresWire,
     #[serde(default)]
     evm_routes: Vec<EvmRouteWire>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoreWire {
+struct PostgresWire {
     runtime_locator_env: EnvironmentName,
 }
 
@@ -179,8 +179,8 @@ fn parse(encoded: Vec<u8>) -> Result<Deployment, ComposeError> {
         });
     }
     Ok(Deployment {
-        store: StoreDeployment {
-            runtime_locator_env: wire.store.runtime_locator_env,
+        postgres: PostgresDeployment {
+            runtime_locator_env: wire.postgres.runtime_locator_env,
         },
         evm_routes,
     })
@@ -220,7 +220,7 @@ mod tests {
     use super::*;
 
     fn valid_document(routes: &str) -> Vec<u8> {
-        format!("[store]\nruntime_locator_env = \"MFM_RUNTIME\"\n{routes}").into_bytes()
+        format!("[postgres]\nruntime_locator_env = \"MFM_RUNTIME\"\n{routes}").into_bytes()
     }
 
     #[test]
@@ -248,7 +248,7 @@ mod tests {
             b"\xff".to_vec(),
             valid_document("include = \"other.toml\"\n"),
             valid_document("profile = \"dev\"\n"),
-            valid_document("[store]\nruntime_locator_env = \"MFM_OTHER\"\n"),
+            valid_document("[postgres]\nruntime_locator_env = \"MFM_OTHER\"\n"),
             valid_document(
                 "[[evm_routes]]\nchain_id = -1\nendpoint_id = \"alpha\"\nadapter_locator_env = \"MFM_EVM\"\n",
             ),

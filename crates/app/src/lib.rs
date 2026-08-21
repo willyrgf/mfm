@@ -21,7 +21,8 @@ use mfm_runtime::{
     RetainedValueView, RunView, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError,
 };
 use mfm_storage_postgres::{
-    provision_schemas, AdminPostgresLocator, PostgresCatalog, PostgresStore, RuntimePostgresLocator,
+    provision_postgres as provision_postgres_backend, AdminPostgresLocator, PostgresBackend,
+    RuntimePostgresLocator,
 };
 use mfm_store::{RunIndex, RunIndexError, Store};
 use serde::ser::SerializeStruct;
@@ -78,16 +79,13 @@ pub enum ComposeError {
     Environment(EnvironmentName),
     /// The runtime PostgreSQL locator was invalid.
     #[error("postgres locator is invalid or unavailable")]
-    StoreLocator,
+    PostgresLocator,
     /// PostgreSQL provisioning failed.
     #[error("postgres provisioning failed")]
     Provision,
-    /// The append-only run store could not be opened.
-    #[error("postgres run store is invalid or unavailable")]
-    Store,
-    /// The config catalog could not be opened.
-    #[error("postgres config catalog is invalid or unavailable")]
-    Catalog,
+    /// The PostgreSQL persistence backend could not be opened.
+    #[error("postgres backend is invalid or unavailable")]
+    Postgres,
     /// An EVM locator or HTTP client could not be constructed.
     #[error("evm provider transport could not be constructed")]
     Provider,
@@ -494,9 +492,9 @@ impl Application {
 
     /// Resolves private locators once and constructs the production PostgreSQL/EVM Application.
     pub async fn open(deployment: &Deployment) -> Result<Self, ComposeError> {
-        let store_value = resolve_environment(deployment.runtime_locator_env())?;
-        let store_locator =
-            RuntimePostgresLocator::parse(store_value).map_err(|_| ComposeError::StoreLocator)?;
+        let postgres_value = resolve_environment(deployment.runtime_postgres_locator_env())?;
+        let postgres_locator = RuntimePostgresLocator::parse(postgres_value)
+            .map_err(|_| ComposeError::PostgresLocator)?;
         let mut routes = Vec::new();
         routes
             .try_reserve_exact(deployment.evm_routes().len())
@@ -510,18 +508,14 @@ impl Application {
             );
             routes.push((route.chain_id(), route.endpoint().clone(), provider));
         }
-        let store = Arc::new(
-            PostgresStore::connect(&store_locator)
+        let postgres = Arc::new(
+            PostgresBackend::connect(&postgres_locator)
                 .await
-                .map_err(|_| ComposeError::Store)?,
+                .map_err(|_| ComposeError::Postgres)?,
         );
-        let catalog: Arc<dyn ConfigCatalog> = Arc::new(
-            PostgresCatalog::connect(&store_locator)
-                .await
-                .map_err(|_| ComposeError::Catalog)?,
-        );
+        let catalog: Arc<dyn ConfigCatalog> = postgres.clone();
         let bindings = BoundCapabilitySet::new(routes)?;
-        let composed = ComposedRuntime::compose(store, bindings)?;
+        let composed = ComposedRuntime::compose(postgres, bindings)?;
         Ok(Self::from_parts(composed, catalog))
     }
 
@@ -695,16 +689,17 @@ impl Application {
 }
 
 /// Provisions both PostgreSQL schemas through short-lived CLI-only administrative authority.
-pub async fn provision_store(
+pub async fn provision_postgres(
     deployment: &Deployment,
     admin_locator_env: &EnvironmentName,
 ) -> Result<(), ComposeError> {
-    let runtime_value = resolve_environment(deployment.runtime_locator_env())?;
+    let runtime_value = resolve_environment(deployment.runtime_postgres_locator_env())?;
     let admin_value = resolve_environment(admin_locator_env)?;
     let runtime =
-        RuntimePostgresLocator::parse(runtime_value).map_err(|_| ComposeError::StoreLocator)?;
-    let admin = AdminPostgresLocator::parse(admin_value).map_err(|_| ComposeError::StoreLocator)?;
-    provision_schemas(&admin, &runtime)
+        RuntimePostgresLocator::parse(runtime_value).map_err(|_| ComposeError::PostgresLocator)?;
+    let admin =
+        AdminPostgresLocator::parse(admin_value).map_err(|_| ComposeError::PostgresLocator)?;
+    provision_postgres_backend(&admin, &runtime)
         .await
         .map_err(|_| ComposeError::Provision)
 }

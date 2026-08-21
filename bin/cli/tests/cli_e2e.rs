@@ -27,8 +27,8 @@ fn config_document(portfolio_id: &str) -> String {
 #[ignore = "requires the managed PostgreSQL and HTTP Reth services from cli-e2e"]
 async fn stored_config_lifecycle_and_runs_are_cli_complete() {
     for name in [
-        "MFM_E2E_RUNTIME_STORE_LOCATOR",
-        "MFM_E2E_ADMIN_STORE_LOCATOR",
+        "MFM_E2E_RUNTIME_POSTGRES_LOCATOR",
+        "MFM_E2E_ADMIN_POSTGRES_LOCATOR",
         "MFM_E2E_EVM_ADAPTER_LOCATOR",
     ] {
         std::env::var(name).unwrap_or_else(|_| panic!("cli-e2e must supply {name}"));
@@ -40,8 +40,8 @@ async fn stored_config_lifecycle_and_runs_are_cli_complete() {
     let override_deployment = root.join("override.toml");
     std::fs::create_dir_all(default_deployment.parent().expect("deployment parent"))
         .expect("create XDG tree");
-    let deployment = r#"[store]
-runtime_locator_env = "MFM_E2E_RUNTIME_STORE_LOCATOR"
+    let deployment = r#"[postgres]
+runtime_locator_env = "MFM_E2E_RUNTIME_POSTGRES_LOCATOR"
 
 [[evm_routes]]
 chain_id = 1337
@@ -82,10 +82,10 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
             &[
                 "--deployment",
                 path(&override_deployment),
-                "store",
+                "postgres",
                 "init",
-                "--admin-store-locator-env",
-                "MFM_E2E_ADMIN_STORE_LOCATOR",
+                "--admin-locator-env",
+                "MFM_E2E_ADMIN_POSTGRES_LOCATOR",
             ],
             &xdg,
         );

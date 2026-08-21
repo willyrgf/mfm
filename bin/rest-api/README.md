@@ -65,7 +65,7 @@ REST-local errors cover invalid body/query/media/path/header, fallback 404/405, 
 parser failures before Axum routing are outside that JSON contract. A durably failed run remains a
 successful HTTP request with status 200 and tagged `state.kind:"failed"`.
 
-The CLI-only asymmetries are intentional: `store init` retains schema authority outside the daemon,
+The CLI-only asymmetries are intentional: `postgres init` retains schema authority outside the daemon,
 and only the CLI may generate a RunId. HTTP status represents request success, while CLI exit 1 may
 represent a runnable or durably failed run.
 

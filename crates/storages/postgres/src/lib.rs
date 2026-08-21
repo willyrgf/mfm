@@ -8,6 +8,9 @@ use std::future::Future;
 use std::time::Duration;
 
 use mfm_canonical::sha256_digest_bytes;
+use mfm_catalog::{
+    CatalogEntries, CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigName,
+};
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId};
 use mfm_journal::{
     frame_head_digest, EncodedRunFrame, StoredRunBytes, MAX_FRAME_BYTES, MAX_RUN_BYTES,
@@ -23,41 +26,40 @@ mod catalog;
 mod index;
 mod locator;
 mod provision;
-pub use catalog::PostgresCatalog;
 pub use locator::{
     AdminPostgresLocator, PostgresLocatorError, RuntimePostgresLocator, MAX_POSTGRES_LOCATOR_BYTES,
 };
-pub use provision::{provision_schemas, ProvisionError};
+pub use provision::{provision_postgres, ProvisionError};
 
-/// PostgreSQL Store after its connection gate has succeeded.
-pub struct PostgresStore {
+/// Complete PostgreSQL persistence backend after its connection gate succeeds.
+pub struct PostgresBackend {
     pool: PgPool,
 }
 
 /// Redaction-safe production-open failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum StoreOpenError {
+pub enum PostgresOpenError {
     /// The static schema or durability posture is incompatible.
-    #[error("postgres store is incompatible")]
+    #[error("postgres backend is incompatible")]
     Incompatible,
     /// The database could not be observed.
-    #[error("postgres store is unavailable")]
+    #[error("postgres backend is unavailable")]
     Unavailable,
 }
 
-impl PostgresStore {
-    /// Connects and verifies the static schema and durability prerequisites.
+impl PostgresBackend {
+    /// Connects and verifies both static schemas and durability prerequisites.
     pub async fn connect(
         locator: &RuntimePostgresLocator,
-    ) -> std::result::Result<Self, StoreOpenError> {
+    ) -> std::result::Result<Self, PostgresOpenError> {
         assert_send_static::<PgRow>();
         assert_send_static::<PgArguments>();
         let options = locator
-            .connect_options("mfm-runtime-store")
-            .map_err(|_| StoreOpenError::Unavailable)?;
+            .connect_options("mfm-runtime-postgres")
+            .map_err(|_| PostgresOpenError::Unavailable)?;
         let mut gate_connection = PgConnection::connect_with(&options)
             .await
-            .map_err(|_| StoreOpenError::Unavailable)?;
+            .map_err(|_| PostgresOpenError::Unavailable)?;
         verify_connection(&mut gate_connection)
             .await
             .map_err(classify_gate_error)?;
@@ -76,12 +78,17 @@ impl PostgresStore {
             .map_err(classify_open_error)?;
         Ok(Self { pool })
     }
+
+    #[cfg(test)]
+    pub(crate) const fn test_pool(&self) -> &PgPool {
+        &self.pool
+    }
 }
 
-const fn classify_gate_error(error: GateError) -> StoreOpenError {
+const fn classify_gate_error(error: GateError) -> PostgresOpenError {
     match error {
-        GateError::Incompatible => StoreOpenError::Incompatible,
-        GateError::Unavailable => StoreOpenError::Unavailable,
+        GateError::Incompatible => PostgresOpenError::Incompatible,
+        GateError::Unavailable => PostgresOpenError::Unavailable,
     }
 }
 
@@ -97,7 +104,7 @@ async fn mfm_relation_count(connection: &mut PgConnection) -> std::result::Resul
     .map_err(|_| GateError::Unavailable)
 }
 
-impl Store for PostgresStore {
+impl Store for PostgresBackend {
     fn load_run<'a>(
         &'a self,
         run_id: &'a RunId,
@@ -121,13 +128,41 @@ impl Store for PostgresStore {
     }
 }
 
-impl RunIndex for PostgresStore {
+impl RunIndex for PostgresBackend {
     fn list_runs<'a>(
         &'a self,
         after: Option<&'a RunId>,
         limit: RunPageLimit,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<RunPage, RunIndexError>> + Send + 'a>> {
         Box::pin(async move { index::list_runs(&self.pool, after, limit).await })
+    }
+}
+
+impl ConfigCatalog for PostgresBackend {
+    fn put_config<'a>(
+        &'a self,
+        entry: &'a CatalogEntry,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<CatalogPutResult, CatalogError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            catalog::put_config(&self.pool, entry, catalog::MutationCommitFault::None).await
+        })
+    }
+
+    fn load_config<'a>(
+        &'a self,
+        name: &'a ConfigName,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<Option<CatalogEntry>, CatalogError>> + Send + 'a>,
+    > {
+        Box::pin(async move { catalog::load_config(&self.pool, name).await })
+    }
+
+    fn list_configs<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<CatalogEntries, CatalogError>> + Send + 'a>>
+    {
+        Box::pin(async move { catalog::list_configs(&self.pool).await })
     }
 }
 
@@ -173,12 +208,12 @@ impl GateError {
     }
 }
 
-fn classify_open_error(error: sqlx::Error) -> StoreOpenError {
+fn classify_open_error(error: sqlx::Error) -> PostgresOpenError {
     match &error {
         sqlx::Error::Protocol(message) if message.contains("mfm-postgres-gate:incompatible") => {
-            StoreOpenError::Incompatible
+            PostgresOpenError::Incompatible
         }
-        _ => StoreOpenError::Unavailable,
+        _ => PostgresOpenError::Unavailable,
     }
 }
 
@@ -197,13 +232,13 @@ async fn verify_durability(connection: &mut PgConnection) -> std::result::Result
 }
 
 async fn verify_connection(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
-    verify_runtime_authority(connection, RuntimeSurface::Run).await?;
-    verify_run_schema(connection).await
+    verify_durability(connection).await?;
+    verify_runtime_authority(connection).await?;
+    verify_run_schema(connection).await?;
+    verify_catalog_schema(connection).await
 }
 
 async fn verify_run_schema(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
-    verify_durability(&mut *connection).await?;
-
     let relations: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT c.relname, c.relkind::text, c.relpersistence::text \
          FROM pg_catalog.pg_class c \
@@ -336,17 +371,10 @@ async fn verify_run_schema(connection: &mut PgConnection) -> std::result::Result
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum RuntimeSurface {
-    Run,
-    Catalog,
-}
-
 type RuntimeRoleRow = (String, bool, bool, bool, bool, bool, bool, bool);
 
 async fn verify_runtime_authority(
     connection: &mut PgConnection,
-    surface: RuntimeSurface,
 ) -> std::result::Result<(), GateError> {
     let role: Option<RuntimeRoleRow> = sqlx::query_as(
         "SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, \
@@ -411,25 +439,21 @@ async fn verify_runtime_authority(
     if owns_objects {
         return Err(GateError::Incompatible);
     }
-    let schema = match surface {
-        RuntimeSurface::Run => "public",
-        RuntimeSurface::Catalog => "mfm_catalog",
-    };
-    let schema_privileges: (bool, bool) = sqlx::query_as(
-        "SELECT has_schema_privilege(current_user, $1, 'USAGE'), \
-                has_schema_privilege(current_user, $1, 'CREATE')",
-    )
-    .bind(schema)
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|_| GateError::Unavailable)?;
-    if schema_privileges != (true, false) {
-        return Err(GateError::Incompatible);
+    for schema in ["public", "mfm_catalog"] {
+        let schema_privileges: (bool, bool) = sqlx::query_as(
+            "SELECT has_schema_privilege(current_user, $1, 'USAGE'), \
+                    has_schema_privilege(current_user, $1, 'CREATE')",
+        )
+        .bind(schema)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| GateError::Unavailable)?;
+        if schema_privileges != (true, false) {
+            return Err(GateError::Incompatible);
+        }
     }
-    let accepted = match surface {
-        RuntimeSurface::Run => verify_run_privileges(connection).await?,
-        RuntimeSurface::Catalog => verify_catalog_privileges(connection).await?,
-    };
+    let accepted =
+        verify_run_privileges(connection).await? && verify_catalog_privileges(connection).await?;
     accepted.then_some(()).ok_or(GateError::Incompatible)
 }
 
@@ -506,17 +530,9 @@ async fn verify_schema_ownership(
     Ok(())
 }
 
-async fn verify_catalog_connection(
-    connection: &mut PgConnection,
-) -> std::result::Result<(), GateError> {
-    verify_runtime_authority(connection, RuntimeSurface::Catalog).await?;
-    verify_catalog_schema(connection).await
-}
-
 async fn verify_catalog_schema(
     connection: &mut PgConnection,
 ) -> std::result::Result<(), GateError> {
-    verify_durability(&mut *connection).await?;
     let relations: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT c.relname, c.relkind::text, c.relpersistence::text \
          FROM pg_catalog.pg_class c \

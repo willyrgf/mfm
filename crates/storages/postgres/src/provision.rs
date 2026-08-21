@@ -2,9 +2,8 @@ use sqlx::{Connection, PgConnection};
 
 use crate::{
     mfm_relation_count, runtime_table_privilege_mask, verify_catalog_schema, verify_durability,
-    verify_run_schema, AdminPostgresLocator, GateError, PostgresCatalog, PostgresStore,
-    RuntimePostgresLocator, CATALOG_SCHEMA_SQL, RUN_SCHEMA_SQL, TABLE_INSERT, TABLE_SELECT,
-    TABLE_UPDATE,
+    verify_run_schema, AdminPostgresLocator, GateError, PostgresBackend, RuntimePostgresLocator,
+    CATALOG_SCHEMA_SQL, RUN_SCHEMA_SQL, TABLE_INSERT, TABLE_SELECT, TABLE_UPDATE,
 };
 
 /// Redaction-safe split-authority schema provisioning failure.
@@ -27,12 +26,12 @@ enum SchemaState {
     Present,
 }
 
-/// Installs or verifies both independently gated schemas with split credentials.
+/// Installs or verifies both schemas with split credentials.
 ///
 /// Target equivalence and the fixed runtime-role posture are proven before any
 /// DDL. Existing installations are verified exactly and are never migrated,
 /// repaired, re-owned, or reset.
-pub async fn provision_schemas(
+pub async fn provision_postgres(
     admin: &AdminPostgresLocator,
     runtime: &RuntimePostgresLocator,
 ) -> Result<(), ProvisionError> {
@@ -105,13 +104,10 @@ pub async fn provision_schemas(
     verify_runtime_grants(&mut connection).await?;
     drop(connection);
 
-    let store = PostgresStore::connect(runtime)
+    let backend = PostgresBackend::connect(runtime)
         .await
         .map_err(classify_open)?;
-    let catalog = PostgresCatalog::connect(runtime)
-        .await
-        .map_err(classify_open)?;
-    drop((store, catalog));
+    drop(backend);
     Ok(())
 }
 
@@ -341,9 +337,9 @@ const fn classify_gate(error: GateError) -> ProvisionError {
     }
 }
 
-const fn classify_open(error: crate::StoreOpenError) -> ProvisionError {
+const fn classify_open(error: crate::PostgresOpenError) -> ProvisionError {
     match error {
-        crate::StoreOpenError::Incompatible => ProvisionError::Incompatible,
-        crate::StoreOpenError::Unavailable => ProvisionError::Unavailable,
+        crate::PostgresOpenError::Incompatible => ProvisionError::Incompatible,
+        crate::PostgresOpenError::Unavailable => ProvisionError::Unavailable,
     }
 }

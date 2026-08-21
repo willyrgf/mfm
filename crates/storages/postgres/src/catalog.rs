@@ -1,79 +1,11 @@
-use std::future::Future;
-use std::pin::Pin;
-
 use mfm_catalog::{
-    CatalogEntries, CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigDigest,
-    ConfigName, MAX_CONFIG_ENTRIES,
+    CatalogEntries, CatalogEntry, CatalogError, CatalogPutResult, ConfigDigest, ConfigName,
+    MAX_CONFIG_ENTRIES,
 };
-use sqlx::postgres::{PgPoolOptions, PgRow};
-use sqlx::{Connection, PgConnection, PgPool, Row};
+use sqlx::postgres::PgRow;
+use sqlx::{PgPool, Row};
 
-use crate::{
-    classify_open_error, verify_catalog_connection, RuntimePostgresLocator, StoreOpenError,
-};
-
-/// PostgreSQL config catalog after its independent connection gate succeeds.
-pub struct PostgresCatalog {
-    pool: PgPool,
-}
-
-impl PostgresCatalog {
-    /// Connects and verifies the independent config-catalog schema and runtime authority.
-    pub async fn connect(locator: &RuntimePostgresLocator) -> Result<Self, StoreOpenError> {
-        let options = locator
-            .connect_options("mfm-runtime-catalog")
-            .map_err(|_| StoreOpenError::Unavailable)?;
-        let mut gate_connection = PgConnection::connect_with(&options)
-            .await
-            .map_err(|_| StoreOpenError::Unavailable)?;
-        verify_catalog_connection(&mut gate_connection)
-            .await
-            .map_err(crate::classify_gate_error)?;
-        drop(gate_connection);
-        let pool = PgPoolOptions::new()
-            .acquire_timeout(std::time::Duration::from_secs(2))
-            .after_connect(|connection, _metadata| {
-                Box::pin(async move {
-                    verify_catalog_connection(connection)
-                        .await
-                        .map_err(|error| sqlx::Error::Protocol(error.marker().to_owned()))
-                })
-            })
-            .connect_with(options)
-            .await
-            .map_err(classify_open_error)?;
-        Ok(Self { pool })
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn test_pool(&self) -> &PgPool {
-        &self.pool
-    }
-}
-
-impl ConfigCatalog for PostgresCatalog {
-    fn put_config<'a>(
-        &'a self,
-        entry: &'a CatalogEntry,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogPutResult, CatalogError>> + Send + 'a>> {
-        Box::pin(async move { put_config(&self.pool, entry, MutationCommitFault::None).await })
-    }
-
-    fn load_config<'a>(
-        &'a self,
-        name: &'a ConfigName,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<CatalogEntry>, CatalogError>> + Send + 'a>> {
-        Box::pin(async move { load_config(&self.pool, name).await })
-    }
-
-    fn list_configs<'a>(
-        &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogEntries, CatalogError>> + Send + 'a>> {
-        Box::pin(async move { list_configs(&self.pool).await })
-    }
-}
-
-async fn load_config(
+pub(super) async fn load_config(
     pool: &PgPool,
     name: &ConfigName,
 ) -> Result<Option<CatalogEntry>, CatalogError> {
@@ -88,7 +20,7 @@ async fn load_config(
     row.map(decode_entry).transpose()
 }
 
-async fn list_configs(pool: &PgPool) -> Result<CatalogEntries, CatalogError> {
+pub(super) async fn list_configs(pool: &PgPool) -> Result<CatalogEntries, CatalogError> {
     let query_limit = i64::try_from(MAX_CONFIG_ENTRIES + 1).map_err(|_| CatalogError::Corrupt)?;
     let rows = sqlx::query(
         "SELECT config_name, config_digest, canonical \
@@ -105,7 +37,7 @@ async fn list_configs(pool: &PgPool) -> Result<CatalogEntries, CatalogError> {
     CatalogEntries::new(items)
 }
 
-async fn put_config(
+pub(super) async fn put_config(
     pool: &PgPool,
     entry: &CatalogEntry,
     fault: MutationCommitFault,

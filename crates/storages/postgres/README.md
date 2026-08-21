@@ -1,8 +1,9 @@
 # mfm-storage-postgres
 
-Durable PostgreSQL implementations of the append-only Store, mechanical RunIndex, and opaque config
-catalog. The run-history and `mfm.config-catalog-postgres.v2` catalog schemas have independent
-connection gates, so either surface remains usable when the other is incompatible.
+One durable PostgreSQL backend implementing the append-only Store, mechanical RunIndex, and opaque
+config catalog. One pool and one connection gate cover both the run-history and
+`mfm.config-catalog-postgres.v2` schemas, so production never admits a partially compatible
+persistence installation.
 
 Production constructors accept only one bounded private `postgresql` URI with an explicit password,
 numeric `127.0.0.1` or `::1` host, and `sslmode=disable`. PostgreSQL is
@@ -27,7 +28,7 @@ Catalog insert and replacement serialize the fixed 256-entry quota, force synchr
 distinguish definite failure from ambiguous acknowledgement. Listing returns the complete bounded
 catalog in ascending bytewise name order.
 
-`provision_schemas` is the one public provisioning entry and is not held by runtime composition. It
+`provision_postgres` is the one public provisioning entry and is not held by runtime composition. It
 requires distinct typed admin/runtime locators for the same normalized target and an already-created
 fixed runtime role. The short-lived admin installs both baselines only when their namespaces are
 absent, owns the objects, and grants only the exact DML authority. Existing installations are

@@ -124,8 +124,8 @@ let
 
     runtime_url="postgresql://mfm_runtime:$runtime_password@''${host:postgres}:''${port:postgres}/postgres?sslmode=disable"
     admin_url="postgresql://postgres:$ambient_password@''${host:postgres}:''${port:postgres}/postgres?sslmode=disable"
-    export MFM_TEST_ADMIN_STORE_LOCATOR="$admin_url"
-    export MFM_TEST_RUNTIME_STORE_LOCATOR="$runtime_url"
+    export MFM_TEST_ADMIN_POSTGRES_LOCATOR="$admin_url"
+    export MFM_TEST_RUNTIME_POSTGRES_LOCATOR="$runtime_url"
     export PGHOST=192.0.2.1 PGPORT=1 PGUSER=ambient PGDATABASE=ambient
     export PGPASSWORD="$ambient_password" PGPASSFILE="''${stateDir}/absent-pgpass"
     export PGSERVICE=ambient PGSSLMODE=verify-full
@@ -274,8 +274,8 @@ in
             DROP SCHEMA IF EXISTS public CASCADE;
             CREATE SCHEMA public AUTHORIZATION CURRENT_USER;
             SQL
-            export MFM_E2E_ADMIN_STORE_LOCATOR="$MFM_TEST_ADMIN_STORE_LOCATOR"
-            export MFM_E2E_RUNTIME_STORE_LOCATOR="$MFM_TEST_RUNTIME_STORE_LOCATOR"
+            export MFM_E2E_ADMIN_POSTGRES_LOCATOR="$MFM_TEST_ADMIN_POSTGRES_LOCATOR"
+            export MFM_E2E_RUNTIME_POSTGRES_LOCATOR="$MFM_TEST_RUNTIME_POSTGRES_LOCATOR"
             export MFM_E2E_EVM_ADAPTER_LOCATOR="$MFM_TEST_EVM_ADAPTER_LOCATOR"
             exec cargo test -p mfm --test cli_e2e -- --include-ignored --test-threads=1
           ''))
@@ -304,8 +304,8 @@ in
             DROP SCHEMA IF EXISTS public CASCADE;
             CREATE SCHEMA public AUTHORIZATION CURRENT_USER;
             SQL
-            export MFM_E2E_ADMIN_STORE_LOCATOR="$MFM_TEST_ADMIN_STORE_LOCATOR"
-            export MFM_E2E_RUNTIME_STORE_LOCATOR="$MFM_TEST_RUNTIME_STORE_LOCATOR"
+            export MFM_E2E_ADMIN_POSTGRES_LOCATOR="$MFM_TEST_ADMIN_POSTGRES_LOCATOR"
+            export MFM_E2E_RUNTIME_POSTGRES_LOCATOR="$MFM_TEST_RUNTIME_POSTGRES_LOCATOR"
             export MFM_E2E_EVM_ADAPTER_LOCATOR="$MFM_TEST_EVM_ADAPTER_LOCATOR"
             cargo build -p mfm -p mfm-rest-api --bins
             export MFM_E2E_CLI_BIN="$CARGO_TARGET_DIR/debug/mfm_cli"

@@ -49,8 +49,8 @@ The CLI e2e is ignored by default. Drive it directly only against a locally star
 
 ```bash
 MFM_E2E_EVM_ADAPTER_LOCATOR="$evm_adapter_locator" \
-MFM_E2E_RUNTIME_STORE_LOCATOR="$runtime_store_locator" \
-MFM_E2E_ADMIN_STORE_LOCATOR="$admin_store_locator" nix develop -c cargo test \
+MFM_E2E_RUNTIME_POSTGRES_LOCATOR="$runtime_postgres_locator" \
+MFM_E2E_ADMIN_POSTGRES_LOCATOR="$admin_postgres_locator" nix develop -c cargo test \
   -p mfm --test cli_e2e -- --include-ignored --test-threads=1
 ```
 

@@ -12,8 +12,8 @@ fn cli_and_rest_are_one_live_application_surface() {
     let cli = required_path("MFM_E2E_CLI_BIN");
     let rest = required_path("MFM_E2E_REST_BIN");
     for name in [
-        "MFM_E2E_RUNTIME_STORE_LOCATOR",
-        "MFM_E2E_ADMIN_STORE_LOCATOR",
+        "MFM_E2E_RUNTIME_POSTGRES_LOCATOR",
+        "MFM_E2E_ADMIN_POSTGRES_LOCATOR",
         "MFM_E2E_EVM_ADAPTER_LOCATOR",
     ] {
         std::env::var(name).unwrap_or_else(|_| panic!("rest-e2e must supply {name}"));
@@ -29,8 +29,8 @@ fn cli_and_rest_are_one_live_application_surface() {
     std::fs::create_dir(&socket_dir).expect("create socket directory");
     std::fs::write(
         &deployment,
-        r#"[store]
-runtime_locator_env = "MFM_E2E_RUNTIME_STORE_LOCATOR"
+        r#"[postgres]
+runtime_locator_env = "MFM_E2E_RUNTIME_POSTGRES_LOCATOR"
 
 [[evm_routes]]
 chain_id = 1337
@@ -46,13 +46,13 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
         &cli,
         &xdg,
         &[
-            "store",
+            "postgres",
             "init",
-            "--admin-store-locator-env",
-            "MFM_E2E_ADMIN_STORE_LOCATOR",
+            "--admin-locator-env",
+            "MFM_E2E_ADMIN_POSTGRES_LOCATOR",
         ],
     );
-    assert_success(&initialized, "store init");
+    assert_success(&initialized, "postgres init");
 
     let mut daemon = Daemon::start(&rest, &xdg, &socket);
     daemon.wait_ready();
@@ -374,12 +374,12 @@ fn command(binary: &Path, xdg: &Path) -> Command {
         .env("HOME", "/nonexistent-hostile-home")
         .env("MFM_DEPLOYMENT", "/nonexistent-hostile-deployment")
         .env(
-            "MFM_E2E_RUNTIME_STORE_LOCATOR",
-            std::env::var("MFM_E2E_RUNTIME_STORE_LOCATOR").expect("runtime locator"),
+            "MFM_E2E_RUNTIME_POSTGRES_LOCATOR",
+            std::env::var("MFM_E2E_RUNTIME_POSTGRES_LOCATOR").expect("runtime locator"),
         )
         .env(
-            "MFM_E2E_ADMIN_STORE_LOCATOR",
-            std::env::var("MFM_E2E_ADMIN_STORE_LOCATOR").expect("admin locator"),
+            "MFM_E2E_ADMIN_POSTGRES_LOCATOR",
+            std::env::var("MFM_E2E_ADMIN_POSTGRES_LOCATOR").expect("admin locator"),
         )
         .env(
             "MFM_E2E_EVM_ADAPTER_LOCATOR",

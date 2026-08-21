@@ -15,8 +15,8 @@ names, never locator values. Its EVM routes are empty or strictly ordered and un
 A complete deployment with one EVM route is:
 
 ```toml
-[store]
-runtime_locator_env = "MFM_RUNTIME_STORE_LOCATOR"
+[postgres]
+runtime_locator_env = "MFM_RUNTIME_POSTGRES_LOCATOR"
 
 [[evm_routes]]
 chain_id = 1
@@ -24,10 +24,10 @@ endpoint_id = "mainnet-primary"
 adapter_locator_env = "MFM_EVM_MAINNET_LOCATOR"
 ```
 
-Resolver names use `[A-Z_][A-Z0-9_]*` and contain 1–64 bytes. The runtime store resolver must hold
+Resolver names use `[A-Z_][A-Z0-9_]*` and contain 1–64 bytes. The runtime PostgreSQL resolver must hold
 one raw, loopback-only `postgresql` URL accepted by `RuntimePostgresLocator`; each adapter resolver
 must hold one raw HTTP(S) URL accepted by `EvmAdapterLocator`. Administrative PostgreSQL authority
-is not part of this file and is resolved only by the CLI `store init` command.
+is not part of this file and is resolved only by the CLI `postgres init` command.
 
 `ConfigDocument` is an opaque async checked value. It bounds input at 256 KiB, rejects malformed
 UTF-8/JSON, duplicate keys, floats, excess depth, unknown fields, and invalid domain values, then
@@ -36,8 +36,9 @@ owns canonical JSON plus its `sha256-jcs-v1` digest. The required entry-point ta
 exactly cover the Portfolio source chains when Application runs the planner during import.
 
 One `ComposedRuntime` derives Runtime adapter registration, public binding discovery, planning
-targets, Store, and RunIndex from the same checked inputs. Config catalog custody is independently
-injected. The complete Application surface is:
+targets, Store, and RunIndex from the same checked inputs. The production Application coerces the
+same PostgreSQL backend into Store, RunIndex, and config-catalog ports. The complete Application
+surface is:
 
 - static entry-point and composed-binding discovery;
 - atomic config import/replace, read, and complete bounded list;

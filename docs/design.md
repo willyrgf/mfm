@@ -35,12 +35,12 @@ The fixed limits are 8 MiB per canonical run object, 65,536 non-payload envelope
 bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. These are format bounds, not
 tunable runtime policy.
 
-PostgreSQL has two independent fresh baselines. Run history owns `mfm_store_schema`,
+PostgreSQL has two fresh baselines behind one backend, pool, and connection gate. Run history owns `mfm_store_schema`,
 `mfm_run_frames`, and `mfm_run_heads` in `public`; opaque named config custody owns
 `mfm_catalog_schema` and `config_entries` in `mfm_catalog`. Run heads also provide the mechanical
-RunIndex projection without parsing frames. Each connection admission gate checks only its schema's
-exact logged relations, constraints, ownership and privileges, plus primary status, `fsync`, and
-`full_page_writes`.
+RunIndex projection without parsing frames. Every connection admission checks both schemas' exact
+logged relations, constraints, ownership and privileges, plus primary status, `fsync`, and
+`full_page_writes`; a partially compatible installation is never exposed.
 
 Loads use one read-only repeatable snapshot. Appends take the per-RunId advisory transaction lock
 before observing state and force synchronous COMMIT. Catalog mutations take one global advisory
