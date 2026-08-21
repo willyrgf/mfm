@@ -2,7 +2,7 @@
 
 One durable PostgreSQL backend implementing the append-only Store, mechanical RunIndex, and opaque
 versioned configuration repository. One pool and one connection gate cover both the run-history and
-`mfm.config-postgres.v1` schemas, so production never admits a partially compatible
+`mfm.config-postgres.v2` schemas, so production never admits a partially compatible
 persistence installation.
 
 Production constructors accept only one bounded private `postgresql` URI with an explicit password,
@@ -24,11 +24,11 @@ validate head/target, insert immutable bytes, update the head, and COMMIT.
 Pre-COMMIT failures are definite typed capacity/corruption/unavailability. Only an IO/protocol loss
 after COMMIT submission is `Indeterminate`.
 
-Configuration import retains immutable `(name, digest, bytes)` revisions, atomically moves one
-current marker per name, forces synchronous COMMIT, and distinguishes definite failure from
-ambiguous acknowledgement. Reimporting a historical digest makes it current without duplicating
-the revision. Listing returns every revision in ascending bytewise name/digest order; documents
-remain individually bounded at 256 KiB, but the revision collection has no count limit.
+Configuration import relies on the `(name, digest)` primary key to create or compare immutable
+bytes, forces synchronous COMMIT, and distinguishes definite failure from ambiguous
+acknowledgement. Exact delete is idempotent and uses the same acknowledgement contract. Listing
+returns every revision in ascending bytewise name/digest order; documents remain individually
+bounded at 256 KiB, but the revision collection has no count limit.
 
 `provision_postgres` is the one public provisioning entry and is not held by runtime composition. It
 requires distinct typed admin/runtime locators for the same normalized target and an already-created

@@ -88,7 +88,7 @@ enum BindingCommand {
 
 #[derive(Subcommand)]
 enum ConfigCommand {
-    /// Imports or replaces one complete named config.
+    /// Imports one immutable named config revision.
     Import {
         /// Durable configuration name.
         name: String,
@@ -98,6 +98,14 @@ enum ConfigCommand {
     },
     /// Lists every retained configuration revision.
     List,
+    /// Deletes one exact retained configuration revision.
+    Delete {
+        /// Durable configuration name.
+        name: String,
+        /// Exact revision digest.
+        #[arg(long)]
+        digest: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -107,9 +115,9 @@ enum RunCommand {
         /// Durable config name.
         #[arg(long)]
         config: String,
-        /// Optional exact config revision assertion.
+        /// Exact retained config revision.
         #[arg(long = "config-digest")]
-        config_digest: Option<String>,
+        config_digest: String,
         /// Optional explicit identity; omission uses OS cryptographic entropy.
         #[arg(long = "run-id")]
         run_id: Option<String>,
@@ -286,10 +294,17 @@ async fn run_config(
             emit_serializable(output, &ItemList::new(&result), || {
                 let mut text = String::new();
                 for item in &result {
-                    text.push_str(&render_config_revision_summary(item));
+                    text.push_str(&render_config_summary(item));
                 }
                 text
             })
+        }
+        ConfigCommand::Delete { name, digest } => {
+            let name = ConfigName::new(name).map_err(|_| CliError::ConfigName)?;
+            let digest = ConfigDigest::parse(digest).map_err(|_| CliError::ConfigDigest)?;
+            let application = open(deployment).await?;
+            application.delete_config(&name, &digest).await?;
+            emit_empty(output)
         }
     }
 }
@@ -306,13 +321,10 @@ async fn run_run(
             run_id,
         } => {
             let name = ConfigName::new(config).map_err(|_| CliError::ConfigName)?;
-            let selection = match config_digest {
-                Some(digest) => ConfigSelection::Exact {
-                    name,
-                    digest: ConfigDigest::parse(digest).map_err(|_| CliError::ConfigDigest)?,
-                },
-                None => ConfigSelection::Current { name },
-            };
+            let selection = ConfigSelection::new(
+                name,
+                ConfigDigest::parse(config_digest).map_err(|_| CliError::ConfigDigest)?,
+            );
             let run_id = match run_id {
                 Some(value) => RunId::parse(value).map_err(|_| CliError::RunId)?,
                 None => generate_run_id()?,
@@ -564,16 +576,6 @@ fn render_config_summary(config: &mfm_app::ConfigSummary) -> String {
     )
 }
 
-fn render_config_revision_summary(config: &mfm_app::ConfigRevisionSummary) -> String {
-    format!(
-        "config_name={}\nconfig_digest={}\nentry_point={}\ncurrent={}\n",
-        config.name(),
-        config.digest(),
-        config.entry_point(),
-        config.is_current()
-    )
-}
-
 fn render_run_view(view: &RunView) -> String {
     let mut rendered = format!(
         "run_id={}\nhead_sequence={}\nhead_digest={}\nstate={}\n",
@@ -653,7 +655,7 @@ mod tests {
         let bindings = BoundCapabilitySet::new(Vec::new()).expect("bindings");
         let composed = ComposedRuntime::compose(store, bindings).expect("composition");
         let application =
-            Application::from_parts(composed, Arc::new(MemoryConfigRepository::new()));
+            Application::from_parts(composed, Arc::new(MemoryConfigRepository::default()));
         let document = ConfigDocument::new(DOCUMENT.to_vec())
             .await
             .expect("document");

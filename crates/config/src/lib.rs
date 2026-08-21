@@ -8,7 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use mfm_ids::{ContentDigest, DigestAlgorithm};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 mod memory;
 
@@ -23,7 +23,8 @@ pub const MAX_CONFIG_DOCUMENT_BYTES: usize = 256 * 1024;
 pub struct ConfigNameError;
 
 /// A bounded lowercase name in the durable configuration repository.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
 pub struct ConfigName(String);
 
 impl ConfigName {
@@ -51,24 +52,9 @@ impl ConfigName {
     }
 }
 
-impl fmt::Debug for ConfigName {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_tuple("ConfigName").field(&self.0).finish()
-    }
-}
-
 impl fmt::Display for ConfigName {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
-    }
-}
-
-impl Serialize for ConfigName {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -88,7 +74,8 @@ impl<'de> Deserialize<'de> for ConfigName {
 pub struct ConfigDigestError;
 
 /// Content digest of one canonical configuration document.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
 pub struct ConfigDigest(ContentDigest);
 
 impl ConfigDigest {
@@ -106,38 +93,15 @@ impl ConfigDigest {
         Self::new(digest)
     }
 
-    /// Returns the underlying checked content digest.
-    pub const fn content_digest(&self) -> &ContentDigest {
-        &self.0
-    }
-
     /// Returns the canonical identity string.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
 }
 
-impl fmt::Debug for ConfigDigest {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_tuple("ConfigDigest")
-            .field(&self.0)
-            .finish()
-    }
-}
-
 impl fmt::Display for ConfigDigest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
-    }
-}
-
-impl Serialize for ConfigDigest {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -205,43 +169,13 @@ impl ConfigRevision {
     }
 }
 
-/// One retained revision annotated with its current status.
-pub struct RetainedConfigRevision {
-    revision: ConfigRevision,
-    current: bool,
-}
-
-impl RetainedConfigRevision {
-    /// Constructs one retained revision projection.
-    pub const fn new(revision: ConfigRevision, current: bool) -> Self {
-        Self { revision, current }
-    }
-
-    /// Returns the immutable revision.
-    pub const fn revision(&self) -> &ConfigRevision {
-        &self.revision
-    }
-
-    /// Reports whether this revision is current for its name.
-    pub const fn is_current(&self) -> bool {
-        self.current
-    }
-
-    /// Consumes the projection into its revision and current marker.
-    pub fn into_parts(self) -> (ConfigRevision, bool) {
-        (self.revision, self.current)
-    }
-}
-
 /// Atomic configuration import outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigImportResult {
-    /// The name was absent and its first revision was created.
+    /// The exact revision was absent and was created.
     Created,
-    /// The exact supplied revision was already current and nothing was written.
+    /// The exact supplied revision was already retained and nothing was written.
     Unchanged,
-    /// The supplied new or historical revision was made current.
-    Updated,
 }
 
 /// Redaction-safe configuration repository failure.
@@ -258,69 +192,32 @@ pub enum ConfigRepositoryError {
     Indeterminate,
 }
 
-/// The complete ordered set of retained configuration revisions.
-pub struct ConfigRevisions {
-    items: Vec<RetainedConfigRevision>,
-}
-
-impl ConfigRevisions {
-    /// Constructs a structurally checked complete revision snapshot.
-    pub fn new(items: Vec<RetainedConfigRevision>) -> Result<Self, ConfigRepositoryError> {
-        if items.windows(2).any(|pair| {
-            let left = pair[0].revision();
-            let right = pair[1].revision();
-            (left.name(), left.digest()) >= (right.name(), right.digest())
-        }) {
-            return Err(ConfigRepositoryError::Corrupt);
-        }
-        let mut name: Option<&ConfigName> = None;
-        let mut current_count = 0_usize;
-        for item in &items {
-            if name.is_some_and(|name| name != item.revision().name()) {
-                if current_count != 1 {
-                    return Err(ConfigRepositoryError::Corrupt);
-                }
-                current_count = 0;
-            }
-            name = Some(item.revision().name());
-            current_count += usize::from(item.is_current());
-        }
-        if name.is_some() && current_count != 1 {
-            return Err(ConfigRepositoryError::Corrupt);
-        }
-        Ok(Self { items })
-    }
-
-    /// Returns every retained revision in ascending name/digest order.
-    pub fn items(&self) -> &[RetainedConfigRevision] {
-        &self.items
-    }
-
-    /// Consumes the snapshot into its ordered revisions.
-    pub fn into_items(self) -> Vec<RetainedConfigRevision> {
-        self.items
-    }
-}
+/// Boxed asynchronous configuration repository operation.
+pub type ConfigFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, ConfigRepositoryError>> + Send + 'a>>;
 
 /// Object-safe, domain-generic configuration custody contract.
 pub trait ConfigRepository: Send + Sync {
-    /// Atomically retains the revision and makes it current for its name.
+    /// Atomically creates or compares one exact immutable revision.
     fn import_config<'a>(
         &'a self,
         revision: &'a ConfigRevision,
-    ) -> Pin<Box<dyn Future<Output = Result<ConfigImportResult, ConfigRepositoryError>> + Send + 'a>>;
+    ) -> ConfigFuture<'a, ConfigImportResult>;
 
-    /// Loads the current revision, or an exact retained digest when supplied.
+    /// Loads one exact retained revision.
     fn load_config<'a>(
         &'a self,
         name: &'a ConfigName,
-        digest: Option<&'a ConfigDigest>,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<Option<ConfigRevision>, ConfigRepositoryError>> + Send + 'a>,
-    >;
+        digest: &'a ConfigDigest,
+    ) -> ConfigFuture<'a, Option<ConfigRevision>>;
 
     /// Lists every retained revision in ascending name/digest order.
-    fn list_configs<'a>(
+    fn list_configs(&self) -> ConfigFuture<'_, Vec<ConfigRevision>>;
+
+    /// Idempotently deletes one exact retained revision.
+    fn delete_config<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<ConfigRevisions, ConfigRepositoryError>> + Send + 'a>>;
+        name: &'a ConfigName,
+        digest: &'a ConfigDigest,
+    ) -> ConfigFuture<'a, ()>;
 }

@@ -134,19 +134,6 @@ impl ConfigDocument {
     pub(crate) fn revision(&self, name: ConfigName) -> Result<ConfigRevision, ()> {
         ConfigRevision::new(name, self.digest.clone(), self.canonical.to_vec()).map_err(|_| ())
     }
-
-    pub(crate) fn revision_summary(
-        &self,
-        name: ConfigName,
-        current: bool,
-    ) -> ConfigRevisionSummary {
-        ConfigRevisionSummary {
-            name,
-            digest: self.digest.clone(),
-            entry_point: self.entry_point(),
-            current,
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -259,37 +246,6 @@ impl ConfigSummary {
     }
 }
 
-/// One retained configuration revision returned by complete listing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ConfigRevisionSummary {
-    name: ConfigName,
-    digest: ConfigDigest,
-    entry_point: EntryPointId,
-    current: bool,
-}
-
-impl ConfigRevisionSummary {
-    /// Returns the configuration name.
-    pub const fn name(&self) -> &ConfigName {
-        &self.name
-    }
-
-    /// Returns the canonical-document digest.
-    pub const fn digest(&self) -> &ConfigDigest {
-        &self.digest
-    }
-
-    /// Returns the entry point derived from the retained document.
-    pub const fn entry_point(&self) -> &EntryPointId {
-        &self.entry_point
-    }
-
-    /// Reports whether this revision is current for its name.
-    pub const fn is_current(&self) -> bool {
-        self.current
-    }
-}
-
 /// Result of importing a configuration revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -304,20 +260,13 @@ pub enum ImportOutcome {
         /// Existing revision identity.
         config: ConfigSummary,
     },
-    /// The supplied new or historical revision was atomically made current.
-    Updated {
-        /// Replacement revision identity.
-        config: ConfigSummary,
-    },
 }
 
 impl ImportOutcome {
     /// Returns the imported or retained config summary.
     pub const fn config(&self) -> &ConfigSummary {
         match self {
-            Self::Created { config } | Self::Unchanged { config } | Self::Updated { config } => {
-                config
-            }
+            Self::Created { config } | Self::Unchanged { config } => config,
         }
     }
 }

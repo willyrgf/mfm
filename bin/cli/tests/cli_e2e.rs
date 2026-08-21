@@ -139,14 +139,22 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
     let configs = json(&configs);
     assert_eq!(configs["items"][0]["name"], "daily");
     assert_eq!(configs["items"][1]["name"], "weekly");
-    assert_eq!(configs["items"][0]["current"], true);
-    assert_eq!(configs["items"][1]["current"], true);
+    assert!(configs["items"][0].get("current").is_none());
 
     let started = run_cli(
-        &["--output", "json", "run", "start", "--config", "daily"],
+        &[
+            "--output",
+            "json",
+            "run",
+            "start",
+            "--config",
+            "daily",
+            "--config-digest",
+            &digest,
+        ],
         &xdg,
     );
-    assert_success(&started, "generated-id Current start");
+    assert_success(&started, "generated-id exact start");
     let started_json = json(&started);
     let generated_id = started_json["run"]["run_id"]
         .as_str()
@@ -233,7 +241,7 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
         1
     );
 
-    let updated = run_cli(
+    let second_revision = run_cli(
         &[
             "--output",
             "json",
@@ -245,9 +253,9 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
         ],
         &xdg,
     );
-    assert_success(&updated, "replace name");
-    assert_eq!(json(&updated)["outcome"], "updated");
-    let replacement_digest = json(&updated)["config"]["digest"]
+    assert_success(&second_revision, "import second revision");
+    assert_eq!(json(&second_revision)["outcome"], "created");
+    let replacement_digest = json(&second_revision)["config"]["digest"]
         .as_str()
         .expect("replacement digest")
         .to_owned();
@@ -271,48 +279,45 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
     assert_success(&historical, "historical Exact start");
     assert_eq!(json(&historical)["config"]["digest"], digest);
 
-    let reactivated = run_cli(
-        &[
-            "--output",
-            "json",
-            "config",
-            "import",
-            "daily",
-            "--from",
-            path(&original_document),
-        ],
-        &xdg,
-    );
-    assert_success(&reactivated, "reactivate historical revision");
-    assert_eq!(json(&reactivated)["outcome"], "updated");
     let configs = run_cli(&["--output", "json", "config", "list"], &xdg);
     assert_success(&configs, "revision history list");
     let configs = json(&configs);
-    let daily = configs["items"]
-        .as_array()
-        .expect("config items")
-        .iter()
-        .filter(|item| item["name"] == "daily")
-        .collect::<Vec<_>>();
-    assert_eq!(daily.len(), 2);
-    assert!(daily
-        .iter()
-        .any(|item| item["digest"] == digest && item["current"] == true));
-    assert!(daily
-        .iter()
-        .any(|item| item["digest"] == replacement_digest && item["current"] == false));
+    let items = configs["items"].as_array().expect("config items");
+    assert_eq!(
+        items.iter().filter(|item| item["name"] == "daily").count(),
+        2
+    );
+    assert!(items.iter().all(|item| item.get("current").is_none()));
+
+    let deleted = run_cli(&["config", "delete", "daily", "--digest", &digest], &xdg);
+    assert_success(&deleted, "delete exact revision");
 
     let retained = run_cli(
         &["--output", "json", "run", "show", "--run-id", &generated_id],
         &xdg,
     );
-    assert_success(&retained, "retained run after config replacement");
+    assert_success(&retained, "retained run after config deletion");
     assert_eq!(json(&retained)["run_id"], generated_id);
+
+    let surviving_revision = run_cli(
+        &[
+            "--output",
+            "json",
+            "run",
+            "start",
+            "--config",
+            "daily",
+            "--config-digest",
+            &replacement_digest,
+        ],
+        &xdg,
+    );
+    assert_success(&surviving_revision, "other revision survives delete");
 
     let old_grammar = run_cli(&["snapshot"], &xdg);
     assert_eq!(old_grammar.status.code(), Some(2));
-    let removed_delete = run_cli(&["config", "delete", "daily"], &xdg);
-    assert_eq!(removed_delete.status.code(), Some(2));
+    let missing_digest = run_cli(&["run", "start", "--config", "daily"], &xdg);
+    assert_eq!(missing_digest.status.code(), Some(2));
     std::fs::remove_dir_all(&root).expect("remove isolated e2e tree");
 }
 

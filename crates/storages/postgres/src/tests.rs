@@ -131,6 +131,8 @@ fn migration_and_classifier_contracts_are_exact() {
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_heads"));
     assert!(CONFIG_SCHEMA_SQL.contains("CREATE SCHEMA mfm_config"));
     assert!(CONFIG_SCHEMA_SQL.contains("CREATE TABLE mfm_config.config_revisions"));
+    assert!(CONFIG_SCHEMA_SQL.contains("mfm.config-postgres.v2"));
+    assert!(!CONFIG_SCHEMA_SQL.contains("current"));
     assert!(!RUN_SCHEMA_SQL.contains("UNLOGGED"));
     assert!(!CONFIG_SCHEMA_SQL.contains("UNLOGGED"));
     assert_eq!(
@@ -575,7 +577,7 @@ async fn assert_config_mutation_contract(backend: &Arc<PostgresBackend>) {
         Err(ConfigRepositoryError::Unavailable)
     );
     assert!(backend
-        .load_config(before.name(), None)
+        .load_config(before.name(), before.digest())
         .await
         .expect("resolve before-submission import")
         .is_none());
@@ -591,7 +593,7 @@ async fn assert_config_mutation_contract(backend: &Arc<PostgresBackend>) {
         Err(ConfigRepositoryError::Indeterminate)
     );
     assert!(backend
-        .load_config(rolled_back.name(), None)
+        .load_config(rolled_back.name(), rolled_back.digest())
         .await
         .expect("resolve rolled-back import")
         .is_none());
@@ -604,7 +606,7 @@ async fn assert_config_mutation_contract(backend: &Arc<PostgresBackend>) {
     );
     assert_eq!(
         backend
-            .load_config(committed.name(), None)
+            .load_config(committed.name(), committed.digest())
             .await
             .expect("resolve committed import")
             .expect("committed revision")
@@ -612,31 +614,27 @@ async fn assert_config_mutation_contract(backend: &Arc<PostgresBackend>) {
         committed.digest()
     );
 
-    let replacement = config_revision("ambiguous-import", 4);
+    let second = config_revision("ambiguous-import", 4);
     assert_eq!(
-        config::import_config_with_fault(
-            backend.test_pool(),
-            &replacement,
-            Fault::UnknownCommitted,
-        )
-        .await,
+        config::import_config_with_fault(backend.test_pool(), &second, Fault::UnknownCommitted,)
+            .await,
         Err(ConfigRepositoryError::Indeterminate)
     );
     assert_eq!(
         backend
-            .load_config(replacement.name(), None)
+            .load_config(second.name(), second.digest())
             .await
-            .expect("resolve committed update")
-            .expect("updated revision")
+            .expect("resolve second committed import")
+            .expect("second revision")
             .digest(),
-        replacement.digest()
+        second.digest()
     );
     assert_eq!(
         backend
-            .load_config(committed.name(), Some(committed.digest()))
+            .load_config(committed.name(), committed.digest())
             .await
-            .expect("load historical revision")
-            .expect("historical revision")
+            .expect("load first revision")
+            .expect("first revision")
             .canonical_bytes(),
         committed.canonical_bytes()
     );
@@ -644,21 +642,22 @@ async fn assert_config_mutation_contract(backend: &Arc<PostgresBackend>) {
         backend
             .import_config(&committed)
             .await
-            .expect("reactivate historical revision"),
-        ConfigImportResult::Updated
+            .expect("repeat first revision"),
+        ConfigImportResult::Unchanged
     );
+    let collision = ConfigRevision::new(
+        committed.name().clone(),
+        committed.digest().clone(),
+        br#"{"different":true}"#.to_vec(),
+    )
+    .expect("bounded collision");
     assert_eq!(
-        backend
-            .load_config(committed.name(), None)
-            .await
-            .expect("load reactivated revision")
-            .expect("current revision")
-            .digest(),
-        committed.digest()
+        backend.import_config(&collision).await,
+        Err(ConfigRepositoryError::Corrupt)
     );
 
     let race_left = config_revision("race", 5);
-    let race_right = config_revision("race", 6);
+    let race_right = race_left.clone();
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let left = {
         let backend = Arc::clone(backend);
@@ -693,7 +692,7 @@ async fn assert_config_mutation_contract(backend: &Arc<PostgresBackend>) {
     assert_eq!(
         outcomes
             .iter()
-            .filter(|outcome| **outcome == ConfigImportResult::Updated)
+            .filter(|outcome| **outcome == ConfigImportResult::Unchanged)
             .count(),
         1
     );
@@ -709,47 +708,85 @@ async fn assert_config_mutation_contract(backend: &Arc<PostgresBackend>) {
     }
 
     let entries = backend.list_configs().await.expect("config revisions");
-    assert_eq!(entries.items().len(), 306);
     assert_eq!(
         entries
-            .items()
             .iter()
-            .filter(|entry| entry.revision().name().as_str() == "ambiguous-import")
+            .filter(|entry| entry.name().as_str() == "ambiguous-import")
             .count(),
         2
     );
     assert_eq!(
         entries
-            .items()
             .iter()
-            .filter(|entry| entry.revision().name().as_str() == "race")
+            .filter(|entry| entry.name().as_str() == "race")
             .count(),
-        2
+        1
     );
-    sqlx::query(
-        "UPDATE mfm_config.config_revisions SET current = false WHERE config_name = $1 AND current",
-    )
-    .bind(committed.name().as_str())
-    .execute(backend.test_pool())
-    .await
-    .expect("break current marker");
-    assert!(matches!(
-        backend.load_config(committed.name(), None).await,
-        Err(ConfigRepositoryError::Corrupt)
-    ));
     assert_eq!(
-        backend.import_config(&committed).await,
-        Err(ConfigRepositoryError::Corrupt)
+        entries
+            .iter()
+            .filter(|entry| entry.name().as_str().starts_with("unbounded-"))
+            .count(),
+        300
     );
-    sqlx::query(
-        "UPDATE mfm_config.config_revisions SET current = true \
-         WHERE config_name = $1 AND config_digest = $2",
+
+    assert_delete_fault(
+        backend,
+        config_revision("delete-before", 7),
+        Fault::BeforeSubmission,
+        ConfigRepositoryError::Unavailable,
+        true,
     )
-    .bind(committed.name().as_str())
-    .bind(committed.digest().as_str())
-    .execute(backend.test_pool())
-    .await
-    .expect("restore current marker");
+    .await;
+    assert_delete_fault(
+        backend,
+        config_revision("delete-rollback", 8),
+        Fault::UnknownRolledBack,
+        ConfigRepositoryError::Indeterminate,
+        true,
+    )
+    .await;
+    let delete_committed = config_revision("delete-committed", 9);
+    assert_delete_fault(
+        backend,
+        delete_committed.clone(),
+        Fault::UnknownCommitted,
+        ConfigRepositoryError::Indeterminate,
+        false,
+    )
+    .await;
+    backend
+        .delete_config(delete_committed.name(), delete_committed.digest())
+        .await
+        .expect("idempotent delete retry");
+}
+
+async fn assert_delete_fault(
+    backend: &PostgresBackend,
+    revision: ConfigRevision,
+    fault: config::MutationCommitFault,
+    error: ConfigRepositoryError,
+    retained: bool,
+) {
+    backend.import_config(&revision).await.expect("import");
+    assert_eq!(
+        config::delete_config_with_fault(
+            backend.test_pool(),
+            revision.name(),
+            revision.digest(),
+            fault,
+        )
+        .await,
+        Err(error)
+    );
+    assert_eq!(
+        backend
+            .load_config(revision.name(), revision.digest())
+            .await
+            .expect("resolve delete")
+            .is_some(),
+        retained
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -821,21 +858,21 @@ async fn managed_postgres_persistence_authority_contract() {
             .import_config(&replacement)
             .await
             .expect("new revision"),
-        ConfigImportResult::Updated
+        ConfigImportResult::Created
     );
     let retained = backend
-        .load_config(first.name(), None)
+        .load_config(replacement.name(), replacement.digest())
         .await
         .expect("load config")
         .expect("retained config");
     assert_eq!(retained.digest(), replacement.digest());
     assert_eq!(retained.canonical_bytes(), replacement.canonical_bytes());
-    let historical = backend
-        .load_config(first.name(), Some(first.digest()))
+    let original = backend
+        .load_config(first.name(), first.digest())
         .await
-        .expect("load historical config")
-        .expect("historical config");
-    assert_eq!(historical.canonical_bytes(), first.canonical_bytes());
+        .expect("load original config")
+        .expect("original config");
+    assert_eq!(original.canonical_bytes(), first.canonical_bytes());
 
     assert_snapshot_and_blocking_contract(&backend).await;
     assert_commit_and_hostile_contract(&backend, &mut connection).await;
@@ -852,10 +889,12 @@ async fn managed_postgres_persistence_authority_contract() {
         .execute(&mut runtime_connection)
         .await
         .is_err());
-    assert!(sqlx::query("DELETE FROM mfm_config.config_revisions")
-        .execute(&mut runtime_connection)
-        .await
-        .is_err());
+    assert!(
+        sqlx::query("UPDATE mfm_config.config_revisions SET canonical = canonical")
+            .execute(&mut runtime_connection)
+            .await
+            .is_err()
+    );
 
     connection
         .execute("GRANT TRUNCATE ON public.mfm_run_frames TO mfm_runtime")

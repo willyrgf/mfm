@@ -28,8 +28,9 @@ deployment environment.
 | GET | `/healthz` | none | `{"status":"ok"}` |
 | GET | `/v1/entry-points` | none | shared `ItemList` |
 | GET | `/v1/bindings` | none | shared `ItemList` |
-| PUT | `/v1/configs/{name}` | raw config JSON | shared `ImportOutcome`; 201 created or 200 unchanged/updated |
+| PUT | `/v1/configs/{name}` | raw config JSON | shared `ImportOutcome`; 201 created or 200 unchanged |
 | GET | `/v1/configs` | none | complete retained-revision `ItemList` |
+| DELETE | `/v1/configs/{name}/revisions/{digest}` | none | empty; 204 whether present or absent |
 | GET | `/v1/runs?after=&limit=` | none | shared mechanical `RunPage` |
 | POST | `/v1/runs/{run_id}/start` | strict selection JSON | shared `StartRunResult` |
 | POST | `/v1/runs/{run_id}/progress` | `{}` | shared `RunView` |
@@ -40,11 +41,10 @@ same status and headers with no body. All other routed methods receive the norma
 There is no schema-provisioning, deployment-view, inline-config start, server-generated RunId,
 keystore, transaction, replay, trace, audit, or effect route.
 
-Start accepts exactly one exhaustive selection:
+Start accepts exactly one revision selection:
 
 ```json
-{"config":{"kind":"current","name":"daily"}}
-{"config":{"kind":"exact","name":"daily","digest":"content:sha256-jcs-v1:<64 hex>"}}
+{"config":{"name":"daily","digest":"content:sha256-jcs-v1:<64 hex>"}}
 ```
 
 The path RunId is always caller-owned. Mutating routes use Axum's JSON media-type admission,
@@ -69,6 +69,6 @@ and only the CLI may generate a RunId. HTTP status represents request success, w
 represent a runnable or durably failed run.
 
 `nix run .#run -- --task rest-e2e` builds the CLI and REST binaries explicitly, starts this real
-listener against local Reth and PostgreSQL, and compares discovery, config, Current/Exact start,
+listener against local Reth and PostgreSQL, and compares discovery, config, exact start/delete,
 run-head, full RunView, and shared-error JSON. The two renderers also match the same frozen
 start/progress indeterminate recovery fixtures under `docs/contracts/client-surface/`.

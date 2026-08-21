@@ -4,7 +4,7 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use mfm_app::{
     Application, ConfigDocument, ConfigDocumentError, ConfigName, ConfigSelection, ImportOutcome,
@@ -26,6 +26,10 @@ pub(crate) fn router(application: Arc<Application>) -> Router {
         .route(
             "/v1/configs/{name}",
             put(import_config).layer(DefaultBodyLimit::max(MAX_CONFIG_DOCUMENT_BYTES)),
+        )
+        .route(
+            "/v1/configs/{name}/revisions/{digest}",
+            delete(delete_config),
         )
         .route("/v1/runs", get(list_runs))
         .route(
@@ -65,9 +69,23 @@ async fn import_config(
     let outcome = application.import_config(name.clone(), document).await?;
     let status = match outcome {
         ImportOutcome::Created { .. } => StatusCode::CREATED,
-        ImportOutcome::Unchanged { .. } | ImportOutcome::Updated { .. } => StatusCode::OK,
+        ImportOutcome::Unchanged { .. } => StatusCode::OK,
     };
     Ok(json_response(status, &outcome))
+}
+
+async fn delete_config(
+    State(application): State<Arc<Application>>,
+    path: Result<Path<(ConfigName, mfm_app::ConfigDigest)>, PathRejection>,
+) -> Result<Response, RestError> {
+    let Path((name, digest)) = path.map_err(|_| {
+        RestError(checked_error(
+            "invalid_config_revision",
+            "config revision identity is invalid",
+        ))
+    })?;
+    application.delete_config(&name, &digest).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn list_configs(
@@ -398,7 +416,7 @@ mod tests {
         let composed = ComposedRuntime::compose(store, bindings).expect("composition");
         Arc::new(Application::from_parts(
             composed,
-            Arc::new(MemoryConfigRepository::new()),
+            Arc::new(MemoryConfigRepository::default()),
         ))
     }
 
@@ -553,12 +571,26 @@ mod tests {
             .expect("digest")
             .to_owned();
 
-        let response = send(
+        assert_error(
             &service,
             json_request(
                 Method::POST,
                 &format!("/v1/runs/{RUN_ID}/start"),
                 Body::from(r#"{"config":{"kind":"current","name":"daily"}}"#),
+            ),
+            StatusCode::BAD_REQUEST,
+            "invalid_request_body",
+        )
+        .await;
+
+        let response = send(
+            &service,
+            json_request(
+                Method::POST,
+                &format!("/v1/runs/{RUN_ID}/start"),
+                Body::from(format!(
+                    r#"{{"config":{{"name":"daily","digest":"{digest}"}}}}"#
+                )),
             ),
         )
         .await;
@@ -656,6 +688,30 @@ mod tests {
             .await
             .status(),
             StatusCode::METHOD_NOT_ALLOWED
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                send(
+                    &service,
+                    request(
+                        Method::DELETE,
+                        &format!("/v1/configs/daily/revisions/{digest}"),
+                        Body::empty(),
+                    ),
+                )
+                .await
+                .status(),
+                StatusCode::NO_CONTENT
+            );
+        }
+        assert_eq!(
+            send(
+                &service,
+                request(Method::GET, &format!("/v1/runs/{RUN_ID}"), Body::empty()),
+            )
+            .await
+            .status(),
+            StatusCode::OK
         );
     }
 }

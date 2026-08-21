@@ -9,8 +9,7 @@ use std::time::Duration;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_config::{
-    ConfigDigest, ConfigImportResult, ConfigName, ConfigRepository, ConfigRepositoryError,
-    ConfigRevision, ConfigRevisions,
+    ConfigDigest, ConfigFuture, ConfigImportResult, ConfigName, ConfigRepository, ConfigRevision,
 };
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId};
 use mfm_journal::{
@@ -143,9 +142,7 @@ impl ConfigRepository for PostgresBackend {
     fn import_config<'a>(
         &'a self,
         revision: &'a ConfigRevision,
-    ) -> std::pin::Pin<
-        Box<dyn Future<Output = Result<ConfigImportResult, ConfigRepositoryError>> + Send + 'a>,
-    > {
+    ) -> ConfigFuture<'a, ConfigImportResult> {
         Box::pin(async move {
             config::import_config(&self.pool, revision, config::MutationCommitFault::None).await
         })
@@ -154,19 +151,23 @@ impl ConfigRepository for PostgresBackend {
     fn load_config<'a>(
         &'a self,
         name: &'a ConfigName,
-        digest: Option<&'a ConfigDigest>,
-    ) -> std::pin::Pin<
-        Box<dyn Future<Output = Result<Option<ConfigRevision>, ConfigRepositoryError>> + Send + 'a>,
-    > {
+        digest: &'a ConfigDigest,
+    ) -> ConfigFuture<'a, Option<ConfigRevision>> {
         Box::pin(async move { config::load_config(&self.pool, name, digest).await })
     }
 
-    fn list_configs<'a>(
-        &'a self,
-    ) -> std::pin::Pin<
-        Box<dyn Future<Output = Result<ConfigRevisions, ConfigRepositoryError>> + Send + 'a>,
-    > {
+    fn list_configs(&self) -> ConfigFuture<'_, Vec<ConfigRevision>> {
         Box::pin(async move { config::list_configs(&self.pool).await })
+    }
+
+    fn delete_config<'a>(
+        &'a self,
+        name: &'a ConfigName,
+        digest: &'a ConfigDigest,
+    ) -> ConfigFuture<'a, ()> {
+        Box::pin(async move {
+            config::delete_config(&self.pool, name, digest, config::MutationCommitFault::None).await
+        })
     }
 }
 
@@ -477,12 +478,13 @@ async fn verify_config_privileges(
 ) -> std::result::Result<bool, GateError> {
     let marker = runtime_table_privilege_mask(connection, "mfm_config.mfm_config_schema").await?;
     let revisions = runtime_table_privilege_mask(connection, "mfm_config.config_revisions").await?;
-    Ok(marker == TABLE_SELECT && revisions == TABLE_SELECT | TABLE_INSERT | TABLE_UPDATE)
+    Ok(marker == TABLE_SELECT && revisions == TABLE_SELECT | TABLE_INSERT | TABLE_DELETE)
 }
 
 const TABLE_SELECT: i32 = 1;
 const TABLE_INSERT: i32 = 2;
 const TABLE_UPDATE: i32 = 4;
+const TABLE_DELETE: i32 = 8;
 
 async fn runtime_table_privilege_mask(
     connection: &mut PgConnection,
@@ -577,7 +579,6 @@ async fn verify_config_schema(connection: &mut PgConnection) -> std::result::Res
             column("config_revisions", "config_name", "text", true, Some("C")),
             column("config_revisions", "config_digest", "text", true, Some("C")),
             column("config_revisions", "canonical", "bytea", true, None),
-            column("config_revisions", "current", "bool", true, None),
             column(
                 "mfm_config_schema",
                 "schema_contract",
@@ -600,7 +601,7 @@ async fn verify_config_schema(connection: &mut PgConnection) -> std::result::Res
                     GateError::Unavailable
                 }
             })?;
-    if markers != ["mfm.config-postgres.v1"] {
+    if markers != ["mfm.config-postgres.v2"] {
         return Err(GateError::Incompatible);
     }
     let indexes: Vec<(String, String, String)> = sqlx::query_as(
@@ -616,11 +617,6 @@ async fn verify_config_schema(connection: &mut PgConnection) -> std::result::Res
     .map_err(|_| GateError::Unavailable)?;
     if indexes
         != [
-            index(
-                "config_revisions",
-                "mfm_config_revisions_current_key",
-                "CREATE UNIQUE INDEX mfm_config_revisions_current_key ON mfm_config.config_revisions USING btree (config_name) WHERE current",
-            ),
             index(
                 "config_revisions",
                 "mfm_config_revisions_pkey",
@@ -652,7 +648,7 @@ async fn verify_config_schema(connection: &mut PgConnection) -> std::result::Res
         constraint("config_revisions", "mfm_config_revisions_name_grammar_check", "c", "CHECK (((config_name ~ '^[a-z0-9][a-z0-9-]*$'::text) AND (\"right\"(config_name, 1) <> '-'::text)))"),
         constraint("config_revisions", "mfm_config_revisions_name_length_check", "c", "CHECK (((octet_length(config_name) >= 1) AND (octet_length(config_name) <= 64)))"),
         constraint("config_revisions", "mfm_config_revisions_pkey", "p", "PRIMARY KEY (config_name, config_digest)"),
-        constraint("mfm_config_schema", "mfm_config_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.config-postgres.v1'::text))"),
+        constraint("mfm_config_schema", "mfm_config_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.config-postgres.v2'::text))"),
         constraint("mfm_config_schema", "mfm_config_schema_pkey", "p", "PRIMARY KEY (schema_contract)"),
     ];
     if constraints != expected {
@@ -1295,7 +1291,7 @@ fn classify_precommit_sql(error: sqlx::Error) -> StoreError {
 fn assert_send_static<T: Send + 'static>() {}
 
 const RUN_SCHEMA_SQL: &str = include_str!("../migrations/run_history_postgres_v1.sql");
-const CONFIG_SCHEMA_SQL: &str = include_str!("../migrations/config_postgres_v1.sql");
+const CONFIG_SCHEMA_SQL: &str = include_str!("../migrations/config_postgres_v2.sql");
 
 #[cfg(test)]
 #[path = "../../../kernel/store/tests/support/scenarios.rs"]

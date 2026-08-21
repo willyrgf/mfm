@@ -33,8 +33,7 @@ mod config;
 mod deployment;
 
 pub use config::{
-    ConfigDocument, ConfigDocumentError, ConfigRevisionSummary, ConfigSummary, EntryPointSummary,
-    ImportOutcome,
+    ConfigDocument, ConfigDocumentError, ConfigSummary, EntryPointSummary, ImportOutcome,
 };
 pub use deployment::{
     Deployment, EnvironmentName, EnvironmentNameError, MAX_DEPLOYMENT_DOCUMENT_BYTES,
@@ -272,29 +271,28 @@ impl RequestError {
     }
 }
 
-/// Exhaustive stored-config selection for one run start.
+/// Exact stored-configuration selection for one run start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ConfigSelection {
-    /// Atomically select the revision currently bound to the name.
-    Current {
-        /// Configuration name.
-        name: ConfigName,
-    },
-    /// Select an exact retained revision, whether or not it is current.
-    Exact {
-        /// Configuration name.
-        name: ConfigName,
-        /// Required canonical-document digest.
-        digest: ConfigDigest,
-    },
+#[serde(deny_unknown_fields)]
+pub struct ConfigSelection {
+    name: ConfigName,
+    digest: ConfigDigest,
 }
 
 impl ConfigSelection {
-    fn name(&self) -> &ConfigName {
-        match self {
-            Self::Current { name } | Self::Exact { name, .. } => name,
-        }
+    /// Constructs an exact retained revision selection.
+    pub const fn new(name: ConfigName, digest: ConfigDigest) -> Self {
+        Self { name, digest }
+    }
+
+    /// Returns the selected configuration name.
+    pub const fn name(&self) -> &ConfigName {
+        &self.name
+    }
+
+    /// Returns the selected configuration digest.
+    pub const fn digest(&self) -> &ConfigDigest {
+        &self.digest
     }
 }
 
@@ -548,12 +546,11 @@ impl Application {
         {
             ConfigImportResult::Created => Ok(ImportOutcome::Created { config: summary }),
             ConfigImportResult::Unchanged => Ok(ImportOutcome::Unchanged { config: summary }),
-            ConfigImportResult::Updated => Ok(ImportOutcome::Updated { config: summary }),
         }
     }
 
     /// Lists and revalidates every retained configuration revision.
-    pub async fn list_configs(&self) -> Result<Vec<ConfigRevisionSummary>, RequestError> {
+    pub async fn list_configs(&self) -> Result<Vec<ConfigSummary>, RequestError> {
         let entries = self
             .configs
             .list_configs()
@@ -561,13 +558,11 @@ impl Application {
             .map_err(map_config_repository_error)?;
         tokio::task::spawn_blocking(move || {
             let items = entries
-                .into_items()
                 .into_iter()
                 .map(|entry| {
-                    let (entry, current) = entry.into_parts();
                     let (name, digest, canonical) = entry.into_parts();
                     ConfigDocument::parse_retained(canonical, &digest)
-                        .map(|document| document.revision_summary(name, current))
+                        .map(|document| document.summary(name))
                         .map_err(|_| RequestError::InvalidRetainedConfig)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -577,19 +572,27 @@ impl Application {
         .map_err(|_| RequestError::Internal)?
     }
 
+    /// Idempotently deletes one exact retained configuration revision.
+    pub async fn delete_config(
+        &self,
+        name: &ConfigName,
+        digest: &ConfigDigest,
+    ) -> Result<(), RequestError> {
+        self.configs
+            .delete_config(name, digest)
+            .await
+            .map_err(map_config_repository_error)
+    }
+
     /// Selects a stored config, plans it, admits the exact RunId, and progresses the run.
     pub async fn start_run(
         &self,
         run_id: RunId,
         selection: &ConfigSelection,
     ) -> Result<StartRunResult, RunRequestError> {
-        let selected_digest = match selection {
-            ConfigSelection::Current { .. } => None,
-            ConfigSelection::Exact { digest, .. } => Some(digest),
-        };
         let entry = self
             .configs
-            .load_config(selection.name(), selected_digest)
+            .load_config(selection.name(), selection.digest())
             .await
             .map_err(map_config_repository_error)?
             .ok_or(RequestError::ConfigAbsent)?;
