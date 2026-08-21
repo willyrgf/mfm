@@ -75,5 +75,6 @@ exist. Keystore administration and transaction submission remain outside this su
 The managed `client-e2e` task builds both binaries explicitly, admits an exact historical run through
 a deliberately unavailable live Read, deletes its config revision, resumes it through the Unix-socket
 REST listener against Reth, validates the complete snapshot, and reloads the same durable RunView
-through this JSON surface. Both renderers also match the frozen start/progress recovery envelopes in
-`docs/contracts/client-surface/`.
+through this JSON surface. It then reimports the same revision, starts a fresh CLI-generated run, and
+requires an identical semantic result from the independent execution. Both renderers also match the
+frozen start/progress recovery envelopes in `docs/contracts/client-surface/`.

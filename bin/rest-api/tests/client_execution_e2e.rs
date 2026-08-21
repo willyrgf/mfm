@@ -21,7 +21,7 @@ const OUTPUT_SCHEMA_ID: &str = "schema:mfm.derived.portfolio_snapshot_output:1:s
 
 #[test]
 #[ignore = "requires explicit CLI/REST binaries and managed PostgreSQL/Reth services"]
-fn generated_rest_run_survives_deletion_and_cold_resumes_to_exact_live_snapshot() {
+fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() {
     let cli = required_path("MFM_E2E_CLI_BIN");
     let rest = required_path("MFM_E2E_REST_BIN");
     for name in [
@@ -167,6 +167,46 @@ fn generated_rest_run_survives_deletion_and_cold_resumes_to_exact_live_snapshot(
     assert_eq!(cold_cli, progressed.1);
     let terminal_progress = cli_json(&cli, &xdg, &["run", "progress", "--run-id", &run_id]);
     assert_eq!(terminal_progress, progressed.1);
+
+    let restored = cli_json(
+        &cli,
+        &xdg,
+        &[
+            "config",
+            "import",
+            "daily",
+            "--from",
+            utf8(&historical_document),
+        ],
+    );
+    assert_eq!(restored["outcome"], "created");
+    assert_eq!(restored["config"], historical["config"]);
+
+    let repeated = cli_json(
+        &cli,
+        &xdg,
+        &[
+            "run",
+            "start",
+            "--config",
+            "daily",
+            "--config-digest",
+            &historical_digest,
+        ],
+    );
+    assert_eq!(repeated["config"], historical["config"]);
+    let repeated_run_id = repeated["run"]["run_id"]
+        .as_str()
+        .expect("generated CLI run id");
+    assert_digest(&repeated["run"]["run_id"], "run:sha256-jcs-v1:");
+    assert_ne!(repeated_run_id, run_id);
+    assert_exact_live_snapshot(&repeated["run"], repeated_run_id);
+    assert_eq!(
+        repeated["run"]["head_sequence"],
+        progressed.1["head_sequence"]
+    );
+    assert_ne!(repeated["run"]["head_digest"], progressed.1["head_digest"]);
+    assert_eq!(repeated["run"]["state"], progressed.1["state"]);
 
     std::fs::remove_dir_all(&root).expect("remove client e2e tree");
 }
