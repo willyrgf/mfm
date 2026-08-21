@@ -87,7 +87,7 @@ pub enum ComposeError {
     /// The config catalog could not be opened.
     #[error("postgres config catalog is invalid or unavailable")]
     Catalog,
-    /// An EVM locator or exact TLS client could not be constructed.
+    /// An EVM locator or HTTP client could not be constructed.
     #[error("evm provider transport could not be constructed")]
     Provider,
     /// Typed binding or immutable Runtime assembly construction failed.
@@ -487,11 +487,8 @@ pub struct Application {
 
 impl Application {
     /// Constructs an Application from one checked Runtime/index composition and config catalog.
-    pub fn from_parts(
-        composed: ComposedRuntime,
-        catalog: Arc<dyn ConfigCatalog>,
-    ) -> Result<Self, ComposeError> {
-        Ok(Self { composed, catalog })
+    pub fn from_parts(composed: ComposedRuntime, catalog: Arc<dyn ConfigCatalog>) -> Self {
+        Self { composed, catalog }
     }
 
     /// Resolves private locators once and constructs the production PostgreSQL/EVM Application.
@@ -524,7 +521,7 @@ impl Application {
         );
         let bindings = BoundCapabilitySet::new(routes)?;
         let composed = ComposedRuntime::compose(store, bindings)?;
-        Self::from_parts(composed, catalog)
+        Ok(Self::from_parts(composed, catalog))
     }
 
     /// Returns the strictly ordered compiled entry points.
@@ -622,31 +619,30 @@ impl Application {
             .await
             .map_err(map_catalog_error)?
             .ok_or(RequestError::ConfigAbsent)?;
-        if let ConfigSelection::Exact { digest, .. } = selection {
-            if entry.digest() != digest {
-                return Err(RequestError::ConfigDigestMismatch.into());
-            }
-        }
         let (name, digest, canonical) = entry.into_parts();
-        let document = tokio::task::spawn_blocking(move || {
-            ConfigDocument::parse_retained(canonical, &digest)
-                .map_err(|_| RequestError::InvalidCatalog)
+        let (document, program, c0) = tokio::task::spawn_blocking(move || {
+            let document = ConfigDocument::parse_retained(canonical, &digest)
+                .map_err(|_| RequestError::InvalidCatalog)?;
+            let (program, c0) = match document.plan() {
+                Ok(planned) => planned,
+                Err(PortfolioError::InvalidValue) => return Err(RequestError::InvalidCatalog),
+                Err(PortfolioError::InvalidContinuation | PortfolioError::Program) => {
+                    return Err(RequestError::Internal);
+                }
+            };
+            Ok((document, program, c0))
         })
         .await
         .map_err(|_| RequestError::Internal)??;
         let config = document.summary(name);
+        if let ConfigSelection::Exact { digest, .. } = selection {
+            if config.digest() != digest {
+                return Err(RequestError::ConfigDigestMismatch.into());
+            }
+        }
         if !self.composed.has_targets(document.targets()) {
             return Err(RequestError::BindingUnbound.into());
         }
-        let (program, c0) = tokio::task::spawn_blocking(move || match document.plan() {
-            Ok(planned) => Ok(planned),
-            Err(PortfolioError::InvalidValue) => Err(RequestError::InvalidCatalog),
-            Err(PortfolioError::InvalidContinuation | PortfolioError::Program) => {
-                Err(RequestError::Internal)
-            }
-        })
-        .await
-        .map_err(|_| RequestError::Internal)??;
         match self
             .composed
             .runtime

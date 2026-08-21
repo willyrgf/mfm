@@ -440,9 +440,10 @@ mod tests {
         )])
         .expect("bindings");
         let composed = ComposedRuntime::compose(store, bindings).expect("composition");
-        Arc::new(
-            Application::from_parts(composed, Arc::new(MemoryCatalog::new())).expect("application"),
-        )
+        Arc::new(Application::from_parts(
+            composed,
+            Arc::new(MemoryCatalog::new()),
+        ))
     }
 
     fn request(method: Method, uri: &str, body: impl Into<Body>) -> Request<Body> {
