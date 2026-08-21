@@ -78,5 +78,6 @@ CLI exit 1 may represent a runnable or durably failed run.
 historical run with a generated REST identity through a deliberately unavailable live Read, proves
 the durable runnable prefix, deletes the selected config, cold-resumes the admitted Program through
 this listener against Reth, validates the complete snapshot, and reloads the identical RunView
-through the CLI. The two renderers also match the same frozen start/progress indeterminate recovery
-fixtures under `docs/contracts/client-surface/`.
+through the CLI. It then reimports the same revision and requires a fresh CLI-generated run to
+produce the same semantic result. The two renderers also match the same frozen start/progress
+indeterminate recovery fixtures under `docs/contracts/client-surface/`.
