@@ -195,15 +195,7 @@ struct Daemon {
 impl Daemon {
     fn start(binary: &Path, xdg: &Path, socket: &Path) -> Self {
         let child = command(binary, xdg)
-            .args([
-                "serve",
-                "--unix-socket",
-                utf8(socket),
-                "--max-in-flight-runs",
-                "4",
-                "--run-timeout",
-                "120",
-            ])
+            .args(["serve", "--unix-socket", utf8(socket)])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()

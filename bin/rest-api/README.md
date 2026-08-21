@@ -4,14 +4,11 @@
 complete Application before binding and listens only on a caller-selected Unix socket:
 
 ```text
-mfm_rest_api serve [--deployment <PATH>] --unix-socket <PATH> \
-    [--max-in-flight-runs <N>] [--run-timeout <SECONDS>]
+mfm_rest_api serve [--deployment <PATH>] --unix-socket <PATH>
 ```
 
-The default maximum is 8 active run requests and the default timeout is 120 seconds. Accepted
-ranges are 1–256 requests and 1–3,600 seconds. Deployment selection is the same strict
-override/XDG/HOME bootstrap used by the CLI. Composition failures occur before bind and reach only
-local stderr.
+Deployment selection is the same strict override/XDG/HOME bootstrap used by the CLI. Composition
+failures occur before bind and reach only local stderr.
 
 ## Local socket
 
@@ -63,17 +60,11 @@ bodies are limited to 4 KiB. Bodyless routes accept exactly zero bytes. List que
 limited to 1 KiB, accept only one `cursor` and one `limit`, and use the shared 1–200 page bound with
 default 50.
 
-A global non-waiting semaphore covers start, progress, and run reads. Start/progress additionally
-reject another active mutation for the same RunId. These are process-local amplification controls,
-not durable scheduling authority; timeout cancellation leaves append-only recovery to the next
-read/retry.
-
 Ordinary routed errors are exactly `{"code":"...","message":"..."}` with the shared stable
 Application code/message mapping. Ambiguous run appends add the shared tagged `recovery` object.
-REST-local errors cover invalid body/query/media/path/header, fallback 404/405, body size, run
-pressure, and deadlines. HTTP parser failures before Axum routing are outside that JSON contract. A
-durably failed run remains a successful HTTP request with status 200 and tagged
-`state.kind:"failed"`.
+REST-local errors cover invalid body/query/media/path/header, fallback 404/405, and body size. HTTP
+parser failures before Axum routing are outside that JSON contract. A durably failed run remains a
+successful HTTP request with status 200 and tagged `state.kind:"failed"`.
 
 The CLI-only asymmetries are intentional: `store init` retains schema authority outside the daemon,
 and only the CLI may generate a RunId. HTTP status represents request success, while CLI exit 1 may
