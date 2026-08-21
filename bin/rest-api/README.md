@@ -32,23 +32,28 @@ deployment environment.
 | GET | `/v1/configs` | none | complete retained-revision `ItemList` |
 | DELETE | `/v1/configs/{name}/revisions/{digest}` | none | empty; 204 whether present or absent |
 | GET | `/v1/runs?after=&limit=` | none | shared mechanical `RunPage` |
-| POST | `/v1/runs/{run_id}/start` | strict selection JSON | shared `StartRunResult` |
+| POST | `/v1/runs/start` | strict selection and optional RunId JSON | shared `StartRunResult` |
 | POST | `/v1/runs/{run_id}/progress` | `{}` | shared `RunView` |
 | GET | `/v1/runs/{run_id}` | none | shared `RunView` |
 
 GET routes retain HTTP HEAD semantics: they perform the same Application admission and return the
 same status and headers with no body. All other routed methods receive the normalized 405 envelope.
-There is no schema-provisioning, deployment-view, inline-config start, server-generated RunId,
-keystore, transaction, replay, trace, audit, or effect route.
+There is no schema-provisioning, deployment-view, inline-config start, keystore, transaction,
+replay, trace, audit, or effect route.
 
-Start accepts exactly one revision selection:
+Start accepts exactly one revision selection and an optional explicit identity:
 
 ```json
 {"config":{"name":"daily","digest":"content:sha256-jcs-v1:<64 hex>"}}
 ```
 
-The path RunId is always caller-owned. Mutating routes use Axum's JSON media-type admission,
-accepting `application/json` and application media types with a `+json` suffix.
+When `run_id` is absent, REST obtains exactly 32 bytes from the OS cryptographic random source and
+derives the identity before calling Application. An explicit `"run_id":"run:sha256-jcs-v1:..."`
+bypasses generation and supports deterministic retry. Successful starts return the selected identity
+inside `run.run_id`; ordinary start errors after identity selection add `run_id` to the error body so
+a durably interrupted run remains addressable. Entropy failure is `run_id_generation_failed`.
+Mutating routes use Axum's JSON media-type admission, accepting `application/json` and application
+media types with a `+json` suffix.
 
 ## Bounds and failures
 
@@ -59,18 +64,19 @@ extraction accepts only one `after` RunId and one `limit`, rejects unknown
 or duplicate fields, and uses the shared 1–200 page bound with default 50.
 
 Ordinary routed errors are exactly `{"code":"...","message":"..."}` with the shared stable
-Application code/message mapping. Ambiguous run appends add the shared tagged `recovery` object.
-REST-local errors cover invalid body/query/media/path/header, fallback 404/405, and body size. HTTP
+Application code/message mapping, except that a start request after identity selection also carries
+its `run_id`. Ambiguous run appends add the shared tagged `recovery` object. REST-local errors cover
+invalid body/query/media/path/header, fallback 404/405, body size, and RunId entropy failure. HTTP
 parser failures before Axum routing are outside that JSON contract. A durably failed run remains a
 successful HTTP request with status 200 and tagged `state.kind:"failed"`.
 
-The CLI-only asymmetries are intentional: `postgres init` retains schema authority outside the daemon,
-and only the CLI may generate a RunId. HTTP status represents request success, while CLI exit 1 may
-represent a runnable or durably failed run.
+The CLI-only `postgres init` retains schema authority outside the daemon. Both client surfaces may
+generate a RunId before their one Application call. HTTP status represents request success, while
+CLI exit 1 may represent a runnable or durably failed run.
 
 `nix run .#run -- --task client-e2e` builds the CLI and REST binaries explicitly. It admits an exact
-historical run through a deliberately unavailable live Read, proves the durable runnable prefix,
-deletes the selected config, cold-resumes the admitted Program through this listener against Reth,
-validates the complete snapshot, and reloads the identical RunView through the CLI. The two renderers
-also match the same frozen start/progress indeterminate recovery fixtures under
-`docs/contracts/client-surface/`.
+historical run with a generated REST identity through a deliberately unavailable live Read, proves
+the durable runnable prefix, deletes the selected config, cold-resumes the admitted Program through
+this listener against Reth, validates the complete snapshot, and reloads the identical RunView
+through the CLI. The two renderers also match the same frozen start/progress indeterminate recovery
+fixtures under `docs/contracts/client-surface/`.

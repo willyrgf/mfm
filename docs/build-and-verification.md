@@ -54,7 +54,7 @@ managed `client-e2e` task below; that task owns the complete fixture and binary 
 | --- | --- |
 | `nix run .#model-check` | Admit the compiled model without project tasks. |
 | `nix run .#run -- --task postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
-| `nix run .#run -- --task client-e2e` | Interrupt an exact historical run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it through production REST against Reth, validate the exact snapshot, and reload the same RunView through the CLI over PostgreSQL. |
+| `nix run .#run -- --task client-e2e` | Generate and interrupt an exact historical REST run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it against Reth, then validate and reload its exact snapshot through the CLI. |
 | `nix run .#run -- --task capacity-app` | Exercise the exact 64/65-source Portfolio Program/C0 bound. |
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |
