@@ -48,10 +48,14 @@ The CLI e2e is ignored by default. Drive it directly only against a locally star
 `reth --dev` plus PostgreSQL, and only serially:
 
 ```bash
-MFM_E2E_RPC_URL=... \
-MFM_E2E_RUNTIME_STORE_LOCATOR=... MFM_E2E_ADMIN_STORE_LOCATOR=... nix develop -c cargo test \
+MFM_E2E_EVM_ADAPTER_LOCATOR="$evm_adapter_locator" \
+MFM_E2E_RUNTIME_STORE_LOCATOR="$runtime_store_locator" \
+MFM_E2E_ADMIN_STORE_LOCATOR="$admin_store_locator" nix develop -c cargo test \
   -p mfm --test cli_e2e -- --include-ignored --test-threads=1
 ```
+
+Assign the three lower-case shell variables in this example the same raw HTTP(S) and PostgreSQL URLs
+accepted by the live locators; they are not JSON envelopes.
 
 ## Nixfied tasks
 

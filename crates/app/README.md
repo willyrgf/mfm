@@ -9,7 +9,25 @@ custody, constructs stock EVM HTTP(S) clients, and delegates to the same injecte
 `$XDG_CONFIG_HOME/mfm/deployment.toml`, falling back to `$HOME/.config/mfm/deployment.toml` only when
 the XDG base is unset, empty, or relative. The bounded strict TOML contains environment resolver
 names, never locator values. Its EVM routes are empty or strictly ordered and unique by
-`(chain_id, endpoint_id)`, with at most 256 bindings.
+`(chain_id, endpoint_id)`, with at most 256 bindings. Chain IDs are integers in the inclusive range
+1 through 9,223,372,036,854,775,807.
+
+A complete deployment with one EVM route is:
+
+```toml
+[store]
+runtime_locator_env = "MFM_RUNTIME_STORE_LOCATOR"
+
+[[evm_routes]]
+chain_id = 1
+endpoint_id = "mainnet-primary"
+adapter_locator_env = "MFM_EVM_MAINNET_LOCATOR"
+```
+
+Resolver names use `[A-Z_][A-Z0-9_]*` and contain 1–64 bytes. The runtime store resolver must hold
+one raw, loopback-only `postgresql` URL accepted by `RuntimePostgresLocator`; each adapter resolver
+must hold one raw HTTP(S) URL accepted by `EvmAdapterLocator`. Administrative PostgreSQL authority
+is not part of this file and is resolved only by the CLI `store init` command.
 
 `ConfigDocument` is an opaque async checked value. It bounds input at 256 KiB, rejects malformed
 UTF-8/JSON, duplicate keys, floats, excess depth, unknown fields, and invalid domain values, then

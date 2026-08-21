@@ -8,7 +8,8 @@ mfm_rest_api serve [--deployment <PATH>] --unix-socket <PATH>
 ```
 
 Deployment selection is the same strict override/XDG/HOME bootstrap used by the CLI. Composition
-failures occur before bind and reach only local stderr.
+failures occur before bind and reach only local stderr. The complete deployment grammar, bounds, and
+example are documented by [`mfm-app`](../../crates/app/README.md).
 
 ## Local socket
 
