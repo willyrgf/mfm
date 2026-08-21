@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use axum::body::{to_bytes, Body};
-use axum::extract::rejection::PathRejection;
-use axum::extract::{OriginalUri, Path, Request, State};
-use axum::http::header::{CONTENT_TYPE, LOCATION};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
-use axum::response::Response;
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::http::header::LOCATION;
+use axum::http::{HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
-use axum::Router;
+use axum::{Json, Router};
 use mfm_app::{
     Application, ConfigDocument, ConfigDocumentError, ConfigName, ConfigSelection, ImportOutcome,
     ItemList, RequestError, RunPageLimit, RunRequestError, SerializableRunView,
@@ -15,10 +14,8 @@ use mfm_app::{
 };
 use mfm_ids::RunId;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
-const CONFIG_PATH_ENCODED_MAX: usize = 192;
-const RUN_PATH_ENCODED_MAX: usize = 300;
-const QUERY_ENCODED_MAX: usize = 1024;
 const RUN_BODY_MAX: usize = 4 * 1024;
 
 pub(crate) fn router(application: Arc<Application>) -> Router {
@@ -27,55 +24,52 @@ pub(crate) fn router(application: Arc<Application>) -> Router {
         .route("/v1/entry-points", get(entry_points))
         .route("/v1/bindings", get(bindings))
         .route("/v1/configs", get(list_configs))
-        .route("/v1/configs/{name}", put(import_config).get(read_config))
+        .route(
+            "/v1/configs/{name}",
+            put(import_config)
+                .get(read_config)
+                .layer(DefaultBodyLimit::max(MAX_CONFIG_DOCUMENT_BYTES)),
+        )
         .route("/v1/runs", get(list_runs))
-        .route("/v1/runs/{run_id}/start", post(start_run))
-        .route("/v1/runs/{run_id}/progress", post(progress_run))
+        .route(
+            "/v1/runs/{run_id}/start",
+            post(start_run).layer(DefaultBodyLimit::max(RUN_BODY_MAX)),
+        )
+        .route(
+            "/v1/runs/{run_id}/progress",
+            post(progress_run).layer(DefaultBodyLimit::max(RUN_BODY_MAX)),
+        )
         .route("/v1/runs/{run_id}", get(read_run))
         .fallback(route_not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(application)
 }
 
-async fn health(request: Request) -> Response {
-    if let Err(error) = require_empty_body(request).await {
-        return error;
-    }
+async fn health() -> Response {
     json_response(StatusCode::OK, &Health { status: "ok" })
 }
 
-async fn entry_points(request: Request) -> Response {
-    if let Err(error) = require_empty_body(request).await {
-        return error;
-    }
+async fn entry_points() -> Response {
     json_response(StatusCode::OK, &ItemList::new(Application::entry_points()))
 }
 
-async fn bindings(State(application): State<Arc<Application>>, request: Request) -> Response {
-    if let Err(error) = require_empty_body(request).await {
-        return error;
-    }
+async fn bindings(State(application): State<Arc<Application>>) -> Response {
     json_response(StatusCode::OK, &ItemList::new(application.bindings()))
 }
 
 async fn import_config(
     State(application): State<Arc<Application>>,
-    OriginalUri(uri): OriginalUri,
-    path: Result<Path<String>, PathRejection>,
-    request: Request,
+    path: Result<Path<ConfigName>, PathRejection>,
+    body: Result<Json<Box<RawValue>>, JsonRejection>,
 ) -> Response {
-    if !is_json(request.headers()) {
-        return unsupported_media_type();
-    }
-    let name = match config_name(&uri, path) {
-        Ok(name) => name,
-        Err(error) => return error.response(),
+    let Some(name) = config_name(path) else {
+        return invalid_config_name();
     };
-    let bytes = match bounded_body(request, MAX_CONFIG_DOCUMENT_BYTES).await {
-        Ok(bytes) => bytes,
-        Err(error) => return error,
+    let Json(raw) = match body {
+        Ok(raw) => raw,
+        Err(error) => return config_json_rejection(error),
     };
-    let document = match ConfigDocument::new(bytes).await {
+    let document = match ConfigDocument::new(raw.get().as_bytes().to_vec()).await {
         Ok(document) => document,
         Err(error) => return config_document_error(error),
     };
@@ -101,14 +95,10 @@ async fn import_config(
 
 async fn list_configs(
     State(application): State<Arc<Application>>,
-    OriginalUri(uri): OriginalUri,
-    request: Request,
+    query: Result<Query<EmptyQuery>, QueryRejection>,
 ) -> Response {
-    if let Err(error) = require_empty_body(request).await {
-        return error;
-    }
-    if uri.query().is_some() {
-        return invalid_query_failure().response();
+    if query.is_err() {
+        return invalid_query();
     }
     match application.list_configs().await {
         Ok(items) => json_response(StatusCode::OK, &ItemList::new(&items)),
@@ -118,16 +108,10 @@ async fn list_configs(
 
 async fn read_config(
     State(application): State<Arc<Application>>,
-    OriginalUri(uri): OriginalUri,
-    path: Result<Path<String>, PathRejection>,
-    request: Request,
+    path: Result<Path<ConfigName>, PathRejection>,
 ) -> Response {
-    if let Err(error) = require_empty_body(request).await {
-        return error;
-    }
-    let name = match config_name(&uri, path) {
-        Ok(name) => name,
-        Err(error) => return error.response(),
+    let Some(name) = config_name(path) else {
+        return invalid_config_name();
     };
     match application.read_config(&name).await {
         Ok(config) => json_response(StatusCode::OK, &config),
@@ -137,21 +121,21 @@ async fn read_config(
 
 async fn list_runs(
     State(application): State<Arc<Application>>,
-    OriginalUri(uri): OriginalUri,
-    request: Request,
+    query: Result<Query<RunQuery>, QueryRejection>,
 ) -> Response {
-    if let Err(error) = require_empty_body(request).await {
-        return error;
-    }
-    let query = match query(&uri) {
+    let Query(query) = match query {
         Ok(query) => query,
-        Err(error) => return error.response(),
+        Err(_) => return invalid_query(),
     };
     let after = match query.after.as_deref().map(RunId::parse).transpose() {
         Ok(after) => after,
         Err(_) => return checked_error("invalid_run_id", "run id is invalid"),
     };
-    match application.list_runs(after.as_ref(), query.limit).await {
+    let limit = match query.limit.map(RunPageLimit::new).transpose() {
+        Ok(limit) => limit.unwrap_or_default(),
+        Err(_) => return checked_error("invalid_page_limit", "page limit is invalid"),
+    };
+    match application.list_runs(after.as_ref(), limit).await {
         Ok(page) => json_response(StatusCode::OK, &page),
         Err(error) => request_error(error),
     }
@@ -159,24 +143,15 @@ async fn list_runs(
 
 async fn start_run(
     State(application): State<Arc<Application>>,
-    OriginalUri(uri): OriginalUri,
-    path: Result<Path<String>, PathRejection>,
-    request: Request,
+    path: Result<Path<RunId>, PathRejection>,
+    body: Result<Json<StartBody>, JsonRejection>,
 ) -> Response {
-    if !is_json(request.headers()) {
-        return unsupported_media_type();
-    }
-    let run_id = match run_id(&uri, path) {
-        Ok(run_id) => run_id,
-        Err(error) => return error.response(),
+    let Some(run_id) = run_id(path) else {
+        return invalid_run_id();
     };
-    let bytes = match bounded_body(request, RUN_BODY_MAX).await {
-        Ok(bytes) => bytes,
-        Err(error) => return error,
-    };
-    let body: StartBody = match serde_json::from_slice(&bytes) {
+    let Json(body) = match body {
         Ok(body) => body,
-        Err(_) => return invalid_request_body(),
+        Err(error) => return json_rejection(error),
     };
     match application.start_run(run_id, &body.config).await {
         Ok(result) => json_response(StatusCode::OK, &result),
@@ -186,23 +161,14 @@ async fn start_run(
 
 async fn progress_run(
     State(application): State<Arc<Application>>,
-    OriginalUri(uri): OriginalUri,
-    path: Result<Path<String>, PathRejection>,
-    request: Request,
+    path: Result<Path<RunId>, PathRejection>,
+    body: Result<Json<EmptyBody>, JsonRejection>,
 ) -> Response {
-    if !is_json(request.headers()) {
-        return unsupported_media_type();
-    }
-    let run_id = match run_id(&uri, path) {
-        Ok(run_id) => run_id,
-        Err(error) => return error.response(),
+    let Some(run_id) = run_id(path) else {
+        return invalid_run_id();
     };
-    let bytes = match bounded_body(request, RUN_BODY_MAX).await {
-        Ok(bytes) => bytes,
-        Err(error) => return error,
-    };
-    if serde_json::from_slice::<EmptyBody>(&bytes).is_err() {
-        return invalid_request_body();
+    if let Err(error) = body {
+        return json_rejection(error);
     }
     match application.progress_run(&run_id).await {
         Ok(view) => json_response(StatusCode::OK, &SerializableRunView::new(&view)),
@@ -212,16 +178,10 @@ async fn progress_run(
 
 async fn read_run(
     State(application): State<Arc<Application>>,
-    OriginalUri(uri): OriginalUri,
-    path: Result<Path<String>, PathRejection>,
-    request: Request,
+    path: Result<Path<RunId>, PathRejection>,
 ) -> Response {
-    if let Err(error) = require_empty_body(request).await {
-        return error;
-    }
-    let run_id = match run_id(&uri, path) {
-        Ok(run_id) => run_id,
-        Err(error) => return error.response(),
+    let Some(run_id) = run_id(path) else {
+        return invalid_run_id();
     };
     match application.read_run(&run_id).await {
         Ok(view) => json_response(StatusCode::OK, &SerializableRunView::new(&view)),
@@ -260,158 +220,23 @@ struct StartBody {
 #[serde(deny_unknown_fields)]
 struct EmptyBody {}
 
-struct Query {
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyQuery {}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunQuery {
     after: Option<String>,
-    limit: RunPageLimit,
+    limit: Option<usize>,
 }
 
-fn query(uri: &Uri) -> Result<Query, RestFailure> {
-    let encoded = uri.query().unwrap_or_default();
-    if encoded.len() > QUERY_ENCODED_MAX {
-        return Err(invalid_query_failure());
-    }
-    let mut after = None;
-    let mut limit = None;
-    if !encoded.is_empty() {
-        for field in encoded.split('&') {
-            let (key, value) = field.split_once('=').ok_or_else(invalid_query_failure)?;
-            let key = decode_query_component(key).ok_or_else(invalid_query_failure)?;
-            let value = decode_query_component(value).ok_or_else(invalid_query_failure)?;
-            match key.as_str() {
-                "after" if after.is_none() => after = Some(value),
-                "limit" if limit.is_none() => limit = Some(value),
-                _ => return Err(invalid_query_failure()),
-            }
-        }
-    }
-    let limit = match limit {
-        Some(value) => {
-            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err(invalid_query_failure());
-            }
-            value
-                .parse::<usize>()
-                .ok()
-                .and_then(|value| RunPageLimit::new(value).ok())
-                .ok_or_else(|| checked_failure("invalid_page_limit", "page limit is invalid"))?
-        }
-        None => RunPageLimit::default(),
-    };
-    Ok(Query { after, limit })
+fn config_name(path: Result<Path<ConfigName>, PathRejection>) -> Option<ConfigName> {
+    path.ok().map(|Path(name)| name)
 }
 
-fn decode_query_component(encoded: &str) -> Option<String> {
-    let bytes = encoded.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'%' if index + 2 < bytes.len() => {
-                let high = hex(bytes[index + 1])?;
-                let low = hex(bytes[index + 2])?;
-                decoded.push(high << 4 | low);
-                index += 3;
-            }
-            b'%' => return None,
-            b'+' => {
-                decoded.push(b' ');
-                index += 1;
-            }
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded).ok()
-}
-
-const fn hex(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn config_name(
-    uri: &Uri,
-    path: Result<Path<String>, PathRejection>,
-) -> Result<ConfigName, RestFailure> {
-    if raw_tail(uri).len() > CONFIG_PATH_ENCODED_MAX {
-        return Err(checked_failure(
-            "invalid_config_name",
-            "config name is invalid",
-        ));
-    }
-    let Path(value) =
-        path.map_err(|_| checked_failure("invalid_config_name", "config name is invalid"))?;
-    ConfigName::new(value)
-        .map_err(|_| checked_failure("invalid_config_name", "config name is invalid"))
-}
-
-fn run_id(uri: &Uri, path: Result<Path<String>, PathRejection>) -> Result<RunId, RestFailure> {
-    let encoded = uri
-        .path()
-        .split('/')
-        .rev()
-        .find(|part| !part.is_empty() && *part != "start" && *part != "progress")
-        .unwrap_or_default();
-    if encoded.len() > RUN_PATH_ENCODED_MAX {
-        return Err(checked_failure("invalid_run_id", "run id is invalid"));
-    }
-    let Path(value) = path.map_err(|_| checked_failure("invalid_run_id", "run id is invalid"))?;
-    RunId::parse(value).map_err(|_| checked_failure("invalid_run_id", "run id is invalid"))
-}
-
-fn raw_tail(uri: &Uri) -> &str {
-    uri.path().rsplit('/').next().unwrap_or_default()
-}
-
-fn is_json(headers: &HeaderMap) -> bool {
-    let mut values = headers.get_all(CONTENT_TYPE).iter();
-    let Some(value) = values.next().and_then(|value| value.to_str().ok()) else {
-        return false;
-    };
-    if values.next().is_some() {
-        return false;
-    }
-    let mut parts = value.split(';');
-    if !parts
-        .next()
-        .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"))
-    {
-        return false;
-    }
-    match (parts.next(), parts.next()) {
-        (None, None) => true,
-        (Some(parameter), None) => parameter.split_once('=').is_some_and(|(name, value)| {
-            name.trim().eq_ignore_ascii_case("charset")
-                && value.trim().eq_ignore_ascii_case("utf-8")
-        }),
-        _ => false,
-    }
-}
-
-async fn bounded_body(request: Request, limit: usize) -> Result<Vec<u8>, Response> {
-    to_bytes(request.into_body(), limit)
-        .await
-        .map(|bytes| bytes.to_vec())
-        .map_err(|_| {
-            boundary_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "request_body_too_large",
-                "request body is too large",
-            )
-        })
-}
-
-async fn require_empty_body(request: Request) -> Result<(), Response> {
-    match to_bytes(request.into_body(), 1).await {
-        Ok(bytes) if bytes.is_empty() => Ok(()),
-        Ok(_) | Err(_) => Err(invalid_request_body()),
-    }
+fn run_id(path: Result<Path<RunId>, PathRejection>) -> Option<RunId> {
+    path.ok().map(|Path(run_id)| run_id)
 }
 
 fn config_document_error(error: ConfigDocumentError) -> Response {
@@ -459,11 +284,39 @@ fn run_request_error(error: RunRequestError) -> Response {
     }
 }
 
+fn config_json_rejection(error: JsonRejection) -> Response {
+    if matches!(&error, JsonRejection::MissingJsonContentType(_)) {
+        unsupported_media_type()
+    } else if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        request_body_too_large()
+    } else {
+        config_document_error(ConfigDocumentError::Malformed)
+    }
+}
+
+fn json_rejection(error: JsonRejection) -> Response {
+    if matches!(&error, JsonRejection::MissingJsonContentType(_)) {
+        unsupported_media_type()
+    } else if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        request_body_too_large()
+    } else {
+        invalid_request_body()
+    }
+}
+
 fn invalid_request_body() -> Response {
     boundary_error(
         StatusCode::BAD_REQUEST,
         "invalid_request_body",
         "request body is invalid",
+    )
+}
+
+fn request_body_too_large() -> Response {
+    boundary_error(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "request_body_too_large",
+        "request body is too large",
     )
 }
 
@@ -479,37 +332,20 @@ fn checked_error(code: &'static str, message: &'static str) -> Response {
     boundary_error(StatusCode::BAD_REQUEST, code, message)
 }
 
-#[derive(Clone, Copy)]
-struct RestFailure {
-    status: StatusCode,
-    code: &'static str,
-    message: &'static str,
+fn invalid_config_name() -> Response {
+    checked_error("invalid_config_name", "config name is invalid")
 }
 
-impl RestFailure {
-    const fn new(status: StatusCode, code: &'static str, message: &'static str) -> Self {
-        Self {
-            status,
-            code,
-            message,
-        }
-    }
-
-    fn response(self) -> Response {
-        boundary_error(self.status, self.code, self.message)
-    }
+fn invalid_run_id() -> Response {
+    checked_error("invalid_run_id", "run id is invalid")
 }
 
-const fn invalid_query_failure() -> RestFailure {
-    RestFailure::new(
+fn invalid_query() -> Response {
+    boundary_error(
         StatusCode::BAD_REQUEST,
         "invalid_query",
         "request query is invalid",
     )
-}
-
-const fn checked_failure(code: &'static str, message: &'static str) -> RestFailure {
-    RestFailure::new(StatusCode::BAD_REQUEST, code, message)
 }
 
 fn internal_error() -> Response {
@@ -538,17 +374,7 @@ fn boundary_error(status: StatusCode, code: &'static str, message: &str) -> Resp
 }
 
 fn json_response(status: StatusCode, value: &impl Serialize) -> Response {
-    let bytes = match serde_json::to_vec(value) {
-        Ok(bytes) => bytes,
-        Err(_) if status != StatusCode::INTERNAL_SERVER_ERROR => return internal_error(),
-        Err(_) => b"{\"code\":\"internal\",\"message\":\"application internal failure\"}".to_vec(),
-    };
-    let mut response = Response::new(Body::from(bytes));
-    *response.status_mut() = status;
-    response
-        .headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    response
+    (status, Json(value)).into_response()
 }
 
 #[cfg(test)]
@@ -556,6 +382,8 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
 
+    use axum::body::{to_bytes, Body};
+    use axum::http::header::CONTENT_TYPE;
     use axum::http::{Method, Request};
     use mfm_app::{Application, BoundCapabilitySet, ComposedRuntime, RunRecovery};
     use mfm_catalog::MemoryCatalog;
@@ -692,11 +520,6 @@ mod tests {
                 "method_not_allowed",
             ),
             (
-                request(Method::GET, "/healthz", Body::from("x")),
-                StatusCode::BAD_REQUEST,
-                "invalid_request_body",
-            ),
-            (
                 request(Method::GET, "/v1/configs/UPPER", Body::empty()),
                 StatusCode::BAD_REQUEST,
                 "invalid_config_name",
@@ -707,6 +530,16 @@ mod tests {
                 "invalid_query",
             ),
             (
+                request(Method::GET, "/v1/runs?limit=201", Body::empty()),
+                StatusCode::BAD_REQUEST,
+                "invalid_page_limit",
+            ),
+            (
+                request(Method::GET, "/v1/runs?after=invalid", Body::empty()),
+                StatusCode::BAD_REQUEST,
+                "invalid_run_id",
+            ),
+            (
                 request(
                     Method::POST,
                     &format!("/v1/runs/{RUN_ID}/start"),
@@ -714,6 +547,11 @@ mod tests {
                 ),
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "unsupported_media_type",
+            ),
+            (
+                json_request(Method::PUT, "/v1/configs/malformed", Body::from("{")),
+                StatusCode::BAD_REQUEST,
+                "malformed_config_document",
             ),
             (
                 json_request(
