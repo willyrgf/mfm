@@ -52,7 +52,8 @@ primitive obtains exactly 32 bytes of OS cryptographic entropy and applies
 the only `RunRequestError` carrying data, through the exact `RunRecovery::Start` or
 `RunRecovery::Progress` sum.
 
-`RequestError` owns stable redaction-safe codes and messages. Retained revisions are revalidated as
-canonical documents on every start/list. Unbound routes fail before Runtime Store IO; deleting a
-revision does not revoke already admitted runs. Shared serializers preserve the
+`RequestError` owns stable redaction-safe codes and messages. `SerializableClientError` owns the one
+JSON envelope for plain, identified-start, and append-recovery errors. Retained revisions are
+revalidated as canonical documents on every start/list. Unbound routes fail before Runtime Store IO;
+deleting a revision does not revoke already admitted runs. Shared serializers preserve the
 `RunViewState` sum and embed terminal canonical bytes as a raw JSON value.

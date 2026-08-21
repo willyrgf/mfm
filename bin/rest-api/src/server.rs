@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use mfm_app::{
     generate_run_id, Application, ConfigDocument, ConfigDocumentError, ConfigName, ConfigSelection,
     ImportOutcome, ItemList, RequestError, RunIdGenerationError, RunPageLimit, RunRequestError,
-    SerializableRunView, MAX_CONFIG_DOCUMENT_BYTES,
+    SerializableClientError, SerializableRunView, MAX_CONFIG_DOCUMENT_BYTES,
 };
 use mfm_ids::RunId;
 use serde::{Deserialize, Serialize};
@@ -267,14 +267,13 @@ const fn request_error_status(error: RequestError) -> StatusCode {
 
 fn start_run_error(run_id: &RunId, error: RunRequestError) -> Response {
     match error {
-        RunRequestError::Request(error) => json_response(
-            request_error_status(error),
-            &IdentifiedError {
-                code: error.code(),
-                message: &error.to_string(),
-                run_id,
-            },
-        ),
+        RunRequestError::Request(error) => {
+            let message = error.to_string();
+            json_response(
+                request_error_status(error),
+                &SerializableClientError::identified(error.code(), &message, run_id),
+            )
+        }
         RunRequestError::AppendIndeterminate { recovery } => {
             run_request_error(RunRequestError::AppendIndeterminate { recovery })
         }
@@ -284,14 +283,16 @@ fn start_run_error(run_id: &RunId, error: RunRequestError) -> Response {
 fn run_request_error(error: RunRequestError) -> Response {
     match error {
         RunRequestError::Request(error) => request_error(error),
-        RunRequestError::AppendIndeterminate { recovery } => json_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            &RecoveryError {
-                code: "run_append_indeterminate",
-                message: "run append outcome is indeterminate",
-                recovery,
-            },
-        ),
+        error @ RunRequestError::AppendIndeterminate { .. } => {
+            let message = error.to_string();
+            let recovery = error
+                .recovery()
+                .expect("append-indeterminate error always carries recovery");
+            json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &SerializableClientError::recoverable(error.code(), &message, recovery),
+            )
+        }
     }
 }
 
@@ -367,28 +368,8 @@ fn invalid_query() -> Response {
     )
 }
 
-#[derive(Serialize)]
-struct ErrorBody<'a> {
-    code: &'a str,
-    message: &'a str,
-}
-
-#[derive(Serialize)]
-struct IdentifiedError<'a> {
-    code: &'a str,
-    message: &'a str,
-    run_id: &'a RunId,
-}
-
-#[derive(Serialize)]
-struct RecoveryError {
-    code: &'static str,
-    message: &'static str,
-    recovery: mfm_app::RunRecovery,
-}
-
 fn boundary_error(status: StatusCode, code: &'static str, message: &str) -> Response {
-    json_response(status, &ErrorBody { code, message })
+    json_response(status, &SerializableClientError::new(code, message))
 }
 
 fn json_response(status: StatusCode, value: &impl Serialize) -> Response {
@@ -504,8 +485,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_contract_covers_transport_models_and_recovery() {
-        let application = application();
-        let service = router(Arc::clone(&application));
+        let service = router(application());
 
         let mut health = request(Method::GET, "/healthz", Body::empty());
         health
@@ -722,41 +702,15 @@ mod tests {
         .await;
         assert_eq!(runs["items"][0]["run_id"], generated_run_id.as_str());
 
-        let config = application
-            .import_config(
-                ConfigName::new("daily").expect("name"),
-                ConfigDocument::new(DOCUMENT.to_vec())
-                    .await
-                    .expect("config document"),
-            )
-            .await
-            .expect("retained config")
-            .config()
-            .clone();
         let run_id = RunId::parse(RUN_ID).expect("run id");
-        for (actual, fixture) in [
-            (
-                run_request_error(RunRequestError::AppendIndeterminate {
-                    recovery: RunRecovery::Start {
-                        run_id: run_id.clone(),
-                        config,
-                    },
-                }),
-                include_str!("../../../docs/contracts/client-surface/run-recovery-start.json"),
-            ),
-            (
-                run_request_error(RunRequestError::AppendIndeterminate {
-                    recovery: RunRecovery::Progress { run_id },
-                }),
-                include_str!("../../../docs/contracts/client-surface/run-recovery-progress.json"),
-            ),
-        ] {
-            assert_eq!(actual.status(), StatusCode::SERVICE_UNAVAILABLE);
-            assert_eq!(
-                response_json(actual).await,
-                serde_json::from_str::<serde_json::Value>(fixture).expect("recovery fixture")
-            );
-        }
+        let recovery = run_request_error(RunRequestError::AppendIndeterminate {
+            recovery: RunRecovery::Progress { run_id },
+        });
+        assert_eq!(recovery.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let recovery = response_json(recovery).await;
+        assert_eq!(recovery["code"], "run_append_indeterminate");
+        assert_eq!(recovery["recovery"]["kind"], "progress");
+        assert_eq!(recovery["recovery"]["run_id"], RUN_ID);
 
         assert_eq!(
             send(

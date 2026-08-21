@@ -314,6 +314,69 @@ pub enum RunRecovery {
     },
 }
 
+/// Borrowed client-error JSON model shared by transport renderers.
+pub struct SerializableClientError<'a> {
+    code: &'a str,
+    message: &'a str,
+    detail: ClientErrorDetail<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum ClientErrorDetail<'a> {
+    None,
+    RunId(&'a RunId),
+    Recovery(&'a RunRecovery),
+}
+
+impl<'a> SerializableClientError<'a> {
+    /// Constructs an error with no identity or recovery detail.
+    pub const fn new(code: &'a str, message: &'a str) -> Self {
+        Self {
+            code,
+            message,
+            detail: ClientErrorDetail::None,
+        }
+    }
+
+    /// Constructs a start error carrying its selected run identity.
+    pub const fn identified(code: &'a str, message: &'a str, run_id: &'a RunId) -> Self {
+        Self {
+            code,
+            message,
+            detail: ClientErrorDetail::RunId(run_id),
+        }
+    }
+
+    /// Constructs an append error carrying its exact recovery instruction.
+    pub const fn recoverable(code: &'a str, message: &'a str, recovery: &'a RunRecovery) -> Self {
+        Self {
+            code,
+            message,
+            detail: ClientErrorDetail::Recovery(recovery),
+        }
+    }
+}
+
+impl Serialize for SerializableClientError<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct(
+            "ClientError",
+            2 + usize::from(!matches!(self.detail, ClientErrorDetail::None)),
+        )?;
+        state.serialize_field("code", self.code)?;
+        state.serialize_field("message", self.message)?;
+        match self.detail {
+            ClientErrorDetail::None => {}
+            ClientErrorDetail::RunId(run_id) => state.serialize_field("run_id", run_id)?,
+            ClientErrorDetail::Recovery(recovery) => state.serialize_field("recovery", recovery)?,
+        }
+        state.end()
+    }
+}
+
 /// Run mutation failure with exact recovery identity for ambiguous append acknowledgement.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 // The public recovery sum deliberately retains its checked fields inline; append ambiguity is an
@@ -749,6 +812,10 @@ const fn map_runtime_error(error: RuntimeError) -> RequestError {
 mod tests {
     use super::*;
 
+    const CLIENT_ERROR_DOCUMENT: &[u8] = br#"{
+      "input":{"portfolio":{"quotes":["usd"],"portfolio_id":"portfolio-example","collections":[{"request":{"sources":[{"token":null,"source_id":"wallet-0.native","chain_id":1,"address":"0x1111111111111111111111111111111111111111"}],"decimals":18},"correlation":"native-0"}]},"selector":{"quote":"usd","target":"portfolio-example"},"routes":[{"endpoint_id":"alpha","chain_id":1}]},
+      "entry_point":"mfm.portfolio/snapshot@1"}"#;
+
     #[test]
     fn run_id_generation_consumes_exact_entropy_and_matches_interoperable_vectors() {
         assert_eq!(
@@ -778,6 +845,61 @@ mod tests {
         .is_err());
         assert_eq!(RunIdGenerationError.code(), "run_id_generation_failed");
         assert_eq!(RunIdGenerationError.to_string(), "run id generation failed");
+    }
+
+    #[tokio::test]
+    async fn client_error_json_owns_plain_identified_and_recovery_shapes() {
+        let run_id = RunId::parse(
+            "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
+        )
+        .expect("run id");
+        assert_eq!(
+            serde_json::to_value(SerializableClientError::new("internal", "failure"))
+                .expect("plain error JSON"),
+            serde_json::json!({"code": "internal", "message": "failure"})
+        );
+        assert_eq!(
+            serde_json::to_value(SerializableClientError::identified(
+                "dependency_unavailable",
+                "application dependency is unavailable",
+                &run_id,
+            ))
+            .expect("identified error JSON"),
+            serde_json::json!({
+                "code": "dependency_unavailable",
+                "message": "application dependency is unavailable",
+                "run_id": run_id
+            })
+        );
+
+        let document = ConfigDocument::new(CLIENT_ERROR_DOCUMENT.to_vec())
+            .await
+            .expect("config document");
+        let start = RunRecovery::Start {
+            run_id: run_id.clone(),
+            config: document.summary(ConfigName::new("daily").expect("config name")),
+        };
+        let progress = RunRecovery::Progress { run_id };
+        for (recovery, fixture) in [
+            (
+                &start,
+                include_str!("../../../docs/contracts/client-surface/run-recovery-start.json"),
+            ),
+            (
+                &progress,
+                include_str!("../../../docs/contracts/client-surface/run-recovery-progress.json"),
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(SerializableClientError::recoverable(
+                    "run_append_indeterminate",
+                    "run append outcome is indeterminate",
+                    recovery,
+                ))
+                .expect("recovery error JSON"),
+                serde_json::from_str::<serde_json::Value>(fixture).expect("recovery fixture")
+            );
+        }
     }
 
     #[test]
