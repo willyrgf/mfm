@@ -59,12 +59,11 @@ let
         timeoutMs = 7200000;
       };
     };
-  pgSecurePrepare = pkgs.writeShellApplication {
-    name = "mfm-pg-secure-prepare";
+  pgLocalPrepare = pkgs.writeShellApplication {
+    name = "mfm-pg-local-prepare";
     runtimeInputs = [
       pkgs.coreutils
       pkgs.gnugrep
-      pkgs.openssl
       pkgs.postgresql
     ];
     text = ''
@@ -93,56 +92,28 @@ let
         initdb -D "$pgdata" -U postgres -A trust --no-locale --encoding=UTF8
       fi
 
-      tls_dir="$state_dir/postgres-tls"
-      if [[ ! -s "$tls_dir/ca.pem" || ! -s "$tls_dir/server.pem" || ! -s "$tls_dir/server.key" || ! -s "$tls_dir/alternate-ca.pem" ]]; then
-        rm -rf "$tls_dir"
-        mkdir -p "$tls_dir"
-        chmod 700 "$tls_dir"
-        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-          -subj "/CN=mfm-postgres-test-ca" \
-          -keyout "$tls_dir/ca.key" -out "$tls_dir/ca.pem" >/dev/null 2>&1
-        openssl req -newkey rsa:2048 -nodes \
-          -subj "/CN=127.0.0.1" \
-          -keyout "$tls_dir/server.key" -out "$tls_dir/server.csr" >/dev/null 2>&1
-        printf '%s\n' 'subjectAltName=IP:127.0.0.1' > "$tls_dir/server.ext"
-        openssl x509 -req -days 3650 -sha256 \
-          -in "$tls_dir/server.csr" -CA "$tls_dir/ca.pem" -CAkey "$tls_dir/ca.key" \
-          -CAcreateserial -extfile "$tls_dir/server.ext" -out "$tls_dir/server.pem" \
-          >/dev/null 2>&1
-        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-          -subj "/CN=mfm-postgres-alternate-ca" \
-          -keyout "$tls_dir/alternate-ca.key" -out "$tls_dir/alternate-ca.pem" \
-          >/dev/null 2>&1
-        chmod 600 "$tls_dir/server.key" "$tls_dir/ca.key" "$tls_dir/alternate-ca.key"
-      fi
-
-      if ! grep -q '^# mfm secure postgres fixture$' "$pgdata/postgresql.conf"; then
+      if ! grep -q '^# mfm local postgres fixture$' "$pgdata/postgresql.conf"; then
         {
-          printf '%s\n' '# mfm secure postgres fixture'
-          printf "ssl = on\nssl_cert_file = '%s'\nssl_key_file = '%s'\n" \
-            "$tls_dir/server.pem" "$tls_dir/server.key"
+          printf '%s\n' '# mfm local postgres fixture'
+          printf '%s\n' 'ssl = off'
           printf '%s\n' "password_encryption = 'scram-sha-256'"
         } >> "$pgdata/postgresql.conf"
       fi
       {
-        printf '%s\n' 'hostssl all postgres 127.0.0.1/32 trust'
-        printf '%s\n' 'hostssl all mfm_runtime 127.0.0.1/32 scram-sha-256'
+        printf '%s\n' 'hostnossl all postgres 127.0.0.1/32 trust'
+        printf '%s\n' 'hostnossl all mfm_runtime 127.0.0.1/32 scram-sha-256'
         printf '%s\n' 'host all all 127.0.0.1/32 reject'
+        printf '%s\n' 'hostnossl all postgres ::1/128 trust'
+        printf '%s\n' 'hostnossl all mfm_runtime ::1/128 scram-sha-256'
+        printf '%s\n' 'host all all ::1/128 reject'
       } > "$pgdata/pg_hba.conf"
     '';
   };
-  securePostgresRun = cargoArgs: ''
+  localPostgresRun = cargoArgs: ''
     set -euo pipefail
-    tls_dir="''${stateDir}/postgres-tls"
-    ca_path="$tls_dir/ca.pem"
-    alternate_ca_path="$tls_dir/alternate-ca.pem"
-    ca_hex="$(sha256sum "$ca_path" | cut -d ' ' -f 1)"
-    alternate_ca_hex="$(sha256sum "$alternate_ca_path" | cut -d ' ' -f 1)"
-    rm -f "$tls_dir/ca.key" "$tls_dir/ca.srl" "$tls_dir/server.key" \
-      "$tls_dir/server.csr" "$tls_dir/alternate-ca.key"
-    runtime_password="$(openssl rand -hex 32)"
-    ambient_password="$(openssl rand -hex 32)"
-    admin_dsn="host=''${host:postgres} port=''${port:postgres} user=postgres dbname=postgres sslmode=verify-full sslrootcert=$ca_path"
+    runtime_password="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+    ambient_password="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+    admin_dsn="host=''${host:postgres} port=''${port:postgres} user=postgres dbname=postgres sslmode=disable"
     psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<SQL
     SELECT 'CREATE ROLE mfm_runtime' WHERE NOT EXISTS (
       SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'mfm_runtime'
@@ -151,20 +122,13 @@ let
     ALTER ROLE mfm_runtime PASSWORD '$runtime_password';
     SQL
 
-    runtime_url="postgresql://mfm_runtime:$runtime_password@''${host:postgres}:''${port:postgres}/postgres?sslmode=verify-full"
-    admin_url="postgresql://postgres:$ambient_password@''${host:postgres}:''${port:postgres}/postgres?sslmode=verify-full"
-    wrong_host_url="postgresql://mfm_runtime:$runtime_password@localhost:''${port:postgres}/postgres?sslmode=verify-full"
-    root_spec="{\"kind\":\"pem-file\",\"path\":\"$ca_path\",\"digest\":\"content:sha256-v1:$ca_hex\"}"
-    alternate_spec="{\"kind\":\"pem-file\",\"path\":\"$alternate_ca_path\",\"digest\":\"content:sha256-v1:$alternate_ca_hex\"}"
-    wrong_pin_spec="{\"kind\":\"pem-file\",\"path\":\"$ca_path\",\"digest\":\"content:sha256-v1:0000000000000000000000000000000000000000000000000000000000000000\"}"
-    export MFM_TEST_ADMIN_STORE_LOCATOR="{\"v\":1,\"url\":\"$admin_url\",\"tls_roots\":$root_spec}"
-    export MFM_TEST_RUNTIME_STORE_LOCATOR="{\"v\":1,\"url\":\"$runtime_url\",\"tls_roots\":$root_spec}"
-    export MFM_TEST_WRONG_PIN_STORE_LOCATOR="{\"v\":1,\"url\":\"$runtime_url\",\"tls_roots\":$wrong_pin_spec}"
-    export MFM_TEST_ALTERNATE_CA_STORE_LOCATOR="{\"v\":1,\"url\":\"$runtime_url\",\"tls_roots\":$alternate_spec}"
-    export MFM_TEST_WRONG_HOST_STORE_LOCATOR="{\"v\":1,\"url\":\"$wrong_host_url\",\"tls_roots\":$root_spec}"
+    runtime_url="postgresql://mfm_runtime:$runtime_password@''${host:postgres}:''${port:postgres}/postgres?sslmode=disable"
+    admin_url="postgresql://postgres:$ambient_password@''${host:postgres}:''${port:postgres}/postgres?sslmode=disable"
+    export MFM_TEST_ADMIN_STORE_LOCATOR="{\"v\":1,\"url\":\"$admin_url\"}"
+    export MFM_TEST_RUNTIME_STORE_LOCATOR="{\"v\":1,\"url\":\"$runtime_url\"}"
     export PGHOST=192.0.2.1 PGPORT=1 PGUSER=ambient PGDATABASE=ambient
     export PGPASSWORD="$ambient_password" PGPASSFILE="''${stateDir}/absent-pgpass"
-    export PGSERVICE=ambient SSL_CERT_FILE="$alternate_ca_path"
+    export PGSERVICE=ambient PGSSLMODE=verify-full
     ${cargoArgs}
   '';
   evmTlsPrepare = pkgs.writeShellApplication {
@@ -317,9 +281,9 @@ in
     executable = "bin/cc";
     effects = [ "process" ];
   };
-  nixfied.closures.pg-secure-prepare = {
-    package = pgSecurePrepare;
-    executable = "bin/mfm-pg-secure-prepare";
+  nixfied.closures.pg-local-prepare = {
+    package = pgLocalPrepare;
+    executable = "bin/mfm-pg-local-prepare";
     effects = [
       "process"
       "file-write"
@@ -353,9 +317,9 @@ in
 
   nixfied.tasks.pg-init = lib.mkForce {
     invocation = {
-      tools = [ "pg-secure-prepare" ];
+      tools = [ "pg-local-prepare" ];
       run = [
-        "mfm-pg-secure-prepare"
+        "mfm-pg-local-prepare"
         "--state-dir"
         "\${stateDir}"
       ];
@@ -478,14 +442,17 @@ in
         run = [
           "bash"
           "-c"
-          (securePostgresRun ''
+          (localPostgresRun ''
+            env MFM_TEST_BLOCKED_POSTGRES_ENV=PGOPTIONS PGOPTIONS=mfm-rejected \
+              cargo test -p mfm-storage-postgres --lib \
+                tests::managed_postgres_rejects_pgoptions -- \
+                --include-ignored --exact --test-threads=1
             exec cargo test -p mfm-storage-postgres --lib -- --include-ignored --test-threads=1
           '')
         ];
         tools = [
           "pg-psql"
           pkgs.coreutils
-          pkgs.openssl
         ];
       })
       // {
@@ -516,7 +483,7 @@ in
         run = [
           "bash"
           "-c"
-          (securePostgresRun (secureEvmRun ''
+          (localPostgresRun (secureEvmRun ''
             env -u PGSERVICE -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE \
               -u PGPASSWORD -u PGPASSFILE \
               psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
@@ -533,7 +500,6 @@ in
         tools = [
           "pg-psql"
           pkgs.coreutils
-          pkgs.openssl
         ];
       })
       // {
@@ -547,7 +513,7 @@ in
         run = [
           "bash"
           "-c"
-          (securePostgresRun (secureEvmRun ''
+          (localPostgresRun (secureEvmRun ''
             env -u PGSERVICE -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE \
               -u PGPASSWORD -u PGPASSFILE \
               psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
@@ -569,7 +535,6 @@ in
         tools = [
           "pg-psql"
           pkgs.coreutils
-          pkgs.openssl
         ];
       })
       // {

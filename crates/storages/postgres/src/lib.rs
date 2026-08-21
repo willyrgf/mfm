@@ -15,7 +15,6 @@ use mfm_journal::{
     MAX_RUN_FRAMES,
 };
 use mfm_store::{AppendResult, Store, StoreError};
-use mfm_transport_security::LoadedTlsRoots;
 use sqlx::postgres::{PgArguments, PgPoolOptions, PgRow};
 use sqlx::{Arguments, Connection, PgConnection, PgPool, Row};
 
@@ -34,7 +33,6 @@ pub use provision::{provision_schemas, ProvisionError};
 /// PostgreSQL Store after its connection gate has succeeded.
 pub struct PostgresStore {
     pool: PgPool,
-    _roots: LoadedTlsRoots,
 }
 
 /// Redaction-safe production-open failure.
@@ -55,9 +53,8 @@ impl PostgresStore {
     ) -> std::result::Result<Self, StoreOpenError> {
         assert_send_static::<PgRow>();
         assert_send_static::<PgArguments>();
-        let (options, roots) = locator
+        let options = locator
             .connect_options("mfm-runtime-store")
-            .await
             .map_err(|_| StoreOpenError::Unavailable)?;
         let mut gate_connection = PgConnection::connect_with(&options)
             .await
@@ -78,10 +75,7 @@ impl PostgresStore {
             .connect_with(options)
             .await
             .map_err(classify_open_error)?;
-        Ok(Self {
-            pool,
-            _roots: roots,
-        })
+        Ok(Self { pool })
     }
 }
 

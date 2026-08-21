@@ -4,10 +4,14 @@ Durable PostgreSQL implementations of the append-only Store, mechanical RunIndex
 catalog. The run-history and `mfm.config-catalog-postgres.v1` catalog schemas have independent
 connection gates, so either surface remains usable when the other is incompatible.
 
-Production constructors accept only a bounded private locator. It contains one single-host
-`postgresql` URI with an explicit password and `sslmode=verify-full`, plus either exact compiled
-WebPKI roots or an exclusive content-pinned PEM bundle. The parser and the pinned SQLx seam exclude
-environment, home, passfile, service-file, socket, client-certificate, and additive-root inputs.
+Production constructors accept only a bounded private locator. It contains one `postgresql` URI
+with an explicit password, numeric `127.0.0.1` or `::1` host, and `sslmode=disable`. PostgreSQL is
+intentionally plaintext inside the trusted shared network namespace and no remote database target
+is supported. The parser uses stock SQLx, overwrites every ambient-derived connection value that
+can affect this plaintext connection, and rejects `PGOPTIONS`, whose startup effects SQLx cannot
+clear. Home/passfile and service-file inputs cannot influence the resulting authority. The complete
+v1 wire is `{"v":1,"url":"..."}`. SQLx remains an unmodified crates.io dependency so its
+compile-time query macros can be enabled when the query surface adopts them.
 Every runtime connection must authenticate as the fixed `mfm_runtime` role and pass the exact role,
 ownership, database/schema, table-privilege, durability, and schema gate.
 
@@ -28,4 +32,4 @@ requires distinct typed admin/runtime locators for the same normalized target an
 fixed runtime role. The short-lived admin installs both baselines only when their namespaces are
 absent, owns the objects, and grants only the exact DML authority. Existing installations are
 verified and never migrated, repaired, re-owned, reset, or downgraded. Managed same-crate tests run
-serially through `postgres-test` against a real TLS server and split authority.
+serially through `postgres-test` against a real loopback-only `hostnossl` server and split authority.
