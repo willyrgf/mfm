@@ -30,7 +30,8 @@ mfm_cli [--deployment <PATH>] [--output text|json] run list [--after <RUN_ID>] [
 
 `entry-point list` is static and rejects `--deployment`. Every other command loads the override or
 the conventional XDG/HOME `deployment.toml`. `store init` additionally resolves the checked admin
-locator name and retains no administrative handle after provisioning.
+locator name and retains no administrative handle after provisioning. The complete deployment
+grammar, bounds, and example are documented by [`mfm-app`](../../crates/app/README.md).
 
 `config import` reads at most 256 KiB plus one byte from a file or stdin. It creates an absent name,
 leaves identical content unchanged, or atomically replaces different content. The stored document

@@ -24,7 +24,7 @@ fn config_document(portfolio_id: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires the managed PostgreSQL and TLS-wrapped reth services from cli-e2e"]
+#[ignore = "requires the managed PostgreSQL and HTTP Reth services from cli-e2e"]
 async fn stored_config_lifecycle_and_runs_are_cli_complete() {
     for name in [
         "MFM_E2E_RUNTIME_STORE_LOCATOR",
