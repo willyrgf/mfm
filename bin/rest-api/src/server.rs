@@ -125,7 +125,8 @@ async fn start_run(
     let Json(body) = body.map_err(|error| RestError(json_rejection(error)))?;
     let run_id = match body.run_id {
         Some(run_id) => run_id,
-        None => generate_run_id()?,
+        None => generate_run_id_with(getrandom::fill)
+            .map_err(|_| RestError(run_id_generation_failed()))?,
     };
     let result = application
         .start_run(run_id.clone(), &body.config)
@@ -349,10 +350,6 @@ fn invalid_config_name() -> Response {
 
 fn invalid_run_id() -> Response {
     checked_error("invalid_run_id", "run id is invalid")
-}
-
-fn generate_run_id() -> Result<RunId, RestError> {
-    generate_run_id_with(getrandom::fill).map_err(|_| RestError(run_id_generation_failed()))
 }
 
 fn generate_run_id_with<E>(fill: impl FnOnce(&mut [u8]) -> Result<(), E>) -> Result<RunId, E> {
