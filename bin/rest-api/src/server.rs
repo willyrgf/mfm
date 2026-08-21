@@ -61,132 +61,96 @@ async fn import_config(
     State(application): State<Arc<Application>>,
     path: Result<Path<ConfigName>, PathRejection>,
     body: Result<Json<Box<RawValue>>, JsonRejection>,
-) -> Response {
-    let Some(name) = config_name(path) else {
-        return invalid_config_name();
+) -> Result<Response, RestError> {
+    let Path(name) = path.map_err(|_| RestError(invalid_config_name()))?;
+    let Json(raw) = body.map_err(|error| RestError(config_json_rejection(error)))?;
+    let document = ConfigDocument::new(raw.get().as_bytes().to_vec()).await?;
+    let outcome = application.import_config(name.clone(), document).await?;
+    let status = match outcome {
+        ImportOutcome::Created { .. } => StatusCode::CREATED,
+        ImportOutcome::Unchanged { .. } | ImportOutcome::Updated { .. } => StatusCode::OK,
     };
-    let Json(raw) = match body {
-        Ok(raw) => raw,
-        Err(error) => return config_json_rejection(error),
-    };
-    let document = match ConfigDocument::new(raw.get().as_bytes().to_vec()).await {
-        Ok(document) => document,
-        Err(error) => return config_document_error(error),
-    };
-    match application.import_config(name.clone(), document).await {
-        Ok(outcome) => {
-            let status = match outcome {
-                ImportOutcome::Created { .. } => StatusCode::CREATED,
-                ImportOutcome::Unchanged { .. } | ImportOutcome::Updated { .. } => StatusCode::OK,
-            };
-            let mut response = json_response(status, &outcome);
-            let location = format!("/v1/configs/{}", name.as_str());
-            match HeaderValue::from_str(&location) {
-                Ok(location) => {
-                    response.headers_mut().insert(LOCATION, location);
-                    response
-                }
-                Err(_) => internal_error(),
-            }
-        }
-        Err(error) => request_error(error),
-    }
+    let mut response = json_response(status, &outcome);
+    let location = format!("/v1/configs/{}", name.as_str());
+    let location = HeaderValue::from_str(&location).map_err(|_| RestError(internal_error()))?;
+    response.headers_mut().insert(LOCATION, location);
+    Ok(response)
 }
 
 async fn list_configs(
     State(application): State<Arc<Application>>,
     query: Result<Query<EmptyQuery>, QueryRejection>,
-) -> Response {
-    if query.is_err() {
-        return invalid_query();
-    }
-    match application.list_configs().await {
-        Ok(items) => json_response(StatusCode::OK, &ItemList::new(&items)),
-        Err(error) => request_error(error),
-    }
+) -> Result<Response, RestError> {
+    query.map_err(|_| RestError(invalid_query()))?;
+    let items = application.list_configs().await?;
+    Ok(json_response(StatusCode::OK, &ItemList::new(&items)))
 }
 
 async fn read_config(
     State(application): State<Arc<Application>>,
     path: Result<Path<ConfigName>, PathRejection>,
-) -> Response {
-    let Some(name) = config_name(path) else {
-        return invalid_config_name();
-    };
-    match application.read_config(&name).await {
-        Ok(config) => json_response(StatusCode::OK, &config),
-        Err(error) => request_error(error),
-    }
+) -> Result<Response, RestError> {
+    let Path(name) = path.map_err(|_| RestError(invalid_config_name()))?;
+    let config = application.read_config(&name).await?;
+    Ok(json_response(StatusCode::OK, &config))
 }
 
 async fn list_runs(
     State(application): State<Arc<Application>>,
     query: Result<Query<RunQuery>, QueryRejection>,
-) -> Response {
-    let Query(query) = match query {
-        Ok(query) => query,
-        Err(_) => return invalid_query(),
-    };
-    let after = match query.after.as_deref().map(RunId::parse).transpose() {
-        Ok(after) => after,
-        Err(_) => return checked_error("invalid_run_id", "run id is invalid"),
-    };
-    let limit = match query.limit.map(RunPageLimit::new).transpose() {
-        Ok(limit) => limit.unwrap_or_default(),
-        Err(_) => return checked_error("invalid_page_limit", "page limit is invalid"),
-    };
-    match application.list_runs(after.as_ref(), limit).await {
-        Ok(page) => json_response(StatusCode::OK, &page),
-        Err(error) => request_error(error),
-    }
+) -> Result<Response, RestError> {
+    let Query(query) = query.map_err(|_| RestError(invalid_query()))?;
+    let after = query
+        .after
+        .as_deref()
+        .map(RunId::parse)
+        .transpose()
+        .map_err(|_| RestError(checked_error("invalid_run_id", "run id is invalid")))?;
+    let limit = query
+        .limit
+        .map(RunPageLimit::new)
+        .transpose()
+        .map_err(|_| RestError(checked_error("invalid_page_limit", "page limit is invalid")))?
+        .unwrap_or_default();
+    let page = application.list_runs(after.as_ref(), limit).await?;
+    Ok(json_response(StatusCode::OK, &page))
 }
 
 async fn start_run(
     State(application): State<Arc<Application>>,
     path: Result<Path<RunId>, PathRejection>,
     body: Result<Json<StartBody>, JsonRejection>,
-) -> Response {
-    let Some(run_id) = run_id(path) else {
-        return invalid_run_id();
-    };
-    let Json(body) = match body {
-        Ok(body) => body,
-        Err(error) => return json_rejection(error),
-    };
-    match application.start_run(run_id, &body.config).await {
-        Ok(result) => json_response(StatusCode::OK, &result),
-        Err(error) => run_request_error(error),
-    }
+) -> Result<Response, RestError> {
+    let Path(run_id) = path.map_err(|_| RestError(invalid_run_id()))?;
+    let Json(body) = body.map_err(|error| RestError(json_rejection(error)))?;
+    let result = application.start_run(run_id, &body.config).await?;
+    Ok(json_response(StatusCode::OK, &result))
 }
 
 async fn progress_run(
     State(application): State<Arc<Application>>,
     path: Result<Path<RunId>, PathRejection>,
     body: Result<Json<EmptyBody>, JsonRejection>,
-) -> Response {
-    let Some(run_id) = run_id(path) else {
-        return invalid_run_id();
-    };
-    if let Err(error) = body {
-        return json_rejection(error);
-    }
-    match application.progress_run(&run_id).await {
-        Ok(view) => json_response(StatusCode::OK, &SerializableRunView::new(&view)),
-        Err(error) => run_request_error(error),
-    }
+) -> Result<Response, RestError> {
+    let Path(run_id) = path.map_err(|_| RestError(invalid_run_id()))?;
+    let Json(_) = body.map_err(|error| RestError(json_rejection(error)))?;
+    let view = application.progress_run(&run_id).await?;
+    Ok(json_response(
+        StatusCode::OK,
+        &SerializableRunView::new(&view),
+    ))
 }
 
 async fn read_run(
     State(application): State<Arc<Application>>,
     path: Result<Path<RunId>, PathRejection>,
-) -> Response {
-    let Some(run_id) = run_id(path) else {
-        return invalid_run_id();
-    };
-    match application.read_run(&run_id).await {
-        Ok(view) => json_response(StatusCode::OK, &SerializableRunView::new(&view)),
-        Err(error) => request_error(error),
-    }
+) -> Result<Response, RestError> {
+    let Path(run_id) = path.map_err(|_| RestError(invalid_run_id()))?;
+    let view = application.read_run(&run_id).await?;
+    Ok(json_response(
+        StatusCode::OK,
+        &SerializableRunView::new(&view),
+    ))
 }
 
 async fn route_not_found() -> Response {
@@ -231,12 +195,30 @@ struct RunQuery {
     limit: Option<usize>,
 }
 
-fn config_name(path: Result<Path<ConfigName>, PathRejection>) -> Option<ConfigName> {
-    path.ok().map(|Path(name)| name)
+struct RestError(Response);
+
+impl IntoResponse for RestError {
+    fn into_response(self) -> Response {
+        self.0
+    }
 }
 
-fn run_id(path: Result<Path<RunId>, PathRejection>) -> Option<RunId> {
-    path.ok().map(|Path(run_id)| run_id)
+impl From<ConfigDocumentError> for RestError {
+    fn from(error: ConfigDocumentError) -> Self {
+        Self(config_document_error(error))
+    }
+}
+
+impl From<RequestError> for RestError {
+    fn from(error: RequestError) -> Self {
+        Self(request_error(error))
+    }
+}
+
+impl From<RunRequestError> for RestError {
+    fn from(error: RunRequestError) -> Self {
+        Self(run_request_error(error))
+    }
 }
 
 fn config_document_error(error: ConfigDocumentError) -> Response {
