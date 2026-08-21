@@ -36,14 +36,15 @@ append-only storage authority. Config listing is complete within its fixed 256-e
 enumeration uses ascending `RunId` keyset pages and makes no cross-request snapshot claim.
 
 PostgreSQL owns its raw private locator grammar, target equivalence, SQLx wiring, split-role
-provisioner, loopback-only plaintext policy, ambient-input exclusion, and two independent gates. It
-uses stock SQLx directly. Administrative database authority exists only in the CLI provisioning path
-and is never retained by Application.
+provisioner, loopback-only plaintext policy, ambient-input exclusion, and one full-persistence gate.
+One backend and pool implement Store, RunIndex, and config custody. It uses stock SQLx directly.
+Administrative database authority exists only in the CLI provisioning path and is never retained by
+Application.
 
 `ComposedRuntime` is the only live Portfolio assembly constructor. One opaque binding set supplies
 typed EVM targets and provider handles in stable order; composition derives both adapter
-registrations and public binding views from it. The same concrete backend is coerced to `Store` and
-`RunIndex`, so run execution and enumeration cannot observe different repositories.
+registrations and public binding views from it. The same concrete backend is coerced to `Store`,
+`RunIndex`, and config custody, so production use cases cannot observe different repositories.
 
 CLI and REST render one typed Application use-case surface and install no user authentication or
 authorization layer. Binaries own bounded transport parsing/rendering and transport policy only. A

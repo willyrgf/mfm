@@ -80,9 +80,9 @@ fn catalog_entry(name: &str, value: u8) -> CatalogEntry {
 }
 
 fn managed_locators() -> (AdminPostgresLocator, RuntimePostgresLocator) {
-    let admin = std::env::var("MFM_TEST_ADMIN_STORE_LOCATOR")
+    let admin = std::env::var("MFM_TEST_ADMIN_POSTGRES_LOCATOR")
         .expect("postgres-test must supply the admin locator");
-    let runtime = std::env::var("MFM_TEST_RUNTIME_STORE_LOCATOR")
+    let runtime = std::env::var("MFM_TEST_RUNTIME_POSTGRES_LOCATOR")
         .expect("postgres-test must supply the runtime locator");
     (
         AdminPostgresLocator::parse(admin).expect("admin locator"),
@@ -141,11 +141,11 @@ fn migration_and_classifier_contracts_are_exact() {
         classify_open_error(sqlx::Error::Protocol(
             GateError::Incompatible.marker().to_owned()
         )),
-        StoreOpenError::Incompatible
+        PostgresOpenError::Incompatible
     );
     assert_eq!(
         classify_open_error(sqlx::Error::Protocol("transport".to_owned())),
-        StoreOpenError::Unavailable
+        PostgresOpenError::Unavailable
     );
     assert_eq!(
         classify_precommit_sql(sqlx::Error::Protocol("rejected".to_owned())),
@@ -169,12 +169,12 @@ async fn provisioning_rejects_unequal_targets_before_connecting() {
     ))
     .expect("synthetic runtime locator");
     assert_eq!(
-        provision_schemas(&admin, &runtime).await,
+        provision_postgres(&admin, &runtime).await,
         Err(ProvisionError::Incompatible)
     );
 }
 
-async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresStore>) {
+async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresBackend>) {
     let snapshot_id = run_id(30);
     let snapshot_genesis = genesis(&snapshot_id);
     let snapshot_successor = successor(&snapshot_id);
@@ -292,7 +292,7 @@ async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresStore>) {
 }
 
 async fn assert_commit_and_hostile_contract(
-    store: &Arc<PostgresStore>,
+    store: &Arc<PostgresBackend>,
     connection: &mut PgConnection,
 ) {
     use store_hostile::{HostileCase as Case, Observation};
@@ -565,7 +565,7 @@ async fn assert_commit_and_hostile_contract(
     store_hostile::assert_hostile_matrix(&observed);
 }
 
-async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresCatalog>) {
+async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresBackend>) {
     use catalog::MutationCommitFault as Fault;
 
     let before = catalog_entry("ambiguous-before", 1);
@@ -720,44 +720,47 @@ async fn managed_postgres_persistence_authority_contract() {
     let mut connection = admin_connection(&admin).await;
     reset_schemas(&mut connection).await;
 
-    provision_schemas(&admin, &runtime)
+    provision_postgres(&admin, &runtime)
         .await
         .expect("initial provisioning");
-    provision_schemas(&admin, &runtime)
+    provision_postgres(&admin, &runtime)
         .await
         .expect("idempotent provisioning verification");
 
-    let store = Arc::new(PostgresStore::connect(&runtime).await.expect("run store"));
-    let catalog = Arc::new(PostgresCatalog::connect(&runtime).await.expect("catalog"));
+    let backend = Arc::new(
+        PostgresBackend::connect(&runtime)
+            .await
+            .expect("postgres backend"),
+    );
     let options = runtime
         .connect_options("mfm-local-transport-contract-test")
         .expect("production connection options");
     assert!(matches!(options.get_ssl_mode(), PgSslMode::Disable));
-    store_scenarios::exercise_store(store.as_ref(), &store_scenarios::run(9)).await;
+    store_scenarios::exercise_store(backend.as_ref(), &store_scenarios::run(9)).await;
 
     let first_run_id = run_id(21);
     let second_run_id = run_id(22);
     assert_eq!(
-        store
+        backend
             .append_run(&genesis(&second_run_id))
             .await
             .expect("append second run"),
         AppendResult::Inserted
     );
     assert_eq!(
-        store
+        backend
             .append_run(&genesis(&first_run_id))
             .await
             .expect("append first run"),
         AppendResult::Inserted
     );
-    let page = store
+    let page = backend
         .list_runs(None, RunPageLimit::new(1).expect("page limit"))
         .await
         .expect("first run page");
     assert_eq!(page.items().len(), 1);
     let after = page.next_after().expect("next run id").clone();
-    let next = store
+    let next = backend
         .list_runs(Some(&after), RunPageLimit::new(1).expect("page limit"))
         .await
         .expect("second run page");
@@ -767,21 +770,21 @@ async fn managed_postgres_persistence_authority_contract() {
     let first = catalog_entry("alpha", 1);
     let replacement = catalog_entry("alpha", 2);
     assert_eq!(
-        catalog.put_config(&first).await.expect("insert config"),
+        backend.put_config(&first).await.expect("insert config"),
         CatalogPutResult::Inserted
     );
     assert_eq!(
-        catalog.put_config(&first).await.expect("retry config"),
+        backend.put_config(&first).await.expect("retry config"),
         CatalogPutResult::Unchanged
     );
     assert_eq!(
-        catalog
+        backend
             .put_config(&replacement)
             .await
             .expect("replacement config"),
         CatalogPutResult::Updated
     );
-    let retained = catalog
+    let retained = backend
         .load_config(first.name())
         .await
         .expect("load config")
@@ -789,9 +792,9 @@ async fn managed_postgres_persistence_authority_contract() {
     assert_eq!(retained.digest(), replacement.digest());
     assert_eq!(retained.canonical_bytes(), replacement.canonical_bytes());
 
-    assert_snapshot_and_blocking_contract(&store).await;
-    assert_commit_and_hostile_contract(&store, &mut connection).await;
-    assert_catalog_mutation_contract(&catalog).await;
+    assert_snapshot_and_blocking_contract(&backend).await;
+    assert_commit_and_hostile_contract(&backend, &mut connection).await;
+    assert_catalog_mutation_contract(&backend).await;
 
     let mut runtime_connection = runtime_connection(&runtime).await;
     assert!(
@@ -814,52 +817,49 @@ async fn managed_postgres_persistence_authority_contract() {
         .await
         .expect("grant excess run privilege");
     assert!(matches!(
-        PostgresStore::connect(&runtime).await,
-        Err(StoreOpenError::Incompatible)
+        PostgresBackend::connect(&runtime).await,
+        Err(PostgresOpenError::Incompatible)
     ));
     connection
         .execute("REVOKE TRUNCATE ON public.mfm_run_frames FROM mfm_runtime")
         .await
         .expect("revoke excess run privilege");
-    assert!(PostgresStore::connect(&runtime).await.is_ok());
+    assert!(PostgresBackend::connect(&runtime).await.is_ok());
 
     connection
         .execute("GRANT CREATE ON SCHEMA mfm_catalog TO mfm_runtime")
         .await
         .expect("grant excess catalog privilege");
     assert!(matches!(
-        PostgresCatalog::connect(&runtime).await,
-        Err(StoreOpenError::Incompatible)
+        PostgresBackend::connect(&runtime).await,
+        Err(PostgresOpenError::Incompatible)
     ));
-    assert!(PostgresStore::connect(&runtime).await.is_ok());
     connection
         .execute("REVOKE CREATE ON SCHEMA mfm_catalog FROM mfm_runtime")
         .await
         .expect("revoke excess catalog privilege");
 
-    drop((store, catalog));
+    drop(backend);
     connection
         .execute("DELETE FROM mfm_catalog.mfm_catalog_schema")
         .await
         .expect("break catalog marker");
-    assert!(PostgresStore::connect(&runtime).await.is_ok());
     assert!(matches!(
-        PostgresCatalog::connect(&runtime).await,
-        Err(StoreOpenError::Incompatible)
+        PostgresBackend::connect(&runtime).await,
+        Err(PostgresOpenError::Incompatible)
     ));
 
     reset_schemas(&mut connection).await;
-    provision_schemas(&admin, &runtime)
+    provision_postgres(&admin, &runtime)
         .await
         .expect("restore schemas");
     connection
         .execute("DELETE FROM public.mfm_store_schema")
         .await
         .expect("break run marker");
-    assert!(PostgresCatalog::connect(&runtime).await.is_ok());
     assert!(matches!(
-        PostgresStore::connect(&runtime).await,
-        Err(StoreOpenError::Incompatible)
+        PostgresBackend::connect(&runtime).await,
+        Err(PostgresOpenError::Incompatible)
     ));
 
     reset_schemas(&mut connection).await;
@@ -868,7 +868,7 @@ async fn managed_postgres_persistence_authority_contract() {
         .await
         .expect("partial schema");
     assert_eq!(
-        provision_schemas(&admin, &runtime).await,
+        provision_postgres(&admin, &runtime).await,
         Err(ProvisionError::Incompatible)
     );
     let columns: Vec<String> = sqlx::query_scalar(

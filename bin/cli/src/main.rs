@@ -6,9 +6,10 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mfm_app::{
-    derive_run_id, provision_store, Application, ConfigDigest, ConfigDocument, ConfigDocumentError,
-    ConfigName, ConfigSelection, Deployment, EnvironmentName, ItemList, RequestError, RunPageLimit,
-    RunRecovery, RunRequestError, SerializableRunView, StartRunResult, MAX_CONFIG_DOCUMENT_BYTES,
+    derive_run_id, provision_postgres, Application, ConfigDigest, ConfigDocument,
+    ConfigDocumentError, ConfigName, ConfigSelection, Deployment, EnvironmentName, ItemList,
+    RequestError, RunPageLimit, RunRecovery, RunRequestError, SerializableRunView, StartRunResult,
+    MAX_CONFIG_DOCUMENT_BYTES,
 };
 use mfm_ids::RunId;
 use mfm_runtime::{RunView, RunViewState};
@@ -42,9 +43,9 @@ enum Command {
         command: EntryPointCommand,
     },
     /// Manage the durable persistence installation.
-    Store {
+    Postgres {
         #[command(subcommand)]
-        command: StoreCommand,
+        command: PostgresCommand,
     },
     /// Discover public capability bindings.
     Binding {
@@ -70,12 +71,12 @@ enum EntryPointCommand {
 }
 
 #[derive(Subcommand)]
-enum StoreCommand {
+enum PostgresCommand {
     /// Installs and verifies the run-history and config-catalog schemas.
     Init {
-        /// Environment variable naming the checked administrative store locator.
-        #[arg(long = "admin-store-locator-env")]
-        admin_store_locator_env: String,
+        /// Environment variable naming the checked administrative PostgreSQL locator.
+        #[arg(long = "admin-locator-env")]
+        admin_locator_env: String,
     },
 }
 
@@ -241,15 +242,13 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         Command::EntryPoint {
             command: EntryPointCommand::List,
         } => emit_entry_points(cli.output),
-        Command::Store {
-            command: StoreCommand::Init {
-                admin_store_locator_env,
-            },
+        Command::Postgres {
+            command: PostgresCommand::Init { admin_locator_env },
         } => {
             let deployment = Deployment::load(cli.deployment.as_deref()).await?;
-            let admin = EnvironmentName::new(admin_store_locator_env)
+            let admin = EnvironmentName::new(admin_locator_env)
                 .map_err(|_| CliError::Composition(mfm_app::ComposeError::Deployment))?;
-            provision_store(&deployment, &admin).await?;
+            provision_postgres(&deployment, &admin).await?;
             emit_empty(cli.output)
         }
         Command::Binding {
