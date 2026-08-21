@@ -125,10 +125,10 @@ impl Store for PostgresStore {
 impl RunIndex for PostgresStore {
     fn list_runs<'a>(
         &'a self,
-        cursor: Option<&'a mfm_catalog::RunCursor>,
-        limit: mfm_catalog::PageLimit,
+        after: Option<&'a RunId>,
+        limit: mfm_catalog::RunPageLimit,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<RunPage, RunIndexError>> + Send + 'a>> {
-        Box::pin(async move { index::list_runs(&self.pool, cursor, limit).await })
+        Box::pin(async move { index::list_runs(&self.pool, after, limit).await })
     }
 }
 

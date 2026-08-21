@@ -5,10 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use mfm_canonical::sha256_digest_bytes;
-use mfm_catalog::{
-    CatalogError, CatalogPutResult, ConfigCatalog, ConfigCursor, ConfigDigest, ConfigName,
-    PageLimit, RunCursor, RunIndex, RunIndexError,
-};
+use mfm_catalog::{CatalogError, CatalogPutResult, ConfigCatalog, RunIndex, RunIndexError};
 use mfm_evm::{
     CheckChainIdentity, ConfirmBalanceAnchor, ConsolidateBalanceCollection, EvmAnchorRead,
     EvmBalanceRead, EvmChainIdentityRead, EvmEndpoint, EvmPhysicalTarget, ReadInitialAnchor,
@@ -41,6 +38,7 @@ pub use config::{
 pub use deployment::{
     Deployment, EnvironmentName, EnvironmentNameError, MAX_DEPLOYMENT_DOCUMENT_BYTES,
 };
+pub use mfm_catalog::{ConfigDigest, ConfigName, RunPage, RunPageLimit, MAX_CONFIG_DOCUMENT_BYTES};
 
 use config::ENTRY_POINTS;
 use deployment::resolve_environment;
@@ -468,92 +466,15 @@ impl Serialize for TerminalState<'_> {
     }
 }
 
-/// Checked config list request.
-pub struct ConfigPageRequest {
-    cursor: Option<ConfigCursor>,
-    limit: PageLimit,
-}
-
-impl ConfigPageRequest {
-    /// Constructs one checked keyset-page request.
-    pub const fn new(cursor: Option<ConfigCursor>, limit: PageLimit) -> Self {
-        Self { cursor, limit }
-    }
-}
-
-/// Checked run-head list request.
-pub struct RunPageRequest {
-    cursor: Option<RunCursor>,
-    limit: PageLimit,
-}
-
-impl RunPageRequest {
-    /// Constructs one checked keyset-page request.
-    pub const fn new(cursor: Option<RunCursor>, limit: PageLimit) -> Self {
-        Self { cursor, limit }
-    }
-}
-
-/// One validated page of public config summaries.
+/// Borrowed list JSON model shared by client transports.
 #[derive(Serialize)]
-pub struct ConfigPage {
-    items: Vec<ConfigSummary>,
-    next_cursor: Option<ConfigCursor>,
+pub struct ItemList<'a, T> {
+    items: &'a [T],
 }
 
-impl ConfigPage {
-    /// Returns the ordered config summaries.
-    pub fn items(&self) -> &[ConfigSummary] {
-        &self.items
-    }
-
-    /// Returns the exclusive next cursor when another row was observed.
-    pub const fn next_cursor(&self) -> Option<&ConfigCursor> {
-        self.next_cursor.as_ref()
-    }
-}
-
-/// One mechanical page of run heads.
-#[derive(Serialize)]
-pub struct RunPage {
-    items: Vec<mfm_catalog::RunSummary>,
-    next_cursor: Option<RunCursor>,
-}
-
-impl RunPage {
-    /// Returns the ordered mechanical run summaries.
-    pub fn items(&self) -> &[mfm_catalog::RunSummary] {
-        &self.items
-    }
-
-    /// Returns the exclusive next cursor when another row was observed.
-    pub const fn next_cursor(&self) -> Option<&RunCursor> {
-        self.next_cursor.as_ref()
-    }
-}
-
-/// Borrowed entry-point list JSON model shared by client transports.
-#[derive(Serialize)]
-pub struct EntryPointList<'a> {
-    items: &'a [EntryPointSummary],
-}
-
-impl<'a> EntryPointList<'a> {
-    /// Wraps one ordered entry-point slice.
-    pub const fn new(items: &'a [EntryPointSummary]) -> Self {
-        Self { items }
-    }
-}
-
-/// Borrowed public binding-list JSON model shared by client transports.
-#[derive(Serialize)]
-pub struct BindingList<'a> {
-    items: &'a [PublicBindingView],
-}
-
-impl<'a> BindingList<'a> {
-    /// Wraps one ordered binding slice.
-    pub const fn new(items: &'a [PublicBindingView]) -> Self {
+impl<'a, T> ItemList<'a, T> {
+    /// Wraps one ordered item slice.
+    pub const fn new(items: &'a [T]) -> Self {
         Self { items }
     }
 }
@@ -665,16 +586,16 @@ impl Application {
         .map_err(|_| RequestError::Internal)?
     }
 
-    /// Lists and revalidates one keyset page of config summaries.
-    pub async fn list_configs(&self, page: &ConfigPageRequest) -> Result<ConfigPage, RequestError> {
-        let page = self
+    /// Lists and revalidates the complete bounded config catalog.
+    pub async fn list_configs(&self) -> Result<Vec<ConfigSummary>, RequestError> {
+        let entries = self
             .catalog
-            .list_configs(page.cursor.as_ref(), page.limit)
+            .list_configs()
             .await
             .map_err(map_catalog_error)?;
         tokio::task::spawn_blocking(move || {
-            let (entries, next_cursor) = page.into_parts();
             let items = entries
+                .into_items()
                 .into_iter()
                 .map(|entry| {
                     let (name, digest, canonical) = entry.into_parts();
@@ -683,7 +604,7 @@ impl Application {
                         .map_err(|_| RequestError::InvalidCatalog)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(ConfigPage { items, next_cursor })
+            Ok(items)
         })
         .await
         .map_err(|_| RequestError::Internal)?
@@ -763,15 +684,16 @@ impl Application {
     }
 
     /// Lists one mechanical keyset page of current run heads.
-    pub async fn list_runs(&self, page: &RunPageRequest) -> Result<RunPage, RequestError> {
-        let page = self
-            .composed
+    pub async fn list_runs(
+        &self,
+        after: Option<&RunId>,
+        limit: RunPageLimit,
+    ) -> Result<RunPage, RequestError> {
+        self.composed
             .run_index
-            .list_runs(page.cursor.as_ref(), page.limit)
+            .list_runs(after, limit)
             .await
-            .map_err(map_run_index_error)?;
-        let (items, next_cursor) = page.into_parts();
-        Ok(RunPage { items, next_cursor })
+            .map_err(map_run_index_error)
     }
 }
 

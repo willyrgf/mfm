@@ -4,7 +4,7 @@ use std::sync::Arc;
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_catalog::{
     CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigDigest, ConfigName,
-    PageLimit, RunIndex, MAX_CONFIG_ENTRIES,
+    RunIndex, RunPageLimit, MAX_CONFIG_ENTRIES,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_journal::{JournalHistory, OutcomeKind};
@@ -703,22 +703,12 @@ async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresCatalog>) {
         CatalogPutResult::Updated
     );
 
-    let mut cursor = None;
-    let mut names = Vec::new();
-    loop {
-        let page = catalog
-            .list_configs(
-                cursor.as_ref(),
-                PageLimit::new(17).expect("catalog page limit"),
-            )
-            .await
-            .expect("catalog page");
-        names.extend(page.items().iter().map(|entry| entry.name().clone()));
-        let Some(next) = page.next_cursor().cloned() else {
-            break;
-        };
-        cursor = Some(next);
-    }
+    let entries = catalog.list_configs().await.expect("catalog entries");
+    let names = entries
+        .items()
+        .iter()
+        .map(|entry| entry.name().clone())
+        .collect::<Vec<_>>();
     assert_eq!(names.len(), MAX_CONFIG_ENTRIES);
     assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
 }
@@ -762,13 +752,13 @@ async fn managed_postgres_persistence_authority_contract() {
         AppendResult::Inserted
     );
     let page = store
-        .list_runs(None, PageLimit::new(1).expect("page limit"))
+        .list_runs(None, RunPageLimit::new(1).expect("page limit"))
         .await
         .expect("first run page");
     assert_eq!(page.items().len(), 1);
-    let cursor = page.next_cursor().expect("run cursor").clone();
+    let after = page.next_after().expect("next run id").clone();
     let next = store
-        .list_runs(Some(&cursor), PageLimit::new(1).expect("page limit"))
+        .list_runs(Some(&after), RunPageLimit::new(1).expect("page limit"))
         .await
         .expect("second run page");
     assert_eq!(next.items().len(), 1);

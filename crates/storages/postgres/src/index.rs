@@ -1,14 +1,14 @@
-use mfm_catalog::{PageLimit, RunCursor, RunIndexError, RunPage, RunSummary};
+use mfm_catalog::{RunIndexError, RunPage, RunPageLimit, RunSummary};
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId};
 use mfm_journal::{MAX_RUN_BYTES, MAX_RUN_FRAMES};
 use sqlx::{PgPool, Row};
 
 pub(super) async fn list_runs(
     pool: &PgPool,
-    cursor: Option<&RunCursor>,
-    limit: PageLimit,
+    after: Option<&RunId>,
+    limit: RunPageLimit,
 ) -> Result<RunPage, RunIndexError> {
-    let after = cursor.map_or("", |cursor| cursor.after().as_str());
+    let after = after.map_or("", RunId::as_str);
     let query_limit = i64::try_from(limit.get() + 1).map_err(|_| RunIndexError::Corrupt)?;
     let rows = sqlx::query(
         "SELECT h.run_id, h.head_sequence, f.head_digest, h.total_bytes \
@@ -55,11 +55,11 @@ pub(super) async fn list_runs(
     if has_more {
         items.pop();
     }
-    let next_cursor = if has_more {
+    let next_after = if has_more {
         let last = items.last().ok_or(RunIndexError::Corrupt)?;
-        Some(RunCursor::after_run(last.run_id().clone()))
+        Some(last.run_id().clone())
     } else {
         None
     };
-    RunPage::new(items, next_cursor)
+    RunPage::new(items, next_after)
 }

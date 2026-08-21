@@ -6,12 +6,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mfm_app::{
-    derive_run_id, provision_store, Application, BindingList, ConfigDocument, ConfigDocumentError,
-    ConfigPageRequest, ConfigSelection, Deployment, EntryPointList, EnvironmentName, RequestError,
-    RunPageRequest, RunRecovery, RunRequestError, SerializableRunView, StartRunResult,
-};
-use mfm_catalog::{
-    ConfigCursor, ConfigDigest, ConfigName, PageLimit, RunCursor, MAX_CONFIG_DOCUMENT_BYTES,
+    derive_run_id, provision_store, Application, ConfigDigest, ConfigDocument, ConfigDocumentError,
+    ConfigName, ConfigSelection, Deployment, EnvironmentName, ItemList, RequestError, RunPageLimit,
+    RunRecovery, RunRequestError, SerializableRunView, StartRunResult, MAX_CONFIG_DOCUMENT_BYTES,
 };
 use mfm_ids::RunId;
 use mfm_runtime::{RunView, RunViewState};
@@ -98,15 +95,8 @@ enum ConfigCommand {
         #[arg(long)]
         from: PathBuf,
     },
-    /// Lists one ascending keyset page.
-    List {
-        /// Exclusive config cursor.
-        #[arg(long)]
-        cursor: Option<String>,
-        /// Page size from 1 through 200.
-        #[arg(long)]
-        limit: Option<usize>,
-    },
+    /// Lists the complete bounded catalog.
+    List,
     /// Shows one config summary and exact canonical document.
     Show {
         /// Durable catalog name.
@@ -142,9 +132,9 @@ enum RunCommand {
     },
     /// Lists one ascending mechanical run-head page.
     List {
-        /// Exclusive run cursor.
+        /// Exclusive last RunId from the preceding page.
         #[arg(long)]
-        cursor: Option<String>,
+        after: Option<String>,
         /// Page size from 1 through 200.
         #[arg(long)]
         limit: Option<usize>,
@@ -157,7 +147,6 @@ enum CliError {
     ConfigName,
     ConfigDigest,
     RunId,
-    Cursor,
     PageLimit,
     ConfigDocument(ConfigDocumentError),
     ConfigInput,
@@ -175,7 +164,6 @@ impl CliError {
             Self::ConfigName => "invalid_config_name",
             Self::ConfigDigest => "invalid_config_digest",
             Self::RunId => "invalid_run_id",
-            Self::Cursor => "invalid_cursor",
             Self::PageLimit => "invalid_page_limit",
             Self::ConfigDocument(error) => error.code(),
             Self::ConfigInput => "config_input_unavailable",
@@ -193,7 +181,6 @@ impl CliError {
             Self::ConfigName => "config name is invalid".to_owned(),
             Self::ConfigDigest => "config digest is invalid".to_owned(),
             Self::RunId => "run id is invalid".to_owned(),
-            Self::Cursor => "cursor is invalid".to_owned(),
             Self::PageLimit => "page limit is invalid".to_owned(),
             Self::ConfigDocument(error) => error.to_string(),
             Self::ConfigInput => "config input is unavailable".to_owned(),
@@ -299,23 +286,13 @@ async fn run_config(
             let result = application.import_config(name, document).await?;
             emit_serializable(output, &result, || render_config_summary(result.config()))
         }
-        ConfigCommand::List { cursor, limit } => {
-            let cursor = cursor
-                .map(ConfigCursor::parse)
-                .transpose()
-                .map_err(|_| CliError::Cursor)?;
-            let limit = page_limit(limit)?;
+        ConfigCommand::List => {
             let application = open(deployment).await?;
-            let result = application
-                .list_configs(&ConfigPageRequest::new(cursor, limit))
-                .await?;
-            emit_serializable(output, &result, || {
+            let result = application.list_configs().await?;
+            emit_serializable(output, &ItemList::new(&result), || {
                 let mut text = String::new();
-                for item in result.items() {
+                for item in &result {
                     text.push_str(&render_config_summary(item));
-                }
-                if let Some(cursor) = result.next_cursor() {
-                    text.push_str(&format!("next_cursor={}\n", cursor.as_str()));
                 }
                 text
             })
@@ -374,16 +351,14 @@ async fn run_run(
             let view = application.read_run(&run_id).await?;
             emit_run_view(output, &view)
         }
-        RunCommand::List { cursor, limit } => {
-            let cursor = cursor
-                .map(RunCursor::parse)
+        RunCommand::List { after, limit } => {
+            let after = after
+                .map(RunId::parse)
                 .transpose()
-                .map_err(|_| CliError::Cursor)?;
+                .map_err(|_| CliError::RunId)?;
             let limit = page_limit(limit)?;
             let application = open(deployment).await?;
-            let page = application
-                .list_runs(&RunPageRequest::new(cursor, limit))
-                .await?;
+            let page = application.list_runs(after.as_ref(), limit).await?;
             emit_serializable(output, &page, || {
                 let mut text = String::new();
                 for item in page.items() {
@@ -395,8 +370,8 @@ async fn run_run(
                         item.total_bytes()
                     ));
                 }
-                if let Some(cursor) = page.next_cursor() {
-                    text.push_str(&format!("next_cursor={}\n", cursor.as_str()));
+                if let Some(after) = page.next_after() {
+                    text.push_str(&format!("next_after={after}\n"));
                 }
                 text
             })
@@ -404,9 +379,9 @@ async fn run_run(
     }
 }
 
-fn page_limit(value: Option<usize>) -> Result<PageLimit, CliError> {
+fn page_limit(value: Option<usize>) -> Result<RunPageLimit, CliError> {
     value
-        .map(PageLimit::new)
+        .map(RunPageLimit::new)
         .transpose()
         .map(Option::unwrap_or_default)
         .map_err(|_| CliError::PageLimit)
@@ -446,7 +421,7 @@ fn generate_run_id_with<E>(
 
 fn emit_entry_points(output: OutputFormat) -> Result<ExitCode, CliError> {
     let items = Application::entry_points();
-    emit_serializable(output, &EntryPointList::new(items), || {
+    emit_serializable(output, &ItemList::new(items), || {
         items
             .iter()
             .map(|item| format!("entry_point={}\n", item.entry_point()))
@@ -455,7 +430,7 @@ fn emit_entry_points(output: OutputFormat) -> Result<ExitCode, CliError> {
 }
 
 fn emit_bindings(output: OutputFormat, application: &Application) -> Result<ExitCode, CliError> {
-    emit_serializable(output, &BindingList::new(application.bindings()), || {
+    emit_serializable(output, &ItemList::new(application.bindings()), || {
         application
             .bindings()
             .iter()

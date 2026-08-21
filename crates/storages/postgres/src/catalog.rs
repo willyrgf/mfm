@@ -2,8 +2,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use mfm_catalog::{
-    CatalogEntry, CatalogError, CatalogPage, CatalogPutResult, ConfigCatalog, ConfigCursor,
-    ConfigDigest, ConfigName, PageLimit, MAX_CONFIG_ENTRIES,
+    CatalogEntries, CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigDigest,
+    ConfigName, MAX_CONFIG_ENTRIES,
 };
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{Connection, PgConnection, PgPool, Row};
@@ -68,10 +68,8 @@ impl ConfigCatalog for PostgresCatalog {
 
     fn list_configs<'a>(
         &'a self,
-        cursor: Option<&'a ConfigCursor>,
-        limit: PageLimit,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogPage, CatalogError>> + Send + 'a>> {
-        Box::pin(async move { list_configs(&self.pool, cursor, limit).await })
+    ) -> Pin<Box<dyn Future<Output = Result<CatalogEntries, CatalogError>> + Send + 'a>> {
+        Box::pin(async move { list_configs(&self.pool).await })
     }
 }
 
@@ -90,38 +88,21 @@ async fn load_config(
     row.map(decode_entry).transpose()
 }
 
-async fn list_configs(
-    pool: &PgPool,
-    cursor: Option<&ConfigCursor>,
-    limit: PageLimit,
-) -> Result<CatalogPage, CatalogError> {
-    let after = cursor.map_or("", |cursor| cursor.after().as_str());
-    let query_limit = i64::try_from(limit.get() + 1).map_err(|_| CatalogError::Corrupt)?;
+async fn list_configs(pool: &PgPool) -> Result<CatalogEntries, CatalogError> {
+    let query_limit = i64::try_from(MAX_CONFIG_ENTRIES + 1).map_err(|_| CatalogError::Corrupt)?;
     let rows = sqlx::query(
         "SELECT config_name, config_digest, canonical \
-         FROM mfm_catalog.config_entries WHERE config_name > $1 \
-         ORDER BY config_name COLLATE \"C\" LIMIT $2",
+         FROM mfm_catalog.config_entries ORDER BY config_name COLLATE \"C\" LIMIT $1",
     )
-    .bind(after)
     .bind(query_limit)
     .fetch_all(pool)
     .await
     .map_err(|_| CatalogError::Unavailable)?;
-    let mut items = rows
+    let items = rows
         .into_iter()
         .map(decode_entry)
         .collect::<Result<Vec<_>, _>>()?;
-    let has_more = items.len() > limit.get();
-    if has_more {
-        items.pop();
-    }
-    let next_cursor = if has_more {
-        let last = items.last().ok_or(CatalogError::Corrupt)?;
-        Some(ConfigCursor::after_name(last.name().clone()))
-    } else {
-        None
-    };
-    CatalogPage::new(items, next_cursor)
+    CatalogEntries::new(items)
 }
 
 async fn put_config(

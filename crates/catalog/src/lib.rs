@@ -11,20 +11,18 @@ use std::pin::Pin;
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-mod cursor;
 mod memory;
 
-pub use cursor::{ConfigCursor, CursorError, RunCursor, MAX_CURSOR_ENCODED_BYTES};
 pub use memory::MemoryCatalog;
 
 /// Maximum retained canonical bytes in one config document.
 pub const MAX_CONFIG_DOCUMENT_BYTES: usize = 256 * 1024;
 /// Maximum number of live named config entries.
 pub const MAX_CONFIG_ENTRIES: usize = 256;
-/// Maximum number of items returned by one catalog or index page.
-pub const MAX_PAGE_ITEMS: usize = 200;
-/// Default number of items requested by client surfaces.
-pub const DEFAULT_PAGE_ITEMS: usize = 50;
+/// Maximum number of items returned by one run-index page.
+pub const MAX_RUN_PAGE_ITEMS: usize = 200;
+/// Default number of run heads requested by client surfaces.
+pub const DEFAULT_RUN_PAGE_ITEMS: usize = 50;
 
 /// Error returned when a config name violates its public grammar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -214,20 +212,20 @@ impl CatalogEntry {
     }
 }
 
-/// Checked page size error.
+/// Checked run-page size error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("page limit is invalid")]
-pub struct PageLimitError;
+pub struct RunPageLimitError;
 
-/// A page size in the inclusive range 1 through 200.
+/// A run-head page size in the inclusive range 1 through 200.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PageLimit(usize);
+pub struct RunPageLimit(usize);
 
-impl PageLimit {
+impl RunPageLimit {
     /// Checks a requested page size.
-    pub const fn new(value: usize) -> Result<Self, PageLimitError> {
-        if value == 0 || value > MAX_PAGE_ITEMS {
-            return Err(PageLimitError);
+    pub const fn new(value: usize) -> Result<Self, RunPageLimitError> {
+        if value == 0 || value > MAX_RUN_PAGE_ITEMS {
+            return Err(RunPageLimitError);
         }
         Ok(Self(value))
     }
@@ -238,9 +236,9 @@ impl PageLimit {
     }
 }
 
-impl Default for PageLimit {
+impl Default for RunPageLimit {
     fn default() -> Self {
-        Self(DEFAULT_PAGE_ITEMS)
+        Self(DEFAULT_RUN_PAGE_ITEMS)
     }
 }
 
@@ -272,29 +270,20 @@ pub enum CatalogError {
     Indeterminate,
 }
 
-/// One bounded page of owned config custody snapshots.
-pub struct CatalogPage {
+/// The complete bounded, ordered set of owned config custody snapshots.
+pub struct CatalogEntries {
     items: Vec<CatalogEntry>,
-    next_cursor: Option<ConfigCursor>,
 }
 
-impl CatalogPage {
-    /// Constructs a structurally checked catalog page.
-    pub fn new(
-        items: Vec<CatalogEntry>,
-        next_cursor: Option<ConfigCursor>,
-    ) -> Result<Self, CatalogError> {
-        if items.len() > MAX_PAGE_ITEMS
+impl CatalogEntries {
+    /// Constructs a structurally checked complete catalog snapshot.
+    pub fn new(items: Vec<CatalogEntry>) -> Result<Self, CatalogError> {
+        if items.len() > MAX_CONFIG_ENTRIES
             || items.windows(2).any(|pair| pair[0].name >= pair[1].name)
-            || next_cursor.as_ref().is_some_and(|cursor| {
-                items
-                    .last()
-                    .is_none_or(|entry| cursor.after() != entry.name())
-            })
         {
             return Err(CatalogError::Corrupt);
         }
-        Ok(Self { items, next_cursor })
+        Ok(Self { items })
     }
 
     /// Returns the ordered entries.
@@ -302,14 +291,9 @@ impl CatalogPage {
         &self.items
     }
 
-    /// Returns the exclusive cursor when another item was observed.
-    pub const fn next_cursor(&self) -> Option<&ConfigCursor> {
-        self.next_cursor.as_ref()
-    }
-
-    /// Consumes the page into owned items and cursor.
-    pub fn into_parts(self) -> (Vec<CatalogEntry>, Option<ConfigCursor>) {
-        (self.items, self.next_cursor)
+    /// Consumes the snapshot into its ordered entries.
+    pub fn into_items(self) -> Vec<CatalogEntry> {
+        self.items
     }
 }
 
@@ -327,12 +311,10 @@ pub trait ConfigCatalog: Send + Sync {
         name: &'a ConfigName,
     ) -> Pin<Box<dyn Future<Output = Result<Option<CatalogEntry>, CatalogError>> + Send + 'a>>;
 
-    /// Lists one ascending keyset page.
+    /// Lists the complete bounded catalog in ascending name order.
     fn list_configs<'a>(
         &'a self,
-        cursor: Option<&'a ConfigCursor>,
-        limit: PageLimit,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogPage, CatalogError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<CatalogEntries, CatalogError>> + Send + 'a>>;
 }
 
 /// Error returned when one run-head projection is structurally invalid.
@@ -403,31 +385,27 @@ pub enum RunIndexError {
     Unavailable,
 }
 
-/// One bounded mechanical run-head page.
+/// One bounded mechanical run-head page with an exclusive continuation identity.
+#[derive(Serialize)]
 pub struct RunPage {
     items: Vec<RunSummary>,
-    next_cursor: Option<RunCursor>,
+    next_after: Option<RunId>,
 }
 
 impl RunPage {
     /// Constructs a structurally checked run page.
-    pub fn new(
-        items: Vec<RunSummary>,
-        next_cursor: Option<RunCursor>,
-    ) -> Result<Self, RunIndexError> {
-        if items.len() > MAX_PAGE_ITEMS
+    pub fn new(items: Vec<RunSummary>, next_after: Option<RunId>) -> Result<Self, RunIndexError> {
+        if items.len() > MAX_RUN_PAGE_ITEMS
             || items
                 .windows(2)
                 .any(|pair| pair[0].run_id >= pair[1].run_id)
-            || next_cursor.as_ref().is_some_and(|cursor| {
-                items
-                    .last()
-                    .is_none_or(|summary| cursor.after() != summary.run_id())
-            })
+            || next_after
+                .as_ref()
+                .is_some_and(|after| items.last().is_none_or(|summary| after != summary.run_id()))
         {
             return Err(RunIndexError::Corrupt);
         }
-        Ok(Self { items, next_cursor })
+        Ok(Self { items, next_after })
     }
 
     /// Returns the ordered summaries.
@@ -435,14 +413,14 @@ impl RunPage {
         &self.items
     }
 
-    /// Returns the exclusive cursor when another run was observed.
-    pub const fn next_cursor(&self) -> Option<&RunCursor> {
-        self.next_cursor.as_ref()
+    /// Returns the last returned RunId when another run was observed.
+    pub const fn next_after(&self) -> Option<&RunId> {
+        self.next_after.as_ref()
     }
 
-    /// Consumes the page into owned items and cursor.
-    pub fn into_parts(self) -> (Vec<RunSummary>, Option<RunCursor>) {
-        (self.items, self.next_cursor)
+    /// Consumes the page into owned items and continuation identity.
+    pub fn into_parts(self) -> (Vec<RunSummary>, Option<RunId>) {
+        (self.items, self.next_after)
     }
 }
 
@@ -451,7 +429,7 @@ pub trait RunIndex: Send + Sync {
     /// Lists one ascending keyset page without parsing run history.
     fn list_runs<'a>(
         &'a self,
-        cursor: Option<&'a RunCursor>,
-        limit: PageLimit,
+        after: Option<&'a RunId>,
+        limit: RunPageLimit,
     ) -> Pin<Box<dyn Future<Output = Result<RunPage, RunIndexError>> + Send + 'a>>;
 }

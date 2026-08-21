@@ -17,13 +17,12 @@ name = "mfm_catalog"
 path = "src/lib.rs"
 
 [dependencies]
-mfm-canonical = { path = "../kernel/canonical" }
 mfm-ids = { path = "../kernel/ids" }
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+mfm-canonical = { path = "../kernel/canonical" }
 serde_json = { workspace = true }
 tokio = { workspace = true }

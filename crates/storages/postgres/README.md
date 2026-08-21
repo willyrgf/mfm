@@ -24,8 +24,8 @@ Pre-COMMIT failures are definite typed capacity/corruption/unavailability. Only 
 after COMMIT submission is `Indeterminate`.
 
 Catalog insert and replacement serialize the fixed 256-entry quota, force synchronous COMMIT, and
-distinguish definite failure from ambiguous acknowledgement. Listing uses bytewise
-ascending keyset pages; it does not claim a snapshot across requests.
+distinguish definite failure from ambiguous acknowledgement. Listing returns the complete bounded
+catalog in ascending bytewise name order.
 
 `provision_schemas` is the one public provisioning entry and is not held by runtime composition. It
 requires distinct typed admin/runtime locators for the same normalized target and an already-created

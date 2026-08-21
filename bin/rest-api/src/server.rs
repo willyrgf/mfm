@@ -9,11 +9,10 @@ use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::Router;
 use mfm_app::{
-    Application, BindingList, ConfigDocument, ConfigDocumentError, ConfigPageRequest,
-    ConfigSelection, EntryPointList, ImportOutcome, RequestError, RunPageRequest, RunRequestError,
-    SerializableRunView,
+    Application, ConfigDocument, ConfigDocumentError, ConfigName, ConfigSelection, ImportOutcome,
+    ItemList, RequestError, RunPageLimit, RunRequestError, SerializableRunView,
+    MAX_CONFIG_DOCUMENT_BYTES,
 };
-use mfm_catalog::{ConfigCursor, ConfigName, PageLimit, RunCursor, MAX_CONFIG_DOCUMENT_BYTES};
 use mfm_ids::RunId;
 use serde::{Deserialize, Serialize};
 
@@ -49,17 +48,14 @@ async fn entry_points(request: Request) -> Response {
     if let Err(error) = require_empty_body(request).await {
         return error;
     }
-    json_response(
-        StatusCode::OK,
-        &EntryPointList::new(Application::entry_points()),
-    )
+    json_response(StatusCode::OK, &ItemList::new(Application::entry_points()))
 }
 
 async fn bindings(State(application): State<Arc<Application>>, request: Request) -> Response {
     if let Err(error) = require_empty_body(request).await {
         return error;
     }
-    json_response(StatusCode::OK, &BindingList::new(application.bindings()))
+    json_response(StatusCode::OK, &ItemList::new(application.bindings()))
 }
 
 async fn import_config(
@@ -111,17 +107,11 @@ async fn list_configs(
     if let Err(error) = require_empty_body(request).await {
         return error;
     }
-    let query = match query(&uri) {
-        Ok(query) => query,
-        Err(error) => return error.response(),
-    };
-    let cursor = match query.cursor.as_deref().map(ConfigCursor::parse).transpose() {
-        Ok(cursor) => cursor,
-        Err(_) => return checked_error("invalid_cursor", "cursor is invalid"),
-    };
-    let page = ConfigPageRequest::new(cursor, query.limit);
-    match application.list_configs(&page).await {
-        Ok(page) => json_response(StatusCode::OK, &page),
+    if uri.query().is_some() {
+        return invalid_query_failure().response();
+    }
+    match application.list_configs().await {
+        Ok(items) => json_response(StatusCode::OK, &ItemList::new(&items)),
         Err(error) => request_error(error),
     }
 }
@@ -157,12 +147,11 @@ async fn list_runs(
         Ok(query) => query,
         Err(error) => return error.response(),
     };
-    let cursor = match query.cursor.as_deref().map(RunCursor::parse).transpose() {
-        Ok(cursor) => cursor,
-        Err(_) => return checked_error("invalid_cursor", "cursor is invalid"),
+    let after = match query.after.as_deref().map(RunId::parse).transpose() {
+        Ok(after) => after,
+        Err(_) => return checked_error("invalid_run_id", "run id is invalid"),
     };
-    let page = RunPageRequest::new(cursor, query.limit);
-    match application.list_runs(&page).await {
+    match application.list_runs(after.as_ref(), query.limit).await {
         Ok(page) => json_response(StatusCode::OK, &page),
         Err(error) => request_error(error),
     }
@@ -272,8 +261,8 @@ struct StartBody {
 struct EmptyBody {}
 
 struct Query {
-    cursor: Option<String>,
-    limit: PageLimit,
+    after: Option<String>,
+    limit: RunPageLimit,
 }
 
 fn query(uri: &Uri) -> Result<Query, RestFailure> {
@@ -281,7 +270,7 @@ fn query(uri: &Uri) -> Result<Query, RestFailure> {
     if encoded.len() > QUERY_ENCODED_MAX {
         return Err(invalid_query_failure());
     }
-    let mut cursor = None;
+    let mut after = None;
     let mut limit = None;
     if !encoded.is_empty() {
         for field in encoded.split('&') {
@@ -289,7 +278,7 @@ fn query(uri: &Uri) -> Result<Query, RestFailure> {
             let key = decode_query_component(key).ok_or_else(invalid_query_failure)?;
             let value = decode_query_component(value).ok_or_else(invalid_query_failure)?;
             match key.as_str() {
-                "cursor" if cursor.is_none() => cursor = Some(value),
+                "after" if after.is_none() => after = Some(value),
                 "limit" if limit.is_none() => limit = Some(value),
                 _ => return Err(invalid_query_failure()),
             }
@@ -303,12 +292,12 @@ fn query(uri: &Uri) -> Result<Query, RestFailure> {
             value
                 .parse::<usize>()
                 .ok()
-                .and_then(|value| PageLimit::new(value).ok())
+                .and_then(|value| RunPageLimit::new(value).ok())
                 .ok_or_else(|| checked_failure("invalid_page_limit", "page limit is invalid"))?
         }
-        None => PageLimit::default(),
+        None => RunPageLimit::default(),
     };
-    Ok(Query { cursor, limit })
+    Ok(Query { after, limit })
 }
 
 fn decode_query_component(encoded: &str) -> Option<String> {
@@ -715,7 +704,7 @@ mod tests {
             (
                 request(Method::GET, "/v1/configs?limit=201", Body::empty()),
                 StatusCode::BAD_REQUEST,
-                "invalid_page_limit",
+                "invalid_query",
             ),
             (
                 request(

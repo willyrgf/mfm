@@ -1,13 +1,12 @@
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::ops::Bound::{Excluded, Unbounded};
 use std::pin::Pin;
 
 use tokio::sync::Mutex;
 
 use crate::{
-    CatalogEntry, CatalogError, CatalogPage, CatalogPutResult, ConfigCatalog, ConfigCursor,
-    ConfigName, PageLimit, MAX_CONFIG_ENTRIES,
+    CatalogEntries, CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigName,
+    MAX_CONFIG_ENTRIES,
 };
 
 /// In-memory atomic config custody for hermetic composition and tests.
@@ -63,28 +62,11 @@ impl ConfigCatalog for MemoryCatalog {
 
     fn list_configs<'a>(
         &'a self,
-        cursor: Option<&'a ConfigCursor>,
-        limit: PageLimit,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogPage, CatalogError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<CatalogEntries, CatalogError>> + Send + 'a>> {
         Box::pin(async move {
             let entries = self.entries.lock().await;
-            let start = cursor.map_or(Unbounded, |cursor| Excluded(cursor.after()));
-            let mut page = entries
-                .range::<ConfigName, _>((start, Unbounded))
-                .take(limit.get() + 1)
-                .map(|(_, entry)| entry.clone())
-                .collect::<Vec<_>>();
-            let has_more = page.len() > limit.get();
-            if has_more {
-                page.pop();
-            }
-            let next_cursor = if has_more {
-                let last = page.last().ok_or(CatalogError::Corrupt)?;
-                Some(ConfigCursor::after_name(last.name().clone()))
-            } else {
-                None
-            };
-            CatalogPage::new(page, next_cursor)
+            let items = entries.values().cloned().collect::<Vec<_>>();
+            CatalogEntries::new(items)
         })
     }
 }

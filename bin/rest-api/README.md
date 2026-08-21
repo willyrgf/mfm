@@ -25,12 +25,12 @@ deployment environment.
 | Method | Path | Request | Success body |
 | --- | --- | --- | --- |
 | GET | `/healthz` | empty | `{"status":"ok"}` |
-| GET | `/v1/entry-points` | empty | shared `EntryPointList` |
-| GET | `/v1/bindings` | empty | shared `BindingList` |
+| GET | `/v1/entry-points` | empty | shared `ItemList` |
+| GET | `/v1/bindings` | empty | shared `ItemList` |
 | PUT | `/v1/configs/{name}` | raw config JSON | shared `ImportOutcome`; 201 created or 200 unchanged/updated |
-| GET | `/v1/configs?cursor=&limit=` | empty | shared `ConfigPage` |
+| GET | `/v1/configs` | empty | complete bounded shared `ItemList` |
 | GET | `/v1/configs/{name}` | empty | shared `StoredConfigView` |
-| GET | `/v1/runs?cursor=&limit=` | empty | shared mechanical `RunPage` |
+| GET | `/v1/runs?after=&limit=` | empty | shared mechanical `RunPage` |
 | POST | `/v1/runs/{run_id}/start` | strict selection JSON | shared `StartRunResult` |
 | POST | `/v1/runs/{run_id}/progress` | `{}` | shared `RunView` |
 | GET | `/v1/runs/{run_id}` | empty | shared `RunView` |
@@ -54,9 +54,9 @@ only `charset=UTF-8`.
 ## Bounds and failures
 
 Config request bodies are limited to 256 KiB and checked again by `ConfigDocument`. Run action
-bodies are limited to 4 KiB. Bodyless routes accept exactly zero bytes. List query strings are
-limited to 1 KiB, accept only one `cursor` and one `limit`, and use the shared 1–200 page bound with
-default 50.
+bodies are limited to 4 KiB. Bodyless routes accept exactly zero bytes. Config listing accepts no
+query and returns all at most 256 entries. Run-list query strings are limited to 1 KiB, accept only
+one `after` RunId and one `limit`, and use the shared 1–200 page bound with default 50.
 
 Ordinary routed errors are exactly `{"code":"...","message":"..."}` with the shared stable
 Application code/message mapping. Ambiguous run appends add the shared tagged `recovery` object.

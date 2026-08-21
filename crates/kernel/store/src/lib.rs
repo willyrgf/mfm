@@ -10,7 +10,7 @@ use std::ops::Bound::{Excluded, Unbounded};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use mfm_catalog::{PageLimit, RunCursor, RunIndex, RunIndexError, RunPage, RunSummary};
+use mfm_catalog::{RunIndex, RunIndexError, RunPage, RunPageLimit, RunSummary};
 use mfm_ids::{ContentDigest, RunId};
 use mfm_journal::{
     frame_head_digest, EncodedRunFrame, StoredRunBytes, MAX_FRAME_BYTES, MAX_RUN_BYTES,
@@ -201,12 +201,12 @@ impl Store for MemoryStore {
 impl RunIndex for MemoryStore {
     fn list_runs<'a>(
         &'a self,
-        cursor: Option<&'a RunCursor>,
-        limit: PageLimit,
+        after: Option<&'a RunId>,
+        limit: RunPageLimit,
     ) -> Pin<Box<dyn Future<Output = Result<RunPage, RunIndexError>> + Send + 'a>> {
         Box::pin(async move {
             let runs = self.runs.lock().await;
-            let start = cursor.map_or(Unbounded, |cursor| Excluded(cursor.after()));
+            let start = after.map_or(Unbounded, Excluded);
             let mut page = Vec::with_capacity(limit.get() + 1);
             for (run_id, run) in runs.range::<RunId, _>((start, Unbounded)) {
                 let run = run.lock().await;
@@ -241,13 +241,12 @@ impl RunIndex for MemoryStore {
             if has_more {
                 page.pop();
             }
-            let next_cursor = if has_more {
-                page.last()
-                    .map(|summary| RunCursor::after_run(summary.run_id().clone()))
+            let next_after = if has_more {
+                page.last().map(|summary| summary.run_id().clone())
             } else {
                 None
             };
-            RunPage::new(page, next_cursor)
+            RunPage::new(page, next_after)
         })
     }
 }
