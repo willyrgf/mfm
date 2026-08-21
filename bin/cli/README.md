@@ -56,10 +56,10 @@ pages, and the full tagged RunView. Terminal values occupy raw JSON positions ra
 strings. Successful bodyless operations emit `{}` in JSON mode
 and nothing in text mode.
 
-Ordinary JSON errors are exactly `{"code":"...","message":"..."}`. An ambiguous run append adds
-the shared `recovery` sum. Text mode prints `error: <message>` plus the same recovery RunId and
-selected config summary when present. Locator values, URLs, credentials, config bodies, and provider
-details are never rendered.
+Ordinary JSON errors are exactly `{"code":"...","message":"..."}`. The Application-owned client
+error serializer adds the shared `recovery` sum for an ambiguous run append. Text mode prints
+`error: <message>` plus the same recovery RunId and selected config summary when present. Locator
+values, URLs, credentials, config bodies, and provider details are never rendered.
 
 ## Exit codes
 

@@ -65,8 +65,8 @@ extraction accepts only one `after` RunId and one `limit`, rejects unknown
 or duplicate fields, and uses the shared 1–200 page bound with default 50.
 
 Ordinary routed errors are exactly `{"code":"...","message":"..."}` with the shared stable
-Application code/message mapping, except that a start request after identity selection also carries
-its `run_id`. Ambiguous run appends add the shared tagged `recovery` object. REST-local errors cover
+Application error serializer, except that a start request after identity selection also carries its
+`run_id`. Ambiguous run appends add the shared tagged `recovery` object. REST-local errors cover
 invalid body/query/media/path/header, fallback 404/405, body size, and RunId entropy failure. HTTP
 parser failures before Axum routing are outside that JSON contract. A durably failed run remains a
 successful HTTP request with status 200 and tagged `state.kind:"failed"`.

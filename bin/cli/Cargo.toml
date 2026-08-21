@@ -19,10 +19,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
-[dev-dependencies]
-mfm-config = { path = "../../crates/config" }
-mfm-store = { path = "../../crates/kernel/store" }
-
 [[bin]]
 name = "mfm_cli"
 path = "src/main.rs"

@@ -9,7 +9,7 @@ use mfm_app::{
     generate_run_id, provision_postgres, Application, ConfigDigest, ConfigDocument,
     ConfigDocumentError, ConfigName, ConfigSelection, Deployment, EnvironmentName, ItemList,
     RequestError, RunIdGenerationError, RunPageLimit, RunRecovery, RunRequestError,
-    SerializableRunView, StartRunResult, MAX_CONFIG_DOCUMENT_BYTES,
+    SerializableClientError, SerializableRunView, StartRunResult, MAX_CONFIG_DOCUMENT_BYTES,
 };
 use mfm_ids::RunId;
 use mfm_runtime::{RunView, RunViewState};
@@ -509,34 +509,18 @@ fn emit_error(output: OutputFormat, error: &CliError) -> Result<(), ()> {
             }
         }
         OutputFormat::Json => {
-            let value = ErrorView { error };
+            let message = error.message();
+            let value = match error.recovery() {
+                Some(recovery) => {
+                    SerializableClientError::recoverable(error.code(), &message, recovery)
+                }
+                None => SerializableClientError::new(error.code(), &message),
+            };
             serde_json::to_writer(&mut stderr, &value).map_err(|_| ())?;
             stderr.write_all(b"\n").map_err(|_| ())?;
         }
     }
     stderr.flush().map_err(|_| ())
-}
-
-struct ErrorView<'a> {
-    error: &'a CliError,
-}
-
-impl Serialize for ErrorView<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let recovery = self.error.recovery();
-        let mut state =
-            serializer.serialize_struct("Error", 2 + usize::from(recovery.is_some()))?;
-        state.serialize_field("code", self.error.code())?;
-        state.serialize_field("message", &self.error.message())?;
-        if let Some(recovery) = recovery {
-            state.serialize_field("recovery", recovery)?;
-        }
-        state.end()
-    }
 }
 
 fn render_recovery_text(writer: &mut impl Write, recovery: &RunRecovery) -> Result<(), ()> {
@@ -597,17 +581,7 @@ fn run_exit(view: &RunView) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use mfm_app::{BoundCapabilitySet, ComposedRuntime};
-    use mfm_config::MemoryConfigRepository;
-    use mfm_store::MemoryStore;
-
     use super::*;
-
-    const DOCUMENT: &[u8] = br#"{
-      "input":{"portfolio":{"quotes":["usd"],"portfolio_id":"portfolio-example","collections":[{"request":{"sources":[{"token":null,"source_id":"wallet-0.native","chain_id":1,"address":"0x1111111111111111111111111111111111111111"}],"decimals":18},"correlation":"native-0"}]},"selector":{"quote":"usd","target":"portfolio-example"},"routes":[{"endpoint_id":"alpha","chain_id":1}]},
-      "entry_point":"mfm.portfolio/snapshot@1"}"#;
 
     #[test]
     fn page_limit_and_checked_scalar_errors_are_stable() {
@@ -619,50 +593,6 @@ mod tests {
         assert_eq!(
             CliError::RunIdGeneration(RunIdGenerationError).code(),
             "run_id_generation_failed"
-        );
-    }
-
-    #[tokio::test]
-    async fn recovery_json_matches_the_cross_transport_fixtures() {
-        let store = Arc::new(MemoryStore::new());
-        let bindings = BoundCapabilitySet::new(Vec::new()).expect("bindings");
-        let composed = ComposedRuntime::compose(store, bindings).expect("composition");
-        let application =
-            Application::from_parts(composed, Arc::new(MemoryConfigRepository::default()));
-        let document = ConfigDocument::new(DOCUMENT.to_vec())
-            .await
-            .expect("document");
-        let outcome = application
-            .import_config(ConfigName::new("daily").expect("name"), document)
-            .await
-            .expect("import");
-        let run_id = RunId::parse(
-            "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
-        )
-        .expect("run id");
-        let start = CliError::from(RunRequestError::AppendIndeterminate {
-            recovery: RunRecovery::Start {
-                run_id: run_id.clone(),
-                config: outcome.config().clone(),
-            },
-        });
-        assert_fixture(
-            &ErrorView { error: &start },
-            include_str!("../../../docs/contracts/client-surface/run-recovery-start.json"),
-        );
-        let progress = CliError::from(RunRequestError::AppendIndeterminate {
-            recovery: RunRecovery::Progress { run_id },
-        });
-        assert_fixture(
-            &ErrorView { error: &progress },
-            include_str!("../../../docs/contracts/client-surface/run-recovery-progress.json"),
-        );
-    }
-
-    fn assert_fixture(actual: &impl Serialize, expected: &str) {
-        assert_eq!(
-            serde_json::to_value(actual).expect("actual JSON"),
-            serde_json::from_str::<serde_json::Value>(expected).expect("fixture JSON")
         );
     }
 }

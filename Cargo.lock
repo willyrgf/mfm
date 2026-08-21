@@ -1875,10 +1875,8 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "mfm-app",
- "mfm-config",
  "mfm-ids",
  "mfm-runtime",
- "mfm-store",
  "serde",
  "serde_json",
  "thiserror",
