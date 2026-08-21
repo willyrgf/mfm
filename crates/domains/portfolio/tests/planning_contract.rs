@@ -1,4 +1,4 @@
-use mfm_catalog::MAX_CONFIG_DOCUMENT_BYTES;
+use mfm_config::MAX_CONFIG_DOCUMENT_BYTES;
 use mfm_evm::{EvmBalanceCollectionCompletion, EvmBalanceContext, EvmBalanceFailure};
 use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId};

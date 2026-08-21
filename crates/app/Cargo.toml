@@ -11,8 +11,8 @@ layer = "assembly"
 binary-facing = true
 
 [dependencies]
-mfm-catalog = { path = "../catalog" }
 mfm-canonical = { path = "../kernel/canonical" }
+mfm-config = { path = "../config" }
 mfm-evm = { path = "../domains/evm" }
 mfm-evm-live = { path = "../live/evm" }
 mfm-ids = { path = "../kernel/ids" }

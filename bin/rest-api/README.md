@@ -29,8 +29,7 @@ deployment environment.
 | GET | `/v1/entry-points` | none | shared `ItemList` |
 | GET | `/v1/bindings` | none | shared `ItemList` |
 | PUT | `/v1/configs/{name}` | raw config JSON | shared `ImportOutcome`; 201 created or 200 unchanged/updated |
-| GET | `/v1/configs` | none | complete bounded shared `ItemList` |
-| GET | `/v1/configs/{name}` | none | shared `StoredConfigView` |
+| GET | `/v1/configs` | none | complete retained-revision `ItemList` |
 | GET | `/v1/runs?after=&limit=` | none | shared mechanical `RunPage` |
 | POST | `/v1/runs/{run_id}/start` | strict selection JSON | shared `StartRunResult` |
 | POST | `/v1/runs/{run_id}/progress` | `{}` | shared `RunView` |
@@ -48,15 +47,15 @@ Start accepts exactly one exhaustive selection:
 {"config":{"kind":"exact","name":"daily","digest":"content:sha256-jcs-v1:<64 hex>"}}
 ```
 
-The path RunId is always caller-owned. Successful PUT responses set
-`Location: /v1/configs/{name}`. Mutating routes use Axum's JSON media-type admission, accepting
-`application/json` and application media types with a `+json` suffix.
+The path RunId is always caller-owned. Mutating routes use Axum's JSON media-type admission,
+accepting `application/json` and application media types with a `+json` suffix.
 
 ## Bounds and failures
 
 Config request bodies are limited to 256 KiB and checked again by `ConfigDocument`. Run action
-bodies are limited to 4 KiB. Config listing accepts no query fields and returns all at most 256
-entries. Typed run-list extraction accepts only one `after` RunId and one `limit`, rejects unknown
+bodies are limited to 4 KiB. Config listing accepts no query fields and returns every retained
+revision as one unpaginated aggregate; each document remains independently bounded. Typed run-list
+extraction accepts only one `after` RunId and one `limit`, rejects unknown
 or duplicate fields, and uses the shared 1–200 page bound with default 50.
 
 Ordinary routed errors are exactly `{"code":"...","message":"..."}` with the shared stable

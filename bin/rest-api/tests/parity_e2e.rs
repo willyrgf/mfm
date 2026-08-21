@@ -85,14 +85,12 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
     assert_eq!(rest_import.0, 200);
     assert_eq!(rest_import.1["outcome"], "unchanged");
     assert_eq!(rest_import.1["config"], imported["config"]);
+    let cli_configs = cli_json(&cli, &xdg, &["config", "list"]);
     assert_eq!(
-        cli_json(&cli, &xdg, &["config", "show", "daily"]),
-        rest_json(&socket, "GET", "/v1/configs/daily", None).1
-    );
-    assert_eq!(
-        cli_json(&cli, &xdg, &["config", "list"]),
+        cli_configs,
         rest_json(&socket, "GET", "/v1/configs", None).1
     );
+    assert_eq!(cli_configs["items"][0]["current"], true);
 
     let current_id = run_id(0x11);
     let cli_current = cli_json(
@@ -150,8 +148,8 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
 
     let wrong_digest =
         "content:sha256-jcs-v1:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-    let mismatch_id = run_id(0x33);
-    let cli_mismatch = run_cli(
+    let absent_revision_id = run_id(0x33);
+    let cli_absent_revision = run_cli(
         &cli,
         &xdg,
         &[
@@ -164,22 +162,23 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
             "--config-digest",
             wrong_digest,
             "--run-id",
-            &mismatch_id,
+            &absent_revision_id,
         ],
     );
-    assert_eq!(cli_mismatch.status.code(), Some(2));
-    let rest_mismatch_body =
+    assert_eq!(cli_absent_revision.status.code(), Some(2));
+    let rest_absent_revision_body =
         format!(r#"{{"config":{{"kind":"exact","name":"daily","digest":"{wrong_digest}"}}}}"#);
-    let rest_mismatch = rest_json(
+    let rest_absent_revision = rest_json(
         &socket,
         "POST",
-        &format!("/v1/runs/{mismatch_id}/start"),
-        Some((&rest_mismatch_body, "application/json")),
+        &format!("/v1/runs/{absent_revision_id}/start"),
+        Some((&rest_absent_revision_body, "application/json")),
     );
-    assert_eq!(rest_mismatch.0, 409);
+    assert_eq!(rest_absent_revision.0, 404);
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&cli_mismatch.stderr).expect("CLI error JSON"),
-        rest_mismatch.1
+        serde_json::from_slice::<serde_json::Value>(&cli_absent_revision.stderr)
+            .expect("CLI error JSON"),
+        rest_absent_revision.1
     );
 
     daemon.stop();

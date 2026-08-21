@@ -8,8 +8,9 @@ use std::future::Future;
 use std::time::Duration;
 
 use mfm_canonical::sha256_digest_bytes;
-use mfm_catalog::{
-    CatalogEntries, CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigName,
+use mfm_config::{
+    ConfigDigest, ConfigImportResult, ConfigName, ConfigRepository, ConfigRepositoryError,
+    ConfigRevision, ConfigRevisions,
 };
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId};
 use mfm_journal::{
@@ -22,7 +23,7 @@ use sqlx::{Arguments, Connection, PgConnection, PgPool, Row};
 
 const SCHEMA_CONTRACT: &str = "mfm.run-history-postgres.v1";
 
-mod catalog;
+mod config;
 mod index;
 mod locator;
 mod provision;
@@ -138,31 +139,34 @@ impl RunIndex for PostgresBackend {
     }
 }
 
-impl ConfigCatalog for PostgresBackend {
-    fn put_config<'a>(
+impl ConfigRepository for PostgresBackend {
+    fn import_config<'a>(
         &'a self,
-        entry: &'a CatalogEntry,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<CatalogPutResult, CatalogError>> + Send + 'a>>
-    {
+        revision: &'a ConfigRevision,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<ConfigImportResult, ConfigRepositoryError>> + Send + 'a>,
+    > {
         Box::pin(async move {
-            catalog::put_config(&self.pool, entry, catalog::MutationCommitFault::None).await
+            config::import_config(&self.pool, revision, config::MutationCommitFault::None).await
         })
     }
 
     fn load_config<'a>(
         &'a self,
         name: &'a ConfigName,
+        digest: Option<&'a ConfigDigest>,
     ) -> std::pin::Pin<
-        Box<dyn Future<Output = Result<Option<CatalogEntry>, CatalogError>> + Send + 'a>,
+        Box<dyn Future<Output = Result<Option<ConfigRevision>, ConfigRepositoryError>> + Send + 'a>,
     > {
-        Box::pin(async move { catalog::load_config(&self.pool, name).await })
+        Box::pin(async move { config::load_config(&self.pool, name, digest).await })
     }
 
     fn list_configs<'a>(
         &'a self,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<CatalogEntries, CatalogError>> + Send + 'a>>
-    {
-        Box::pin(async move { catalog::list_configs(&self.pool).await })
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<ConfigRevisions, ConfigRepositoryError>> + Send + 'a>,
+    > {
+        Box::pin(async move { config::list_configs(&self.pool).await })
     }
 }
 
@@ -235,7 +239,7 @@ async fn verify_connection(connection: &mut PgConnection) -> std::result::Result
     verify_durability(connection).await?;
     verify_runtime_authority(connection).await?;
     verify_run_schema(connection).await?;
-    verify_catalog_schema(connection).await
+    verify_config_schema(connection).await
 }
 
 async fn verify_run_schema(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
@@ -439,7 +443,7 @@ async fn verify_runtime_authority(
     if owns_objects {
         return Err(GateError::Incompatible);
     }
-    for schema in ["public", "mfm_catalog"] {
+    for schema in ["public", "mfm_config"] {
         let schema_privileges: (bool, bool) = sqlx::query_as(
             "SELECT has_schema_privilege(current_user, $1, 'USAGE'), \
                     has_schema_privilege(current_user, $1, 'CREATE')",
@@ -453,7 +457,7 @@ async fn verify_runtime_authority(
         }
     }
     let accepted =
-        verify_run_privileges(connection).await? && verify_catalog_privileges(connection).await?;
+        verify_run_privileges(connection).await? && verify_config_privileges(connection).await?;
     accepted.then_some(()).ok_or(GateError::Incompatible)
 }
 
@@ -468,12 +472,12 @@ async fn verify_run_privileges(
         && heads == TABLE_SELECT | TABLE_INSERT | TABLE_UPDATE)
 }
 
-async fn verify_catalog_privileges(
+async fn verify_config_privileges(
     connection: &mut PgConnection,
 ) -> std::result::Result<bool, GateError> {
-    let marker = runtime_table_privilege_mask(connection, "mfm_catalog.mfm_catalog_schema").await?;
-    let entries = runtime_table_privilege_mask(connection, "mfm_catalog.config_entries").await?;
-    Ok(marker == TABLE_SELECT && entries == TABLE_SELECT | TABLE_INSERT | TABLE_UPDATE)
+    let marker = runtime_table_privilege_mask(connection, "mfm_config.mfm_config_schema").await?;
+    let revisions = runtime_table_privilege_mask(connection, "mfm_config.config_revisions").await?;
+    Ok(marker == TABLE_SELECT && revisions == TABLE_SELECT | TABLE_INSERT | TABLE_UPDATE)
 }
 
 const TABLE_SELECT: i32 = 1;
@@ -530,30 +534,28 @@ async fn verify_schema_ownership(
     Ok(())
 }
 
-async fn verify_catalog_schema(
-    connection: &mut PgConnection,
-) -> std::result::Result<(), GateError> {
+async fn verify_config_schema(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
     let relations: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT c.relname, c.relkind::text, c.relpersistence::text \
          FROM pg_catalog.pg_class c \
          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = 'mfm_catalog' AND c.relkind <> 'i' ORDER BY c.relname",
+         WHERE n.nspname = 'mfm_config' AND c.relkind <> 'i' ORDER BY c.relname",
     )
     .fetch_all(&mut *connection)
     .await
     .map_err(|_| GateError::Unavailable)?;
     if relations
         != [
-            relation("config_entries", "r", "p"),
-            relation("mfm_catalog_schema", "r", "p"),
+            relation("config_revisions", "r", "p"),
+            relation("mfm_config_schema", "r", "p"),
         ]
     {
         return Err(GateError::Incompatible);
     }
     verify_schema_ownership(
         connection,
-        "mfm_catalog",
-        &["mfm_catalog_schema", "config_entries"],
+        "mfm_config",
+        &["mfm_config_schema", "config_revisions"],
     )
     .await?;
     let columns: Vec<(String, String, String, bool, Option<String>)> = sqlx::query_as(
@@ -563,8 +565,8 @@ async fn verify_catalog_schema(
          JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid \
          JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
          LEFT JOIN pg_catalog.pg_collation coll ON coll.oid = a.attcollation \
-         WHERE n.nspname = 'mfm_catalog' \
-           AND c.relname IN ('mfm_catalog_schema','config_entries') \
+         WHERE n.nspname = 'mfm_config' \
+           AND c.relname IN ('mfm_config_schema','config_revisions') \
            AND a.attnum > 0 AND NOT a.attisdropped ORDER BY c.relname, a.attnum",
     )
     .fetch_all(&mut *connection)
@@ -572,11 +574,12 @@ async fn verify_catalog_schema(
     .map_err(|_| GateError::Unavailable)?;
     if columns
         != [
-            column("config_entries", "config_name", "text", true, Some("C")),
-            column("config_entries", "config_digest", "text", true, Some("C")),
-            column("config_entries", "canonical", "bytea", true, None),
+            column("config_revisions", "config_name", "text", true, Some("C")),
+            column("config_revisions", "config_digest", "text", true, Some("C")),
+            column("config_revisions", "canonical", "bytea", true, None),
+            column("config_revisions", "current", "bool", true, None),
             column(
-                "mfm_catalog_schema",
+                "mfm_config_schema",
                 "schema_contract",
                 "text",
                 true,
@@ -587,7 +590,7 @@ async fn verify_catalog_schema(
         return Err(GateError::Incompatible);
     }
     let markers: Vec<String> =
-        sqlx::query_scalar("SELECT schema_contract FROM mfm_catalog.mfm_catalog_schema ORDER BY 1")
+        sqlx::query_scalar("SELECT schema_contract FROM mfm_config.mfm_config_schema ORDER BY 1")
             .fetch_all(&mut *connection)
             .await
             .map_err(|error| {
@@ -597,7 +600,7 @@ async fn verify_catalog_schema(
                     GateError::Unavailable
                 }
             })?;
-    if markers != ["mfm.config-catalog-postgres.v2"] {
+    if markers != ["mfm.config-postgres.v1"] {
         return Err(GateError::Incompatible);
     }
     let indexes: Vec<(String, String, String)> = sqlx::query_as(
@@ -606,7 +609,7 @@ async fn verify_catalog_schema(
          JOIN pg_catalog.pg_class table_class ON table_class.oid = idx.indrelid \
          JOIN pg_catalog.pg_class index_class ON index_class.oid = idx.indexrelid \
          JOIN pg_catalog.pg_namespace n ON n.oid = table_class.relnamespace \
-         WHERE n.nspname = 'mfm_catalog' ORDER BY table_class.relname, index_class.relname",
+         WHERE n.nspname = 'mfm_config' ORDER BY table_class.relname, index_class.relname",
     )
     .fetch_all(&mut *connection)
     .await
@@ -614,14 +617,19 @@ async fn verify_catalog_schema(
     if indexes
         != [
             index(
-                "config_entries",
-                "mfm_catalog_config_entries_pkey",
-                "CREATE UNIQUE INDEX mfm_catalog_config_entries_pkey ON mfm_catalog.config_entries USING btree (config_name)",
+                "config_revisions",
+                "mfm_config_revisions_current_key",
+                "CREATE UNIQUE INDEX mfm_config_revisions_current_key ON mfm_config.config_revisions USING btree (config_name) WHERE current",
             ),
             index(
-                "mfm_catalog_schema",
-                "mfm_catalog_schema_pkey",
-                "CREATE UNIQUE INDEX mfm_catalog_schema_pkey ON mfm_catalog.mfm_catalog_schema USING btree (schema_contract)",
+                "config_revisions",
+                "mfm_config_revisions_pkey",
+                "CREATE UNIQUE INDEX mfm_config_revisions_pkey ON mfm_config.config_revisions USING btree (config_name, config_digest)",
+            ),
+            index(
+                "mfm_config_schema",
+                "mfm_config_schema_pkey",
+                "CREATE UNIQUE INDEX mfm_config_schema_pkey ON mfm_config.mfm_config_schema USING btree (schema_contract)",
             ),
         ]
     {
@@ -632,20 +640,20 @@ async fn verify_catalog_schema(
          FROM pg_catalog.pg_constraint con \
          JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = 'mfm_catalog' AND con.contype IN ('c','p') \
+         WHERE n.nspname = 'mfm_config' AND con.contype IN ('c','p') \
          ORDER BY c.relname, con.conname",
     )
     .fetch_all(&mut *connection)
     .await
     .map_err(|_| GateError::Unavailable)?;
     let expected = [
-        constraint("config_entries", "mfm_catalog_config_entries_bytes_check", "c", "CHECK (((octet_length(canonical) >= 1) AND (octet_length(canonical) <= 262144)))"),
-        constraint("config_entries", "mfm_catalog_config_entries_digest_check", "c", "CHECK ((config_digest ~ '^content:sha256-jcs-v1:[0-9a-f]{64}$'::text))"),
-        constraint("config_entries", "mfm_catalog_config_entries_name_grammar_check", "c", "CHECK (((config_name ~ '^[a-z0-9][a-z0-9-]*$'::text) AND (\"right\"(config_name, 1) <> '-'::text)))"),
-        constraint("config_entries", "mfm_catalog_config_entries_name_length_check", "c", "CHECK (((octet_length(config_name) >= 1) AND (octet_length(config_name) <= 64)))"),
-        constraint("config_entries", "mfm_catalog_config_entries_pkey", "p", "PRIMARY KEY (config_name)"),
-        constraint("mfm_catalog_schema", "mfm_catalog_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.config-catalog-postgres.v2'::text))"),
-        constraint("mfm_catalog_schema", "mfm_catalog_schema_pkey", "p", "PRIMARY KEY (schema_contract)"),
+        constraint("config_revisions", "mfm_config_revisions_bytes_check", "c", "CHECK (((octet_length(canonical) >= 1) AND (octet_length(canonical) <= 262144)))"),
+        constraint("config_revisions", "mfm_config_revisions_digest_check", "c", "CHECK ((config_digest ~ '^content:sha256-jcs-v1:[0-9a-f]{64}$'::text))"),
+        constraint("config_revisions", "mfm_config_revisions_name_grammar_check", "c", "CHECK (((config_name ~ '^[a-z0-9][a-z0-9-]*$'::text) AND (\"right\"(config_name, 1) <> '-'::text)))"),
+        constraint("config_revisions", "mfm_config_revisions_name_length_check", "c", "CHECK (((octet_length(config_name) >= 1) AND (octet_length(config_name) <= 64)))"),
+        constraint("config_revisions", "mfm_config_revisions_pkey", "p", "PRIMARY KEY (config_name, config_digest)"),
+        constraint("mfm_config_schema", "mfm_config_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.config-postgres.v1'::text))"),
+        constraint("mfm_config_schema", "mfm_config_schema_pkey", "p", "PRIMARY KEY (schema_contract)"),
     ];
     if constraints != expected {
         return Err(GateError::Incompatible);
@@ -1287,7 +1295,7 @@ fn classify_precommit_sql(error: sqlx::Error) -> StoreError {
 fn assert_send_static<T: Send + 'static>() {}
 
 const RUN_SCHEMA_SQL: &str = include_str!("../migrations/run_history_postgres_v1.sql");
-const CATALOG_SCHEMA_SQL: &str = include_str!("../migrations/config_catalog_postgres_v2.sql");
+const CONFIG_SCHEMA_SQL: &str = include_str!("../migrations/config_postgres_v1.sql");
 
 #[cfg(test)]
 #[path = "../../../kernel/store/tests/support/scenarios.rs"]

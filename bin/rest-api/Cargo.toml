@@ -21,7 +21,7 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 libc = { workspace = true }
-mfm-catalog = { path = "../../crates/catalog" }
+mfm-config = { path = "../../crates/config" }
 mfm-evm = { path = "../../crates/domains/evm" }
 mfm-evm-live = { path = "../../crates/live/evm" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }

@@ -19,7 +19,6 @@ mfm_cli [--deployment <PATH>] [--output text|json] binding list
 
 mfm_cli [--deployment <PATH>] [--output text|json] config import <NAME> --from <PATH|->
 mfm_cli [--deployment <PATH>] [--output text|json] config list
-mfm_cli [--deployment <PATH>] [--output text|json] config show <NAME>
 
 mfm_cli [--deployment <PATH>] [--output text|json] run start --config <NAME> \
     [--config-digest <DIGEST>] [--run-id <RUN_ID>]
@@ -34,10 +33,11 @@ locator name and retains no administrative handle after provisioning. The comple
 grammar, bounds, and example are documented by [`mfm-app`](../../crates/app/README.md).
 
 `config import` reads at most 256 KiB plus one byte from a file or stdin. It creates an absent name,
-leaves identical content unchanged, or atomically replaces different content. The stored document
-is a complete tagged execution config; `run start` accepts no entry-point or inline document. Without
-`--config-digest`, start selects the revision currently bound to the name. Supplying it asserts the
-exact current digest.
+leaves an identical current revision unchanged, or atomically makes a new or retained historical
+revision current. All revisions remain retained. The stored document is a complete tagged execution
+config; `run start` accepts no entry-point or inline document. Without `--config-digest`, start
+selects the revision currently bound to the name. Supplying it selects that exact retained digest,
+whether or not it is current.
 
 Without `--run-id`, only the CLI obtains exactly 32 bytes from the OS cryptographic random source
 and passes them to the frozen pure derivation helper. Entropy failure is
@@ -46,14 +46,15 @@ fallback. Explicit RunIds bypass generation and support deterministic retries.
 
 ## Output
 
-`--output text` is the default human presentation. Config summaries include `config_name`,
-`config_digest`, and `entry_point`. Start prints those fields before the run fields. Terminal run
+`--output text` is the default human presentation. Listed config revisions include `config_name`,
+`config_digest`, `entry_point`, and `current`. Import/start summaries omit the mutable current
+marker. Start prints those fields before the run fields. Terminal run
 text includes `contract_ref`, `value_ref`, and exact canonical `value`.
 
 `--output json` is the stable automation surface shared with REST. It preserves the documented
-Application models: generic item lists, config summaries/documents, start results, mechanical run
-pages, and the full tagged RunView. Canonical config and terminal values occupy raw
-JSON positions rather than quoted strings. Successful bodyless operations emit `{}` in JSON mode
+Application models: generic item lists, config revision summaries, start results, mechanical run
+pages, and the full tagged RunView. Terminal values occupy raw JSON positions rather than quoted
+strings. Successful bodyless operations emit `{}` in JSON mode
 and nothing in text mode.
 
 Ordinary JSON errors are exactly `{"code":"...","message":"..."}`. An ambiguous run append adds

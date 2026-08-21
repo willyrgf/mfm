@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use mfm_canonical::sha256_digest_bytes;
-use mfm_catalog::{CatalogError, CatalogPutResult, ConfigCatalog};
+use mfm_config::{ConfigImportResult, ConfigRepository, ConfigRepositoryError};
 use mfm_evm::{
     CheckChainIdentity, ConfirmBalanceAnchor, ConsolidateBalanceCollection, EvmAnchorRead,
     EvmBalanceRead, EvmChainIdentityRead, EvmEndpoint, EvmPhysicalTarget, ReadInitialAnchor,
@@ -33,13 +33,13 @@ mod config;
 mod deployment;
 
 pub use config::{
-    ConfigDocument, ConfigDocumentError, ConfigSummary, EntryPointSummary, ImportOutcome,
-    StoredConfigView,
+    ConfigDocument, ConfigDocumentError, ConfigRevisionSummary, ConfigSummary, EntryPointSummary,
+    ImportOutcome,
 };
 pub use deployment::{
     Deployment, EnvironmentName, EnvironmentNameError, MAX_DEPLOYMENT_DOCUMENT_BYTES,
 };
-pub use mfm_catalog::{ConfigDigest, ConfigName, MAX_CONFIG_DOCUMENT_BYTES};
+pub use mfm_config::{ConfigDigest, ConfigName, MAX_CONFIG_DOCUMENT_BYTES};
 pub use mfm_store::{RunPage, RunPageLimit};
 
 use config::ENTRY_POINTS;
@@ -213,21 +213,15 @@ pub enum RequestError {
     /// The selected config name is absent.
     #[error("config is absent")]
     ConfigAbsent,
-    /// A caller's revision assertion differs from current content.
-    #[error("config digest does not match current content")]
-    ConfigDigestMismatch,
     /// The complete config cannot be planned.
     #[error("config document is invalid")]
     InvalidConfigDocument,
-    /// The fixed live config capacity was reached.
-    #[error("config catalog capacity exceeded")]
-    CatalogCapacity,
-    /// A catalog mutation may have committed.
+    /// A configuration mutation may have committed.
     #[error("config mutation outcome is indeterminate")]
-    CatalogIndeterminate,
-    /// Retained catalog bytes are invalid.
-    #[error("retained config catalog is invalid")]
-    InvalidCatalog,
+    ConfigMutationIndeterminate,
+    /// Retained configuration bytes or metadata are invalid.
+    #[error("retained config is invalid")]
+    InvalidRetainedConfig,
     /// The run is absent.
     #[error("run is absent")]
     RunAbsent,
@@ -249,7 +243,7 @@ pub enum RequestError {
     /// Retained mechanical run heads are invalid.
     #[error("retained run index is invalid")]
     InvalidRunIndex,
-    /// A required store, catalog, or provider is unavailable.
+    /// A required store, configuration repository, or provider is unavailable.
     #[error("application dependency is unavailable")]
     DependencyUnavailable,
     /// A trusted local invariant failed.
@@ -262,11 +256,9 @@ impl RequestError {
     pub const fn code(self) -> &'static str {
         match self {
             Self::ConfigAbsent => "config_absent",
-            Self::ConfigDigestMismatch => "config_digest_mismatch",
             Self::InvalidConfigDocument => "invalid_config_document",
-            Self::CatalogCapacity => "config_catalog_capacity",
-            Self::CatalogIndeterminate => "config_mutation_indeterminate",
-            Self::InvalidCatalog => "invalid_config_catalog",
+            Self::ConfigMutationIndeterminate => "config_mutation_indeterminate",
+            Self::InvalidRetainedConfig => "invalid_retained_config",
             Self::RunAbsent => "run_absent",
             Self::RunAdmissionConflict => "run_admission_conflict",
             Self::InvalidRunHistory => "invalid_run_history",
@@ -286,12 +278,12 @@ impl RequestError {
 pub enum ConfigSelection {
     /// Atomically select the revision currently bound to the name.
     Current {
-        /// Catalog name.
+        /// Configuration name.
         name: ConfigName,
     },
-    /// Require the current revision to equal the supplied digest.
+    /// Select an exact retained revision, whether or not it is current.
     Exact {
-        /// Catalog name.
+        /// Configuration name.
         name: ConfigName,
         /// Required canonical-document digest.
         digest: ConfigDigest,
@@ -481,13 +473,13 @@ impl<'a, T> ItemList<'a, T> {
 /// Transport-neutral application use-case surface.
 pub struct Application {
     composed: ComposedRuntime,
-    catalog: Arc<dyn ConfigCatalog>,
+    configs: Arc<dyn ConfigRepository>,
 }
 
 impl Application {
-    /// Constructs an Application from one checked Runtime/index composition and config catalog.
-    pub fn from_parts(composed: ComposedRuntime, catalog: Arc<dyn ConfigCatalog>) -> Self {
-        Self { composed, catalog }
+    /// Constructs an Application from one checked Runtime/index composition and config repository.
+    pub fn from_parts(composed: ComposedRuntime, configs: Arc<dyn ConfigRepository>) -> Self {
+        Self { composed, configs }
     }
 
     /// Resolves private locators once and constructs the production PostgreSQL/EVM Application.
@@ -513,10 +505,10 @@ impl Application {
                 .await
                 .map_err(|_| ComposeError::Postgres)?,
         );
-        let catalog: Arc<dyn ConfigCatalog> = postgres.clone();
+        let configs: Arc<dyn ConfigRepository> = postgres.clone();
         let bindings = BoundCapabilitySet::new(routes)?;
         let composed = ComposedRuntime::compose(postgres, bindings)?;
-        Ok(Self::from_parts(composed, catalog))
+        Ok(Self::from_parts(composed, configs))
     }
 
     /// Returns the strictly ordered compiled entry points.
@@ -546,54 +538,37 @@ impl Application {
         .map_err(|_| RequestError::Internal)??;
         let summary = document.summary(name.clone());
         let entry = document
-            .catalog_entry(name)
+            .revision(name)
             .map_err(|_| RequestError::Internal)?;
         match self
-            .catalog
-            .put_config(&entry)
+            .configs
+            .import_config(&entry)
             .await
-            .map_err(map_catalog_error)?
+            .map_err(map_config_repository_error)?
         {
-            CatalogPutResult::Inserted => Ok(ImportOutcome::Created { config: summary }),
-            CatalogPutResult::Unchanged => Ok(ImportOutcome::Unchanged { config: summary }),
-            CatalogPutResult::Updated => Ok(ImportOutcome::Updated { config: summary }),
+            ConfigImportResult::Created => Ok(ImportOutcome::Created { config: summary }),
+            ConfigImportResult::Unchanged => Ok(ImportOutcome::Unchanged { config: summary }),
+            ConfigImportResult::Updated => Ok(ImportOutcome::Updated { config: summary }),
         }
     }
 
-    /// Reads and revalidates one retained config revision.
-    pub async fn read_config(&self, name: &ConfigName) -> Result<StoredConfigView, RequestError> {
-        let entry = self
-            .catalog
-            .load_config(name)
-            .await
-            .map_err(map_catalog_error)?
-            .ok_or(RequestError::ConfigAbsent)?;
-        tokio::task::spawn_blocking(move || {
-            let (name, digest, canonical) = entry.into_parts();
-            ConfigDocument::parse_retained(canonical, &digest)
-                .and_then(|document| document.stored_view(name))
-                .map_err(|_| RequestError::InvalidCatalog)
-        })
-        .await
-        .map_err(|_| RequestError::Internal)?
-    }
-
-    /// Lists and revalidates the complete bounded config catalog.
-    pub async fn list_configs(&self) -> Result<Vec<ConfigSummary>, RequestError> {
+    /// Lists and revalidates every retained configuration revision.
+    pub async fn list_configs(&self) -> Result<Vec<ConfigRevisionSummary>, RequestError> {
         let entries = self
-            .catalog
+            .configs
             .list_configs()
             .await
-            .map_err(map_catalog_error)?;
+            .map_err(map_config_repository_error)?;
         tokio::task::spawn_blocking(move || {
             let items = entries
                 .into_items()
                 .into_iter()
                 .map(|entry| {
+                    let (entry, current) = entry.into_parts();
                     let (name, digest, canonical) = entry.into_parts();
                     ConfigDocument::parse_retained(canonical, &digest)
-                        .map(|document| document.summary(name))
-                        .map_err(|_| RequestError::InvalidCatalog)
+                        .map(|document| document.revision_summary(name, current))
+                        .map_err(|_| RequestError::InvalidRetainedConfig)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(items)
@@ -608,19 +583,25 @@ impl Application {
         run_id: RunId,
         selection: &ConfigSelection,
     ) -> Result<StartRunResult, RunRequestError> {
+        let selected_digest = match selection {
+            ConfigSelection::Current { .. } => None,
+            ConfigSelection::Exact { digest, .. } => Some(digest),
+        };
         let entry = self
-            .catalog
-            .load_config(selection.name())
+            .configs
+            .load_config(selection.name(), selected_digest)
             .await
-            .map_err(map_catalog_error)?
+            .map_err(map_config_repository_error)?
             .ok_or(RequestError::ConfigAbsent)?;
         let (name, digest, canonical) = entry.into_parts();
         let (document, program, c0) = tokio::task::spawn_blocking(move || {
             let document = ConfigDocument::parse_retained(canonical, &digest)
-                .map_err(|_| RequestError::InvalidCatalog)?;
+                .map_err(|_| RequestError::InvalidRetainedConfig)?;
             let (program, c0) = match document.plan() {
                 Ok(planned) => planned,
-                Err(PortfolioError::InvalidValue) => return Err(RequestError::InvalidCatalog),
+                Err(PortfolioError::InvalidValue) => {
+                    return Err(RequestError::InvalidRetainedConfig)
+                }
                 Err(PortfolioError::InvalidContinuation | PortfolioError::Program) => {
                     return Err(RequestError::Internal);
                 }
@@ -630,11 +611,6 @@ impl Application {
         .await
         .map_err(|_| RequestError::Internal)??;
         let config = document.summary(name);
-        if let ConfigSelection::Exact { digest, .. } = selection {
-            if config.digest() != digest {
-                return Err(RequestError::ConfigDigestMismatch.into());
-            }
-        }
         if !self.composed.has_targets(document.targets()) {
             return Err(RequestError::BindingUnbound.into());
         }
@@ -716,12 +692,11 @@ pub fn derive_run_id(entropy: [u8; 32]) -> RunId {
     RunId::from_digest(sha256_digest_bytes(preimage.as_bytes()))
 }
 
-const fn map_catalog_error(error: CatalogError) -> RequestError {
+const fn map_config_repository_error(error: ConfigRepositoryError) -> RequestError {
     match error {
-        CatalogError::Capacity => RequestError::CatalogCapacity,
-        CatalogError::Corrupt => RequestError::InvalidCatalog,
-        CatalogError::Unavailable => RequestError::DependencyUnavailable,
-        CatalogError::Indeterminate => RequestError::CatalogIndeterminate,
+        ConfigRepositoryError::Corrupt => RequestError::InvalidRetainedConfig,
+        ConfigRepositoryError::Unavailable => RequestError::DependencyUnavailable,
+        ConfigRepositoryError::Indeterminate => RequestError::ConfigMutationIndeterminate,
     }
 }
 
@@ -784,29 +759,19 @@ mod tests {
                 "config is absent",
             ),
             (
-                RequestError::ConfigDigestMismatch,
-                "config_digest_mismatch",
-                "config digest does not match current content",
-            ),
-            (
                 RequestError::InvalidConfigDocument,
                 "invalid_config_document",
                 "config document is invalid",
             ),
             (
-                RequestError::CatalogCapacity,
-                "config_catalog_capacity",
-                "config catalog capacity exceeded",
-            ),
-            (
-                RequestError::CatalogIndeterminate,
+                RequestError::ConfigMutationIndeterminate,
                 "config_mutation_indeterminate",
                 "config mutation outcome is indeterminate",
             ),
             (
-                RequestError::InvalidCatalog,
-                "invalid_config_catalog",
-                "retained config catalog is invalid",
+                RequestError::InvalidRetainedConfig,
+                "invalid_retained_config",
+                "retained config is invalid",
             ),
             (RequestError::RunAbsent, "run_absent", "run is absent"),
             (

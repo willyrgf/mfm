@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
-//! Opaque named config custody.
+//! Opaque, versioned configuration custody.
 //!
-//! The catalog never interprets config documents.
+//! The repository never interprets configuration documents.
 
 use std::fmt;
 use std::future::Future;
@@ -12,24 +12,22 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 mod memory;
 
-pub use memory::MemoryCatalog;
+pub use memory::MemoryConfigRepository;
 
-/// Maximum retained canonical bytes in one config document.
+/// Maximum retained canonical bytes in one configuration document.
 pub const MAX_CONFIG_DOCUMENT_BYTES: usize = 256 * 1024;
-/// Maximum number of live named config entries.
-pub const MAX_CONFIG_ENTRIES: usize = 256;
 
-/// Error returned when a config name violates its public grammar.
+/// Error returned when a configuration name violates its public grammar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("config name is invalid")]
 pub struct ConfigNameError;
 
-/// A bounded lowercase name in the durable config catalog.
+/// A bounded lowercase name in the durable configuration repository.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConfigName(String);
 
 impl ConfigName {
-    /// Parses a config name.
+    /// Parses a configuration name.
     pub fn new(value: impl AsRef<str>) -> Result<Self, ConfigNameError> {
         let value = value.as_ref();
         let bytes = value.as_bytes();
@@ -84,12 +82,12 @@ impl<'de> Deserialize<'de> for ConfigName {
     }
 }
 
-/// Error returned when a config digest is not a canonical-JSON digest.
+/// Error returned when a configuration digest is not a canonical-JSON digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("config digest is invalid")]
 pub struct ConfigDigestError;
 
-/// Content digest of one canonical config document.
+/// Content digest of one canonical configuration document.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConfigDigest(ContentDigest);
 
@@ -102,7 +100,7 @@ impl ConfigDigest {
         Ok(Self(digest))
     }
 
-    /// Parses a checked config digest.
+    /// Parses a checked configuration digest.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, ConfigDigestError> {
         let digest = ContentDigest::parse(value).map_err(|_| ConfigDigestError)?;
         Self::new(digest)
@@ -153,31 +151,31 @@ impl<'de> Deserialize<'de> for ConfigDigest {
     }
 }
 
-/// Error returned when opaque catalog custody bytes violate their bounds.
+/// Error returned when opaque revision bytes violate their mechanical bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("catalog entry is invalid")]
-pub struct CatalogEntryError;
+#[error("config revision is invalid")]
+pub struct ConfigRevisionError;
 
-/// One owned, opaque config custody snapshot.
+/// One immutable, opaque configuration revision.
 ///
 /// Construction enforces only mechanical bounds. Application is responsible
 /// for canonical-document parsing and digest verification after every load.
 #[derive(Clone)]
-pub struct CatalogEntry {
+pub struct ConfigRevision {
     name: ConfigName,
     digest: ConfigDigest,
     canonical: Vec<u8>,
 }
 
-impl CatalogEntry {
-    /// Constructs one bounded opaque custody record.
+impl ConfigRevision {
+    /// Constructs one bounded opaque revision.
     pub fn new(
         name: ConfigName,
         digest: ConfigDigest,
         canonical: Vec<u8>,
-    ) -> Result<Self, CatalogEntryError> {
+    ) -> Result<Self, ConfigRevisionError> {
         if canonical.is_empty() || canonical.len() > MAX_CONFIG_DOCUMENT_BYTES {
-            return Err(CatalogEntryError);
+            return Err(ConfigRevisionError);
         }
         Ok(Self {
             name,
@@ -186,7 +184,7 @@ impl CatalogEntry {
         })
     }
 
-    /// Returns the catalog name observed in this snapshot.
+    /// Returns the revision name.
     pub const fn name(&self) -> &ConfigName {
         &self.name
     }
@@ -201,83 +199,128 @@ impl CatalogEntry {
         &self.canonical
     }
 
-    /// Consumes the record into its owned parts.
+    /// Consumes the revision into its owned parts.
     pub fn into_parts(self) -> (ConfigName, ConfigDigest, Vec<u8>) {
         (self.name, self.digest, self.canonical)
     }
 }
 
-/// Atomic config custody outcome.
+/// One retained revision annotated with its current status.
+pub struct RetainedConfigRevision {
+    revision: ConfigRevision,
+    current: bool,
+}
+
+impl RetainedConfigRevision {
+    /// Constructs one retained revision projection.
+    pub const fn new(revision: ConfigRevision, current: bool) -> Self {
+        Self { revision, current }
+    }
+
+    /// Returns the immutable revision.
+    pub const fn revision(&self) -> &ConfigRevision {
+        &self.revision
+    }
+
+    /// Reports whether this revision is current for its name.
+    pub const fn is_current(&self) -> bool {
+        self.current
+    }
+
+    /// Consumes the projection into its revision and current marker.
+    pub fn into_parts(self) -> (ConfigRevision, bool) {
+        (self.revision, self.current)
+    }
+}
+
+/// Atomic configuration import outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CatalogPutResult {
-    /// The absent name was bound to the supplied entry.
-    Inserted,
-    /// The name already retained the exact same digest and bytes.
+pub enum ConfigImportResult {
+    /// The name was absent and its first revision was created.
+    Created,
+    /// The exact supplied revision was already current and nothing was written.
     Unchanged,
-    /// The name retained different content and was atomically replaced.
+    /// The supplied new or historical revision was made current.
     Updated,
 }
 
-/// Redaction-safe config catalog failure.
+/// Redaction-safe configuration repository failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum CatalogError {
-    /// The fixed live-entry bound was reached.
-    #[error("config catalog capacity exceeded")]
-    Capacity,
+pub enum ConfigRepositoryError {
     /// Retained mechanical rows were invalid.
-    #[error("config catalog is corrupt")]
+    #[error("config repository is corrupt")]
     Corrupt,
     /// The operation definitely did not complete.
-    #[error("config catalog is unavailable")]
+    #[error("config repository is unavailable")]
     Unavailable,
     /// A mutation may have committed but acknowledgement was unavailable.
-    #[error("config catalog mutation outcome is indeterminate")]
+    #[error("config mutation outcome is indeterminate")]
     Indeterminate,
 }
 
-/// The complete bounded, ordered set of owned config custody snapshots.
-pub struct CatalogEntries {
-    items: Vec<CatalogEntry>,
+/// The complete ordered set of retained configuration revisions.
+pub struct ConfigRevisions {
+    items: Vec<RetainedConfigRevision>,
 }
 
-impl CatalogEntries {
-    /// Constructs a structurally checked complete catalog snapshot.
-    pub fn new(items: Vec<CatalogEntry>) -> Result<Self, CatalogError> {
-        if items.len() > MAX_CONFIG_ENTRIES
-            || items.windows(2).any(|pair| pair[0].name >= pair[1].name)
-        {
-            return Err(CatalogError::Corrupt);
+impl ConfigRevisions {
+    /// Constructs a structurally checked complete revision snapshot.
+    pub fn new(items: Vec<RetainedConfigRevision>) -> Result<Self, ConfigRepositoryError> {
+        if items.windows(2).any(|pair| {
+            let left = pair[0].revision();
+            let right = pair[1].revision();
+            (left.name(), left.digest()) >= (right.name(), right.digest())
+        }) {
+            return Err(ConfigRepositoryError::Corrupt);
+        }
+        let mut name: Option<&ConfigName> = None;
+        let mut current_count = 0_usize;
+        for item in &items {
+            if name.is_some_and(|name| name != item.revision().name()) {
+                if current_count != 1 {
+                    return Err(ConfigRepositoryError::Corrupt);
+                }
+                current_count = 0;
+            }
+            name = Some(item.revision().name());
+            current_count += usize::from(item.is_current());
+        }
+        if name.is_some() && current_count != 1 {
+            return Err(ConfigRepositoryError::Corrupt);
         }
         Ok(Self { items })
     }
 
-    /// Returns the ordered entries.
-    pub fn items(&self) -> &[CatalogEntry] {
+    /// Returns every retained revision in ascending name/digest order.
+    pub fn items(&self) -> &[RetainedConfigRevision] {
         &self.items
     }
 
-    /// Consumes the snapshot into its ordered entries.
-    pub fn into_items(self) -> Vec<CatalogEntry> {
+    /// Consumes the snapshot into its ordered revisions.
+    pub fn into_items(self) -> Vec<RetainedConfigRevision> {
         self.items
     }
 }
 
-/// Object-safe named config custody contract.
-pub trait ConfigCatalog: Send + Sync {
-    /// Atomically inserts, compares, or replaces one named config.
-    fn put_config<'a>(
+/// Object-safe, domain-generic configuration custody contract.
+pub trait ConfigRepository: Send + Sync {
+    /// Atomically retains the revision and makes it current for its name.
+    fn import_config<'a>(
         &'a self,
-        entry: &'a CatalogEntry,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogPutResult, CatalogError>> + Send + 'a>>;
+        revision: &'a ConfigRevision,
+    ) -> Pin<Box<dyn Future<Output = Result<ConfigImportResult, ConfigRepositoryError>> + Send + 'a>>;
 
-    /// Loads one internally consistent owned name/digest/bytes snapshot.
+    /// Loads the current revision, or an exact retained digest when supplied.
     fn load_config<'a>(
         &'a self,
         name: &'a ConfigName,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<CatalogEntry>, CatalogError>> + Send + 'a>>;
+        digest: Option<&'a ConfigDigest>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Option<ConfigRevision>, ConfigRepositoryError>> + Send + 'a>,
+    >;
 
-    /// Lists the complete bounded catalog in ascending name order.
+    /// Lists every retained revision in ascending name/digest order.
     fn list_configs<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogEntries, CatalogError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<ConfigRevisions, ConfigRepositoryError>> + Send + 'a>>;
 }

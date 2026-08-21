@@ -1,8 +1,8 @@
 [package]
-name = "mfm-catalog"
+name = "mfm-config"
 version = "0.1.0"
 edition = "2021"
-description = "Opaque named config custody for MFM"
+description = "Opaque versioned configuration custody for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
@@ -13,7 +13,7 @@ domain-facing = false
 binary-facing = true
 
 [lib]
-name = "mfm_catalog"
+name = "mfm_config"
 path = "src/lib.rs"
 
 [dependencies]

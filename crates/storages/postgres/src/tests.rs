@@ -2,9 +2,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
-use mfm_catalog::{
-    CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigDigest, ConfigName,
-    MAX_CONFIG_ENTRIES,
+use mfm_config::{
+    ConfigDigest, ConfigImportResult, ConfigName, ConfigRepository, ConfigRepositoryError,
+    ConfigRevision,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_journal::{JournalHistory, OutcomeKind};
@@ -68,15 +68,15 @@ fn observe_store<T>(result: Result<T, StoreError>) -> store_hostile::Observation
     }
 }
 
-fn catalog_entry(name: &str, value: u8) -> CatalogEntry {
+fn config_revision(name: &str, value: usize) -> ConfigRevision {
     let canonical = PlainCanonicalJsonBytes::from_json_str(&format!(r#"{{"value":{value}}}"#))
         .expect("canonical JSON");
-    CatalogEntry::new(
+    ConfigRevision::new(
         ConfigName::new(name).expect("config name"),
         ConfigDigest::new(canonical.content_digest()).expect("config digest"),
         canonical.to_vec(),
     )
-    .expect("catalog entry")
+    .expect("config revision")
 }
 
 fn managed_locators() -> (AdminPostgresLocator, RuntimePostgresLocator) {
@@ -110,9 +110,9 @@ async fn runtime_connection(locator: &RuntimePostgresLocator) -> PgConnection {
 
 async fn reset_schemas(connection: &mut PgConnection) {
     connection
-        .execute("DROP SCHEMA IF EXISTS mfm_catalog CASCADE")
+        .execute("DROP SCHEMA IF EXISTS mfm_config CASCADE")
         .await
-        .expect("drop catalog schema");
+        .expect("drop config schema");
     connection
         .execute("DROP SCHEMA IF EXISTS public CASCADE")
         .await
@@ -129,10 +129,10 @@ fn migration_and_classifier_contracts_are_exact() {
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_store_schema"));
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_frames"));
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_heads"));
-    assert!(CATALOG_SCHEMA_SQL.contains("CREATE SCHEMA mfm_catalog"));
-    assert!(CATALOG_SCHEMA_SQL.contains("CREATE TABLE mfm_catalog.config_entries"));
+    assert!(CONFIG_SCHEMA_SQL.contains("CREATE SCHEMA mfm_config"));
+    assert!(CONFIG_SCHEMA_SQL.contains("CREATE TABLE mfm_config.config_revisions"));
     assert!(!RUN_SCHEMA_SQL.contains("UNLOGGED"));
-    assert!(!CATALOG_SCHEMA_SQL.contains("UNLOGGED"));
+    assert!(!CONFIG_SCHEMA_SQL.contains("UNLOGGED"));
     assert_eq!(
         advisory_lock_key(run_id(7).as_str()),
         -9_027_535_993_765_170_775
@@ -565,152 +565,191 @@ async fn assert_commit_and_hostile_contract(
     store_hostile::assert_hostile_matrix(&observed);
 }
 
-async fn assert_catalog_mutation_contract(catalog: &Arc<PostgresBackend>) {
-    use catalog::MutationCommitFault as Fault;
+async fn assert_config_mutation_contract(backend: &Arc<PostgresBackend>) {
+    use config::MutationCommitFault as Fault;
 
-    let before = catalog_entry("ambiguous-before", 1);
+    let before = config_revision("ambiguous-before", 1);
     assert_eq!(
-        catalog::put_config_with_fault(catalog.test_pool(), &before, Fault::BeforeSubmission).await,
-        Err(CatalogError::Unavailable)
+        config::import_config_with_fault(backend.test_pool(), &before, Fault::BeforeSubmission)
+            .await,
+        Err(ConfigRepositoryError::Unavailable)
     );
-    assert!(catalog
-        .load_config(before.name())
+    assert!(backend
+        .load_config(before.name(), None)
         .await
-        .expect("resolve before-submission insert")
+        .expect("resolve before-submission import")
         .is_none());
 
-    let rolled_back = catalog_entry("ambiguous-rollback", 2);
+    let rolled_back = config_revision("ambiguous-rollback", 2);
     assert_eq!(
-        catalog::put_config_with_fault(
-            catalog.test_pool(),
+        config::import_config_with_fault(
+            backend.test_pool(),
             &rolled_back,
             Fault::UnknownRolledBack,
         )
         .await,
-        Err(CatalogError::Indeterminate)
+        Err(ConfigRepositoryError::Indeterminate)
     );
-    assert!(catalog
-        .load_config(rolled_back.name())
+    assert!(backend
+        .load_config(rolled_back.name(), None)
         .await
-        .expect("resolve rolled-back insert")
+        .expect("resolve rolled-back import")
         .is_none());
 
-    let committed = catalog_entry("ambiguous-insert", 3);
+    let committed = config_revision("ambiguous-import", 3);
     assert_eq!(
-        catalog::put_config_with_fault(catalog.test_pool(), &committed, Fault::UnknownCommitted,)
+        config::import_config_with_fault(backend.test_pool(), &committed, Fault::UnknownCommitted,)
             .await,
-        Err(CatalogError::Indeterminate)
+        Err(ConfigRepositoryError::Indeterminate)
     );
     assert_eq!(
-        catalog
-            .load_config(committed.name())
+        backend
+            .load_config(committed.name(), None)
             .await
-            .expect("resolve committed insert")
-            .expect("committed entry")
+            .expect("resolve committed import")
+            .expect("committed revision")
             .digest(),
         committed.digest()
     );
 
-    let replacement = catalog_entry("ambiguous-insert", 4);
+    let replacement = config_revision("ambiguous-import", 4);
     assert_eq!(
-        catalog::put_config_with_fault(catalog.test_pool(), &replacement, Fault::UnknownCommitted,)
-            .await,
-        Err(CatalogError::Indeterminate)
+        config::import_config_with_fault(
+            backend.test_pool(),
+            &replacement,
+            Fault::UnknownCommitted,
+        )
+        .await,
+        Err(ConfigRepositoryError::Indeterminate)
     );
     assert_eq!(
-        catalog
-            .load_config(replacement.name())
+        backend
+            .load_config(replacement.name(), None)
             .await
             .expect("resolve committed update")
-            .expect("updated entry")
+            .expect("updated revision")
             .digest(),
         replacement.digest()
     );
+    assert_eq!(
+        backend
+            .load_config(committed.name(), Some(committed.digest()))
+            .await
+            .expect("load historical revision")
+            .expect("historical revision")
+            .canonical_bytes(),
+        committed.canonical_bytes()
+    );
+    assert_eq!(
+        backend
+            .import_config(&committed)
+            .await
+            .expect("reactivate historical revision"),
+        ConfigImportResult::Updated
+    );
+    assert_eq!(
+        backend
+            .load_config(committed.name(), None)
+            .await
+            .expect("load reactivated revision")
+            .expect("current revision")
+            .digest(),
+        committed.digest()
+    );
 
-    let race_left = catalog_entry("race", 5);
-    let race_right = catalog_entry("race", 6);
+    let race_left = config_revision("race", 5);
+    let race_right = config_revision("race", 6);
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let left = {
-        let catalog = Arc::clone(catalog);
+        let backend = Arc::clone(backend);
         let barrier = Arc::clone(&barrier);
         tokio::spawn(async move {
             barrier.wait().await;
-            catalog.put_config(&race_left).await
+            backend.import_config(&race_left).await
         })
     };
     let right = {
-        let catalog = Arc::clone(catalog);
+        let backend = Arc::clone(backend);
         let barrier = Arc::clone(&barrier);
         tokio::spawn(async move {
             barrier.wait().await;
-            catalog.put_config(&race_right).await
+            backend.import_config(&race_right).await
         })
     };
     let outcomes = [
-        left.await.expect("left catalog join").expect("left insert"),
+        left.await.expect("left config join").expect("left import"),
         right
             .await
-            .expect("right catalog join")
-            .expect("right insert"),
+            .expect("right config join")
+            .expect("right import"),
     ];
     assert_eq!(
         outcomes
             .iter()
-            .filter(|outcome| **outcome == CatalogPutResult::Inserted)
+            .filter(|outcome| **outcome == ConfigImportResult::Created)
             .count(),
         1
     );
     assert_eq!(
         outcomes
             .iter()
-            .filter(|outcome| **outcome == CatalogPutResult::Updated)
+            .filter(|outcome| **outcome == ConfigImportResult::Updated)
             .count(),
         1
     );
 
-    for (name, value) in [("beta", 7), ("gamma", 8)] {
+    for index in 0..300 {
         assert_eq!(
-            catalog
-                .put_config(&catalog_entry(name, value))
+            backend
+                .import_config(&config_revision(&format!("unbounded-{index:03}"), index,))
                 .await
-                .expect("page seed"),
-            CatalogPutResult::Inserted
+                .expect("unbounded import"),
+            ConfigImportResult::Created
         );
     }
-    for index in 0..(MAX_CONFIG_ENTRIES - 5) {
-        assert_eq!(
-            catalog
-                .put_config(&catalog_entry(
-                    &format!("quota-{index:03}"),
-                    u8::try_from(index).expect("quota value"),
-                ))
-                .await
-                .expect("quota insert"),
-            CatalogPutResult::Inserted
-        );
-    }
-    assert_eq!(
-        catalog
-            .put_config(&catalog_entry("quota-overflow", 9))
-            .await,
-        Err(CatalogError::Capacity)
-    );
-    assert_eq!(
-        catalog
-            .put_config(&catalog_entry("quota-000", u8::MAX))
-            .await
-            .expect("replace at capacity"),
-        CatalogPutResult::Updated
-    );
 
-    let entries = catalog.list_configs().await.expect("catalog entries");
-    let names = entries
-        .items()
-        .iter()
-        .map(|entry| entry.name().clone())
-        .collect::<Vec<_>>();
-    assert_eq!(names.len(), MAX_CONFIG_ENTRIES);
-    assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+    let entries = backend.list_configs().await.expect("config revisions");
+    assert_eq!(entries.items().len(), 306);
+    assert_eq!(
+        entries
+            .items()
+            .iter()
+            .filter(|entry| entry.revision().name().as_str() == "ambiguous-import")
+            .count(),
+        2
+    );
+    assert_eq!(
+        entries
+            .items()
+            .iter()
+            .filter(|entry| entry.revision().name().as_str() == "race")
+            .count(),
+        2
+    );
+    sqlx::query(
+        "UPDATE mfm_config.config_revisions SET current = false WHERE config_name = $1 AND current",
+    )
+    .bind(committed.name().as_str())
+    .execute(backend.test_pool())
+    .await
+    .expect("break current marker");
+    assert!(matches!(
+        backend.load_config(committed.name(), None).await,
+        Err(ConfigRepositoryError::Corrupt)
+    ));
+    assert_eq!(
+        backend.import_config(&committed).await,
+        Err(ConfigRepositoryError::Corrupt)
+    );
+    sqlx::query(
+        "UPDATE mfm_config.config_revisions SET current = true \
+         WHERE config_name = $1 AND config_digest = $2",
+    )
+    .bind(committed.name().as_str())
+    .bind(committed.digest().as_str())
+    .execute(backend.test_pool())
+    .await
+    .expect("restore current marker");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -767,34 +806,40 @@ async fn managed_postgres_persistence_authority_contract() {
     assert_eq!(next.items().len(), 1);
     assert!(page.items()[0].run_id() < next.items()[0].run_id());
 
-    let first = catalog_entry("alpha", 1);
-    let replacement = catalog_entry("alpha", 2);
+    let first = config_revision("alpha", 1);
+    let replacement = config_revision("alpha", 2);
     assert_eq!(
-        backend.put_config(&first).await.expect("insert config"),
-        CatalogPutResult::Inserted
+        backend.import_config(&first).await.expect("import config"),
+        ConfigImportResult::Created
     );
     assert_eq!(
-        backend.put_config(&first).await.expect("retry config"),
-        CatalogPutResult::Unchanged
+        backend.import_config(&first).await.expect("retry config"),
+        ConfigImportResult::Unchanged
     );
     assert_eq!(
         backend
-            .put_config(&replacement)
+            .import_config(&replacement)
             .await
-            .expect("replacement config"),
-        CatalogPutResult::Updated
+            .expect("new revision"),
+        ConfigImportResult::Updated
     );
     let retained = backend
-        .load_config(first.name())
+        .load_config(first.name(), None)
         .await
         .expect("load config")
         .expect("retained config");
     assert_eq!(retained.digest(), replacement.digest());
     assert_eq!(retained.canonical_bytes(), replacement.canonical_bytes());
+    let historical = backend
+        .load_config(first.name(), Some(first.digest()))
+        .await
+        .expect("load historical config")
+        .expect("historical config");
+    assert_eq!(historical.canonical_bytes(), first.canonical_bytes());
 
     assert_snapshot_and_blocking_contract(&backend).await;
     assert_commit_and_hostile_contract(&backend, &mut connection).await;
-    assert_catalog_mutation_contract(&backend).await;
+    assert_config_mutation_contract(&backend).await;
 
     let mut runtime_connection = runtime_connection(&runtime).await;
     assert!(
@@ -807,7 +852,7 @@ async fn managed_postgres_persistence_authority_contract() {
         .execute(&mut runtime_connection)
         .await
         .is_err());
-    assert!(sqlx::query("DELETE FROM mfm_catalog.config_entries")
+    assert!(sqlx::query("DELETE FROM mfm_config.config_revisions")
         .execute(&mut runtime_connection)
         .await
         .is_err());
@@ -827,23 +872,23 @@ async fn managed_postgres_persistence_authority_contract() {
     assert!(PostgresBackend::connect(&runtime).await.is_ok());
 
     connection
-        .execute("GRANT CREATE ON SCHEMA mfm_catalog TO mfm_runtime")
+        .execute("GRANT CREATE ON SCHEMA mfm_config TO mfm_runtime")
         .await
-        .expect("grant excess catalog privilege");
+        .expect("grant excess config privilege");
     assert!(matches!(
         PostgresBackend::connect(&runtime).await,
         Err(PostgresOpenError::Incompatible)
     ));
     connection
-        .execute("REVOKE CREATE ON SCHEMA mfm_catalog FROM mfm_runtime")
+        .execute("REVOKE CREATE ON SCHEMA mfm_config FROM mfm_runtime")
         .await
-        .expect("revoke excess catalog privilege");
+        .expect("revoke excess config privilege");
 
     drop(backend);
     connection
-        .execute("DELETE FROM mfm_catalog.mfm_catalog_schema")
+        .execute("DELETE FROM mfm_config.mfm_config_schema")
         .await
-        .expect("break catalog marker");
+        .expect("break config marker");
     assert!(matches!(
         PostgresBackend::connect(&runtime).await,
         Err(PostgresOpenError::Incompatible)

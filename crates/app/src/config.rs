@@ -1,7 +1,7 @@
 use std::fmt;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_catalog::{CatalogEntry, ConfigDigest, ConfigName, MAX_CONFIG_DOCUMENT_BYTES};
+use mfm_config::{ConfigDigest, ConfigName, ConfigRevision, MAX_CONFIG_DOCUMENT_BYTES};
 use mfm_evm::{EvmEndpoint, EvmPhysicalTarget, EVM_BALANCE_SOURCE_LIMIT};
 use mfm_ids::EntryPointId;
 use mfm_portfolio::{
@@ -9,9 +9,7 @@ use mfm_portfolio::{
     PortfolioSnapshotSelector, PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
 };
 use mfm_program::Program;
-use serde::ser::SerializeStruct;
-use serde::{Deserialize, Serialize, Serializer};
-use serde_json::value::RawValue;
+use serde::{Deserialize, Serialize};
 
 /// Stable code for a checked config-document construction failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,14 +131,21 @@ impl ConfigDocument {
         }
     }
 
-    pub(crate) fn catalog_entry(&self, name: ConfigName) -> Result<CatalogEntry, ()> {
-        CatalogEntry::new(name, self.digest.clone(), self.canonical.to_vec()).map_err(|_| ())
+    pub(crate) fn revision(&self, name: ConfigName) -> Result<ConfigRevision, ()> {
+        ConfigRevision::new(name, self.digest.clone(), self.canonical.to_vec()).map_err(|_| ())
     }
 
-    pub(crate) fn stored_view(self, name: ConfigName) -> Result<StoredConfigView, ()> {
-        let config = self.summary(name);
-        let document = RawValue::from_string(self.canonical.as_str().to_owned()).map_err(|_| ())?;
-        Ok(StoredConfigView { config, document })
+    pub(crate) fn revision_summary(
+        &self,
+        name: ConfigName,
+        current: bool,
+    ) -> ConfigRevisionSummary {
+        ConfigRevisionSummary {
+            name,
+            digest: self.digest.clone(),
+            entry_point: self.entry_point(),
+            current,
+        }
     }
 }
 
@@ -238,7 +243,7 @@ pub struct ConfigSummary {
 }
 
 impl ConfigSummary {
-    /// Returns the catalog name.
+    /// Returns the configuration name.
     pub const fn name(&self) -> &ConfigName {
         &self.name
     }
@@ -254,7 +259,38 @@ impl ConfigSummary {
     }
 }
 
-/// Result of importing an absent or identical config.
+/// One retained configuration revision returned by complete listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConfigRevisionSummary {
+    name: ConfigName,
+    digest: ConfigDigest,
+    entry_point: EntryPointId,
+    current: bool,
+}
+
+impl ConfigRevisionSummary {
+    /// Returns the configuration name.
+    pub const fn name(&self) -> &ConfigName {
+        &self.name
+    }
+
+    /// Returns the canonical-document digest.
+    pub const fn digest(&self) -> &ConfigDigest {
+        &self.digest
+    }
+
+    /// Returns the entry point derived from the retained document.
+    pub const fn entry_point(&self) -> &EntryPointId {
+        &self.entry_point
+    }
+
+    /// Reports whether this revision is current for its name.
+    pub const fn is_current(&self) -> bool {
+        self.current
+    }
+}
+
+/// Result of importing a configuration revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum ImportOutcome {
@@ -268,7 +304,7 @@ pub enum ImportOutcome {
         /// Existing revision identity.
         config: ConfigSummary,
     },
-    /// The name's prior revision was atomically replaced.
+    /// The supplied new or historical revision was atomically made current.
     Updated {
         /// Replacement revision identity.
         config: ConfigSummary,
@@ -283,35 +319,5 @@ impl ImportOutcome {
                 config
             }
         }
-    }
-}
-
-/// One validated stored config with its exact canonical document embedded as raw JSON.
-pub struct StoredConfigView {
-    config: ConfigSummary,
-    document: Box<RawValue>,
-}
-
-impl StoredConfigView {
-    /// Returns the retained config summary.
-    pub const fn config(&self) -> &ConfigSummary {
-        &self.config
-    }
-
-    /// Returns the exact canonical JSON document.
-    pub fn canonical_bytes(&self) -> &[u8] {
-        self.document.get().as_bytes()
-    }
-}
-
-impl Serialize for StoredConfigView {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("StoredConfigView", 2)?;
-        state.serialize_field("config", &self.config)?;
-        state.serialize_field("document", &self.document)?;
-        state.end()
     }
 }
