@@ -68,7 +68,9 @@ The CLI-only asymmetries are intentional: `postgres init` retains schema authori
 and only the CLI may generate a RunId. HTTP status represents request success, while CLI exit 1 may
 represent a runnable or durably failed run.
 
-`nix run .#run -- --task rest-e2e` builds the CLI and REST binaries explicitly, starts this real
-listener against local Reth and PostgreSQL, and compares discovery, config, exact start/delete,
-run-head, full RunView, and shared-error JSON. The two renderers also match the same frozen
-start/progress indeterminate recovery fixtures under `docs/contracts/client-surface/`.
+`nix run .#run -- --task client-e2e` builds the CLI and REST binaries explicitly. It admits an exact
+historical run through a deliberately unavailable live Read, proves the durable runnable prefix,
+deletes the selected config, cold-resumes the admitted Program through this listener against Reth,
+validates the complete snapshot, and reloads the identical RunView through the CLI. The two renderers
+also match the same frozen start/progress indeterminate recovery fixtures under
+`docs/contracts/client-surface/`.

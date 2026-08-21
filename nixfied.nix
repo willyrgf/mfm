@@ -261,37 +261,7 @@ in
       kind = "composite";
       steps = nixfiedLib.seq [ "postgres-test" ];
     };
-    cli-e2e =
-      (cargoLeaf {
-        run = [
-          "bash"
-          "-c"
-          (localPostgresRun (localEvmRun ''
-            env -u PGSERVICE -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE \
-              -u PGPASSWORD -u PGPASSFILE \
-              psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
-            DROP SCHEMA IF EXISTS mfm_config CASCADE;
-            DROP SCHEMA IF EXISTS public CASCADE;
-            CREATE SCHEMA public AUTHORIZATION CURRENT_USER;
-            SQL
-            export MFM_E2E_ADMIN_POSTGRES_LOCATOR="$MFM_TEST_ADMIN_POSTGRES_LOCATOR"
-            export MFM_E2E_RUNTIME_POSTGRES_LOCATOR="$MFM_TEST_RUNTIME_POSTGRES_LOCATOR"
-            export MFM_E2E_EVM_ADAPTER_LOCATOR="$MFM_TEST_EVM_ADAPTER_LOCATOR"
-            exec cargo test -p mfm --test cli_e2e -- --include-ignored --test-threads=1
-          ''))
-        ];
-        tools = [
-          "pg-psql"
-          pkgs.coreutils
-        ];
-      })
-      // {
-        requires = [
-          "postgres"
-          "reth"
-        ];
-      };
-    rest-e2e =
+    client-e2e =
       (cargoLeaf {
         run = [
           "bash"
@@ -311,7 +281,7 @@ in
             export MFM_E2E_CLI_BIN="$CARGO_TARGET_DIR/debug/mfm_cli"
             export MFM_E2E_REST_BIN="$CARGO_TARGET_DIR/debug/mfm_rest_api"
             test -x "$MFM_E2E_CLI_BIN" -a -x "$MFM_E2E_REST_BIN"
-            exec cargo test -p mfm-rest-api --test parity_e2e -- \
+            exec cargo test -p mfm-rest-api --test client_execution_e2e -- \
               --include-ignored --test-threads=1
           ''))
         ];
@@ -392,8 +362,7 @@ in
         "doc-tests"
         "capacity-envelope"
         "test-db"
-        "cli-e2e"
-        "rest-e2e"
+        "client-e2e"
       ];
     };
   };

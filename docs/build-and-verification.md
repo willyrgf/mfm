@@ -44,18 +44,9 @@ nix develop -c cargo test -p mfm --all-targets
 nix develop -c cargo test -p mfm-rest-api --all-targets
 ```
 
-The CLI e2e is ignored by default. Drive it directly only against a locally started pinned
-`reth --dev` plus PostgreSQL, and only serially:
-
-```bash
-MFM_E2E_EVM_ADAPTER_LOCATOR="$evm_adapter_locator" \
-MFM_E2E_RUNTIME_POSTGRES_LOCATOR="$runtime_postgres_locator" \
-MFM_E2E_ADMIN_POSTGRES_LOCATOR="$admin_postgres_locator" nix develop -c cargo test \
-  -p mfm --test cli_e2e -- --include-ignored --test-threads=1
-```
-
-Assign the three lower-case shell variables in this example the same raw HTTP(S) and PostgreSQL URLs
-accepted by the live locators; they are not JSON envelopes.
+The cross-transport client execution e2e is ignored by default because it requires both built
+binaries, a fresh split-role PostgreSQL schema, and pinned Reth. Drive it serially through the
+managed `client-e2e` task below; that task owns the complete fixture and binary setup.
 
 ## Nixfied tasks
 
@@ -63,13 +54,12 @@ accepted by the live locators; they are not JSON envelopes.
 | --- | --- |
 | `nix run .#model-check` | Admit the compiled model without project tasks. |
 | `nix run .#run -- --task postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
-| `nix run .#run -- --task cli-e2e` | Exercise the complete stored-config CLI lifecycle against local Reth and split-role PostgreSQL fixtures. |
-| `nix run .#run -- --task rest-e2e` | Build both client binaries explicitly and compare their shared JSON models through the production Unix-socket REST listener against local Reth and PostgreSQL. |
+| `nix run .#run -- --task client-e2e` | Interrupt an exact historical run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it through production REST against Reth, validate the exact snapshot, and reload the same RunView through the CLI over PostgreSQL. |
 | `nix run .#run -- --task capacity-app` | Exercise the exact 64/65-source Portfolio Program/C0 bound. |
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |
 | `nix run .#run -- --task capacity-envelope` | Compose the three capacity owners above. |
-| `nix run .#ci` | Compose format, Clippy, workspace check/tests, managed DB, both managed client e2es, docs, and capacity tasks. |
+| `nix run .#ci` | Compose format, Clippy, workspace check/tests, managed DB, the managed client e2e, docs, and capacity tasks. |
 
 Do not run broad component gates immediately before `.#ci` on the same tree. Once focused failures
 are resolved, run CI exactly once on the final candidate when the workflow requires the composed
