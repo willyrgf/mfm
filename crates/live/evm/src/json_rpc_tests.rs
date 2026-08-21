@@ -367,6 +367,59 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
 }
 
 #[tokio::test]
+async fn redirects_never_leave_the_selected_endpoint() {
+    let target = TcpListener::bind("127.0.0.1:0").expect("bind redirect target");
+    let target_address = target.local_addr().expect("redirect target address");
+    let target_worker = std::thread::spawn(move || {
+        let (mut stream, _) = target.accept().expect("accept redirect target");
+        let request = read_http_request(&mut stream);
+        if !request.is_empty() {
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":"0x539"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).expect("write target");
+        }
+        !request.is_empty()
+    });
+
+    let redirect = TcpListener::bind("127.0.0.1:0").expect("bind redirect source");
+    let redirect_url = format!(
+        "http://{}",
+        redirect.local_addr().expect("redirect address")
+    );
+    let redirect_worker = std::thread::spawn(move || {
+        let (mut stream, _) = redirect.accept().expect("accept redirect source");
+        let _ = read_http_request(&mut stream);
+        let response = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_address}\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write redirect");
+    });
+
+    let response = JsonRpcEvmProvider::new_http_for_test(redirect_url)
+        .expect("provider")
+        .request(
+            operation("mfm.evm.read-chain-identity@1"),
+            intent_bytes(
+                "mfm.evm.read-chain-identity@1",
+                serde_json::json!({ "kind": "chain_identity" }),
+            ),
+        )
+        .await;
+    assert_eq!(response, Err(ReadAdapterError::Unavailable));
+    redirect_worker.join().expect("redirect worker");
+
+    let _ = TcpStream::connect(target_address);
+    assert!(!target_worker.join().expect("target worker"));
+}
+
+#[tokio::test]
 async fn undecodable_or_mismatched_intent_is_internal_and_never_enters_transport() {
     // No stub is bound: an Internal outcome proves nothing reached a transport.
     let provider =
@@ -404,20 +457,17 @@ fn an_unusable_url_fails_construction_without_naming_it() {
 }
 
 #[test]
-fn locator_accepts_plain_or_stock_tls_http_and_rejects_non_http_wires() {
-    for accepted in [
-        r#"{"v":1,"url":"http://127.0.0.1:8545"}"#,
-        r#"{"v":1,"url":"https://example.com"}"#,
-    ] {
+fn locator_accepts_raw_http_urls_and_rejects_other_forms() {
+    for accepted in ["http://127.0.0.1:8545", "https://example.com"] {
         let locator = EvmAdapterLocator::parse(accepted).expect("HTTP locator");
         JsonRpcEvmProvider::connect(&locator).expect("provider");
     }
 
     for rejected in [
-        r#"{"v":1,"url":"ftp://127.0.0.1/x"}"#,
-        r#"{"v":1,"url":"https://127.0.0.1/x#fragment"}"#,
-        r#"{"v":2,"url":"https://127.0.0.1/x"}"#,
-        r#"{"v":1,"url":"https://127.0.0.1/x","tls_roots":{"kind":"webpki"}}"#,
+        "ftp://127.0.0.1/x",
+        "https://127.0.0.1/x#fragment",
+        "https://127.0.0.1/x\n",
+        r#"{"v":1,"url":"https://127.0.0.1/x"}"#,
     ] {
         assert!(EvmAdapterLocator::parse(rejected).is_err(), "{rejected}");
     }
