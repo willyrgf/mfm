@@ -9,9 +9,9 @@ use mfm_app::{
     SerializableRunView, MAX_EVM_BINDINGS,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_catalog::{
-    CatalogEntries, CatalogEntry, CatalogError, CatalogPutResult, ConfigCatalog, ConfigDigest,
-    ConfigName, MemoryCatalog, MAX_CONFIG_DOCUMENT_BYTES,
+use mfm_config::{
+    ConfigDigest, ConfigImportResult, ConfigName, ConfigRepository, ConfigRepositoryError,
+    ConfigRevision, ConfigRevisions, MemoryConfigRepository, MAX_CONFIG_DOCUMENT_BYTES,
 };
 use mfm_evm::{EvmEndpoint, EvmReadValue};
 use mfm_evm_live::{EvmProvider, EvmProviderResponse};
@@ -154,42 +154,47 @@ fn application_with_backend(
         BoundCapabilitySet::new(bindings).expect("bindings"),
     )
     .expect("composition");
-    Application::from_parts(composed, Arc::new(MemoryCatalog::new()))
+    Application::from_parts(composed, Arc::new(MemoryConfigRepository::new()))
 }
 
-struct HostileCatalog {
-    entry: CatalogEntry,
+struct HostileConfigRepository {
+    revision: ConfigRevision,
 }
 
-impl ConfigCatalog for HostileCatalog {
-    fn put_config<'a>(
+impl ConfigRepository for HostileConfigRepository {
+    fn import_config<'a>(
         &'a self,
-        _entry: &'a CatalogEntry,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogPutResult, CatalogError>> + Send + 'a>> {
-        Box::pin(async { Err(CatalogError::Corrupt) })
+        _revision: &'a ConfigRevision,
+    ) -> Pin<Box<dyn Future<Output = Result<ConfigImportResult, ConfigRepositoryError>> + Send + 'a>>
+    {
+        Box::pin(async { Err(ConfigRepositoryError::Corrupt) })
     }
 
     fn load_config<'a>(
         &'a self,
         _name: &'a ConfigName,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<CatalogEntry>, CatalogError>> + Send + 'a>> {
-        Box::pin(async { Ok(Some(self.entry.clone())) })
+        _digest: Option<&'a ConfigDigest>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Option<ConfigRevision>, ConfigRepositoryError>> + Send + 'a>,
+    > {
+        Box::pin(async { Ok(Some(self.revision.clone())) })
     }
 
     fn list_configs<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<CatalogEntries, CatalogError>> + Send + 'a>> {
-        Box::pin(async { Err(CatalogError::Corrupt) })
+    ) -> Pin<Box<dyn Future<Output = Result<ConfigRevisions, ConfigRepositoryError>> + Send + 'a>>
+    {
+        Box::pin(async { Err(ConfigRepositoryError::Corrupt) })
     }
 }
 
-fn application_with_catalog(entry: CatalogEntry) -> Application {
+fn application_with_config_repository(revision: ConfigRevision) -> Application {
     let composed = ComposedRuntime::compose(
         Arc::new(FaultStore::new()),
         BoundCapabilitySet::new(Vec::new()).expect("bindings"),
     )
     .expect("composition");
-    Application::from_parts(composed, Arc::new(HostileCatalog { entry }))
+    Application::from_parts(composed, Arc::new(HostileConfigRepository { revision }))
 }
 
 struct FaultStore {
@@ -320,13 +325,13 @@ async fn config_document_boundary_is_strict_and_canonical() {
         imported.config().digest().as_str(),
         "content:sha256-jcs-v1:0723d5ccf638cfcf6bb85d96de269e93adcef0847147ace563d09464c8c12250"
     );
-    let shown = app.read_config(&config_name("daily")).await.expect("show");
-    assert_eq!(shown.config(), imported.config());
+    let listed = app.list_configs().await.expect("list");
+    assert_eq!(listed.len(), 1);
     assert_eq!(
-        ConfigDigest::parse(shown.config().digest().as_str()).expect("digest"),
-        *shown.config().digest()
+        ConfigDigest::parse(listed[0].digest().as_str()).expect("digest"),
+        *listed[0].digest()
     );
-    assert!(!shown.canonical_bytes().contains(&b'\n'));
+    assert!(listed[0].is_current());
 
     for malformed in [
         br#"{"entry_point":"x","entry_point":"y"}"#.as_slice(),
@@ -405,7 +410,7 @@ async fn stored_config_lifecycle_drives_current_exact_and_retained_runs() {
     assert!(matches!(updated, ImportOutcome::Updated { .. }));
     assert_ne!(updated.config().digest(), &digest);
 
-    let exact = app
+    let exact_current = app
         .start_run(
             run_id(11),
             &ConfigSelection::Exact {
@@ -415,20 +420,18 @@ async fn stored_config_lifecycle_drives_current_exact_and_retained_runs() {
         )
         .await
         .expect("exact start");
-    assert_eq!(exact.config(), updated.config());
-    assert!(matches!(
-        app.start_run(
+    assert_eq!(exact_current.config(), updated.config());
+    let exact_historical = app
+        .start_run(
             run_id(12),
             &ConfigSelection::Exact {
                 name: name.clone(),
-                digest,
+                digest: digest.clone(),
             },
         )
-        .await,
-        Err(mfm_app::RunRequestError::Request(
-            RequestError::ConfigDigestMismatch
-        ))
-    ));
+        .await
+        .expect("historical exact start");
+    assert_eq!(exact_historical.config().digest(), &digest);
     let wrong = ConfigDigest::new(ContentDigest::from_digest(
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([9; 32]),
@@ -444,24 +447,34 @@ async fn stored_config_lifecycle_drives_current_exact_and_retained_runs() {
         )
         .await,
         Err(mfm_app::RunRequestError::Request(
-            RequestError::ConfigDigestMismatch
+            RequestError::ConfigAbsent
         ))
     ));
 
     let configs = app.list_configs().await.expect("configs");
-    assert_eq!(configs.as_slice(), std::slice::from_ref(updated.config()));
+    assert_eq!(configs.len(), 2);
+    assert_eq!(
+        configs.iter().filter(|config| config.is_current()).count(),
+        1
+    );
+    assert!(configs
+        .iter()
+        .any(|config| config.digest() == updated.config().digest() && config.is_current()));
+    assert!(configs
+        .iter()
+        .any(|config| config.digest() == &digest && !config.is_current()));
     let runs = app
         .list_runs(None, RunPageLimit::default())
         .await
         .expect("run page");
-    assert_eq!(runs.items().len(), 2);
+    assert_eq!(runs.items().len(), 3);
 
     let retained = app.read_run(&run_id(10)).await.expect("retained run");
     assert_eq!(retained.head_digest(), started.run().head_digest());
 }
 
 #[tokio::test]
-async fn start_revalidates_hostile_catalog_rows_before_caller_or_binding_errors() {
+async fn start_revalidates_hostile_config_rows_before_binding_errors() {
     let name = config_name("hostile-digest");
     let canonical = PlainCanonicalJsonBytes::from_json_str(
         &serde_json::to_string(&document_value(vec![(1, "alpha")], "portfolio-example"))
@@ -474,9 +487,10 @@ async fn start_revalidates_hostile_catalog_rows_before_caller_or_binding_errors(
         DigestBytes::from_array([9; 32]),
     ))
     .expect("false digest");
-    let entry = CatalogEntry::new(name.clone(), false_digest, canonical.to_vec()).expect("entry");
+    let revision =
+        ConfigRevision::new(name.clone(), false_digest, canonical.to_vec()).expect("revision");
     assert!(matches!(
-        application_with_catalog(entry)
+        application_with_config_repository(revision)
             .start_run(
                 run_id(14),
                 &ConfigSelection::Exact {
@@ -486,7 +500,7 @@ async fn start_revalidates_hostile_catalog_rows_before_caller_or_binding_errors(
             )
             .await,
         Err(mfm_app::RunRequestError::Request(
-            RequestError::InvalidCatalog
+            RequestError::InvalidRetainedConfig
         ))
     ));
 
@@ -497,13 +511,13 @@ async fn start_revalidates_hostile_catalog_rows_before_caller_or_binding_errors(
     )
     .expect("canonical document");
     let digest = ConfigDigest::new(canonical.content_digest()).expect("digest");
-    let entry = CatalogEntry::new(name.clone(), digest, canonical.to_vec()).expect("entry");
+    let revision = ConfigRevision::new(name.clone(), digest, canonical.to_vec()).expect("revision");
     assert!(matches!(
-        application_with_catalog(entry)
+        application_with_config_repository(revision)
             .start_run(run_id(15), &ConfigSelection::Current { name })
             .await,
         Err(mfm_app::RunRequestError::Request(
-            RequestError::InvalidCatalog
+            RequestError::InvalidRetainedConfig
         ))
     ));
 }

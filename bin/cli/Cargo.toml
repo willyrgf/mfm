@@ -21,7 +21,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-mfm-catalog = { path = "../../crates/catalog" }
+mfm-config = { path = "../../crates/config" }
 mfm-store = { path = "../../crates/kernel/store" }
 
 [[bin]]

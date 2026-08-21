@@ -1,9 +1,9 @@
 use sqlx::{Connection, PgConnection};
 
 use crate::{
-    mfm_relation_count, runtime_table_privilege_mask, verify_catalog_schema, verify_durability,
+    mfm_relation_count, runtime_table_privilege_mask, verify_config_schema, verify_durability,
     verify_run_schema, AdminPostgresLocator, GateError, PostgresBackend, RuntimePostgresLocator,
-    CATALOG_SCHEMA_SQL, RUN_SCHEMA_SQL, TABLE_INSERT, TABLE_SELECT, TABLE_UPDATE,
+    CONFIG_SCHEMA_SQL, RUN_SCHEMA_SQL, TABLE_INSERT, TABLE_SELECT, TABLE_UPDATE,
 };
 
 /// Redaction-safe split-authority schema provisioning failure.
@@ -53,9 +53,9 @@ pub async fn provision_postgres(
         .await
         .map_err(|_| ProvisionError::Unavailable)?;
     let run_state = inspect_run_schema(&mut connection, &owner).await?;
-    let catalog_state = inspect_catalog_schema(&mut connection, &owner).await?;
+    let config_state = inspect_config_schema(&mut connection, &owner).await?;
 
-    if run_state == SchemaState::Absent || catalog_state == SchemaState::Absent {
+    if run_state == SchemaState::Absent || config_state == SchemaState::Absent {
         let mut transaction = connection
             .begin()
             .await
@@ -78,8 +78,8 @@ pub async fn provision_postgres(
                 .await
                 .map_err(|_| ProvisionError::Unavailable)?;
         }
-        if catalog_state == SchemaState::Absent {
-            sqlx::raw_sql(CATALOG_SCHEMA_SQL)
+        if config_state == SchemaState::Absent {
+            sqlx::raw_sql(CONFIG_SCHEMA_SQL)
                 .execute(&mut *transaction)
                 .await
                 .map_err(|_| ProvisionError::Unavailable)?;
@@ -96,11 +96,11 @@ pub async fn provision_postgres(
     verify_run_schema(&mut connection)
         .await
         .map_err(classify_gate)?;
-    verify_catalog_schema(&mut connection)
+    verify_config_schema(&mut connection)
         .await
         .map_err(classify_gate)?;
     verify_owned_objects(&mut connection, &owner, "public").await?;
-    verify_owned_objects(&mut connection, &owner, "mfm_catalog").await?;
+    verify_owned_objects(&mut connection, &owner, "mfm_config").await?;
     verify_runtime_grants(&mut connection).await?;
     drop(connection);
 
@@ -174,12 +174,12 @@ async fn inspect_run_schema(
     Ok(SchemaState::Present)
 }
 
-async fn inspect_catalog_schema(
+async fn inspect_config_schema(
     connection: &mut PgConnection,
     owner: &str,
 ) -> Result<SchemaState, ProvisionError> {
     let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'mfm_catalog')",
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'mfm_config')",
     )
     .fetch_one(&mut *connection)
     .await
@@ -187,10 +187,10 @@ async fn inspect_catalog_schema(
     if !exists {
         return Ok(SchemaState::Absent);
     }
-    verify_catalog_schema(connection)
+    verify_config_schema(connection)
         .await
         .map_err(classify_gate)?;
-    verify_owned_objects(connection, owner, "mfm_catalog").await?;
+    verify_owned_objects(connection, owner, "mfm_config").await?;
     verify_runtime_table_grants(connection, false).await?;
     Ok(SchemaState::Present)
 }
@@ -206,7 +206,7 @@ async fn verify_owned_objects(
            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
            WHERE n.nspname = $1 \
              AND c.relname IN ('mfm_store_schema','mfm_run_frames','mfm_run_heads', \
-                               'mfm_catalog_schema','config_entries') \
+                               'mfm_config_schema','config_revisions') \
              AND pg_get_userbyid(c.relowner) <> $2)",
     )
     .bind(schema)
@@ -250,7 +250,7 @@ async fn verify_runtime_grants(connection: &mut PgConnection) -> Result<(), Prov
     if database != (true, false, false) {
         return Err(ProvisionError::Incompatible);
     }
-    for schema in ["public", "mfm_catalog"] {
+    for schema in ["public", "mfm_config"] {
         let privileges: (bool, bool) = sqlx::query_as(
             "SELECT has_schema_privilege('mfm_runtime', $1, 'USAGE'), \
                     has_schema_privilege('mfm_runtime', $1, 'CREATE')",
@@ -284,10 +284,10 @@ async fn verify_runtime_table_grants(
     } else {
         [
             (
-                "mfm_catalog.config_entries",
+                "mfm_config.config_revisions",
                 TABLE_SELECT | TABLE_INSERT | TABLE_UPDATE,
             ),
-            ("mfm_catalog.mfm_catalog_schema", TABLE_SELECT),
+            ("mfm_config.mfm_config_schema", TABLE_SELECT),
         ]
         .as_slice()
     };

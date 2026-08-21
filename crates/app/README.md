@@ -37,11 +37,11 @@ exactly cover the Portfolio source chains when Application runs the planner duri
 
 One `ComposedRuntime` derives Runtime adapter registration, public binding discovery, planning
 targets, Store, and RunIndex from the same checked inputs. The production Application coerces the
-same PostgreSQL backend into Store, RunIndex, and config-catalog ports. The complete Application
+same PostgreSQL backend into Store, RunIndex, and configuration-repository ports. The complete Application
 surface is:
 
 - static entry-point and composed-binding discovery;
-- atomic config import/replace, read, and complete bounded list;
+- atomic config import/current selection and complete retained-revision list;
 - stored-config run start through exhaustive `Current` or `Exact` selection;
 - run progress, semantic read, and mechanical `RunId`-keyset list.
 
@@ -51,7 +51,7 @@ helper implements `mfm.run-id.random.v1`; it performs no IO and Application neve
 the only `RunRequestError` carrying data, through the exact `RunRecovery::Start` or
 `RunRecovery::Progress` sum.
 
-`RequestError` owns stable redaction-safe codes and messages. Catalog rows are revalidated as
-canonical documents on every read/start/list. Unbound routes fail before Runtime Store IO;
-replacing a config never changes retained run genesis. Shared serializers preserve the
+`RequestError` owns stable redaction-safe codes and messages. Retained revisions are revalidated as
+canonical documents on every start/list. Unbound routes fail before Runtime Store IO; importing a
+new revision never changes retained run genesis. Shared serializers preserve the
 `RunViewState` sum and embed terminal canonical bytes as a raw JSON value.

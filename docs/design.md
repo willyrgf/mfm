@@ -35,16 +35,18 @@ The fixed limits are 8 MiB per canonical run object, 65,536 non-payload envelope
 bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. These are format bounds, not
 tunable runtime policy.
 
-PostgreSQL has two fresh baselines behind one backend, pool, and connection gate. Run history owns `mfm_store_schema`,
-`mfm_run_frames`, and `mfm_run_heads` in `public`; opaque named config custody owns
-`mfm_catalog_schema` and `config_entries` in `mfm_catalog`. Run heads also provide the mechanical
-RunIndex projection without parsing frames. Every connection admission checks both schemas' exact
-logged relations, constraints, ownership and privileges, plus primary status, `fsync`, and
-`full_page_writes`; a partially compatible installation is never exposed.
+PostgreSQL has two fresh baselines behind one backend, pool, and connection gate. Run history owns
+`mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads` in `public`; opaque versioned
+configuration custody owns `mfm_config_schema` and `config_revisions` in `mfm_config`. Run
+heads also provide the mechanical RunIndex projection without parsing frames. Every connection
+admission checks both schemas' exact logged relations, constraints, ownership and privileges, plus
+primary status, `fsync`, and `full_page_writes`; a partially compatible installation is never
+exposed.
 
 Loads use one read-only repeatable snapshot. Appends take the per-RunId advisory transaction lock
-before observing state and force synchronous COMMIT. Catalog mutations take one global advisory
-transaction lock, enforce 256 live entries, and preserve ambiguous COMMIT acknowledgement. A
+before observing state and force synchronous COMMIT. Configuration imports take one global advisory
+transaction lock, retain immutable `(name, digest)` revisions, move one current marker per name, and
+preserve ambiguous COMMIT acknowledgement. There is no revision-count limit or delete operation. A
 short-lived admin provisioner accepts separate typed admin/runtime locators for one normalized
 target, installs only absent namespaces, and grants the fixed `mfm_runtime` role exact DML authority.
 Runtime connections have no ownership or DDL authority. Existing installations are verified and
@@ -75,13 +77,15 @@ and derives Runtime registrations, planning targets, public binding views, Store
 the same checked binding set. The EVM client uses no ambient proxy, redirect, referer propagation, or
 automatic retry.
 
-The named config catalog retains complete, bounded canonical config documents tagged by the exact
-entry point. Import validates and plans the document before atomic insert or replacement. Run start selects
-either the name's current revision or an exact `sha256-jcs-v1` revision, checks every requested
-binding before Runtime Store IO, and returns the selected config summary with the run view. The
-shared surface also owns entry-point/binding discovery, config read/list, run
-progress/read, and mechanical run-head listing. Every execution receives an explicit caller-owned
-RunId; ambiguous append acknowledgement carries the exact start or progress recovery identity.
+The configuration repository retains complete, individually bounded canonical documents tagged by
+the exact entry point. Import validates and plans the document before atomically creating or
+reactivating one immutable revision. Run start selects either the name's current revision or any
+exact retained `sha256-jcs-v1` revision, checks every requested binding before Runtime Store IO,
+and returns the selected config summary with the run view. The management surface exposes only
+config import and a complete unpaginated revision list with one current marker per name. The shared
+surface also owns entry-point/binding discovery, run progress/read, and mechanical run-head listing.
+Every execution receives an explicit caller-owned RunId; ambiguous append acknowledgement carries
+the exact start or progress recovery identity.
 Transaction submission requires a future durable transaction-authority/outbox design and is not
 part of this system.
 

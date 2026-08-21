@@ -23,7 +23,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 mfm-canonical = { path = "../../kernel/canonical" }
-mfm-catalog = { path = "../../catalog" }
+mfm-config = { path = "../../config" }
 serde_json = { workspace = true }
 
 [[test]]

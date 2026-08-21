@@ -1876,7 +1876,7 @@ dependencies = [
  "clap",
  "getrandom 0.3.4",
  "mfm-app",
- "mfm-catalog",
+ "mfm-config",
  "mfm-ids",
  "mfm-runtime",
  "mfm-store",
@@ -1891,7 +1891,7 @@ name = "mfm-app"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
- "mfm-catalog",
+ "mfm-config",
  "mfm-evm",
  "mfm-evm-live",
  "mfm-ids",
@@ -1931,7 +1931,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-catalog"
+name = "mfm-config"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
@@ -2010,7 +2010,7 @@ name = "mfm-portfolio"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
- "mfm-catalog",
+ "mfm-config",
  "mfm-evm",
  "mfm-ids",
  "mfm-program",
@@ -2059,7 +2059,7 @@ dependencies = [
  "clap",
  "libc",
  "mfm-app",
- "mfm-catalog",
+ "mfm-config",
  "mfm-evm",
  "mfm-evm-live",
  "mfm-ids",
@@ -2105,7 +2105,7 @@ name = "mfm-storage-postgres"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
- "mfm-catalog",
+ "mfm-config",
  "mfm-ids",
  "mfm-journal",
  "mfm-store",

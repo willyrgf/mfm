@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::header::LOCATION;
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -26,9 +25,7 @@ pub(crate) fn router(application: Arc<Application>) -> Router {
         .route("/v1/configs", get(list_configs))
         .route(
             "/v1/configs/{name}",
-            put(import_config)
-                .get(read_config)
-                .layer(DefaultBodyLimit::max(MAX_CONFIG_DOCUMENT_BYTES)),
+            put(import_config).layer(DefaultBodyLimit::max(MAX_CONFIG_DOCUMENT_BYTES)),
         )
         .route("/v1/runs", get(list_runs))
         .route(
@@ -70,11 +67,7 @@ async fn import_config(
         ImportOutcome::Created { .. } => StatusCode::CREATED,
         ImportOutcome::Unchanged { .. } | ImportOutcome::Updated { .. } => StatusCode::OK,
     };
-    let mut response = json_response(status, &outcome);
-    let location = format!("/v1/configs/{}", name.as_str());
-    let location = HeaderValue::from_str(&location).map_err(|_| RestError(internal_error()))?;
-    response.headers_mut().insert(LOCATION, location);
-    Ok(response)
+    Ok(json_response(status, &outcome))
 }
 
 async fn list_configs(
@@ -84,15 +77,6 @@ async fn list_configs(
     query.map_err(|_| RestError(invalid_query()))?;
     let items = application.list_configs().await?;
     Ok(json_response(StatusCode::OK, &ItemList::new(&items)))
-}
-
-async fn read_config(
-    State(application): State<Arc<Application>>,
-    path: Result<Path<ConfigName>, PathRejection>,
-) -> Result<Response, RestError> {
-    let Path(name) = path.map_err(|_| RestError(invalid_config_name()))?;
-    let config = application.read_config(&name).await?;
-    Ok(json_response(StatusCode::OK, &config))
 }
 
 async fn list_runs(
@@ -234,16 +218,14 @@ fn config_document_error(error: ConfigDocumentError) -> Response {
 fn request_error(error: RequestError) -> Response {
     let status = match error {
         RequestError::ConfigAbsent | RequestError::RunAbsent => StatusCode::NOT_FOUND,
-        RequestError::ConfigDigestMismatch
-        | RequestError::RunAdmissionConflict
-        | RequestError::BindingUnbound => StatusCode::CONFLICT,
-        RequestError::InvalidConfigDocument
-        | RequestError::CatalogCapacity
-        | RequestError::RunCapacity => StatusCode::UNPROCESSABLE_ENTITY,
-        RequestError::CatalogIndeterminate | RequestError::DependencyUnavailable => {
+        RequestError::RunAdmissionConflict | RequestError::BindingUnbound => StatusCode::CONFLICT,
+        RequestError::InvalidConfigDocument | RequestError::RunCapacity => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+        RequestError::ConfigMutationIndeterminate | RequestError::DependencyUnavailable => {
             StatusCode::SERVICE_UNAVAILABLE
         }
-        RequestError::InvalidCatalog
+        RequestError::InvalidRetainedConfig
         | RequestError::InvalidRunHistory
         | RequestError::IncompatibleAssembly
         | RequestError::InvalidRunIndex
@@ -330,14 +312,6 @@ fn invalid_query() -> Response {
     )
 }
 
-fn internal_error() -> Response {
-    boundary_error(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal",
-        "application internal failure",
-    )
-}
-
 #[derive(Serialize)]
 struct ErrorBody<'a> {
     code: &'a str,
@@ -366,9 +340,9 @@ mod tests {
 
     use axum::body::{to_bytes, Body};
     use axum::http::header::CONTENT_TYPE;
-    use axum::http::{Method, Request};
+    use axum::http::{HeaderValue, Method, Request};
     use mfm_app::{Application, BoundCapabilitySet, ComposedRuntime, RunRecovery};
-    use mfm_catalog::MemoryCatalog;
+    use mfm_config::MemoryConfigRepository;
     use mfm_evm::{EvmEndpoint, EvmReadValue};
     use mfm_evm_live::{EvmProvider, EvmProviderResponse};
     use mfm_ids::StableId;
@@ -424,7 +398,7 @@ mod tests {
         let composed = ComposedRuntime::compose(store, bindings).expect("composition");
         Arc::new(Application::from_parts(
             composed,
-            Arc::new(MemoryCatalog::new()),
+            Arc::new(MemoryConfigRepository::new()),
         ))
     }
 
@@ -503,7 +477,7 @@ mod tests {
                 "method_not_allowed",
             ),
             (
-                request(Method::GET, "/v1/configs/UPPER", Body::empty()),
+                json_request(Method::PUT, "/v1/configs/UPPER", Body::from(DOCUMENT)),
                 StatusCode::BAD_REQUEST,
                 "invalid_config_name",
             ),
@@ -573,7 +547,6 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::CREATED);
-        assert_eq!(response.headers()[LOCATION], "/v1/configs/daily");
         let imported = response_json(response).await;
         let digest = imported["config"]["digest"]
             .as_str()
@@ -631,16 +604,23 @@ mod tests {
         assert_eq!(runs["items"][0]["run_id"], RUN_ID);
 
         let config = application
-            .read_config(&ConfigName::new("daily").expect("name"))
+            .import_config(
+                ConfigName::new("daily").expect("name"),
+                ConfigDocument::new(DOCUMENT.to_vec())
+                    .await
+                    .expect("config document"),
+            )
             .await
-            .expect("stored config");
+            .expect("retained config")
+            .config()
+            .clone();
         let run_id = RunId::parse(RUN_ID).expect("run id");
         for (actual, fixture) in [
             (
                 run_request_error(RunRequestError::AppendIndeterminate {
                     recovery: RunRecovery::Start {
                         run_id: run_id.clone(),
-                        config: config.config().clone(),
+                        config,
                     },
                 }),
                 include_str!("../../../docs/contracts/client-surface/run-recovery-start.json"),
@@ -659,6 +639,15 @@ mod tests {
             );
         }
 
+        assert_eq!(
+            send(
+                &service,
+                request(Method::GET, "/v1/configs/daily", Body::empty()),
+            )
+            .await
+            .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
         assert_eq!(
             send(
                 &service,

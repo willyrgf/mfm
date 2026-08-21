@@ -139,6 +139,8 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
     let configs = json(&configs);
     assert_eq!(configs["items"][0]["name"], "daily");
     assert_eq!(configs["items"][1]["name"], "weekly");
+    assert_eq!(configs["items"][0]["current"], true);
+    assert_eq!(configs["items"][1]["current"], true);
 
     let started = run_cli(
         &["--output", "json", "run", "start", "--config", "daily"],
@@ -251,7 +253,7 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
         .to_owned();
     assert_ne!(replacement_digest, digest);
 
-    let mismatch = run_cli(
+    let historical = run_cli(
         &[
             "--output",
             "json",
@@ -266,8 +268,39 @@ adapter_locator_env = "MFM_E2E_EVM_ADAPTER_LOCATOR"
         ],
         &xdg,
     );
-    assert_eq!(mismatch.status.code(), Some(2));
-    assert_eq!(json_stderr(&mismatch)["code"], "config_digest_mismatch");
+    assert_success(&historical, "historical Exact start");
+    assert_eq!(json(&historical)["config"]["digest"], digest);
+
+    let reactivated = run_cli(
+        &[
+            "--output",
+            "json",
+            "config",
+            "import",
+            "daily",
+            "--from",
+            path(&original_document),
+        ],
+        &xdg,
+    );
+    assert_success(&reactivated, "reactivate historical revision");
+    assert_eq!(json(&reactivated)["outcome"], "updated");
+    let configs = run_cli(&["--output", "json", "config", "list"], &xdg);
+    assert_success(&configs, "revision history list");
+    let configs = json(&configs);
+    let daily = configs["items"]
+        .as_array()
+        .expect("config items")
+        .iter()
+        .filter(|item| item["name"] == "daily")
+        .collect::<Vec<_>>();
+    assert_eq!(daily.len(), 2);
+    assert!(daily
+        .iter()
+        .any(|item| item["digest"] == digest && item["current"] == true));
+    assert!(daily
+        .iter()
+        .any(|item| item["digest"] == replacement_digest && item["current"] == false));
 
     let retained = run_cli(
         &["--output", "json", "run", "show", "--run-id", &generated_id],
@@ -311,10 +344,6 @@ fn run_cli(arguments: &[&str], xdg: &Path) -> Output {
 
 fn json(output: &Output) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).expect("stdout JSON")
-}
-
-fn json_stderr(output: &Output) -> serde_json::Value {
-    serde_json::from_slice(&output.stderr).expect("stderr JSON")
 }
 
 fn assert_success(output: &Output, label: &str) {

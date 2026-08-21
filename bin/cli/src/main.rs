@@ -72,7 +72,7 @@ enum EntryPointCommand {
 
 #[derive(Subcommand)]
 enum PostgresCommand {
-    /// Installs and verifies the run-history and config-catalog schemas.
+    /// Installs and verifies the run-history and configuration schemas.
     Init {
         /// Environment variable naming the checked administrative PostgreSQL locator.
         #[arg(long = "admin-locator-env")]
@@ -90,19 +90,14 @@ enum BindingCommand {
 enum ConfigCommand {
     /// Imports or replaces one complete named config.
     Import {
-        /// Durable catalog name.
+        /// Durable configuration name.
         name: String,
         /// Config JSON path, or `-` for stdin.
         #[arg(long)]
         from: PathBuf,
     },
-    /// Lists the complete bounded catalog.
+    /// Lists every retained configuration revision.
     List,
-    /// Shows one config summary and exact canonical document.
-    Show {
-        /// Durable catalog name.
-        name: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -291,20 +286,8 @@ async fn run_config(
             emit_serializable(output, &ItemList::new(&result), || {
                 let mut text = String::new();
                 for item in &result {
-                    text.push_str(&render_config_summary(item));
+                    text.push_str(&render_config_revision_summary(item));
                 }
-                text
-            })
-        }
-        ConfigCommand::Show { name } => {
-            let name = ConfigName::new(name).map_err(|_| CliError::ConfigName)?;
-            let application = open(deployment).await?;
-            let result = application.read_config(&name).await?;
-            emit_serializable(output, &result, || {
-                let mut text = render_config_summary(result.config());
-                text.push_str("document=");
-                text.push_str(std::str::from_utf8(result.canonical_bytes()).unwrap_or("{}"));
-                text.push('\n');
                 text
             })
         }
@@ -581,6 +564,16 @@ fn render_config_summary(config: &mfm_app::ConfigSummary) -> String {
     )
 }
 
+fn render_config_revision_summary(config: &mfm_app::ConfigRevisionSummary) -> String {
+    format!(
+        "config_name={}\nconfig_digest={}\nentry_point={}\ncurrent={}\n",
+        config.name(),
+        config.digest(),
+        config.entry_point(),
+        config.is_current()
+    )
+}
+
 fn render_run_view(view: &RunView) -> String {
     let mut rendered = format!(
         "run_id={}\nhead_sequence={}\nhead_digest={}\nstate={}\n",
@@ -617,7 +610,7 @@ mod tests {
     use std::sync::Arc;
 
     use mfm_app::{BoundCapabilitySet, ComposedRuntime};
-    use mfm_catalog::MemoryCatalog;
+    use mfm_config::MemoryConfigRepository;
     use mfm_store::MemoryStore;
 
     use super::*;
@@ -659,7 +652,8 @@ mod tests {
         let store = Arc::new(MemoryStore::new());
         let bindings = BoundCapabilitySet::new(Vec::new()).expect("bindings");
         let composed = ComposedRuntime::compose(store, bindings).expect("composition");
-        let application = Application::from_parts(composed, Arc::new(MemoryCatalog::new()));
+        let application =
+            Application::from_parts(composed, Arc::new(MemoryConfigRepository::new()));
         let document = ConfigDocument::new(DOCUMENT.to_vec())
             .await
             .expect("document");
