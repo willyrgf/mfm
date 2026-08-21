@@ -1,9 +1,9 @@
 # MFM CLI
 
 `mfm_cli` is the command-line rendering of the typed Application client surface. It owns bounded
-argv/file/stdin parsing, optional client-side RunId generation, text/JSON rendering, and CLI-only
-schema provisioning. It does not parse deployment TOML, resolve locator environments, construct
-providers, plan domain Programs, or interpret run history.
+argv/file/stdin parsing, text/JSON rendering, and CLI-only schema provisioning. It does not parse
+deployment TOML, resolve locator environments, construct providers, plan domain Programs, or
+interpret run history.
 
 The CLI adds no authentication or authorization layer. Process execution, environment access, and
 database credentials belong to the enclosing deployment.
@@ -39,8 +39,8 @@ remain independent. `config delete` idempotently removes only the exact name/dig
 document is a complete tagged execution config; `run start` accepts no entry-point or inline
 document and always requires one exact retained digest.
 
-Without `--run-id`, the CLI obtains exactly 32 bytes from the OS cryptographic random source and
-passes them to the frozen pure derivation helper. Entropy failure is
+Without `--run-id`, the CLI uses the shared Application client primitive that obtains exactly 32
+bytes from the OS cryptographic random source and applies the frozen derivation. Entropy failure is
 `run_id_generation_failed`; there is no time, PID, counter, environment, provider, or existence
 fallback. Explicit RunIds bypass generation and support deterministic retries.
 

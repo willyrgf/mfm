@@ -13,8 +13,8 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Config repository port | immutable named revisions, exact import/load/delete, and complete listing | config-wire parsing, Program semantics, merging, defaults, or revocation |
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
 | Live adapters | bounded provider ingress and direct typed callback registration | domain planning or State registration |
-| Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
-| Binaries | bounded transport parsing, client-side RunId entropy where offered, one Application call, transport policy, and redacted rendering | composition, domain planning, environment resolution, execution lifecycle, or run semantics |
+| Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning; shared client RunId generation and JSON models | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
+| Binaries | bounded transport parsing, one Application call, transport policy, and redacted rendering | composition, domain planning, environment resolution, execution lifecycle, or run semantics |
 
 RuntimeAssemblyBuilder registers exact value codecs, Pure/Read State drivers, Match descriptors, and
 Read callbacks. `finish` freezes one immutable assembly. Program association pre-resolves every
@@ -53,12 +53,12 @@ shared Application request contains only bounded, secret-free data and stable se
 pre-bound capabilities. It cannot introduce environment resolution, a filesystem or network
 locator, secret custody, schema authority, or an unbounded durable effect.
 
-The CLI owns argv, bounded file/stdin input, optional RunId entropy, exit status, and schema
-provisioning outside listener-held Application state. REST owns liveness, bounded HTTP admission,
-optional RunId entropy, and an unauthenticated Unix socket; it exposes neither schema nor secret
-administration. Both select an explicit or generated identity before their one Application call.
-REST returns HTTP 200 for a durably failed run, while the CLI uses exit 1 for Runnable or Failed.
-These are named transport asymmetries, not second use-case implementations.
+The CLI owns argv, bounded file/stdin input, exit status, and schema provisioning outside
+listener-held Application state. REST owns liveness, bounded HTTP admission, and an unauthenticated
+Unix socket; it exposes neither schema nor secret administration. Both accept an optional identity
+and use the same Application client primitive to generate one before their one use-case call. REST
+returns HTTP 200 for a durably failed run, while the CLI uses exit 1 for Runnable or Failed. These
+are named transport asymmetries, not second use-case implementations.
 
 The source-authoring sequence is separate from progression:
 

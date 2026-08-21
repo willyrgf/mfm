@@ -84,9 +84,10 @@ digest, checks every requested binding before Runtime Store IO, and returns the 
 summary with the run view. The management surface exposes import, complete unpaginated listing, and
 idempotent exact delete. Deletion does not revoke runs already admitted from that revision. The shared
 surface also owns entry-point/binding discovery, run progress/read, and mechanical run-head listing.
-Every execution receives an explicit transport-selected RunId; a client surface may accept one or
-derive one from OS cryptographic entropy before calling Application. Ambiguous append
-acknowledgement carries the exact start or progress recovery identity.
+Every execution receives an explicit transport-selected RunId. Both client surfaces accept one or
+use the same Application client primitive to derive one from OS cryptographic entropy before the
+start use case. Ambiguous append acknowledgement carries the exact start or progress recovery
+identity.
 Transaction submission requires a future durable transaction-authority/outbox design and is not
 part of this system.
 
@@ -94,7 +95,7 @@ CLI and REST are thin renderings of that single surface and add no authenticatio
 layer. REST serves HTTP/1 on one caller-selected Unix socket; the enclosing deployment owns access
 isolation, permissions, and stale-socket cleanup. Bounded bodies and queries are REST transport
 concerns. Schema provisioning remains CLI-only. Both client binaries may select an optional RunId
-or derive one before calling Application; REST exposes no administrative or secret-custody route.
+or use the shared generation primitive; REST exposes no administrative or secret-custody route.
 
 Secrets do not enter Program, C0, frames, Store metadata, RunView, outputs, logs, or error details.
 Writable restoration behind acknowledged state is unsupported; a new writable timeline requires

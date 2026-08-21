@@ -683,8 +683,30 @@ pub async fn provision_postgres(
         .map_err(|_| ComposeError::Provision)
 }
 
-/// Derives `mfm.run-id.random.v1` from exactly 32 caller-supplied entropy octets.
-pub fn derive_run_id(entropy: [u8; 32]) -> RunId {
+/// Failure to obtain OS entropy for a fresh [`RunId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("run id generation failed")]
+pub struct RunIdGenerationError;
+
+impl RunIdGenerationError {
+    /// Returns the stable machine-readable error code.
+    pub const fn code(self) -> &'static str {
+        "run_id_generation_failed"
+    }
+}
+
+/// Generates `mfm.run-id.random.v1` from exactly 32 bytes of OS cryptographic entropy.
+pub fn generate_run_id() -> Result<RunId, RunIdGenerationError> {
+    generate_run_id_with(|entropy| getrandom::fill(entropy)).map_err(|_| RunIdGenerationError)
+}
+
+fn generate_run_id_with<E>(fill: impl FnOnce(&mut [u8; 32]) -> Result<(), E>) -> Result<RunId, E> {
+    let mut entropy = [0; 32];
+    fill(&mut entropy)?;
+    Ok(derive_run_id(entropy))
+}
+
+fn derive_run_id(entropy: [u8; 32]) -> RunId {
     use fmt::Write as _;
 
     let mut hex = String::with_capacity(64);
@@ -728,19 +750,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_id_derivation_matches_both_interoperable_vectors() {
+    fn run_id_generation_consumes_exact_entropy_and_matches_interoperable_vectors() {
         assert_eq!(
-            derive_run_id([0; 32]).as_str(),
+            generate_run_id_with(|entropy| {
+                entropy.fill(0);
+                Ok::<_, ()>(())
+            })
+            .expect("zero entropy")
+            .as_str(),
             "run:sha256-jcs-v1:1ffc529adb99fb0f91d2c1712affb64a6d57fcdc9ac78c31c9681449e9c9f79a"
         );
-        let mut ascending = [0; 32];
-        for (value, byte) in ascending.iter_mut().zip(0_u8..) {
-            *value = byte;
-        }
         assert_eq!(
-            derive_run_id(ascending).as_str(),
+            generate_run_id_with(|entropy| {
+                for (value, byte) in entropy.iter_mut().zip(0_u8..) {
+                    *value = byte;
+                }
+                Ok::<_, ()>(())
+            })
+            .expect("ascending entropy")
+            .as_str(),
             "run:sha256-jcs-v1:4412ec646bc21fee7eb806a97dccf2ec412ce38b33f9c3d7ea25e83fac13339e"
         );
+        assert!(generate_run_id_with(|entropy| {
+            entropy.fill(9);
+            Err::<(), _>(())
+        })
+        .is_err());
+        assert_eq!(RunIdGenerationError.code(), "run_id_generation_failed");
+        assert_eq!(RunIdGenerationError.to_string(), "run id generation failed");
     }
 
     #[test]

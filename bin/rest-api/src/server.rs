@@ -7,9 +7,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use mfm_app::{
-    derive_run_id, Application, ConfigDocument, ConfigDocumentError, ConfigName, ConfigSelection,
-    ImportOutcome, ItemList, RequestError, RunPageLimit, RunRequestError, SerializableRunView,
-    MAX_CONFIG_DOCUMENT_BYTES,
+    generate_run_id, Application, ConfigDocument, ConfigDocumentError, ConfigName, ConfigSelection,
+    ImportOutcome, ItemList, RequestError, RunIdGenerationError, RunPageLimit, RunRequestError,
+    SerializableRunView, MAX_CONFIG_DOCUMENT_BYTES,
 };
 use mfm_ids::RunId;
 use serde::{Deserialize, Serialize};
@@ -125,8 +125,7 @@ async fn start_run(
     let Json(body) = body.map_err(|error| RestError(json_rejection(error)))?;
     let run_id = match body.run_id {
         Some(run_id) => run_id,
-        None => generate_run_id_with(getrandom::fill)
-            .map_err(|_| RestError(run_id_generation_failed()))?,
+        None => generate_run_id().map_err(|error| RestError(run_id_generation_failed(error)))?,
     };
     let result = application
         .start_run(run_id.clone(), &body.config)
@@ -352,17 +351,11 @@ fn invalid_run_id() -> Response {
     checked_error("invalid_run_id", "run id is invalid")
 }
 
-fn generate_run_id_with<E>(fill: impl FnOnce(&mut [u8]) -> Result<(), E>) -> Result<RunId, E> {
-    let mut entropy = [0; 32];
-    fill(&mut entropy)?;
-    Ok(derive_run_id(entropy))
-}
-
-fn run_id_generation_failed() -> Response {
+fn run_id_generation_failed(error: RunIdGenerationError) -> Response {
     boundary_error(
         StatusCode::INTERNAL_SERVER_ERROR,
-        "run_id_generation_failed",
-        "run id generation failed",
+        error.code(),
+        &error.to_string(),
     )
 }
 
@@ -627,7 +620,7 @@ mod tests {
             .expect("digest")
             .to_owned();
 
-        let entropy_error = run_id_generation_failed();
+        let entropy_error = run_id_generation_failed(RunIdGenerationError);
         assert_eq!(entropy_error.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
             response_json(entropy_error).await,
@@ -811,22 +804,5 @@ mod tests {
             .status(),
             StatusCode::OK
         );
-    }
-
-    #[test]
-    fn run_id_generation_consumes_exactly_32_bytes_and_fails_closed() {
-        let generated = generate_run_id_with(|entropy| {
-            assert_eq!(entropy.len(), 32);
-            entropy.fill(7);
-            Ok::<_, ()>(())
-        })
-        .expect("generated run id");
-        assert_eq!(generated, derive_run_id([7; 32]));
-
-        assert!(generate_run_id_with(|entropy| {
-            entropy.fill(9);
-            Err::<(), _>(())
-        })
-        .is_err());
     }
 }
