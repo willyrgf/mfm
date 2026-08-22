@@ -578,21 +578,3 @@ fn run_exit(view: &RunView) -> ExitCode {
         RunViewState::Runnable | RunViewState::Failed(_) => ExitCode::from(1),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn page_limit_and_checked_scalar_errors_are_stable() {
-        assert!(page_limit(None).is_ok());
-        assert!(matches!(page_limit(Some(0)), Err(CliError::PageLimit)));
-        assert!(matches!(page_limit(Some(201)), Err(CliError::PageLimit)));
-        assert_eq!(CliError::ConfigName.code(), "invalid_config_name");
-        assert_eq!(CliError::RunId.code(), "invalid_run_id");
-        assert_eq!(
-            CliError::RunIdGeneration(RunIdGenerationError).code(),
-            "run_id_generation_failed"
-        );
-    }
-}

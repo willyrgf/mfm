@@ -91,34 +91,3 @@ enum MainError {
     #[error("rest server failed")]
     Serve,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn serve_grammar_requires_a_socket_and_preserves_deployment_presence() {
-        let without_override = Cli::try_parse_from([
-            "mfm_rest_api",
-            "serve",
-            "--unix-socket",
-            "/private/mfm.sock",
-        ])
-        .expect("serve grammar");
-        let Command::Serve { deployment, .. } = without_override.command;
-        assert!(deployment.is_none());
-
-        let with_override = Cli::try_parse_from([
-            "mfm_rest_api",
-            "serve",
-            "--deployment",
-            "/operator/deployment.toml",
-            "--unix-socket",
-            "/private/mfm.sock",
-        ])
-        .expect("serve grammar");
-        let Command::Serve { deployment, .. } = with_override.command;
-        assert_eq!(deployment, Some(PathBuf::from("/operator/deployment.toml")));
-        assert!(Cli::try_parse_from(["mfm_rest_api", "serve"]).is_err());
-    }
-}

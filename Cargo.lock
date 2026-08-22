@@ -1942,7 +1942,6 @@ dependencies = [
 name = "mfm-evm"
 version = "0.1.0"
 dependencies = [
- "mfm-canonical",
  "mfm-capabilities",
  "mfm-ids",
  "mfm-program",
@@ -2005,8 +2004,6 @@ dependencies = [
 name = "mfm-portfolio"
 version = "0.1.0"
 dependencies = [
- "mfm-canonical",
- "mfm-config",
  "mfm-evm",
  "mfm-ids",
  "mfm-program",

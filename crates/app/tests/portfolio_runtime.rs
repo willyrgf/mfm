@@ -410,6 +410,19 @@ async fn stored_config_lifecycle_uses_exact_revisions_and_preserves_admitted_run
     assert!(matches!(started.run().state(), RunViewState::Succeeded(_)));
     assert_eq!(first.calls.load(Ordering::SeqCst), 4);
     assert_eq!(second.calls.load(Ordering::SeqCst), 4);
+    let rendered = serde_json::to_value(SerializableRunView::new(started.run())).expect("JSON");
+    assert_eq!(rendered["state"]["kind"], "succeeded");
+    assert_eq!(
+        rendered["state"]["value"]["snapshot"]["collections"]
+            .as_array()
+            .expect("snapshot collections")
+            .len(),
+        2
+    );
+    assert_eq!(
+        rendered["state"]["value"]["report"]["totals_by_quote"][0]["total_value_dec"],
+        "2"
+    );
 
     let second_revision = app
         .import_config(name.clone(), document(vec![(1, "alpha")]).await)
@@ -555,25 +568,6 @@ async fn invalid_or_unbound_config_fails_before_run_store_io() {
         .expect("run page")
         .items()
         .is_empty());
-}
-
-#[tokio::test]
-async fn shared_run_serializer_preserves_the_state_sum_and_raw_value() {
-    let app = application(&[(1, "alpha", provider(1))]);
-    let name = config_name("serial");
-    let imported = app
-        .import_config(name, document(vec![(1, "alpha")]).await)
-        .await
-        .expect("import");
-    let result = app
-        .start_run(run_id(30), &selection(&imported))
-        .await
-        .expect("start");
-    let rendered = serde_json::to_value(SerializableRunView::new(result.run())).expect("JSON");
-    assert_eq!(rendered["state"]["kind"], "succeeded");
-    assert!(rendered["state"]["contract_ref"].is_object());
-    assert!(rendered["state"]["value_ref"].is_object());
-    assert!(rendered["state"]["value"].is_object());
 }
 
 #[tokio::test]

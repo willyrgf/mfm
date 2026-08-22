@@ -22,8 +22,6 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-mfm-canonical = { path = "../../kernel/canonical" }
-mfm-config = { path = "../../config" }
 serde_json = { workspace = true }
 
 [[test]]
