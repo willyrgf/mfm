@@ -12,6 +12,7 @@ database credentials belong to the enclosing deployment.
 
 ```text
 mfm_cli [--output text|json] entry-point list
+mfm_cli [--output text|json] inspect list
 
 mfm_cli [--deployment <PATH>] [--output text|json] postgres init \
     --admin-locator-env <NAME>
@@ -28,10 +29,16 @@ mfm_cli [--deployment <PATH>] [--output text|json] run show --run-id <RUN_ID>
 mfm_cli [--deployment <PATH>] [--output text|json] run list [--after <RUN_ID>] [--limit <N>]
 ```
 
-`entry-point list` is static and rejects `--deployment`. Every other command loads the override or
-the conventional XDG/HOME `deployment.toml`. `postgres init` additionally resolves the checked admin
-locator name and retains no administrative handle after provisioning. The complete deployment
-grammar, bounds, and example are documented by [`mfm-app`](../../crates/app/README.md).
+`entry-point list` and `inspect list` are static and reject `--deployment`. Every other command loads
+the override or the conventional XDG/HOME `deployment.toml`. `postgres init` additionally resolves
+the checked admin locator name and retains no administrative handle after provisioning. The complete
+deployment grammar, bounds, and example are documented by
+[`mfm-app`](../../crates/app/README.md).
+
+`inspect list` is the crude developer inventory of every entry point, reusable Operation, and
+Pure/Read State admitted by the compiled product composition. It does not expand an Operation or
+load a configuration. IDs and kinds are stable machine fields; descriptions are non-semantic
+human-facing prose. Component inspection is intentionally CLI-only.
 
 `config import` reads at most 256 KiB plus one byte from a file or stdin. It creates one immutable
 name/digest revision or leaves identical retained bytes unchanged. Different digests under one name
@@ -55,6 +62,9 @@ Application models: generic item lists, config revision summaries, start results
 pages, and the full tagged RunView. Terminal values occupy raw JSON positions rather than quoted
 strings. Successful bodyless operations emit `{}` in JSON mode
 and nothing in text mode.
+
+Component inspection JSON is an `ItemList` whose items contain `kind`, `id`, and `description`.
+Text renders the same three fields for each component.
 
 Ordinary JSON errors are exactly `{"code":"...","message":"..."}`. The Application-owned client
 error serializer adds the shared `recovery` sum for an ambiguous run append. Text mode prints

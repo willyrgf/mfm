@@ -6,9 +6,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mfm_app::{
-    generate_run_id, provision_postgres, Application, ConfigDigest, ConfigDocument,
-    ConfigDocumentError, ConfigName, ConfigSelection, Deployment, EnvironmentName, ItemList,
-    RequestError, RunIdGenerationError, RunPageLimit, RunRecovery, RunRequestError,
+    generate_run_id, provision_postgres, Application, ComponentSummary, ConfigDigest,
+    ConfigDocument, ConfigDocumentError, ConfigName, ConfigSelection, Deployment, EnvironmentName,
+    ItemList, RequestError, RunIdGenerationError, RunPageLimit, RunRecovery, RunRequestError,
     SerializableClientError, SerializableRunView, StartRunResult, MAX_CONFIG_DOCUMENT_BYTES,
 };
 use mfm_ids::RunId;
@@ -42,6 +42,11 @@ enum Command {
         #[command(subcommand)]
         command: EntryPointCommand,
     },
+    /// Inspect definitions admitted by the compiled product.
+    Inspect {
+        #[command(subcommand)]
+        command: InspectCommand,
+    },
     /// Manage the durable persistence installation.
     Postgres {
         #[command(subcommand)]
@@ -67,6 +72,12 @@ enum Command {
 #[derive(Subcommand)]
 enum EntryPointCommand {
     /// Lists every accepted config-document entry-point tag.
+    List,
+}
+
+#[derive(Subcommand)]
+enum InspectCommand {
+    /// Lists every compiled entry point, reusable Operation, and State.
     List,
 }
 
@@ -238,13 +249,20 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<ExitCode, CliError> {
-    if matches!(cli.command, Command::EntryPoint { .. }) && cli.deployment.is_some() {
+    if matches!(
+        cli.command,
+        Command::EntryPoint { .. } | Command::Inspect { .. }
+    ) && cli.deployment.is_some()
+    {
         return Err(CliError::Usage);
     }
     match cli.command {
         Command::EntryPoint {
             command: EntryPointCommand::List,
         } => emit_entry_points(cli.output),
+        Command::Inspect {
+            command: InspectCommand::List,
+        } => emit_components(cli.output),
         Command::Postgres {
             command: PostgresCommand::Init { admin_locator_env },
         } => {
@@ -411,6 +429,25 @@ fn emit_entry_points(output: OutputFormat) -> Result<ExitCode, CliError> {
     })
 }
 
+fn emit_components(output: OutputFormat) -> Result<ExitCode, CliError> {
+    let items = Application::components();
+    emit_serializable(output, &ItemList::new(&items), || render_components(&items))
+}
+
+fn render_components(items: &[ComponentSummary]) -> String {
+    items
+        .iter()
+        .map(|item| {
+            format!(
+                "kind={}\nid={}\ndescription={}\n\n",
+                item.kind().as_str(),
+                item.id(),
+                item.description()
+            )
+        })
+        .collect()
+}
+
 fn emit_bindings(output: OutputFormat, application: &Application) -> Result<ExitCode, CliError> {
     emit_serializable(output, &ItemList::new(application.bindings()), || {
         application
@@ -422,7 +459,7 @@ fn emit_bindings(output: OutputFormat, application: &Application) -> Result<Exit
                     endpoint_id,
                     binding_ref,
                 } => format!(
-                    "kind=evm\nchain_id={chain_id}\nendpoint_id={endpoint_id}\nbinding_ref={}\n",
+                    "kind=evm\nchain_id={chain_id}\nendpoint_id={endpoint_id}\nbinding_ref={}\n\n",
                     serde_json::to_string(binding_ref).unwrap_or_else(|_| "{}".to_owned())
                 ),
             })
@@ -576,5 +613,42 @@ fn run_exit(view: &RunView) -> ExitCode {
     match view.state() {
         RunViewState::Succeeded(_) => ExitCode::SUCCESS,
         RunViewState::Runnable | RunViewState::Failed(_) => ExitCode::from(1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspect_list_grammar_is_static() {
+        let cli = Cli::try_parse_from(["mfm", "inspect", "list"]).expect("inspect list");
+        assert!(matches!(
+            cli.command,
+            Command::Inspect {
+                command: InspectCommand::List
+            }
+        ));
+        assert!(Cli::try_parse_from(["mfm", "inspect"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn inspect_list_rejects_deployment_before_loading_it() {
+        let cli =
+            Cli::try_parse_from(["mfm", "--deployment", "/does/not/exist", "inspect", "list"])
+                .expect("inspect list with deployment");
+        assert!(matches!(run(cli).await, Err(CliError::Usage)));
+    }
+
+    #[test]
+    fn component_text_is_complete_and_uniform() {
+        let items = Application::components();
+        let rendered = render_components(&items);
+        assert_eq!(rendered.lines().count(), items.len() * 3);
+        assert!(rendered.starts_with("kind=entry_point\nid=mfm.portfolio/snapshot@1\ndescription="));
+        assert!(rendered
+            .contains("kind=operation\nid=mfm.evm.operation.collect-balances@1\ndescription="));
+        assert!(rendered
+            .contains("kind=read_state\nid=mfm.evm.state.read-native-balance@1\ndescription="));
     }
 }

@@ -38,8 +38,8 @@ deployment environment.
 
 GET routes retain HTTP HEAD semantics: they perform the same Application admission and return the
 same status and headers with no body. All other routed methods receive the normalized 405 envelope.
-There is no schema-provisioning, deployment-view, inline-config start, keystore, transaction,
-replay, trace, audit, or effect route.
+There is no schema-provisioning, compiled-component inspection, deployment-view, inline-config
+start, keystore, transaction, replay, trace, audit, or effect route.
 
 Start accepts exactly one revision selection and an optional explicit identity:
 

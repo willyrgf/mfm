@@ -99,8 +99,9 @@ part of this system.
 CLI and REST are thin renderings of that single surface and add no authentication or authorization
 layer. REST serves HTTP/1 on one caller-selected Unix socket; the enclosing deployment owns access
 isolation, permissions, and stale-socket cleanup. Bounded bodies and queries are REST transport
-concerns. Schema provisioning remains CLI-only. Both client binaries may select an optional RunId
-or use the shared generation primitive; REST exposes no administrative or secret-custody route.
+concerns. Schema provisioning and compiled-component inspection remain CLI-only. Both client
+binaries may select an optional RunId or use the shared generation primitive; REST exposes no
+administrative, developer-inspection, or secret-custody route.
 
 Secrets do not enter Program, C0, frames, Store metadata, RunView, outputs, logs, or error details.
 Writable restoration behind acknowledged state is unsupported; a new writable timeline requires
