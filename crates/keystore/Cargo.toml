@@ -14,9 +14,13 @@ name = "mfm_keystore"
 path = "src/lib.rs"
 
 [dependencies]
+k256 = { workspace = true }
 mfm-ids = { path = "../kernel/ids" }
+mfm-signing = { path = "../signing" }
 thiserror = { workspace = true }
-zeroize = "1.7"
+tokio = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
+serde = { workspace = true }
 trybuild = "1.0"

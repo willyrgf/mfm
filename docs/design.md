@@ -44,6 +44,14 @@ bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. Program vali
 conservative bound `1 + Pure + Read + 2*Effect <= 65,536` across every declaration. These are format
 bounds, not tunable runtime policy.
 
+Signing owns the exact recoverable-secp256k1 public key identity, 32-byte transient digest,
+low-S compact recoverable signature, public recovery, and key-bound `Signer` contract. The
+in-process keystore constructs its non-`Send`, non-`Sync` key map inside one dedicated owner thread,
+accepts only checked zeroizing scalars, retains at most 64 distinct key instances, and communicates
+over a bounded channel. Duplicate import returns another handle with the same public key content
+ref. Explicit async shutdown requests exit and immediately awaits an OS-thread join in blocking
+work; dropping the final sender also ends the owner loop.
+
 PostgreSQL has two fresh baselines behind one backend, pool, and connection gate. Run history owns
 `mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads` in `public`; opaque versioned
 configuration custody owns `mfm_config_schema` and `config_revisions` in `mfm_config`. Run

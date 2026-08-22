@@ -11,6 +11,8 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Journal | exact frame encoding and complete-history qualification | domain interpretation or persistence IO |
 | Store / run index ports | object-safe complete load and atomic append; separate mechanical current-head enumeration | Program, State, capability, reducer, config semantics, or run-status derivation |
 | Config repository port | immutable named revisions, exact import/load/delete, and complete listing | config-wire parsing, Program semantics, merging, defaults, or revocation |
+| Signing | checked public key identity, transient digest/signature contracts, public recovery | secret custody, EVM encoding, provider IO |
+| Keystore | bounded thread-affine secp256k1 custody and key-bound signer handles | Program, Runtime, EVM, persistence, free-form signing |
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
 | Live adapters | bounded provider ingress and direct typed callback registration | domain planning or State registration |
 | Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning and compiled component inventory; shared client RunId generation and JSON models | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
@@ -92,9 +94,9 @@ ref. Connections, transactions, Store mutation, and provider IO remain async and
 jobs. Dropping an operation is safe: no candidate exists yet, or the one in-flight append commits
 atomically and the next complete reload resolves it.
 
-The domain graph is one-way: Portfolio depends on EVM domain contracts; EVM depends on foundations
-and Program; live EVM depends on EVM plus Runtime. Neither domain depends on Runtime, Store, live IO,
-or Application.
+The domain graph is one-way: Portfolio depends on EVM domain contracts; EVM depends on foundations,
+public signing contracts, and Program; live EVM depends on EVM plus Runtime and captures concrete
+signer handles. Neither domain depends on Runtime, Store, live IO, keystore custody, or Application.
 
 ## Material uncertainties
 

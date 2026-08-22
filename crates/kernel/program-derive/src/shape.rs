@@ -408,6 +408,18 @@ fn field_descriptor_tokens(
                 ::mfm_values::LiteralValue::String(#literal.to_owned())
             ));
         }
+        if let Some((minimum_bytes, maximum_bytes)) = attrs.minimum_bytes.zip(attrs.maximum_bytes) {
+            if !is_string_type(&field.ty) {
+                return Err(syn::Error::new_spanned(
+                    &field.ty,
+                    "decoded byte bounds require a base64url String field",
+                ));
+            }
+            shape = quote!(::mfm_values::SchemaShape::BoundedBytes {
+                minimum_decoded_bytes: #minimum_bytes,
+                maximum_decoded_bytes: #maximum_bytes,
+            });
+        }
         if attrs.minimum_items.is_some() || attrs.maximum_items.is_some() {
             let minimum_items = attrs
                 .minimum_items

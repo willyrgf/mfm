@@ -157,6 +157,8 @@ pub(super) struct FieldAttrs {
     pub(super) optional_absent: bool,
     pub(super) minimum_items: Option<u32>,
     pub(super) maximum_items: Option<u32>,
+    pub(super) minimum_bytes: Option<u32>,
+    pub(super) maximum_bytes: Option<u32>,
 }
 
 impl FieldAttrs {
@@ -183,6 +185,20 @@ impl FieldAttrs {
                         Ok(())
                     } else if meta.path.is_ident("maximum_items") {
                         output.maximum_items = Some(
+                            meta.value()?
+                                .parse::<syn::LitInt>()?
+                                .base10_parse::<u32>()?,
+                        );
+                        Ok(())
+                    } else if meta.path.is_ident("minimum_bytes") {
+                        output.minimum_bytes = Some(
+                            meta.value()?
+                                .parse::<syn::LitInt>()?
+                                .base10_parse::<u32>()?,
+                        );
+                        Ok(())
+                    } else if meta.path.is_ident("maximum_bytes") {
+                        output.maximum_bytes = Some(
                             meta.value()?
                                 .parse::<syn::LitInt>()?
                                 .base10_parse::<u32>()?,
@@ -238,12 +254,32 @@ impl FieldAttrs {
                 "sequence bounds require #[mfm(persisted, ...)]",
             ));
         }
-        if output.literal.is_some()
-            && (output.minimum_items.is_some() || output.maximum_items.is_some() || output.default)
+        if output.minimum_bytes.zip(output.maximum_bytes).is_none()
+            && (output.minimum_bytes.is_some() || output.maximum_bytes.is_some())
         {
             return Err(syn::Error::new(
                 Span::call_site(),
-                "literal fields cannot also declare defaults or sequence bounds",
+                "byte bounds require both minimum_bytes and maximum_bytes",
+            ));
+        }
+        if output.literal.is_some()
+            && (output.minimum_items.is_some()
+                || output.maximum_items.is_some()
+                || output.minimum_bytes.is_some()
+                || output.maximum_bytes.is_some()
+                || output.default)
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "literal fields cannot also declare defaults, sequence bounds, or byte bounds",
+            ));
+        }
+        if (output.minimum_items.is_some() || output.maximum_items.is_some())
+            && (output.minimum_bytes.is_some() || output.maximum_bytes.is_some())
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "a field cannot declare both sequence and byte bounds",
             ));
         }
         if output
@@ -254,6 +290,16 @@ impl FieldAttrs {
             return Err(syn::Error::new(
                 Span::call_site(),
                 "minimum_items cannot exceed maximum_items",
+            ));
+        }
+        if output
+            .minimum_bytes
+            .zip(output.maximum_bytes)
+            .is_some_and(|(minimum, maximum)| minimum > maximum)
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "minimum_bytes cannot exceed maximum_bytes",
             ));
         }
         Ok(output)
