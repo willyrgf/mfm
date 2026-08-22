@@ -6,9 +6,18 @@ use mfm_config::{
     ConfigDigest, ConfigImportResult, ConfigName, ConfigRepository, ConfigRepositoryError,
     ConfigRevision,
 };
+use mfm_evm::{
+    EvmAddress, EvmAuthorityEpoch, EvmBlockAnchor, EvmChainInstance, EvmHash,
+    EvmTransactionSettlement, EvmTransactionTerminalResult, EvmU256,
+};
+use mfm_evm_transaction_authority::{
+    AuthorityError, AuthorityState, EvmTransactionAuthority, ExactRawTransaction, NonceDomain,
+    NonceDomainKey,
+};
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_journal::{JournalHistory, OutcomeKind};
 use mfm_store::{AppendResult, RunIndex, RunPageLimit};
+use mfm_values::canonicalize_mfm_value;
 use sqlx::postgres::PgSslMode;
 use sqlx::{Connection, Executor};
 
@@ -16,6 +25,49 @@ use super::*;
 
 fn run_id(byte: u8) -> RunId {
     RunId::from_digest(DigestBytes::from_array([byte; 32]))
+}
+
+fn effect_id(byte: u8) -> mfm_ids::EffectId {
+    mfm_ids::EffectId::from_digest(DigestBytes::from_array([byte; 32]))
+}
+
+fn evm_hash(byte: u8) -> EvmHash {
+    EvmHash::new(format!("0x{}", format!("{byte:02x}").repeat(32))).expect("EVM hash")
+}
+
+fn evm_address(byte: u8) -> EvmAddress {
+    EvmAddress::new(format!("0x{}", format!("{byte:02x}").repeat(20))).expect("EVM address")
+}
+
+fn nonce_domain(
+    epoch: &EvmAuthorityEpoch,
+    chain_id: u64,
+    genesis_byte: u8,
+    sender_byte: u8,
+    signer_byte: u8,
+) -> NonceDomain {
+    NonceDomain::new(
+        NonceDomainKey::new(
+            epoch.clone(),
+            EvmChainInstance::new(chain_id, evm_hash(genesis_byte)).expect("chain instance"),
+            evm_address(sender_byte),
+        ),
+        reference("mfm.test.signer", &[signer_byte]),
+    )
+}
+
+fn transaction_settlement(
+    effect_id: mfm_ids::EffectId,
+    nonce: u64,
+    transaction_hash: EvmHash,
+) -> EvmTransactionSettlement {
+    EvmTransactionSettlement::new(
+        effect_id,
+        nonce,
+        transaction_hash,
+        EvmBlockAnchor::new(EvmU256::from_u64(12), evm_hash(12)),
+        EvmTransactionTerminalResult::SuccessCall,
+    )
 }
 
 fn reference(name: &str, bytes: &[u8]) -> ContentRef {
@@ -110,6 +162,10 @@ async fn runtime_connection(locator: &RuntimePostgresLocator) -> PgConnection {
 
 async fn reset_schemas(connection: &mut PgConnection) {
     connection
+        .execute("DROP SCHEMA IF EXISTS mfm_evm_tx CASCADE")
+        .await
+        .expect("drop EVM transaction schema");
+    connection
         .execute("DROP SCHEMA IF EXISTS mfm_config CASCADE")
         .await
         .expect("drop config schema");
@@ -132,9 +188,16 @@ fn migration_and_classifier_contracts_are_exact() {
     assert!(CONFIG_SCHEMA_SQL.contains("CREATE SCHEMA mfm_config"));
     assert!(CONFIG_SCHEMA_SQL.contains("CREATE TABLE mfm_config.config_revisions"));
     assert!(CONFIG_SCHEMA_SQL.contains("mfm.config-postgres.v2"));
+    assert!(evm_tx::EVM_TX_SCHEMA_SQL.contains("CREATE SCHEMA mfm_evm_tx"));
+    assert!(evm_tx::EVM_TX_SCHEMA_SQL.contains("CREATE TABLE mfm_evm_tx.nonce_domains"));
+    assert!(evm_tx::EVM_TX_SCHEMA_SQL.contains("CREATE TABLE mfm_evm_tx.nonce_reservations"));
+    assert!(evm_tx::EVM_TX_SCHEMA_SQL.contains("CREATE TABLE mfm_evm_tx.prepared_transactions"));
+    assert!(evm_tx::EVM_TX_SCHEMA_SQL.contains("CREATE TABLE mfm_evm_tx.transaction_settlements"));
+    assert!(!evm_tx::EVM_TX_SCHEMA_SQL.contains("INSERT INTO"));
     assert!(!CONFIG_SCHEMA_SQL.contains("current"));
     assert!(!RUN_SCHEMA_SQL.contains("UNLOGGED"));
     assert!(!CONFIG_SCHEMA_SQL.contains("UNLOGGED"));
+    assert!(!evm_tx::EVM_TX_SCHEMA_SQL.contains("UNLOGGED"));
     assert_eq!(
         advisory_lock_key(run_id(7).as_str()),
         -9_027_535_993_765_170_775
@@ -157,6 +220,33 @@ fn migration_and_classifier_contracts_are_exact() {
     assert!(!durability_matches(false, "on", "on"));
     assert!(!durability_matches(true, "off", "on"));
     assert!(!durability_matches(true, "on", "off"));
+}
+
+#[test]
+fn evm_nonce_domain_lock_vector_is_frozen() {
+    let key = NonceDomainKey::new(
+        EvmAuthorityEpoch::new([1; 32]),
+        EvmChainInstance::new(
+            1,
+            EvmHash::new(format!("0x{}", "02".repeat(32))).expect("genesis"),
+        )
+        .expect("chain"),
+        EvmAddress::new("0x0303030303030303030303030303030303030303").expect("sender"),
+    );
+    let (preimage, digest, lock_key) = evm_tx::test_lock_vector(&key).expect("lock vector");
+    assert_eq!(
+        preimage,
+        "{\"authority_epoch\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"chain_id\":1,\"domain\":\"mfm.evm.nonce-domain-lock.v1\",\"expected_genesis_hash\":\"0x0202020202020202020202020202020202020202020202020202020202020202\",\"sender\":\"0x0303030303030303030303030303030303030303\"}"
+    );
+    assert_eq!(
+        digest,
+        [
+            0x41, 0xa8, 0xa1, 0xeb, 0x96, 0x53, 0x39, 0x95, 0x19, 0x6e, 0xb0, 0x5e, 0x6e, 0x74,
+            0x62, 0xa5, 0xfb, 0x04, 0x4d, 0xaa, 0x8f, 0x69, 0x4a, 0xe8, 0x3d, 0x91, 0xa1, 0xab,
+            0x6b, 0x1b, 0xe8, 0x01,
+        ]
+    );
+    assert_eq!(lock_key, 4_731_209_441_764_129_173);
 }
 
 #[tokio::test]
@@ -789,6 +879,450 @@ async fn assert_delete_fault(
     );
 }
 
+async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresBackend>) {
+    let epoch = backend.authority_epoch().clone();
+    let domain = nonce_domain(&epoch, 1, 2, 3, 4);
+    let command_ref = reference("mfm.test.evm-command", &[5]);
+    let first_effect = effect_id(6);
+    assert!(backend
+        .load(&first_effect, &command_ref)
+        .await
+        .expect("absent load")
+        .is_none());
+
+    let reserved = backend
+        .reserve_or_compare(&first_effect, &command_ref, &domain, 7)
+        .await
+        .expect("first reservation");
+    assert_eq!(reserved.nonce(), 7);
+    assert!(reserved.domain() == &domain);
+    assert_eq!(
+        backend
+            .reserve_or_compare(&first_effect, &command_ref, &domain, 999)
+            .await
+            .expect("same Effect retry")
+            .nonce(),
+        7
+    );
+    assert_eq!(
+        backend
+            .load(&first_effect, &reference("mfm.test.other-command", &[8]))
+            .await
+            .err(),
+        Some(AuthorityError::Internal)
+    );
+    assert_eq!(
+        backend
+            .reserve_or_compare(
+                &first_effect,
+                &reference("mfm.test.other-command", &[8]),
+                &domain,
+                7,
+            )
+            .await
+            .err(),
+        Some(AuthorityError::Internal)
+    );
+    assert_eq!(
+        backend
+            .reserve_or_compare(
+                &effect_id(9),
+                &command_ref,
+                &nonce_domain(&epoch, 1, 2, 3, 10),
+                8,
+            )
+            .await
+            .err(),
+        Some(AuthorityError::Internal)
+    );
+    assert_eq!(
+        backend
+            .reserve_or_compare(&effect_id(11), &command_ref, &domain, 8)
+            .await
+            .err(),
+        Some(AuthorityError::Unavailable)
+    );
+
+    let transaction_hash = evm_hash(13);
+    let raw = ExactRawTransaction::new(vec![2, 0xc0]).expect("raw transaction");
+    assert_eq!(
+        backend
+            .retain_prepared(
+                &first_effect,
+                &reference("mfm.test.other-command", &[8]),
+                &transaction_hash,
+                &raw,
+            )
+            .await
+            .err(),
+        Some(AuthorityError::Internal)
+    );
+    let prepared = backend
+        .retain_prepared(&first_effect, &command_ref, &transaction_hash, &raw)
+        .await
+        .expect("retain prepared");
+    assert_eq!(prepared.raw_transaction().as_bytes(), raw.as_bytes());
+    assert_eq!(
+        backend
+            .retain_prepared(&first_effect, &command_ref, &transaction_hash, &raw)
+            .await
+            .expect("prepared retry")
+            .raw_transaction()
+            .as_bytes(),
+        raw.as_bytes()
+    );
+    assert_eq!(
+        backend
+            .retain_prepared(
+                &first_effect,
+                &command_ref,
+                &transaction_hash,
+                &ExactRawTransaction::new(vec![2, 0xc1]).expect("wrong raw"),
+            )
+            .await
+            .err(),
+        Some(AuthorityError::Internal)
+    );
+    let evidence = transaction_settlement(first_effect.clone(), 7, transaction_hash.clone());
+    assert_eq!(
+        backend
+            .retain_settlement(
+                &first_effect,
+                &reference("mfm.test.other-command", &[8]),
+                &evidence,
+            )
+            .await
+            .err(),
+        Some(AuthorityError::Internal)
+    );
+    assert_eq!(
+        backend
+            .retain_settlement(
+                &first_effect,
+                &command_ref,
+                &transaction_settlement(effect_id(41), 7, transaction_hash.clone()),
+            )
+            .await
+            .err(),
+        Some(AuthorityError::Internal)
+    );
+    assert_eq!(
+        backend
+            .retain_settlement(
+                &first_effect,
+                &command_ref,
+                &transaction_settlement(first_effect.clone(), 7, evm_hash(42)),
+            )
+            .await
+            .err(),
+        Some(AuthorityError::Internal)
+    );
+    assert_eq!(
+        backend
+            .retain_settlement(
+                &first_effect,
+                &command_ref,
+                &transaction_settlement(first_effect.clone(), 8, transaction_hash.clone()),
+            )
+            .await
+            .err(),
+        Some(AuthorityError::Internal)
+    );
+    let settled = backend
+        .retain_settlement(&first_effect, &command_ref, &evidence)
+        .await
+        .expect("retain settlement");
+    assert_eq!(settled.evidence(), &evidence);
+    assert_eq!(
+        backend
+            .retain_settlement(&first_effect, &command_ref, &evidence)
+            .await
+            .expect("settlement retry")
+            .evidence(),
+        &evidence
+    );
+    let AuthorityState::Settled(loaded) = backend
+        .load(&first_effect, &command_ref)
+        .await
+        .expect("settled load")
+        .expect("settled state")
+    else {
+        panic!("expected settled authority state");
+    };
+    assert_eq!(loaded.evidence(), &evidence);
+    assert_eq!(
+        loaded.prepared().raw_transaction().as_bytes(),
+        raw.as_bytes()
+    );
+
+    let second_effect = effect_id(14);
+    for observed in [7, 9] {
+        assert_eq!(
+            backend
+                .reserve_or_compare(&second_effect, &command_ref, &domain, observed)
+                .await
+                .err(),
+            Some(AuthorityError::Unavailable)
+        );
+    }
+    assert_eq!(
+        backend
+            .reserve_or_compare(&second_effect, &command_ref, &domain, 8)
+            .await
+            .expect("next reservation")
+            .nonce(),
+        8
+    );
+    let second_hash = evm_hash(43);
+    backend
+        .retain_prepared(
+            &second_effect,
+            &command_ref,
+            &second_hash,
+            &ExactRawTransaction::new(vec![2, 0xc4]).expect("revert raw"),
+        )
+        .await
+        .expect("revert prepared");
+    let reverted = EvmTransactionSettlement::new(
+        second_effect.clone(),
+        8,
+        second_hash,
+        EvmBlockAnchor::new(EvmU256::from_u64(13), evm_hash(44)),
+        EvmTransactionTerminalResult::Reverted,
+    );
+    backend
+        .retain_settlement(&second_effect, &command_ref, &reverted)
+        .await
+        .expect("revert settlement");
+    assert_eq!(
+        backend
+            .reserve_or_compare(&effect_id(45), &command_ref, &domain, 9)
+            .await
+            .expect("post-revert reservation")
+            .nonce(),
+        9
+    );
+
+    let zero_domain = nonce_domain(&epoch, 46, 47, 48, 49);
+    assert_eq!(
+        backend
+            .reserve_or_compare(&effect_id(50), &command_ref, &zero_domain, 0)
+            .await
+            .expect("zero reservation")
+            .nonce(),
+        0
+    );
+
+    let max_domain = nonce_domain(&epoch, u64::MAX, 15, 16, 17);
+    let max_effect = effect_id(18);
+    assert_eq!(
+        backend
+            .reserve_or_compare(&max_effect, &command_ref, &max_domain, u64::MAX)
+            .await
+            .expect("u64 max reservation")
+            .nonce(),
+        u64::MAX
+    );
+    let max_hash = evm_hash(39);
+    backend
+        .retain_prepared(
+            &max_effect,
+            &command_ref,
+            &max_hash,
+            &ExactRawTransaction::new(vec![2, 0xc3]).expect("max raw"),
+        )
+        .await
+        .expect("max prepared");
+    backend
+        .retain_settlement(
+            &max_effect,
+            &command_ref,
+            &transaction_settlement(max_effect.clone(), u64::MAX, max_hash),
+        )
+        .await
+        .expect("max settlement");
+    assert_eq!(
+        backend
+            .reserve_or_compare(&effect_id(40), &command_ref, &max_domain, 0)
+            .await
+            .err(),
+        Some(AuthorityError::Internal)
+    );
+    let distinct_genesis = nonce_domain(&epoch, 1, 19, 3, 4);
+    assert_eq!(
+        backend
+            .reserve_or_compare(&effect_id(20), &command_ref, &distinct_genesis, 42)
+            .await
+            .expect("distinct genesis domain")
+            .nonce(),
+        42
+    );
+
+    let racing_domain = nonce_domain(&epoch, 21, 22, 23, 24);
+    let race = [effect_id(25), effect_id(26)]
+        .into_iter()
+        .map(|effect| {
+            let backend = Arc::clone(backend);
+            let command_ref = command_ref.clone();
+            let domain = racing_domain.clone();
+            tokio::spawn(async move {
+                backend
+                    .reserve_or_compare(&effect, &command_ref, &domain, 3)
+                    .await
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut outcomes = Vec::new();
+    for attempt in race {
+        outcomes.push(attempt.await.expect("different Effect race join"));
+    }
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| outcome.as_ref().err() == Some(&AuthorityError::Unavailable))
+            .count(),
+        1
+    );
+
+    let same_effect_domain = nonce_domain(&epoch, 27, 28, 29, 30);
+    let same_effect = effect_id(31);
+    let attempts = (0..2)
+        .map(|_| {
+            let backend = Arc::clone(backend);
+            let command_ref = command_ref.clone();
+            let domain = same_effect_domain.clone();
+            let effect = same_effect.clone();
+            tokio::spawn(async move {
+                backend
+                    .reserve_or_compare(&effect, &command_ref, &domain, 4)
+                    .await
+            })
+        })
+        .collect::<Vec<_>>();
+    for attempt in attempts {
+        assert_eq!(
+            attempt
+                .await
+                .expect("same Effect join")
+                .expect("same Effect convergence")
+                .nonce(),
+            4
+        );
+    }
+
+    let retained_bytes: Vec<u8> = sqlx::query_scalar(
+        "SELECT settlement_bytes FROM mfm_evm_tx.transaction_settlements WHERE effect_id = $1",
+    )
+    .bind(first_effect.as_str())
+    .fetch_one(backend.test_pool())
+    .await
+    .expect("retained settlement bytes");
+    assert_eq!(
+        retained_bytes,
+        canonicalize_mfm_value(&evidence)
+            .expect("canonical evidence")
+            .0
+            .as_bytes()
+    );
+
+    let fault_domain = nonce_domain(&epoch, 32, 33, 34, 35);
+    let fault_effect = effect_id(36);
+    backend.inject_authority_commit_fault(evm_tx::AuthorityCommitFault::UnknownRolledBack);
+    assert_eq!(
+        backend
+            .reserve_or_compare(&fault_effect, &command_ref, &fault_domain, 5)
+            .await
+            .err(),
+        Some(AuthorityError::Unavailable)
+    );
+    assert!(backend
+        .load(&fault_effect, &command_ref)
+        .await
+        .expect("rolled-back reservation load")
+        .is_none());
+    backend.inject_authority_commit_fault(evm_tx::AuthorityCommitFault::UnknownCommitted);
+    assert_eq!(
+        backend
+            .reserve_or_compare(&fault_effect, &command_ref, &fault_domain, 5)
+            .await
+            .err(),
+        Some(AuthorityError::Unavailable)
+    );
+    assert!(matches!(
+        backend
+            .load(&fault_effect, &command_ref)
+            .await
+            .expect("committed reservation load"),
+        Some(AuthorityState::Reserved(_))
+    ));
+
+    let fault_hash = evm_hash(37);
+    let fault_raw = ExactRawTransaction::new(vec![2, 0xc2]).expect("fault raw");
+    backend.inject_authority_commit_fault(evm_tx::AuthorityCommitFault::UnknownRolledBack);
+    assert_eq!(
+        backend
+            .retain_prepared(&fault_effect, &command_ref, &fault_hash, &fault_raw)
+            .await
+            .err(),
+        Some(AuthorityError::Unavailable)
+    );
+    assert!(matches!(
+        backend
+            .load(&fault_effect, &command_ref)
+            .await
+            .expect("rolled-back prepared load"),
+        Some(AuthorityState::Reserved(_))
+    ));
+    backend.inject_authority_commit_fault(evm_tx::AuthorityCommitFault::UnknownCommitted);
+    assert_eq!(
+        backend
+            .retain_prepared(&fault_effect, &command_ref, &fault_hash, &fault_raw)
+            .await
+            .err(),
+        Some(AuthorityError::Unavailable)
+    );
+    assert!(matches!(
+        backend
+            .load(&fault_effect, &command_ref)
+            .await
+            .expect("committed prepared load"),
+        Some(AuthorityState::Prepared(_))
+    ));
+
+    let fault_evidence = transaction_settlement(fault_effect.clone(), 5, fault_hash);
+    backend.inject_authority_commit_fault(evm_tx::AuthorityCommitFault::UnknownRolledBack);
+    assert_eq!(
+        backend
+            .retain_settlement(&fault_effect, &command_ref, &fault_evidence)
+            .await
+            .err(),
+        Some(AuthorityError::Unavailable)
+    );
+    assert!(matches!(
+        backend
+            .load(&fault_effect, &command_ref)
+            .await
+            .expect("rolled-back settlement load"),
+        Some(AuthorityState::Prepared(_))
+    ));
+    backend.inject_authority_commit_fault(evm_tx::AuthorityCommitFault::UnknownCommitted);
+    assert_eq!(
+        backend
+            .retain_settlement(&fault_effect, &command_ref, &fault_evidence)
+            .await
+            .err(),
+        Some(AuthorityError::Unavailable)
+    );
+    assert!(matches!(
+        backend
+            .load(&fault_effect, &command_ref)
+            .await
+            .expect("committed settlement load"),
+        Some(AuthorityState::Settled(_))
+    ));
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires the managed local PostgreSQL service provided by postgres-test"]
 async fn managed_postgres_persistence_authority_contract() {
@@ -808,6 +1342,14 @@ async fn managed_postgres_persistence_authority_contract() {
             .await
             .expect("postgres backend"),
     );
+    provision_postgres(&admin, &runtime)
+        .await
+        .expect("stable epoch verification");
+    let stable_backend = PostgresBackend::connect(&runtime)
+        .await
+        .expect("stable backend");
+    assert_eq!(stable_backend.authority_epoch(), backend.authority_epoch());
+    drop(stable_backend);
     let options = runtime
         .connect_options("mfm-local-transport-contract-test")
         .expect("production connection options");
@@ -877,6 +1419,45 @@ async fn managed_postgres_persistence_authority_contract() {
     assert_snapshot_and_blocking_contract(&backend).await;
     assert_commit_and_hostile_contract(&backend, &mut connection).await;
     assert_config_mutation_contract(&backend).await;
+    assert_evm_transaction_authority_contract(&backend).await;
+
+    let epoch_bytes = backend
+        .authority_epoch()
+        .as_bytes()
+        .expect("authority epoch bytes");
+    let signer_ref = reference("mfm.test.signer", &[49]);
+    for invalid_chain_id in ["0", "18446744073709551616"] {
+        assert!(sqlx::query(
+            "INSERT INTO mfm_evm_tx.nonce_domains \
+             (authority_epoch, chain_id, genesis_hash, sender, signer_schema_id, signer_content_digest) \
+             VALUES ($1, $2::numeric, $3, $4, $5, $6)",
+        )
+        .bind(epoch_bytes.as_slice())
+        .bind(invalid_chain_id)
+        .bind([51_u8; 32].as_slice())
+        .bind([52_u8; 20].as_slice())
+        .bind(signer_ref.schema_id().as_str())
+        .bind(signer_ref.content_digest().as_str())
+        .execute(&mut connection)
+        .await
+        .is_err());
+    }
+    let command_ref = reference("mfm.test.evm-command", &[5]);
+    assert!(sqlx::query(
+        "INSERT INTO mfm_evm_tx.nonce_reservations \
+         (effect_id, command_schema_id, command_content_digest, authority_epoch, chain_id, \
+          genesis_hash, sender, reserved_nonce) \
+         VALUES ($1, $2, $3, $4, 46, $5, $6, 18446744073709551616)",
+    )
+    .bind(effect_id(52).as_str())
+    .bind(command_ref.schema_id().as_str())
+    .bind(command_ref.content_digest().as_str())
+    .bind(epoch_bytes.as_slice())
+    .bind([47_u8; 32].as_slice())
+    .bind([48_u8; 20].as_slice())
+    .execute(&mut connection)
+    .await
+    .is_err());
 
     let mut runtime_connection = runtime_connection(&runtime).await;
     assert!(
@@ -891,6 +1472,16 @@ async fn managed_postgres_persistence_authority_contract() {
         .is_err());
     assert!(
         sqlx::query("UPDATE mfm_config.config_revisions SET canonical = canonical")
+            .execute(&mut runtime_connection)
+            .await
+            .is_err()
+    );
+    assert!(sqlx::query("DELETE FROM mfm_evm_tx.nonce_reservations")
+        .execute(&mut runtime_connection)
+        .await
+        .is_err());
+    assert!(
+        sqlx::query("UPDATE mfm_evm_tx.nonce_domains SET sender = sender")
             .execute(&mut runtime_connection)
             .await
             .is_err()
@@ -923,7 +1514,72 @@ async fn managed_postgres_persistence_authority_contract() {
         .await
         .expect("revoke excess config privilege");
 
+    connection
+        .execute("GRANT DELETE ON mfm_evm_tx.nonce_reservations TO mfm_runtime")
+        .await
+        .expect("grant excess transaction privilege");
+    assert!(matches!(
+        PostgresBackend::connect(&runtime).await,
+        Err(PostgresOpenError::Incompatible)
+    ));
+    connection
+        .execute("REVOKE DELETE ON mfm_evm_tx.nonce_reservations FROM mfm_runtime")
+        .await
+        .expect("revoke excess transaction privilege");
+
+    connection
+        .execute(
+            "UPDATE mfm_evm_tx.transaction_settlements SET settlement_bytes = '{ }'::bytea \
+             WHERE effect_id = 'effect:sha256-jcs-v1:2424242424242424242424242424242424242424242424242424242424242424'",
+        )
+        .await
+        .expect("inject noncanonical settlement bytes");
+    assert_eq!(
+        backend
+            .load(&effect_id(36), &reference("mfm.test.evm-command", &[5]),)
+            .await
+            .err(),
+        Some(AuthorityError::Internal)
+    );
+    connection
+        .execute(
+            "UPDATE mfm_evm_tx.transaction_settlements SET settlement_bytes = '{}'::bytea \
+             WHERE effect_id = 'effect:sha256-jcs-v1:2424242424242424242424242424242424242424242424242424242424242424'",
+        )
+        .await
+        .expect("inject malformed settlement bytes");
+    assert_eq!(
+        backend
+            .reserve_or_compare(
+                &effect_id(38),
+                &reference("mfm.test.evm-command", &[5]),
+                &nonce_domain(backend.authority_epoch(), 32, 33, 34, 35),
+                6,
+            )
+            .await
+            .err(),
+        Some(AuthorityError::Internal)
+    );
+
+    let original_epoch = backend.authority_epoch().clone();
+    reset_schemas(&mut connection).await;
+    provision_postgres(&admin, &runtime)
+        .await
+        .expect("fresh authority recreation");
+    let replacement = PostgresBackend::connect(&runtime)
+        .await
+        .expect("replacement backend");
+    assert_ne!(replacement.authority_epoch(), &original_epoch);
+    assert_eq!(
+        backend
+            .load(&effect_id(6), &reference("mfm.test.evm-command", &[5]),)
+            .await
+            .err(),
+        Some(AuthorityError::Internal)
+    );
+
     drop(backend);
+    drop(replacement);
     connection
         .execute("DELETE FROM mfm_config.mfm_config_schema")
         .await
@@ -945,6 +1601,19 @@ async fn managed_postgres_persistence_authority_contract() {
         PostgresBackend::connect(&runtime).await,
         Err(PostgresOpenError::Incompatible)
     ));
+
+    reset_schemas(&mut connection).await;
+    provision_postgres(&admin, &runtime)
+        .await
+        .expect("complete baseline before mixed-state test");
+    connection
+        .execute("DROP SCHEMA mfm_evm_tx CASCADE")
+        .await
+        .expect("drop one managed schema");
+    assert_eq!(
+        provision_postgres(&admin, &runtime).await,
+        Err(ProvisionError::Incompatible)
+    );
 
     reset_schemas(&mut connection).await;
     connection

@@ -1,8 +1,9 @@
 #![warn(missing_docs)]
-//! PostgreSQL implementation of the mechanical append-only Store.
+//! PostgreSQL implementation of mechanical persistence and EVM transaction authority.
 //!
-//! Production construction verifies the fresh static schema and durability
-//! prerequisites before exposing a usable handle.
+//! Production construction verifies all fresh static schemas and durability prerequisites before
+//! exposing one pool-backed Store, config repository, RunIndex, and append-only transaction
+//! authority handle.
 
 use std::future::Future;
 use std::time::Duration;
@@ -11,6 +12,7 @@ use mfm_canonical::sha256_digest_bytes;
 use mfm_config::{
     ConfigDigest, ConfigFuture, ConfigImportResult, ConfigName, ConfigRepository, ConfigRevision,
 };
+use mfm_evm::EvmAuthorityEpoch;
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId};
 use mfm_journal::{
     frame_head_digest, EncodedRunFrame, StoredRunBytes, MAX_FRAME_BYTES, MAX_RUN_BYTES,
@@ -23,6 +25,7 @@ use sqlx::{Arguments, Connection, PgConnection, PgPool, Row};
 const SCHEMA_CONTRACT: &str = "mfm.run-history-postgres.v2";
 
 mod config;
+mod evm_tx;
 mod index;
 mod locator;
 mod provision;
@@ -34,6 +37,9 @@ pub use provision::{provision_postgres, ProvisionError};
 /// Complete PostgreSQL persistence backend after its connection gate succeeds.
 pub struct PostgresBackend {
     pool: PgPool,
+    authority_epoch: EvmAuthorityEpoch,
+    #[cfg(test)]
+    authority_commit_fault: std::sync::atomic::AtomicU8,
 }
 
 /// Redaction-safe production-open failure.
@@ -70,13 +76,24 @@ impl PostgresBackend {
                 Box::pin(async move {
                     verify_connection(connection)
                         .await
+                        .map(|_| ())
                         .map_err(|error| sqlx::Error::Protocol(error.marker().to_owned()))
                 })
             })
             .connect_with(options)
             .await
             .map_err(classify_open_error)?;
-        Ok(Self { pool })
+        let mut admitted_connection = pool.acquire().await.map_err(classify_open_error)?;
+        let authority_epoch = verify_connection(&mut admitted_connection)
+            .await
+            .map_err(classify_gate_error)?;
+        drop(admitted_connection);
+        Ok(Self {
+            pool,
+            authority_epoch,
+            #[cfg(test)]
+            authority_commit_fault: std::sync::atomic::AtomicU8::new(0),
+        })
     }
 
     #[cfg(test)]
@@ -236,11 +253,14 @@ async fn verify_durability(connection: &mut PgConnection) -> std::result::Result
     Ok(())
 }
 
-async fn verify_connection(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
+async fn verify_connection(
+    connection: &mut PgConnection,
+) -> std::result::Result<EvmAuthorityEpoch, GateError> {
     verify_durability(connection).await?;
     verify_runtime_authority(connection).await?;
     verify_run_schema(connection).await?;
-    verify_config_schema(connection).await
+    verify_config_schema(connection).await?;
+    evm_tx::verify_evm_tx_schema(connection).await
 }
 
 async fn verify_run_schema(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
@@ -444,7 +464,7 @@ async fn verify_runtime_authority(
     if owns_objects {
         return Err(GateError::Incompatible);
     }
-    for schema in ["public", "mfm_config"] {
+    for schema in ["public", "mfm_config", "mfm_evm_tx"] {
         let schema_privileges: (bool, bool) = sqlx::query_as(
             "SELECT has_schema_privilege(current_user, $1, 'USAGE'), \
                     has_schema_privilege(current_user, $1, 'CREATE')",
@@ -457,8 +477,9 @@ async fn verify_runtime_authority(
             return Err(GateError::Incompatible);
         }
     }
-    let accepted =
-        verify_run_privileges(connection).await? && verify_config_privileges(connection).await?;
+    let accepted = verify_run_privileges(connection).await?
+        && verify_config_privileges(connection).await?
+        && evm_tx::verify_evm_tx_privileges(connection).await?;
     accepted.then_some(()).ok_or(GateError::Incompatible)
 }
 

@@ -270,6 +270,7 @@ in
             env -u PGSERVICE -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE \
               -u PGPASSWORD -u PGPASSFILE \
               psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+            DROP SCHEMA IF EXISTS mfm_evm_tx CASCADE;
             DROP SCHEMA IF EXISTS mfm_config CASCADE;
             DROP SCHEMA IF EXISTS public CASCADE;
             CREATE SCHEMA public AUTHORIZATION CURRENT_USER;

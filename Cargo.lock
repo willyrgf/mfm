@@ -1972,6 +1972,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-evm-transaction-authority"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-evm",
+ "mfm-ids",
+ "thiserror",
+]
+
+[[package]]
 name = "mfm-ids"
 version = "0.1.0"
 dependencies = [
@@ -2108,12 +2118,17 @@ dependencies = [
 name = "mfm-storage-postgres"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "mfm-canonical",
  "mfm-config",
+ "mfm-evm",
+ "mfm-evm-transaction-authority",
  "mfm-ids",
  "mfm-journal",
  "mfm-store",
+ "mfm-values",
  "percent-encoding",
+ "serde_json",
  "sqlx",
  "thiserror",
  "tokio",
