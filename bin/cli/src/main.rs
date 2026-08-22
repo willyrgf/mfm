@@ -644,7 +644,7 @@ mod tests {
     fn component_text_is_complete_and_uniform() {
         let items = Application::components();
         let rendered = render_components(&items);
-        assert_eq!(rendered.lines().count(), items.len() * 3);
+        assert_eq!(rendered.lines().count(), items.len() * 4);
         assert!(rendered.starts_with("kind=entry_point\nid=mfm.portfolio/snapshot@1\ndescription="));
         assert!(rendered
             .contains("kind=operation\nid=mfm.evm.operation.collect-balances@1\ndescription="));

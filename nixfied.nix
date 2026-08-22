@@ -7,6 +7,7 @@
 }:
 let
   rustToolchain = import ./nix/rust-toolchain.nix { inherit pkgs; };
+  pinnedSolc = assert pkgs.solc.version == "0.8.33"; pkgs.solc;
   cargoTools = [
     "rust-toolchain"
     pkgs.bash
@@ -297,6 +298,39 @@ in
           "reth"
         ];
       };
+    effect-e2e =
+      (cargoLeaf {
+        run = [
+          "bash"
+          "-c"
+          (localPostgresRun (localEvmRun ''
+            env -u PGSERVICE -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE \
+              -u PGPASSWORD -u PGPASSFILE \
+              psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+            DROP SCHEMA IF EXISTS mfm_evm_tx CASCADE;
+            DROP SCHEMA IF EXISTS mfm_config CASCADE;
+            DROP SCHEMA IF EXISTS public CASCADE;
+            CREATE SCHEMA public AUTHORIZATION CURRENT_USER;
+            SQL
+            export MFM_EFFECT_E2E_ADMIN_POSTGRES_LOCATOR="$MFM_TEST_ADMIN_POSTGRES_LOCATOR"
+            export MFM_EFFECT_E2E_RUNTIME_POSTGRES_LOCATOR="$MFM_TEST_RUNTIME_POSTGRES_LOCATOR"
+            export MFM_EFFECT_E2E_EVM_ADAPTER_LOCATOR="$MFM_TEST_EVM_ADAPTER_LOCATOR"
+            exec cargo test -p mfm-app --test evm_contract_effect_e2e -- \
+              --include-ignored --test-threads=1
+          ''))
+        ];
+        tools = [
+          "pg-psql"
+          pkgs.coreutils
+          pinnedSolc
+        ];
+      })
+      // {
+        requires = [
+          "postgres"
+          "reth"
+        ];
+      };
     doc-tests = cargoLeaf {
       run = [
         "cargo"
@@ -364,6 +398,7 @@ in
         "capacity-envelope"
         "test-db"
         "client-e2e"
+        "effect-e2e"
       ];
     };
   };

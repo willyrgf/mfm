@@ -495,6 +495,28 @@ async fn redirects_never_leave_the_selected_endpoint() {
 }
 
 #[tokio::test]
+async fn complete_raw_submission_followed_by_connection_drop_is_unavailable() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind drop server");
+    let url = format!("http://{}", listener.local_addr().expect("server address"));
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept submission");
+        read_http_request(&mut stream)
+    });
+    let raw = ExactRawTransaction::new(vec![0x02, 0xc0]).expect("bounded raw");
+    assert_eq!(
+        JsonRpcEvmProvider::new_http_for_test(url)
+            .expect("provider")
+            .submit_raw(&raw)
+            .await,
+        Err(AdapterError::Unavailable)
+    );
+    let request: serde_json::Value =
+        serde_json::from_slice(&worker.join().expect("drop server")).expect("request JSON");
+    assert_eq!(request["method"], "eth_sendRawTransaction");
+    assert_eq!(request["params"], serde_json::json!(["0x02c0"]));
+}
+
+#[tokio::test]
 async fn undecodable_or_mismatched_intent_is_internal_and_never_enters_transport() {
     // No stub is bound: an Internal outcome proves nothing reached a transport.
     let provider =
