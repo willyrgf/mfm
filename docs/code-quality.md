@@ -61,6 +61,26 @@ type machinery more complex than the invalid states, branches, or change sites i
 Test constructor rejection and invariant-preserving transformations. Use compile-fail tests when a
 compile-time exclusion is an intentional API contract.
 
+## Test Value
+
+Every test must be able to fail because an observable capability regressed. Prefer one scenario
+through a crate's public API that covers a useful success path and its material boundary failures.
+Cross-crate tests should exercise the same entry points and concrete domain types that a consumer
+uses; do not rebuild a parallel model of the implementation in test-only fixtures.
+
+Do not add runtime assertions for facts already proved by Rust's type checker, trait bounds, private
+fields, or an infallible constructor. Do not freeze implementation detail such as helper call
+counts, internal declaration indices, duplicated associated-type declarations, or constants that
+the test reads from the implementation itself. A schema, wire, hash, or public error assertion is
+valuable only when it independently states an interoperability, hostile-input, redaction, or
+persistence contract.
+
+Keep setup visible in the scenario. Introduce a test helper only when it represents a reusable
+external boundary (for example a hostile Store or a loopback provider), not to shorten ordinary
+value construction or assertions. Prefer production constructors and functions over fixture files.
+Retain small unit tests for complex deterministic algorithms when their input/output table is the
+clearest contract. Retain compile-fail tests for deliberate authority and ownership exclusions.
+
 ## Commits and Reporting
 
 Divide non-trivial work into ordered logical commits. Each must contain one coherent, internally
