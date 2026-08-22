@@ -11,3 +11,7 @@ Five Pure States implement Program contracts directly. A private root Operation 
 owned EVM collection Operations with structured exact failure handlers, so Portfolio does not know
 child declaration sizes or indices. The domain has no Runtime, Store, provider, generic
 configuration lifecycle, or IO dependency.
+
+The entry point and public State definitions own their compiled-product inspection IDs and
+descriptions. This source metadata is not part of Program expansion or identity. The private root
+Operation is represented publicly by the entry point rather than admitted as a reusable Operation.

@@ -6,7 +6,9 @@ ordered array of State or Match declarations. Index zero is the root; every succ
 failure contracts. Missing success/failure successors mean the corresponding exact root result;
 `Never` is the reserved uninhabited failure contract and can never be encoded as a value.
 
-Source code authors the graph through one deterministic typed `Operation`. `expand_program` gives
+Source code authors the graph through one deterministic typed `Operation`. Product-inspection IDs
+and descriptions on admitted Operations and States are source metadata only: they are not lowered,
+hashed, or persisted. `expand_program` gives
 the root Operation the sole `OperationExpansion` compiler context, which flattens Pure States,
 exact-pair Reads, child Operations, structured Match joins, and exact failure handlers into one
 private symbolic draft before constructing Program v2. Operations, callbacks, injection setup, and
@@ -83,7 +85,10 @@ comparing one immutable revision. Run start requires an exact retained name and 
 digest, checks every requested binding before Runtime Store IO, and returns the selected config
 summary with the run view. The management surface exposes import, complete unpaginated listing, and
 idempotent exact delete. Deletion does not revoke runs already admitted from that revision. The shared
-surface also owns entry-point/binding discovery, run progress/read, and mechanical run-head listing.
+surface also owns compiled component, entry-point, and binding discovery, run progress/read, and
+mechanical run-head listing. Compiled component discovery is an unexpanded inventory of the public
+entry points and reusable Operations admitted by Application composition plus the exact States that
+the same composition registers with Runtime.
 Every execution receives an explicit transport-selected RunId. Both client surfaces accept one or
 use the same Application client primitive to derive one from OS cryptographic entropy before the
 start use case. Ambiguous append acknowledgement carries the exact start or progress recovery

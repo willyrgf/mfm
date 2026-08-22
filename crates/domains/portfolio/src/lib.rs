@@ -45,6 +45,9 @@ macro_rules! impl_checked_deserialize {
 
 /// Stable Portfolio snapshot entry-point identity.
 pub const PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID: &str = "mfm.portfolio/snapshot@1";
+/// Human-readable Portfolio snapshot entry-point description.
+pub const PORTFOLIO_SNAPSHOT_ENTRY_POINT_DESCRIPTION: &str =
+    "Builds a Portfolio snapshot from configured EVM observations.";
 /// Maximum declaration-ordered EVM collections.
 const PORTFOLIO_COLLECTION_LIMIT: usize = 64;
 
@@ -530,14 +533,22 @@ pub struct MapEvmBalanceFailure;
 pub struct ConsolidatePortfolio;
 
 macro_rules! impl_portfolio_state {
-    ($state:ident, $input:ty, $output:ty, $id:literal) => {
+    ($state:ident, $input:ty, $output:ty, $id:literal, $description:literal) => {
+        impl $state {
+            /// Stable State identity used by Program authoring and product inspection.
+            pub const STATE_ID: &'static str = $id;
+            /// Human-readable product inspection description.
+            pub const DESCRIPTION: &'static str = $description;
+        }
+
         impl State for $state {
             type Input = $input;
             type Output = $output;
             type Failure = PortfolioSnapshotFailure;
 
             fn state_id() -> mfm_program::Result<StableId> {
-                StableId::new($id).map_err(|_| mfm_program::ProgramError::InvalidContract)
+                StableId::new(Self::STATE_ID)
+                    .map_err(|_| mfm_program::ProgramError::InvalidContract)
             }
         }
     };
@@ -547,31 +558,36 @@ impl_portfolio_state!(
     InitializePortfolio,
     PortfolioSnapshotInput,
     PortfolioContinuation,
-    "mfm.portfolio.state.initialize@1"
+    "mfm.portfolio.state.initialize@1",
+    "Initializes one Portfolio snapshot continuation."
 );
 impl_portfolio_state!(
     EnterPortfolioCollection,
     PortfolioContinuation,
     EvmBalanceContext<PortfolioContinuation>,
-    "mfm.portfolio.state.enter-collection@1"
+    "mfm.portfolio.state.enter-collection@1",
+    "Enters the next EVM balance collection."
 );
 impl_portfolio_state!(
     ResumePortfolioCollection,
     EvmBalanceCollectionCompletion<PortfolioContinuation>,
     PortfolioContinuation,
-    "mfm.portfolio.state.resume-collection@1"
+    "mfm.portfolio.state.resume-collection@1",
+    "Resumes Portfolio aggregation after one EVM balance collection."
 );
 impl_portfolio_state!(
     MapEvmBalanceFailure,
     EvmBalanceFailure,
     PortfolioSnapshotOutput,
-    "mfm.portfolio.state.map-evm-failure@1"
+    "mfm.portfolio.state.map-evm-failure@1",
+    "Maps an EVM balance failure into the Portfolio failure contract."
 );
 impl_portfolio_state!(
     ConsolidatePortfolio,
     PortfolioContinuation,
     PortfolioSnapshotOutput,
-    "mfm.portfolio.state.consolidate@1"
+    "mfm.portfolio.state.consolidate@1",
+    "Consolidates all completed collections into the Portfolio snapshot output."
 );
 fn initialize_portfolio(
     input: PortfolioSnapshotInput,

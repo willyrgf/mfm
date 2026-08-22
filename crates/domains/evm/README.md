@@ -5,6 +5,10 @@ Secret-free typed EVM Read capabilities, cumulative balance State semantics, and
 directly. `CollectEvmBalances<K>` is the checked configured child Operation; it deterministically
 unrolls the native/token topology per source without exposing declaration counts or indices.
 
+The State definitions and public reusable `CollectEvmBalances<K>` Operation own their
+compiled-product inspection IDs and descriptions. This source metadata is not lowered into Program
+or included in content identity.
+
 The Portfolio planner derives each checked target binding once and shares that exact `ContentRef`
 with C0 and its configured child Operation. Six exact `CapabilityInjection` pairings clone that
 binding for their designated Reads. The current policies add no support States and perform no

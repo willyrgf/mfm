@@ -6,7 +6,8 @@ use mfm_evm::{EvmEndpoint, EvmPhysicalTarget, EVM_BALANCE_SOURCE_LIMIT};
 use mfm_ids::EntryPointId;
 use mfm_portfolio::{
     plan_snapshot, PortfolioConfig, PortfolioError, PortfolioSnapshotInput,
-    PortfolioSnapshotSelector, PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
+    PortfolioSnapshotSelector, PORTFOLIO_SNAPSHOT_ENTRY_POINT_DESCRIPTION,
+    PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
 };
 use mfm_program::Program;
 use serde::{Deserialize, Serialize};
@@ -208,6 +209,8 @@ impl EvmRouteWire {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct EntryPointSummary {
     entry_point: &'static str,
+    #[serde(skip_serializing)]
+    description: &'static str,
 }
 
 impl EntryPointSummary {
@@ -215,10 +218,16 @@ impl EntryPointSummary {
     pub const fn entry_point(self) -> &'static str {
         self.entry_point
     }
+
+    /// Returns the human-readable entry-point description.
+    pub const fn description(self) -> &'static str {
+        self.description
+    }
 }
 
 pub(crate) const ENTRY_POINTS: [EntryPointSummary; 1] = [EntryPointSummary {
     entry_point: PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
+    description: PORTFOLIO_SNAPSHOT_ENTRY_POINT_DESCRIPTION,
 }];
 
 /// Public identity of one retained config revision.

@@ -6,17 +6,10 @@ use std::sync::Arc;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_config::{ConfigImportResult, ConfigRepository, ConfigRepositoryError};
-use mfm_evm::{
-    CheckChainIdentity, ConfirmBalanceAnchor, ConsolidateBalanceCollection, EvmAnchorRead,
-    EvmBalanceRead, EvmChainIdentityRead, EvmEndpoint, EvmPhysicalTarget, ReadInitialAnchor,
-    ReadNativeBalance, ReadTokenBalance, ReadTokenDecimals, SelectBalanceAsset,
-};
+use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
 use mfm_evm_live::{register_evm_reads, EvmAdapterLocator, EvmProvider, JsonRpcEvmProvider};
 use mfm_ids::{ContentRef, RunId};
-use mfm_portfolio::{
-    ConsolidatePortfolio, EnterPortfolioCollection, InitializePortfolio, MapEvmBalanceFailure,
-    PortfolioContinuation, PortfolioError, ResumePortfolioCollection,
-};
+use mfm_portfolio::PortfolioError;
 use mfm_runtime::{
     RetainedValueView, RunView, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError,
 };
@@ -31,6 +24,7 @@ use serde_json::value::RawValue;
 
 mod config;
 mod deployment;
+mod inspection;
 
 pub use config::{
     ConfigDocument, ConfigDocumentError, ConfigSummary, EntryPointSummary, ImportOutcome,
@@ -38,6 +32,7 @@ pub use config::{
 pub use deployment::{
     Deployment, EnvironmentName, EnvironmentNameError, MAX_DEPLOYMENT_DOCUMENT_BYTES,
 };
+pub use inspection::{ComponentKind, ComponentSummary};
 pub use mfm_config::{ConfigDigest, ConfigName, MAX_CONFIG_DOCUMENT_BYTES};
 pub use mfm_store::{RunPage, RunPageLimit};
 
@@ -52,19 +47,7 @@ pub const MAX_EVM_BINDINGS: usize = 256;
 /// [`ComposedRuntime`] is the composition trusted callers want. This entry stays public only for
 /// adapterless tests that prove association rejects a Program before Store IO.
 pub fn register_portfolio_states(builder: &mut RuntimeAssemblyBuilder) -> mfm_runtime::Result<()> {
-    builder.register_pure::<InitializePortfolio>()?;
-    builder.register_pure::<EnterPortfolioCollection>()?;
-    builder.register_pure::<ResumePortfolioCollection>()?;
-    builder.register_pure::<MapEvmBalanceFailure>()?;
-    builder.register_pure::<ConsolidatePortfolio>()?;
-    builder.register_read::<CheckChainIdentity<PortfolioContinuation>, EvmChainIdentityRead>()?;
-    builder.register_read::<ReadInitialAnchor<PortfolioContinuation>, EvmAnchorRead>()?;
-    builder.register_pure::<SelectBalanceAsset<PortfolioContinuation>>()?;
-    builder.register_read::<ReadNativeBalance<PortfolioContinuation>, EvmBalanceRead>()?;
-    builder.register_read::<ReadTokenDecimals<PortfolioContinuation>, EvmBalanceRead>()?;
-    builder.register_read::<ReadTokenBalance<PortfolioContinuation>, EvmBalanceRead>()?;
-    builder.register_read::<ConfirmBalanceAnchor<PortfolioContinuation>, EvmAnchorRead>()?;
-    builder.register_pure::<ConsolidateBalanceCollection<PortfolioContinuation>>()
+    inspection::register_states(builder)
 }
 
 /// Redaction-safe live composition failure.
@@ -577,6 +560,11 @@ impl Application {
         &ENTRY_POINTS
     }
 
+    /// Returns every definition admitted by the compiled product composition.
+    pub fn components() -> Vec<ComponentSummary> {
+        inspection::components()
+    }
+
     /// Returns stable public bindings derived from the exact composed adapter targets.
     pub fn bindings(&self) -> &[PublicBindingView] {
         &self.composed.bindings
@@ -910,6 +898,97 @@ mod tests {
         for entry in Application::entry_points() {
             assert!(mfm_ids::EntryPointId::new(entry.entry_point()).is_ok());
         }
+        assert_eq!(
+            serde_json::to_value(ItemList::new(Application::entry_points()))
+                .expect("entry-point JSON"),
+            serde_json::json!({
+                "items": [{"entry_point": "mfm.portfolio/snapshot@1"}]
+            })
+        );
+    }
+
+    #[test]
+    fn compiled_components_are_checked_complete_and_ordered() {
+        let components = Application::components();
+        let expected = [
+            (ComponentKind::EntryPoint, "mfm.portfolio/snapshot@1"),
+            (
+                ComponentKind::Operation,
+                "mfm.evm.operation.collect-balances@1",
+            ),
+            (
+                ComponentKind::PureState,
+                "mfm.evm.state.consolidate-balance-collection@1",
+            ),
+            (ComponentKind::PureState, "mfm.evm.state.select-asset@1"),
+            (
+                ComponentKind::PureState,
+                "mfm.portfolio.state.consolidate@1",
+            ),
+            (
+                ComponentKind::PureState,
+                "mfm.portfolio.state.enter-collection@1",
+            ),
+            (ComponentKind::PureState, "mfm.portfolio.state.initialize@1"),
+            (
+                ComponentKind::PureState,
+                "mfm.portfolio.state.map-evm-failure@1",
+            ),
+            (
+                ComponentKind::PureState,
+                "mfm.portfolio.state.resume-collection@1",
+            ),
+            (
+                ComponentKind::ReadState,
+                "mfm.evm.state.check-chain-identity@1",
+            ),
+            (
+                ComponentKind::ReadState,
+                "mfm.evm.state.confirm-balance-anchor@1",
+            ),
+            (
+                ComponentKind::ReadState,
+                "mfm.evm.state.read-initial-anchor@1",
+            ),
+            (
+                ComponentKind::ReadState,
+                "mfm.evm.state.read-native-balance@1",
+            ),
+            (
+                ComponentKind::ReadState,
+                "mfm.evm.state.read-token-balance@1",
+            ),
+            (
+                ComponentKind::ReadState,
+                "mfm.evm.state.read-token-decimals@1",
+            ),
+        ];
+        assert_eq!(components.len(), expected.len());
+        for (component, (kind, id)) in components.iter().zip(expected) {
+            assert_eq!(component.kind(), kind);
+            assert_eq!(component.id(), id);
+            assert!(component.description().len() <= 512);
+            assert_eq!(component.description(), component.description().trim());
+            assert!(!component.description().is_empty());
+            assert!(!component.description().chars().any(char::is_control));
+            match kind {
+                ComponentKind::EntryPoint => {
+                    assert!(mfm_ids::EntryPointId::new(component.id()).is_ok());
+                }
+                ComponentKind::Operation | ComponentKind::PureState | ComponentKind::ReadState => {
+                    assert!(mfm_ids::StableId::new(component.id()).is_ok());
+                }
+            }
+        }
+        assert!(components
+            .windows(2)
+            .all(|pair| (pair[0].kind(), pair[0].id()) < (pair[1].kind(), pair[1].id())));
+
+        let json = serde_json::to_value(ItemList::new(&components)).expect("component JSON");
+        assert_eq!(json["items"][0]["kind"], "entry_point");
+        assert_eq!(json["items"][1]["kind"], "operation");
+        assert_eq!(json["items"][2]["kind"], "pure_state");
+        assert_eq!(json["items"][9]["kind"], "read_state");
     }
 
     #[test]

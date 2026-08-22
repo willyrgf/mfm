@@ -40,10 +40,17 @@ targets, Store, and RunIndex from the same checked inputs. The production Applic
 same PostgreSQL backend into Store, RunIndex, and configuration-repository ports. The complete Application
 surface is:
 
-- static entry-point and composed-binding discovery;
+- static compiled-component and entry-point discovery plus composed-binding discovery;
 - immutable exact-revision config import, complete list, and idempotent delete;
 - stored-config run start through one exact name/digest selection;
 - run progress, semantic read, and mechanical `RunId`-keyset list.
+
+Compiled-component discovery returns the entry points, public reusable Operations, and Pure/Read
+States admitted by the product composition. Domain definitions own their stable IDs and
+human-readable descriptions. The private State inventory also performs the exact Runtime State
+registrations, so discovery cannot drift from live composition. It performs no Program expansion,
+configuration parsing, deployment resolution, Store access, or provider IO; descriptions are
+non-semantic and never enter Program bytes or durable history.
 
 Every execution receives an explicit caller-owned `RunId`. The shared `generate_run_id()` client
 primitive obtains exactly 32 bytes of OS cryptographic entropy and applies

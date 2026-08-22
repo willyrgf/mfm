@@ -13,13 +13,18 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Config repository port | immutable named revisions, exact import/load/delete, and complete listing | config-wire parsing, Program semantics, merging, defaults, or revocation |
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
 | Live adapters | bounded provider ingress and direct typed callback registration | domain planning or State registration |
-| Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning; shared client RunId generation and JSON models | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
+| Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning and compiled component inventory; shared client RunId generation and JSON models | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
 | Binaries | bounded transport parsing, one Application call, transport policy, and redacted rendering | composition, domain planning, environment resolution, execution lifecycle, or run semantics |
 
 RuntimeAssemblyBuilder registers exact value codecs, Pure/Read State drivers, Match descriptors, and
 Read callbacks. `finish` freezes one immutable assembly. Program association pre-resolves every
 implementation and callback; the fold performs no public registry lookup and exposes no erased value
 workflow.
+
+Application's private compiled State table couples each State's domain-owned inspection metadata to
+the same monomorphized Runtime registration function used by live composition. The component
+inventory adds the domain-owned entry-point definition and explicitly admitted public reusable
+Operations without expanding a Program. Runtime owns no descriptions or Operation registry.
 
 The progression sequence is:
 

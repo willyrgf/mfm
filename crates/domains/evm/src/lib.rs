@@ -1377,14 +1377,22 @@ fn balance_integrity_failure<K: MfmValueTrait>(
 }
 
 macro_rules! impl_balance_state {
-    ($state:ident, $input:ty, $output:ty, $id:literal) => {
+    ($state:ident, $input:ty, $output:ty, $id:literal, $description:literal) => {
+        impl<K: MfmValueTrait> $state<K> {
+            /// Stable State identity used by Program authoring and product inspection.
+            pub const STATE_ID: &'static str = $id;
+            /// Human-readable product inspection description.
+            pub const DESCRIPTION: &'static str = $description;
+        }
+
         impl<K: MfmValueTrait> State for $state<K> {
             type Input = $input;
             type Output = $output;
             type Failure = EvmBalanceFailure;
 
             fn state_id() -> mfm_program::Result<StableId> {
-                StableId::new($id).map_err(|_| mfm_program::ProgramError::InvalidContract)
+                StableId::new(Self::STATE_ID)
+                    .map_err(|_| mfm_program::ProgramError::InvalidContract)
             }
         }
     };
@@ -1394,49 +1402,57 @@ impl_balance_state!(
     CheckChainIdentity,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.check-chain-identity@1"
+    "mfm.evm.state.check-chain-identity@1",
+    "Verifies that one balance collection targets the expected EVM chain."
 );
 impl_balance_state!(
     ReadInitialAnchor,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.read-initial-anchor@1"
+    "mfm.evm.state.read-initial-anchor@1",
+    "Reads the initial anchor for one balance source."
 );
 impl_balance_state!(
     SelectBalanceAsset,
     EvmBalanceContext<K>,
     EvmBalanceAsset<K>,
-    "mfm.evm.state.select-asset@1"
+    "mfm.evm.state.select-asset@1",
+    "Selects native or token balance observation topology."
 );
 impl_balance_state!(
     ReadNativeBalance,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.read-native-balance@1"
+    "mfm.evm.state.read-native-balance@1",
+    "Reads one native-asset balance."
 );
 impl_balance_state!(
     ReadTokenDecimals,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.read-token-decimals@1"
+    "mfm.evm.state.read-token-decimals@1",
+    "Reads the decimal scale for one token asset."
 );
 impl_balance_state!(
     ReadTokenBalance,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.read-token-balance@1"
+    "mfm.evm.state.read-token-balance@1",
+    "Reads one token-asset balance."
 );
 impl_balance_state!(
     ConfirmBalanceAnchor,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.confirm-balance-anchor@1"
+    "mfm.evm.state.confirm-balance-anchor@1",
+    "Confirms that the initial balance anchor remains current."
 );
 impl_balance_state!(
     ConsolidateBalanceCollection,
     EvmBalanceContext<K>,
     EvmBalanceCollectionCompletion<K>,
-    "mfm.evm.state.consolidate-balance-collection@1"
+    "mfm.evm.state.consolidate-balance-collection@1",
+    "Consolidates one completed EVM balance collection."
 );
 
 fn balance_read_intent<K: MfmValueTrait>(
@@ -1997,6 +2013,11 @@ pub struct CollectEvmBalances<K: MfmValueTrait> {
 }
 
 impl<K: MfmValueTrait> CollectEvmBalances<K> {
+    /// Stable product-inspection identity for this reusable Operation.
+    pub const OPERATION_ID: &'static str = "mfm.evm.operation.collect-balances@1";
+    /// Human-readable product inspection description.
+    pub const DESCRIPTION: &'static str = "Authors one checked EVM balance collection.";
+
     /// Constructs one collection expansion with a checked source count.
     pub fn new(binding_ref: ContentRef, source_count: usize) -> Result<Self, EvmDomainError> {
         if !(1..=EVM_BALANCE_SOURCE_LIMIT).contains(&source_count) {
