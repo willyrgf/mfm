@@ -64,3 +64,10 @@ JSON envelope for plain, identified-start, and append-recovery errors. Retained 
 revalidated as canonical documents on every start/list. Unbound routes fail before Runtime Store IO;
 deleting a revision does not revoke already admitted runs. Shared serializers preserve the
 `RunViewState` sum and embed terminal canonical bytes as a raw JSON value.
+
+The ignored `evm_contract_effect_e2e` integration test is the only app-level composition of the EVM
+transaction Effect and anchored transaction-route Read. It compiles a first-party Solidity fixture,
+uses a generated ephemeral signer plus real PostgreSQL authority and Reth, and reconstructs Runtime
+between forced recovery boundaries. Its lifecycle Operation, values, registrations, and fixed
+development settlement policy are test-only: they add no production component inventory,
+deployment configuration, CLI, REST, or `Application` entry point.

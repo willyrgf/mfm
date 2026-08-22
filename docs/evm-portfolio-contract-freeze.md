@@ -43,6 +43,12 @@ frozen Program or result wire.
 `IntegrityBlocked` remains distinct through the EVM failure and Portfolio mapper. A local target or
 route mismatch is Runtime `Internal`, never manufactured durable evidence.
 
-EVM transaction submission has no entry point, Program, capability, nonce/signer/broadcast
-composition, or fixture. Reintroduction requires a separate durable transaction-authority/outbox
-RFC.
+The generic Effect protocol, EVM transaction contracts, append-only nonce/raw/settlement authority,
+live transaction adapter, and first-party contract fixture now exist as reusable lower-level
+contracts. The managed fixture owns its lifecycle Operation and Program locally and proves two
+mutations plus an anchored call; none of that topology is part of Portfolio.
+
+Portfolio still exposes no transaction entry point, capability use, signer/authority composition,
+contract lifecycle, or mutation result. Production `ComposedRuntime`, configuration, CLI, and REST
+register only the existing observational Portfolio Reads. Adding mutation to Portfolio would require
+a separately reviewed product and production-finality contract; this fixture does not imply one.

@@ -1,4 +1,4 @@
-# EVM Read routing
+# EVM RPC routing
 
 `EvmPhysicalTarget { chain_id, endpoint_ref }` is the sole public route identity. The EVM domain owns
 its checked schema/value/content ref. Portfolio planning requires targets strictly sorted and unique
@@ -37,3 +37,38 @@ every process; an RPC URL, credential, or client handle never enters the derivat
 The request bytes a provider receives are the serialized `EvmReadIntent`. A provider decodes them
 with the domain's own checked `EvmReadIntent` deserializer and matches `subject()`; it declares no
 serde mirror of the wire, so a domain subject change is a compile error rather than silent drift.
+
+Transaction identity is stricter than observational routing. `EvmChainInstance` binds a nonzero
+chain ID to the expected genesis hash, and `EvmTransactionRoute` adds the endpoint ref. A complete
+Effect binding additionally fixes the transaction-authority epoch, sender, and public signer
+identity. The provider locator and signer handle remain process-local. Before signing or submission,
+the adapter compares the complete binding and asks the separate `EvmTransactionProvider` facet to
+recheck chain ID and genesis at the selected endpoint.
+
+The transaction provider exposes only checked chain-instance, pending-nonce, receipt,
+canonical-block, and exact-raw-submission operations. Execution has one loop-free sequence per
+caller invocation:
+
+1. Load the append-only authority and return settled evidence immediately when it already exists.
+2. Observe the pending nonce only when a reservation is absent, then reserve or compare the exact
+   Effect ID and command reference.
+3. Sign the fixed type-2, empty-access-list transaction only when prepared bytes are absent, and
+   retain its exact raw bytes and hash before provider submission.
+4. Check the receipt first. A null receipt permits at most one submission of the retained bytes and
+   returns `Unavailable`, so the caller must resume.
+5. On a later invocation, require two equal receipt observations and two equal current-canonical
+   block observations before retaining settlement.
+
+Every retry therefore reuses the same Effect ID, command, nonce, signature, hash, and raw bytes.
+Transport duplication is allowed; authorizing a replacement or another semantic transaction is
+not. Provider errors and malformed transaction ingress are redacted `Unavailable`; a local binding,
+signer, route, or retained-authority mismatch is `Internal` before the affected provider phase.
+
+Anchored contract calls use the transaction route rather than `EvmPhysicalTarget`. The provider
+re-observes the named block by number, requires code and calls by the exact block-hash selector, then
+re-observes the same block before returning. Missing anchors are `SafeFailure`, codeless targets are
+`Rejected`, and authenticated anchor replacement is `IntegrityBlocked`.
+
+Transaction and anchored-route callbacks are intentionally absent from production
+`ComposedRuntime`. Their version 1 receipt settlement is fixed to the pinned, non-reorging managed
+Reth fixture; it is not a configurable production finality policy.
