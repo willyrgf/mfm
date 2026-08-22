@@ -67,11 +67,12 @@ bounded return bytes. Rejected, safe-failure, and integrity-blocked evidence pro
 failure reason. These domain contracts perform no provider, signing, nonce, or persistence IO; the
 authority and live adapter remain separate downstream responsibilities.
 
-PostgreSQL has two fresh baselines behind one backend, pool, and connection gate. Run history owns
+PostgreSQL has three fresh baselines behind one backend, pool, and connection gate. Run history owns
 `mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads` in `public`; opaque versioned
-configuration custody owns `mfm_config_schema` and `config_revisions` in `mfm_config`. Run
-heads also provide the mechanical RunIndex projection without parsing frames. Every connection
-admission checks both schemas' exact logged relations, constraints, ownership and privileges, plus
+configuration custody owns `mfm_config_schema` and `config_revisions` in `mfm_config`; and EVM
+transaction authority owns its marker plus four append-only fact tables in `mfm_evm_tx`. Run heads
+also provide the mechanical RunIndex projection without parsing frames. Every connection admission
+checks all three schemas' exact logged relations, constraints, ownership and privileges, plus
 primary status, `fsync`, and `full_page_writes`; a partially compatible installation is never
 exposed.
 
@@ -80,9 +81,21 @@ before observing state and force synchronous COMMIT. Configuration imports use t
 primary key to create or compare immutable revisions. Import and exact idempotent delete force
 synchronous COMMIT and preserve ambiguous acknowledgement. There is no revision-count limit. A
 short-lived admin provisioner accepts separate typed admin/runtime locators for one normalized
-target, installs only absent namespaces, and grants the fixed `mfm_runtime` role exact DML authority.
+target, installs only when all three managed surfaces are absent, and grants the fixed
+`mfm_runtime` role exact DML authority.
 Runtime connections have no ownership or DDL authority. Existing installations are verified and
 never migrated, repaired, re-owned, or reset.
+
+The transaction authority epoch is generated with OS cryptographic entropy in the fresh schema
+transaction and captured at backend admission. A nonce domain is exactly epoch, chain instance,
+and sender; signer identity is an immutable compared content ref, while endpoint identity is not a
+nonce dimension. Reservation serializes one domain with a frozen JCS advisory-lock digest and
+accepts provider pending nonce only at initial creation or exact authority-next. Reservations,
+prepared raw transactions, and terminal settlements are immutable insert-or-compare facts.
+Settlement bytes are current-type canonical JSON and must exactly match EffectId, command-selected
+reservation, nonce, and prepared transaction hash. Ambiguous authority COMMIT acknowledgement is
+`Unavailable`; a later `load` qualifies the committed-or-absent outcome. Writable rollback of an
+epoch is unsupported.
 
 PostgreSQL network authority is one strict URI with an explicit password, numeric `127.0.0.1` or
 `::1` host, and `sslmode=disable`. PostgreSQL traffic is intentionally plaintext inside the trusted

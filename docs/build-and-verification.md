@@ -36,6 +36,7 @@ nix develop -c cargo test \
   -p mfm-ids -p mfm-values -p mfm-program-derive -p mfm-capabilities --all-targets
 nix develop -c cargo test -p mfm-program -p mfm-journal --all-targets
 nix develop -c cargo test -p mfm-store --all-targets
+nix develop -c cargo test -p mfm-evm-transaction-authority --all-targets
 nix develop -c cargo test -p mfm-storage-postgres --lib
 nix develop -c cargo test -p mfm-runtime --all-targets
 nix develop -c cargo test -p mfm-evm -p mfm-portfolio -p mfm-evm-live --all-targets

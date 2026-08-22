@@ -1,9 +1,9 @@
 # mfm-storage-postgres
 
-One durable PostgreSQL backend implementing the append-only Store, mechanical RunIndex, and opaque
-versioned configuration repository. One pool and one connection gate cover both the run-history and
-`mfm.config-postgres.v2` schemas, so production never admits a partially compatible
-persistence installation.
+One durable PostgreSQL backend implementing the append-only Store, mechanical RunIndex, opaque
+versioned configuration repository, and EVM transaction authority. One pool and one connection
+gate cover run history, `mfm.config-postgres.v2`, and `mfm.evm-transaction-postgres.v1`, so
+production never admits a partially compatible persistence installation.
 
 Production constructors accept only one bounded private `postgresql` URI with an explicit password,
 numeric `127.0.0.1` or `::1` host, and `sslmode=disable`. PostgreSQL is
@@ -30,9 +30,18 @@ acknowledgement. Exact delete is idempotent and uses the same acknowledgement co
 returns every revision in ascending bytewise name/digest order; documents remain individually
 bounded at 256 KiB, but the revision collection has no count limit.
 
+The `mfm_evm_tx` schema is an insert-only fact chain: nonce domain, reservation, exact prepared
+transaction, then canonical typed settlement. Its generated 32-byte epoch distinguishes every
+fresh installation. Reservation uses an endpoint-independent domain advisory lock and exact
+`NUMERIC(20,0)` u64 conversion; the signer content ref is compared but is not a key dimension.
+Every authority operation rechecks the captured epoch. Loads qualify current typed settlement bytes
+and reconstruct the complete nested predecessor state. Every write uses synchronous COMMIT; an
+ambiguous acknowledgement is `Unavailable` and the next caller-driven `load` resolves it.
+
 `provision_postgres` is the one public provisioning entry and is not held by runtime composition. It
 requires distinct typed admin/runtime locators for the same normalized target and an already-created
-fixed runtime role. The short-lived admin installs both baselines only when their namespaces are
-absent, owns the objects, and grants only the exact DML authority. Existing installations are
-verified and never migrated, repaired, re-owned, reset, or downgraded. Managed same-crate tests run
+fixed runtime role. The short-lived admin installs all three baselines only when all managed
+surfaces are absent, owns the objects, and grants only the exact DML authority. Existing
+installations are verified and never migrated, repaired, re-owned, reset, or downgraded. Managed
+same-crate tests run
 serially through `postgres-test` against a real loopback-only `hostnossl` server and split authority.

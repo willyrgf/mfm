@@ -32,8 +32,18 @@ pages are not snapshots across requests. Config interpretation belongs to Applic
 status remains a Runtime fold.
 
 PostgreSQL configuration custody owns exactly `mfm_config_schema` and `config_revisions` under
-`mfm.config-postgres.v2`. One backend, pool, and admission gate check run history and configuration
-schema, ownership, ACL, and durability together; the fixed runtime role owns neither surface.
+`mfm.config-postgres.v2`. PostgreSQL EVM transaction authority owns exactly
+`mfm_evm_tx_schema`, `nonce_domains`, `nonce_reservations`, `prepared_transactions`, and
+`transaction_settlements` under `mfm.evm-transaction-postgres.v1`. One backend, pool, and admission
+gate check all three schemas, ownership, ACL, and durability together; the fixed runtime role owns
+none of them.
+
+Authority records are non-Program, non-serde port values. A reservation retains EffectId, command
+ref, nonce, and a domain consisting of epoch, chain instance, sender, and compared signer ref. A
+prepared record adds only exact raw transaction bytes and transaction hash. A settled record nests
+that predecessor and the qualified typed `EvmTransactionSettlement`. Raw bytes have no text/debug
+surface. The database stores canonical settlement bytes but no command copy, action, endpoint,
+provider response, timestamps, mutable status, or broadcast instruction.
 
 Application interprets retained bytes as one strict, complete, versioned config document. Its public
 JSON contains only the entry-point tag, stable route selectors, and checked secret-free domain
@@ -65,7 +75,7 @@ settlement policy, access list, timeout, or arbitrary metadata.
 closed terminal result. Workflow success and revert projections omit EffectId, nonce, command, raw
 receipt, logs, and provider response. Anchored contract-call intents retain target, bounded calldata,
 exact anchor, chain ID, operation ID, and transaction-route ref; returned evidence retains only the
-anchor and bounded return bytes. Transient signing digests/signatures and future raw-transaction
+anchor and bounded return bytes. Transient signing digests/signatures and raw-transaction
 custody never enter these values.
 
 Ambiguous start/progress acknowledgement is the only shared use-case error carrying data. Both
