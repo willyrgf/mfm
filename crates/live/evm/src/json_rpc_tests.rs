@@ -145,10 +145,14 @@ fn conversions_and_calldata_are_exact() {
     assert_eq!(quantity_to_decimal("0x0").as_deref(), Some("0"));
     assert_eq!(quantity_to_decimal(&format!("0x{}", "f".repeat(65))), None);
 
-    assert_eq!(block_tag("17"), Ok("0x11".to_owned()));
-    assert_eq!(block_tag("0"), Ok("0x0".to_owned()));
-    assert_eq!(block_tag("0x11"), Err(AdapterError::Internal));
-    assert_eq!(block_tag(&"9".repeat(40)), Err(AdapterError::Internal));
+    assert_eq!(
+        block_tag(&EvmU256::new("17").expect("block number")),
+        Ok("0x11".to_owned())
+    );
+    assert_eq!(
+        block_tag(&EvmU256::new("0").expect("block number")),
+        Ok("0x0".to_owned())
+    );
 
     assert_eq!(
         word_to_u8("0x0000000000000000000000000000000000000000000000000000000000000012"),
@@ -160,9 +164,9 @@ fn conversions_and_calldata_are_exact() {
     );
     assert_eq!(word_to_u8("0x12"), None);
 
-    assert!(is_block_hash(BLOCK_HASH));
-    assert!(!is_block_hash("0xAAAA"));
-    assert!(!is_block_hash("0x11"));
+    assert!(EvmHash::new(BLOCK_HASH).is_ok());
+    assert!(EvmHash::new("0xAAAA").is_err());
+    assert!(EvmHash::new("0x11").is_err());
 
     assert_eq!(checked_address(HOLDER), Ok(HOLDER.to_owned()));
     // Checksummed input renders back to the exact lowercase 20-byte address.
@@ -235,7 +239,7 @@ async fn native_balance_reads_the_committed_anchor_by_number() {
     assert_eq!(
         response,
         EvmProviderResponse::Read(EvmReadValue::RawUnits(
-            "1000000000000000000000000".to_owned()
+            EvmU256::new("1000000000000000000000000").expect("units")
         ))
     );
     assert_eq!(
@@ -265,10 +269,10 @@ async fn anchor_confirmation_never_asks_for_the_moving_head() {
         .expect("confirmed anchor");
     assert_eq!(
         response,
-        EvmProviderResponse::Read(EvmReadValue::Anchor {
-            number: "17".to_owned(),
-            hash: BLOCK_HASH.to_owned(),
-        })
+        EvmProviderResponse::Read(EvmReadValue::Anchor(EvmBlockAnchor::new(
+            EvmU256::new("17").expect("number"),
+            EvmHash::new(BLOCK_HASH).expect("hash"),
+        )))
     );
     assert_eq!(
         stub.observed_request()["params"],

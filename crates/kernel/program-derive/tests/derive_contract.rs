@@ -71,6 +71,29 @@ struct FixedPublicBytes {
     value: String,
 }
 
+#[derive(Serialize, Deserialize, MfmValue)]
+#[serde(transparent)]
+#[mfm(transparent_bytes)]
+struct TransparentFixedPublicBytes {
+    #[mfm(minimum_bytes = 2, maximum_bytes = 2)]
+    value: String,
+}
+
+#[derive(Serialize, Deserialize, MfmValue)]
+#[serde(transparent)]
+#[mfm(transparent_string)]
+struct TransparentFixedPublicText {
+    #[mfm(minimum_bytes = 2, maximum_bytes = 2)]
+    value: String,
+}
+
+#[derive(Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct NonzeroPublicNumber {
+    #[mfm(unsigned_minimum = 1, unsigned_maximum = 10)]
+    value: u64,
+}
+
 #[test]
 fn surviving_value_derives_generate_complete_schema_descriptors() {
     assert!(External::<Payload>::schema_descriptor().is_ok());
@@ -97,6 +120,35 @@ fn surviving_value_derives_generate_complete_schema_descriptors() {
     assert!(bytes
         .identity()
         .validate_canonical_value(br#"{"value":"AQ"}"#)
+        .is_err());
+    let transparent_bytes =
+        TransparentFixedPublicBytes::schema_descriptor().expect("transparent bytes descriptor");
+    assert!(transparent_bytes
+        .identity()
+        .validate_canonical_value(br#""AQI""#)
+        .is_ok());
+    assert!(transparent_bytes
+        .identity()
+        .validate_canonical_value(br#""AQ""#)
+        .is_err());
+    let transparent_text =
+        TransparentFixedPublicText::schema_descriptor().expect("transparent text descriptor");
+    assert!(transparent_text
+        .identity()
+        .validate_canonical_value(br#""ab""#)
+        .is_ok());
+    assert!(transparent_text
+        .identity()
+        .validate_canonical_value(br#""abc""#)
+        .is_err());
+    let number = NonzeroPublicNumber::schema_descriptor().expect("number descriptor");
+    assert!(number
+        .identity()
+        .validate_canonical_value(br#"{"value":1}"#)
+        .is_ok());
+    assert!(number
+        .identity()
+        .validate_canonical_value(br#"{"value":0}"#)
         .is_err());
 }
 

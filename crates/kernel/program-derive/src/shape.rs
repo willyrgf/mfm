@@ -41,7 +41,10 @@ pub(super) fn schema_shape_tokens(
         ));
     }
     if attrs.transparent_string {
-        return transparent_string_shape_tokens(data, kind, generic_params);
+        return transparent_string_shape_tokens(data, kind);
+    }
+    if attrs.transparent_bytes {
+        return transparent_bytes_shape_tokens(data);
     }
     if attrs.transparent_map {
         return transparent_map_shape_tokens(data, kind, generic_params);
@@ -209,7 +212,6 @@ fn transparent_map_shape_tokens(
 fn transparent_string_shape_tokens(
     data: &Data,
     kind: DeriveKind,
-    _generic_params: &[Ident],
 ) -> syn::Result<SchemaShapeOutput> {
     let Data::Struct(DataStruct {
         fields: Fields::Named(fields),
@@ -239,13 +241,94 @@ fn transparent_string_shape_tokens(
             "mfm(transparent_string) field must be String",
         ));
     }
+    let field_attrs = FieldAttrs::parse(&field.attrs)?;
+    if field_attrs.minimum_items.is_some()
+        || field_attrs.maximum_items.is_some()
+        || field_attrs.literal.is_some()
+        || field_attrs.default
+        || field_attrs.optional_absent
+        || field_attrs.unsigned_minimum.is_some()
+        || field_attrs.unsigned_maximum.is_some()
+    {
+        return Err(syn::Error::new_spanned(
+            field,
+            "transparent strings accept only UTF-8 byte bounds",
+        ));
+    }
 
     Ok(SchemaShapeOutput {
-        shape: if kind == DeriveKind::PersistedContract {
+        shape: if let Some((minimum, maximum)) =
+            field_attrs.minimum_bytes.zip(field_attrs.maximum_bytes)
+        {
+            quote!(::mfm_values::SchemaShape::BoundedString {
+                minimum_bytes: #minimum,
+                maximum_bytes: #maximum,
+                grammar: ::mfm_values::StringGrammar::UnicodeScalarText,
+            })
+        } else if kind == DeriveKind::PersistedContract {
             bounded_persisted_string()
         } else {
             quote!(::mfm_values::SchemaShape::String)
         },
+        default_bounds: Vec::new(),
+    })
+}
+
+fn transparent_bytes_shape_tokens(data: &Data) -> syn::Result<SchemaShapeOutput> {
+    let Data::Struct(DataStruct {
+        fields: Fields::Named(fields),
+        ..
+    }) = data
+    else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "mfm(transparent_bytes) requires a named struct",
+        ));
+    };
+    if fields.named.len() != 1 {
+        return Err(syn::Error::new(
+            fields.span(),
+            "mfm(transparent_bytes) requires exactly one String field",
+        ));
+    }
+    let field = fields
+        .named
+        .first()
+        .expect("field count checked before access");
+    if !is_string_type(&field.ty) {
+        return Err(syn::Error::new_spanned(
+            &field.ty,
+            "mfm(transparent_bytes) field must be String",
+        ));
+    }
+    let attrs = FieldAttrs::parse(&field.attrs)?;
+    let (minimum, maximum) = attrs
+        .minimum_bytes
+        .zip(attrs.maximum_bytes)
+        .ok_or_else(|| {
+            syn::Error::new_spanned(
+                field,
+                "transparent bytes require minimum_bytes and maximum_bytes",
+            )
+        })?;
+    if attrs.minimum_items.is_some()
+        || attrs.maximum_items.is_some()
+        || attrs.literal.is_some()
+        || attrs.default
+        || attrs.optional_absent
+        || attrs.unsigned_minimum.is_some()
+        || attrs.unsigned_maximum.is_some()
+    {
+        return Err(syn::Error::new_spanned(
+            field,
+            "transparent bytes accept only decoded byte bounds",
+        ));
+    }
+    Ok(SchemaShapeOutput {
+        shape: quote!(::mfm_values::SchemaShape::BoundedBytes {
+            minimum_decoded_bytes: #minimum,
+            maximum_decoded_bytes: #maximum,
+        }),
         default_bounds: Vec::new(),
     })
 }
@@ -418,6 +501,29 @@ fn field_descriptor_tokens(
             shape = quote!(::mfm_values::SchemaShape::BoundedBytes {
                 minimum_decoded_bytes: #minimum_bytes,
                 maximum_decoded_bytes: #maximum_bytes,
+            });
+        }
+        if let Some((minimum, maximum)) = attrs.unsigned_minimum.zip(attrs.unsigned_maximum) {
+            let Type::Path(path) = &field.ty else {
+                return Err(syn::Error::new_spanned(
+                    &field.ty,
+                    "unsigned bounds require an unsigned integer field",
+                ));
+            };
+            if !path.path.segments.last().is_some_and(|segment| {
+                matches!(
+                    segment.ident.to_string().as_str(),
+                    "u8" | "u16" | "u32" | "u64"
+                )
+            }) {
+                return Err(syn::Error::new_spanned(
+                    &field.ty,
+                    "unsigned bounds require an unsigned integer field",
+                ));
+            }
+            shape = quote!(::mfm_values::SchemaShape::UnsignedRange {
+                minimum: #minimum,
+                maximum: #maximum,
             });
         }
         if attrs.minimum_items.is_some() || attrs.maximum_items.is_some() {

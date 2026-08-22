@@ -13,7 +13,7 @@ use mfm_config::{
     ConfigDigest, ConfigFuture, ConfigImportResult, ConfigName, ConfigRepository,
     ConfigRepositoryError, ConfigRevision, MemoryConfigRepository, MAX_CONFIG_DOCUMENT_BYTES,
 };
-use mfm_evm::{EvmEndpoint, EvmReadValue};
+use mfm_evm::{EvmBlockAnchor, EvmEndpoint, EvmHash, EvmReadValue, EvmU256};
 use mfm_evm_live::{EvmProvider, EvmProviderResponse};
 use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, RunId, StableId};
 use mfm_runtime::{AdapterError, RunViewState};
@@ -48,16 +48,18 @@ impl EvmProvider for Provider {
             let value = match operation.as_str() {
                 "mfm.evm.read-chain-identity@1" => EvmReadValue::ChainId(self.chain_id),
                 "mfm.evm.read-initial-anchor@1" | "mfm.evm.confirm-balance-anchor@1" => {
-                    EvmReadValue::Anchor {
-                        number: "100".to_owned(),
-                        hash: ANCHOR.to_owned(),
-                    }
+                    EvmReadValue::Anchor(EvmBlockAnchor::new(
+                        EvmU256::new("100").expect("number"),
+                        EvmHash::new(ANCHOR).expect("hash"),
+                    ))
                 }
                 "mfm.evm.read-native-balance@1" => {
-                    EvmReadValue::RawUnits("1000000000000000000".to_owned())
+                    EvmReadValue::RawUnits(EvmU256::new("1000000000000000000").expect("units"))
                 }
                 "mfm.evm.read-token-decimals@1" => EvmReadValue::TokenDecimals(6),
-                "mfm.evm.read-token-balance@1" => EvmReadValue::RawUnits("2500000".to_owned()),
+                "mfm.evm.read-token-balance@1" => {
+                    EvmReadValue::RawUnits(EvmU256::new("2500000").expect("units"))
+                }
                 _ => return Err(AdapterError::Internal),
             };
             Ok(EvmProviderResponse::Read(value))

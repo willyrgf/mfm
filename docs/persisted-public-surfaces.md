@@ -54,6 +54,20 @@ contains only the fixed algorithm ID and exact 65-byte uncompressed SEC1 public 
 is the key-instance identity. Signing digests, compact signatures, recovery IDs, private scalars,
 owner channels, and signer handles have no persisted serde surface.
 
+EVM Program-visible transaction values are strict content-addressed values. The public chain
+instance is `(nonzero chain_id, expected_genesis_hash)`; a transaction route adds one endpoint ref;
+the wallet adds one checked sender and `PublicSignerIdentity`; and the Effect binding adds one exact
+32-byte authority epoch. `Eip1559TransactionCommand` contains only that binding, a bounded Create or
+Call action, value, nonzero gas limit, and ordered fee pair. It contains no nonce, provider locator,
+settlement policy, access list, timeout, or arbitrary metadata.
+
+`EvmTransactionSettlement` retains EffectId, nonce, transaction hash, receipt block anchor, and one
+closed terminal result. Workflow success and revert projections omit EffectId, nonce, command, raw
+receipt, logs, and provider response. Anchored contract-call intents retain target, bounded calldata,
+exact anchor, chain ID, operation ID, and transaction-route ref; returned evidence retains only the
+anchor and bounded return bytes. Transient signing digests/signatures and future raw-transaction
+custody never enter these values.
+
 Ambiguous start/progress acknowledgement is the only shared use-case error carrying data. Both
 client transports use the same Application-owned error serializer and the exact recovery envelopes
 frozen under `docs/contracts/client-surface/`; an identified REST start error may additionally carry

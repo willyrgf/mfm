@@ -10,6 +10,7 @@ pub(super) struct ContainerAttrs {
     pub(super) enum_tag: Option<String>,
     pub(super) enum_content: Option<String>,
     pub(super) transparent_string: bool,
+    pub(super) transparent_bytes: bool,
     pub(super) transparent_map: bool,
     pub(super) serde_transparent: bool,
     pub(super) unsigned_minimum: Option<u64>,
@@ -28,6 +29,7 @@ impl ContainerAttrs {
             enum_tag: None,
             enum_content: None,
             transparent_string: false,
+            transparent_bytes: false,
             transparent_map: false,
             serde_transparent: false,
             unsigned_minimum: None,
@@ -47,6 +49,8 @@ impl ContainerAttrs {
                         output.schema_name = meta.value()?.parse::<LitStr>()?.value();
                     } else if meta.path.is_ident("transparent_string") {
                         output.transparent_string = true;
+                    } else if meta.path.is_ident("transparent_bytes") {
+                        output.transparent_bytes = true;
                     } else if meta.path.is_ident("transparent_map") {
                         output.transparent_map = true;
                     } else if meta.path.is_ident("unsigned_minimum") {
@@ -116,7 +120,16 @@ impl ContainerAttrs {
             }
         }
 
-        if output.transparent_string && output.transparent_map {
+        if [
+            output.transparent_string,
+            output.transparent_bytes,
+            output.transparent_map,
+        ]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count()
+            > 1
+        {
             return Err(syn::Error::new(
                 Span::call_site(),
                 "MFM derives accept only one transparent container mode",
@@ -159,6 +172,8 @@ pub(super) struct FieldAttrs {
     pub(super) maximum_items: Option<u32>,
     pub(super) minimum_bytes: Option<u32>,
     pub(super) maximum_bytes: Option<u32>,
+    pub(super) unsigned_minimum: Option<u64>,
+    pub(super) unsigned_maximum: Option<u64>,
 }
 
 impl FieldAttrs {
@@ -202,6 +217,20 @@ impl FieldAttrs {
                             meta.value()?
                                 .parse::<syn::LitInt>()?
                                 .base10_parse::<u32>()?,
+                        );
+                        Ok(())
+                    } else if meta.path.is_ident("unsigned_minimum") {
+                        output.unsigned_minimum = Some(
+                            meta.value()?
+                                .parse::<syn::LitInt>()?
+                                .base10_parse::<u64>()?,
+                        );
+                        Ok(())
+                    } else if meta.path.is_ident("unsigned_maximum") {
+                        output.unsigned_maximum = Some(
+                            meta.value()?
+                                .parse::<syn::LitInt>()?
+                                .base10_parse::<u64>()?,
                         );
                         Ok(())
                     } else {
@@ -262,11 +291,24 @@ impl FieldAttrs {
                 "byte bounds require both minimum_bytes and maximum_bytes",
             ));
         }
+        if output
+            .unsigned_minimum
+            .zip(output.unsigned_maximum)
+            .is_none()
+            && (output.unsigned_minimum.is_some() || output.unsigned_maximum.is_some())
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "unsigned bounds require both unsigned_minimum and unsigned_maximum",
+            ));
+        }
         if output.literal.is_some()
             && (output.minimum_items.is_some()
                 || output.maximum_items.is_some()
                 || output.minimum_bytes.is_some()
                 || output.maximum_bytes.is_some()
+                || output.unsigned_minimum.is_some()
+                || output.unsigned_maximum.is_some()
                 || output.default)
         {
             return Err(syn::Error::new(
@@ -282,6 +324,20 @@ impl FieldAttrs {
                 "a field cannot declare both sequence and byte bounds",
             ));
         }
+        let selected_bounds = [
+            output.minimum_items.is_some(),
+            output.minimum_bytes.is_some(),
+            output.unsigned_minimum.is_some(),
+        ]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count();
+        if selected_bounds > 1 {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "a field cannot combine sequence, byte, and unsigned bounds",
+            ));
+        }
         if output
             .minimum_items
             .zip(output.maximum_items)
@@ -290,6 +346,16 @@ impl FieldAttrs {
             return Err(syn::Error::new(
                 Span::call_site(),
                 "minimum_items cannot exceed maximum_items",
+            ));
+        }
+        if output
+            .unsigned_minimum
+            .zip(output.unsigned_maximum)
+            .is_some_and(|(minimum, maximum)| minimum > maximum)
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "unsigned_minimum cannot exceed unsigned_maximum",
             ));
         }
         if output
