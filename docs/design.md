@@ -67,6 +67,24 @@ bounded return bytes. Rejected, safe-failure, and integrity-blocked evidence pro
 failure reason. These domain contracts perform no provider, signing, nonce, or persistence IO; the
 authority and live adapter remain separate downstream responsibilities.
 
+The live EVM transaction adapter captures one exact binding, key-bound signer, append-only
+transaction authority, and transaction-only provider facet. Before authority or provider IO it
+compares the complete command binding, authority epoch, public signer identity, and derived sender.
+It reserves one provider-observed pending nonce, signs the fixed type-2 payload with purpose
+`mfm.evm.sign-eip1559@1`, retains exact signed bytes, and reconciles receipts before retaining typed
+settlement. Retained bytes are fully decoded and compared before provider entry. A null receipt
+causes at most one submission of those bytes in an invocation and always returns Unavailable; a
+later caller resumes from authority facts. Settlement requires two equal receipt observations and
+two equal current-canonical block observations. Version 1 is the canonical-receipt policy for the
+pinned non-reorging development fixture and is not registered by production composition.
+
+The same JSON-RPC client implements a separate transaction provider facet and the generic anchored
+contract-call observation. Anchored calls re-observe the authored block by number, require deployed
+code at its canonical block-hash selector, perform one call at that selector, and re-observe the
+same block before returning bounded bytes. An absent named block is SafeFailure, no code is
+Rejected, and a replaced authenticated anchor is IntegrityBlocked; RPC and malformed-ingress
+failures remain Unavailable.
+
 PostgreSQL has three fresh baselines behind one backend, pool, and connection gate. Run history owns
 `mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads` in `public`; opaque versioned
 configuration custody owns `mfm_config_schema` and `config_revisions` in `mfm_config`; and EVM
@@ -136,10 +154,10 @@ Every execution receives an explicit transport-selected RunId. Both client surfa
 use the same Application client primitive to derive one from OS cryptographic entropy before the
 start use case. Ambiguous append acknowledgement carries the exact start or progress recovery
 identity.
-The generic Effect protocol supplies durable command authorization and caller-driven recovery.
-Production transaction submission still requires the separate EVM transaction authority and live
-adapter introduced by the transaction-specific design; production composition registers no Effect
-adapter at this stage.
+The generic Effect protocol supplies durable command authorization and caller-driven recovery. The
+development EVM transaction adapter deliberately remains outside production composition: a future
+irreversible production finality policy requires a new capability contract identity rather than
+reusing canonical-receipt evidence.
 
 CLI and REST are thin renderings of that single surface and add no authentication or authorization
 layer. REST serves HTTP/1 on one caller-selected Unix socket; the enclosing deployment owns access

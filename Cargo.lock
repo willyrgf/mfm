@@ -1959,10 +1959,15 @@ name = "mfm-evm-live"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-rlp",
  "mfm-canonical",
  "mfm-evm",
+ "mfm-evm-transaction-authority",
  "mfm-ids",
+ "mfm-keystore",
  "mfm-runtime",
+ "mfm-signing",
+ "mfm-values",
  "reqwest",
  "serde",
  "serde_json",
