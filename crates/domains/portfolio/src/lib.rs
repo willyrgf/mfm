@@ -275,7 +275,7 @@ fn completed_collection_scaled_total(
         .request
         .sources
         .first()
-        .is_none_or(|source| result.chain_id != source.chain_id)
+        .is_none_or(|source| result.chain_id != source.chain_id())
         || result.collection_ordinal != ordinal
         || result.anchor.validate().is_err()
         || result.holdings.len() != demand.request.sources.len()
@@ -284,7 +284,7 @@ fn completed_collection_scaled_total(
             .iter()
             .zip(&demand.request.sources)
             .any(|(holding, source)| {
-                holding.source_id != source.source_id
+                holding.source_id != source.source_id()
                     || holding.decimals > 30
                     || !is_decimal_integer(&holding.raw_units)
                     || holding.amount_dec != decimal_amount(&holding.raw_units, holding.decimals)
@@ -306,9 +306,9 @@ fn completed_collection_scaled_total(
 }
 
 fn holding_matches_planned_source(holding: &PortfolioHolding, source: &EvmBalanceSource) -> bool {
-    match (&holding.asset, &source.token) {
+    match (&holding.asset, source.token()) {
         (PortfolioAsset::Native, None) => true,
-        (PortfolioAsset::Token { contract }, Some(token)) => contract == token,
+        (PortfolioAsset::Token { contract }, Some(token)) => contract == token.as_str(),
         _ => false,
     }
 }
@@ -1012,7 +1012,7 @@ pub fn plan_snapshot(
         .collections
         .iter()
         .filter_map(|collection| collection.request.sources.first())
-        .map(|source| source.chain_id)
+        .map(EvmBalanceSource::chain_id)
         .collect::<BTreeSet<_>>();
     if required_chains.len() != targets.len()
         || !required_chains
@@ -1030,7 +1030,7 @@ pub fn plan_snapshot(
             .request
             .sources
             .first()
-            .map(|source| source.chain_id)
+            .map(EvmBalanceSource::chain_id)
             .ok_or(PortfolioError::Program)?;
         let target_index = targets
             .binary_search_by_key(&chain_id, EvmPhysicalTarget::chain_id)
@@ -1135,5 +1135,5 @@ fn duplicate_source_ids<'a>(requests: impl Iterator<Item = &'a EvmBalanceRequest
     let mut source_ids = BTreeSet::new();
     requests
         .flat_map(|request| &request.sources)
-        .any(|source| !source_ids.insert(&source.source_id))
+        .any(|source| !source_ids.insert(source.source_id()))
 }

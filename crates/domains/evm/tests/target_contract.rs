@@ -27,7 +27,7 @@ fn a_physical_target_has_one_interoperable_checked_identity() {
     assert_eq!(target.binding_ref().expect("binding"), reference);
     assert_eq!(
         serde_json::to_string(&reference).expect("reference JSON"),
-        r#"{"content_digest":"content:sha256-v1:7701e82ec5bd36b79b7e361b85bfe358494b531ad687b2683a397eaf7f44037e","schema_id":"schema:mfm.evm-physical-target:1:sha256-jcs-v1:4f21dfcf2cbe47e513963fff2d6da4e73c7f603dcaf5fb558b670f27f82cab32"}"#
+        r#"{"content_digest":"content:sha256-v1:7701e82ec5bd36b79b7e361b85bfe358494b531ad687b2683a397eaf7f44037e","schema_id":"schema:mfm.evm-physical-target:1:sha256-jcs-v1:2ee09931b3289c2a2169788badc06101af145d6628751550bbd21d30d6ac346c"}"#
     );
 
     assert!(EvmPhysicalTarget::new(0, endpoint.clone()).is_err());

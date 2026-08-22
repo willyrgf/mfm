@@ -52,6 +52,21 @@ over a bounded channel. Duplicate import returns another handle with the same pu
 ref. Explicit async shutdown requests exit and immediately awaits an OS-thread join in blocking
 work; dropping the final sender also ends the owner loop.
 
+EVM Program values use one checked lowercase `EvmAddress`, lowercase `EvmHash`, canonical decimal
+`EvmU256`, and exact 32-byte authority epoch. A transaction binding fixes chain ID plus expected
+genesis hash, endpoint reference, authority epoch, sender, and public signer identity. The sole
+transaction command is nonce-free EIP-1559 type 2 with an empty access list and a distinct bounded
+Create or Call action. `EvmTransactionEffect` prepares that command unchanged. Settlement evidence
+binds the pending EffectId and contains only the reserved nonce, transaction hash, receipt anchor,
+and matching success-create, success-call, or reverted result; interpretation preserves caller
+context without echoing the command.
+
+The context-preserving anchored contract-call Read fixes a transaction-route content ref, target,
+bounded calldata, and exact block anchor. Returned evidence contains only the same anchor and
+bounded return bytes. Rejected, safe-failure, and integrity-blocked evidence project to a closed
+failure reason. These domain contracts perform no provider, signing, nonce, or persistence IO; the
+authority and live adapter remain separate downstream responsibilities.
+
 PostgreSQL has two fresh baselines behind one backend, pool, and connection gate. Run history owns
 `mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads` in `public`; opaque versioned
 configuration custody owns `mfm_config_schema` and `config_revisions` in `mfm_config`. Run

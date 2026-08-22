@@ -9,7 +9,9 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use alloy_primitives::{hex, Address, U256};
-use mfm_evm::{EvmBalanceSource, EvmBlockAnchor, EvmReadIntent, EvmReadSubject, EvmReadValue};
+use mfm_evm::{
+    EvmBalanceSource, EvmBlockAnchor, EvmHash, EvmReadIntent, EvmReadSubject, EvmReadValue, EvmU256,
+};
 use mfm_ids::StableId;
 use mfm_runtime::AdapterError;
 use serde::{Deserialize, Serialize};
@@ -135,17 +137,17 @@ impl JsonRpcEvmProvider {
         let number = block
             .get("number")
             .and_then(serde_json::Value::as_str)
-            .and_then(quantity_to_u64)
+            .and_then(quantity_to_decimal)
+            .and_then(|number| EvmU256::new(number).ok())
             .ok_or(AdapterError::Unavailable)?;
         let hash = block
             .get("hash")
             .and_then(serde_json::Value::as_str)
-            .filter(|hash| is_block_hash(hash))
+            .and_then(|hash| EvmHash::new(hash.to_owned()).ok())
             .ok_or(AdapterError::Unavailable)?;
-        Ok(returned(EvmReadValue::Anchor {
-            number: number.to_string(),
-            hash: hash.to_owned(),
-        }))
+        Ok(returned(EvmReadValue::Anchor(EvmBlockAnchor::new(
+            number, hash,
+        ))))
     }
 
     /// Performs one anchored `eth_call` and returns its result word.
@@ -157,8 +159,8 @@ impl JsonRpcEvmProvider {
         anchor: &EvmBlockAnchor,
         data: String,
     ) -> Result<Option<String>, AdapterError> {
-        let token = source.token.as_deref().ok_or(AdapterError::Internal)?;
-        let to = checked_address(token)?;
+        let token = source.token().ok_or(AdapterError::Internal)?;
+        let to = checked_address(token.as_str())?;
         let tag = block_tag(anchor.number())?;
         let Some(result) = self
             .call(
@@ -191,7 +193,7 @@ impl JsonRpcEvmProvider {
             }
             EvmReadSubject::InitialAnchor => self.anchor(serde_json::json!("latest")).await,
             EvmReadSubject::NativeBalance { source, anchor } => {
-                let address = checked_address(&source.address)?;
+                let address = checked_address(source.address().as_str())?;
                 let tag = block_tag(anchor.number())?;
                 let Some(result) = self
                     .call("eth_getBalance", serde_json::json!([address, tag]))
@@ -203,7 +205,9 @@ impl JsonRpcEvmProvider {
                     .as_str()
                     .and_then(quantity_to_decimal)
                     .ok_or(AdapterError::Unavailable)?;
-                Ok(returned(EvmReadValue::RawUnits(units)))
+                Ok(returned(EvmReadValue::RawUnits(
+                    EvmU256::new(units).map_err(|_| AdapterError::Unavailable)?,
+                )))
             }
             EvmReadSubject::TokenDecimals { source, anchor } => {
                 let Some(word) = self
@@ -216,7 +220,7 @@ impl JsonRpcEvmProvider {
                 Ok(returned(EvmReadValue::TokenDecimals(decimals)))
             }
             EvmReadSubject::TokenBalance { source, anchor } => {
-                let holder = Address::from_str(&source.address).map_err(|_| {
+                let holder = Address::from_str(source.address().as_str()).map_err(|_| {
                     // A malformed address is a local domain-value defect, never a node error.
                     AdapterError::Internal
                 })?;
@@ -227,13 +231,16 @@ impl JsonRpcEvmProvider {
                     return Ok(EvmProviderResponse::SafeFailure);
                 };
                 let units = quantity_to_decimal(&word).ok_or(AdapterError::Unavailable)?;
-                Ok(returned(EvmReadValue::RawUnits(units)))
+                Ok(returned(EvmReadValue::RawUnits(
+                    EvmU256::new(units).map_err(|_| AdapterError::Unavailable)?,
+                )))
             }
             // Confirmation reads the committed number, never the moving head.
             EvmReadSubject::ConfirmAnchor { anchor, .. } => {
                 let tag = block_tag(anchor.number())?;
                 self.anchor(serde_json::json!(tag)).await
             }
+            EvmReadSubject::AnchoredContractCall { .. } => Err(AdapterError::Internal),
         }
     }
 }
@@ -325,10 +332,11 @@ fn balance_of_calldata(holder: &Address) -> String {
 }
 
 /// Renders one checked decimal block number as its `0x` quantity tag.
-fn block_tag(number: &str) -> Result<String, AdapterError> {
+fn block_tag(number: &EvmU256) -> Result<String, AdapterError> {
     number
-        .parse::<u64>()
-        .map(|number| format!("0x{number:x}"))
+        .as_str()
+        .parse::<U256>()
+        .map(|number| format!("{number:#x}"))
         .map_err(|_| AdapterError::Internal)
 }
 
@@ -357,12 +365,6 @@ fn word_to_u8(value: &str) -> Option<u8> {
     let (leading, last) = digits.split_at(62);
     leading.bytes().all(|byte| byte == b'0').then_some(())?;
     u8::from_str_radix(last, 16).ok()
-}
-
-fn is_block_hash(value: &str) -> bool {
-    hex_digits(value).is_some_and(|digits| {
-        digits.len() == 64 && digits.bytes().all(|byte| !byte.is_ascii_uppercase())
-    })
 }
 
 #[cfg(test)]
