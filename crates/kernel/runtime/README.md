@@ -1,15 +1,18 @@
 # mfm-runtime
 
-RuntimeAssemblyBuilder registers typed values, Pure/Read States, Match descriptors, and Read
-adapters. `finish` produces one immutable assembly. Program association pre-resolves all exact
-contracts and callbacks before execution.
+RuntimeAssemblyBuilder registers typed values, Pure/Read/Effect States, Match descriptors, and
+separate Read and Effect adapters. `finish` produces one immutable assembly. Program association
+pre-resolves all exact contracts and callbacks before execution.
 
 Runtime owns `start`, `resume`, `read`, and the sole hot/cold semantic fold. It appends genesis and
-fused conclusions through Store, extends locally after `Inserted`, and completely reloads after
-`NotInserted` or on cold entry. Match is a no-frame structural projection. `read` never progresses.
+fused Pure/Read conclusions through Store. An Effect first appends its exact command and derived
+`EffectId`, calls its adapter only after known insertion, then appends evidence and outcome as the
+adjacent conclusion. Runtime extends locally after `Inserted` and completely reloads after
+`NotInserted` or on cold entry. Match is a no-frame structural projection. `read` never progresses
+or calls an adapter; it re-prepares only to validate a retained Effect command and identity.
 The Match projection selects and qualifies the exact nested canonical payload bytes through the
 registered payload codec; it never serializes a typed selector or payload.
 
-Adapter errors map to redaction-safe Runtime errors and append nothing. Dropping at any await is
-safety-neutral; Runtime has no background finalizer, pending owner, semaphore, timeout, retry token,
-or public State-by-State lifecycle.
+Adapter errors map to redaction-safe Runtime errors and append no conclusion. A pending Effect is
+publicly Runnable. Dropping at any await is safety-neutral; Runtime has no background finalizer,
+semaphore, timeout, internal retry loop, or public State-by-State lifecycle.

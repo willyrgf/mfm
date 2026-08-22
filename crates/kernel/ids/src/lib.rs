@@ -6,9 +6,9 @@
 //! formatting; canonical byte production and digest computation live in later
 //! kernel crates.
 //!
-//! [`RunId`] and [`ArtifactId`] are fixed to `sha256-jcs-v1`; [`ContentDigest`] accepts both
-//! supported algorithms. [`ContentRef`] binds interpretation to exact-byte identity, while Journal
-//! separately qualifies retained frame-local bytes.
+//! [`RunId`], [`EffectId`], and [`ArtifactId`] are fixed to `sha256-jcs-v1`; [`ContentDigest`]
+//! accepts both supported algorithms. [`ContentRef`] binds interpretation to exact-byte identity,
+//! while Journal separately qualifies retained frame-local bytes.
 //!
 //! ```compile_fail
 //! use mfm_ids::{SchemaId, SemanticTypeId};
@@ -153,6 +153,9 @@ pub enum SchemaKind {}
 /// Marker for run ids.
 pub enum RunIdKind {}
 
+/// Marker for effect ids.
+pub enum EffectIdKind {}
+
 /// Marker for artifact ids.
 pub enum ArtifactIdKind {}
 
@@ -170,6 +173,9 @@ pub type SchemaId = Identity<SchemaKind>;
 
 /// Typed run identity.
 pub type RunId = Identity<RunIdKind>;
+
+/// Durable identity of one prepared Effect occurrence.
+pub type EffectId = Identity<EffectIdKind>;
 
 /// Artifact storage object identity.
 pub type ArtifactId = Identity<ArtifactIdKind>;
@@ -605,6 +611,7 @@ impl private::IdentityCategory for SchemaKind {
 }
 
 impl_digest_only_category!(RunIdKind, "run");
+impl_digest_only_category!(EffectIdKind, "effect");
 impl_digest_only_category!(ArtifactIdKind, "artifact");
 impl_unrestricted_digest_only_category!(ContentDigestKind, "content");
 

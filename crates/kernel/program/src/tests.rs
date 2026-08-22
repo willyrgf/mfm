@@ -1,11 +1,13 @@
-use mfm_capabilities::{CapabilityError, ReadCapabilityContract};
+use mfm_capabilities::{CapabilityError, EffectCapabilityContract, ReadCapabilityContract};
 use mfm_ids::{
-    ContentRef, DigestAlgorithm, DigestBytes, EntryPointId, SchemaVersion, SemanticTypeId, StableId,
+    ContentRef, DigestAlgorithm, DigestBytes, EffectId, EntryPointId, SchemaVersion,
+    SemanticTypeId, StableId,
 };
 use mfm_program::{
-    capability_contract_ref, nominal_contract_ref, state_implementation_ref, Declaration,
-    Execution, MatchDeclaration, MatchVariant, Never, Program, ProgramError, State,
-    StateDeclaration,
+    capability_contract_ref, expand_program, nominal_contract_ref, state_implementation_ref,
+    CapabilityInjection, Declaration, EffectState, Execution, InjectionWriter, MatchDeclaration,
+    MatchVariant, Never, Operation, OperationExpansion, PreparationError, Program, ProgramError,
+    ProposedStateOutcome, PureState, ReadState, State, StateDeclaration,
 };
 use mfm_program_derive::MfmValue;
 use mfm_values::{
@@ -52,6 +54,18 @@ impl State for RightIdentityState {
     }
 }
 
+impl PureState for LeftIdentityState {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+impl PureState for RightIdentityState {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
 impl State for IdentityState {
     type Input = Value;
     type Output = Value;
@@ -82,6 +96,31 @@ impl ReadCapabilityContract for IdentityRead {
     }
 }
 
+impl ReadState<IdentityRead> for IdentityState {
+    fn prepare(input: &Self::Input) -> Result<Value, PreparationError> {
+        Ok(Value { value: input.value })
+    }
+
+    fn interpret(
+        input: Self::Input,
+        _evidence: &Value,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+impl CapabilityInjection<IdentityState> for IdentityRead {
+    type Setup = Value;
+    type ExpandedInput = Value;
+    type ExpandedOutput = Value;
+
+    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
+        mfm_values::canonicalize_mfm_value(setup)
+            .map(|(_, reference)| reference)
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
 struct InvalidIdentityState;
 
 impl State for InvalidIdentityState {
@@ -109,6 +148,161 @@ impl ReadCapabilityContract for InvalidIdentityRead {
         _evidence: &Self::Evidence,
     ) -> mfm_capabilities::Result<()> {
         Ok(())
+    }
+}
+
+struct IdentityEffect;
+
+impl EffectCapabilityContract for IdentityEffect {
+    type Command = Value;
+    type Evidence = Value;
+
+    fn contract_id() -> mfm_capabilities::Result<StableId> {
+        StableId::new("mfm.test.identity/effect@1").map_err(|_| CapabilityError::InvalidContract)
+    }
+
+    fn bind_evidence(
+        _effect_id: &EffectId,
+        command: &Self::Command,
+        evidence: &Self::Evidence,
+    ) -> mfm_capabilities::Result<()> {
+        (command.value == evidence.value)
+            .then_some(())
+            .ok_or(CapabilityError::EvidenceBinding)
+    }
+}
+
+struct IdentityEffectState;
+
+impl State for IdentityEffectState {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.identity/effect-state@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl EffectState<IdentityEffect> for IdentityEffectState {
+    fn prepare(input: &Self::Input) -> Result<Value, PreparationError> {
+        Ok(Value { value: input.value })
+    }
+
+    fn interpret(
+        input: Self::Input,
+        _evidence: &Value,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+impl CapabilityInjection<IdentityEffectState> for IdentityEffect {
+    type Setup = Value;
+    type ExpandedInput = Value;
+    type ExpandedOutput = Value;
+
+    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
+        mfm_values::canonicalize_mfm_value(setup)
+            .map(|(_, reference)| reference)
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+struct IdentityEffectOperation;
+
+impl Operation for IdentityEffectOperation {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        expansion: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        expansion.effect::<IdentityEffectState, IdentityEffect>(&Value { value: 9 })
+    }
+}
+
+struct ExecutionSumOperation;
+
+impl Operation for ExecutionSumOperation {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        expansion: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        expansion.pure::<LeftIdentityState>()?;
+        expansion.read::<IdentityState, IdentityRead>(&Value { value: 3 })?;
+        expansion.effect::<IdentityEffectState, IdentityEffect>(&Value { value: 4 })
+    }
+}
+
+struct SupportedEffectState;
+
+impl State for SupportedEffectState {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Value;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.identity/supported-effect-state@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl EffectState<IdentityEffect> for SupportedEffectState {
+    fn prepare(input: &Self::Input) -> Result<Value, PreparationError> {
+        Ok(Value { value: input.value })
+    }
+
+    fn interpret(
+        input: Self::Input,
+        evidence: &Value,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        if evidence.value == input.value {
+            ProposedStateOutcome::Success { output: input }
+        } else {
+            ProposedStateOutcome::Failure { failure: input }
+        }
+    }
+}
+
+impl CapabilityInjection<SupportedEffectState> for IdentityEffect {
+    type Setup = Value;
+    type ExpandedInput = Value;
+    type ExpandedOutput = Value;
+
+    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
+        mfm_values::canonicalize_mfm_value(setup)
+            .map(|(_, reference)| reference)
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+
+    fn write_before(_setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
+        writer.pure::<LeftIdentityState>()
+    }
+
+    fn write_after(_setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
+        writer.pure::<RightIdentityState>()
+    }
+}
+
+struct SupportedEffectOperation;
+
+impl Operation for SupportedEffectOperation {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Value;
+
+    fn expand(
+        &self,
+        expansion: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        expansion.effect::<SupportedEffectState, IdentityEffect>(&Value { value: 17 })
     }
 }
 
@@ -218,6 +412,116 @@ fn implementation_reference_preimages_remain_v1_exact() {
             .content_digest()
             .as_str(),
         "content:sha256-v1:70c931a7ae3e52ce943296347e6a3f0ab04425cfb8a390428145ff34753ced54"
+    );
+}
+
+#[test]
+fn program_v3_requires_its_domain_and_freezes_the_effect_sum_and_schema() {
+    let program = expand_program(
+        EntryPointId::new("mfm.test.identity/effect-operation@1").expect("entry point"),
+        &IdentityEffectOperation,
+    )
+    .expect("Program");
+    let wire: serde_json::Value =
+        serde_json::from_slice(program.canonical_bytes()).expect("Program wire");
+    assert_eq!(wire["domain"], "mfm.program.v3");
+    assert_eq!(
+        wire["declarations"][0]["value"]["execution"]["kind"],
+        "effect"
+    );
+    let Declaration::State(declaration) = &program.declarations()[0] else {
+        panic!("Effect declaration");
+    };
+    assert!(matches!(declaration.execution(), Execution::Effect { .. }));
+    assert_eq!(
+        program.content_ref().schema_id().as_str(),
+        "schema:mfm-program-document:3:sha256-jcs-v1:8bc8621870bca09cec311f2c7a1d451fc31e0e205af97813dfc52da7e7146df4"
+    );
+    assert_eq!(
+        Program::decode_canonical(program.canonical_bytes())
+            .expect("round trip")
+            .canonical_bytes(),
+        program.canonical_bytes()
+    );
+
+    let mut without_domain = wire.clone();
+    without_domain
+        .as_object_mut()
+        .expect("Program object")
+        .remove("domain");
+    let without_domain = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&without_domain).expect("json"),
+    )
+    .expect("canonical");
+    assert!(Program::decode_canonical(without_domain.as_bytes()).is_err());
+
+    let mut unknown_field = wire.clone();
+    unknown_field["unknown"] = serde_json::json!(true);
+    let unknown_field = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&unknown_field).expect("json"),
+    )
+    .expect("canonical");
+    assert!(Program::decode_canonical(unknown_field.as_bytes()).is_err());
+
+    let mut wrong_domain = wire;
+    wrong_domain["domain"] = serde_json::json!("mfm.program.v2");
+    let wrong_domain = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&wrong_domain).expect("json"),
+    )
+    .expect("canonical");
+    assert!(Program::decode_canonical(wrong_domain.as_bytes()).is_err());
+}
+
+#[test]
+fn effect_authoring_applies_pure_support_deterministically_and_preserves_failure_routing() {
+    let entry =
+        EntryPointId::new("mfm.test.identity/supported-effect-operation@1").expect("entry point");
+    let first = expand_program(entry.clone(), &SupportedEffectOperation).expect("first Program");
+    let second = expand_program(entry, &SupportedEffectOperation).expect("second Program");
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.declarations().len(), 3);
+
+    let [Declaration::State(before), Declaration::State(effect), Declaration::State(after)] =
+        first.declarations()
+    else {
+        panic!("three State declarations");
+    };
+    assert!(before.execution().is_pure());
+    assert!(effect.execution().is_effect());
+    assert!(after.execution().is_pure());
+    assert_eq!(before.next_index(), Some(1));
+    assert_eq!(effect.next_index(), Some(2));
+    assert_eq!(effect.failure_next_index(), None);
+    assert_eq!(after.next_index(), None);
+    assert_eq!(
+        effect.execution().command_contract_ref(),
+        Some(&nominal_contract_ref::<Value>().expect("command contract"))
+    );
+}
+
+#[test]
+fn execution_sum_preserves_each_mode_and_its_exact_static_abi() {
+    let program = expand_program(
+        EntryPointId::new("mfm.test.identity/execution-sum@1").expect("entry point"),
+        &ExecutionSumOperation,
+    )
+    .expect("Program");
+    let [Declaration::State(pure), Declaration::State(read), Declaration::State(effect)] =
+        program.declarations()
+    else {
+        panic!("Pure, Read, and Effect declarations");
+    };
+    let value = nominal_contract_ref::<Value>().expect("value contract");
+    assert!(matches!(pure.execution(), Execution::Pure));
+    assert!(matches!(read.execution(), Execution::Read { .. }));
+    assert_eq!(read.execution().intent_contract_ref(), Some(&value));
+    assert_eq!(read.execution().evidence_contract_ref(), Some(&value));
+    assert!(matches!(effect.execution(), Execution::Effect { .. }));
+    assert_eq!(effect.execution().command_contract_ref(), Some(&value));
+    assert_eq!(effect.execution().evidence_contract_ref(), Some(&value));
+    assert_ne!(
+        read.execution().capability_contract_ref(),
+        effect.execution().capability_contract_ref()
     );
 }
 
@@ -422,6 +726,91 @@ fn program_bounds_and_edge_targets_are_exact() {
             nominal_contract_ref::<Never>().expect("never"),
             oversized,
         ),
+        Err(ProgramError::Capacity)
+    );
+}
+
+#[test]
+fn effect_frame_weight_is_bounded_with_checked_global_arithmetic() {
+    let value = nominal_contract_ref::<Value>().expect("value");
+    let never = nominal_contract_ref::<Never>().expect("never");
+    let effect_implementation =
+        state_implementation_ref::<IdentityEffectState>().expect("Effect State");
+    let pure_implementation = state_implementation_ref::<IdentityState>().expect("Pure State");
+    let binding = mfm_values::canonicalize_mfm_value(&Value { value: 9 })
+        .expect("binding")
+        .1;
+    let effect_execution = Execution::effect(
+        super::effect_capability_contract_ref::<IdentityEffect>().expect("capability"),
+        value.clone(),
+        value.clone(),
+        binding,
+    );
+    let build = |pure_tail: usize| {
+        let declaration_count = 32_767 + pure_tail;
+        (0..declaration_count)
+            .map(|index| {
+                let next = (index + 1 < declaration_count)
+                    .then(|| u16::try_from(index + 1).expect("index"));
+                let (implementation, execution) = if index < 32_767 {
+                    (effect_implementation.clone(), effect_execution.clone())
+                } else {
+                    (pure_implementation.clone(), Execution::pure())
+                };
+                Declaration::State(StateDeclaration::new(
+                    implementation,
+                    value.clone(),
+                    value.clone(),
+                    never.clone(),
+                    execution,
+                    next,
+                    None,
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        super::validate_program(&value, &value, &never, &build(1)),
+        Ok(())
+    );
+    assert_eq!(
+        super::validate_program(&value, &value, &never, &build(2)),
+        Err(ProgramError::Capacity)
+    );
+
+    let branch_len = 16_384_usize;
+    let mut mutually_exclusive = Vec::with_capacity(1 + branch_len * 2);
+    mutually_exclusive.push(Declaration::Match(
+        MatchDeclaration::new(
+            value.clone(),
+            vec![
+                MatchVariant::new(StableId::new("left").expect("tag"), 1),
+                MatchVariant::new(
+                    StableId::new("right").expect("tag"),
+                    u16::try_from(branch_len + 1).expect("right target"),
+                ),
+            ],
+        )
+        .expect("branch"),
+    ));
+    for branch in 0..2 {
+        for offset in 0..branch_len {
+            let index = 1 + branch * branch_len + offset;
+            let next =
+                (offset + 1 < branch_len).then(|| u16::try_from(index + 1).expect("successor"));
+            mutually_exclusive.push(Declaration::State(StateDeclaration::new(
+                effect_implementation.clone(),
+                value.clone(),
+                value.clone(),
+                never.clone(),
+                effect_execution.clone(),
+                next,
+                None,
+            )));
+        }
+    }
+    assert_eq!(
+        super::validate_program(&value, &value, &never, &mutually_exclusive),
         Err(ProgramError::Capacity)
     );
 }

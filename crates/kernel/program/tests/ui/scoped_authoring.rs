@@ -10,7 +10,6 @@ fn inspect_expansion(expansion: &mut OperationExpansion<Never, Never, Never>) {
     expansion.branch_to();
     expansion.return_success();
     expansion.finish();
-    expansion.effect();
 }
 
 fn inspect_writer(writer: &mut InjectionWriter) {

@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
-//! Closed contracts for observational Read capabilities.
+//! Closed contracts for observational Read and mutating Effect capabilities.
 
-use mfm_ids::StableId;
+use mfm_ids::{EffectId, StableId};
 use mfm_values::MfmValue;
 
 /// Result type for capability contract operations.
@@ -30,4 +30,22 @@ pub trait ReadCapabilityContract: Send + Sync + 'static {
 
     /// Proves that evidence answers the exact intent.
     fn bind_evidence(intent: &Self::Intent, evidence: &Self::Evidence) -> Result<()>;
+}
+
+/// One mutating capability with a closed command/evidence contract.
+pub trait EffectCapabilityContract: Send + Sync + 'static {
+    /// Complete nonce-free command passed to the trusted adapter.
+    type Command: MfmValue;
+    /// Closed evidence returned by the trusted adapter.
+    type Evidence: MfmValue;
+
+    /// Returns the stable capability contract identity.
+    fn contract_id() -> Result<StableId>;
+
+    /// Proves that evidence settles the exact Effect and command.
+    fn bind_evidence(
+        effect_id: &EffectId,
+        command: &Self::Command,
+        evidence: &Self::Evidence,
+    ) -> Result<()>;
 }

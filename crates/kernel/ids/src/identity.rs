@@ -257,6 +257,13 @@ impl Identity<RunIdKind> {
     }
 }
 
+impl Identity<EffectIdKind> {
+    /// Constructs an effect id with the fixed `Sha256JcsV1` algorithm.
+    pub fn from_digest(digest: DigestBytes) -> Self {
+        Self::with_digest_algorithm(DigestAlgorithm::Sha256JcsV1, digest)
+    }
+}
+
 impl Identity<ArtifactIdKind> {
     /// Constructs an artifact id with the fixed `Sha256JcsV1` algorithm.
     pub fn from_digest(digest: DigestBytes) -> Self {

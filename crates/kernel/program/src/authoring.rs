@@ -1,14 +1,15 @@
 use std::collections::hash_map::Entry;
 use std::{any::TypeId, collections::HashMap, marker::PhantomData};
 
-use mfm_capabilities::ReadCapabilityContract;
+use mfm_capabilities::{EffectCapabilityContract, ReadCapabilityContract};
 use mfm_ids::{ContentRef, EntryPointId, SchemaId, SemanticTypeId, StableId};
 use mfm_values::{EnumTagging, MfmValue, SchemaDescriptor, SchemaShape};
 
 use crate::{
-    capability_contract_ref, derive_nominal_contract, state_implementation_ref, Declaration,
-    Execution, MatchDeclaration, MatchVariant, Never, Program, ProgramError, PureState, ReadState,
-    Result, State, StateDeclaration, MAX_DECLARATIONS, MAX_MATCH_ARMS, MAX_STATES,
+    capability_contract_ref, derive_nominal_contract, effect_capability_contract_ref,
+    state_implementation_ref, Declaration, EffectState, Execution, MatchDeclaration, MatchVariant,
+    Never, Program, ProgramError, PureState, ReadState, Result, State, StateDeclaration,
+    MAX_DECLARATIONS, MAX_MATCH_ARMS, MAX_STATES,
 };
 
 const MAX_AUTHORING_CALLBACK_DEPTH: u8 = 64;
@@ -29,7 +30,7 @@ pub trait Operation: Sized {
     ) -> Result<()>;
 }
 
-/// Deterministically expands one root Operation and constructs Program v2.
+/// Deterministically expands one root Operation and constructs Program v3.
 pub fn expand_program<O: Operation>(entry_point_id: EntryPointId, root: &O) -> Result<Program> {
     let mut identities = IdentityMemo::default();
     let input = identities.value_ref::<O::Input>()?;
@@ -62,7 +63,8 @@ struct CachedValueContract {
 struct IdentityMemo {
     values: HashMap<TypeId, CachedValueContract>,
     states: HashMap<TypeId, ContentRef>,
-    capabilities: HashMap<TypeId, ContentRef>,
+    read_capabilities: HashMap<TypeId, ContentRef>,
+    effect_capabilities: HashMap<TypeId, ContentRef>,
 }
 
 impl IdentityMemo {
@@ -93,13 +95,23 @@ impl IdentityMemo {
         Ok(reference)
     }
 
-    fn capability_ref<C: ReadCapabilityContract>(&mut self) -> Result<ContentRef> {
+    fn read_capability_ref<C: ReadCapabilityContract>(&mut self) -> Result<ContentRef> {
         let key = TypeId::of::<C>();
-        if let Some(reference) = self.capabilities.get(&key) {
+        if let Some(reference) = self.read_capabilities.get(&key) {
             return Ok(reference.clone());
         }
         let reference = capability_contract_ref::<C>()?;
-        self.capabilities.insert(key, reference.clone());
+        self.read_capabilities.insert(key, reference.clone());
+        Ok(reference)
+    }
+
+    fn effect_capability_ref<C: EffectCapabilityContract>(&mut self) -> Result<ContentRef> {
+        let key = TypeId::of::<C>();
+        if let Some(reference) = self.effect_capabilities.get(&key) {
+            return Ok(reference.clone());
+        }
+        let reference = effect_capability_contract_ref::<C>()?;
+        self.effect_capabilities.insert(key, reference.clone());
         Ok(reference)
     }
 }
@@ -176,6 +188,41 @@ where
         )?;
         nested_callback_depth(self.callback_depth)?;
         let (identities, suffix) = expand_read_suffix::<S, C>(
+            setup,
+            std::mem::take(&mut self.identities),
+            expanded_input,
+            expanded_output,
+            state_input,
+            state_output,
+            state_failure,
+            never,
+            self.callback_depth,
+        );
+        self.identities = identities;
+        self.draft.merge_connected(suffix?)
+    }
+
+    /// Appends one exact-pair Effect occurrence with deterministic capability-owned injection.
+    pub fn effect<S, C>(&mut self, setup: &<C as CapabilityInjection<S>>::Setup) -> Result<()>
+    where
+        S: EffectState<C>,
+        C: EffectCapabilityContract + CapabilityInjection<S>,
+    {
+        let expanded_input = self.identities.value_ref::<C::ExpandedInput>()?;
+        let expanded_output = self.identities.value_ref::<C::ExpandedOutput>()?;
+        let state_input = self.identities.value_ref::<S::Input>()?;
+        let state_output = self.identities.value_ref::<S::Output>()?;
+        let state_failure = self.identities.value_ref::<S::Failure>()?;
+        let never = self.identities.value_ref::<Never>()?;
+        self.draft.require_current(&expanded_input)?;
+        require_legal_failure(
+            &state_failure,
+            &never,
+            &self.failure_contract_ref,
+            &self.admitted_failure_contract_refs,
+        )?;
+        nested_callback_depth(self.callback_depth)?;
+        let (identities, suffix) = expand_effect_suffix::<S, C>(
             setup,
             std::mem::take(&mut self.identities),
             expanded_input,
@@ -428,7 +475,7 @@ where
     }
 }
 
-/// Deterministic authoring policy for one exact Read capability and State pairing.
+/// Deterministic authoring policy for one exact capability and State pairing.
 pub trait CapabilityInjection<S>
 where
     S: State,
@@ -443,12 +490,12 @@ where
     /// Derives the original occurrence's immutable persisted binding.
     fn original_binding_ref(setup: &Self::Setup) -> Result<ContentRef>;
 
-    /// Writes ordinary Pure States before the designated Read occurrence.
+    /// Writes ordinary Pure States before the designated capability occurrence.
     fn write_before(_setup: &Self::Setup, _writer: &mut InjectionWriter) -> Result<()> {
         Ok(())
     }
 
-    /// Writes ordinary Pure States after the designated Read occurrence.
+    /// Writes ordinary Pure States after the designated capability occurrence.
     fn write_after(_setup: &Self::Setup, _writer: &mut InjectionWriter) -> Result<()> {
         Ok(())
     }
@@ -872,8 +919,62 @@ where
             state_output,
             state_failure.clone(),
             Execution::read(
-                writer.identities.capability_ref::<C>()?,
+                writer.identities.read_capability_ref::<C>()?,
                 writer.identities.value_ref::<C::Intent>()?,
+                writer.identities.value_ref::<C::Evidence>()?,
+                binding_ref,
+            ),
+            &never,
+            &state_failure,
+            &[],
+        )?;
+        nested_callback_depth(callback_depth)?;
+        <C as CapabilityInjection<S>>::write_after(setup, &mut writer).map_err(authoring_error)?;
+        writer.draft.require_current(&expanded_output)?;
+        Ok(())
+    })();
+    let InjectionWriter {
+        draft, identities, ..
+    } = writer;
+    (identities, result.map(|()| draft))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_effect_suffix<S, C>(
+    setup: &C::Setup,
+    identities: IdentityMemo,
+    expanded_input: ContentRef,
+    expanded_output: ContentRef,
+    state_input: ContentRef,
+    state_output: ContentRef,
+    state_failure: ContentRef,
+    never: ContentRef,
+    callback_depth: u8,
+) -> (IdentityMemo, Result<ExpansionDraft>)
+where
+    S: EffectState<C>,
+    C: EffectCapabilityContract + CapabilityInjection<S>,
+{
+    let mut writer = InjectionWriter {
+        draft: ExpansionDraft::new(expanded_input),
+        required_failure_contract_ref: state_failure.clone(),
+        identities,
+    };
+    let result = (|| {
+        <C as CapabilityInjection<S>>::write_before(setup, &mut writer).map_err(authoring_error)?;
+        writer.draft.require_current(&state_input)?;
+        nested_callback_depth(callback_depth)?;
+        let binding_ref =
+            <C as CapabilityInjection<S>>::original_binding_ref(setup).map_err(authoring_error)?;
+        append_state_core(
+            &mut writer.draft,
+            writer.identities.state_ref::<S>()?,
+            state_input,
+            state_output,
+            state_failure.clone(),
+            Execution::effect(
+                writer.identities.effect_capability_ref::<C>()?,
+                writer.identities.value_ref::<C::Command>()?,
                 writer.identities.value_ref::<C::Evidence>()?,
                 binding_ref,
             ),

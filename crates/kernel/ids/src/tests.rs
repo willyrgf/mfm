@@ -24,18 +24,41 @@ fn content_ref_requires_schema_and_exact_byte_algorithms() {
 fn fixed_digest_ids_construct_parse_and_serialize_with_jcs_algorithm() {
     let bytes = DigestBytes::from_array([7; 32]);
     let run = RunId::from_digest(bytes);
+    let effect = EffectId::from_digest(bytes);
     let artifact = ArtifactId::from_digest(bytes);
 
     assert_eq!(run.algorithm(), DigestAlgorithm::Sha256JcsV1);
+    assert_eq!(effect.algorithm(), DigestAlgorithm::Sha256JcsV1);
     assert_eq!(artifact.algorithm(), DigestAlgorithm::Sha256JcsV1);
     assert_eq!(RunId::parse(run.as_str()), Ok(run.clone()));
+    assert_eq!(EffectId::parse(effect.as_str()), Ok(effect.clone()));
     assert_eq!(ArtifactId::parse(artifact.as_str()), Ok(artifact.clone()));
     assert_eq!(
         serde_json::to_string(&run).expect("run json"),
         format!("\"run:sha256-jcs-v1:{bytes}\"")
     );
     assert_eq!(
+        serde_json::to_string(&effect).expect("effect json"),
+        format!("\"effect:sha256-jcs-v1:{bytes}\"")
+    );
+    assert_eq!(
         serde_json::to_string(&artifact).expect("artifact json"),
         format!("\"artifact:sha256-jcs-v1:{bytes}\"")
     );
+}
+
+#[test]
+fn effect_id_rejects_every_noncanonical_spelling() {
+    let exact = format!("effect:sha256-jcs-v1:{}", "01".repeat(32));
+    assert!(EffectId::parse(&exact).is_ok());
+    for invalid in [
+        exact.to_uppercase(),
+        exact.replace("effect", "run"),
+        exact.replace("sha256-jcs-v1", "sha256-v1"),
+        exact.replace("01", "0g"),
+        exact[..exact.len() - 1].to_owned(),
+        format!("{exact}0"),
+    ] {
+        assert!(EffectId::parse(invalid).is_err());
+    }
 }

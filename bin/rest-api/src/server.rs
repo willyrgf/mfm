@@ -389,7 +389,7 @@ mod tests {
     use mfm_evm::{EvmEndpoint, EvmReadValue};
     use mfm_evm_live::{EvmProvider, EvmProviderResponse};
     use mfm_ids::StableId;
-    use mfm_runtime::ReadAdapterError;
+    use mfm_runtime::AdapterError;
     use mfm_store::MemoryStore;
     use tower::ServiceExt;
 
@@ -409,7 +409,7 @@ mod tests {
             &'a self,
             operation: StableId,
             _request_bytes: Vec<u8>,
-        ) -> Pin<Box<dyn Future<Output = Result<EvmProviderResponse, ReadAdapterError>> + Send + 'a>>
+        ) -> Pin<Box<dyn Future<Output = Result<EvmProviderResponse, AdapterError>> + Send + 'a>>
         {
             Box::pin(async move {
                 let value = match operation.as_str() {
@@ -423,7 +423,7 @@ mod tests {
                     "mfm.evm.read-native-balance@1" => {
                         EvmReadValue::RawUnits("1000000000000000000".to_owned())
                     }
-                    _ => return Err(ReadAdapterError::Internal),
+                    _ => return Err(AdapterError::Internal),
                 };
                 Ok(EvmProviderResponse::Read(value))
             })

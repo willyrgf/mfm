@@ -11,8 +11,8 @@ use std::marker::PhantomData;
 use mfm_capabilities::ReadCapabilityContract;
 use mfm_ids::{ContentRef, StableId};
 use mfm_program::{
-    CapabilityInjection, Operation, OperationExpansion, ProgramError, ProposedStateOutcome,
-    PureState, ReadPreparationError, ReadState, State,
+    CapabilityInjection, Operation, OperationExpansion, PreparationError, ProgramError,
+    ProposedStateOutcome, PureState, ReadState, State,
 };
 use mfm_program_derive::MfmValue;
 use mfm_values::{string_contains_secret_marker, MfmValue as MfmValueTrait};
@@ -1907,9 +1907,9 @@ macro_rules! impl_balance_access {
                 input: &Self::Input,
             ) -> std::result::Result<
                 <$capability as ReadCapabilityContract>::Intent,
-                ReadPreparationError,
+                PreparationError,
             > {
-                $prepare(input).map_err(|_| ReadPreparationError)
+                $prepare(input).map_err(|_| PreparationError)
             }
 
             fn interpret(

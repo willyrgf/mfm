@@ -147,8 +147,8 @@ fn conversions_and_calldata_are_exact() {
 
     assert_eq!(block_tag("17"), Ok("0x11".to_owned()));
     assert_eq!(block_tag("0"), Ok("0x0".to_owned()));
-    assert_eq!(block_tag("0x11"), Err(ReadAdapterError::Internal));
-    assert_eq!(block_tag(&"9".repeat(40)), Err(ReadAdapterError::Internal));
+    assert_eq!(block_tag("0x11"), Err(AdapterError::Internal));
+    assert_eq!(block_tag(&"9".repeat(40)), Err(AdapterError::Internal));
 
     assert_eq!(
         word_to_u8("0x0000000000000000000000000000000000000000000000000000000000000012"),
@@ -170,10 +170,10 @@ fn conversions_and_calldata_are_exact() {
         checked_address("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"),
         Ok(HOLDER.to_owned())
     );
-    assert_eq!(checked_address("0xnothex"), Err(ReadAdapterError::Internal));
+    assert_eq!(checked_address("0xnothex"), Err(AdapterError::Internal));
     assert_eq!(
         checked_address("wallet.native"),
-        Err(ReadAdapterError::Internal)
+        Err(AdapterError::Internal)
     );
 
     assert_eq!(decimals_calldata(), "0x313ce567");
@@ -347,7 +347,7 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
                 ),
             )
             .await;
-        assert_eq!(response, Err(ReadAdapterError::Unavailable), "body {body}");
+        assert_eq!(response, Err(AdapterError::Unavailable), "body {body}");
     }
 
     let unbound = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -363,7 +363,7 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
             ),
         )
         .await;
-    assert_eq!(response, Err(ReadAdapterError::Unavailable));
+    assert_eq!(response, Err(AdapterError::Unavailable));
 }
 
 #[tokio::test]
@@ -412,7 +412,7 @@ async fn redirects_never_leave_the_selected_endpoint() {
             ),
         )
         .await;
-    assert_eq!(response, Err(ReadAdapterError::Unavailable));
+    assert_eq!(response, Err(AdapterError::Unavailable));
     redirect_worker.join().expect("redirect worker");
 
     let _ = TcpStream::connect(target_address);
@@ -428,7 +428,7 @@ async fn undecodable_or_mismatched_intent_is_internal_and_never_enters_transport
         provider
             .request(operation("mfm.evm.read-chain-identity@1"), b"{}".to_vec())
             .await,
-        Err(ReadAdapterError::Internal)
+        Err(AdapterError::Internal)
     );
     assert_eq!(
         provider
@@ -440,7 +440,7 @@ async fn undecodable_or_mismatched_intent_is_internal_and_never_enters_transport
                 ),
             )
             .await,
-        Err(ReadAdapterError::Internal)
+        Err(AdapterError::Internal)
     );
 }
 

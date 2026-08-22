@@ -1,8 +1,9 @@
 # mfm-program
 
 Program owns deterministic typed source authoring and the one checked canonical
-`mfm-program-document@2` graph. An `Operation` describes reusable authoring-only composition;
-`OperationExpansion` lowers Pure States, exact-pair Reads, child Operations, structured Match
+`mfm-program-document@3` graph with the required `mfm.program.v3` domain. An `Operation` describes
+reusable authoring-only composition; `OperationExpansion` lowers Pure States, exact-pair Reads and
+Effects, child Operations, structured Match
 joins, and exact failure handlers through one private flat draft. Operation values, callbacks,
 injection setup, and scope metadata are erased before Program construction.
 
@@ -70,12 +71,14 @@ assert_eq!(program.declarations().len(), 2);
 
 Index zero is root. Final declarations are State or closed-sum Match. State successors are
 optional forward `u16` indices; absence means that branch's exact root contract. Read declarations
-retain capability, intent, evidence, and binding refs. `Program::decode_canonical` is the retained
+retain capability, intent, evidence, and binding refs; Effect declarations retain capability,
+command, evidence, and binding refs. `Program::decode_canonical` is the retained
 wire ingress; raw declaration and Program source constructors are private.
 
 Program is content addressed and has no catalog, registry, erased value, runtime implementation,
-configuration contract, persisted Operation, or second wire DTO. Capability injection is
-deterministic authoring-time topology only and grants no provider, signer, or mutation authority.
+configuration contract, persisted Operation, or second wire DTO. The global frame bound counts
+genesis plus Pure/Read weight one and Effect weight two. Capability injection is deterministic
+authoring-time topology only and grants no provider, signer, or mutation authority.
 Operation implementations compose children only through `OperationExpansion`, and capability
 policies emit support States only through `InjectionWriter`. Direct trait callback calls bypass
 kernel callback accounting and are forbidden in reviewed production code. This trusted-code rule

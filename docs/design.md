@@ -10,32 +10,39 @@ Source code authors the graph through one deterministic typed `Operation`. Produ
 and descriptions on admitted Operations and States are source metadata only: they are not lowered,
 hashed, or persisted. `expand_program` gives
 the root Operation the sole `OperationExpansion` compiler context, which flattens Pure States,
-exact-pair Reads, child Operations, structured Match joins, and exact failure handlers into one
-private symbolic draft before constructing Program v2. Operations, callbacks, injection setup, and
-scope boundaries are erased; only the immutable State/Match graph is persisted.
+exact-pair Reads and Effects, child Operations, structured Match joins, and exact failure handlers
+into one private symbolic draft before constructing Program v3. Operations, callbacks, injection
+setup, and scope boundaries are erased; only the immutable State/Match graph is persisted.
 
 Pure States deterministically map typed input to typed success/failure. Read States deterministically
-prepare typed intent, then interpret typed evidence. Runtime associates all values, State drivers,
-Match projections, and `(capability contract, binding ref)` adapters before execution. State code has
-no ambient IO and there is no generic effect or mutation capability.
+prepare typed intent, then interpret typed evidence. Effect States deterministically prepare a
+complete command and interpret typed settlement evidence. Runtime associates all values, State
+drivers, Match projections, and mode-specific `(capability contract, binding ref)` adapters before
+execution. State code has no ambient IO.
 
-Each Read occurrence applies the exact capability/State pair's authoring-time injection policy.
-Injection may add deterministic Pure topology before or after the one kernel-owned Read, but it
-cannot perform IO, access or replace that Read, register an adapter, or grant execution authority.
-Effect, signing, nonce, broadcast, and durable mutation authority remain deferred.
+Each Read or Effect occurrence applies the exact capability/State pair's authoring-time injection
+policy. Injection may add deterministic Pure topology before or after the one kernel-owned
+occurrence, but it cannot emit a Read, Effect, child Operation, Match, or failure handler; perform
+IO; access or replace the occurrence; register an adapter; or grant execution authority.
 
-Runtime admits `(RunId, Program, C0)`, appends genesis, folds the qualified history, executes only
-the selected declaration, and appends one fused conclusion. A Read frame contains intent, accepted
-evidence, and outcome together; adapter errors append nothing. Match is a pure projection and adds no
-frame. Zero-State Programs terminate at genesis. Hot advancement and cold reload use the same fold.
+Runtime admits `(RunId, Program, C0)`, appends genesis, folds the qualified history, and executes only
+the selected declaration. Pure and Read append one fused conclusion; a Read frame contains intent,
+accepted evidence, and outcome together. Effect execution first appends the complete command and
+derived `EffectId`, enters the adapter only after known insertion, and then appends accepted evidence
+and outcome. An adapter error leaves the prepare pending and appends no conclusion. Match is a pure
+projection and adds no frame. Zero-State Programs terminate at genesis. Hot advancement and cold
+reload use the same fold. Cold fold re-prepares only a retained Effect command to validate its exact
+bytes and identity; retained Pure/Read conclusions remain authoritative event-log outcomes.
 
-Journal owns the exact `mfm.run.frame.v1` canonical wire, recursive exact-byte SHA-256 heads, strict
-frame-local object closure, and history qualification. Store sees only sealed frames and opaque
-complete transfers. It atomically inserts at the exact head or writes nothing.
+Journal owns the exact `mfm.run.frame.v2` canonical wire, recursive exact-byte SHA-256 heads, strict
+frame-local object closure, Effect prepare/conclusion adjacency, and history qualification. Store
+sees only sealed frames and opaque complete transfers. It atomically inserts at the exact head or
+writes nothing and has no Effect semantics.
 
 The fixed limits are 8 MiB per canonical run object, 65,536 non-payload envelope bytes, 25,231,360
-bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. These are format bounds, not
-tunable runtime policy.
+bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. Program validates the
+conservative bound `1 + Pure + Read + 2*Effect <= 65,536` across every declaration. These are format
+bounds, not tunable runtime policy.
 
 PostgreSQL has two fresh baselines behind one backend, pool, and connection gate. Run history owns
 `mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads` in `public`; opaque versioned
@@ -93,8 +100,10 @@ Every execution receives an explicit transport-selected RunId. Both client surfa
 use the same Application client primitive to derive one from OS cryptographic entropy before the
 start use case. Ambiguous append acknowledgement carries the exact start or progress recovery
 identity.
-Transaction submission requires a future durable transaction-authority/outbox design and is not
-part of this system.
+The generic Effect protocol supplies durable command authorization and caller-driven recovery.
+Production transaction submission still requires the separate EVM transaction authority and live
+adapter introduced by the transaction-specific design; production composition registers no Effect
+adapter at this stage.
 
 CLI and REST are thin renderings of that single surface and add no authentication or authorization
 layer. REST serves HTTP/1 on one caller-selected Unix socket; the enclosing deployment owns access

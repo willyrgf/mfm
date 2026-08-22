@@ -13,7 +13,7 @@ use mfm_evm::{
     EvmReadIntent, EvmReadValue,
 };
 use mfm_ids::StableId;
-use mfm_runtime::{ReadAdapterError, RuntimeAssemblyBuilder};
+use mfm_runtime::{AdapterError, RuntimeAssemblyBuilder};
 
 mod json_rpc;
 
@@ -62,7 +62,7 @@ pub enum EvmProviderResponse {
 /// block, so its sources cannot tear across chain progression.
 ///
 /// Return [`EvmProviderResponse::IntegrityBlocked`] only for authenticated external evidence of an
-/// integrity block. A local decode, address, or operation mismatch is [`ReadAdapterError::Internal`]
+/// integrity block. A local decode, address, or operation mismatch is [`AdapterError::Internal`]
 /// before any IO. Reads must be duplicate-safe: a dropped run repeats the call.
 pub trait EvmProvider: Send + Sync + 'static {
     /// Performs one observational request for the supplied operation.
@@ -72,9 +72,7 @@ pub trait EvmProvider: Send + Sync + 'static {
         request_bytes: Vec<u8>,
     ) -> Pin<
         Box<
-            dyn Future<Output = std::result::Result<EvmProviderResponse, ReadAdapterError>>
-                + Send
-                + 'a,
+            dyn Future<Output = std::result::Result<EvmProviderResponse, AdapterError>> + Send + 'a,
         >,
     >;
 }
@@ -106,18 +104,16 @@ async fn read(
     target: &EvmPhysicalTarget,
     provider: &dyn EvmProvider,
     intent: &EvmReadIntent,
-) -> std::result::Result<EvmReadEvidence, ReadAdapterError> {
+) -> std::result::Result<EvmReadEvidence, AdapterError> {
     let (operation, chain_id) = intent.operation_and_chain_id();
-    let binding_ref = target
-        .binding_ref()
-        .map_err(|_| ReadAdapterError::Internal)?;
+    let binding_ref = target.binding_ref().map_err(|_| AdapterError::Internal)?;
     if chain_id != target.chain_id() || intent.route_ref() != &binding_ref {
-        return Err(ReadAdapterError::Internal);
+        return Err(AdapterError::Internal);
     }
-    let operation = StableId::new(operation).map_err(|_| ReadAdapterError::Internal)?;
-    let request_bytes = serde_json::to_vec(intent).map_err(|_| ReadAdapterError::Internal)?;
+    let operation = StableId::new(operation).map_err(|_| AdapterError::Internal)?;
+    let request_bytes = serde_json::to_vec(intent).map_err(|_| AdapterError::Internal)?;
     if request_bytes.len() > MAX_EVM_REQUEST_BYTES {
-        return Err(ReadAdapterError::Internal);
+        return Err(AdapterError::Internal);
     }
     match provider.request(operation, request_bytes).await? {
         EvmProviderResponse::Read(value) => Ok(EvmReadEvidence::Returned { value }),
@@ -147,7 +143,7 @@ mod tests {
             _request_bytes: Vec<u8>,
         ) -> Pin<
             Box<
-                dyn Future<Output = std::result::Result<EvmProviderResponse, ReadAdapterError>>
+                dyn Future<Output = std::result::Result<EvmProviderResponse, AdapterError>>
                     + Send
                     + 'a,
             >,
@@ -233,12 +229,12 @@ mod tests {
         let wrong_chain = target(2, 2);
         assert_eq!(
             read(&registered, &provider, &intent(&wrong_chain)).await,
-            Err(ReadAdapterError::Internal)
+            Err(AdapterError::Internal)
         );
         let wrong_route = target(1, 3);
         assert_eq!(
             read(&registered, &provider, &intent(&wrong_route)).await,
-            Err(ReadAdapterError::Internal)
+            Err(AdapterError::Internal)
         );
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     }

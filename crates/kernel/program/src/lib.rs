@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Typed deterministic authoring and checked immutable Program v2 contracts.
+//! Typed deterministic authoring and checked immutable Program v3 contracts.
 //!
 //! A Program is the sole persisted control document. Runtime associates its
 //! immutable declarations with typed implementations. Authoring callbacks and
@@ -15,7 +15,7 @@ extern crate self as mfm_program;
 use std::collections::BTreeSet;
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
-use mfm_capabilities::ReadCapabilityContract;
+use mfm_capabilities::{EffectCapabilityContract, ReadCapabilityContract};
 use mfm_ids::{
     ContentRef, DigestAlgorithm, DigestBytes, EntryPointId, SchemaId, SchemaVersion,
     SemanticTypeId, StableId,
@@ -38,6 +38,7 @@ pub use authoring::{
 const MAX_DECLARATIONS: usize = 65_536;
 const MAX_STATES: usize = 65_535;
 const MAX_MATCH_ARMS: usize = 256;
+const MAX_PROGRAM_FRAME_WEIGHT: u64 = 65_536;
 
 /// Result type for Program construction and decoding.
 pub type Result<T> = std::result::Result<T, ProgramError>;
@@ -96,7 +97,7 @@ where
     C: ReadCapabilityContract,
 {
     /// Prepares the exact adapter intent.
-    fn prepare(input: &Self::Input) -> std::result::Result<C::Intent, ReadPreparationError>;
+    fn prepare(input: &Self::Input) -> std::result::Result<C::Intent, PreparationError>;
 
     /// Interprets accepted evidence.
     fn interpret(
@@ -105,10 +106,25 @@ where
     ) -> ProposedStateOutcome<Self::Output, Self::Failure>;
 }
 
-/// Redaction-safe failure of trusted deterministic Read preparation.
+/// Deterministic State behavior driven by typed Effect evidence.
+pub trait EffectState<C>: State
+where
+    C: EffectCapabilityContract,
+{
+    /// Prepares the exact adapter command.
+    fn prepare(input: &Self::Input) -> std::result::Result<C::Command, PreparationError>;
+
+    /// Interprets accepted evidence.
+    fn interpret(
+        input: Self::Input,
+        evidence: &C::Evidence,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure>;
+}
+
+/// Redaction-safe failure of trusted deterministic capability preparation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("read preparation failed")]
-pub struct ReadPreparationError;
+#[error("capability preparation failed")]
+pub struct PreparationError;
 
 /// Uninhabited failure value owned by the framework.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +194,14 @@ pub fn capability_contract_ref<C: ReadCapabilityContract>() -> Result<ContentRef
     )
 }
 
+/// Derives the retained v1 contract reference for an Effect capability.
+pub fn effect_capability_contract_ref<C: EffectCapabilityContract>() -> Result<ContentRef> {
+    implementation_ref(
+        "mfm.capability-contract",
+        C::contract_id().map_err(|_| ProgramError::InvalidContract)?,
+    )
+}
+
 fn implementation_ref(schema_name: &str, id: StableId) -> Result<ContentRef> {
     let schema = SchemaId::new(
         schema_name,
@@ -210,24 +234,39 @@ pub(crate) fn derive_nominal_contract<T: MfmValue>() -> Result<(ContentRef, Sche
     Ok((contract_ref, descriptor))
 }
 
-/// One Pure or Read execution declaration.
+/// One closed Pure, Read, or Effect execution declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Execution {
-    read: Option<Box<ReadExecution>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ReadExecution {
-    capability_contract_ref: ContentRef,
-    intent_contract_ref: ContentRef,
-    evidence_contract_ref: ContentRef,
-    binding_ref: ContentRef,
+pub enum Execution {
+    /// Deterministic execution without a capability.
+    Pure,
+    /// Observational execution against one exact capability and binding.
+    Read {
+        /// Capability contract.
+        capability_contract_ref: ContentRef,
+        /// Prepared intent contract.
+        intent_contract_ref: ContentRef,
+        /// Returned evidence contract.
+        evidence_contract_ref: ContentRef,
+        /// Immutable adapter binding.
+        binding_ref: ContentRef,
+    },
+    /// Mutating execution against one exact capability and binding.
+    Effect {
+        /// Capability contract.
+        capability_contract_ref: ContentRef,
+        /// Prepared command contract.
+        command_contract_ref: ContentRef,
+        /// Returned evidence contract.
+        evidence_contract_ref: ContentRef,
+        /// Immutable adapter binding.
+        binding_ref: ContentRef,
+    },
 }
 
 impl Execution {
     /// Constructs Pure execution.
     pub(crate) fn pure() -> Self {
-        Self { read: None }
+        Self::Pure
     }
 
     /// Constructs Read execution with its complete static ABI and binding.
@@ -237,39 +276,102 @@ impl Execution {
         evidence_contract_ref: ContentRef,
         binding_ref: ContentRef,
     ) -> Self {
-        Self {
-            read: Some(Box::new(ReadExecution {
-                capability_contract_ref,
-                intent_contract_ref,
-                evidence_contract_ref,
-                binding_ref,
-            })),
+        Self::Read {
+            capability_contract_ref,
+            intent_contract_ref,
+            evidence_contract_ref,
+            binding_ref,
+        }
+    }
+
+    /// Constructs Effect execution with its complete static ABI and binding.
+    pub(crate) fn effect(
+        capability_contract_ref: ContentRef,
+        command_contract_ref: ContentRef,
+        evidence_contract_ref: ContentRef,
+        binding_ref: ContentRef,
+    ) -> Self {
+        Self::Effect {
+            capability_contract_ref,
+            command_contract_ref,
+            evidence_contract_ref,
+            binding_ref,
         }
     }
 
     /// Returns whether this declaration is Pure.
     pub const fn is_pure(&self) -> bool {
-        self.read.is_none()
+        matches!(self, Self::Pure)
     }
 
-    /// Returns the Read capability contract, if present.
+    /// Returns whether this declaration is Read.
+    pub const fn is_read(&self) -> bool {
+        matches!(self, Self::Read { .. })
+    }
+
+    /// Returns whether this declaration is Effect.
+    pub const fn is_effect(&self) -> bool {
+        matches!(self, Self::Effect { .. })
+    }
+
+    /// Returns the capability contract for a Read or Effect, if present.
     pub fn capability_contract_ref(&self) -> Option<&ContentRef> {
-        self.read.as_ref().map(|read| &read.capability_contract_ref)
+        match self {
+            Self::Pure => None,
+            Self::Read {
+                capability_contract_ref,
+                ..
+            }
+            | Self::Effect {
+                capability_contract_ref,
+                ..
+            } => Some(capability_contract_ref),
+        }
     }
 
     /// Returns the Read intent contract, if present.
     pub fn intent_contract_ref(&self) -> Option<&ContentRef> {
-        self.read.as_ref().map(|read| &read.intent_contract_ref)
+        match self {
+            Self::Read {
+                intent_contract_ref,
+                ..
+            } => Some(intent_contract_ref),
+            Self::Pure | Self::Effect { .. } => None,
+        }
     }
 
-    /// Returns the Read evidence contract, if present.
+    /// Returns the Effect command contract, if present.
+    pub fn command_contract_ref(&self) -> Option<&ContentRef> {
+        match self {
+            Self::Effect {
+                command_contract_ref,
+                ..
+            } => Some(command_contract_ref),
+            Self::Pure | Self::Read { .. } => None,
+        }
+    }
+
+    /// Returns the evidence contract for a Read or Effect, if present.
     pub fn evidence_contract_ref(&self) -> Option<&ContentRef> {
-        self.read.as_ref().map(|read| &read.evidence_contract_ref)
+        match self {
+            Self::Pure => None,
+            Self::Read {
+                evidence_contract_ref,
+                ..
+            }
+            | Self::Effect {
+                evidence_contract_ref,
+                ..
+            } => Some(evidence_contract_ref),
+        }
     }
 
     /// Returns the adapter binding reference, if present.
     pub fn binding_ref(&self) -> Option<&ContentRef> {
-        self.read.as_ref().map(|read| &read.binding_ref)
+        match self {
+            Self::Pure => None,
+            Self::Read { binding_ref, .. } | Self::Effect { binding_ref, .. } => Some(binding_ref),
+        }
     }
 }
 
@@ -569,7 +671,7 @@ fn program_schema_id() -> Result<SchemaId> {
         SchemaKind::PersistedContract,
         None,
         "mfm-program-document",
-        SchemaVersion::new("2").map_err(|_| ProgramError::InvalidContract)?,
+        SchemaVersion::new("3").map_err(|_| ProgramError::InvalidContract)?,
         SchemaShape::CanonicalJsonTerminal {
             profile: CanonicalJsonProfile::GeneralFloatFree,
         },
@@ -596,6 +698,19 @@ fn validate_program(
         .filter(|declaration| matches!(declaration, Declaration::State(_)))
         .count();
     if state_count > MAX_STATES {
+        return Err(ProgramError::Capacity);
+    }
+    let frame_weight = declarations.iter().try_fold(1_u64, |weight, declaration| {
+        let declaration_weight = match declaration {
+            Declaration::State(state) if state.execution().is_effect() => 2,
+            Declaration::State(_) => 1,
+            Declaration::Match(_) => 0,
+        };
+        weight
+            .checked_add(declaration_weight)
+            .ok_or(ProgramError::Capacity)
+    })?;
+    if frame_weight > MAX_PROGRAM_FRAME_WEIGHT {
         return Err(ProgramError::Capacity);
     }
     let never = never_ref()?;
@@ -733,6 +848,7 @@ fn encode_wire(wire: &ProgramDocumentWire<'_>) -> Result<PlainCanonicalJsonBytes
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
 struct ProgramDocumentWire<'a> {
+    domain: &'static str,
     entry_point_id: &'a str,
     admitted_context_contract_ref: &'a ContentRef,
     root_success_contract_ref: &'a ContentRef,
@@ -749,6 +865,7 @@ impl<'a> ProgramDocumentWire<'a> {
         declarations: &'a [Declaration],
     ) -> Self {
         Self {
+            domain: "mfm.program.v3",
             entry_point_id: entry_point_id.as_str(),
             admitted_context_contract_ref: admitted,
             root_success_contract_ref: success,
@@ -802,13 +919,29 @@ impl<'a> From<&'a StateDeclaration> for StateWire<'a> {
             input_contract_ref: state.input_contract_ref(),
             output_contract_ref: state.output_contract_ref(),
             failure_contract_ref: state.failure_contract_ref(),
-            execution: match &state.execution.read {
-                None => ExecutionWire::Pure,
-                Some(read) => ExecutionWire::Read {
-                    capability_contract_ref: &read.capability_contract_ref,
-                    intent_contract_ref: &read.intent_contract_ref,
-                    evidence_contract_ref: &read.evidence_contract_ref,
-                    binding_ref: &read.binding_ref,
+            execution: match &state.execution {
+                Execution::Pure => ExecutionWire::Pure,
+                Execution::Read {
+                    capability_contract_ref,
+                    intent_contract_ref,
+                    evidence_contract_ref,
+                    binding_ref,
+                } => ExecutionWire::Read {
+                    capability_contract_ref,
+                    intent_contract_ref,
+                    evidence_contract_ref,
+                    binding_ref,
+                },
+                Execution::Effect {
+                    capability_contract_ref,
+                    command_contract_ref,
+                    evidence_contract_ref,
+                    binding_ref,
+                } => ExecutionWire::Effect {
+                    capability_contract_ref,
+                    command_contract_ref,
+                    evidence_contract_ref,
+                    binding_ref,
                 },
             },
             next_index: state.next_index(),
@@ -824,6 +957,12 @@ enum ExecutionWire<'a> {
     Read {
         capability_contract_ref: &'a ContentRef,
         intent_contract_ref: &'a ContentRef,
+        evidence_contract_ref: &'a ContentRef,
+        binding_ref: &'a ContentRef,
+    },
+    Effect {
+        capability_contract_ref: &'a ContentRef,
+        command_contract_ref: &'a ContentRef,
         evidence_contract_ref: &'a ContentRef,
         binding_ref: &'a ContentRef,
     },
@@ -844,6 +983,7 @@ struct MatchVariantWire<'a> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawProgramDocument {
+    domain: String,
     entry_point_id: String,
     admitted_context_contract_ref: RawContentRef,
     root_success_contract_ref: RawContentRef,
@@ -861,6 +1001,9 @@ impl RawProgramDocument {
         ContentRef,
         Vec<Declaration>,
     )> {
+        if self.domain != "mfm.program.v3" {
+            return Err(ProgramError::InvalidContract);
+        }
         let entry =
             EntryPointId::new(self.entry_point_id).map_err(|_| ProgramError::InvalidContract)?;
         let admitted = self.admitted_context_contract_ref.try_checked()?;
@@ -935,6 +1078,12 @@ enum RawExecution {
         evidence_contract_ref: RawContentRef,
         binding_ref: RawContentRef,
     },
+    Effect {
+        capability_contract_ref: RawContentRef,
+        command_contract_ref: RawContentRef,
+        evidence_contract_ref: RawContentRef,
+        binding_ref: RawContentRef,
+    },
 }
 
 impl RawExecution {
@@ -949,6 +1098,17 @@ impl RawExecution {
             } => Execution::read(
                 capability_contract_ref.try_checked()?,
                 intent_contract_ref.try_checked()?,
+                evidence_contract_ref.try_checked()?,
+                binding_ref.try_checked()?,
+            ),
+            Self::Effect {
+                capability_contract_ref,
+                command_contract_ref,
+                evidence_contract_ref,
+                binding_ref,
+            } => Execution::effect(
+                capability_contract_ref.try_checked()?,
+                command_contract_ref.try_checked()?,
                 evidence_contract_ref.try_checked()?,
                 binding_ref.try_checked()?,
             ),

@@ -11,7 +11,7 @@ use std::time::Duration;
 use alloy_primitives::{hex, Address, U256};
 use mfm_evm::{EvmBalanceSource, EvmBlockAnchor, EvmReadIntent, EvmReadSubject, EvmReadValue};
 use mfm_ids::StableId;
-use mfm_runtime::ReadAdapterError;
+use mfm_runtime::AdapterError;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -98,7 +98,7 @@ impl JsonRpcEvmProvider {
         &self,
         method: &str,
         params: serde_json::Value,
-    ) -> Result<Option<serde_json::Value>, ReadAdapterError> {
+    ) -> Result<Option<serde_json::Value>, AdapterError> {
         let response = self
             .http
             .post(self.url.clone())
@@ -110,25 +110,22 @@ impl JsonRpcEvmProvider {
             })
             .send()
             .await
-            .map_err(|_| ReadAdapterError::Unavailable)?;
+            .map_err(|_| AdapterError::Unavailable)?;
         if !response.status().is_success() {
-            return Err(ReadAdapterError::Unavailable);
+            return Err(AdapterError::Unavailable);
         }
         let body = bounded_body(response).await?;
         let envelope: JsonRpcResponse =
-            serde_json::from_slice(&body).map_err(|_| ReadAdapterError::Unavailable)?;
+            serde_json::from_slice(&body).map_err(|_| AdapterError::Unavailable)?;
         match (envelope.result, envelope.error) {
             (Some(result), None) => Ok(Some(result)),
             (None, Some(_)) => Ok(None),
-            _ => Err(ReadAdapterError::Unavailable),
+            _ => Err(AdapterError::Unavailable),
         }
     }
 
     /// Reads one block anchor by the supplied block tag.
-    async fn anchor(
-        &self,
-        tag: serde_json::Value,
-    ) -> Result<EvmProviderResponse, ReadAdapterError> {
+    async fn anchor(&self, tag: serde_json::Value) -> Result<EvmProviderResponse, AdapterError> {
         let Some(block) = self
             .call("eth_getBlockByNumber", serde_json::json!([tag, false]))
             .await?
@@ -139,12 +136,12 @@ impl JsonRpcEvmProvider {
             .get("number")
             .and_then(serde_json::Value::as_str)
             .and_then(quantity_to_u64)
-            .ok_or(ReadAdapterError::Unavailable)?;
+            .ok_or(AdapterError::Unavailable)?;
         let hash = block
             .get("hash")
             .and_then(serde_json::Value::as_str)
             .filter(|hash| is_block_hash(hash))
-            .ok_or(ReadAdapterError::Unavailable)?;
+            .ok_or(AdapterError::Unavailable)?;
         Ok(returned(EvmReadValue::Anchor {
             number: number.to_string(),
             hash: hash.to_owned(),
@@ -159,8 +156,8 @@ impl JsonRpcEvmProvider {
         source: &EvmBalanceSource,
         anchor: &EvmBlockAnchor,
         data: String,
-    ) -> Result<Option<String>, ReadAdapterError> {
-        let token = source.token.as_deref().ok_or(ReadAdapterError::Internal)?;
+    ) -> Result<Option<String>, AdapterError> {
+        let token = source.token.as_deref().ok_or(AdapterError::Internal)?;
         let to = checked_address(token)?;
         let tag = block_tag(anchor.number())?;
         let Some(result) = self
@@ -172,7 +169,7 @@ impl JsonRpcEvmProvider {
         else {
             return Ok(None);
         };
-        let word = result.as_str().ok_or(ReadAdapterError::Unavailable)?;
+        let word = result.as_str().ok_or(AdapterError::Unavailable)?;
         if word == "0x" {
             return Ok(None);
         }
@@ -180,10 +177,7 @@ impl JsonRpcEvmProvider {
     }
 
     /// Routes one checked Read subject to its exact RPC call.
-    async fn observe(
-        &self,
-        subject: &EvmReadSubject,
-    ) -> Result<EvmProviderResponse, ReadAdapterError> {
+    async fn observe(&self, subject: &EvmReadSubject) -> Result<EvmProviderResponse, AdapterError> {
         match subject {
             EvmReadSubject::ChainIdentity => {
                 let Some(result) = self.call("eth_chainId", serde_json::json!([])).await? else {
@@ -192,7 +186,7 @@ impl JsonRpcEvmProvider {
                 let chain_id = result
                     .as_str()
                     .and_then(quantity_to_u64)
-                    .ok_or(ReadAdapterError::Unavailable)?;
+                    .ok_or(AdapterError::Unavailable)?;
                 Ok(returned(EvmReadValue::ChainId(chain_id)))
             }
             EvmReadSubject::InitialAnchor => self.anchor(serde_json::json!("latest")).await,
@@ -208,7 +202,7 @@ impl JsonRpcEvmProvider {
                 let units = result
                     .as_str()
                     .and_then(quantity_to_decimal)
-                    .ok_or(ReadAdapterError::Unavailable)?;
+                    .ok_or(AdapterError::Unavailable)?;
                 Ok(returned(EvmReadValue::RawUnits(units)))
             }
             EvmReadSubject::TokenDecimals { source, anchor } => {
@@ -218,13 +212,13 @@ impl JsonRpcEvmProvider {
                 else {
                     return Ok(EvmProviderResponse::SafeFailure);
                 };
-                let decimals = word_to_u8(&word).ok_or(ReadAdapterError::Unavailable)?;
+                let decimals = word_to_u8(&word).ok_or(AdapterError::Unavailable)?;
                 Ok(returned(EvmReadValue::TokenDecimals(decimals)))
             }
             EvmReadSubject::TokenBalance { source, anchor } => {
                 let holder = Address::from_str(&source.address).map_err(|_| {
                     // A malformed address is a local domain-value defect, never a node error.
-                    ReadAdapterError::Internal
+                    AdapterError::Internal
                 })?;
                 let Some(word) = self
                     .contract_call(source, anchor, balance_of_calldata(&holder))
@@ -232,7 +226,7 @@ impl JsonRpcEvmProvider {
                 else {
                     return Ok(EvmProviderResponse::SafeFailure);
                 };
-                let units = quantity_to_decimal(&word).ok_or(ReadAdapterError::Unavailable)?;
+                let units = quantity_to_decimal(&word).ok_or(AdapterError::Unavailable)?;
                 Ok(returned(EvmReadValue::RawUnits(units)))
             }
             // Confirmation reads the committed number, never the moving head.
@@ -260,15 +254,14 @@ impl EvmProvider for JsonRpcEvmProvider {
         &'a self,
         operation: StableId,
         request_bytes: Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = Result<EvmProviderResponse, ReadAdapterError>> + Send + 'a>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<EvmProviderResponse, AdapterError>> + Send + 'a>> {
         Box::pin(async move {
             // The request bytes are the serialized intent: decode with the domain's own
             // checked deserializer so a subject change is a compile error, not wire drift.
             let intent: EvmReadIntent =
-                serde_json::from_slice(&request_bytes).map_err(|_| ReadAdapterError::Internal)?;
+                serde_json::from_slice(&request_bytes).map_err(|_| AdapterError::Internal)?;
             if intent.operation_and_chain_id().0 != operation.as_str() {
-                return Err(ReadAdapterError::Internal);
+                return Err(AdapterError::Internal);
             }
             self.observe(intent.subject()).await
         })
@@ -291,21 +284,21 @@ struct JsonRpcResponse {
     error: Option<serde_json::Value>,
 }
 
-async fn bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, ReadAdapterError> {
+async fn bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, AdapterError> {
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
     {
-        return Err(ReadAdapterError::Unavailable);
+        return Err(AdapterError::Unavailable);
     }
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| ReadAdapterError::Unavailable)?
+        .map_err(|_| AdapterError::Unavailable)?
     {
         if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
-            return Err(ReadAdapterError::Unavailable);
+            return Err(AdapterError::Unavailable);
         }
         body.extend_from_slice(&chunk);
     }
@@ -317,10 +310,10 @@ const fn returned(value: EvmReadValue) -> EvmProviderResponse {
 }
 
 /// Parses a 20-byte address and re-renders it; addresses are never spliced as text.
-fn checked_address(value: &str) -> Result<String, ReadAdapterError> {
+fn checked_address(value: &str) -> Result<String, AdapterError> {
     Address::from_str(value)
         .map(|address| format!("0x{}", hex::encode(address)))
-        .map_err(|_| ReadAdapterError::Internal)
+        .map_err(|_| AdapterError::Internal)
 }
 
 fn decimals_calldata() -> String {
@@ -332,11 +325,11 @@ fn balance_of_calldata(holder: &Address) -> String {
 }
 
 /// Renders one checked decimal block number as its `0x` quantity tag.
-fn block_tag(number: &str) -> Result<String, ReadAdapterError> {
+fn block_tag(number: &str) -> Result<String, AdapterError> {
     number
         .parse::<u64>()
         .map(|number| format!("0x{number:x}"))
-        .map_err(|_| ReadAdapterError::Internal)
+        .map_err(|_| AdapterError::Internal)
 }
 
 fn hex_digits(value: &str) -> Option<&str> {
