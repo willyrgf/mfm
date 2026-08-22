@@ -64,6 +64,13 @@ struct EffectIdentityContainer {
     effect_ids: Vec<mfm_ids::EffectId>,
 }
 
+#[derive(Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct FixedPublicBytes {
+    #[mfm(minimum_bytes = 2, maximum_bytes = 2)]
+    value: String,
+}
+
 #[test]
 fn surviving_value_derives_generate_complete_schema_descriptors() {
     assert!(External::<Payload>::schema_descriptor().is_ok());
@@ -82,6 +89,15 @@ fn surviving_value_derives_generate_complete_schema_descriptors() {
         .expect("identity")
         .as_str()
         .contains("\"grammar\":\"effect_id\""));
+    let bytes = FixedPublicBytes::schema_descriptor().expect("bytes descriptor");
+    assert!(bytes
+        .identity()
+        .validate_canonical_value(br#"{"value":"AQI"}"#)
+        .is_ok());
+    assert!(bytes
+        .identity()
+        .validate_canonical_value(br#"{"value":"AQ"}"#)
+        .is_err());
 }
 
 #[test]

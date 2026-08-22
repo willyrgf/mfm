@@ -1994,8 +1994,12 @@ dependencies = [
 name = "mfm-keystore"
 version = "0.1.0"
 dependencies = [
+ "k256",
  "mfm-ids",
+ "mfm-signing",
+ "serde",
  "thiserror",
+ "tokio",
  "trybuild",
  "zeroize",
 ]
@@ -2088,8 +2092,13 @@ dependencies = [
 name = "mfm-signing"
 version = "0.1.0"
 dependencies = [
+ "k256",
+ "mfm-canonical",
  "mfm-ids",
+ "mfm-program-derive",
+ "mfm-values",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

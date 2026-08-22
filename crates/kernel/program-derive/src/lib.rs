@@ -248,7 +248,10 @@ fn two_generic_types<'a>(
 }
 
 fn reject_known_secret_type(ty: &Type) -> syn::Result<()> {
-    let text = quote!(#ty).to_string().replace("SecretFree", "");
+    let text = quote!(#ty)
+        .to_string()
+        .replace("SecretFree", "")
+        .replace("PublicSigningKey", "");
     for marker in [
         "Secret",
         "Password",

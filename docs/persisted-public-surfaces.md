@@ -48,6 +48,12 @@ A selected State and a prepared pending Effect both render as `Runnable`; Effect
 and identity are not added to the public view.
 Client JSON preserves that sum and embeds the terminal canonical bytes as a raw JSON value rather
 than a quoted string.
+
+`PublicSigningKey` and `PublicSignerIdentity` are content-addressed public MFM values. The key value
+contains only the fixed algorithm ID and exact 65-byte uncompressed SEC1 public key; its content ref
+is the key-instance identity. Signing digests, compact signatures, recovery IDs, private scalars,
+owner channels, and signer handles have no persisted serde surface.
+
 Ambiguous start/progress acknowledgement is the only shared use-case error carrying data. Both
 client transports use the same Application-owned error serializer and the exact recovery envelopes
 frozen under `docs/contracts/client-surface/`; an identified REST start error may additionally carry
