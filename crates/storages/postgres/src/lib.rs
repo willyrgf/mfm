@@ -8,46 +8,58 @@ use std::future::Future;
 use std::time::Duration;
 
 use mfm_canonical::sha256_digest_bytes;
+use mfm_config::{
+    ConfigDigest, ConfigFuture, ConfigImportResult, ConfigName, ConfigRepository, ConfigRevision,
+};
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId};
 use mfm_journal::{
     frame_head_digest, EncodedRunFrame, StoredRunBytes, MAX_FRAME_BYTES, MAX_RUN_BYTES,
     MAX_RUN_FRAMES,
 };
-use mfm_store::{AppendResult, Store, StoreError};
-use sqlx::postgres::{PgArguments, PgConnectOptions, PgPoolOptions, PgRow};
-#[cfg(test)]
-use sqlx::Executor;
+use mfm_store::{AppendResult, RunIndex, RunIndexError, RunPage, RunPageLimit, Store, StoreError};
+use sqlx::postgres::{PgArguments, PgPoolOptions, PgRow};
 use sqlx::{Arguments, Connection, PgConnection, PgPool, Row};
 
 const SCHEMA_CONTRACT: &str = "mfm.run-history-postgres.v1";
 
-/// PostgreSQL Store after its connection gate has succeeded.
-pub struct PostgresStore {
+mod config;
+mod index;
+mod locator;
+mod provision;
+pub use locator::{
+    AdminPostgresLocator, PostgresLocatorError, RuntimePostgresLocator, MAX_POSTGRES_LOCATOR_BYTES,
+};
+pub use provision::{provision_postgres, ProvisionError};
+
+/// Complete PostgreSQL persistence backend after its connection gate succeeds.
+pub struct PostgresBackend {
     pool: PgPool,
 }
 
 /// Redaction-safe production-open failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum StoreOpenError {
+pub enum PostgresOpenError {
     /// The static schema or durability posture is incompatible.
-    #[error("postgres store is incompatible")]
+    #[error("postgres backend is incompatible")]
     Incompatible,
     /// The database could not be observed.
-    #[error("postgres store is unavailable")]
+    #[error("postgres backend is unavailable")]
     Unavailable,
 }
 
-impl PostgresStore {
-    /// Connects and verifies the static schema and durability prerequisites.
-    pub async fn connect(database_url: &str) -> std::result::Result<Self, StoreOpenError> {
+impl PostgresBackend {
+    /// Connects and verifies both static schemas and durability prerequisites.
+    pub async fn connect(
+        locator: &RuntimePostgresLocator,
+    ) -> std::result::Result<Self, PostgresOpenError> {
         assert_send_static::<PgRow>();
         assert_send_static::<PgArguments>();
-        let options: PgConnectOptions = database_url
-            .parse()
-            .map_err(|_| StoreOpenError::Unavailable)?;
+        let options = locator
+            .connect_options("mfm-runtime-postgres")
+            .map_err(|_| PostgresOpenError::Unavailable)?;
         let mut gate_connection = PgConnection::connect_with(&options)
             .await
-            .map_err(|_| StoreOpenError::Unavailable)?;
+            .map_err(|_| PostgresOpenError::Unavailable)?;
         verify_connection(&mut gate_connection)
             .await
             .map_err(classify_gate_error)?;
@@ -66,16 +78,33 @@ impl PostgresStore {
             .map_err(classify_open_error)?;
         Ok(Self { pool })
     }
-}
 
-const fn classify_gate_error(error: GateError) -> StoreOpenError {
-    match error {
-        GateError::Incompatible => StoreOpenError::Incompatible,
-        GateError::Unavailable => StoreOpenError::Unavailable,
+    #[cfg(test)]
+    pub(crate) const fn test_pool(&self) -> &PgPool {
+        &self.pool
     }
 }
 
-impl Store for PostgresStore {
+const fn classify_gate_error(error: GateError) -> PostgresOpenError {
+    match error {
+        GateError::Incompatible => PostgresOpenError::Incompatible,
+        GateError::Unavailable => PostgresOpenError::Unavailable,
+    }
+}
+
+/// Counts every `mfm_`-prefixed relation, indexes included, in the public schema.
+async fn mfm_relation_count(connection: &mut PgConnection) -> std::result::Result<i64, GateError> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND left(c.relname, 4) = 'mfm_'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)
+}
+
+impl Store for PostgresBackend {
     fn load_run<'a>(
         &'a self,
         run_id: &'a RunId,
@@ -96,6 +125,49 @@ impl Store for PostgresStore {
         Box<dyn Future<Output = std::result::Result<AppendResult, StoreError>> + Send + 'a>,
     > {
         Box::pin(async move { append_run(&self.pool, frame, CommitFault::None).await })
+    }
+}
+
+impl RunIndex for PostgresBackend {
+    fn list_runs<'a>(
+        &'a self,
+        after: Option<&'a RunId>,
+        limit: RunPageLimit,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<RunPage, RunIndexError>> + Send + 'a>> {
+        Box::pin(async move { index::list_runs(&self.pool, after, limit).await })
+    }
+}
+
+impl ConfigRepository for PostgresBackend {
+    fn import_config<'a>(
+        &'a self,
+        revision: &'a ConfigRevision,
+    ) -> ConfigFuture<'a, ConfigImportResult> {
+        Box::pin(async move {
+            config::import_config(&self.pool, revision, config::MutationCommitFault::None).await
+        })
+    }
+
+    fn load_config<'a>(
+        &'a self,
+        name: &'a ConfigName,
+        digest: &'a ConfigDigest,
+    ) -> ConfigFuture<'a, Option<ConfigRevision>> {
+        Box::pin(async move { config::load_config(&self.pool, name, digest).await })
+    }
+
+    fn list_configs(&self) -> ConfigFuture<'_, Vec<ConfigRevision>> {
+        Box::pin(async move { config::list_configs(&self.pool).await })
+    }
+
+    fn delete_config<'a>(
+        &'a self,
+        name: &'a ConfigName,
+        digest: &'a ConfigDigest,
+    ) -> ConfigFuture<'a, ()> {
+        Box::pin(async move {
+            config::delete_config(&self.pool, name, digest, config::MutationCommitFault::None).await
+        })
     }
 }
 
@@ -141,16 +213,16 @@ impl GateError {
     }
 }
 
-fn classify_open_error(error: sqlx::Error) -> StoreOpenError {
+fn classify_open_error(error: sqlx::Error) -> PostgresOpenError {
     match &error {
         sqlx::Error::Protocol(message) if message.contains("mfm-postgres-gate:incompatible") => {
-            StoreOpenError::Incompatible
+            PostgresOpenError::Incompatible
         }
-        _ => StoreOpenError::Unavailable,
+        _ => PostgresOpenError::Unavailable,
     }
 }
 
-async fn verify_connection(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
+async fn verify_durability(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
     let durable: (bool, String, String) = sqlx::query_as(
         "SELECT NOT pg_is_in_recovery(), current_setting('fsync'), \
          current_setting('full_page_writes')",
@@ -161,7 +233,17 @@ async fn verify_connection(connection: &mut PgConnection) -> std::result::Result
     if !durability_matches(durable.0, &durable.1, &durable.2) {
         return Err(GateError::Incompatible);
     }
+    Ok(())
+}
 
+async fn verify_connection(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
+    verify_durability(connection).await?;
+    verify_runtime_authority(connection).await?;
+    verify_run_schema(connection).await?;
+    verify_config_schema(connection).await
+}
+
+async fn verify_run_schema(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
     let relations: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT c.relname, c.relkind::text, c.relpersistence::text \
          FROM pg_catalog.pg_class c \
@@ -182,6 +264,12 @@ async fn verify_connection(connection: &mut PgConnection) -> std::result::Result
     if relations != expected_relations {
         return Err(GateError::Incompatible);
     }
+    verify_schema_ownership(
+        connection,
+        "public",
+        &["mfm_store_schema", "mfm_run_frames", "mfm_run_heads"],
+    )
+    .await?;
 
     let columns: Vec<(String, String, String, bool, Option<String>)> = sqlx::query_as(
         "SELECT c.relname, a.attname, t.typname, a.attnotnull, coll.collname \
@@ -283,6 +371,287 @@ async fn verify_connection(connection: &mut PgConnection) -> std::result::Result
     .await
     .map_err(|_| GateError::Unavailable)?;
     if !constraints_match(&constraints) {
+        return Err(GateError::Incompatible);
+    }
+    Ok(())
+}
+
+type RuntimeRoleRow = (String, bool, bool, bool, bool, bool, bool, bool);
+
+async fn verify_runtime_authority(
+    connection: &mut PgConnection,
+) -> std::result::Result<(), GateError> {
+    let role: Option<RuntimeRoleRow> = sqlx::query_as(
+        "SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, \
+                rolcanlogin, rolreplication, rolbypassrls \
+         FROM pg_catalog.pg_roles WHERE rolname = current_user",
+    )
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)?;
+    let Some(role) = role else {
+        return Err(GateError::Incompatible);
+    };
+    if role.0 != "mfm_runtime"
+        || role.1
+        || role.2
+        || role.3
+        || role.4
+        || !role.5
+        || role.6
+        || role.7
+    {
+        return Err(GateError::Incompatible);
+    }
+    let memberships: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_catalog.pg_auth_members m \
+         JOIN pg_catalog.pg_roles r ON r.oid = m.member OR r.oid = m.roleid \
+         WHERE r.rolname = 'mfm_runtime'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)?;
+    if memberships != 0 {
+        return Err(GateError::Incompatible);
+    }
+    let database: (bool, bool, bool) = sqlx::query_as(
+        "SELECT has_database_privilege(current_user, current_database(), 'CONNECT'), \
+                has_database_privilege(current_user, current_database(), 'CREATE'), \
+                has_database_privilege(current_user, current_database(), 'TEMPORARY')",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)?;
+    if database != (true, false, false) {
+        return Err(GateError::Incompatible);
+    }
+    let owns_objects: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+           SELECT 1 FROM pg_catalog.pg_database d \
+            WHERE d.datname = current_database() AND pg_get_userbyid(d.datdba) = current_user \
+           UNION ALL \
+           SELECT 1 FROM pg_catalog.pg_namespace n WHERE pg_get_userbyid(n.nspowner) = current_user \
+           UNION ALL \
+           SELECT 1 FROM pg_catalog.pg_class c \
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+            WHERE pg_get_userbyid(c.relowner) = current_user \
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+         )",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)?;
+    if owns_objects {
+        return Err(GateError::Incompatible);
+    }
+    for schema in ["public", "mfm_config"] {
+        let schema_privileges: (bool, bool) = sqlx::query_as(
+            "SELECT has_schema_privilege(current_user, $1, 'USAGE'), \
+                    has_schema_privilege(current_user, $1, 'CREATE')",
+        )
+        .bind(schema)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| GateError::Unavailable)?;
+        if schema_privileges != (true, false) {
+            return Err(GateError::Incompatible);
+        }
+    }
+    let accepted =
+        verify_run_privileges(connection).await? && verify_config_privileges(connection).await?;
+    accepted.then_some(()).ok_or(GateError::Incompatible)
+}
+
+async fn verify_run_privileges(
+    connection: &mut PgConnection,
+) -> std::result::Result<bool, GateError> {
+    let marker = runtime_table_privilege_mask(connection, "public.mfm_store_schema").await?;
+    let frames = runtime_table_privilege_mask(connection, "public.mfm_run_frames").await?;
+    let heads = runtime_table_privilege_mask(connection, "public.mfm_run_heads").await?;
+    Ok(marker == TABLE_SELECT
+        && frames == TABLE_SELECT | TABLE_INSERT
+        && heads == TABLE_SELECT | TABLE_INSERT | TABLE_UPDATE)
+}
+
+async fn verify_config_privileges(
+    connection: &mut PgConnection,
+) -> std::result::Result<bool, GateError> {
+    let marker = runtime_table_privilege_mask(connection, "mfm_config.mfm_config_schema").await?;
+    let revisions = runtime_table_privilege_mask(connection, "mfm_config.config_revisions").await?;
+    Ok(marker == TABLE_SELECT && revisions == TABLE_SELECT | TABLE_INSERT | TABLE_DELETE)
+}
+
+const TABLE_SELECT: i32 = 1;
+const TABLE_INSERT: i32 = 2;
+const TABLE_UPDATE: i32 = 4;
+const TABLE_DELETE: i32 = 8;
+
+async fn runtime_table_privilege_mask(
+    connection: &mut PgConnection,
+    table: &str,
+) -> std::result::Result<i32, GateError> {
+    sqlx::query_scalar(
+        "SELECT has_table_privilege('mfm_runtime', $1, 'SELECT')::int \
+              + has_table_privilege('mfm_runtime', $1, 'INSERT')::int * 2 \
+              + has_table_privilege('mfm_runtime', $1, 'UPDATE')::int * 4 \
+              + has_table_privilege('mfm_runtime', $1, 'DELETE')::int * 8 \
+              + has_table_privilege('mfm_runtime', $1, 'TRUNCATE')::int * 16 \
+              + has_table_privilege('mfm_runtime', $1, 'REFERENCES')::int * 32 \
+              + has_table_privilege('mfm_runtime', $1, 'TRIGGER')::int * 64",
+    )
+    .bind(table)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|error| {
+        if is_undefined_schema_object(&error) {
+            GateError::Incompatible
+        } else {
+            GateError::Unavailable
+        }
+    })
+}
+
+async fn verify_schema_ownership(
+    connection: &mut PgConnection,
+    schema: &str,
+    relations: &[&str],
+) -> std::result::Result<(), GateError> {
+    let owners: Vec<String> = sqlx::query_scalar(
+        "SELECT pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n \
+         WHERE n.nspname = $1 \
+         UNION \
+         SELECT pg_get_userbyid(c.relowner) FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = ANY($2) \
+         ORDER BY 1",
+    )
+    .bind(schema)
+    .bind(relations)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)?;
+    if owners.len() != 1 || owners[0] == "mfm_runtime" {
+        return Err(GateError::Incompatible);
+    }
+    Ok(())
+}
+
+async fn verify_config_schema(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
+    let relations: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT c.relname, c.relkind::text, c.relpersistence::text \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'mfm_config' AND c.relkind <> 'i' ORDER BY c.relname",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)?;
+    if relations
+        != [
+            relation("config_revisions", "r", "p"),
+            relation("mfm_config_schema", "r", "p"),
+        ]
+    {
+        return Err(GateError::Incompatible);
+    }
+    verify_schema_ownership(
+        connection,
+        "mfm_config",
+        &["mfm_config_schema", "config_revisions"],
+    )
+    .await?;
+    let columns: Vec<(String, String, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT c.relname, a.attname, t.typname, a.attnotnull, coll.collname \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid \
+         JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
+         LEFT JOIN pg_catalog.pg_collation coll ON coll.oid = a.attcollation \
+         WHERE n.nspname = 'mfm_config' \
+           AND c.relname IN ('mfm_config_schema','config_revisions') \
+           AND a.attnum > 0 AND NOT a.attisdropped ORDER BY c.relname, a.attnum",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)?;
+    if columns
+        != [
+            column("config_revisions", "config_name", "text", true, Some("C")),
+            column("config_revisions", "config_digest", "text", true, Some("C")),
+            column("config_revisions", "canonical", "bytea", true, None),
+            column(
+                "mfm_config_schema",
+                "schema_contract",
+                "text",
+                true,
+                Some("C"),
+            ),
+        ]
+    {
+        return Err(GateError::Incompatible);
+    }
+    let markers: Vec<String> =
+        sqlx::query_scalar("SELECT schema_contract FROM mfm_config.mfm_config_schema ORDER BY 1")
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(|error| {
+                if is_undefined_schema_object(&error) {
+                    GateError::Incompatible
+                } else {
+                    GateError::Unavailable
+                }
+            })?;
+    if markers != ["mfm.config-postgres.v2"] {
+        return Err(GateError::Incompatible);
+    }
+    let indexes: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT table_class.relname, index_class.relname, pg_get_indexdef(index_class.oid) \
+         FROM pg_catalog.pg_index idx \
+         JOIN pg_catalog.pg_class table_class ON table_class.oid = idx.indrelid \
+         JOIN pg_catalog.pg_class index_class ON index_class.oid = idx.indexrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = table_class.relnamespace \
+         WHERE n.nspname = 'mfm_config' ORDER BY table_class.relname, index_class.relname",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)?;
+    if indexes
+        != [
+            index(
+                "config_revisions",
+                "mfm_config_revisions_pkey",
+                "CREATE UNIQUE INDEX mfm_config_revisions_pkey ON mfm_config.config_revisions USING btree (config_name, config_digest)",
+            ),
+            index(
+                "mfm_config_schema",
+                "mfm_config_schema_pkey",
+                "CREATE UNIQUE INDEX mfm_config_schema_pkey ON mfm_config.mfm_config_schema USING btree (schema_contract)",
+            ),
+        ]
+    {
+        return Err(GateError::Incompatible);
+    }
+    let constraints: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT c.relname, con.conname, con.contype::text, pg_get_constraintdef(con.oid, false) \
+         FROM pg_catalog.pg_constraint con \
+         JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'mfm_config' AND con.contype IN ('c','p') \
+         ORDER BY c.relname, con.conname",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)?;
+    let expected = [
+        constraint("config_revisions", "mfm_config_revisions_bytes_check", "c", "CHECK (((octet_length(canonical) >= 1) AND (octet_length(canonical) <= 262144)))"),
+        constraint("config_revisions", "mfm_config_revisions_digest_check", "c", "CHECK ((config_digest ~ '^content:sha256-jcs-v1:[0-9a-f]{64}$'::text))"),
+        constraint("config_revisions", "mfm_config_revisions_name_grammar_check", "c", "CHECK (((config_name ~ '^[a-z0-9][a-z0-9-]*$'::text) AND (\"right\"(config_name, 1) <> '-'::text)))"),
+        constraint("config_revisions", "mfm_config_revisions_name_length_check", "c", "CHECK (((octet_length(config_name) >= 1) AND (octet_length(config_name) <= 64)))"),
+        constraint("config_revisions", "mfm_config_revisions_pkey", "p", "PRIMARY KEY (config_name, config_digest)"),
+        constraint("mfm_config_schema", "mfm_config_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.config-postgres.v2'::text))"),
+        constraint("mfm_config_schema", "mfm_config_schema_pkey", "p", "PRIMARY KEY (schema_contract)"),
+    ];
+    if constraints != expected {
         return Err(GateError::Incompatible);
     }
     Ok(())
@@ -921,8 +1290,8 @@ fn classify_precommit_sql(error: sqlx::Error) -> StoreError {
 
 fn assert_send_static<T: Send + 'static>() {}
 
-#[cfg(test)]
-const MIGRATION_SQL: &str = include_str!("../migrations/0001_runtime_journal_store.sql");
+const RUN_SCHEMA_SQL: &str = include_str!("../migrations/run_history_postgres_v1.sql");
+const CONFIG_SCHEMA_SQL: &str = include_str!("../migrations/config_postgres_v2.sql");
 
 #[cfg(test)]
 #[path = "../../../kernel/store/tests/support/scenarios.rs"]
@@ -931,13 +1300,6 @@ mod store_scenarios;
 #[cfg(test)]
 #[path = "../../../kernel/store/tests/support/hostile.rs"]
 mod store_hostile;
-
-#[cfg(test)]
-async fn install_fresh_schema(
-    connection: &mut PgConnection,
-) -> std::result::Result<(), sqlx::Error> {
-    connection.execute(MIGRATION_SQL).await.map(|_| ())
-}
 
 #[cfg(test)]
 mod tests;

@@ -15,6 +15,12 @@ use mfm_evm::{
 use mfm_ids::StableId;
 use mfm_runtime::{ReadAdapterError, RuntimeAssemblyBuilder};
 
+mod json_rpc;
+
+pub use json_rpc::{
+    EvmAdapterLocator, EvmProviderBuildError, JsonRpcEvmProvider, MAX_EVM_ADAPTER_LOCATOR_BYTES,
+};
+
 const MAX_EVM_REQUEST_BYTES: usize = 512 * 1024;
 
 /// Typed provider response after bounded authenticated ingress.
@@ -31,6 +37,33 @@ pub enum EvmProviderResponse {
 }
 
 /// Provider transport paired with one immutable public target.
+///
+/// `request_bytes` is one serialized [`mfm_evm::EvmReadIntent`]. Decode it with the domain's own
+/// checked deserializer; do not mirror that wire. Every operation below must observe the exact
+/// subject the intent carries, on the target chain the adapter already checked.
+///
+/// | Operation | Subject | Required observation |
+/// | --- | --- | --- |
+/// | `mfm.evm.read-chain-identity@1` | `ChainIdentity` | the chain id |
+/// | `mfm.evm.read-initial-anchor@1` | `InitialAnchor` | the anchor of the current head block |
+/// | `mfm.evm.read-native-balance@1` | `NativeBalance { source, anchor }` | the native balance **at** `anchor` |
+/// | `mfm.evm.read-token-decimals@1` | `TokenDecimals { source, anchor }` | the token decimal scale **at** `anchor` |
+/// | `mfm.evm.read-token-balance@1` | `TokenBalance { source, anchor }` | the token balance **at** `anchor` |
+/// | `mfm.evm.confirm-balance-anchor@1` | `ConfirmAnchor { source, anchor }` | the anchor of the block **that `anchor.number()` names** |
+///
+/// The confirmation is the one contract an implementor is most likely to get wrong. It must
+/// re-observe the named committed block. It must never return the head. The EVM domain compares
+/// the returned number and hash to the anchor it pinned before the balance reads: an equal pair
+/// proves the block still stands, and a different hash at the same number proves a reorg replaced
+/// it. A head read would instead report the ordinary progression of the chain, so every collection
+/// on a chain that produces blocks would fail with stage `confirm_anchor`.
+///
+/// All balance and decimal reads are anchored for the same reason: one collection must observe one
+/// block, so its sources cannot tear across chain progression.
+///
+/// Return [`EvmProviderResponse::IntegrityBlocked`] only for authenticated external evidence of an
+/// integrity block. A local decode, address, or operation mismatch is [`ReadAdapterError::Internal`]
+/// before any IO. Reads must be duplicate-safe: a dropped run repeats the call.
 pub trait EvmProvider: Send + Sync + 'static {
     /// Performs one observational request for the supplied operation.
     fn request<'a>(

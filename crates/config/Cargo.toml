@@ -1,28 +1,28 @@
 [package]
-name = "mfm-store"
+name = "mfm-config"
 version = "0.1.0"
 edition = "2021"
-description = "Mechanical append-only Store for MFM"
+description = "Opaque versioned configuration custody for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
 
 [package.metadata.mfm]
-layer = "kernel"
+layer = "port"
 domain-facing = false
-binary-facing = false
+binary-facing = true
 
 [lib]
-name = "mfm_store"
+name = "mfm_config"
 path = "src/lib.rs"
 
 [dependencies]
-mfm-ids = { path = "../ids" }
-mfm-journal = { path = "../journal" }
+mfm-ids = { path = "../kernel/ids" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-mfm-canonical = { path = "../canonical" }
+mfm-canonical = { path = "../kernel/canonical" }
+serde_json = { workspace = true }
 tokio = { workspace = true }

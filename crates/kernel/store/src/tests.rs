@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc as StdArc, Barrier};
 use std::task::{Context, Poll, Waker};
@@ -437,7 +437,7 @@ fn absent_and_private_empty_loads_are_unavailable_without_tokio() {
     let absent = MemoryStore::new();
     let empty_id = run(28);
     let empty = MemoryStore {
-        runs: Mutex::new(HashMap::from([(
+        runs: Mutex::new(BTreeMap::from([(
             empty_id.clone(),
             Arc::new(Mutex::new(MemoryRun {
                 frames: Vec::new(),

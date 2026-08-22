@@ -3,13 +3,17 @@ use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId};
 use mfm_journal::{
     EncodedRunFrame, JournalHistory, OutcomeKind, MAX_FRAME_BYTES, MAX_RUN_BYTES, MAX_RUN_FRAMES,
 };
-use mfm_store::{AppendResult, MemoryStore, Store};
+use mfm_store::{AppendResult, MemoryStore, RunIndex, RunPageLimit, Store};
 
 #[path = "support/scenarios.rs"]
 mod scenarios;
 
 fn run() -> RunId {
     RunId::from_digest(DigestBytes::from_array([7; 32]))
+}
+
+fn run_with_byte(byte: u8) -> RunId {
+    RunId::from_digest(DigestBytes::from_array([byte; 32]))
 }
 
 fn reference(name: &str, bytes: &[u8]) -> ContentRef {
@@ -102,4 +106,55 @@ fn store_capacity_constants_are_the_frozen_format_bounds() {
     assert_eq!(MAX_FRAME_BYTES, 3 * 8_388_608 + 65_536);
     assert_eq!(MAX_RUN_FRAMES, 65_536);
     assert_eq!(MAX_RUN_BYTES, 512 * 1024 * 1024);
+}
+
+#[test]
+fn run_page_limits_are_bounded() {
+    assert!(RunPageLimit::new(0).is_err());
+    assert!(RunPageLimit::new(mfm_store::MAX_RUN_PAGE_ITEMS + 1).is_err());
+}
+
+#[tokio::test]
+async fn memory_run_index_pages_only_mechanical_heads_in_run_id_order() {
+    let store = MemoryStore::new();
+    for byte in [5, 1, 3] {
+        let run_id = run_with_byte(byte);
+        let program = b"{}";
+        let context = b"[]";
+        let frame = EncodedRunFrame::admission(
+            &run_id,
+            &reference("mfm.test.program", program),
+            program,
+            &reference("mfm.test.context", context),
+            context,
+        )
+        .expect("genesis");
+        assert_eq!(
+            store.append_run(&frame).await.expect("append"),
+            AppendResult::Inserted
+        );
+    }
+
+    let limit = RunPageLimit::new(2).expect("limit");
+    let first = store.list_runs(None, limit).await.expect("first page");
+    assert_eq!(
+        first
+            .items()
+            .iter()
+            .map(|summary| summary.run_id().clone())
+            .collect::<Vec<_>>(),
+        [run_with_byte(1), run_with_byte(3)]
+    );
+    for summary in first.items() {
+        assert_eq!(summary.head_sequence(), 1);
+        assert!(summary.total_bytes() > 0);
+        assert_eq!(summary.head_digest().algorithm(), DigestAlgorithm::Sha256V1);
+    }
+    let second = store
+        .list_runs(first.next_after(), limit)
+        .await
+        .expect("second page");
+    assert_eq!(second.items().len(), 1);
+    assert_eq!(second.items()[0].run_id(), &run_with_byte(5));
+    assert!(second.next_after().is_none());
 }

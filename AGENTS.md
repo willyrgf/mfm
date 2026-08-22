@@ -14,6 +14,8 @@ owns verification selection and `nixfied.nix` owns the executable task graph.
 - Never log, print, or persist passwords, mnemonics, private keys, or credentials.
 - Preserve crate boundaries and keep libraries usable without the CLI.
 - Add dependencies only with strong justification.
+- Do not commit third-party vendored source or use external git/path patches without explicit user
+  approval.
 - Treat keystore and cryptographic changes as high risk and strengthen tests explicitly.
 
 ## When architecture is unclear

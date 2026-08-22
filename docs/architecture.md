@@ -9,11 +9,12 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Program | typed Operation authoring, sole private lowering draft, checked v2 State/Match graph, `State`, `PureState`, `ReadState`, `Never` | registries, IO, scheduling |
 | Runtime | immutable assembly, Program association, sole fold, typed execution/progression | persisted wire or physical storage |
 | Journal | exact frame encoding and complete-history qualification | domain interpretation or persistence IO |
-| Store | object-safe complete load and atomic append | Program, State, capability, or reducer semantics |
+| Store / run index ports | object-safe complete load and atomic append; separate mechanical current-head enumeration | Program, State, capability, reducer, config semantics, or run-status derivation |
+| Config repository port | immutable named revisions, exact import/load/delete, and complete listing | config-wire parsing, Program semantics, merging, defaults, or revocation |
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
 | Live adapters | bounded provider ingress and direct typed callback registration | domain planning or State registration |
-| Application | Portfolio plan/start and direct Runtime resume/read facade | sessions, frame inspection, status derivation |
-| Binaries | one-shot CLI help/version and REST unavailable diagnostic; future typed request parsing/rendering | execution lifecycle or a bound REST listener |
+| Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning; shared client RunId generation and JSON models | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
+| Binaries | bounded transport parsing, one Application call, transport policy, and redacted rendering | composition, domain planning, environment resolution, execution lifecycle, or run semantics |
 
 RuntimeAssemblyBuilder registers exact value codecs, Pure/Read State drivers, Match descriptors, and
 Read callbacks. `finish` freezes one immutable assembly. Program association pre-resolves every
@@ -28,6 +29,36 @@ caller -> Application -> Runtime -> Journal frame -> Store append
                                   -> Read adapter -> provider
 Store load -> Journal qualify -> Runtime fold -> RunView
 ```
+
+Concrete storage backends may implement both `Store` and the separate `RunIndex`, but Runtime
+receives only `dyn Store`. Config custody and run enumeration therefore cannot widen Runtime's
+append-only storage authority. Config listing returns all retained revisions as one unpaginated
+aggregate; each document remains bounded, but the collection has no count limit. Run enumeration
+uses ascending `RunId` keyset pages and makes no cross-request snapshot claim.
+
+PostgreSQL owns its raw private locator grammar, target equivalence, SQLx wiring, split-role
+provisioner, loopback-only plaintext policy, ambient-input exclusion, and one full-persistence gate.
+One backend and pool implement Store, RunIndex, and config custody. It uses stock SQLx directly.
+Administrative database authority exists only in the CLI provisioning path and is never retained by
+Application.
+
+`ComposedRuntime` is the only live Portfolio assembly constructor. One opaque binding set supplies
+typed EVM targets and provider handles in stable order; composition derives both adapter
+registrations and public binding views from it. The same concrete backend is coerced to `Store`,
+`RunIndex`, and config custody, so production use cases cannot observe different repositories.
+
+CLI and REST render one typed Application use-case surface and install no user authentication or
+authorization layer. Binaries own bounded transport parsing/rendering and transport policy only. A
+shared Application request contains only bounded, secret-free data and stable selectors for
+pre-bound capabilities. It cannot introduce environment resolution, a filesystem or network
+locator, secret custody, schema authority, or an unbounded durable effect.
+
+The CLI owns argv, bounded file/stdin input, exit status, and schema provisioning outside
+listener-held Application state. REST owns liveness, bounded HTTP admission, and an unauthenticated
+Unix socket; it exposes neither schema nor secret administration. Both accept an optional identity
+and use the same Application client primitive to generate one before their one use-case call. REST
+returns HTTP 200 for a durably failed run, while the CLI uses exit 1 for Runnable or Failed. These
+are named transport asymmetries, not second use-case implementations.
 
 The source-authoring sequence is separate from progression:
 
@@ -55,3 +86,7 @@ next complete reload resolves it.
 The domain graph is one-way: Portfolio depends on EVM domain contracts; EVM depends on foundations
 and Program; live EVM depends on EVM plus Runtime. Neither domain depends on Runtime, Store, live IO,
 or Application.
+
+## Material uncertainties
+
+none

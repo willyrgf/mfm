@@ -40,20 +40,26 @@ nix develop -c cargo test -p mfm-storage-postgres --lib
 nix develop -c cargo test -p mfm-runtime --all-targets
 nix develop -c cargo test -p mfm-evm -p mfm-portfolio -p mfm-evm-live --all-targets
 nix develop -c cargo test -p mfm-app --all-targets
-nix develop -c cargo check -p mfm -p mfm-rest-api --all-targets
+nix develop -c cargo test -p mfm --all-targets
+nix develop -c cargo test -p mfm-rest-api --all-targets
 ```
+
+The cross-transport client execution e2e is ignored by default because it requires both built
+binaries, a fresh split-role PostgreSQL schema, and pinned Reth. Drive it serially through the
+managed `client-e2e` task below; that task owns the complete fixture and binary setup.
 
 ## Nixfied tasks
 
 | Command | Contract |
 | --- | --- |
 | `nix run .#model-check` | Admit the compiled model without project tasks. |
-| `nix run .#run -- --task postgres-test` | Run private ignored same-crate PostgreSQL tests against the managed database; missing service/URL is a failure. |
+| `nix run .#run -- --task postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
+| `nix run .#run -- --task client-e2e` | Generate and interrupt an exact historical REST run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it against Reth, validate and reload its exact snapshot through the CLI, then reimport the same revision and require an independent CLI-generated run to produce the same semantic result. |
 | `nix run .#run -- --task capacity-app` | Exercise the exact 64/65-source Portfolio Program/C0 bound. |
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |
 | `nix run .#run -- --task capacity-envelope` | Compose the three capacity owners above. |
-| `nix run .#ci` | Compose format, Clippy, workspace check/tests, managed DB, docs, and capacity tasks. |
+| `nix run .#ci` | Compose format, Clippy, workspace check/tests, managed DB, the managed client e2e, docs, and capacity tasks. |
 
 Do not run broad component gates immediately before `.#ci` on the same tree. Once focused failures
 are resolved, run CI exactly once on the final candidate when the workflow requires the composed

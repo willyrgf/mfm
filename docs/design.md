@@ -35,20 +35,72 @@ The fixed limits are 8 MiB per canonical run object, 65,536 non-payload envelope
 bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. These are format bounds, not
 tunable runtime policy.
 
-PostgreSQL is a fresh three-table baseline: `mfm_store_schema`, `mfm_run_frames`, and
-`mfm_run_heads`. Connection admission checks exact schema shape, logged tables, primary status,
-`fsync`, and `full_page_writes`. Loads use one read-only repeatable snapshot. Appends take the
-per-RunId advisory transaction lock before observing state and force synchronous COMMIT.
+PostgreSQL has two fresh baselines behind one backend, pool, and connection gate. Run history owns
+`mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads` in `public`; opaque versioned
+configuration custody owns `mfm_config_schema` and `config_revisions` in `mfm_config`. Run
+heads also provide the mechanical RunIndex projection without parsing frames. Every connection
+admission checks both schemas' exact logged relations, constraints, ownership and privileges, plus
+primary status, `fsync`, and `full_page_writes`; a partially compatible installation is never
+exposed.
+
+Loads use one read-only repeatable snapshot. Appends take the per-RunId advisory transaction lock
+before observing state and force synchronous COMMIT. Configuration imports use the `(name, digest)`
+primary key to create or compare immutable revisions. Import and exact idempotent delete force
+synchronous COMMIT and preserve ambiguous acknowledgement. There is no revision-count limit. A
+short-lived admin provisioner accepts separate typed admin/runtime locators for one normalized
+target, installs only absent namespaces, and grants the fixed `mfm_runtime` role exact DML authority.
+Runtime connections have no ownership or DDL authority. Existing installations are verified and
+never migrated, repaired, re-owned, or reset.
+
+PostgreSQL network authority is one strict URI with an explicit password, numeric `127.0.0.1` or
+`::1` host, and `sslmode=disable`. PostgreSQL traffic is intentionally plaintext inside the trusted
+shared network namespace; remote database targets are unsupported. The private locator uses stock
+SQLx, overwrites every ambient-derived value that can affect this plaintext connection, and rejects
+`PGOPTIONS`, whose startup effects SQLx cannot clear. Home/passfile and service-file inputs cannot
+influence the resulting authority.
 
 EVM physical route identity is the domain-owned, secret-free `EvmPhysicalTarget { chain_id,
 endpoint_ref }`. Planning and adapter registration derive the same content ref. Credentials and
 client handles are process-local and never persisted. Wrong local route/chain is `Internal` before
 provider entry; only authenticated external evidence may become `IntegrityBlocked`.
 
-Application supports Portfolio snapshot planning/start plus Runtime resume/read. Callers provide the
-RunId explicitly. Transaction submission requires a future durable transaction-authority/outbox
-design and is not part of this system.
+Live composition accepts an empty or strictly sorted, unique set of at most 256 EVM bindings.
+Multiple endpoints may bind one chain. One `ComposedRuntime` derives its immutable assembly,
+planning targets, public `(chain_id, endpoint_id, binding_ref)` views, Store, and RunIndex from that
+single checked input and concrete backend; there is no singular one-route assembly constructor.
+
+Application owns the transport-neutral client surface. A strict XDG/HOME- or override-selected
+`deployment.toml` names environment resolvers for the runtime PostgreSQL locator and stable public
+EVM bindings; it contains no locator values and has no product lifecycle. Production composition
+resolves each raw private locator once, constructs local PostgreSQL and stock EVM HTTP(S) clients,
+and derives Runtime registrations, planning targets, public binding views, Store, and RunIndex from
+the same checked binding set. The EVM client uses no ambient proxy, redirect, referer propagation, or
+automatic retry.
+
+The configuration repository retains complete, individually bounded canonical documents tagged by
+the exact entry point. Import validates and plans the document before atomically creating or
+comparing one immutable revision. Run start requires an exact retained name and `sha256-jcs-v1`
+digest, checks every requested binding before Runtime Store IO, and returns the selected config
+summary with the run view. The management surface exposes import, complete unpaginated listing, and
+idempotent exact delete. Deletion does not revoke runs already admitted from that revision. The shared
+surface also owns entry-point/binding discovery, run progress/read, and mechanical run-head listing.
+Every execution receives an explicit transport-selected RunId. Both client surfaces accept one or
+use the same Application client primitive to derive one from OS cryptographic entropy before the
+start use case. Ambiguous append acknowledgement carries the exact start or progress recovery
+identity.
+Transaction submission requires a future durable transaction-authority/outbox design and is not
+part of this system.
+
+CLI and REST are thin renderings of that single surface and add no authentication or authorization
+layer. REST serves HTTP/1 on one caller-selected Unix socket; the enclosing deployment owns access
+isolation, permissions, and stale-socket cleanup. Bounded bodies and queries are REST transport
+concerns. Schema provisioning remains CLI-only. Both client binaries may select an optional RunId
+or use the shared generation primitive; REST exposes no administrative or secret-custody route.
 
 Secrets do not enter Program, C0, frames, Store metadata, RunView, outputs, logs, or error details.
 Writable restoration behind acknowledged state is unsupported; a new writable timeline requires
 fresh external authority and fresh RunIds.
+
+## Material uncertainties
+
+none

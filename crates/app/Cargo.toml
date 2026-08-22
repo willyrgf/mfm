@@ -11,14 +11,22 @@ layer = "assembly"
 binary-facing = true
 
 [dependencies]
+mfm-canonical = { path = "../kernel/canonical" }
+mfm-config = { path = "../config" }
 mfm-evm = { path = "../domains/evm" }
+mfm-evm-live = { path = "../live/evm" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-portfolio = { path = "../domains/portfolio" }
+mfm-program = { path = "../kernel/program" }
 mfm-runtime = { path = "../kernel/runtime" }
+mfm-storage-postgres = { path = "../storages/postgres" }
+mfm-store = { path = "../kernel/store" }
+getrandom = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
-mfm-evm-live = { path = "../live/evm" }
-mfm-store = { path = "../kernel/store" }
-serde_json = { workspace = true }
+mfm-journal = { path = "../kernel/journal" }

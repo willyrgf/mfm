@@ -4,8 +4,9 @@
 //! Store owns physical atomicity and complete-prefix snapshots. Journal alone
 //! qualifies the returned bytes; Store has no Program or domain semantics.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::future::Future;
+use std::ops::Bound::{Excluded, Unbounded};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -14,7 +15,160 @@ use mfm_journal::{
     frame_head_digest, EncodedRunFrame, StoredRunBytes, MAX_FRAME_BYTES, MAX_RUN_BYTES,
     MAX_RUN_FRAMES,
 };
+use serde::Serialize;
 use tokio::sync::Mutex;
+
+/// Maximum number of items returned by one run-index page.
+pub const MAX_RUN_PAGE_ITEMS: usize = 200;
+/// Default number of run heads requested by client surfaces.
+pub const DEFAULT_RUN_PAGE_ITEMS: usize = 50;
+
+/// Checked run-page size error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("page limit is invalid")]
+pub struct RunPageLimitError;
+
+/// A run-head page size in the inclusive range 1 through 200.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunPageLimit(usize);
+
+impl RunPageLimit {
+    /// Checks a requested page size.
+    pub const fn new(value: usize) -> Result<Self, RunPageLimitError> {
+        if value == 0 || value > MAX_RUN_PAGE_ITEMS {
+            return Err(RunPageLimitError);
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the checked page size.
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for RunPageLimit {
+    fn default() -> Self {
+        Self(DEFAULT_RUN_PAGE_ITEMS)
+    }
+}
+
+/// Error returned when one run-head projection is structurally invalid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("run summary is invalid")]
+pub struct RunSummaryError;
+
+/// Mechanical current-head projection for one run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunSummary {
+    run_id: RunId,
+    head_sequence: u64,
+    head_digest: ContentDigest,
+    total_bytes: u64,
+}
+
+impl RunSummary {
+    /// Constructs a structurally checked current-head projection.
+    pub fn new(
+        run_id: RunId,
+        head_sequence: u64,
+        head_digest: ContentDigest,
+        total_bytes: u64,
+    ) -> Result<Self, RunSummaryError> {
+        if head_sequence == 0
+            || head_digest.algorithm() != mfm_ids::DigestAlgorithm::Sha256V1
+            || total_bytes == 0
+        {
+            return Err(RunSummaryError);
+        }
+        Ok(Self {
+            run_id,
+            head_sequence,
+            head_digest,
+            total_bytes,
+        })
+    }
+
+    /// Returns the run identity.
+    pub const fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Returns the current retained frame sequence.
+    pub const fn head_sequence(&self) -> u64 {
+        self.head_sequence
+    }
+
+    /// Returns the exact current frame digest.
+    pub const fn head_digest(&self) -> &ContentDigest {
+        &self.head_digest
+    }
+
+    /// Returns cumulative retained frame bytes.
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+}
+
+/// Redaction-safe mechanical run-index failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RunIndexError {
+    /// Retained head rows were inconsistent.
+    #[error("run index is corrupt")]
+    Corrupt,
+    /// The index could not be read.
+    #[error("run index is unavailable")]
+    Unavailable,
+}
+
+/// One bounded mechanical run-head page with an exclusive continuation identity.
+#[derive(Serialize)]
+pub struct RunPage {
+    items: Vec<RunSummary>,
+    next_after: Option<RunId>,
+}
+
+impl RunPage {
+    /// Constructs a structurally checked run page.
+    pub fn new(items: Vec<RunSummary>, next_after: Option<RunId>) -> Result<Self, RunIndexError> {
+        if items.len() > MAX_RUN_PAGE_ITEMS
+            || items
+                .windows(2)
+                .any(|pair| pair[0].run_id >= pair[1].run_id)
+            || next_after
+                .as_ref()
+                .is_some_and(|after| items.last().is_none_or(|summary| after != summary.run_id()))
+        {
+            return Err(RunIndexError::Corrupt);
+        }
+        Ok(Self { items, next_after })
+    }
+
+    /// Returns the ordered summaries.
+    pub fn items(&self) -> &[RunSummary] {
+        &self.items
+    }
+
+    /// Returns the last returned RunId when another run was observed.
+    pub const fn next_after(&self) -> Option<&RunId> {
+        self.next_after.as_ref()
+    }
+
+    /// Consumes the page into owned items and continuation identity.
+    pub fn into_parts(self) -> (Vec<RunSummary>, Option<RunId>) {
+        (self.items, self.next_after)
+    }
+}
+
+/// Object-safe mechanical current-head index.
+pub trait RunIndex: Send + Sync {
+    /// Lists one ascending keyset page without parsing run history.
+    fn list_runs<'a>(
+        &'a self,
+        after: Option<&'a RunId>,
+        limit: RunPageLimit,
+    ) -> Pin<Box<dyn Future<Output = Result<RunPage, RunIndexError>> + Send + 'a>>;
+}
 
 /// The only mechanical append outcomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +219,7 @@ pub trait Store: Send + Sync {
 
 /// In-memory Store with per-run append serialization.
 pub struct MemoryStore {
-    runs: Mutex<HashMap<RunId, Arc<Mutex<MemoryRun>>>>,
+    runs: Mutex<BTreeMap<RunId, Arc<Mutex<MemoryRun>>>>,
 }
 
 struct MemoryRun {
@@ -88,7 +242,7 @@ impl MemoryStore {
     /// Constructs an empty Store.
     pub fn new() -> Self {
         Self {
-            runs: Mutex::new(HashMap::new()),
+            runs: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -192,6 +346,59 @@ impl Store for MemoryStore {
                     Ok(AppendResult::Inserted)
                 }
             }
+        })
+    }
+}
+
+impl RunIndex for MemoryStore {
+    fn list_runs<'a>(
+        &'a self,
+        after: Option<&'a RunId>,
+        limit: RunPageLimit,
+    ) -> Pin<Box<dyn Future<Output = Result<RunPage, RunIndexError>> + Send + 'a>> {
+        Box::pin(async move {
+            let runs = self.runs.lock().await;
+            let start = after.map_or(Unbounded, Excluded);
+            let mut page = Vec::with_capacity(limit.get() + 1);
+            for (run_id, run) in runs.range::<RunId, _>((start, Unbounded)) {
+                let run = run.lock().await;
+                let Some(head) = &run.head else {
+                    if run.frames.is_empty() {
+                        continue;
+                    }
+                    return Err(RunIndexError::Corrupt);
+                };
+                if head.sequence == 0
+                    || head.sequence > MAX_RUN_FRAMES
+                    || usize::try_from(head.sequence).ok() != Some(run.frames.len())
+                    || head.total_bytes == 0
+                    || head.total_bytes > MAX_RUN_BYTES
+                {
+                    return Err(RunIndexError::Corrupt);
+                }
+                let current = run.frames.last().ok_or(RunIndexError::Corrupt)?;
+                let summary = RunSummary::new(
+                    run_id.clone(),
+                    head.sequence,
+                    current.head_digest.clone(),
+                    head.total_bytes,
+                )
+                .map_err(|_| RunIndexError::Corrupt)?;
+                page.push(summary);
+                if page.len() > limit.get() {
+                    break;
+                }
+            }
+            let has_more = page.len() > limit.get();
+            if has_more {
+                page.pop();
+            }
+            let next_after = if has_more {
+                page.last().map(|summary| summary.run_id().clone())
+            } else {
+                None
+            };
+            RunPage::new(page, next_after)
         })
     }
 }
