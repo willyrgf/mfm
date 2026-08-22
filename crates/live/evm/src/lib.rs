@@ -1,25 +1,35 @@
 #![warn(missing_docs)]
-//! Direct observational EVM provider registration.
+//! Bounded EVM provider registration and durable transaction execution.
 //!
-//! The live adapter owns only the provider boundary. Domain State registration
-//! and Runtime construction remain trusted composition responsibilities.
+//! The live adapter owns provider ingress, exact transaction wire encoding, and
+//! signer/authority/provider orchestration. Domain State registration and Runtime
+//! construction remain trusted composition responsibilities.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use mfm_evm::{
-    EvmAnchorRead, EvmBalanceRead, EvmChainIdentityRead, EvmPhysicalTarget, EvmReadEvidence,
-    EvmReadIntent, EvmReadValue,
+    EvmAnchorRead, EvmAnchoredContractCallRead, EvmBalanceRead, EvmChainIdentityRead,
+    EvmPhysicalTarget, EvmReadEvidence, EvmReadIntent, EvmReadSubject, EvmReadValue,
+    EvmTransactionRoute, EVM_ANCHORED_CONTRACT_CALL_OPERATION_ID,
 };
 use mfm_ids::StableId;
 use mfm_runtime::{AdapterError, RuntimeAssemblyBuilder};
 
+mod codec;
 mod json_rpc;
+mod transaction;
 
 pub use json_rpc::{
     EvmAdapterLocator, EvmProviderBuildError, JsonRpcEvmProvider, MAX_EVM_ADAPTER_LOCATOR_BYTES,
 };
+pub use transaction::{
+    register_evm_transaction_effect, EvmTransactionProvider, EvmTransactionProviderFuture,
+    ObservedChainInstance, ProviderReceipt, ProviderReceiptResult,
+};
+
+pub use codec::{ethereum_address, evm_keccak256, EvmCodecError};
 
 const MAX_EVM_REQUEST_BYTES: usize = 512 * 1024;
 
@@ -50,6 +60,7 @@ pub enum EvmProviderResponse {
 /// | `mfm.evm.read-token-decimals@1` | `TokenDecimals { source, anchor }` | the token decimal scale **at** `anchor` |
 /// | `mfm.evm.read-token-balance@1` | `TokenBalance { source, anchor }` | the token balance **at** `anchor` |
 /// | `mfm.evm.confirm-balance-anchor@1` | `ConfirmAnchor { source, anchor }` | the anchor of the block **that `anchor.number()` names** |
+/// | `mfm.evm.read-anchored-contract-call@1` | `AnchoredContractCall { anchor, target, calldata }` | deployed code and call result **at** `anchor`, bracketed by named-block observations |
 ///
 /// The confirmation is the one contract an implementor is most likely to get wrong. It must
 /// re-observe the named committed block. It must never return the head. The EVM domain compares
@@ -62,8 +73,9 @@ pub enum EvmProviderResponse {
 /// block, so its sources cannot tear across chain progression.
 ///
 /// Return [`EvmProviderResponse::IntegrityBlocked`] only for authenticated external evidence of an
-/// integrity block. A local decode, address, or operation mismatch is [`AdapterError::Internal`]
-/// before any IO. Reads must be duplicate-safe: a dropped run repeats the call.
+/// integrity block, such as replacement of an authored anchored-call block. A local decode,
+/// address, or operation mismatch is [`AdapterError::Internal`] before any IO. Reads must be
+/// duplicate-safe: a dropped run repeats the call.
 pub trait EvmProvider: Send + Sync + 'static {
     /// Performs one observational request for the supplied operation.
     fn request<'a>(
@@ -100,6 +112,48 @@ pub fn register_evm_reads(
     register!(EvmBalanceRead, target, provider)
 }
 
+/// Registers the generic anchored contract-call Read callback for one transaction route.
+pub fn register_evm_anchored_contract_calls(
+    builder: &mut RuntimeAssemblyBuilder,
+    route: EvmTransactionRoute,
+    provider: Arc<dyn EvmProvider>,
+) -> mfm_runtime::Result<()> {
+    let callback_route = route.clone();
+    builder.register_adapter::<EvmAnchoredContractCallRead, EvmTransactionRoute, _>(
+        route,
+        move |intent| {
+            let route = callback_route.clone();
+            let provider = Arc::clone(&provider);
+            Box::pin(async move { read_anchored(&route, provider.as_ref(), intent).await })
+        },
+    )
+}
+
+async fn read_anchored(
+    route: &EvmTransactionRoute,
+    provider: &dyn EvmProvider,
+    intent: &EvmReadIntent,
+) -> std::result::Result<EvmReadEvidence, AdapterError> {
+    let (operation, chain_id) = intent.operation_and_chain_id();
+    let binding_ref = route.binding_ref().map_err(|_| AdapterError::Internal)?;
+    if operation != EVM_ANCHORED_CONTRACT_CALL_OPERATION_ID
+        || !matches!(
+            intent.subject(),
+            EvmReadSubject::AnchoredContractCall { .. }
+        )
+        || chain_id != route.chain_instance().chain_id()
+        || intent.route_ref() != &binding_ref
+    {
+        return Err(AdapterError::Internal);
+    }
+    let operation = StableId::new(operation).map_err(|_| AdapterError::Internal)?;
+    let request_bytes = serde_json::to_vec(intent).map_err(|_| AdapterError::Internal)?;
+    if request_bytes.len() > MAX_EVM_REQUEST_BYTES {
+        return Err(AdapterError::Internal);
+    }
+    map_provider_response(provider.request(operation, request_bytes).await?)
+}
+
 async fn read(
     target: &EvmPhysicalTarget,
     provider: &dyn EvmProvider,
@@ -115,7 +169,13 @@ async fn read(
     if request_bytes.len() > MAX_EVM_REQUEST_BYTES {
         return Err(AdapterError::Internal);
     }
-    match provider.request(operation, request_bytes).await? {
+    map_provider_response(provider.request(operation, request_bytes).await?)
+}
+
+fn map_provider_response(
+    response: EvmProviderResponse,
+) -> std::result::Result<EvmReadEvidence, AdapterError> {
+    match response {
         EvmProviderResponse::Read(value) => Ok(EvmReadEvidence::Returned { value }),
         EvmProviderResponse::Rejected => Ok(EvmReadEvidence::Rejected),
         EvmProviderResponse::SafeFailure => Ok(EvmReadEvidence::SafeFailure),
@@ -266,5 +326,40 @@ mod tests {
         assert_eq!(target.binding_ref().expect("durable identity"), binding);
         first.finish().expect("first assembly");
         replacement.finish().expect("replacement assembly");
+    }
+
+    #[tokio::test]
+    async fn anchored_registration_is_route_keyed_and_rejects_other_read_intents_locally() {
+        let physical = target(1, 2);
+        let route = EvmTransactionRoute::new(
+            mfm_evm::EvmChainInstance::new(
+                1,
+                mfm_evm::EvmHash::new(
+                    "0x1111111111111111111111111111111111111111111111111111111111111111",
+                )
+                .expect("genesis"),
+            )
+            .expect("chain"),
+            physical.endpoint_ref().clone(),
+        );
+        let provider = Arc::new(Provider {
+            calls: AtomicUsize::new(0),
+            response: EvmProviderResponse::Rejected,
+        });
+        assert_eq!(
+            read_anchored(&route, provider.as_ref(), &intent(&physical)).await,
+            Err(AdapterError::Internal)
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+
+        let provider: Arc<dyn EvmProvider> = provider;
+        let mut builder = RuntimeAssemblyBuilder::new();
+        register_evm_anchored_contract_calls(&mut builder, route.clone(), Arc::clone(&provider))
+            .expect("anchored callback");
+        assert_eq!(
+            register_evm_anchored_contract_calls(&mut builder, route, provider),
+            Err(mfm_runtime::RuntimeError::IncompatibleAssembly)
+        );
+        builder.finish().expect("assembly");
     }
 }
