@@ -1922,9 +1922,7 @@ name = "mfm-capabilities"
 version = "0.1.0"
 dependencies = [
  "mfm-ids",
- "mfm-program-derive",
  "mfm-values",
- "serde",
  "thiserror",
 ]
 

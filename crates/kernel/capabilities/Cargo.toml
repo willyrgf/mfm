@@ -20,7 +20,3 @@ path = "src/lib.rs"
 thiserror = { workspace = true }
 mfm-ids = { path = "../ids" }
 mfm-values = { path = "../values" }
-
-[dev-dependencies]
-mfm-program-derive = { path = "../program-derive" }
-serde = { workspace = true }

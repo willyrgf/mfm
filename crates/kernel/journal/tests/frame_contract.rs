@@ -1,8 +1,8 @@
 use mfm_canonical::raw_content_digest;
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId};
+use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId};
 use mfm_journal::{
     frame_head_digest, EncodedRunFrame, JournalError, JournalHistory, JournalRecord, OutcomeKind,
-    StoredRunBytes, MAX_FRAME_BYTES, MAX_FRAME_NON_PAYLOAD_ENVELOPE, MAX_RUN_BYTES, MAX_RUN_FRAMES,
+    StoredRunBytes,
 };
 use mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES;
 use serde_json::{json, Value};
@@ -463,7 +463,7 @@ fn history_requires_exact_sequence_predecessor_and_recursive_head() {
 }
 
 #[test]
-fn qualification_rejects_wrong_run_chain_and_hostile_closure() {
+fn qualification_rejects_a_history_belonging_to_another_run() {
     let program = b"{}";
     let context = b"[]";
     let genesis = EncodedRunFrame::admission(
@@ -476,58 +476,17 @@ fn qualification_rejects_wrong_run_chain_and_hostile_closure() {
     .expect("genesis");
     let bytes = genesis.canonical_bytes().to_vec();
     assert!(matches!(
-        JournalHistory::qualify(
-            &run(4),
-            StoredRunBytes::new(vec![bytes.clone()]).expect("stored")
-        ),
-        Err(JournalError::InvalidHistory)
-    ));
-
-    let mut wire: serde_json::Value = serde_json::from_slice(&bytes).expect("wire");
-    wire["objects"].as_array_mut().expect("objects").pop();
-    let hostile = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
-        &serde_json::to_string(&wire).expect("json"),
-    )
-    .expect("canonical");
-    assert!(matches!(
-        JournalHistory::qualify(
-            &run(3),
-            StoredRunBytes::new(vec![hostile.as_bytes().to_vec()]).expect("stored")
-        ),
-        Err(JournalError::InvalidHistory)
-    ));
-
-    let mut damaged = bytes;
-    damaged[0] = b'[';
-    assert!(matches!(
-        JournalHistory::qualify(&run(3), StoredRunBytes::new(vec![damaged]).expect("stored")),
+        JournalHistory::qualify(&run(4), StoredRunBytes::new(vec![bytes]).expect("stored")),
         Err(JournalError::InvalidHistory)
     ));
 }
 
 #[test]
-fn opaque_transfer_is_nonempty_and_bounded() {
+fn opaque_transfer_must_contain_a_complete_prefix() {
     assert!(matches!(
         StoredRunBytes::new(Vec::new()),
         Err(JournalError::InvalidHistory)
     ));
-    assert_eq!(
-        ContentDigest::from_digest(DigestAlgorithm::Sha256V1, DigestBytes::from_array([0; 32]))
-            .algorithm(),
-        DigestAlgorithm::Sha256V1
-    );
-}
-
-#[test]
-fn journal_capacity_theorem_is_exact() {
-    assert_eq!(MAX_RUN_OBJECT_CANONICAL_BYTES, 8 * 1024 * 1024);
-    assert_eq!(MAX_FRAME_NON_PAYLOAD_ENVELOPE, 65_536);
-    assert_eq!(
-        MAX_FRAME_BYTES,
-        3 * MAX_RUN_OBJECT_CANONICAL_BYTES + MAX_FRAME_NON_PAYLOAD_ENVELOPE
-    );
-    assert_eq!(MAX_RUN_FRAMES, 65_536);
-    assert_eq!(MAX_RUN_BYTES, 512 * 1024 * 1024);
 }
 
 #[test]

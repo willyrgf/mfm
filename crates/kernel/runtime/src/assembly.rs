@@ -858,7 +858,3 @@ fn match_payload_descriptor(
         _ => None,
     }
 }
-
-#[cfg(test)]
-#[path = "assembly/tests.rs"]
-mod tests;

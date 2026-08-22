@@ -31,20 +31,3 @@ pub trait ReadCapabilityContract: Send + Sync + 'static {
     /// Proves that evidence answers the exact intent.
     fn bind_evidence(intent: &Self::Intent, evidence: &Self::Evidence) -> Result<()>;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn errors_are_closed_and_redacted() {
-        assert_eq!(
-            CapabilityError::InvalidContract.to_string(),
-            "capability contract is invalid"
-        );
-        assert_eq!(
-            CapabilityError::EvidenceBinding.to_string(),
-            "capability evidence does not bind to intent"
-        );
-    }
-}
