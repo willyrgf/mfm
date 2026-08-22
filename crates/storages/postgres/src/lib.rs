@@ -20,7 +20,7 @@ use mfm_store::{AppendResult, RunIndex, RunIndexError, RunPage, RunPageLimit, St
 use sqlx::postgres::{PgArguments, PgPoolOptions, PgRow};
 use sqlx::{Arguments, Connection, PgConnection, PgPool, Row};
 
-const SCHEMA_CONTRACT: &str = "mfm.run-history-postgres.v1";
+const SCHEMA_CONTRACT: &str = "mfm.run-history-postgres.v2";
 
 mod config;
 mod index;
@@ -697,7 +697,7 @@ fn constraints_match(constraints: &[(String, String, String, String)]) -> bool {
         constraint("mfm_run_heads", "mfm_run_heads_run_id_check", "c", "CHECK ((run_id ~ '^run:sha256-jcs-v1:[0-9a-f]{64}$'::text))"),
         constraint("mfm_run_heads", "mfm_run_heads_sequence_check", "c", "CHECK (((head_sequence >= 1) AND (head_sequence <= 65536)))"),
         constraint("mfm_run_heads", "mfm_run_heads_total_bytes_check", "c", "CHECK (((total_bytes >= 1) AND (total_bytes <= 536870912)))"),
-        constraint("mfm_store_schema", "mfm_store_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.run-history-postgres.v1'::text))"),
+        constraint("mfm_store_schema", "mfm_store_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.run-history-postgres.v2'::text))"),
         constraint("mfm_store_schema", "mfm_store_schema_pkey", "p", "PRIMARY KEY (schema_contract)"),
     ];
     constraints == expected
@@ -1290,7 +1290,7 @@ fn classify_precommit_sql(error: sqlx::Error) -> StoreError {
 
 fn assert_send_static<T: Send + 'static>() {}
 
-const RUN_SCHEMA_SQL: &str = include_str!("../migrations/run_history_postgres_v1.sql");
+const RUN_SCHEMA_SQL: &str = include_str!("../migrations/run_history_postgres_v2.sql");
 const CONFIG_SCHEMA_SQL: &str = include_str!("../migrations/config_postgres_v2.sql");
 
 #[cfg(test)]

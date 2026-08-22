@@ -125,7 +125,7 @@ async fn reset_schemas(connection: &mut PgConnection) {
 
 #[test]
 fn migration_and_classifier_contracts_are_exact() {
-    assert_eq!(SCHEMA_CONTRACT, "mfm.run-history-postgres.v1");
+    assert_eq!(SCHEMA_CONTRACT, "mfm.run-history-postgres.v2");
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_store_schema"));
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_frames"));
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_heads"));

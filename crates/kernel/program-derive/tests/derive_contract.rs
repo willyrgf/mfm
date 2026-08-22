@@ -52,12 +52,36 @@ struct SecondRetainedValue {
     second: String,
 }
 
+#[derive(Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct EffectIdentityValue {
+    effect_id: mfm_ids::EffectId,
+}
+
+#[derive(Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct EffectIdentityContainer {
+    effect_ids: Vec<mfm_ids::EffectId>,
+}
+
 #[test]
 fn surviving_value_derives_generate_complete_schema_descriptors() {
     assert!(External::<Payload>::schema_descriptor().is_ok());
     assert!(Adjacent::<Payload>::schema_descriptor().is_ok());
     assert!(Boxed::schema_descriptor().is_ok());
     assert!(Internal::schema_descriptor().is_ok());
+    assert!(EffectIdentityValue::schema_descriptor()
+        .expect("EffectId descriptor")
+        .identity_canonical_json()
+        .expect("identity")
+        .as_str()
+        .contains("\"grammar\":\"effect_id\""));
+    assert!(EffectIdentityContainer::schema_descriptor()
+        .expect("EffectId container descriptor")
+        .identity_canonical_json()
+        .expect("identity")
+        .as_str()
+        .contains("\"grammar\":\"effect_id\""));
 }
 
 #[test]

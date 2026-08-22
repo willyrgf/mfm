@@ -4,9 +4,9 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 
 | Owner | Responsibility | Must not own |
 | --- | --- | --- |
-| IDs / Values | checked identities, schema descriptors, canonical typed values, 8 MiB object bound | execution or IO |
-| Capabilities | `ReadCapabilityContract` and intent/evidence binding | State outcomes or retries |
-| Program | typed Operation authoring, sole private lowering draft, checked v2 State/Match graph, `State`, `PureState`, `ReadState`, `Never` | registries, IO, scheduling |
+| IDs / Values | checked identities including `EffectId`, schema descriptors, canonical typed values, 8 MiB object bound | execution or IO |
+| Capabilities | Read intent/evidence and Effect command/evidence contracts | State outcomes or retries |
+| Program | typed Operation authoring, sole private lowering draft, checked v3 State/Match graph, Pure/Read/Effect State contracts, `Never` | registries, IO, scheduling |
 | Runtime | immutable assembly, Program association, sole fold, typed execution/progression | persisted wire or physical storage |
 | Journal | exact frame encoding and complete-history qualification | domain interpretation or persistence IO |
 | Store / run index ports | object-safe complete load and atomic append; separate mechanical current-head enumeration | Program, State, capability, reducer, config semantics, or run-status derivation |
@@ -16,10 +16,10 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning and compiled component inventory; shared client RunId generation and JSON models | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
 | Binaries | bounded transport parsing, one Application call, transport policy, and redacted rendering | composition, domain planning, environment resolution, execution lifecycle, or run semantics |
 
-RuntimeAssemblyBuilder registers exact value codecs, Pure/Read State drivers, Match descriptors, and
-Read callbacks. `finish` freezes one immutable assembly. Program association pre-resolves every
-implementation and callback; the fold performs no public registry lookup and exposes no erased value
-workflow.
+RuntimeAssemblyBuilder registers exact value codecs, Pure/Read/Effect State drivers, Match
+descriptors, and mode-specific callbacks. `finish` freezes one immutable assembly. Program
+association pre-resolves every implementation and callback; the fold performs no public registry
+lookup and exposes no erased value workflow.
 
 Application's private compiled State table couples each State's domain-owned inspection metadata to
 the same monomorphized Runtime registration function used by live composition. The component
@@ -32,6 +32,8 @@ The progression sequence is:
 caller -> Application -> Runtime -> Journal frame -> Store append
                                   -> Pure driver
                                   -> Read adapter -> provider
+                                  -> Effect prepare -> Store append -> Effect adapter
+                                                     -> Effect conclusion -> Store append
 Store load -> Journal qualify -> Runtime fold -> RunView
 ```
 
@@ -69,7 +71,7 @@ asymmetries, not second use-case implementations.
 The source-authoring sequence is separate from progression:
 
 ```text
-domain Operation -> OperationExpansion -> one private flat draft -> immutable Program v2
+domain Operation -> OperationExpansion -> one private flat draft -> immutable Program v3
                          |-> exact capability/State injection policy
 ```
 
@@ -84,10 +86,11 @@ kernel callback accounting and are forbidden in reviewed production code. This t
 is not a security or authorization boundary; checked Program construction remains the persisted
 graph boundary.
 
-Pure work and byte-heavy validation run in immediately awaited pure blocking jobs. Connections,
-transactions, Store mutation, and provider IO remain async and outside those jobs. Dropping an
-operation is safe: no candidate exists yet, or the one in-flight append commits atomically and the
-next complete reload resolves it.
+Pure work and byte-heavy validation run in immediately awaited pure blocking jobs. Effect identity
+derivation belongs to Runtime and binds RunId, Program ref, declaration index, and exact command
+ref. Connections, transactions, Store mutation, and provider IO remain async and outside those
+jobs. Dropping an operation is safe: no candidate exists yet, or the one in-flight append commits
+atomically and the next complete reload resolves it.
 
 The domain graph is one-way: Portfolio depends on EVM domain contracts; EVM depends on foundations
 and Program; live EVM depends on EVM plus Runtime. Neither domain depends on Runtime, Store, live IO,

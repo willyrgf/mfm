@@ -2,7 +2,7 @@
 
 Direct provider registration for the three surviving EVM Read capabilities. Each callback captures
 one domain-owned `EvmPhysicalTarget` and opaque provider handle, checks exact intent chain/route
-before IO, bounds request encoding, and returns typed evidence or `ReadAdapterError`.
+before IO, bounds request encoding, and returns typed evidence or `AdapterError`.
 
 `EvmAdapterLocator` is one bounded private HTTP(S) URL. It implements neither `Debug`, `Display`,
 nor serialization. Non-HTTP schemes, fragments, and control characters are rejected.

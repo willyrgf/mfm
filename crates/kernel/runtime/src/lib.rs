@@ -42,7 +42,7 @@ pub enum RuntimeError {
     /// A local fixed capacity was exceeded.
     #[error("runtime capacity exceeded")]
     Capacity,
-    /// A required Store or Read dependency is unavailable.
+    /// A required Store or capability dependency is unavailable.
     #[error("runtime dependency is unavailable")]
     Unavailable,
     /// A trusted local invariant failed.
@@ -50,14 +50,14 @@ pub enum RuntimeError {
     Internal,
 }
 
-/// Redaction-safe error available to Read adapters.
+/// Redaction-safe error available to Read and Effect adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum ReadAdapterError {
-    /// No trusted observation was produced.
-    #[error("read adapter is unavailable")]
+pub enum AdapterError {
+    /// No trusted observation or settlement evidence was produced.
+    #[error("adapter is unavailable")]
     Unavailable,
     /// A trusted adapter invariant failed.
-    #[error("read adapter failed")]
+    #[error("adapter failed")]
     Internal,
 }
 

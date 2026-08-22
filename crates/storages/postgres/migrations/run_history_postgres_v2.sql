@@ -2,11 +2,11 @@ CREATE TABLE public.mfm_store_schema (
     schema_contract TEXT COLLATE "C" NOT NULL,
     CONSTRAINT mfm_store_schema_pkey PRIMARY KEY (schema_contract),
     CONSTRAINT mfm_store_schema_contract_check
-        CHECK (schema_contract = 'mfm.run-history-postgres.v1')
+        CHECK (schema_contract = 'mfm.run-history-postgres.v2')
 );
 
 INSERT INTO public.mfm_store_schema (schema_contract)
-VALUES ('mfm.run-history-postgres.v1');
+VALUES ('mfm.run-history-postgres.v2');
 
 CREATE TABLE public.mfm_run_frames (
     run_id       TEXT COLLATE "C" NOT NULL,

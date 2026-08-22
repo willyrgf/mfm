@@ -6,31 +6,46 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
-use mfm_capabilities::ReadCapabilityContract;
-use mfm_ids::{ContentRef, SchemaId, SemanticTypeId};
+use mfm_capabilities::{EffectCapabilityContract, ReadCapabilityContract};
+use mfm_ids::{ContentRef, EffectId, SchemaId, SemanticTypeId};
 use mfm_program::{
-    capability_contract_ref, nominal_contract_ref, state_implementation_ref, Declaration, Never,
-    Program, PureState, ReadState, StateDeclaration,
+    capability_contract_ref, effect_capability_contract_ref, nominal_contract_ref,
+    state_implementation_ref, Declaration, EffectState, Never, Program, PureState, ReadState,
+    StateDeclaration,
 };
 use mfm_values::{canonicalize_mfm_value, EnumTagging, MfmValue, SchemaDescriptor, SchemaShape};
 use serde_json::value::RawValue;
 
 use crate::engine::{self, DriverContext, DriverDisposition};
-use crate::{ReadAdapterError, Result, RuntimeError};
+use crate::{AdapterError, Result, RuntimeError};
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-type AdapterCallback<C> = dyn for<'a> Fn(
+type ReadAdapterCallback<C> = dyn for<'a> Fn(
         &'a <C as ReadCapabilityContract>::Intent,
     ) -> BoxFuture<
         'a,
-        std::result::Result<<C as ReadCapabilityContract>::Evidence, ReadAdapterError>,
+        std::result::Result<<C as ReadCapabilityContract>::Evidence, AdapterError>,
     > + Send
     + Sync;
 pub(crate) type EvidenceQualification =
     Box<dyn FnOnce() -> std::result::Result<QualifiedValue, mfm_values::ValueError> + Send>;
-pub(crate) type ErasedAdapterCallback = dyn for<'a> Fn(
+pub(crate) type ErasedReadAdapterCallback = dyn for<'a> Fn(
         &'a QualifiedValue,
-    ) -> BoxFuture<'a, std::result::Result<EvidenceQualification, ReadAdapterError>>
+    ) -> BoxFuture<'a, std::result::Result<EvidenceQualification, AdapterError>>
+    + Send
+    + Sync;
+type EffectAdapterCallback<C> = dyn for<'a> Fn(
+        &'a EffectId,
+        &'a <C as EffectCapabilityContract>::Command,
+    ) -> BoxFuture<
+        'a,
+        std::result::Result<<C as EffectCapabilityContract>::Evidence, AdapterError>,
+    > + Send
+    + Sync;
+pub(crate) type ErasedEffectAdapterCallback = dyn for<'a> Fn(
+        &'a EffectId,
+        &'a QualifiedValue,
+    ) -> BoxFuture<'a, std::result::Result<EvidenceQualification, AdapterError>>
     + Send
     + Sync;
 
@@ -116,6 +131,7 @@ pub(crate) fn qualify_hot<T: MfmValue>(
 enum StateMode {
     Pure,
     Read(Box<ReadSignature>),
+    Effect(Box<EffectSignature>),
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -123,6 +139,14 @@ struct ReadSignature {
     capability_type: TypeId,
     capability_contract_ref: ContentRef,
     intent_contract_ref: ContentRef,
+    evidence_contract_ref: ContentRef,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct EffectSignature {
+    capability_type: TypeId,
+    capability_contract_ref: ContentRef,
+    command_contract_ref: ContentRef,
     evidence_contract_ref: ContentRef,
 }
 
@@ -142,7 +166,8 @@ pub(crate) trait RegisteredState: Send + Sync {
     fn associate(
         &self,
         declaration: &StateDeclaration,
-        adapters: &AdapterRegistry,
+        read_adapters: &ReadAdapterRegistry,
+        effect_adapters: &EffectAdapterRegistry,
     ) -> Result<Arc<dyn RegisteredState>>;
 
     fn validate_retained_read(
@@ -151,9 +176,30 @@ pub(crate) trait RegisteredState: Send + Sync {
         evidence: &QualifiedValue,
     ) -> Result<()>;
 
+    fn validate_retained_effect_prepare(
+        &self,
+        input: &QualifiedValue,
+        command: &QualifiedValue,
+    ) -> Result<()>;
+
+    fn validate_retained_effect_evidence(
+        &self,
+        effect_id: &EffectId,
+        command: &QualifiedValue,
+        evidence: &QualifiedValue,
+    ) -> Result<()>;
+
     fn start<'a>(
         &'a self,
         input: QualifiedValue,
+        context: DriverContext<'a>,
+    ) -> BoxFuture<'a, Result<DriverDisposition>>;
+
+    fn start_pending<'a>(
+        &'a self,
+        input: QualifiedValue,
+        effect_id: EffectId,
+        command: QualifiedValue,
         context: DriverContext<'a>,
     ) -> BoxFuture<'a, Result<DriverDisposition>>;
 }
@@ -171,7 +217,8 @@ impl<S: PureState> RegisteredState for PureDriver<S> {
     fn associate(
         &self,
         declaration: &StateDeclaration,
-        _adapters: &AdapterRegistry,
+        _read_adapters: &ReadAdapterRegistry,
+        _effect_adapters: &EffectAdapterRegistry,
     ) -> Result<Arc<dyn RegisteredState>> {
         if !declaration.execution().is_pure() || !declaration_matches(&self.signature, declaration)
         {
@@ -191,12 +238,39 @@ impl<S: PureState> RegisteredState for PureDriver<S> {
         Err(RuntimeError::InvalidHistory)
     }
 
+    fn validate_retained_effect_prepare(
+        &self,
+        _input: &QualifiedValue,
+        _command: &QualifiedValue,
+    ) -> Result<()> {
+        Err(RuntimeError::InvalidHistory)
+    }
+
+    fn validate_retained_effect_evidence(
+        &self,
+        _effect_id: &EffectId,
+        _command: &QualifiedValue,
+        _evidence: &QualifiedValue,
+    ) -> Result<()> {
+        Err(RuntimeError::InvalidHistory)
+    }
+
     fn start<'a>(
         &'a self,
         input: QualifiedValue,
         context: DriverContext<'a>,
     ) -> BoxFuture<'a, Result<DriverDisposition>> {
         Box::pin(engine::start_pure::<S>(input, context))
+    }
+
+    fn start_pending<'a>(
+        &'a self,
+        _input: QualifiedValue,
+        _effect_id: EffectId,
+        _command: QualifiedValue,
+        _context: DriverContext<'a>,
+    ) -> BoxFuture<'a, Result<DriverDisposition>> {
+        Box::pin(async { Err(RuntimeError::Internal) })
     }
 }
 
@@ -205,7 +279,7 @@ where
     C: ReadCapabilityContract,
 {
     signature: StateSignature,
-    adapter: Option<Arc<ErasedAdapterCallback>>,
+    adapter: Option<Arc<ErasedReadAdapterCallback>>,
     marker: std::marker::PhantomData<fn() -> (S, C)>,
 }
 
@@ -221,9 +295,11 @@ where
     fn associate(
         &self,
         declaration: &StateDeclaration,
-        adapters: &AdapterRegistry,
+        read_adapters: &ReadAdapterRegistry,
+        _effect_adapters: &EffectAdapterRegistry,
     ) -> Result<Arc<dyn RegisteredState>> {
-        if declaration.execution().is_pure() || !declaration_matches(&self.signature, declaration) {
+        if !declaration.execution().is_read() || !declaration_matches(&self.signature, declaration)
+        {
             return Err(RuntimeError::IncompatibleAssembly);
         }
         let StateMode::Read(read) = &self.signature.mode else {
@@ -233,7 +309,7 @@ where
             .execution()
             .binding_ref()
             .ok_or(RuntimeError::IncompatibleAssembly)?;
-        let entry = adapters
+        let entry = read_adapters
             .get(&read.capability_contract_ref)
             .and_then(|bindings| bindings.get(binding_ref))
             .ok_or(RuntimeError::IncompatibleAssembly)?;
@@ -263,6 +339,23 @@ where
         C::bind_evidence(intent, evidence).map_err(|_| RuntimeError::InvalidHistory)
     }
 
+    fn validate_retained_effect_prepare(
+        &self,
+        _input: &QualifiedValue,
+        _command: &QualifiedValue,
+    ) -> Result<()> {
+        Err(RuntimeError::InvalidHistory)
+    }
+
+    fn validate_retained_effect_evidence(
+        &self,
+        _effect_id: &EffectId,
+        _command: &QualifiedValue,
+        _evidence: &QualifiedValue,
+    ) -> Result<()> {
+        Err(RuntimeError::InvalidHistory)
+    }
+
     fn start<'a>(
         &'a self,
         input: QualifiedValue,
@@ -273,6 +366,137 @@ where
         };
         Box::pin(engine::start_read::<S, C>(
             input,
+            context,
+            Arc::clone(adapter),
+        ))
+    }
+
+    fn start_pending<'a>(
+        &'a self,
+        _input: QualifiedValue,
+        _effect_id: EffectId,
+        _command: QualifiedValue,
+        _context: DriverContext<'a>,
+    ) -> BoxFuture<'a, Result<DriverDisposition>> {
+        Box::pin(async { Err(RuntimeError::Internal) })
+    }
+}
+
+struct EffectDriver<S, C>
+where
+    C: EffectCapabilityContract,
+{
+    signature: StateSignature,
+    adapter: Option<Arc<ErasedEffectAdapterCallback>>,
+    marker: std::marker::PhantomData<fn() -> (S, C)>,
+}
+
+impl<S, C> RegisteredState for EffectDriver<S, C>
+where
+    S: EffectState<C>,
+    C: EffectCapabilityContract,
+{
+    fn signature(&self) -> &StateSignature {
+        &self.signature
+    }
+
+    fn associate(
+        &self,
+        declaration: &StateDeclaration,
+        _read_adapters: &ReadAdapterRegistry,
+        effect_adapters: &EffectAdapterRegistry,
+    ) -> Result<Arc<dyn RegisteredState>> {
+        if !declaration.execution().is_effect()
+            || !declaration_matches(&self.signature, declaration)
+        {
+            return Err(RuntimeError::IncompatibleAssembly);
+        }
+        let StateMode::Effect(effect) = &self.signature.mode else {
+            return Err(RuntimeError::IncompatibleAssembly);
+        };
+        let binding_ref = declaration
+            .execution()
+            .binding_ref()
+            .ok_or(RuntimeError::IncompatibleAssembly)?;
+        let entry = effect_adapters
+            .get(&effect.capability_contract_ref)
+            .and_then(|bindings| bindings.get(binding_ref))
+            .ok_or(RuntimeError::IncompatibleAssembly)?;
+        if entry.capability_type != TypeId::of::<C>() {
+            return Err(RuntimeError::IncompatibleAssembly);
+        }
+        Ok(Arc::new(Self {
+            signature: self.signature.clone(),
+            adapter: Some(Arc::clone(&entry.callback)),
+            marker: std::marker::PhantomData,
+        }))
+    }
+
+    fn validate_retained_read(
+        &self,
+        _intent: &QualifiedValue,
+        _evidence: &QualifiedValue,
+    ) -> Result<()> {
+        Err(RuntimeError::InvalidHistory)
+    }
+
+    fn validate_retained_effect_prepare(
+        &self,
+        input: &QualifiedValue,
+        command: &QualifiedValue,
+    ) -> Result<()> {
+        let input = input
+            .typed
+            .downcast_ref::<S::Input>()
+            .ok_or(RuntimeError::InvalidHistory)?;
+        let expected = S::prepare(input).map_err(|_| RuntimeError::InvalidHistory)?;
+        let expected = qualify_hot(expected).map_err(|_| RuntimeError::InvalidHistory)?;
+        ((expected.contract_ref == command.contract_ref)
+            && (expected.value_ref == command.value_ref)
+            && (expected.canonical == command.canonical))
+            .then_some(())
+            .ok_or(RuntimeError::InvalidHistory)
+    }
+
+    fn validate_retained_effect_evidence(
+        &self,
+        effect_id: &EffectId,
+        command: &QualifiedValue,
+        evidence: &QualifiedValue,
+    ) -> Result<()> {
+        let command = command
+            .typed
+            .downcast_ref::<C::Command>()
+            .ok_or(RuntimeError::InvalidHistory)?;
+        let evidence = evidence
+            .typed
+            .downcast_ref::<C::Evidence>()
+            .ok_or(RuntimeError::InvalidHistory)?;
+        C::bind_evidence(effect_id, command, evidence).map_err(|_| RuntimeError::InvalidHistory)
+    }
+
+    fn start<'a>(
+        &'a self,
+        input: QualifiedValue,
+        context: DriverContext<'a>,
+    ) -> BoxFuture<'a, Result<DriverDisposition>> {
+        Box::pin(engine::start_effect::<S, C>(input, context))
+    }
+
+    fn start_pending<'a>(
+        &'a self,
+        input: QualifiedValue,
+        effect_id: EffectId,
+        command: QualifiedValue,
+        context: DriverContext<'a>,
+    ) -> BoxFuture<'a, Result<DriverDisposition>> {
+        let Some(adapter) = self.adapter.as_ref() else {
+            return Box::pin(async { Err(RuntimeError::Internal) });
+        };
+        Box::pin(engine::start_pending_effect::<S, C>(
+            input,
+            effect_id,
+            command,
             context,
             Arc::clone(adapter),
         ))
@@ -290,51 +514,60 @@ fn declaration_matches(signature: &StateSignature, declaration: &StateDeclaratio
     match &signature.mode {
         StateMode::Pure => declaration.execution().is_pure(),
         StateMode::Read(read) => {
-            declaration.execution().capability_contract_ref() == Some(&read.capability_contract_ref)
+            declaration.execution().is_read()
+                && declaration.execution().capability_contract_ref()
+                    == Some(&read.capability_contract_ref)
                 && declaration.execution().intent_contract_ref() == Some(&read.intent_contract_ref)
                 && declaration.execution().evidence_contract_ref()
                     == Some(&read.evidence_contract_ref)
+        }
+        StateMode::Effect(effect) => {
+            declaration.execution().is_effect()
+                && declaration.execution().capability_contract_ref()
+                    == Some(&effect.capability_contract_ref)
+                && declaration.execution().command_contract_ref()
+                    == Some(&effect.command_contract_ref)
+                && declaration.execution().evidence_contract_ref()
+                    == Some(&effect.evidence_contract_ref)
         }
     }
 }
 
 struct CatchAdapterPanic<'a, T> {
-    inner: BoxFuture<'a, std::result::Result<T, ReadAdapterError>>,
+    inner: BoxFuture<'a, std::result::Result<T, AdapterError>>,
 }
 
 impl<T> Future for CatchAdapterPanic<'_, T> {
-    type Output = std::result::Result<T, ReadAdapterError>;
+    type Output = std::result::Result<T, AdapterError>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.inner.as_mut().poll(context)
         }))
-        .unwrap_or(Poll::Ready(Err(ReadAdapterError::Internal)))
+        .unwrap_or(Poll::Ready(Err(AdapterError::Internal)))
     }
 }
 
-fn erase_adapter<C, F>(callback: F) -> Arc<ErasedAdapterCallback>
+fn erase_read_adapter<C, F>(callback: F) -> Arc<ErasedReadAdapterCallback>
 where
     C: ReadCapabilityContract,
     F: for<'a> Fn(
             &'a C::Intent,
         ) -> Pin<
-            Box<
-                dyn Future<Output = std::result::Result<C::Evidence, ReadAdapterError>> + Send + 'a,
-            >,
+            Box<dyn Future<Output = std::result::Result<C::Evidence, AdapterError>> + Send + 'a>,
         > + Send
         + Sync
         + 'static,
 {
-    let callback: Arc<AdapterCallback<C>> = Arc::new(callback);
+    let callback: Arc<ReadAdapterCallback<C>> = Arc::new(callback);
     Arc::new(move |qualified_intent| {
         let Some(intent) = qualified_intent.typed.downcast_ref::<C::Intent>() else {
-            return Box::pin(async { Err(ReadAdapterError::Internal) });
+            return Box::pin(async { Err(AdapterError::Internal) });
         };
         let future =
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (callback)(intent))) {
                 Ok(future) => future,
-                Err(_) => return Box::pin(async { Err(ReadAdapterError::Internal) }),
+                Err(_) => return Box::pin(async { Err(AdapterError::Internal) }),
             };
         Box::pin(async move {
             let evidence = CatchAdapterPanic { inner: future }.await?;
@@ -343,12 +576,48 @@ where
     })
 }
 
-pub(crate) struct AdapterEntry {
-    capability_type: TypeId,
-    callback: Arc<ErasedAdapterCallback>,
+fn erase_effect_adapter<C, F>(callback: F) -> Arc<ErasedEffectAdapterCallback>
+where
+    C: EffectCapabilityContract,
+    F: for<'a> Fn(
+            &'a EffectId,
+            &'a C::Command,
+        ) -> Pin<
+            Box<dyn Future<Output = std::result::Result<C::Evidence, AdapterError>> + Send + 'a>,
+        > + Send
+        + Sync
+        + 'static,
+{
+    let callback: Arc<EffectAdapterCallback<C>> = Arc::new(callback);
+    Arc::new(move |effect_id, qualified_command| {
+        let Some(command) = qualified_command.typed.downcast_ref::<C::Command>() else {
+            return Box::pin(async { Err(AdapterError::Internal) });
+        };
+        let future = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (callback)(effect_id, command)
+        })) {
+            Ok(future) => future,
+            Err(_) => return Box::pin(async { Err(AdapterError::Internal) }),
+        };
+        Box::pin(async move {
+            let evidence = CatchAdapterPanic { inner: future }.await?;
+            Ok(Box::new(move || qualify_hot(evidence)) as EvidenceQualification)
+        })
+    })
 }
 
-type AdapterRegistry = BTreeMap<ContentRef, BTreeMap<ContentRef, AdapterEntry>>;
+pub(crate) struct ReadAdapterEntry {
+    capability_type: TypeId,
+    callback: Arc<ErasedReadAdapterCallback>,
+}
+
+pub(crate) struct EffectAdapterEntry {
+    capability_type: TypeId,
+    callback: Arc<ErasedEffectAdapterCallback>,
+}
+
+type ReadAdapterRegistry = BTreeMap<ContentRef, BTreeMap<ContentRef, ReadAdapterEntry>>;
+type EffectAdapterRegistry = BTreeMap<ContentRef, BTreeMap<ContentRef, EffectAdapterEntry>>;
 
 #[derive(Clone, PartialEq, Eq)]
 struct CapabilitySignature {
@@ -357,13 +626,22 @@ struct CapabilitySignature {
     evidence_contract_ref: ContentRef,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct EffectCapabilitySignature {
+    capability_type: TypeId,
+    command_contract_ref: ContentRef,
+    evidence_contract_ref: ContentRef,
+}
+
 /// Mutable builder for one immutable Runtime assembly.
 pub struct RuntimeAssemblyBuilder {
     values: BTreeMap<ContentRef, Arc<ValueCodec>>,
     semantics: BTreeMap<SemanticTypeId, ContentRef>,
     states: BTreeMap<ContentRef, Arc<dyn RegisteredState>>,
-    capabilities: BTreeMap<ContentRef, CapabilitySignature>,
-    adapters: AdapterRegistry,
+    read_capabilities: BTreeMap<ContentRef, CapabilitySignature>,
+    effect_capabilities: BTreeMap<ContentRef, EffectCapabilitySignature>,
+    read_adapters: ReadAdapterRegistry,
+    effect_adapters: EffectAdapterRegistry,
     invalid: bool,
 }
 
@@ -375,8 +653,10 @@ impl RuntimeAssemblyBuilder {
             values: BTreeMap::new(),
             semantics: BTreeMap::new(),
             states: BTreeMap::new(),
-            capabilities: BTreeMap::new(),
-            adapters: BTreeMap::new(),
+            read_capabilities: BTreeMap::new(),
+            effect_capabilities: BTreeMap::new(),
+            read_adapters: BTreeMap::new(),
+            effect_adapters: BTreeMap::new(),
             invalid: false,
         };
         if builder.register_value::<Never>().is_err() {
@@ -469,6 +749,35 @@ impl RuntimeAssemblyBuilder {
         )
     }
 
+    /// Registers one Effect State, capability, and complete value ABI.
+    pub fn register_effect<S, C>(&mut self) -> Result<()>
+    where
+        S: EffectState<C>,
+        C: EffectCapabilityContract,
+    {
+        self.register_value::<S::Input>()?;
+        self.register_value::<S::Output>()?;
+        self.register_value::<S::Failure>()?;
+        self.register_value::<C::Command>()?;
+        self.register_value::<C::Evidence>()?;
+        let capability = self.ensure_effect_capability::<C>()?;
+        let signature = state_signature::<S>(StateMode::Effect(Box::new(EffectSignature {
+            capability_type: TypeId::of::<C>(),
+            capability_contract_ref: effect_capability_contract_ref::<C>()
+                .map_err(|_| RuntimeError::IncompatibleAssembly)?,
+            command_contract_ref: capability.command_contract_ref,
+            evidence_contract_ref: capability.evidence_contract_ref,
+        })))?;
+        self.register_state(
+            signature.clone(),
+            Arc::new(EffectDriver::<S, C> {
+                signature,
+                adapter: None,
+                marker: std::marker::PhantomData,
+            }),
+        )
+    }
+
     /// Registers one typed adapter under its internally derived binding ref.
     pub fn register_adapter<C, B, F>(&mut self, binding: B, callback: F) -> Result<()>
     where
@@ -478,9 +787,7 @@ impl RuntimeAssemblyBuilder {
                 &'a C::Intent,
             ) -> Pin<
                 Box<
-                    dyn Future<Output = std::result::Result<C::Evidence, ReadAdapterError>>
-                        + Send
-                        + 'a,
+                    dyn Future<Output = std::result::Result<C::Evidence, AdapterError>> + Send + 'a,
                 >,
             > + Send
             + Sync
@@ -494,15 +801,53 @@ impl RuntimeAssemblyBuilder {
         }
         let (_, binding_ref) =
             canonicalize_mfm_value(&binding).map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        let bindings = self.adapters.entry(capability_ref).or_default();
+        let bindings = self.read_adapters.entry(capability_ref).or_default();
         if bindings.contains_key(&binding_ref) {
             return Err(RuntimeError::IncompatibleAssembly);
         }
         bindings.insert(
             binding_ref,
-            AdapterEntry {
+            ReadAdapterEntry {
                 capability_type: TypeId::of::<C>(),
-                callback: erase_adapter::<C, F>(callback),
+                callback: erase_read_adapter::<C, F>(callback),
+            },
+        );
+        Ok(())
+    }
+
+    /// Registers one typed Effect adapter under its internally derived binding ref.
+    pub fn register_effect_adapter<C, B, F>(&mut self, binding: B, callback: F) -> Result<()>
+    where
+        C: EffectCapabilityContract,
+        B: MfmValue,
+        F: for<'a> Fn(
+                &'a EffectId,
+                &'a C::Command,
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = std::result::Result<C::Evidence, AdapterError>> + Send + 'a,
+                >,
+            > + Send
+            + Sync
+            + 'static,
+    {
+        let capability = self.ensure_effect_capability::<C>()?;
+        let capability_ref = effect_capability_contract_ref::<C>()
+            .map_err(|_| RuntimeError::IncompatibleAssembly)?;
+        if capability.capability_type != TypeId::of::<C>() {
+            return Err(RuntimeError::IncompatibleAssembly);
+        }
+        let (_, binding_ref) =
+            canonicalize_mfm_value(&binding).map_err(|_| RuntimeError::IncompatibleAssembly)?;
+        let bindings = self.effect_adapters.entry(capability_ref).or_default();
+        if bindings.contains_key(&binding_ref) {
+            return Err(RuntimeError::IncompatibleAssembly);
+        }
+        bindings.insert(
+            binding_ref,
+            EffectAdapterEntry {
+                capability_type: TypeId::of::<C>(),
+                callback: erase_effect_adapter::<C, F>(callback),
             },
         );
         Ok(())
@@ -517,7 +862,8 @@ impl RuntimeAssemblyBuilder {
             inner: Arc::new(AssemblyInner {
                 values: self.values,
                 states: self.states,
-                adapters: self.adapters,
+                read_adapters: self.read_adapters,
+                effect_adapters: self.effect_adapters,
             }),
         })
     }
@@ -550,12 +896,43 @@ impl RuntimeAssemblyBuilder {
                 .map_err(|_| RuntimeError::IncompatibleAssembly)?,
         };
         let key = contract;
-        if let Some(previous) = self.capabilities.get(&key) {
+        if self.effect_capabilities.contains_key(&key) {
+            return Err(RuntimeError::IncompatibleAssembly);
+        }
+        if let Some(previous) = self.read_capabilities.get(&key) {
             if previous != &signature {
                 return Err(RuntimeError::IncompatibleAssembly);
             }
         } else {
-            self.capabilities.insert(key, signature.clone());
+            self.read_capabilities.insert(key, signature.clone());
+        }
+        Ok(signature)
+    }
+
+    fn ensure_effect_capability<C: EffectCapabilityContract>(
+        &mut self,
+    ) -> Result<EffectCapabilitySignature> {
+        self.register_value::<C::Command>()?;
+        self.register_value::<C::Evidence>()?;
+        let contract = effect_capability_contract_ref::<C>()
+            .map_err(|_| RuntimeError::IncompatibleAssembly)?;
+        let signature = EffectCapabilitySignature {
+            capability_type: TypeId::of::<C>(),
+            command_contract_ref: nominal_contract_ref::<C::Command>()
+                .map_err(|_| RuntimeError::IncompatibleAssembly)?,
+            evidence_contract_ref: nominal_contract_ref::<C::Evidence>()
+                .map_err(|_| RuntimeError::IncompatibleAssembly)?,
+        };
+        let key = contract;
+        if self.read_capabilities.contains_key(&key) {
+            return Err(RuntimeError::IncompatibleAssembly);
+        }
+        if let Some(previous) = self.effect_capabilities.get(&key) {
+            if previous != &signature {
+                return Err(RuntimeError::IncompatibleAssembly);
+            }
+        } else {
+            self.effect_capabilities.insert(key, signature.clone());
         }
         Ok(signature)
     }
@@ -584,7 +961,8 @@ pub struct RuntimeAssembly {
 pub(crate) struct AssemblyInner {
     values: BTreeMap<ContentRef, Arc<ValueCodec>>,
     states: BTreeMap<ContentRef, Arc<dyn RegisteredState>>,
-    adapters: AdapterRegistry,
+    read_adapters: ReadAdapterRegistry,
+    effect_adapters: EffectAdapterRegistry,
 }
 
 impl RuntimeAssembly {
@@ -610,19 +988,29 @@ impl RuntimeAssembly {
                         .states
                         .get(state.state_implementation_ref())
                         .ok_or(RuntimeError::IncompatibleAssembly)?;
-                    let bound = registered.associate(state, &self.inner.adapters)?;
+                    let bound = registered.associate(
+                        state,
+                        &self.inner.read_adapters,
+                        &self.inner.effect_adapters,
+                    )?;
                     let output_codec = self
                         .codec(state.output_contract_ref())
                         .ok_or(RuntimeError::IncompatibleAssembly)?;
                     let failure_codec = self
                         .codec(state.failure_contract_ref())
                         .ok_or(RuntimeError::IncompatibleAssembly)?;
-                    let read_codecs = match (
-                        state.execution().intent_contract_ref(),
-                        state.execution().evidence_contract_ref(),
-                    ) {
-                        (None, None) if state.execution().is_pure() => None,
-                        (Some(intent), Some(evidence)) if !state.execution().is_pure() => {
+                    let (read_codecs, effect_codecs) = if state.execution().is_pure() {
+                        (None, None)
+                    } else if state.execution().is_read() {
+                        let intent = state
+                            .execution()
+                            .intent_contract_ref()
+                            .ok_or(RuntimeError::IncompatibleAssembly)?;
+                        let evidence = state
+                            .execution()
+                            .evidence_contract_ref()
+                            .ok_or(RuntimeError::IncompatibleAssembly)?;
+                        (
                             Some(ReadCodecs {
                                 intent: self
                                     .codec(intent)
@@ -630,15 +1018,38 @@ impl RuntimeAssembly {
                                 evidence: self
                                     .codec(evidence)
                                     .ok_or(RuntimeError::IncompatibleAssembly)?,
-                            })
-                        }
-                        _ => return Err(RuntimeError::IncompatibleAssembly),
+                            }),
+                            None,
+                        )
+                    } else if state.execution().is_effect() {
+                        let command = state
+                            .execution()
+                            .command_contract_ref()
+                            .ok_or(RuntimeError::IncompatibleAssembly)?;
+                        let evidence = state
+                            .execution()
+                            .evidence_contract_ref()
+                            .ok_or(RuntimeError::IncompatibleAssembly)?;
+                        (
+                            None,
+                            Some(EffectCodecs {
+                                command: self
+                                    .codec(command)
+                                    .ok_or(RuntimeError::IncompatibleAssembly)?,
+                                evidence: self
+                                    .codec(evidence)
+                                    .ok_or(RuntimeError::IncompatibleAssembly)?,
+                            }),
+                        )
+                    } else {
+                        return Err(RuntimeError::IncompatibleAssembly);
                     };
                     declarations.push(ExecutableDeclaration::State(ExecutableState {
                         driver: bound,
                         output_codec,
                         failure_codec,
                         read_codecs,
+                        effect_codecs,
                     }));
                 }
                 Declaration::Match(selector) => {
@@ -688,10 +1099,16 @@ pub(crate) struct ExecutableState {
     pub(crate) output_codec: Arc<ValueCodec>,
     pub(crate) failure_codec: Arc<ValueCodec>,
     pub(crate) read_codecs: Option<ReadCodecs>,
+    pub(crate) effect_codecs: Option<EffectCodecs>,
 }
 
 pub(crate) struct ReadCodecs {
     pub(crate) intent: Arc<ValueCodec>,
+    pub(crate) evidence: Arc<ValueCodec>,
+}
+
+pub(crate) struct EffectCodecs {
+    pub(crate) command: Arc<ValueCodec>,
     pub(crate) evidence: Arc<ValueCodec>,
 }
 

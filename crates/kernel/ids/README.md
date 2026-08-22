@@ -1,9 +1,9 @@
 # mfm-ids
 
-Checked stable, schema, content, run, and entry-point identities shared by kernel/domain crates.
+Checked stable, schema, content, run, Effect, and entry-point identities shared by kernel/domain crates.
 Parsing enforces exact algorithm tags, grammar, lengths, and lowercase hexadecimal spelling.
 
-`RunId` and `ArtifactId` are fixed to `sha256-jcs-v1`. `ContentDigest` accepts either supported
+`RunId`, `EffectId`, and `ArtifactId` are fixed to `sha256-jcs-v1`. `ContentDigest` accepts either supported
 algorithm, while `ContentRef` combines a schema interpretation with an exact-byte
 `sha256-v1` identity. Journal separately qualifies the retained frame-local bytes.
 

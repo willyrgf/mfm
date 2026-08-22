@@ -1594,13 +1594,14 @@ fn literal_matches(literal: &LiteralValue, value: &serde_json::Value) -> bool {
 /// descriptor never carries regular-expression text and the grammar has exactly
 /// one implementation.
 fn grammar_admits(grammar: StringGrammar, value: &str) -> bool {
-    use mfm_ids::{ContentDigest, RunId, SchemaId, SemanticTypeId, StableId};
+    use mfm_ids::{ContentDigest, EffectId, RunId, SchemaId, SemanticTypeId, StableId};
 
     match grammar {
         StringGrammar::UnicodeScalarText => !value.chars().any(|ch| ch.is_control()),
         StringGrammar::ContentDigest => ContentDigest::parse(value)
             .is_ok_and(|digest| digest.algorithm() == DigestAlgorithm::Sha256V1),
         StringGrammar::RunId => RunId::parse(value).is_ok(),
+        StringGrammar::EffectId => EffectId::parse(value).is_ok(),
         StringGrammar::ArtifactId => mfm_ids::ArtifactId::parse(value).is_ok(),
         StringGrammar::SchemaId => SchemaId::parse(value).is_ok(),
         StringGrammar::SemanticTypeId => SemanticTypeId::parse(value).is_ok(),
@@ -1953,6 +1954,7 @@ fn parse_string_grammar(value: &str) -> Result<StringGrammar> {
         StringGrammar::UnicodeScalarText,
         StringGrammar::ContentDigest,
         StringGrammar::RunId,
+        StringGrammar::EffectId,
         StringGrammar::ArtifactId,
         StringGrammar::SchemaId,
         StringGrammar::SemanticTypeId,
@@ -2545,8 +2547,11 @@ fn reject_duplicate_names<'a>(
 
 #[cfg(test)]
 mod secret_marker_tests {
-    use super::{grammar_admits, string_contains_secret_marker, DigestAlgorithm, StringGrammar};
-    use mfm_ids::{ContentDigest, DigestBytes};
+    use super::{
+        grammar_admits, parse_string_grammar, string_contains_secret_marker, DigestAlgorithm,
+        StringGrammar,
+    };
+    use mfm_ids::{ContentDigest, DigestBytes, EffectId};
 
     #[test]
     fn content_ref_grammar_accepts_only_exact_byte_digest_algorithm() {
@@ -2557,6 +2562,21 @@ mod secret_marker_tests {
         assert!(ContentDigest::parse(jcs.as_str()).is_ok());
         assert!(grammar_admits(StringGrammar::ContentDigest, raw.as_str()));
         assert!(!grammar_admits(StringGrammar::ContentDigest, jcs.as_str()));
+    }
+
+    #[test]
+    fn effect_id_grammar_delegates_to_the_checked_owner() {
+        let effect = EffectId::from_digest(DigestBytes::from_array([8; 32]));
+        assert_eq!(StringGrammar::EffectId.as_str(), "effect_id");
+        assert_eq!(
+            parse_string_grammar("effect_id"),
+            Ok(StringGrammar::EffectId)
+        );
+        assert!(grammar_admits(StringGrammar::EffectId, effect.as_str()));
+        assert!(!grammar_admits(
+            StringGrammar::EffectId,
+            &effect.as_str().replace("effect", "run")
+        ));
     }
 
     #[test]

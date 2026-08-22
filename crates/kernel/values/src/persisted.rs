@@ -28,6 +28,8 @@ pub enum StringGrammar {
     ContentDigest,
     /// `run:sha256-jcs-v1:<64 lowercase hex>` owned by `RunId`.
     RunId,
+    /// `effect:sha256-jcs-v1:<64 lowercase hex>` owned by `EffectId`.
+    EffectId,
     /// `artifact:sha256-jcs-v1:<64 lowercase hex>` owned by `ArtifactId`.
     ArtifactId,
     /// `schema:<name>:<version>:sha256-jcs-v1:<64 lowercase hex>` owned by `SchemaId`.
@@ -53,6 +55,7 @@ impl StringGrammar {
             Self::UnicodeScalarText => "unicode_scalar_text",
             Self::ContentDigest => "content_digest",
             Self::RunId => "run_id",
+            Self::EffectId => "effect_id",
             Self::ArtifactId => "artifact_id",
             Self::SchemaId => "schema_id",
             Self::SemanticTypeId => "semantic_type_id",

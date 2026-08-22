@@ -1,14 +1,14 @@
 #![warn(missing_docs)]
 //! Exact canonical run frames and qualified append-only history.
 //!
-//! Journal owns the one RunFrameV1 encoder and qualifier. Store moves opaque
+//! Journal owns the one RunFrameV2 encoder and qualifier. Store moves opaque
 //! bytes; Runtime receives only borrowed qualified record and object views.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use mfm_canonical::{raw_content_digest, sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, RunId, SchemaId};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, EffectId, RunId, SchemaId};
 use mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -109,6 +109,22 @@ pub enum JournalRecord<'a> {
         /// Complete typed outcome.
         outcome: JournalObject<'a>,
     },
+    /// One durable Effect command prepared before adapter entry.
+    StateEffectPrepared {
+        /// Durable identity derived from the exact occurrence and command.
+        effect_id: &'a EffectId,
+        /// Exact prepared command.
+        command: JournalObject<'a>,
+    },
+    /// One Effect conclusion adjacent to its prepare.
+    StateEffectConcluded {
+        /// Exact accepted evidence.
+        evidence: JournalObject<'a>,
+        /// Success or failure branch.
+        kind: OutcomeKind,
+        /// Complete typed outcome.
+        outcome: JournalObject<'a>,
+    },
 }
 
 /// One sealed valid canonical frame.
@@ -172,7 +188,7 @@ impl EncodedRunFrame {
         &self.frame.head_digest
     }
 
-    /// Returns exact canonical RunFrameV1 bytes.
+    /// Returns exact canonical RunFrameV2 bytes.
     pub fn canonical_bytes(&self) -> &[u8] {
         self.frame.canonical.as_bytes()
     }
@@ -276,6 +292,7 @@ impl JournalHistory {
                 let previous = frames.last().ok_or(JournalError::InvalidHistory)?;
                 if frame.previous_head_digest.as_ref() != Some(&previous.head_digest)
                     || matches!(frame.record, RecordOwned::RunAdmitted { .. })
+                    || !records_are_adjacent(&previous.record, &frame.record)
                 {
                     return Err(JournalError::InvalidHistory);
                 }
@@ -351,11 +368,52 @@ impl JournalHistory {
         )
     }
 
+    /// Encodes one Effect prepare against this exact head.
+    pub fn encode_effect_prepare(
+        &self,
+        effect_id: &EffectId,
+        command_ref: &ContentRef,
+        command: &[u8],
+    ) -> std::result::Result<EncodedRunFrame, JournalError> {
+        self.construct_successor(
+            RecordOwned::StateEffectPrepared {
+                effect_id: effect_id.clone(),
+                command: command_ref.clone(),
+            },
+            vec![(command_ref.clone(), command)],
+        )
+    }
+
+    /// Encodes one Effect conclusion adjacent to this history's pending prepare.
+    pub fn encode_effect_conclusion(
+        &self,
+        evidence_ref: &ContentRef,
+        evidence: &[u8],
+        kind: OutcomeKind,
+        value_ref: &ContentRef,
+        value: &[u8],
+    ) -> std::result::Result<EncodedRunFrame, JournalError> {
+        self.construct_successor(
+            RecordOwned::StateEffectConcluded {
+                evidence: evidence_ref.clone(),
+                outcome: OutcomeOwned {
+                    kind,
+                    value: value_ref.clone(),
+                },
+            },
+            vec![(evidence_ref.clone(), evidence), (value_ref.clone(), value)],
+        )
+    }
+
     fn construct_successor(
         &self,
         record: RecordOwned,
         objects: Vec<(ContentRef, &[u8])>,
     ) -> std::result::Result<EncodedRunFrame, JournalError> {
+        let previous = &self.frames[self.frames.len() - 1].record;
+        if !records_are_adjacent(previous, &record) {
+            return Err(JournalError::InvalidFrame);
+        }
         let sequence = self
             .head_sequence()
             .checked_add(1)
@@ -393,6 +451,10 @@ impl JournalHistory {
         if inserted.run_id() != self.run_id()
             || inserted.run_sequence() != expected_sequence
             || inserted.previous_head_digest() != Some(self.head_digest())
+            || !records_are_adjacent(
+                &self.frames[self.frames.len() - 1].record,
+                &inserted.frame.record,
+            )
         {
             return Err(JournalError::InvalidFrame);
         }
@@ -470,6 +532,19 @@ impl QualifiedFrame {
                 kind: outcome.kind,
                 outcome: self.object(&outcome.value),
             },
+            RecordOwned::StateEffectPrepared { effect_id, command } => {
+                JournalRecord::StateEffectPrepared {
+                    effect_id,
+                    command: self.object(command),
+                }
+            }
+            RecordOwned::StateEffectConcluded { evidence, outcome } => {
+                JournalRecord::StateEffectConcluded {
+                    evidence: self.object(evidence),
+                    kind: outcome.kind,
+                    outcome: self.object(&outcome.value),
+                }
+            }
         }
     }
 
@@ -501,6 +576,14 @@ enum RecordOwned {
     },
     StateConcludedRead {
         intent: ContentRef,
+        evidence: ContentRef,
+        outcome: OutcomeOwned,
+    },
+    StateEffectPrepared {
+        effect_id: EffectId,
+        command: ContentRef,
+    },
+    StateEffectConcluded {
         evidence: ContentRef,
         outcome: OutcomeOwned,
     },
@@ -617,6 +700,11 @@ fn record_refs(record: &RecordOwned) -> BTreeSet<(String, String)> {
             .into_iter()
             .map(content_key)
             .collect(),
+        RecordOwned::StateEffectPrepared { command, .. } => BTreeSet::from([content_key(command)]),
+        RecordOwned::StateEffectConcluded { evidence, outcome } => [evidence, &outcome.value]
+            .into_iter()
+            .map(content_key)
+            .collect(),
     }
 }
 
@@ -650,7 +738,7 @@ fn encode_frame(
         })
         .collect();
     let wire = FrameWire {
-        domain: "mfm.run.frame.v1",
+        domain: "mfm.run.frame.v2",
         run_id: run_id.as_str(),
         run_sequence,
         previous_head_digest: previous_head_digest.map(ContentDigest::as_str),
@@ -710,6 +798,14 @@ enum RecordWire<'a> {
         evidence: &'a ContentRef,
         outcome: OutcomeWire<'a>,
     },
+    StateEffectPrepared {
+        effect_id: &'a str,
+        command: &'a ContentRef,
+    },
+    StateEffectConcluded {
+        evidence: &'a ContentRef,
+        outcome: OutcomeWire<'a>,
+    },
 }
 
 impl<'a> From<&'a RecordOwned> for RecordWire<'a> {
@@ -731,6 +827,14 @@ impl<'a> From<&'a RecordOwned> for RecordWire<'a> {
                 outcome,
             } => Self::StateConcludedRead {
                 intent,
+                evidence,
+                outcome: OutcomeWire::from(outcome),
+            },
+            RecordOwned::StateEffectPrepared { effect_id, command } => Self::StateEffectPrepared {
+                effect_id: effect_id.as_str(),
+                command,
+            },
+            RecordOwned::StateEffectConcluded { evidence, outcome } => Self::StateEffectConcluded {
                 evidence,
                 outcome: OutcomeWire::from(outcome),
             },
@@ -791,6 +895,14 @@ enum RawRecord {
         evidence: RawContentRef,
         outcome: RawOutcome,
     },
+    StateEffectPrepared {
+        effect_id: String,
+        command: RawContentRef,
+    },
+    StateEffectConcluded {
+        evidence: RawContentRef,
+        outcome: RawOutcome,
+    },
 }
 
 #[derive(Deserialize)]
@@ -824,7 +936,7 @@ fn qualify_frame(bytes: &[u8]) -> std::result::Result<QualifiedFrame, JournalErr
         .map_err(|_| JournalError::InvalidHistory)?;
     let raw: RawFrame =
         serde_json::from_slice(canonical.as_bytes()).map_err(|_| JournalError::InvalidHistory)?;
-    if raw.domain != "mfm.run.frame.v1"
+    if raw.domain != "mfm.run.frame.v2"
         || raw.run_sequence == 0
         || raw.run_sequence > MAX_RUN_FRAMES
         || (raw.run_sequence == 1) != raw.previous_head_digest.is_none()
@@ -916,7 +1028,24 @@ impl RawRecord {
                 evidence: evidence.checked()?,
                 outcome: outcome.checked()?,
             },
+            Self::StateEffectPrepared { effect_id, command } => RecordOwned::StateEffectPrepared {
+                effect_id: EffectId::parse(effect_id).map_err(|_| JournalError::InvalidHistory)?,
+                command: command.checked()?,
+            },
+            Self::StateEffectConcluded { evidence, outcome } => RecordOwned::StateEffectConcluded {
+                evidence: evidence.checked()?,
+                outcome: outcome.checked()?,
+            },
         })
+    }
+}
+
+fn records_are_adjacent(previous: &RecordOwned, next: &RecordOwned) -> bool {
+    match previous {
+        RecordOwned::StateEffectPrepared { .. } => {
+            matches!(next, RecordOwned::StateEffectConcluded { .. })
+        }
+        _ => !matches!(next, RecordOwned::StateEffectConcluded { .. }),
     }
 }
 

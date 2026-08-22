@@ -677,6 +677,7 @@ fn checked_identity_shape(ident: &str) -> Option<proc_macro2::TokenStream> {
         "SchemaId" => (quote!(SchemaId), 512),
         "SemanticTypeId" => (quote!(SemanticTypeId), 512),
         "RunId" => (quote!(RunId), 128),
+        "EffectId" => (quote!(EffectId), 128),
         "ArtifactId" => (quote!(ArtifactId), 128),
         "StableId" => (quote!(StableId), 512),
         "EntryPointId" => (quote!(EntryPointId), 512),

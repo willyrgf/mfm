@@ -16,7 +16,7 @@ use mfm_config::{
 use mfm_evm::{EvmEndpoint, EvmReadValue};
 use mfm_evm_live::{EvmProvider, EvmProviderResponse};
 use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, RunId, StableId};
-use mfm_runtime::{ReadAdapterError, RunViewState};
+use mfm_runtime::{AdapterError, RunViewState};
 use mfm_store::{AppendResult, MemoryStore, Store, StoreError};
 
 const ANCHOR: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -32,19 +32,18 @@ impl EvmProvider for Provider {
         &'a self,
         operation: StableId,
         request_bytes: Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = Result<EvmProviderResponse, ReadAdapterError>> + Send + 'a>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<EvmProviderResponse, AdapterError>> + Send + 'a>> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if !self.available.load(Ordering::SeqCst) {
-                return Err(ReadAdapterError::Unavailable);
+                return Err(AdapterError::Unavailable);
             }
             let request: serde_json::Value =
-                serde_json::from_slice(&request_bytes).map_err(|_| ReadAdapterError::Internal)?;
+                serde_json::from_slice(&request_bytes).map_err(|_| AdapterError::Internal)?;
             if request.get("operation").and_then(serde_json::Value::as_str)
                 != Some(operation.as_str())
             {
-                return Err(ReadAdapterError::Internal);
+                return Err(AdapterError::Internal);
             }
             let value = match operation.as_str() {
                 "mfm.evm.read-chain-identity@1" => EvmReadValue::ChainId(self.chain_id),
@@ -59,7 +58,7 @@ impl EvmProvider for Provider {
                 }
                 "mfm.evm.read-token-decimals@1" => EvmReadValue::TokenDecimals(6),
                 "mfm.evm.read-token-balance@1" => EvmReadValue::RawUnits("2500000".to_owned()),
-                _ => return Err(ReadAdapterError::Internal),
+                _ => return Err(AdapterError::Internal),
             };
             Ok(EvmProviderResponse::Read(value))
         })

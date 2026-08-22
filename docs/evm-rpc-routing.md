@@ -15,7 +15,7 @@ capabilities directly. One target serves all six current Read State occurrences;
 map, descriptor wrapper, or live assembly contribution exists.
 
 Before IO, the callback checks intent chain and route against the captured target. A local mismatch
-returns `ReadAdapterError::Internal`, enters no provider, and appends nothing. Timeout, transport, or
+returns `AdapterError::Internal`, enters no provider, and appends nothing. Timeout, transport, or
 malformed unauthenticated ingress returns `Unavailable`. Accepted provider results are the closed
 typed `Read`, `Rejected`, `SafeFailure`, and `IntegrityBlocked` cases. Only authenticated external
 integrity evidence becomes durable.
