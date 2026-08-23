@@ -81,8 +81,8 @@ reconciles receipts before retaining typed settlement. Retained bytes are fully 
 compared before provider entry. A null receipt causes at most one submission of those bytes in an
 invocation; a matching submission response returns normal Pending progress, while a transport
 failure, dropped acknowledgement, malformed response, or hash mismatch remains Unavailable.
-Settlement requires two equal receipt observations
-and two equal current-canonical block observations. Version 1 is the canonical-receipt policy for
+Settlement requires one validated receipt and equality with the provider's current canonical
+identity for its block number. Version 1 is the canonical-receipt policy for
 the pinned non-reorging development fixture and is not registered by production composition.
 
 The same JSON-RPC client implements a separate transaction provider facet and the generic anchored

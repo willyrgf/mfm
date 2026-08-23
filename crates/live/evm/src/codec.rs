@@ -310,3 +310,80 @@ fn decode_scalar(payload: &mut &[u8]) -> Result<[u8; 32], EvmCodecError> {
     scalar[32 - bytes.len()..].copy_from_slice(bytes);
     Ok(scalar)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VALID_RAW: &str = "02f85382053907020a830186a08080826000c001a07ffd3c6f6e2217de62458b59faca6e9a3a829c7bcf9ebaa04e0414c1eb0d0419a06f5a761a7bb9c0dab816d83eb5472e2dfd61c8da2eca46924c500c54efe5d58b";
+
+    fn valid_raw() -> Vec<u8> {
+        hex::decode(VALID_RAW).expect("frozen raw transaction")
+    }
+
+    fn position(raw: &[u8], pattern: &[u8]) -> usize {
+        raw.windows(pattern.len())
+            .position(|window| window == pattern)
+            .expect("frozen pattern")
+    }
+
+    #[test]
+    fn signed_decoder_rejects_every_noncanonical_or_unsupported_boundary() {
+        assert!(decode_signed(&valid_raw()).is_ok());
+
+        let mut leading_zero_nonce = valid_raw();
+        let nonce = position(&leading_zero_nonce, &[0x82, 0x05, 0x39, 0x07]) + 3;
+        leading_zero_nonce.splice(nonce..=nonce, [0x82, 0x00, 0x07]);
+        leading_zero_nonce[2] += 2;
+
+        let mut nonempty_access_list = valid_raw();
+        let access_list = position(&nonempty_access_list, &[0x82, 0x60, 0x00, 0xc0, 0x01]) + 3;
+        let mut encoded_access_list = vec![0xd7, 0xd6, 0x94];
+        encoded_access_list.extend_from_slice(&[0; 20]);
+        encoded_access_list.push(0xc0);
+        nonempty_access_list.splice(access_list..=access_list, encoded_access_list);
+        nonempty_access_list[2] += 23;
+
+        let mut invalid_parity = valid_raw();
+        let parity = position(&invalid_parity, &[0xc0, 0x01, 0xa0]) + 1;
+        invalid_parity[parity] = 2;
+
+        let mut zero_scalar = valid_raw();
+        let scalar = zero_scalar
+            .iter()
+            .rposition(|byte| *byte == 0xa0)
+            .expect("scalar header");
+        zero_scalar[scalar + 1..scalar + 33].fill(0);
+
+        let mut high_s = valid_raw();
+        let scalar = high_s
+            .iter()
+            .rposition(|byte| *byte == 0xa0)
+            .expect("scalar header");
+        high_s[scalar + 1..scalar + 33].copy_from_slice(&[
+            0x91, 0xb4, 0xf9, 0x86, 0xaa, 0x69, 0xaa, 0xac, 0xb4, 0xe3, 0xa8, 0xa4, 0x67, 0xa8,
+            0x0e, 0x0c, 0x5f, 0x60, 0x2d, 0xc8, 0xd1, 0x77, 0xb0, 0x37, 0xcc, 0x60, 0x5e, 0x63,
+            0x3d, 0x74, 0x14, 0x8d,
+        ]);
+
+        let mut trailing = valid_raw();
+        trailing.push(0);
+        let mut malformed_list = valid_raw();
+        malformed_list[2] -= 1;
+        let mut noncanonical_list = valid_raw();
+        noncanonical_list.splice(1..3, [0xf9, 0x00, 0x53]);
+
+        for invalid in [
+            leading_zero_nonce,
+            nonempty_access_list,
+            trailing,
+            malformed_list,
+            noncanonical_list,
+            invalid_parity,
+            high_s,
+            zero_scalar,
+        ] {
+            assert!(decode_signed(&invalid).is_err());
+        }
+    }
+}

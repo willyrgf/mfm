@@ -203,7 +203,7 @@ async fn execute(
         .await
         .map_err(map_authority_error)?;
 
-    let prepared = match state {
+    let (prepared, chain_verified) = match state {
         Some(AuthorityState::Settled(settled)) => {
             validate_reservation(
                 settled.prepared().reservation(),
@@ -229,11 +229,14 @@ async fn execute(
                 &local.domain,
             )?;
             validate_prepared(&prepared, command, &local)?;
-            prepared
+            (prepared, false)
         }
         Some(AuthorityState::Reserved(reservation)) => {
             validate_reservation(&reservation, effect_id, &local.command_ref, &local.domain)?;
-            prepare(effect_id, command, &local, reservation, signer, authority).await?
+            (
+                prepare(effect_id, command, &local, reservation, signer, authority).await?,
+                false,
+            )
         }
         None => {
             verify_chain(command, provider).await?;
@@ -243,11 +246,23 @@ async fn execute(
                 .await
                 .map_err(map_authority_error)?;
             validate_reservation(&reservation, effect_id, &local.command_ref, &local.domain)?;
-            prepare(effect_id, command, &local, reservation, signer, authority).await?
+            (
+                prepare(effect_id, command, &local, reservation, signer, authority).await?,
+                true,
+            )
         }
     };
 
-    reconcile(effect_id, command, &local, &prepared, authority, provider).await
+    reconcile(
+        effect_id,
+        command,
+        &local,
+        &prepared,
+        chain_verified,
+        authority,
+        provider,
+    )
+    .await
 }
 
 struct LocalExecution {
@@ -340,10 +355,13 @@ async fn reconcile(
     command: &Eip1559TransactionCommand,
     local: &LocalExecution,
     prepared: &PreparedRecord,
+    chain_verified: bool,
     authority: &dyn EvmTransactionAuthority,
     provider: &dyn EvmTransactionProvider,
 ) -> Result<EffectAdapterOutcome<EvmTransactionSettlement>, AdapterError> {
-    verify_chain(command, provider).await?;
+    if !chain_verified {
+        verify_chain(command, provider).await?;
+    }
     let Some(receipt) = provider.receipt(prepared.transaction_hash()).await? else {
         let submitted = provider.submit_raw(prepared.raw_transaction()).await?;
         if &submitted != prepared.transaction_hash() {
@@ -356,20 +374,6 @@ async fn reconcile(
         .canonical_block(receipt.block_anchor().number())
         .await?;
     if &canonical != receipt.block_anchor() {
-        return Err(AdapterError::Unavailable);
-    }
-
-    let reobserved = provider
-        .receipt(prepared.transaction_hash())
-        .await?
-        .ok_or(AdapterError::Unavailable)?;
-    if reobserved != receipt {
-        return Err(AdapterError::Unavailable);
-    }
-    let reobserved_canonical = provider
-        .canonical_block(receipt.block_anchor().number())
-        .await?;
-    if reobserved_canonical != canonical {
         return Err(AdapterError::Unavailable);
     }
 

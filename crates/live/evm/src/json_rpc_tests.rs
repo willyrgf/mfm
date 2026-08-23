@@ -495,7 +495,7 @@ async fn redirects_never_leave_the_selected_endpoint() {
 }
 
 #[tokio::test]
-async fn complete_raw_submission_followed_by_connection_drop_is_unavailable() {
+async fn loopback_submission_acknowledgement_drop_after_full_request_is_unavailable() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind drop server");
     let url = format!("http://{}", listener.local_addr().expect("server address"));
     let worker = std::thread::spawn(move || {
@@ -610,6 +610,19 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         submit_stub.observed_request()["params"],
         serde_json::json!(["0x02c0"])
     );
+
+    for body in [
+        r#"{"jsonrpc":"2.0","id":1,"result":null}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":"0xnothex"}"#,
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"opaque"}}"#,
+        r#"not json"#,
+    ] {
+        assert_eq!(
+            Stub::new(body).provider().submit_raw(&raw).await,
+            Err(AdapterError::Unavailable),
+            "body {body}"
+        );
+    }
 
     for body in [
         r#"{"jsonrpc":"2.0","id":1,"result":null}"#,
