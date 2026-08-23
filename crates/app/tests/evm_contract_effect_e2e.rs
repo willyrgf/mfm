@@ -16,7 +16,7 @@ use mfm_evm::{
 use mfm_evm_live::{
     ethereum_address, evm_keccak256, register_evm_anchored_contract_calls,
     register_evm_transaction_effect, EvmAdapterLocator, EvmProvider, EvmTransactionProvider,
-    JsonRpcEvmProvider,
+    JsonRpcEvmProvider, EVM_EIP1559_SIGNING_PURPOSE_ID,
 };
 use mfm_evm_transaction_authority::{
     AuthorityError, AuthorityFuture, AuthorityState, EvmTransactionAuthority, PreparedRecord,
@@ -1097,7 +1097,13 @@ async fn generated_signer(owner: &KeystoreOwner) -> Arc<dyn Signer> {
         let mut candidate = Zeroizing::new([0_u8; 32]);
         getrandom::fill(candidate.as_mut()).expect("OS entropy");
         if let Ok(secret) = SecretSecp256k1Scalar::new(*candidate) {
-            let signer = owner.import_secp256k1(secret).await.expect("key import");
+            let signer = owner
+                .import_secp256k1(
+                    secret,
+                    StableId::new(EVM_EIP1559_SIGNING_PURPOSE_ID).expect("signing purpose"),
+                )
+                .await
+                .expect("key import");
             return Arc::new(signer);
         }
     }

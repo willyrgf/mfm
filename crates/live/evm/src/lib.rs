@@ -26,7 +26,7 @@ pub use json_rpc::{
 };
 pub use transaction::{
     register_evm_transaction_effect, EvmTransactionProvider, EvmTransactionProviderFuture,
-    ObservedChainInstance, ProviderReceipt, ProviderReceiptResult,
+    ObservedChainInstance, ProviderReceipt, ProviderReceiptResult, EVM_EIP1559_SIGNING_PURPOSE_ID,
 };
 
 pub use codec::{ethereum_address, evm_keccak256, EvmCodecError};

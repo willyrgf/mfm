@@ -25,8 +25,8 @@ Existing balance reads retain their reviewed JSON-RPC-error/empty-call SafeFailu
 transaction and anchored-call paths treat every JSON-RPC error, unexpected null, malformed field,
 oversize body, and transport failure as Unavailable; receipt null alone means not yet mined.
 Anchored block absence is SafeFailure, codeless target is Rejected, and replacement of the authored
-block is authenticated IntegrityBlocked evidence. Local operation, route, binding, signer, or
-retained-authority mismatch is Internal before later authority/provider phases.
+block is authenticated IntegrityBlocked evidence. Local operation, route, binding, signer purpose,
+signer identity, or retained-authority mismatch is Internal before authority/provider IO.
 
 The pure codec pins `alloy-rlp` 0.3.16 and directly encodes/decodes the fixed empty-access-list
 EIP-1559 form. It rejects noncanonical/trailing RLP and verifies every retained field, transaction
@@ -34,8 +34,9 @@ hash, recovery parity, recovered public key, and sender. Keccak helpers expose o
 hash/address results; private key custody remains in `mfm-keystore`.
 
 Transaction execution is caller-driven and loop-free. It loads authority first, reserves one
-pending nonce, signs once, retains exact raw bytes, checks receipt before submission, and submits at
-most once per invocation. A matching submission response returns normal Runtime `Pending` progress;
+pending nonce, signs once through the captured immutable-purpose handle, retains exact raw bytes,
+checks receipt before submission, and submits at most once per invocation. A matching submission
+response returns normal Runtime `Pending` progress;
 transport failure, a dropped acknowledgement, malformed ingress, or a mismatched returned hash is
 `Unavailable`. Receipt settlement is inserted only after repeated receipt and canonical block
 observations agree. Settled evidence is an authority fast path with no signer/provider call. Dropped

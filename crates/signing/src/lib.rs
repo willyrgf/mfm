@@ -2,7 +2,7 @@
 //! Checked public signing contracts and recoverable secp256k1 verification.
 //!
 //! This crate owns only public key identity, transient digest/signature values, and the reusable
-//! key-bound signer interface. Private key custody belongs to a signer implementation.
+//! key- and purpose-bound signer interface. Private key custody belongs to a signer implementation.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -249,13 +249,16 @@ pub fn verify_recoverable_signature(
         .ok_or(SigningError::Failed)
 }
 
-/// Reusable key-bound signer interface.
+/// Reusable key- and purpose-bound signer interface.
 pub trait Signer: Send + Sync + 'static {
     /// Returns the immutable public signer/key identity.
     fn public_identity(&self) -> &PublicSignerIdentity;
 
-    /// Signs one exact digest for one checked public purpose.
-    fn sign(&self, digest: SigningDigest, purpose: StableId) -> SigningFuture;
+    /// Returns the immutable purpose authorized by this handle.
+    fn purpose(&self) -> &StableId;
+
+    /// Signs one exact digest under the handle's immutable purpose.
+    fn sign(&self, digest: SigningDigest) -> SigningFuture;
 }
 
 fn map_value_error(_error: ValueError) -> SigningError {

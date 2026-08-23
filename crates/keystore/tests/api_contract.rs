@@ -11,19 +11,37 @@ fn keystore_remains_thread_affine() {
 }
 
 #[tokio::test]
-async fn duplicate_import_and_signing_are_key_bound_deterministic_and_recoverable() {
+async fn duplicate_import_and_signing_are_key_and_purpose_bound_deterministic_and_recoverable() {
     let owner = KeystoreOwner::start().expect("owner");
     let mut scalar = [0_u8; 32];
     scalar[31] = 1;
+    let purpose = StableId::new("mfm.test/sign@1").expect("purpose");
     let first = owner
-        .import_secp256k1(SecretSecp256k1Scalar::new(scalar).expect("scalar"))
+        .import_secp256k1(
+            SecretSecp256k1Scalar::new(scalar).expect("scalar"),
+            purpose.clone(),
+        )
         .await
         .expect("first import");
     let duplicate = owner
-        .import_secp256k1(SecretSecp256k1Scalar::new(scalar).expect("scalar"))
+        .import_secp256k1(
+            SecretSecp256k1Scalar::new(scalar).expect("scalar"),
+            purpose.clone(),
+        )
         .await
         .expect("duplicate import");
+    let other_purpose = owner
+        .import_secp256k1(
+            SecretSecp256k1Scalar::new(scalar).expect("scalar"),
+            StableId::new("mfm.test/other-sign@1").expect("other purpose"),
+        )
+        .await
+        .expect("same key under another purpose");
     assert_eq!(first.public_identity(), duplicate.public_identity());
+    assert_eq!(first.public_identity(), other_purpose.public_identity());
+    assert_eq!(first.purpose(), &purpose);
+    assert_eq!(duplicate.purpose(), &purpose);
+    assert_ne!(first.purpose(), other_purpose.purpose());
     assert_eq!(
         first.public_identity().signer_route().as_str(),
         IN_PROCESS_KEYSTORE_SIGNER_ROUTE_ID
@@ -53,15 +71,8 @@ async fn duplicate_import_and_signing_are_key_bound_deterministic_and_recoverabl
     );
 
     let digest = SigningDigest::from_bytes([0x2a; 32]);
-    let purpose = StableId::new("mfm.test/sign@1").expect("purpose");
-    let first_signature = first
-        .sign(digest, purpose.clone())
-        .await
-        .expect("first signature");
-    let second_signature = duplicate
-        .sign(digest, purpose)
-        .await
-        .expect("second signature");
+    let first_signature = first.sign(digest).await.expect("first signature");
+    let second_signature = duplicate.sign(digest).await.expect("second signature");
     assert!(first_signature == second_signature);
     let actual = first_signature
         .as_bytes()
@@ -85,12 +96,7 @@ async fn duplicate_import_and_signing_are_key_bound_deterministic_and_recoverabl
 
     owner.shutdown().await.expect("shutdown");
     assert!(matches!(
-        first
-            .sign(
-                SigningDigest::from_bytes([1; 32]),
-                StableId::new("mfm.test/after-shutdown@1").expect("purpose"),
-            )
-            .await,
+        first.sign(SigningDigest::from_bytes([1; 32])).await,
         Err(SigningError::Failed)
     ));
 }
@@ -101,14 +107,27 @@ async fn scalar_and_distinct_key_capacity_bounds_are_exact() {
     assert!(SecretSecp256k1Scalar::new([0xff_u8; 32]).is_err());
 
     let owner = KeystoreOwner::start().expect("owner");
+    let purpose = StableId::new("mfm.test/capacity-sign@1").expect("purpose");
     for value in 1..=MAX_KEY_INSTANCES {
         let mut scalar = [0_u8; 32];
         scalar[24..].copy_from_slice(&u64::try_from(value).expect("scalar value").to_be_bytes());
         owner
-            .import_secp256k1(SecretSecp256k1Scalar::new(scalar).expect("scalar"))
+            .import_secp256k1(
+                SecretSecp256k1Scalar::new(scalar).expect("scalar"),
+                purpose.clone(),
+            )
             .await
             .expect("within capacity");
     }
+    let mut first_scalar = [0_u8; 32];
+    first_scalar[31] = 1;
+    owner
+        .import_secp256k1(
+            SecretSecp256k1Scalar::new(first_scalar).expect("first scalar"),
+            StableId::new("mfm.test/capacity-other-sign@1").expect("other purpose"),
+        )
+        .await
+        .expect("same key under another purpose does not consume capacity");
     let mut overflow = [0_u8; 32];
     overflow[24..].copy_from_slice(
         &u64::try_from(MAX_KEY_INSTANCES + 1)
@@ -117,7 +136,10 @@ async fn scalar_and_distinct_key_capacity_bounds_are_exact() {
     );
     assert!(matches!(
         owner
-            .import_secp256k1(SecretSecp256k1Scalar::new(overflow).expect("scalar"))
+            .import_secp256k1(
+                SecretSecp256k1Scalar::new(overflow).expect("scalar"),
+                purpose,
+            )
             .await,
         Err(KeystoreError::Capacity)
     ));

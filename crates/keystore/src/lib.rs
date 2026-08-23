@@ -2,8 +2,8 @@
 //! Thread-affine in-process custody for recoverable secp256k1 keys.
 //!
 //! The non-`Send`, non-`Sync` [`Keystore`] exists only inside its dedicated owner thread. Async
-//! callers hold bounded command senders and key-bound [`KeystoreSigner`] handles; private scalars
-//! never cross back out of the owner.
+//! callers hold bounded command senders and key- and purpose-bound [`KeystoreSigner`] handles;
+//! private scalars never cross back out of the owner.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -117,10 +117,8 @@ impl Keystore {
         &self,
         key_ref: &ContentRef,
         digest: SigningDigest,
-        purpose: StableId,
     ) -> Result<CompactRecoverableSignature, KeystoreError> {
         let entry = self.entries.get(key_ref).ok_or(KeystoreError::Invalid)?;
-        let _purpose = purpose;
         let (signature, recovery_id) = entry
             .signing_key
             .sign_prehash_recoverable(digest.as_bytes())
@@ -138,7 +136,6 @@ enum Command {
     Sign {
         key_ref: ContentRef,
         digest: SigningDigest,
-        purpose: StableId,
         response: oneshot::Sender<Result<CompactRecoverableSignature, KeystoreError>>,
     },
     Shutdown {
@@ -175,10 +172,11 @@ impl KeystoreOwner {
         })
     }
 
-    /// Imports one checked secret and returns a key-bound signer handle.
+    /// Imports one checked secret and returns a key- and purpose-bound signer handle.
     pub async fn import_secp256k1(
         &self,
         secret: SecretSecp256k1Scalar,
+        purpose: StableId,
     ) -> Result<KeystoreSigner, KeystoreError> {
         let sender = self.sender.as_ref().ok_or(KeystoreError::Unavailable)?;
         let (response, result) = oneshot::channel();
@@ -190,6 +188,7 @@ impl KeystoreOwner {
         Ok(KeystoreSigner {
             sender: sender.clone(),
             identity: Arc::new(identity),
+            purpose,
         })
     }
 
@@ -215,11 +214,12 @@ impl KeystoreOwner {
     }
 }
 
-/// Cloneable key-bound sender for one retained secret key.
+/// Cloneable key- and purpose-bound sender for one retained secret key.
 #[derive(Clone)]
 pub struct KeystoreSigner {
     sender: mpsc::Sender<Command>,
     identity: Arc<PublicSignerIdentity>,
+    purpose: StableId,
 }
 
 impl Signer for KeystoreSigner {
@@ -227,7 +227,11 @@ impl Signer for KeystoreSigner {
         &self.identity
     }
 
-    fn sign(&self, digest: SigningDigest, purpose: StableId) -> SigningFuture {
+    fn purpose(&self) -> &StableId {
+        &self.purpose
+    }
+
+    fn sign(&self, digest: SigningDigest) -> SigningFuture {
         let sender = self.sender.clone();
         let key_ref = match self.identity.key_instance_ref() {
             Ok(reference) => reference,
@@ -239,7 +243,6 @@ impl Signer for KeystoreSigner {
                 .send(Command::Sign {
                     key_ref,
                     digest,
-                    purpose,
                     response,
                 })
                 .await
@@ -262,10 +265,9 @@ fn owner_loop(mut receiver: mpsc::Receiver<Command>) {
             Command::Sign {
                 key_ref,
                 digest,
-                purpose,
                 response,
             } => {
-                let _ = response.send(keystore.sign(&key_ref, digest, purpose));
+                let _ = response.send(keystore.sign(&key_ref, digest));
             }
             Command::Shutdown { response } => {
                 let _ = response.send(());
