@@ -1,6 +1,6 @@
 //! Production JSON-RPC 2.0 provider for bounded EVM Reads and transactions.
 //!
-//! The provider owns exactly one endpoint URL and the six frozen-wire RPC calls the EVM
+//! The provider owns exactly one endpoint URL and the bounded Read and transaction methods the EVM
 //! domain contracts require. It holds no key, nonce authority, or automatic retry.
 
 use std::future::Future;

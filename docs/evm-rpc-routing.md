@@ -40,10 +40,11 @@ serde mirror of the wire, so a domain subject change is a compile error rather t
 
 Transaction identity is stricter than observational routing. `EvmChainInstance` binds a nonzero
 chain ID to the expected genesis hash, and `EvmTransactionRoute` adds the endpoint ref. A complete
-Effect binding additionally fixes the transaction-authority epoch, sender, and public signer
-identity. The provider locator and signer handle remain process-local. Before signing or submission,
-the adapter compares the complete binding and asks the separate `EvmTransactionProvider` facet to
-recheck chain ID and genesis at the selected endpoint.
+Effect binding additionally fixes the transaction-authority epoch and sender account. The provider
+locator and purpose-bound signer handle remain process-local. Before authority
+or provider IO, the adapter compares the complete binding, requires the signer public key to derive
+the bound sender, and asks the separate `EvmTransactionProvider` facet to recheck chain ID and
+genesis at the selected endpoint.
 
 The transaction provider exposes only checked chain-instance, pending-nonce, receipt,
 canonical-block, and exact-raw-submission operations. Execution has one loop-free sequence per
@@ -57,8 +58,8 @@ caller invocation:
 4. Check the receipt first. A null receipt permits at most one submission of the retained bytes and
    a matching submission response returns `Pending`, so the caller must resume. A transport
    failure, dropped acknowledgement, malformed response, or mismatched hash returns `Unavailable`.
-5. On a later invocation, require two equal receipt observations and two equal current-canonical
-   block observations before retaining settlement.
+5. On a later invocation, validate one present receipt, require its block identity to equal the
+   provider's current canonical block at that number, and retain the resulting settlement.
 
 Every retry therefore reuses the same Effect ID, command, nonce, signature, hash, and raw bytes.
 Transport duplication is allowed; authorizing a replacement or another semantic transaction is

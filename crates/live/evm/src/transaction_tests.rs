@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -89,7 +90,15 @@ impl Secp256k1Signer for RecordingSigner {
 struct MemoryAuthority {
     epoch: EvmAuthorityEpoch,
     state: Mutex<Option<AuthorityState>>,
-    loads: AtomicUsize,
+    operations: Mutex<Vec<AuthorityOperation>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthorityOperation {
+    Load,
+    Reserve,
+    RetainPrepared,
+    RetainSettlement,
 }
 
 impl MemoryAuthority {
@@ -97,12 +106,16 @@ impl MemoryAuthority {
         Self {
             epoch,
             state: Mutex::new(None),
-            loads: AtomicUsize::new(0),
+            operations: Mutex::new(Vec::new()),
         }
     }
 
     fn state(&self) -> Option<AuthorityState> {
         self.state.lock().expect("authority lock").clone()
+    }
+
+    fn operations(&self) -> Vec<AuthorityOperation> {
+        self.operations.lock().expect("operations lock").clone()
     }
 }
 
@@ -117,7 +130,10 @@ impl EvmTransactionAuthority for MemoryAuthority {
         expected_command_ref: &'a ContentRef,
     ) -> AuthorityFuture<'a, Option<AuthorityState>> {
         Box::pin(async move {
-            self.loads.fetch_add(1, Ordering::SeqCst);
+            self.operations
+                .lock()
+                .expect("operations lock")
+                .push(AuthorityOperation::Load);
             let state = self.state();
             if let Some(state) = &state {
                 let reservation = state_reservation(state);
@@ -139,6 +155,10 @@ impl EvmTransactionAuthority for MemoryAuthority {
         observed_pending_nonce: u64,
     ) -> AuthorityFuture<'a, Reservation> {
         Box::pin(async move {
+            self.operations
+                .lock()
+                .expect("operations lock")
+                .push(AuthorityOperation::Reserve);
             let mut state = self.state.lock().expect("authority lock");
             if let Some(existing) = &*state {
                 return Ok(state_reservation(existing).clone());
@@ -162,6 +182,10 @@ impl EvmTransactionAuthority for MemoryAuthority {
         raw_transaction: &'a ExactRawTransaction,
     ) -> AuthorityFuture<'a, PreparedRecord> {
         Box::pin(async move {
+            self.operations
+                .lock()
+                .expect("operations lock")
+                .push(AuthorityOperation::RetainPrepared);
             let mut state = self.state.lock().expect("authority lock");
             match state.as_ref() {
                 Some(AuthorityState::Reserved(reservation)) => {
@@ -196,6 +220,10 @@ impl EvmTransactionAuthority for MemoryAuthority {
         evidence: &'a EvmTransactionSettlement,
     ) -> AuthorityFuture<'a, SettledRecord> {
         Box::pin(async move {
+            self.operations
+                .lock()
+                .expect("operations lock")
+                .push(AuthorityOperation::RetainSettlement);
             let mut state = self.state.lock().expect("authority lock");
             match state.as_ref() {
                 Some(AuthorityState::Prepared(prepared))
@@ -223,82 +251,119 @@ fn state_reservation(state: &AuthorityState) -> &Reservation {
     }
 }
 
-struct Provider {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProviderOperation {
+    ChainInstance,
+    PendingNonce(EvmAddress),
+    Receipt(EvmHash),
+    CanonicalBlock(EvmU256),
+    SubmitRaw(Vec<u8>),
+}
+
+struct ScriptedProvider {
     chain: ObservedChainInstance,
     pending: u64,
-    receipt: Mutex<Option<ProviderReceipt>>,
+    receipts: Mutex<VecDeque<Result<Option<ProviderReceipt>, AdapterError>>>,
     canonical: EvmBlockAnchor,
-    chain_calls: AtomicUsize,
-    pending_calls: AtomicUsize,
-    receipt_calls: AtomicUsize,
-    canonical_calls: AtomicUsize,
-    submits: AtomicUsize,
+    submissions: Mutex<VecDeque<Result<Option<EvmHash>, AdapterError>>>,
+    operations: Mutex<Vec<ProviderOperation>>,
     block_receipt_once: AtomicBool,
     receipt_entered: Notify,
     release_receipt: Notify,
 }
 
-impl Provider {
+impl ScriptedProvider {
     fn new(chain_id: u64) -> Self {
         Self {
             chain: ObservedChainInstance::new(chain_id, EvmHash::new(GENESIS).expect("genesis"))
                 .expect("chain"),
             pending: 7,
-            receipt: Mutex::new(None),
+            receipts: Mutex::new(VecDeque::new()),
             canonical: EvmBlockAnchor::new(
                 EvmU256::from_u64(9),
                 EvmHash::new(BLOCK).expect("block"),
             ),
-            chain_calls: AtomicUsize::new(0),
-            pending_calls: AtomicUsize::new(0),
-            receipt_calls: AtomicUsize::new(0),
-            canonical_calls: AtomicUsize::new(0),
-            submits: AtomicUsize::new(0),
+            submissions: Mutex::new(VecDeque::new()),
+            operations: Mutex::new(Vec::new()),
             block_receipt_once: AtomicBool::new(false),
             receipt_entered: Notify::new(),
             release_receipt: Notify::new(),
         }
     }
+
+    fn push_receipt(&self, receipt: Result<Option<ProviderReceipt>, AdapterError>) {
+        self.receipts
+            .lock()
+            .expect("receipts lock")
+            .push_back(receipt);
+    }
+
+    fn push_submission(&self, result: Result<Option<EvmHash>, AdapterError>) {
+        self.submissions
+            .lock()
+            .expect("submissions lock")
+            .push_back(result);
+    }
+
+    fn operations(&self) -> Vec<ProviderOperation> {
+        self.operations.lock().expect("operations lock").clone()
+    }
 }
 
-impl EvmTransactionProvider for Provider {
+impl EvmTransactionProvider for ScriptedProvider {
     fn chain_instance(&self) -> EvmTransactionProviderFuture<'_, ObservedChainInstance> {
         Box::pin(async move {
-            self.chain_calls.fetch_add(1, Ordering::SeqCst);
+            self.operations
+                .lock()
+                .expect("operations lock")
+                .push(ProviderOperation::ChainInstance);
             Ok(self.chain.clone())
         })
     }
 
     fn pending_nonce<'a>(
         &'a self,
-        _sender: &'a EvmAddress,
+        sender: &'a EvmAddress,
     ) -> EvmTransactionProviderFuture<'a, u64> {
         Box::pin(async move {
-            self.pending_calls.fetch_add(1, Ordering::SeqCst);
+            self.operations
+                .lock()
+                .expect("operations lock")
+                .push(ProviderOperation::PendingNonce(sender.clone()));
             Ok(self.pending)
         })
     }
 
     fn receipt<'a>(
         &'a self,
-        _transaction_hash: &'a EvmHash,
+        transaction_hash: &'a EvmHash,
     ) -> EvmTransactionProviderFuture<'a, Option<ProviderReceipt>> {
         Box::pin(async move {
-            self.receipt_calls.fetch_add(1, Ordering::SeqCst);
+            self.operations
+                .lock()
+                .expect("operations lock")
+                .push(ProviderOperation::Receipt(transaction_hash.clone()));
             if self.block_receipt_once.swap(false, Ordering::SeqCst) {
                 self.receipt_entered.notify_one();
                 self.release_receipt.notified().await;
             }
-            Ok(self.receipt.lock().expect("receipt lock").clone())
+            self.receipts
+                .lock()
+                .expect("receipts lock")
+                .pop_front()
+                .unwrap_or(Ok(None))
         })
     }
 
     fn canonical_block<'a>(
         &'a self,
-        _block_number: &'a EvmU256,
+        block_number: &'a EvmU256,
     ) -> EvmTransactionProviderFuture<'a, EvmBlockAnchor> {
         Box::pin(async move {
-            self.canonical_calls.fetch_add(1, Ordering::SeqCst);
+            self.operations
+                .lock()
+                .expect("operations lock")
+                .push(ProviderOperation::CanonicalBlock(block_number.clone()));
             Ok(self.canonical.clone())
         })
     }
@@ -308,8 +373,21 @@ impl EvmTransactionProvider for Provider {
         raw_transaction: &'a ExactRawTransaction,
     ) -> EvmTransactionProviderFuture<'a, EvmHash> {
         Box::pin(async move {
-            self.submits.fetch_add(1, Ordering::SeqCst);
-            evm_keccak256(raw_transaction.as_bytes()).map_err(|_| AdapterError::Internal)
+            let raw = raw_transaction.as_bytes().to_vec();
+            self.operations
+                .lock()
+                .expect("operations lock")
+                .push(ProviderOperation::SubmitRaw(raw.clone()));
+            match self
+                .submissions
+                .lock()
+                .expect("submissions lock")
+                .pop_front()
+            {
+                Some(Ok(Some(hash))) => Ok(hash),
+                Some(Ok(None)) | None => evm_keccak256(&raw).map_err(|_| AdapterError::Internal),
+                Some(Err(error)) => Err(error),
+            }
         })
     }
 }
@@ -365,7 +443,7 @@ async fn transaction_registration_uses_the_complete_binding_as_its_only_key() {
     let (_owner, signer, binding, _command, _effect_id) = fixture().await;
     let authority: Arc<dyn EvmTransactionAuthority> =
         Arc::new(MemoryAuthority::new(binding.authority_epoch().clone()));
-    let provider: Arc<dyn EvmTransactionProvider> = Arc::new(Provider::new(1337));
+    let provider: Arc<dyn EvmTransactionProvider> = Arc::new(ScriptedProvider::new(1337));
     let signer: Arc<dyn Secp256k1Signer> = signer;
     let mut builder = RuntimeAssemblyBuilder::new();
     register_evm_transaction_effect(
@@ -387,7 +465,7 @@ async fn transaction_registration_uses_the_complete_binding_as_its_only_key() {
 async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
     let (_owner, signer, binding, command, effect_id) = fixture().await;
     let authority = MemoryAuthority::new(binding.authority_epoch().clone());
-    let provider = Provider::new(1337);
+    let provider = ScriptedProvider::new(1337);
 
     assert_eq!(
         execute(
@@ -414,20 +492,26 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
     );
     assert_eq!(prepared.reservation().nonce(), 7);
     assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(provider.pending_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(provider.receipt_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(provider.submits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        provider.operations(),
+        [
+            ProviderOperation::ChainInstance,
+            ProviderOperation::PendingNonce(binding.sender().clone()),
+            ProviderOperation::Receipt(prepared.transaction_hash().clone()),
+            ProviderOperation::SubmitRaw(prepared.raw_transaction().as_bytes().to_vec()),
+        ]
+    );
     assert_eq!(signer.purpose().as_str(), EVM_EIP1559_SIGNING_PURPOSE_ID);
 
     let created = create_address(binding.sender(), 7).expect("created address");
-    *provider.receipt.lock().expect("receipt lock") = Some(ProviderReceipt::new(
+    provider.push_receipt(Ok(Some(ProviderReceipt::new(
         prepared.transaction_hash().clone(),
         binding.sender().clone(),
         ProviderReceiptResult::SuccessCreate {
             contract_address: created.clone(),
         },
         provider.canonical.clone(),
-    ));
+    ))));
     let EffectAdapterOutcome::Settled(evidence) = execute(
         &binding,
         &effect_id,
@@ -450,14 +534,17 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
             if created_address == &created
     ));
     assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(provider.receipt_calls.load(Ordering::SeqCst), 3);
-    assert_eq!(provider.canonical_calls.load(Ordering::SeqCst), 2);
-
-    let phase_counts = (
-        signer.calls.load(Ordering::SeqCst),
-        provider.chain_calls.load(Ordering::SeqCst),
-        provider.receipt_calls.load(Ordering::SeqCst),
+    assert_eq!(
+        &provider.operations()[4..],
+        [
+            ProviderOperation::ChainInstance,
+            ProviderOperation::Receipt(prepared.transaction_hash().clone()),
+            ProviderOperation::CanonicalBlock(provider.canonical.number().clone()),
+        ]
     );
+
+    let signer_calls = signer.calls.load(Ordering::SeqCst);
+    let provider_operations = provider.operations();
     assert_eq!(
         execute(
             &binding,
@@ -470,21 +557,15 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
         .await,
         Ok(EffectAdapterOutcome::Settled(evidence))
     );
-    assert_eq!(
-        phase_counts,
-        (
-            signer.calls.load(Ordering::SeqCst),
-            provider.chain_calls.load(Ordering::SeqCst),
-            provider.receipt_calls.load(Ordering::SeqCst),
-        )
-    );
+    assert_eq!(signer.calls.load(Ordering::SeqCst), signer_calls);
+    assert_eq!(provider.operations(), provider_operations);
 }
 
 #[tokio::test]
 async fn cancellation_after_prepare_leaves_one_resumable_exact_transaction() {
     let (_owner, signer, binding, command, effect_id) = fixture().await;
     let authority = MemoryAuthority::new(binding.authority_epoch().clone());
-    let provider = Provider::new(1337);
+    let provider = ScriptedProvider::new(1337);
     provider.block_receipt_once.store(true, Ordering::SeqCst);
     {
         let entered = provider.receipt_entered.notified();
@@ -521,8 +602,356 @@ async fn cancellation_after_prepare_leaves_one_resumable_exact_transaction() {
         Ok(EffectAdapterOutcome::Pending)
     );
     assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(provider.pending_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(provider.submits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        provider
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, ProviderOperation::PendingNonce(_)))
+            .count(),
+        1
+    );
+    let submitted = provider
+        .operations()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            ProviderOperation::SubmitRaw(raw) => Some(raw),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(submitted.len(), 1);
+    let AuthorityState::Prepared(prepared) = authority.state().expect("prepared") else {
+        panic!("cancellation must retain preparation")
+    };
+    assert_eq!(submitted[0], prepared.raw_transaction().as_bytes());
+}
+
+#[tokio::test]
+async fn pending_retries_submit_identical_retained_bytes_without_reserving_again() {
+    let (_owner, signer, binding, command, effect_id) = fixture().await;
+    let authority = MemoryAuthority::new(binding.authority_epoch().clone());
+    let provider = ScriptedProvider::new(1337);
+
+    for _ in 0..2 {
+        assert_eq!(
+            execute(
+                &binding,
+                &effect_id,
+                &command,
+                signer.as_ref(),
+                &authority,
+                &provider,
+            )
+            .await,
+            Ok(EffectAdapterOutcome::Pending)
+        );
+    }
+    let operations = provider.operations();
+    let submitted = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            ProviderOperation::SubmitRaw(raw) => Some(raw),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(submitted.len(), 2);
+    assert_eq!(submitted[0], submitted[1]);
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|operation| matches!(operation, ProviderOperation::PendingNonce(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        authority.operations(),
+        [
+            AuthorityOperation::Load,
+            AuthorityOperation::Reserve,
+            AuthorityOperation::RetainPrepared,
+            AuthorityOperation::Load,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn preloaded_reservation_skips_pending_nonce_and_resumes_preparation() {
+    let (_owner, signer, binding, command, effect_id) = fixture().await;
+    let authority = MemoryAuthority::new(binding.authority_epoch().clone());
+    let provider = ScriptedProvider::new(1337);
+    let local = validate_local(&binding, &command, signer.as_ref(), &authority).expect("local");
+    *authority.state.lock().expect("authority lock") =
+        Some(AuthorityState::Reserved(Reservation::new(
+            effect_id.clone(),
+            local.command_ref.clone(),
+            local.domain,
+            7,
+        )));
+
+    assert_eq!(
+        execute(
+            &binding,
+            &effect_id,
+            &command,
+            signer.as_ref(),
+            &authority,
+            &provider,
+        )
+        .await,
+        Ok(EffectAdapterOutcome::Pending)
+    );
+    assert!(provider
+        .operations()
+        .iter()
+        .all(|operation| !matches!(operation, ProviderOperation::PendingNonce(_))));
+    assert!(matches!(
+        authority.state(),
+        Some(AuthorityState::Prepared(_))
+    ));
+}
+
+#[tokio::test]
+async fn submission_failure_or_mismatched_hash_remains_unavailable() {
+    for submission in [
+        Err(AdapterError::Unavailable),
+        Ok(Some(
+            EvmHash::new(format!("0x{}", "99".repeat(32))).expect("mismatched hash"),
+        )),
+    ] {
+        let (_owner, signer, binding, command, effect_id) = fixture().await;
+        let authority = MemoryAuthority::new(binding.authority_epoch().clone());
+        let provider = ScriptedProvider::new(1337);
+        provider.push_submission(submission);
+
+        assert_eq!(
+            execute(
+                &binding,
+                &effect_id,
+                &command,
+                signer.as_ref(),
+                &authority,
+                &provider,
+            )
+            .await,
+            Err(AdapterError::Unavailable)
+        );
+        assert!(matches!(
+            authority.state(),
+            Some(AuthorityState::Prepared(_))
+        ));
+        assert_eq!(
+            provider
+                .operations()
+                .iter()
+                .filter(|operation| matches!(operation, ProviderOperation::SubmitRaw(_)))
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn receipt_shape_validation_covers_create_call_revert_and_mismatch_matrix() {
+    let (_owner, signer, binding, create_command, effect_id) = fixture().await;
+    let authority = MemoryAuthority::new(binding.authority_epoch().clone());
+    let provider = ScriptedProvider::new(1337);
+    assert_eq!(
+        execute(
+            &binding,
+            &effect_id,
+            &create_command,
+            signer.as_ref(),
+            &authority,
+            &provider,
+        )
+        .await,
+        Ok(EffectAdapterOutcome::Pending)
+    );
+    let AuthorityState::Prepared(prepared) = authority.state().expect("prepared") else {
+        panic!("fixture must prepare")
+    };
+    let local = validate_local(&binding, &create_command, signer.as_ref(), &authority)
+        .expect("local binding");
+    let target =
+        EvmAddress::new("0x4444444444444444444444444444444444444444").expect("call target");
+    let call_command = Eip1559TransactionCommand::new(
+        binding.clone(),
+        EvmTransactionAction::call(target.clone(), vec![1, 2]).expect("call action"),
+        EvmU256::from_u64(0),
+        100_000,
+        EvmU256::from_u64(2),
+        EvmU256::from_u64(10),
+    )
+    .expect("call command");
+    let created =
+        create_address(binding.sender(), prepared.reservation().nonce()).expect("created address");
+
+    enum Expected {
+        Created,
+        Called,
+        Reverted,
+        Error,
+    }
+
+    let wrong_hash = EvmHash::new(format!("0x{}", "88".repeat(32))).expect("wrong hash");
+    let wrong_sender =
+        EvmAddress::new("0x5555555555555555555555555555555555555555").expect("wrong sender");
+    let wrong_target =
+        EvmAddress::new("0x6666666666666666666666666666666666666666").expect("wrong target");
+    let wrong_created = EvmAddress::new("0x7777777777777777777777777777777777777777")
+        .expect("wrong created address");
+    let cases = [
+        (
+            &create_command,
+            prepared.transaction_hash().clone(),
+            binding.sender().clone(),
+            ProviderReceiptResult::SuccessCreate {
+                contract_address: created,
+            },
+            Expected::Created,
+        ),
+        (
+            &create_command,
+            prepared.transaction_hash().clone(),
+            binding.sender().clone(),
+            ProviderReceiptResult::RevertedCreate,
+            Expected::Reverted,
+        ),
+        (
+            &call_command,
+            prepared.transaction_hash().clone(),
+            binding.sender().clone(),
+            ProviderReceiptResult::SuccessCall {
+                target: target.clone(),
+            },
+            Expected::Called,
+        ),
+        (
+            &call_command,
+            prepared.transaction_hash().clone(),
+            binding.sender().clone(),
+            ProviderReceiptResult::RevertedCall {
+                target: target.clone(),
+            },
+            Expected::Reverted,
+        ),
+        (
+            &create_command,
+            prepared.transaction_hash().clone(),
+            binding.sender().clone(),
+            ProviderReceiptResult::SuccessCreate {
+                contract_address: wrong_created,
+            },
+            Expected::Error,
+        ),
+        (
+            &call_command,
+            prepared.transaction_hash().clone(),
+            binding.sender().clone(),
+            ProviderReceiptResult::SuccessCall {
+                target: wrong_target,
+            },
+            Expected::Error,
+        ),
+        (
+            &create_command,
+            wrong_hash,
+            binding.sender().clone(),
+            ProviderReceiptResult::RevertedCreate,
+            Expected::Error,
+        ),
+        (
+            &create_command,
+            prepared.transaction_hash().clone(),
+            wrong_sender,
+            ProviderReceiptResult::RevertedCreate,
+            Expected::Error,
+        ),
+    ];
+
+    for (command, hash, sender, result, expected) in cases {
+        let receipt = ProviderReceipt::new(hash, sender, result, provider.canonical.clone());
+        let actual = validate_receipt(&effect_id, &receipt, &prepared, command, &local);
+        match expected {
+            Expected::Created => assert!(matches!(
+                actual,
+                Ok(EvmTransactionSettlement::Confirmed {
+                    confirmation: EvmTransactionConfirmation::Created { .. },
+                    ..
+                })
+            )),
+            Expected::Called => assert!(matches!(
+                actual,
+                Ok(EvmTransactionSettlement::Confirmed {
+                    confirmation: EvmTransactionConfirmation::Called { .. },
+                    ..
+                })
+            )),
+            Expected::Reverted => {
+                assert!(matches!(
+                    actual,
+                    Ok(EvmTransactionSettlement::Reverted { .. })
+                ))
+            }
+            Expected::Error => assert_eq!(actual, Err(AdapterError::Unavailable)),
+        }
+    }
+}
+
+#[tokio::test]
+async fn noncanonical_receipt_anchor_stops_before_settlement() {
+    let (_owner, signer, binding, command, effect_id) = fixture().await;
+    let authority = MemoryAuthority::new(binding.authority_epoch().clone());
+    let provider = ScriptedProvider::new(1337);
+    assert_eq!(
+        execute(
+            &binding,
+            &effect_id,
+            &command,
+            signer.as_ref(),
+            &authority,
+            &provider,
+        )
+        .await,
+        Ok(EffectAdapterOutcome::Pending)
+    );
+    let AuthorityState::Prepared(prepared) = authority.state().expect("prepared") else {
+        panic!("fixture must prepare")
+    };
+    let other_anchor = EvmBlockAnchor::new(
+        EvmU256::from_u64(10),
+        EvmHash::new(format!("0x{}", "33".repeat(32))).expect("other block"),
+    );
+    provider.push_receipt(Ok(Some(ProviderReceipt::new(
+        prepared.transaction_hash().clone(),
+        binding.sender().clone(),
+        ProviderReceiptResult::RevertedCreate,
+        other_anchor.clone(),
+    ))));
+
+    assert_eq!(
+        execute(
+            &binding,
+            &effect_id,
+            &command,
+            signer.as_ref(),
+            &authority,
+            &provider,
+        )
+        .await,
+        Err(AdapterError::Unavailable)
+    );
+    assert!(matches!(
+        authority.state(),
+        Some(AuthorityState::Prepared(_))
+    ));
+    assert!(provider
+        .operations()
+        .contains(&ProviderOperation::CanonicalBlock(
+            other_anchor.number().clone()
+        )));
+    assert!(!authority
+        .operations()
+        .contains(&AuthorityOperation::RetainSettlement));
 }
 
 #[tokio::test]
@@ -533,7 +962,7 @@ async fn wrong_returned_signature_is_rejected_before_preparation_or_submission()
         calls: AtomicUsize::new(0),
     };
     let authority = MemoryAuthority::new(binding.authority_epoch().clone());
-    let provider = Provider::new(1337);
+    let provider = ScriptedProvider::new(1337);
 
     assert_eq!(
         execute(&binding, &effect_id, &command, &signer, &authority, &provider,).await,
@@ -544,34 +973,88 @@ async fn wrong_returned_signature_is_rejected_before_preparation_or_submission()
         authority.state(),
         Some(AuthorityState::Reserved(_))
     ));
-    assert_eq!(provider.submits.load(Ordering::SeqCst), 0);
-    assert_eq!(provider.receipt_calls.load(Ordering::SeqCst), 0);
+    assert!(provider.operations().iter().all(|operation| !matches!(
+        operation,
+        ProviderOperation::Receipt(_) | ProviderOperation::SubmitRaw(_)
+    )));
 }
 
 #[tokio::test]
 async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_entry() {
     let (owner, signer, binding, command, effect_id) = fixture().await;
     let authority = MemoryAuthority::new(binding.authority_epoch().clone());
-    let provider = Provider::new(1337);
-    let wrong_binding = EvmTransactionBinding::new(
-        binding.route().clone(),
-        EvmAuthorityEpoch::new([4; 32]),
-        binding.sender().clone(),
-    );
+    let provider = ScriptedProvider::new(1337);
+    let other_endpoint = EvmEndpoint::new("transaction-test-other")
+        .expect("other endpoint")
+        .endpoint_ref()
+        .expect("other endpoint ref");
+    let other_genesis = EvmHash::new(format!("0x{}", "aa".repeat(32))).expect("other genesis");
+    let wrong_bindings = [
+        EvmTransactionBinding::new(
+            binding.route().clone(),
+            EvmAuthorityEpoch::new([4; 32]),
+            binding.sender().clone(),
+        ),
+        EvmTransactionBinding::new(
+            EvmTransactionRoute::new(binding.route().chain_instance().clone(), other_endpoint),
+            binding.authority_epoch().clone(),
+            binding.sender().clone(),
+        ),
+        EvmTransactionBinding::new(
+            EvmTransactionRoute::new(
+                EvmChainInstance::new(1338, EvmHash::new(GENESIS).expect("genesis"))
+                    .expect("other chain"),
+                binding.route().endpoint_ref().clone(),
+            ),
+            binding.authority_epoch().clone(),
+            binding.sender().clone(),
+        ),
+        EvmTransactionBinding::new(
+            EvmTransactionRoute::new(
+                EvmChainInstance::new(1337, other_genesis).expect("other genesis chain"),
+                binding.route().endpoint_ref().clone(),
+            ),
+            binding.authority_epoch().clone(),
+            binding.sender().clone(),
+        ),
+        EvmTransactionBinding::new(
+            binding.route().clone(),
+            binding.authority_epoch().clone(),
+            EvmAddress::new("0x9999999999999999999999999999999999999999").expect("other sender"),
+        ),
+    ];
+    for wrong_binding in wrong_bindings {
+        assert_eq!(
+            execute(
+                &wrong_binding,
+                &effect_id,
+                &command,
+                signer.as_ref(),
+                &authority,
+                &provider,
+            )
+            .await,
+            Err(AdapterError::Internal)
+        );
+    }
+    assert!(authority.operations().is_empty());
+    assert!(provider.operations().is_empty());
+
+    let wrong_epoch_authority = MemoryAuthority::new(EvmAuthorityEpoch::new([4; 32]));
     assert_eq!(
         execute(
-            &wrong_binding,
+            &binding,
             &effect_id,
             &command,
             signer.as_ref(),
-            &authority,
+            &wrong_epoch_authority,
             &provider,
         )
         .await,
         Err(AdapterError::Internal)
     );
-    assert_eq!(authority.loads.load(Ordering::SeqCst), 0);
-    assert_eq!(provider.chain_calls.load(Ordering::SeqCst), 0);
+    assert!(wrong_epoch_authority.operations().is_empty());
+    assert!(provider.operations().is_empty());
 
     let wrong_purpose = Arc::new(RecordingSigner {
         inner: owner
@@ -596,12 +1079,8 @@ async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_e
         Err(AdapterError::Internal)
     );
     assert_eq!(wrong_purpose.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(authority.loads.load(Ordering::SeqCst), 0);
-    assert_eq!(provider.chain_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(provider.pending_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(provider.receipt_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(provider.canonical_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(provider.submits.load(Ordering::SeqCst), 0);
+    assert!(authority.operations().is_empty());
+    assert!(provider.operations().is_empty());
 
     let wrong_key = Arc::new(RecordingSigner {
         inner: owner
@@ -626,10 +1105,36 @@ async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_e
         Err(AdapterError::Internal)
     );
     assert_eq!(wrong_key.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(authority.loads.load(Ordering::SeqCst), 0);
-    assert_eq!(provider.chain_calls.load(Ordering::SeqCst), 0);
+    assert!(authority.operations().is_empty());
+    assert!(provider.operations().is_empty());
 
     let local = validate_local(&binding, &command, signer.as_ref(), &authority).expect("local");
+    let wrong_domain = NonceDomain::new(
+        binding.authority_epoch().clone(),
+        binding.route().chain_instance().clone(),
+        EvmAddress::new("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").expect("wrong sender"),
+    );
+    *authority.state.lock().expect("authority lock") =
+        Some(AuthorityState::Reserved(Reservation::new(
+            effect_id.clone(),
+            local.command_ref.clone(),
+            wrong_domain,
+            7,
+        )));
+    assert_eq!(
+        execute(
+            &binding,
+            &effect_id,
+            &command,
+            signer.as_ref(),
+            &authority,
+            &provider,
+        )
+        .await,
+        Err(AdapterError::Internal)
+    );
+    assert!(provider.operations().is_empty());
+
     let reservation = Reservation::new(
         effect_id.clone(),
         local.command_ref.clone(),
@@ -655,5 +1160,5 @@ async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_e
         .await,
         Err(AdapterError::Internal)
     );
-    assert_eq!(provider.chain_calls.load(Ordering::SeqCst), 0);
+    assert!(provider.operations().is_empty());
 }

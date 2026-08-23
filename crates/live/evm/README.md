@@ -38,9 +38,9 @@ pending nonce, signs once through the captured immutable-purpose handle, retains
 checks receipt before submission, and submits at most once per invocation. A matching submission
 response returns normal Runtime `Pending` progress;
 transport failure, a dropped acknowledgement, malformed ingress, or a mismatched returned hash is
-`Unavailable`. Receipt settlement is inserted only after repeated receipt and canonical block
-observations agree. Settled evidence is an authority fast path with no signer/provider call. Dropped
-futures resume from the append-only reservation/preparation/settlement facts.
+`Unavailable`. Receipt settlement is inserted after one validated receipt and one matching
+canonical block observation. Settled evidence is an authority fast path with no signer/provider
+call. Dropped futures resume from the append-only reservation/preparation/settlement facts.
 
 This is the ONLY crate allowed to depend on `alloy-*`. Custody is option-invariant and the frozen
 wire codecs (U256/hex, ABI, RLP, keccak) live in alloy's stable pure-Rust core; the provider half of
