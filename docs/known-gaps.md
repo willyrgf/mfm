@@ -9,8 +9,8 @@
   Production submission remains unsupported until a product defines its finality, confirmation,
   reorg, authorization, and operational policy under a separately reviewed capability identity.
 - The in-process keystore has no encrypted persistent custody or key recovery across host-process
-  termination. The managed cold-recovery proof rebuilds Runtime and IO handles while retaining the
-  same ephemeral signer owner.
+  termination. The bounded managed cold-recovery loop rebuilds Runtime and every IO handle between
+  caller invocations while retaining the same ephemeral signer owner.
 - The append-only EVM transaction authority has no writable rollback, snapshot restoration, nonce
   release/reuse, replacement, or fee-bump contract. Loss of acknowledged authority requires a new
   authority epoch and fresh runs rather than reconstruction of its old writable timeline.
