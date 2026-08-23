@@ -9,7 +9,7 @@ use mfm_evm_transaction_authority::{
     AuthorityFuture, AuthorityState, EvmTransactionAuthority, PreparedRecord, Reservation,
     SettledRecord, MAX_EXACT_RAW_TRANSACTION_BYTES,
 };
-use mfm_ids::{DigestBytes, EffectId};
+use mfm_ids::{DigestBytes, EffectId, StableId};
 use mfm_keystore::{KeystoreOwner, KeystoreSigner, SecretSecp256k1Scalar};
 use mfm_signing::{PublicSignerIdentity, Signer, SigningDigest, SigningFuture};
 use tokio::sync::Notify;
@@ -48,7 +48,6 @@ fn public_keccak_and_ethereum_address_helpers_are_exact_and_bounded() {
 struct RecordingSigner {
     inner: KeystoreSigner,
     calls: AtomicUsize,
-    purposes: Mutex<Vec<String>>,
 }
 
 impl Signer for RecordingSigner {
@@ -56,13 +55,13 @@ impl Signer for RecordingSigner {
         self.inner.public_identity()
     }
 
-    fn sign(&self, digest: SigningDigest, purpose: StableId) -> SigningFuture {
+    fn purpose(&self) -> &StableId {
+        self.inner.purpose()
+    }
+
+    fn sign(&self, digest: SigningDigest) -> SigningFuture {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.purposes
-            .lock()
-            .expect("purpose lock")
-            .push(purpose.as_str().to_owned());
-        self.inner.sign(digest, purpose)
+        self.inner.sign(digest)
     }
 }
 
@@ -303,7 +302,10 @@ async fn fixture() -> (
 ) {
     let owner = KeystoreOwner::start().expect("owner");
     let signer = owner
-        .import_secp256k1(SecretSecp256k1Scalar::new([7; 32]).expect("fixture secret"))
+        .import_secp256k1(
+            SecretSecp256k1Scalar::new([7; 32]).expect("fixture secret"),
+            StableId::new(EVM_EIP1559_SIGNING_PURPOSE_ID).expect("signing purpose"),
+        )
         .await
         .expect("signer");
     let sender = ethereum_address(
@@ -316,7 +318,6 @@ async fn fixture() -> (
     let signer = Arc::new(RecordingSigner {
         inner: signer,
         calls: AtomicUsize::new(0),
-        purposes: Mutex::new(Vec::new()),
     });
     let route = EvmTransactionRoute::new(
         EvmChainInstance::new(1337, EvmHash::new(GENESIS).expect("genesis")).expect("chain"),
@@ -405,10 +406,7 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
     assert_eq!(provider.pending_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.receipt_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.submits.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        signer.purposes.lock().expect("purposes").as_slice(),
-        [EVM_EIP1559_SIGNING_PURPOSE_ID]
-    );
+    assert_eq!(signer.purpose().as_str(), EVM_EIP1559_SIGNING_PURPOSE_ID);
 
     let created = create_address(binding.wallet().sender(), 7).expect("created address");
     *provider.receipt.lock().expect("receipt lock") = Some(ProviderReceipt::new(
@@ -515,7 +513,7 @@ async fn cancellation_after_prepare_leaves_one_resumable_exact_transaction() {
 
 #[tokio::test]
 async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_entry() {
-    let (_owner, signer, binding, command, effect_id) = fixture().await;
+    let (owner, signer, binding, command, effect_id) = fixture().await;
     let authority = MemoryAuthority::new(binding.authority_epoch().clone());
     let provider = Provider::new(1337);
     let wrong_binding = EvmTransactionBinding::new(
@@ -537,6 +535,36 @@ async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_e
     );
     assert_eq!(authority.loads.load(Ordering::SeqCst), 0);
     assert_eq!(provider.chain_calls.load(Ordering::SeqCst), 0);
+
+    let wrong_purpose = Arc::new(RecordingSigner {
+        inner: owner
+            .import_secp256k1(
+                SecretSecp256k1Scalar::new([7; 32]).expect("fixture secret"),
+                StableId::new("mfm.test.evm/wrong-purpose@1").expect("wrong purpose"),
+            )
+            .await
+            .expect("same key under wrong purpose"),
+        calls: AtomicUsize::new(0),
+    });
+    assert_eq!(
+        execute(
+            &binding,
+            &effect_id,
+            &command,
+            wrong_purpose.as_ref(),
+            &authority,
+            &provider,
+        )
+        .await,
+        Err(AdapterError::Internal)
+    );
+    assert_eq!(wrong_purpose.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(authority.loads.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.chain_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.pending_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.receipt_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.canonical_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.submits.load(Ordering::SeqCst), 0);
 
     let local = validate_local(&binding, &command, signer.as_ref(), &authority).expect("local");
     let reservation = Reservation::new(

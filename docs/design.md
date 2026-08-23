@@ -48,12 +48,14 @@ conservative bound `1 + Pure + Read + 2*Effect <= 65,536` across every declarati
 bounds, not tunable runtime policy.
 
 Signing owns the exact recoverable-secp256k1 public key identity, 32-byte transient digest,
-low-S compact recoverable signature, public recovery, and key-bound `Signer` contract. The
-in-process keystore constructs its non-`Send`, non-`Sync` key map inside one dedicated owner thread,
-accepts only checked zeroizing scalars, retains at most 64 distinct key instances, and communicates
-over a bounded channel. Duplicate import returns another handle with the same public key content
-ref. Explicit async shutdown requests exit and immediately awaits an OS-thread join in blocking
-work; dropping the final sender also ends the owner loop.
+low-S compact recoverable signature, public recovery, and key- and purpose-bound `Signer` contract.
+The in-process keystore constructs its non-`Send`, non-`Sync` key map inside one dedicated owner
+thread, accepts only checked zeroizing scalars, retains at most 64 distinct key instances, and
+communicates over a bounded channel. Purpose is immutable on each returned handle and does not cross
+the owner channel. Duplicate same-key imports return handles with the same public identity and may
+carry different purposes without consuming another key slot. Explicit async shutdown requests exit
+and immediately awaits an OS-thread join in blocking work; dropping the final sender also ends the
+owner loop.
 
 EVM Program values use one checked lowercase `EvmAddress`, lowercase `EvmHash`, canonical decimal
 `EvmU256`, and exact 32-byte authority epoch. A transaction binding fixes chain ID plus expected
@@ -70,15 +72,16 @@ bounded return bytes. Rejected, safe-failure, and integrity-blocked evidence pro
 failure reason. These domain contracts perform no provider, signing, nonce, or persistence IO; the
 authority and live adapter remain separate downstream responsibilities.
 
-The live EVM transaction adapter captures one exact binding, key-bound signer, append-only
-transaction authority, and transaction-only provider facet. Before authority or provider IO it
-compares the complete command binding, authority epoch, public signer identity, and derived sender.
-It reserves one provider-observed pending nonce, signs the fixed type-2 payload with purpose
-`mfm.evm.sign-eip1559@1`, retains exact signed bytes, and reconciles receipts before retaining typed
-settlement. Retained bytes are fully decoded and compared before provider entry. A null receipt
-causes at most one submission of those bytes in an invocation; a matching submission response
-returns normal Pending progress, while a transport failure, dropped acknowledgement, malformed
-response, or hash mismatch remains Unavailable. Settlement requires two equal receipt observations
+The live EVM transaction adapter captures one exact binding, key- and purpose-bound signer,
+append-only transaction authority, and transaction-only provider facet. Before authority or
+provider IO it compares the complete command binding, authority epoch, public signer identity,
+immutable purpose `mfm.evm.sign-eip1559@1`, and derived sender. It reserves one provider-observed
+pending nonce, signs the fixed type-2 payload through that handle, retains exact signed bytes, and
+reconciles receipts before retaining typed settlement. Retained bytes are fully decoded and
+compared before provider entry. A null receipt causes at most one submission of those bytes in an
+invocation; a matching submission response returns normal Pending progress, while a transport
+failure, dropped acknowledgement, malformed response, or hash mismatch remains Unavailable.
+Settlement requires two equal receipt observations
 and two equal current-canonical block observations. Version 1 is the canonical-receipt policy for
 the pinned non-reorging development fixture and is not registered by production composition.
 

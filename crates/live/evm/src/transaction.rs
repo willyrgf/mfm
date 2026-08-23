@@ -269,6 +269,11 @@ fn validate_local(
     {
         return Err(AdapterError::Internal);
     }
+    let purpose =
+        StableId::new(EVM_EIP1559_SIGNING_PURPOSE_ID).map_err(|_| AdapterError::Internal)?;
+    if signer.purpose() != &purpose {
+        return Err(AdapterError::Internal);
+    }
     let public_key = signer
         .public_identity()
         .public_key()
@@ -304,10 +309,8 @@ async fn prepare(
 ) -> Result<PreparedRecord, AdapterError> {
     let digest = transaction_signing_digest(command, reservation.nonce())
         .map_err(|_| AdapterError::Internal)?;
-    let purpose =
-        StableId::new(EVM_EIP1559_SIGNING_PURPOSE_ID).map_err(|_| AdapterError::Internal)?;
     let signature = signer
-        .sign(digest, purpose)
+        .sign(digest)
         .await
         .map_err(|_| AdapterError::Unavailable)?;
     let (raw, transaction_hash) = signed_transaction(command, reservation.nonce(), signature)
