@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mfm_canonical::CanonicalBytes;
 use mfm_evm::{
     AnchoredContractCallCompletion, AnchoredContractCallContext, AnchoredContractCallFailure,
     Eip1559TransactionCommand, EvmAddress, EvmAnchoredContractCallRead, EvmAuthorityEpoch,
@@ -26,8 +25,8 @@ use mfm_ids::{ContentRef, DigestBytes, EffectId, EntryPointId, RunId, StableId};
 use mfm_journal::{JournalHistory, JournalRecord};
 use mfm_keystore::{KeystoreOwner, SecretSecp256k1Scalar};
 use mfm_program::{
-    expand_program, Never, Operation, OperationExpansion, ProgramError, ProposedStateOutcome,
-    PureState, State,
+    expand_program, Operation, OperationExpansion, ProgramError, ProposedStateOutcome, PureState,
+    State,
 };
 use mfm_program_derive::MfmValue;
 use mfm_runtime::{RunView, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError};
@@ -37,8 +36,7 @@ use mfm_storage_postgres::{
     PostgresEvmTransactionAuthority, RuntimePostgresLocator,
 };
 use mfm_store::Store;
-use serde::de;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 const SOURCE: &str = include_str!("fixtures/MfmEffectFixture.sol");
@@ -52,50 +50,8 @@ const CONFIGURATION_GAS: u64 = 200_000;
 const PRIORITY_FEE: u64 = 1_000_000_000;
 const MAX_FEE: u64 = 10_000_000_000;
 const FUNDING_WEI_HEX: &str = "0xde0b6b3a7640000";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
-#[serde(transparent)]
-#[mfm(
-    namespace = "mfm.test.evm-effect",
-    name = "bytes",
-    version = "1",
-    schema = "mfm.test.evm-effect-bytes",
-    transparent_bytes
-)]
-struct FixtureBytes {
-    #[mfm(minimum_bytes = 0, maximum_bytes = 131072)]
-    value: String,
-}
-
-impl FixtureBytes {
-    fn new(bytes: Vec<u8>) -> Self {
-        Self {
-            value: CanonicalBytes::new(bytes).encoded().to_owned(),
-        }
-    }
-
-    fn bytes(&self) -> Vec<u8> {
-        CanonicalBytes::from_base64url_no_pad(self.value.clone())
-            .expect("fixture bytes remain canonical")
-            .into_bytes()
-    }
-}
-
-impl<'de> Deserialize<'de> for FixtureBytes {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        let bytes = CanonicalBytes::from_base64url_no_pad(value.clone())
-            .map_err(de::Error::custom)?
-            .into_bytes();
-        if bytes.len() > 131_072 {
-            return Err(de::Error::custom("fixture bytes are invalid"));
-        }
-        Ok(Self { value })
-    }
-}
+const CONFIGURE_SELECTOR: [u8; 4] = [0x1e, 0xb2, 0x5e, 0x0a];
+const VALUE_SELECTOR: [u8; 4] = [0x3f, 0xa4, 0xf2, 0x45];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(
@@ -106,42 +62,22 @@ impl<'de> Deserialize<'de> for FixtureBytes {
 )]
 #[mfm(
     namespace = "mfm.test.evm-effect",
-    name = "flow-context",
+    name = "lifecycle-context",
     version = "1",
-    schema = "mfm.test.evm-effect-flow-context"
+    schema = "mfm.test.evm-effect-lifecycle-context"
 )]
-enum EffectFlowContext {
-    Deployment {
+enum LifecycleContext {
+    AwaitingDeployment {
         binding: EvmTransactionBinding,
-        configure_calldata: FixtureBytes,
-        value_calldata: FixtureBytes,
     },
-    Configuration {
+    AwaitingConfiguration {
         binding: EvmTransactionBinding,
-        contract_address: EvmAddress,
-        deployment_hash: EvmHash,
-        value_calldata: FixtureBytes,
+        deployment: EvmTransactionConfirmation,
     },
-    Observation {
-        anchor: EvmBlockAnchor,
-        configuration_hash: EvmHash,
-        contract_address: EvmAddress,
-        deployment_hash: EvmHash,
+    BothTransactionsComplete {
+        deployment: EvmTransactionConfirmation,
+        configuration: EvmTransactionConfirmation,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.test.evm-effect",
-    name = "input",
-    version = "1",
-    schema = "mfm.test.evm-effect-input"
-)]
-struct EffectFixtureInput {
-    configure_calldata: FixtureBytes,
-    deployment_command: Eip1559TransactionCommand,
-    value_calldata: FixtureBytes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -171,43 +107,16 @@ struct EffectFixtureReport {
 enum EffectFixtureFailure {
     TransactionReverted,
     AnchoredObservationFailed,
-}
-
-struct PrepareDeployment;
-
-impl State for PrepareDeployment {
-    type Input = EffectFixtureInput;
-    type Output = EvmTransactionContext<EffectFlowContext>;
-    type Failure = Never;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.evm-effect/prepare-deployment@1")
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl PureState for PrepareDeployment {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        let binding = input.deployment_command.binding().clone();
-        ProposedStateOutcome::Success {
-            output: EvmTransactionContext::new(
-                EffectFlowContext::Deployment {
-                    binding,
-                    configure_calldata: input.configure_calldata,
-                    value_calldata: input.value_calldata,
-                },
-                input.deployment_command,
-            ),
-        }
-    }
+    InvalidLifecycle,
+    InvalidReturnData,
 }
 
 struct PrepareConfiguration;
 
 impl State for PrepareConfiguration {
-    type Input = EvmTransactionCompletion<EffectFlowContext>;
-    type Output = EvmTransactionContext<EffectFlowContext>;
-    type Failure = Never;
+    type Input = EvmTransactionCompletion<LifecycleContext>;
+    type Output = EvmTransactionContext<LifecycleContext>;
+    type Failure = EffectFixtureFailure;
 
     fn state_id() -> mfm_program::Result<StableId> {
         StableId::new("mfm.test.evm-effect/prepare-configuration@1")
@@ -217,24 +126,21 @@ impl State for PrepareConfiguration {
 
 impl PureState for PrepareConfiguration {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        let EffectFlowContext::Deployment {
-            binding,
-            configure_calldata,
-            value_calldata,
-        } = input.caller_context().clone()
+        let LifecycleContext::AwaitingDeployment { binding } = input.caller_context().clone()
         else {
-            unreachable!("deployment completion retains the deployment context")
+            return invalid_lifecycle();
         };
+        let deployment = input.confirmed().clone();
         let EvmTransactionConfirmation::Created {
             created_address, ..
-        } = input.confirmed()
+        } = &deployment
         else {
-            unreachable!("a successful create command yields a created address")
+            return invalid_lifecycle();
         };
         let command = Eip1559TransactionCommand::new(
             binding.clone(),
-            EvmTransactionAction::call(created_address.clone(), configure_calldata.bytes())
-                .expect("fixture calldata is bounded"),
+            EvmTransactionAction::call(created_address.clone(), fixture_configure_calldata())
+                .expect("fixed fixture calldata is bounded"),
             EvmU256::from_u64(0),
             CONFIGURATION_GAS,
             EvmU256::from_u64(PRIORITY_FEE),
@@ -243,11 +149,9 @@ impl PureState for PrepareConfiguration {
         .expect("fixed configuration command is valid");
         ProposedStateOutcome::Success {
             output: EvmTransactionContext::new(
-                EffectFlowContext::Configuration {
+                LifecycleContext::AwaitingConfiguration {
                     binding,
-                    contract_address: created_address.clone(),
-                    deployment_hash: input.confirmed().transaction_hash().clone(),
-                    value_calldata,
+                    deployment,
                 },
                 command,
             ),
@@ -258,9 +162,9 @@ impl PureState for PrepareConfiguration {
 struct PrepareObservation;
 
 impl State for PrepareObservation {
-    type Input = EvmTransactionCompletion<EffectFlowContext>;
-    type Output = AnchoredContractCallContext<EffectFlowContext>;
-    type Failure = Never;
+    type Input = EvmTransactionCompletion<LifecycleContext>;
+    type Output = AnchoredContractCallContext<LifecycleContext>;
+    type Failure = EffectFixtureFailure;
 
     fn state_id() -> mfm_program::Result<StableId> {
         StableId::new("mfm.test.evm-effect/prepare-observation@1")
@@ -270,32 +174,35 @@ impl State for PrepareObservation {
 
 impl PureState for PrepareObservation {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        let EffectFlowContext::Configuration {
+        let LifecycleContext::AwaitingConfiguration {
             binding,
-            contract_address,
-            deployment_hash,
-            value_calldata,
+            deployment,
         } = input.caller_context().clone()
         else {
-            unreachable!("configuration completion retains its context")
+            return invalid_lifecycle();
         };
-        assert!(matches!(
-            input.confirmed(),
-            EvmTransactionConfirmation::Called { .. }
-        ));
-        let anchor = input.confirmed().block_anchor().clone();
-        let context = EffectFlowContext::Observation {
-            anchor: anchor.clone(),
-            configuration_hash: input.confirmed().transaction_hash().clone(),
-            contract_address: contract_address.clone(),
-            deployment_hash,
+        let EvmTransactionConfirmation::Created {
+            created_address, ..
+        } = &deployment
+        else {
+            return invalid_lifecycle();
+        };
+        let created_address = created_address.clone();
+        let configuration = input.confirmed().clone();
+        let EvmTransactionConfirmation::Called { block_anchor, .. } = &configuration else {
+            return invalid_lifecycle();
+        };
+        let block_anchor = block_anchor.clone();
+        let context = LifecycleContext::BothTransactionsComplete {
+            deployment,
+            configuration,
         };
         let output = AnchoredContractCallContext::for_route(
             context,
             binding.route(),
-            contract_address,
-            value_calldata.bytes(),
-            anchor,
+            created_address,
+            VALUE_SELECTOR.to_vec(),
+            block_anchor,
         )
         .expect("fixed anchored call is valid");
         ProposedStateOutcome::Success { output }
@@ -305,9 +212,9 @@ impl PureState for PrepareObservation {
 struct FinalizeReport;
 
 impl State for FinalizeReport {
-    type Input = AnchoredContractCallCompletion<EffectFlowContext>;
+    type Input = AnchoredContractCallCompletion<LifecycleContext>;
     type Output = EffectFixtureReport;
-    type Failure = Never;
+    type Failure = EffectFixtureFailure;
 
     fn state_id() -> mfm_program::Result<StableId> {
         StableId::new("mfm.test.evm-effect/finalize-report@1")
@@ -317,31 +224,98 @@ impl State for FinalizeReport {
 
 impl PureState for FinalizeReport {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        let EffectFlowContext::Observation {
-            anchor,
-            configuration_hash,
-            contract_address,
-            deployment_hash,
+        let LifecycleContext::BothTransactionsComplete {
+            deployment,
+            configuration,
         } = input.caller_context().clone()
         else {
-            unreachable!("anchored completion retains observation context")
+            return invalid_lifecycle();
         };
-        let mut expected = vec![0_u8; 32];
-        expected[31] = CONFIGURED_VALUE as u8;
-        assert_eq!(
-            input.result().return_bytes().expect("return bytes"),
-            expected
-        );
-        assert_eq!(input.result().anchor(), &anchor);
+        let EvmTransactionConfirmation::Created {
+            created_address,
+            transaction_hash: deployment_hash,
+            ..
+        } = deployment
+        else {
+            return invalid_lifecycle();
+        };
+        let EvmTransactionConfirmation::Called {
+            block_anchor,
+            transaction_hash: configuration_hash,
+        } = configuration
+        else {
+            return invalid_lifecycle();
+        };
+        if input.result().anchor() != &block_anchor {
+            return invalid_lifecycle();
+        }
+        let Ok(return_bytes) = input.result().return_bytes() else {
+            return invalid_return_data();
+        };
+        let Ok(value) = decode_fixture_value(&return_bytes) else {
+            return invalid_return_data();
+        };
         ProposedStateOutcome::Success {
             output: EffectFixtureReport {
-                anchor,
+                anchor: input.result().anchor().clone(),
                 configuration_hash,
-                contract_address,
+                contract_address: created_address,
                 deployment_hash,
-                value: EvmU256::from_u64(CONFIGURED_VALUE),
+                value,
             },
         }
+    }
+}
+
+fn fixture_configure_calldata() -> Vec<u8> {
+    let mut calldata = Vec::with_capacity(36);
+    calldata.extend_from_slice(&CONFIGURE_SELECTOR);
+    calldata.extend_from_slice(&abi_word(CONFIGURED_VALUE));
+    calldata
+}
+
+fn decode_fixture_value(return_bytes: &[u8]) -> Result<EvmU256, EffectFixtureFailure> {
+    let word =
+        <[u8; 32]>::try_from(return_bytes).map_err(|_| EffectFixtureFailure::InvalidReturnData)?;
+    if word[..24].iter().any(|byte| *byte != 0) {
+        return Err(EffectFixtureFailure::InvalidReturnData);
+    }
+    let suffix =
+        <[u8; 8]>::try_from(&word[24..]).map_err(|_| EffectFixtureFailure::InvalidReturnData)?;
+    Ok(EvmU256::from_u64(u64::from_be_bytes(suffix)))
+}
+
+#[test]
+fn fixture_return_projection_rejects_malformed_or_wider_values() {
+    assert_eq!(
+        decode_fixture_value(&abi_word(CONFIGURED_VALUE)),
+        Ok(EvmU256::from_u64(CONFIGURED_VALUE))
+    );
+    assert_eq!(
+        decode_fixture_value(&[0; 31]),
+        Err(EffectFixtureFailure::InvalidReturnData)
+    );
+    assert_eq!(
+        decode_fixture_value(&[0; 33]),
+        Err(EffectFixtureFailure::InvalidReturnData)
+    );
+    let mut wider = [0; 32];
+    wider[23] = 1;
+    assert_eq!(
+        decode_fixture_value(&wider),
+        Err(EffectFixtureFailure::InvalidReturnData)
+    );
+}
+
+fn invalid_lifecycle<O>() -> ProposedStateOutcome<O, EffectFixtureFailure> {
+    ProposedStateOutcome::Failure {
+        failure: EffectFixtureFailure::InvalidLifecycle,
+    }
+}
+
+fn invalid_return_data<O>() -> ProposedStateOutcome<O, EffectFixtureFailure> {
+    ProposedStateOutcome::Failure {
+        failure: EffectFixtureFailure::InvalidReturnData,
     }
 }
 
@@ -369,21 +343,21 @@ macro_rules! failure_mapper {
 
 failure_mapper!(
     MapDeploymentFailure,
-    EvmTransactionReversion<EffectFlowContext>,
-    EvmTransactionContext<EffectFlowContext>,
+    EvmTransactionReversion<LifecycleContext>,
+    EvmTransactionContext<LifecycleContext>,
     "mfm.test.evm-effect/map-deployment-failure@1",
     EffectFixtureFailure::TransactionReverted
 );
 failure_mapper!(
     MapConfigurationFailure,
-    EvmTransactionReversion<EffectFlowContext>,
-    AnchoredContractCallContext<EffectFlowContext>,
+    EvmTransactionReversion<LifecycleContext>,
+    AnchoredContractCallContext<LifecycleContext>,
     "mfm.test.evm-effect/map-configuration-failure@1",
     EffectFixtureFailure::TransactionReverted
 );
 failure_mapper!(
     MapAnchoredFailure,
-    AnchoredContractCallFailure<EffectFlowContext>,
+    AnchoredContractCallFailure<LifecycleContext>,
     EffectFixtureReport,
     "mfm.test.evm-effect/map-anchored-failure@1",
     EffectFixtureFailure::AnchoredObservationFailed
@@ -395,7 +369,7 @@ struct EffectFixtureOperation {
 }
 
 impl Operation for EffectFixtureOperation {
-    type Input = EffectFixtureInput;
+    type Input = EvmTransactionContext<LifecycleContext>;
     type Output = EffectFixtureReport;
     type Failure = EffectFixtureFailure;
 
@@ -403,13 +377,12 @@ impl Operation for EffectFixtureOperation {
         &self,
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
-        body.pure::<PrepareDeployment>()?;
         body.with_failure_handler::<
-            EvmTransactionReversion<EffectFlowContext>,
-            EvmTransactionContext<EffectFlowContext>,
+            EvmTransactionReversion<LifecycleContext>,
+            EvmTransactionContext<LifecycleContext>,
         >(
             |protected| {
-                protected.effect::<ExecuteEvmTransaction<EffectFlowContext>, EvmTransactionEffect>(
+                protected.effect::<ExecuteEvmTransaction<LifecycleContext>, EvmTransactionEffect>(
                     &self.binding,
                 )?;
                 protected.pure::<PrepareConfiguration>()
@@ -417,11 +390,11 @@ impl Operation for EffectFixtureOperation {
             |handler| handler.pure::<MapDeploymentFailure>(),
         )?;
         body.with_failure_handler::<
-            EvmTransactionReversion<EffectFlowContext>,
-            AnchoredContractCallContext<EffectFlowContext>,
+            EvmTransactionReversion<LifecycleContext>,
+            AnchoredContractCallContext<LifecycleContext>,
         >(
             |protected| {
-                protected.effect::<ExecuteEvmTransaction<EffectFlowContext>, EvmTransactionEffect>(
+                protected.effect::<ExecuteEvmTransaction<LifecycleContext>, EvmTransactionEffect>(
                     &self.binding,
                 )?;
                 protected.pure::<PrepareObservation>()
@@ -429,12 +402,12 @@ impl Operation for EffectFixtureOperation {
             |handler| handler.pure::<MapConfigurationFailure>(),
         )?;
         body.with_failure_handler::<
-            AnchoredContractCallFailure<EffectFlowContext>,
+            AnchoredContractCallFailure<LifecycleContext>,
             EffectFixtureReport,
         >(
             |protected| {
                 protected.read::<
-                    ReadAnchoredContractCall<EffectFlowContext>,
+                    ReadAnchoredContractCall<LifecycleContext>,
                     EvmAnchoredContractCallRead,
                 >(&self.route)?;
                 protected.pure::<FinalizeReport>()
@@ -538,9 +511,6 @@ async fn runtime(
 
     let mut builder = RuntimeAssemblyBuilder::new();
     builder
-        .register_pure::<PrepareDeployment>()
-        .expect("prepare deployment");
-    builder
         .register_pure::<PrepareConfiguration>()
         .expect("prepare configuration");
     builder
@@ -559,10 +529,10 @@ async fn runtime(
         .register_pure::<MapAnchoredFailure>()
         .expect("anchored failure");
     builder
-        .register_effect::<ExecuteEvmTransaction<EffectFlowContext>, EvmTransactionEffect>()
+        .register_effect::<ExecuteEvmTransaction<LifecycleContext>, EvmTransactionEffect>()
         .expect("transaction state");
     builder
-        .register_read::<ReadAnchoredContractCall<EffectFlowContext>, EvmAnchoredContractCallRead>()
+        .register_read::<ReadAnchoredContractCall<LifecycleContext>, EvmAnchoredContractCallRead>()
         .expect("anchored state");
     register_evm_transaction_effect(
         &mut builder,
@@ -652,8 +622,23 @@ fn compile_fixture() -> Result<CompiledFixture, CompileError> {
         .and_then(serde_json::Value::as_array)
         .ok_or(CompileError)?;
     require_abi(abi, "constructor", None, &["uint256"], &[])?;
-    let configure_selector = require_abi(abi, "function", Some("configure"), &["uint256"], &[])?;
-    let value_selector = require_abi(abi, "function", Some("value"), &[], &["uint256"])?;
+    let configure_selector = selector_bytes(&require_abi(
+        abi,
+        "function",
+        Some("configure"),
+        &["uint256"],
+        &[],
+    )?)?;
+    let value_selector = selector_bytes(&require_abi(
+        abi,
+        "function",
+        Some("value"),
+        &[],
+        &["uint256"],
+    )?)?;
+    if configure_selector != CONFIGURE_SELECTOR || value_selector != VALUE_SELECTOR {
+        return Err(CompileError);
+    }
     let configured_topic = require_abi(abi, "event", Some("Configured"), &["uint256"], &[])?;
     let mut creation = decode_hex_data(
         contract
@@ -673,9 +658,9 @@ fn compile_fixture() -> Result<CompiledFixture, CompileError> {
     if creation.is_empty() || deployed.is_empty() {
         return Err(CompileError);
     }
-    let mut configure_calldata = selector_bytes(&configure_selector)?.to_vec();
+    let mut configure_calldata = configure_selector.to_vec();
     configure_calldata.extend_from_slice(&abi_word(CONFIGURED_VALUE));
-    let value_calldata = selector_bytes(&value_selector)?.to_vec();
+    let value_calldata = value_selector.to_vec();
     Ok(CompiledFixture {
         creation,
         deployed,
@@ -1146,16 +1131,21 @@ async fn journal_effects(
     let history = JournalHistory::qualify(run_id, stored).expect("qualified history");
     let mut prepared = Vec::new();
     let mut concluded = 0;
+    let mut previous_was_effect_prepare = false;
     for record in history.records() {
         match record {
             JournalRecord::StateEffectPrepared { effect_id, command } => {
-                assert!(!String::from_utf8_lossy(command.canonical_bytes()).contains("raw"));
                 let typed: Eip1559TransactionCommand =
                     serde_json::from_slice(command.canonical_bytes()).expect("typed command");
                 prepared.push((effect_id.clone(), command.content_ref().clone(), typed));
+                previous_was_effect_prepare = true;
             }
-            JournalRecord::StateEffectConcluded { .. } => concluded += 1,
-            _ => {}
+            JournalRecord::StateEffectConcluded { .. } => {
+                assert!(previous_was_effect_prepare);
+                concluded += 1;
+                previous_was_effect_prepare = false;
+            }
+            _ => previous_was_effect_prepare = false,
         }
     }
     (prepared, concluded)
@@ -1287,11 +1277,12 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
         EvmU256::from_u64(MAX_FEE),
     )
     .expect("configuration command");
-    let input = EffectFixtureInput {
-        configure_calldata: FixtureBytes::new(compiled.configure_calldata.clone()),
-        deployment_command: deployment_command.clone(),
-        value_calldata: FixtureBytes::new(compiled.value_calldata.clone()),
-    };
+    let input = EvmTransactionContext::new(
+        LifecycleContext::AwaitingDeployment {
+            binding: binding.clone(),
+        },
+        deployment_command.clone(),
+    );
     let program = expand_program(
         EntryPointId::new("mfm.test.evm-effect/run@1").expect("entry point"),
         &EffectFixtureOperation {
@@ -1302,127 +1293,106 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     .expect("fixture Program");
     let run_id = RunId::from_digest(DigestBytes::from_array([0x5a; 32]));
     let consumed = Arc::new(AtomicBool::new(false));
-    let mut invocations = 0_u8;
+    let mut initial = Some((program, input));
+    let mut independently_observed = Vec::<PreparedRecord>::new();
+    let mut terminal = None;
 
-    let (first_runtime, first_backend, first_authority) = runtime(
-        &runtime_locator,
-        &rpc_locator,
-        &binding,
-        Arc::clone(&signer),
-        Arc::clone(&consumed),
-    )
-    .await;
-    invocations += 1;
-    assert!(matches!(
-        first_runtime.start(run_id.clone(), program, input).await,
-        Err(RuntimeError::Unavailable)
-    ));
-    assert!(consumed.load(Ordering::SeqCst));
-    assert_eq!(
-        observer
-            .pending_nonce(&sender)
-            .await
-            .expect("pending nonce"),
-        0
-    );
-    let (first_effects, first_conclusions) = journal_effects(&first_backend, &run_id).await;
-    assert_eq!(first_effects.len(), 1);
-    assert_eq!(first_conclusions, 0);
-    assert!(matches!(
-        first_authority
-            .load(&first_effects[0].0, &first_effects[0].1)
-            .await
-            .expect("reservation"),
-        Some(AuthorityState::Reserved(_))
-    ));
-    drop(first_runtime);
-    drop(first_backend);
-    drop(first_authority);
+    for attempt in 0..8 {
+        let (runtime, backend, authority) = runtime(
+            &runtime_locator,
+            &rpc_locator,
+            &binding,
+            Arc::clone(&signer),
+            Arc::clone(&consumed),
+        )
+        .await;
+        let progress = if attempt == 0 {
+            let (program, input) = initial.take().expect("one initial admission");
+            runtime.start(run_id.clone(), program, input).await
+        } else {
+            runtime.resume(&run_id).await
+        };
 
-    let (second_runtime, second_backend, second_authority) = runtime(
-        &runtime_locator,
-        &rpc_locator,
-        &binding,
-        Arc::clone(&signer),
-        Arc::clone(&consumed),
-    )
-    .await;
-    invocations += 1;
-    let second_progress = second_runtime
-        .resume(&run_id)
-        .await
-        .expect("accepted deployment submission is pending");
-    assert!(matches!(second_progress.state(), RunViewState::Runnable));
-    let (second_effects, second_conclusions) = journal_effects(&second_backend, &run_id).await;
-    assert_eq!(second_effects.len(), 1);
-    assert_eq!(second_conclusions, 0);
-    let Some(AuthorityState::Prepared(deployment_prepared)) = second_authority
-        .load(&second_effects[0].0, &second_effects[0].1)
-        .await
-        .expect("prepared deployment")
-    else {
-        panic!("deployment must be prepared after accepted submission")
+        if attempt == 0 {
+            assert!(matches!(progress, Err(RuntimeError::Unavailable)));
+            assert!(consumed.load(Ordering::SeqCst));
+            assert_eq!(
+                observer
+                    .pending_nonce(&sender)
+                    .await
+                    .expect("pending nonce"),
+                0
+            );
+            let (effects, conclusions) = journal_effects(&backend, &run_id).await;
+            assert_eq!(effects.len(), 1);
+            assert_eq!(conclusions, 0);
+            assert!(matches!(
+                authority
+                    .load(&effects[0].0, &effects[0].1)
+                    .await
+                    .expect("reservation"),
+                Some(AuthorityState::Reserved(_))
+            ));
+            drop(runtime);
+            drop(backend);
+            drop(authority);
+            continue;
+        }
+
+        match progress {
+            Ok(view) if matches!(view.state(), RunViewState::Runnable) => {
+                let (effects, _) = journal_effects(&backend, &run_id).await;
+                let mut newly_prepared = 0;
+                for (effect_id, command_ref, _) in effects {
+                    let state = authority
+                        .load(&effect_id, &command_ref)
+                        .await
+                        .expect("public authority state")
+                        .expect("retained authority state");
+                    let AuthorityState::Prepared(prepared) = state else {
+                        continue;
+                    };
+                    if independently_observed
+                        .iter()
+                        .any(|observed| observed.transaction_hash() == prepared.transaction_hash())
+                    {
+                        continue;
+                    }
+                    let receipt = observer
+                        .await_receipt(prepared.transaction_hash())
+                        .await
+                        .expect("independently observed prepared transaction");
+                    if prepared.reservation().nonce() == 0 {
+                        assert_eq!(
+                            receipt
+                                .get("contractAddress")
+                                .and_then(serde_json::Value::as_str),
+                            Some(expected_contract.as_str())
+                        );
+                    }
+                    independently_observed.push(prepared);
+                    newly_prepared += 1;
+                }
+                assert_eq!(newly_prepared, 1);
+                drop(runtime);
+                drop(backend);
+                drop(authority);
+            }
+            Ok(view) => {
+                drop(runtime);
+                terminal = Some((view, backend, authority));
+                break;
+            }
+            Err(error) => panic!("unexpected recovery failure: {error:?}"),
+        }
+    }
+
+    let (terminal, final_backend, final_authority) =
+        terminal.expect("fixture must terminate within eight caller invocations");
+    independently_observed.sort_by_key(|prepared| prepared.reservation().nonce());
+    let [deployment_prepared, configuration_prepared] = independently_observed.as_slice() else {
+        panic!("exactly two prepared transactions must reach Reth")
     };
-    let deployment_receipt = observer
-        .await_receipt(deployment_prepared.transaction_hash())
-        .await
-        .expect("independently observed deployment");
-    assert_eq!(
-        deployment_receipt
-            .get("contractAddress")
-            .and_then(serde_json::Value::as_str),
-        Some(expected_contract.as_str())
-    );
-    drop(second_runtime);
-    drop(second_backend);
-    drop(second_authority);
-
-    let (third_runtime, third_backend, third_authority) = runtime(
-        &runtime_locator,
-        &rpc_locator,
-        &binding,
-        Arc::clone(&signer),
-        Arc::clone(&consumed),
-    )
-    .await;
-    invocations += 1;
-    let third_progress = third_runtime
-        .resume(&run_id)
-        .await
-        .expect("accepted configuration submission is pending");
-    assert!(matches!(third_progress.state(), RunViewState::Runnable));
-    let (third_effects, third_conclusions) = journal_effects(&third_backend, &run_id).await;
-    assert_eq!(third_effects.len(), 2);
-    assert_eq!(third_conclusions, 1);
-    let Some(AuthorityState::Prepared(configuration_prepared)) = third_authority
-        .load(&third_effects[1].0, &third_effects[1].1)
-        .await
-        .expect("prepared configuration")
-    else {
-        panic!("configuration must be prepared after accepted submission")
-    };
-    observer
-        .await_receipt(configuration_prepared.transaction_hash())
-        .await
-        .expect("independently observed configuration");
-    drop(third_runtime);
-    drop(third_backend);
-    drop(third_authority);
-
-    let (fourth_runtime, fourth_backend, fourth_authority) = runtime(
-        &runtime_locator,
-        &rpc_locator,
-        &binding,
-        Arc::clone(&signer),
-        Arc::clone(&consumed),
-    )
-    .await;
-    invocations += 1;
-    let terminal = fourth_runtime
-        .resume(&run_id)
-        .await
-        .expect("terminal resume");
-    assert!(invocations <= 8);
     let report = terminal_report(&terminal);
     let terminal_bytes = match terminal.state() {
         RunViewState::Succeeded(value) => value.canonical_bytes().to_vec(),
@@ -1439,14 +1409,14 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     );
     assert_eq!(report.value, EvmU256::from_u64(CONFIGURED_VALUE));
 
-    let (final_effects, final_conclusions) = journal_effects(&fourth_backend, &run_id).await;
+    let (final_effects, final_conclusions) = journal_effects(&final_backend, &run_id).await;
     assert_eq!(final_effects.len(), 2);
     assert_eq!(final_conclusions, 2);
     assert_eq!(final_effects[0].2, deployment_command);
     assert_eq!(final_effects[1].2, configuration_command);
     let mut settled = Vec::new();
     for (effect_id, command_ref, _) in &final_effects {
-        let Some(AuthorityState::Settled(state)) = fourth_authority
+        let Some(AuthorityState::Settled(state)) = final_authority
             .load(effect_id, command_ref)
             .await
             .expect("settled authority")
@@ -1485,6 +1455,14 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
         .expect("canonical wallet transactions");
     transactions.sort_by_key(|transaction| transaction.nonce);
     assert_eq!(transactions.len(), 2);
+    assert_eq!(
+        transactions[0].hash,
+        *settled[0].prepared().transaction_hash()
+    );
+    assert_eq!(
+        transactions[1].hash,
+        *settled[1].prepared().transaction_hash()
+    );
     assert_eq!(transactions[0].hash, report.deployment_hash);
     assert_eq!(transactions[1].hash, report.configuration_hash);
     assert_eq!(
@@ -1551,9 +1529,8 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
         abi_word(CONFIGURED_VALUE)
     );
 
-    drop(fourth_runtime);
-    drop(fourth_backend);
-    drop(fourth_authority);
+    drop(final_backend);
+    drop(final_authority);
     let (cold_runtime, _cold_backend, _cold_authority) =
         runtime(&runtime_locator, &rpc_locator, &binding, signer, consumed).await;
     let cold_read = cold_runtime.read(&run_id).await.expect("cold read");
@@ -1561,6 +1538,7 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
         RunViewState::Succeeded(value) => value.canonical_bytes(),
         _ => panic!("cold read must remain terminal"),
     };
+    assert_eq!(cold_read.head_digest(), terminal.head_digest());
     assert_eq!(cold_bytes, terminal_bytes);
     let final_resume = cold_runtime.resume(&run_id).await.expect("terminal resume");
     assert_eq!(final_resume.head_digest(), terminal.head_digest());

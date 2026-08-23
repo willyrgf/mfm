@@ -67,7 +67,9 @@ deleting a revision does not revoke already admitted runs. Shared serializers pr
 
 The ignored `evm_contract_effect_e2e` integration test is the only app-level composition of the EVM
 transaction Effect and anchored transaction-route Read. It compiles a first-party Solidity fixture,
-uses a generated ephemeral signer plus real PostgreSQL authority and Reth, and reconstructs Runtime
-between forced recovery boundaries. Its lifecycle Operation, values, registrations, and fixed
+checks fixed fixture selectors against the emitted ABI, admits the deployment transaction directly,
+and uses a generated ephemeral signer plus real PostgreSQL authority and Reth. A bounded caller loop
+reconstructs Runtime and every IO handle across forced recovery boundaries; the final report decodes
+its value from anchored Read evidence. Its lifecycle Operation, values, registrations, and fixed
 development settlement policy are test-only: they add no production component inventory,
 deployment configuration, CLI, REST, or `Application` entry point.
