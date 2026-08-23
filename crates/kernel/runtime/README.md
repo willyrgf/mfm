@@ -13,6 +13,8 @@ or calls an adapter; it re-prepares only to validate a retained Effect command a
 The Match projection selects and qualifies the exact nested canonical payload bytes through the
 registered payload codec; it never serializes a typed selector or payload.
 
-Adapter errors map to redaction-safe Runtime errors and append no conclusion. A pending Effect is
-publicly Runnable. Dropping at any await is safety-neutral; Runtime has no background finalizer,
+An Effect adapter returns `Pending` or `Settled(evidence)`. Pending appends no conclusion, restores
+the identical prepared fold state, and returns a publicly Runnable view without another adapter
+entry in that invocation. Adapter errors remain distinct redaction-safe Runtime errors and also
+append no conclusion. Dropping at any await is safety-neutral; Runtime has no background finalizer,
 semaphore, timeout, internal retry loop, or public State-by-State lifecycle.

@@ -28,11 +28,14 @@ IO; access or replace the occurrence; register an adapter; or grant execution au
 Runtime admits `(RunId, Program, C0)`, appends genesis, folds the qualified history, and executes only
 the selected declaration. Pure and Read append one fused conclusion; a Read frame contains intent,
 accepted evidence, and outcome together. Effect execution first appends the complete command and
-derived `EffectId`, enters the adapter only after known insertion, and then appends accepted evidence
-and outcome. An adapter error leaves the prepare pending and appends no conclusion. Match is a pure
-projection and adds no frame. Zero-State Programs terminate at genesis. Hot advancement and cold
-reload use the same fold. Cold fold re-prepares only a retained Effect command to validate its exact
-bytes and identity; retained Pure/Read conclusions remain authoritative event-log outcomes.
+derived `EffectId`, and enters the adapter only after known insertion. `Settled(evidence)` binds and
+interprets the evidence before appending the adjacent conclusion. `Pending` retains the identical
+prepare, appends nothing, and returns a Runnable view without re-entering the adapter in that
+invocation. An adapter error also leaves the prepare pending and appends no conclusion, but returns
+its distinct Runtime error. Match is a pure projection and adds no frame. Zero-State Programs
+terminate at genesis. Hot advancement and cold reload use the same fold. Cold fold re-prepares only
+a retained Effect command to validate its exact bytes and identity; retained Pure/Read conclusions
+remain authoritative event-log outcomes.
 
 Journal owns the exact `mfm.run.frame.v2` canonical wire, recursive exact-byte SHA-256 heads, strict
 frame-local object closure, Effect prepare/conclusion adjacency, and history qualification. Store
@@ -73,10 +76,11 @@ compares the complete command binding, authority epoch, public signer identity, 
 It reserves one provider-observed pending nonce, signs the fixed type-2 payload with purpose
 `mfm.evm.sign-eip1559@1`, retains exact signed bytes, and reconciles receipts before retaining typed
 settlement. Retained bytes are fully decoded and compared before provider entry. A null receipt
-causes at most one submission of those bytes in an invocation and always returns Unavailable; a
-later caller resumes from authority facts. Settlement requires two equal receipt observations and
-two equal current-canonical block observations. Version 1 is the canonical-receipt policy for the
-pinned non-reorging development fixture and is not registered by production composition.
+causes at most one submission of those bytes in an invocation; a matching submission response
+returns normal Pending progress, while a transport failure, dropped acknowledgement, malformed
+response, or hash mismatch remains Unavailable. Settlement requires two equal receipt observations
+and two equal current-canonical block observations. Version 1 is the canonical-receipt policy for
+the pinned non-reorging development fixture and is not registered by production composition.
 
 The same JSON-RPC client implements a separate transaction provider facet and the generic anchored
 contract-call observation. Anchored calls re-observe the authored block by number, require deployed

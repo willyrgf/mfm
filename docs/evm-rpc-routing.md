@@ -55,7 +55,8 @@ caller invocation:
 3. Sign the fixed type-2, empty-access-list transaction only when prepared bytes are absent, and
    retain its exact raw bytes and hash before provider submission.
 4. Check the receipt first. A null receipt permits at most one submission of the retained bytes and
-   returns `Unavailable`, so the caller must resume.
+   a matching submission response returns `Pending`, so the caller must resume. A transport
+   failure, dropped acknowledgement, malformed response, or mismatched hash returns `Unavailable`.
 5. On a later invocation, require two equal receipt observations and two equal current-canonical
    block observations before retaining settlement.
 

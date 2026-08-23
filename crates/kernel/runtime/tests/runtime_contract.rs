@@ -12,7 +12,9 @@ use mfm_program::{
     PreparationError, ProgramError, ProposedStateOutcome, PureState, ReadState, State,
 };
 use mfm_program_derive::MfmValue;
-use mfm_runtime::{AdapterError, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError};
+use mfm_runtime::{
+    AdapterError, EffectAdapterOutcome, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError,
+};
 use mfm_store::{AppendResult, MemoryStore, Store, StoreError};
 use mfm_values::canonicalize_mfm_value;
 use serde::{Deserialize, Serialize};
@@ -345,11 +347,11 @@ fn effect_registration_rejects_duplicate_and_wrong_kind_capability_entries() {
             let effect_id = effect_id.clone();
             let value = command.value;
             Box::pin(async move {
-                Ok(EffectEvidence {
+                Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                     effect_id,
                     value,
                     accepted: true,
-                })
+                }))
             })
         })
         .expect("Effect adapter");
@@ -360,11 +362,11 @@ fn effect_registration_rejects_duplicate_and_wrong_kind_capability_entries() {
                 let effect_id = effect_id.clone();
                 let value = command.value;
                 Box::pin(async move {
-                    Ok(EffectEvidence {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                         effect_id,
                         value,
                         accepted: true,
-                    })
+                    }))
                 })
             },
         ),
@@ -660,11 +662,11 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
                 Box::pin(async move {
                     entered.notify_one();
                     release.notified().await;
-                    Ok(EffectEvidence {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                         effect_id,
                         value,
                         accepted: true,
-                    })
+                    }))
                 })
             }
         })
@@ -720,11 +722,11 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
                     .expect("resumed observations")
                     .push((effect_id.clone(), value));
                 Box::pin(async move {
-                    Ok(EffectEvidence {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                         effect_id,
                         value,
                         accepted: true,
-                    })
+                    }))
                 })
             }
         })
@@ -747,6 +749,65 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
 }
 
 #[tokio::test]
+async fn pending_yields_once_and_a_later_settlement_closes_the_same_prepare() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(MemoryStore::new());
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder
+        .register_effect::<Mutate, Mutation>()
+        .expect("Effect State");
+    builder
+        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
+            let calls = Arc::clone(&calls);
+            move |effect_id, command| {
+                let invocation = calls.fetch_add(1, Ordering::SeqCst);
+                let effect_id = effect_id.clone();
+                let value = command.value;
+                Box::pin(async move {
+                    if invocation == 0 {
+                        Ok(EffectAdapterOutcome::Pending)
+                    } else {
+                        Ok(EffectAdapterOutcome::Settled(EffectEvidence {
+                            effect_id,
+                            value,
+                            accepted: true,
+                        }))
+                    }
+                })
+            }
+        })
+        .expect("Effect adapter");
+    let runtime = Runtime::new(builder.finish().expect("assembly"), store);
+    let run_id = RunId::from_digest(DigestBytes::from_array([45; 32]));
+
+    let pending = runtime
+        .start(
+            run_id.clone(),
+            expand_program(
+                EntryPointId::new("mfm.test.runtime/pending-effect@1").expect("entry point"),
+                &EffectProgram,
+            )
+            .expect("Program"),
+            Number { value: 21 },
+        )
+        .await
+        .expect("pending is normal progress");
+    assert_eq!(pending.head_sequence(), 2);
+    assert!(matches!(pending.state(), RunViewState::Runnable));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let cold = runtime.read(&run_id).await.expect("cold pending view");
+    assert_eq!(cold.head_digest(), pending.head_digest());
+    assert!(matches!(cold.state(), RunViewState::Runnable));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let settled = runtime.resume(&run_id).await.expect("later settlement");
+    assert_eq!(settled.head_sequence(), 3);
+    assert!(matches!(settled.state(), RunViewState::Succeeded(_)));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
     let calls = Arc::new(AtomicUsize::new(0));
     let store = Arc::new(MemoryStore::new());
@@ -762,11 +823,11 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
                 let effect_id = effect_id.clone();
                 let value = command.value;
                 Box::pin(async move {
-                    Ok(EffectEvidence {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                         effect_id,
                         value,
                         accepted: true,
-                    })
+                    }))
                 })
             }
         })
@@ -806,11 +867,11 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
         .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, |_effect_id, command| {
             let value = command.value;
             Box::pin(async move {
-                Ok(EffectEvidence {
+                Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                     effect_id: EffectId::from_digest(DigestBytes::from_array([99; 32])),
                     value,
                     accepted: true,
-                })
+                }))
             })
         })
         .expect("adapter");
@@ -1028,11 +1089,11 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
                 let effect_id = effect_id.clone();
                 let value = command.value;
                 Box::pin(async move {
-                    Ok(EffectEvidence {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                         effect_id,
                         value,
                         accepted: true,
-                    })
+                    }))
                 })
             }
         })
@@ -1083,11 +1144,11 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
                 let effect_id = effect_id.clone();
                 let value = command.value;
                 Box::pin(async move {
-                    Ok(EffectEvidence {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                         effect_id,
                         value,
                         accepted: true,
-                    })
+                    }))
                 })
             }
         })
@@ -1131,11 +1192,11 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
                 let effect_id = effect_id.clone();
                 let value = command.value;
                 Box::pin(async move {
-                    Ok(EffectEvidence {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                         effect_id,
                         value,
                         accepted: true,
-                    })
+                    }))
                 })
             }
         })
@@ -1190,11 +1251,11 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
                 let effect_id = effect_id.clone();
                 let value = command.value;
                 Box::pin(async move {
-                    Ok(EffectEvidence {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                         effect_id,
                         value,
                         accepted: true,
-                    })
+                    }))
                 })
             }
         })
@@ -1253,11 +1314,11 @@ async fn effect_not_inserted_reloads_the_committed_prepare_or_conclusion() {
                     let effect_id = effect_id.clone();
                     let value = command.value;
                     Box::pin(async move {
-                        Ok(EffectEvidence {
+                        Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                             effect_id,
                             value,
                             accepted: true,
-                        })
+                        }))
                     })
                 }
             })
@@ -1398,11 +1459,11 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
                 let effect_id = effect_id.clone();
                 let value = command.value;
                 Box::pin(async move {
-                    Ok(EffectEvidence {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                         effect_id,
                         value,
                         accepted: true,
-                    })
+                    }))
                 })
             }
         })
@@ -1463,11 +1524,11 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
                     let effect_id = effect_id.clone();
                     let value = command.value;
                     Box::pin(async move {
-                        Ok(EffectEvidence {
+                        Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                             effect_id,
                             value,
                             accepted: true,
-                        })
+                        }))
                     })
                 }
             })
@@ -1493,11 +1554,11 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
             let effect_id = effect_id.clone();
             let value = command.value;
             Box::pin(async move {
-                Ok(EffectEvidence {
+                Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                     effect_id,
                     value,
                     accepted: true,
-                })
+                }))
             })
         })
         .expect("adapter");
@@ -1629,11 +1690,11 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
                     let effect_id = effect_id.clone();
                     let value = command.value;
                     Box::pin(async move {
-                        Ok(EffectEvidence {
+                        Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                             effect_id,
                             value,
                             accepted: true,
-                        })
+                        }))
                     })
                 }
             })
@@ -1699,11 +1760,11 @@ async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
                 let barrier = Arc::clone(&barrier);
                 Box::pin(async move {
                     barrier.wait().await;
-                    Ok(EffectEvidence {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                         effect_id,
                         value,
                         accepted: true,
-                    })
+                    }))
                 })
             }
         })

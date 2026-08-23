@@ -387,7 +387,7 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
             &provider,
         )
         .await,
-        Err(AdapterError::Unavailable)
+        Ok(EffectAdapterOutcome::Pending)
     );
     let AuthorityState::Prepared(prepared) = authority.state().expect("prepared") else {
         panic!("first call must retain exact prepared bytes")
@@ -419,7 +419,7 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
         },
         provider.canonical.clone(),
     ));
-    let evidence = execute(
+    let EffectAdapterOutcome::Settled(evidence) = execute(
         &binding,
         &effect_id,
         &command,
@@ -428,7 +428,9 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
         &provider,
     )
     .await
-    .expect("settled receipt");
+    .expect("settled receipt") else {
+        panic!("receipt must settle the Effect")
+    };
     assert_eq!(evidence.nonce(), 7);
     assert!(matches!(
         evidence.result(),
@@ -454,7 +456,7 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
             &provider,
         )
         .await,
-        Ok(evidence)
+        Ok(EffectAdapterOutcome::Settled(evidence))
     );
     assert_eq!(
         phase_counts,
@@ -504,7 +506,7 @@ async fn cancellation_after_prepare_leaves_one_resumable_exact_transaction() {
             &provider,
         )
         .await,
-        Err(AdapterError::Unavailable)
+        Ok(EffectAdapterOutcome::Pending)
     );
     assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.pending_calls.load(Ordering::SeqCst), 1);
