@@ -1329,10 +1329,11 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     )
     .await;
     invocations += 1;
-    assert!(matches!(
-        second_runtime.resume(&run_id).await,
-        Err(RuntimeError::Unavailable)
-    ));
+    let second_progress = second_runtime
+        .resume(&run_id)
+        .await
+        .expect("accepted deployment submission is pending");
+    assert!(matches!(second_progress.state(), RunViewState::Runnable));
     let (second_effects, second_conclusions) = journal_effects(&second_backend, &run_id).await;
     assert_eq!(second_effects.len(), 1);
     assert_eq!(second_conclusions, 0);
@@ -1365,10 +1366,11 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     )
     .await;
     invocations += 1;
-    assert!(matches!(
-        third_runtime.resume(&run_id).await,
-        Err(RuntimeError::Unavailable)
-    ));
+    let third_progress = third_runtime
+        .resume(&run_id)
+        .await
+        .expect("accepted configuration submission is pending");
+    assert!(matches!(third_progress.state(), RunViewState::Runnable));
     let (third_effects, third_conclusions) = journal_effects(&third_backend, &run_id).await;
     assert_eq!(third_effects.len(), 2);
     assert_eq!(third_conclusions, 1);

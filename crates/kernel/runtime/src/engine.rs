@@ -17,11 +17,15 @@ use crate::assembly::{
     ExecutableDeclaration, ExecutableProgram, QualifiedValue, RegisteredState, RuntimeAssembly,
     ValueCodec,
 };
-use crate::{AdapterError, Result, RetainedValueView, RunView, RunViewState, RuntimeError};
+use crate::{
+    AdapterError, EffectAdapterOutcome, Result, RetainedValueView, RunView, RunViewState,
+    RuntimeError,
+};
 
 pub(crate) enum DriverDisposition {
     Continue,
     Reload,
+    Yield,
 }
 
 pub(crate) struct DriverContext<'a> {
@@ -273,6 +277,9 @@ async fn advance_until_stable(store: Arc<dyn Store>, accumulator: Accumulator) -
             DriverDisposition::Reload => {
                 slot = Some(load_and_fold(reload_assembly, &store, &reload_run_id, true).await?);
             }
+            DriverDisposition::Yield => {
+                return view(slot.take().ok_or(RuntimeError::Internal)?);
+            }
         }
     }
 }
@@ -513,9 +520,32 @@ where
     C: EffectCapabilityContract,
 {
     let accumulator = context.accumulator.take().ok_or(RuntimeError::Internal)?;
-    let qualify_evidence = adapter(&effect_id, &command)
+    let outcome = adapter(&effect_id, &command)
         .await
         .map_err(map_adapter_error)?;
+    let qualify_evidence = match outcome {
+        EffectAdapterOutcome::Pending => {
+            let driver = match accumulator
+                .executable
+                .declarations
+                .get(context.declaration_index)
+            {
+                Some(ExecutableDeclaration::State(state)) => Arc::clone(&state.driver),
+                _ => return Err(RuntimeError::Internal),
+            };
+            let mut accumulator = accumulator;
+            accumulator.state = Some(FoldState::EffectPending {
+                declaration_index: context.declaration_index,
+                driver,
+                input,
+                effect_id,
+                command: Box::new(command),
+            });
+            *context.accumulator = Some(accumulator);
+            return Ok(DriverDisposition::Yield);
+        }
+        EffectAdapterOutcome::Settled(qualify_evidence) => qualify_evidence,
+    };
     let typed_input = input
         .typed
         .downcast::<S::Input>()

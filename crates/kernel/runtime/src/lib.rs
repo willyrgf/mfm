@@ -61,6 +61,18 @@ pub enum AdapterError {
     Internal,
 }
 
+/// Result of one successful Effect adapter invocation.
+///
+/// Nonterminal progress is represented without fabricating evidence or
+/// concluding the durable Effect prepare.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectAdapterOutcome<E> {
+    /// The Effect remains pending and can be resumed by a later caller.
+    Pending,
+    /// The Effect produced terminal evidence that Runtime must bind and interpret.
+    Settled(E),
+}
+
 /// Durable public state of a run.
 pub enum RunViewState {
     /// The selected State is waiting for caller-driven progression.

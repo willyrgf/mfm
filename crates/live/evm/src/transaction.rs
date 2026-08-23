@@ -14,7 +14,7 @@ use mfm_evm_transaction_authority::{
     NonceDomainKey, PreparedRecord, Reservation,
 };
 use mfm_ids::{ContentRef, EffectId, StableId};
-use mfm_runtime::{AdapterError, RuntimeAssemblyBuilder};
+use mfm_runtime::{AdapterError, EffectAdapterOutcome, RuntimeAssemblyBuilder};
 use mfm_signing::{Signer, UncompressedSec1PublicKey};
 use mfm_values::canonicalize_mfm_value;
 
@@ -196,7 +196,7 @@ async fn execute(
     signer: &dyn Signer,
     authority: &dyn EvmTransactionAuthority,
     provider: &dyn EvmTransactionProvider,
-) -> Result<EvmTransactionSettlement, AdapterError> {
+) -> Result<EffectAdapterOutcome<EvmTransactionSettlement>, AdapterError> {
     let local = validate_local(binding, command, signer, authority)?;
     let state = authority
         .load(effect_id, &local.command_ref)
@@ -219,7 +219,7 @@ async fn execute(
                 command,
                 &local,
             )?;
-            return Ok(settled.evidence().clone());
+            return Ok(EffectAdapterOutcome::Settled(settled.evidence().clone()));
         }
         Some(AuthorityState::Prepared(prepared)) => {
             validate_reservation(
@@ -342,14 +342,14 @@ async fn reconcile(
     prepared: &PreparedRecord,
     authority: &dyn EvmTransactionAuthority,
     provider: &dyn EvmTransactionProvider,
-) -> Result<EvmTransactionSettlement, AdapterError> {
+) -> Result<EffectAdapterOutcome<EvmTransactionSettlement>, AdapterError> {
     verify_chain(command, provider).await?;
     let Some(receipt) = provider.receipt(prepared.transaction_hash()).await? else {
         let submitted = provider.submit_raw(prepared.raw_transaction()).await?;
         if &submitted != prepared.transaction_hash() {
             return Err(AdapterError::Unavailable);
         }
-        return Err(AdapterError::Unavailable);
+        return Ok(EffectAdapterOutcome::Pending);
     };
     let result = validate_receipt(&receipt, prepared, command, local)?;
     let canonical = provider
@@ -398,7 +398,7 @@ async fn reconcile(
         command,
         local,
     )?;
-    Ok(settled.evidence().clone())
+    Ok(EffectAdapterOutcome::Settled(settled.evidence().clone()))
 }
 
 fn validate_receipt(

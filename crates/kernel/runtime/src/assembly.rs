@@ -17,7 +17,7 @@ use mfm_values::{canonicalize_mfm_value, EnumTagging, MfmValue, SchemaDescriptor
 use serde_json::value::RawValue;
 
 use crate::engine::{self, DriverContext, DriverDisposition};
-use crate::{AdapterError, Result, RuntimeError};
+use crate::{AdapterError, EffectAdapterOutcome, Result, RuntimeError};
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type ReadAdapterCallback<C> = dyn for<'a> Fn(
@@ -39,14 +39,19 @@ type EffectAdapterCallback<C> = dyn for<'a> Fn(
         &'a <C as EffectCapabilityContract>::Command,
     ) -> BoxFuture<
         'a,
-        std::result::Result<<C as EffectCapabilityContract>::Evidence, AdapterError>,
+        std::result::Result<
+            EffectAdapterOutcome<<C as EffectCapabilityContract>::Evidence>,
+            AdapterError,
+        >,
     > + Send
     + Sync;
 pub(crate) type ErasedEffectAdapterCallback = dyn for<'a> Fn(
         &'a EffectId,
         &'a QualifiedValue,
-    ) -> BoxFuture<'a, std::result::Result<EvidenceQualification, AdapterError>>
-    + Send
+    ) -> BoxFuture<
+        'a,
+        std::result::Result<EffectAdapterOutcome<EvidenceQualification>, AdapterError>,
+    > + Send
     + Sync;
 
 pub(crate) struct QualifiedValue {
@@ -583,7 +588,15 @@ where
             &'a EffectId,
             &'a C::Command,
         ) -> Pin<
-            Box<dyn Future<Output = std::result::Result<C::Evidence, AdapterError>> + Send + 'a>,
+            Box<
+                dyn Future<
+                        Output = std::result::Result<
+                            EffectAdapterOutcome<C::Evidence>,
+                            AdapterError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
         > + Send
         + Sync
         + 'static,
@@ -600,8 +613,12 @@ where
             Err(_) => return Box::pin(async { Err(AdapterError::Internal) }),
         };
         Box::pin(async move {
-            let evidence = CatchAdapterPanic { inner: future }.await?;
-            Ok(Box::new(move || qualify_hot(evidence)) as EvidenceQualification)
+            match (CatchAdapterPanic { inner: future }).await? {
+                EffectAdapterOutcome::Pending => Ok(EffectAdapterOutcome::Pending),
+                EffectAdapterOutcome::Settled(evidence) => Ok(EffectAdapterOutcome::Settled(
+                    Box::new(move || qualify_hot(evidence)) as EvidenceQualification,
+                )),
+            }
         })
     })
 }
@@ -825,7 +842,13 @@ impl RuntimeAssemblyBuilder {
                 &'a C::Command,
             ) -> Pin<
                 Box<
-                    dyn Future<Output = std::result::Result<C::Evidence, AdapterError>> + Send + 'a,
+                    dyn Future<
+                            Output = std::result::Result<
+                                EffectAdapterOutcome<C::Evidence>,
+                                AdapterError,
+                            >,
+                        > + Send
+                        + 'a,
                 >,
             > + Send
             + Sync
