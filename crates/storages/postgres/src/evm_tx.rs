@@ -2,7 +2,7 @@ use mfm_canonical::{sha256_digest_bytes, CanonicalBytes, PlainCanonicalJsonBytes
 use mfm_evm::{EvmAddress, EvmAuthorityEpoch, EvmChainInstance, EvmHash, EvmTransactionSettlement};
 use mfm_evm_transaction_authority::{
     AuthorityError, AuthorityFuture, AuthorityState, EvmTransactionAuthority, ExactRawTransaction,
-    NonceDomain, NonceDomainKey, PreparedRecord, Reservation, SettledRecord,
+    NonceDomain, PreparedRecord, Reservation, SettledRecord,
 };
 use mfm_ids::{ContentDigest, ContentRef, EffectId, SchemaId};
 use mfm_values::canonicalize_mfm_value;
@@ -13,9 +13,9 @@ use crate::{
     GateError, PostgresBackend, TABLE_INSERT, TABLE_SELECT,
 };
 
-pub(crate) const EVM_TX_SCHEMA_CONTRACT: &str = "mfm.evm-transaction-postgres.v1";
+pub(crate) const EVM_TX_SCHEMA_CONTRACT: &str = "mfm.evm-transaction-postgres.v2";
 pub(crate) const EVM_TX_SCHEMA_SQL: &str =
-    include_str!("../migrations/evm_transaction_postgres_v1.sql");
+    include_str!("../migrations/evm_transaction_postgres_v2.sql");
 const MAX_SETTLEMENT_BYTES: usize = 65_536;
 
 impl EvmTransactionAuthority for PostgresBackend {
@@ -55,7 +55,7 @@ impl EvmTransactionAuthority for PostgresBackend {
         observed_pending_nonce: u64,
     ) -> AuthorityFuture<'a, Reservation> {
         Box::pin(async move {
-            if domain.key().authority_epoch() != &self.authority_epoch {
+            if domain.authority_epoch() != &self.authority_epoch {
                 return Err(AuthorityError::Internal);
             }
             let mut transaction = self.pool.begin().await.map_err(unavailable)?;
@@ -64,7 +64,7 @@ impl EvmTransactionAuthority for PostgresBackend {
                 .await
                 .map_err(unavailable)?;
             verify_captured_epoch(&mut transaction, &self.authority_epoch).await?;
-            let lock_key = nonce_domain_lock_key(domain.key())?;
+            let lock_key = nonce_domain_lock_key(domain)?;
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
                 .bind(lock_key)
                 .execute(&mut *transaction)
@@ -79,14 +79,9 @@ impl EvmTransactionAuthority for PostgresBackend {
                 return Ok(retained);
             }
 
-            let existing_domain = load_domain(&mut transaction, domain.key()).await?;
-            if let Some(existing) = &existing_domain {
-                if existing != domain {
-                    return Err(AuthorityError::Internal);
-                }
-            }
+            let domain_exists = load_domain(&mut transaction, domain).await?;
 
-            let nonce = match latest_reservation_effect(&mut transaction, domain.key()).await? {
+            let nonce = match latest_reservation_effect(&mut transaction, domain).await? {
                 None => observed_pending_nonce,
                 Some(previous_effect_id) => {
                     let previous = load_state(&mut transaction, &previous_effect_id)
@@ -108,17 +103,11 @@ impl EvmTransactionAuthority for PostgresBackend {
                 }
             };
 
-            if existing_domain.is_none() {
+            if !domain_exists {
                 insert_domain(&mut transaction, domain).await?;
             }
-            let inserted = insert_reservation(
-                &mut transaction,
-                effect_id,
-                command_ref,
-                domain.key(),
-                nonce,
-            )
-            .await?;
+            let inserted =
+                insert_reservation(&mut transaction, effect_id, command_ref, domain, nonce).await?;
             let retained = if inserted {
                 Reservation::new(
                     effect_id.clone(),
@@ -379,7 +368,7 @@ async fn load_state(
     let row = sqlx::query(
         "SELECT r.effect_id, r.command_schema_id, r.command_content_digest, \
                 r.authority_epoch, r.chain_id::text, r.genesis_hash, r.sender, \
-                r.reserved_nonce::text, d.signer_schema_id, d.signer_content_digest, \
+                r.reserved_nonce::text, \
                 p.transaction_hash, p.raw_transaction, s.settlement_bytes \
          FROM mfm_evm_tx.nonce_reservations r \
          JOIN mfm_evm_tx.nonce_domains d \
@@ -413,21 +402,14 @@ fn parse_authority_state(row: sqlx::postgres::PgRow) -> Result<AuthorityState, A
             .map_err(internal)?,
     )?;
     let sender = evm_address_from_bytes(&row.try_get::<Vec<u8>, _>("sender").map_err(internal)?)?;
-    let signer_ref = parse_content_ref(
-        row.try_get("signer_schema_id").map_err(internal)?,
-        row.try_get("signer_content_digest").map_err(internal)?,
-    )?;
     let nonce = parse_u64(
         &row.try_get::<String, _>("reserved_nonce")
             .map_err(internal)?,
     )?;
     let domain = NonceDomain::new(
-        NonceDomainKey::new(
-            epoch,
-            EvmChainInstance::new(chain_id, genesis).map_err(internal)?,
-            sender,
-        ),
-        signer_ref,
+        epoch,
+        EvmChainInstance::new(chain_id, genesis).map_err(internal)?,
+        sender,
     );
     let reservation = Reservation::new(retained_effect, command_ref, domain, nonce);
     let hash: Option<Vec<u8>> = row.try_get("transaction_hash").map_err(internal)?;
@@ -454,13 +436,13 @@ fn parse_authority_state(row: sqlx::postgres::PgRow) -> Result<AuthorityState, A
 
 async fn load_domain(
     connection: &mut PgConnection,
-    key: &NonceDomainKey,
-) -> Result<Option<NonceDomain>, AuthorityError> {
+    key: &NonceDomain,
+) -> Result<bool, AuthorityError> {
     let epoch = key.authority_epoch().as_bytes().map_err(internal)?;
     let genesis = decode_hex::<32>(key.chain_instance().expected_genesis_hash().as_str())?;
     let sender = decode_hex::<20>(key.sender().as_str())?;
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT signer_schema_id, signer_content_digest FROM mfm_evm_tx.nonce_domains \
+    let retained: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM mfm_evm_tx.nonce_domains \
          WHERE authority_epoch = $1 AND chain_id = $2::numeric \
            AND genesis_hash = $3 AND sender = $4",
     )
@@ -471,18 +453,12 @@ async fn load_domain(
     .fetch_optional(connection)
     .await
     .map_err(unavailable)?;
-    row.map(|(schema, digest)| {
-        Ok(NonceDomain::new(
-            key.clone(),
-            parse_content_ref(schema, digest)?,
-        ))
-    })
-    .transpose()
+    Ok(retained.is_some())
 }
 
 async fn latest_reservation_effect(
     connection: &mut PgConnection,
-    key: &NonceDomainKey,
+    key: &NonceDomain,
 ) -> Result<Option<EffectId>, AuthorityError> {
     let epoch = key.authority_epoch().as_bytes().map_err(internal)?;
     let genesis = decode_hex::<32>(key.chain_instance().expected_genesis_hash().as_str())?;
@@ -509,32 +485,24 @@ async fn insert_domain(
     connection: &mut PgConnection,
     domain: &NonceDomain,
 ) -> Result<(), AuthorityError> {
-    let key = domain.key();
-    let epoch = key.authority_epoch().as_bytes().map_err(internal)?;
-    let genesis = decode_hex::<32>(key.chain_instance().expected_genesis_hash().as_str())?;
-    let sender = decode_hex::<20>(key.sender().as_str())?;
+    let epoch = domain.authority_epoch().as_bytes().map_err(internal)?;
+    let genesis = decode_hex::<32>(domain.chain_instance().expected_genesis_hash().as_str())?;
+    let sender = decode_hex::<20>(domain.sender().as_str())?;
     let inserted = sqlx::query(
         "INSERT INTO mfm_evm_tx.nonce_domains \
-         (authority_epoch, chain_id, genesis_hash, sender, signer_schema_id, signer_content_digest) \
-         VALUES ($1, $2::numeric, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+         (authority_epoch, chain_id, genesis_hash, sender) \
+         VALUES ($1, $2::numeric, $3, $4) ON CONFLICT DO NOTHING",
     )
     .bind(epoch.as_slice())
-    .bind(key.chain_instance().chain_id().to_string())
+    .bind(domain.chain_instance().chain_id().to_string())
     .bind(genesis.as_slice())
     .bind(sender.as_slice())
-    .bind(domain.signer_identity_ref().schema_id().as_str())
-    .bind(domain.signer_identity_ref().content_digest().as_str())
     .execute(&mut *connection)
     .await
     .map_err(unavailable)?
     .rows_affected();
-    if inserted == 0 {
-        let retained = load_domain(connection, key)
-            .await?
-            .ok_or(AuthorityError::Internal)?;
-        if retained != *domain {
-            return Err(AuthorityError::Internal);
-        }
+    if inserted == 0 && !load_domain(connection, domain).await? {
+        return Err(AuthorityError::Internal);
     }
     Ok(())
 }
@@ -543,7 +511,7 @@ async fn insert_reservation(
     connection: &mut PgConnection,
     effect_id: &EffectId,
     command_ref: &ContentRef,
-    key: &NonceDomainKey,
+    key: &NonceDomain,
     nonce: u64,
 ) -> Result<bool, AuthorityError> {
     let epoch = key.authority_epoch().as_bytes().map_err(internal)?;
@@ -644,7 +612,7 @@ fn hex_prefixed(bytes: &[u8]) -> String {
     output
 }
 
-fn nonce_domain_lock_preimage(key: &NonceDomainKey) -> Result<String, AuthorityError> {
+fn nonce_domain_lock_preimage(key: &NonceDomain) -> Result<String, AuthorityError> {
     let epoch = key.authority_epoch().as_bytes().map_err(internal)?;
     let json = format!(
         "{{\"authority_epoch\":\"{}\",\"chain_id\":{},\"domain\":\"mfm.evm.nonce-domain-lock.v1\",\"expected_genesis_hash\":\"{}\",\"sender\":\"{}\"}}",
@@ -657,7 +625,7 @@ fn nonce_domain_lock_preimage(key: &NonceDomainKey) -> Result<String, AuthorityE
     Ok(json)
 }
 
-fn nonce_domain_lock_key(key: &NonceDomainKey) -> Result<i64, AuthorityError> {
+fn nonce_domain_lock_key(key: &NonceDomain) -> Result<i64, AuthorityError> {
     let preimage = nonce_domain_lock_preimage(key)?;
     let digest = sha256_digest_bytes(preimage.as_bytes());
     let first: [u8; 8] = digest.as_bytes()[..8].try_into().map_err(internal)?;
@@ -731,14 +699,6 @@ pub(crate) async fn verify_evm_tx_schema(
         column("nonce_domains", "chain_id", "numeric", true, None),
         column("nonce_domains", "genesis_hash", "bytea", true, None),
         column("nonce_domains", "sender", "bytea", true, None),
-        column("nonce_domains", "signer_schema_id", "text", true, Some("C")),
-        column(
-            "nonce_domains",
-            "signer_content_digest",
-            "text",
-            true,
-            Some("C"),
-        ),
         column("nonce_reservations", "effect_id", "text", true, Some("C")),
         column(
             "nonce_reservations",
@@ -883,7 +843,7 @@ pub(crate) async fn verify_evm_tx_schema(
 
 fn expected_evm_tx_constraints() -> Vec<(String, String, String, String)> {
     vec![
-        constraint("mfm_evm_tx_schema", "mfm_evm_tx_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.evm-transaction-postgres.v1'::text))"),
+        constraint("mfm_evm_tx_schema", "mfm_evm_tx_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.evm-transaction-postgres.v2'::text))"),
         constraint("mfm_evm_tx_schema", "mfm_evm_tx_schema_epoch_check", "c", "CHECK ((octet_length(authority_epoch) = 32))"),
         constraint("mfm_evm_tx_schema", "mfm_evm_tx_schema_epoch_key", "u", "UNIQUE (authority_epoch)"),
         constraint("mfm_evm_tx_schema", "mfm_evm_tx_schema_pkey", "p", "PRIMARY KEY (schema_contract)"),
@@ -893,8 +853,6 @@ fn expected_evm_tx_constraints() -> Vec<(String, String, String, String)> {
         constraint("nonce_domains", "nonce_domains_genesis_hash_check", "c", "CHECK ((octet_length(genesis_hash) = 32))"),
         constraint("nonce_domains", "nonce_domains_pkey", "p", "PRIMARY KEY (authority_epoch, chain_id, genesis_hash, sender)"),
         constraint("nonce_domains", "nonce_domains_sender_check", "c", "CHECK ((octet_length(sender) = 20))"),
-        constraint("nonce_domains", "nonce_domains_signer_digest_check", "c", "CHECK ((signer_content_digest ~ '^content:sha256-v1:[0-9a-f]{64}$'::text))"),
-        constraint("nonce_domains", "nonce_domains_signer_schema_id_check", "c", "CHECK ((((octet_length(signer_schema_id) >= 1) AND (octet_length(signer_schema_id) <= 512)) AND (signer_schema_id ~ '^schema:[a-z0-9][a-z0-9._/-]*:[1-9][0-9]*:sha256-jcs-v1:[0-9a-f]{64}$'::text)))"),
         constraint("nonce_reservations", "nonce_reservations_chain_id_check", "c", "CHECK (((chain_id >= (1)::numeric) AND (chain_id <= '18446744073709551615'::numeric)))"),
         constraint("nonce_reservations", "nonce_reservations_command_digest_check", "c", "CHECK ((command_content_digest ~ '^content:sha256-v1:[0-9a-f]{64}$'::text))"),
         constraint("nonce_reservations", "nonce_reservations_command_schema_id_check", "c", "CHECK ((((octet_length(command_schema_id) >= 1) AND (octet_length(command_schema_id) <= 512)) AND (command_schema_id ~ '^schema:[a-z0-9][a-z0-9._/-]*:[1-9][0-9]*:sha256-jcs-v1:[0-9a-f]{64}$'::text)))"),
@@ -939,7 +897,7 @@ pub(crate) async fn verify_evm_tx_privileges(
 
 #[cfg(test)]
 pub(crate) fn test_lock_vector(
-    key: &NonceDomainKey,
+    key: &NonceDomain,
 ) -> Result<(String, [u8; 32], i64), AuthorityError> {
     let preimage = nonce_domain_lock_preimage(key)?;
     let digest = *sha256_digest_bytes(preimage.as_bytes()).as_bytes();

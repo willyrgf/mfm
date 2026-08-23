@@ -33,11 +33,10 @@ pub use anchored_call::{
 pub use transaction::{
     Eip1559TransactionCommand, EvmAddress, EvmAuthorityEpoch, EvmChainInstance, EvmHash,
     EvmTransactionAction, EvmTransactionBinding, EvmTransactionCompletion,
-    EvmTransactionConfirmation, EvmTransactionConfirmationResult, EvmTransactionContext,
-    EvmTransactionEffect, EvmTransactionReversion, EvmTransactionRevert, EvmTransactionRoute,
-    EvmTransactionSettlement, EvmTransactionTerminalResult, EvmU256, EvmWalletIdentity,
-    ExecuteEvmTransaction, EVM_TRANSACTION_EFFECT_CAPABILITY_ID, EXECUTE_EVM_TRANSACTION_STATE_ID,
-    MAX_EVM_CALLDATA_BYTES, MAX_EVM_INITCODE_BYTES,
+    EvmTransactionConfirmation, EvmTransactionContext, EvmTransactionEffect,
+    EvmTransactionReversion, EvmTransactionRevert, EvmTransactionRoute, EvmTransactionSettlement,
+    EvmU256, ExecuteEvmTransaction, EVM_TRANSACTION_EFFECT_CAPABILITY_ID,
+    EXECUTE_EVM_TRANSACTION_STATE_ID, MAX_EVM_CALLDATA_BYTES, MAX_EVM_INITCODE_BYTES,
 };
 
 macro_rules! impl_checked_deserialize {

@@ -3,7 +3,7 @@
 Direct provider registration for the three balance-oriented EVM Read capabilities, the generic
 anchored contract-call Read, and the development-only durable EVM transaction Effect. The balance
 callbacks retain the existing `EvmProvider` contract. Anchored calls bind an `EvmTransactionRoute`;
-transaction execution binds the complete route, authority epoch, and wallet identity.
+transaction execution binds the complete route, authority epoch, and sender account.
 
 `EvmAdapterLocator` is one bounded private HTTP(S) URL. It implements neither `Debug`, `Display`,
 nor serialization. Non-HTTP schemes, fragments, and control characters are rejected.
@@ -26,7 +26,7 @@ transaction and anchored-call paths treat every JSON-RPC error, unexpected null,
 oversize body, and transport failure as Unavailable; receipt null alone means not yet mined.
 Anchored block absence is SafeFailure, codeless target is Rejected, and replacement of the authored
 block is authenticated IntegrityBlocked evidence. Local operation, route, binding, signer purpose,
-signer identity, or retained-authority mismatch is Internal before authority/provider IO.
+public-key-derived sender, or retained-authority mismatch is Internal before authority/provider IO.
 
 The pure codec pins `alloy-rlp` 0.3.16 and directly encodes/decodes the fixed empty-access-list
 EIP-1559 form. It rejects noncanonical/trailing RLP and verifies every retained field, transaction

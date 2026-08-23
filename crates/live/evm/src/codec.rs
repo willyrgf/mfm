@@ -7,7 +7,7 @@ use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use mfm_evm::{Eip1559TransactionCommand, EvmAddress, EvmHash, EvmTransactionAction, EvmU256};
 use mfm_evm_transaction_authority::{ExactRawTransaction, MAX_EXACT_RAW_TRANSACTION_BYTES};
 use mfm_signing::{
-    recover_public_key, CompactRecoverableSignature, SigningDigest, UncompressedSec1PublicKey,
+    recover_public_key, CompactRecoverableSignature, Secp256k1PublicKey, SigningDigest,
 };
 
 const TYPE_2: u8 = 0x02;
@@ -21,7 +21,7 @@ pub enum EvmCodecError {
 }
 
 /// Derives the Ethereum address of one checked uncompressed secp256k1 public key.
-pub fn ethereum_address(key: &UncompressedSec1PublicKey) -> EvmAddress {
+pub fn ethereum_address(key: &Secp256k1PublicKey) -> EvmAddress {
     let digest = keccak256(&key.as_bytes()[1..]);
     let value = format!("0x{}", hex::encode(&digest[12..]));
     EvmAddress::new(value).expect("derived Ethereum address has a fixed valid encoding")
@@ -79,7 +79,7 @@ pub(crate) fn validate_signed_transaction(
     nonce: u64,
     expected_hash: &EvmHash,
     raw: &ExactRawTransaction,
-    expected_key: &UncompressedSec1PublicKey,
+    expected_key: &Secp256k1PublicKey,
     expected_sender: &EvmAddress,
 ) -> Result<(), EvmCodecError> {
     if &hash(raw.as_bytes()) != expected_hash {

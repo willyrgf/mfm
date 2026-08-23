@@ -8,11 +8,10 @@ use mfm_config::{
 };
 use mfm_evm::{
     EvmAddress, EvmAuthorityEpoch, EvmBlockAnchor, EvmChainInstance, EvmHash,
-    EvmTransactionSettlement, EvmTransactionTerminalResult, EvmU256,
+    EvmTransactionConfirmation, EvmTransactionRevert, EvmTransactionSettlement, EvmU256,
 };
 use mfm_evm_transaction_authority::{
     AuthorityError, AuthorityState, EvmTransactionAuthority, ExactRawTransaction, NonceDomain,
-    NonceDomainKey,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_journal::{JournalHistory, OutcomeKind};
@@ -44,15 +43,11 @@ fn nonce_domain(
     chain_id: u64,
     genesis_byte: u8,
     sender_byte: u8,
-    signer_byte: u8,
 ) -> NonceDomain {
     NonceDomain::new(
-        NonceDomainKey::new(
-            epoch.clone(),
-            EvmChainInstance::new(chain_id, evm_hash(genesis_byte)).expect("chain instance"),
-            evm_address(sender_byte),
-        ),
-        reference("mfm.test.signer", &[signer_byte]),
+        epoch.clone(),
+        EvmChainInstance::new(chain_id, evm_hash(genesis_byte)).expect("chain instance"),
+        evm_address(sender_byte),
     )
 }
 
@@ -61,12 +56,13 @@ fn transaction_settlement(
     nonce: u64,
     transaction_hash: EvmHash,
 ) -> EvmTransactionSettlement {
-    EvmTransactionSettlement::new(
+    EvmTransactionSettlement::confirmed(
         effect_id,
         nonce,
-        transaction_hash,
-        EvmBlockAnchor::new(EvmU256::from_u64(12), evm_hash(12)),
-        EvmTransactionTerminalResult::SuccessCall,
+        EvmTransactionConfirmation::Called {
+            block_anchor: EvmBlockAnchor::new(EvmU256::from_u64(12), evm_hash(12)),
+            transaction_hash,
+        },
     )
 }
 
@@ -224,7 +220,7 @@ fn migration_and_classifier_contracts_are_exact() {
 
 #[test]
 fn evm_nonce_domain_lock_vector_is_frozen() {
-    let key = NonceDomainKey::new(
+    let key = NonceDomain::new(
         EvmAuthorityEpoch::new([1; 32]),
         EvmChainInstance::new(
             1,
@@ -881,7 +877,7 @@ async fn assert_delete_fault(
 
 async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresBackend>) {
     let epoch = backend.authority_epoch().clone();
-    let domain = nonce_domain(&epoch, 1, 2, 3, 4);
+    let domain = nonce_domain(&epoch, 1, 2, 3);
     let command_ref = reference("mfm.test.evm-command", &[5]);
     let first_effect = effect_id(6);
     assert!(backend
@@ -918,18 +914,6 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresBackend
                 &reference("mfm.test.other-command", &[8]),
                 &domain,
                 7,
-            )
-            .await
-            .err(),
-        Some(AuthorityError::Internal)
-    );
-    assert_eq!(
-        backend
-            .reserve_or_compare(
-                &effect_id(9),
-                &command_ref,
-                &nonce_domain(&epoch, 1, 2, 3, 10),
-                8,
             )
             .await
             .err(),
@@ -1083,12 +1067,13 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresBackend
         )
         .await
         .expect("revert prepared");
-    let reverted = EvmTransactionSettlement::new(
+    let reverted = EvmTransactionSettlement::reverted(
         second_effect.clone(),
         8,
-        second_hash,
-        EvmBlockAnchor::new(EvmU256::from_u64(13), evm_hash(44)),
-        EvmTransactionTerminalResult::Reverted,
+        EvmTransactionRevert::new(
+            EvmBlockAnchor::new(EvmU256::from_u64(13), evm_hash(44)),
+            second_hash,
+        ),
     );
     backend
         .retain_settlement(&second_effect, &command_ref, &reverted)
@@ -1103,7 +1088,7 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresBackend
         9
     );
 
-    let zero_domain = nonce_domain(&epoch, 46, 47, 48, 49);
+    let zero_domain = nonce_domain(&epoch, 46, 47, 48);
     assert_eq!(
         backend
             .reserve_or_compare(&effect_id(50), &command_ref, &zero_domain, 0)
@@ -1113,7 +1098,7 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresBackend
         0
     );
 
-    let max_domain = nonce_domain(&epoch, u64::MAX, 15, 16, 17);
+    let max_domain = nonce_domain(&epoch, u64::MAX, 15, 16);
     let max_effect = effect_id(18);
     assert_eq!(
         backend
@@ -1148,7 +1133,7 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresBackend
             .err(),
         Some(AuthorityError::Internal)
     );
-    let distinct_genesis = nonce_domain(&epoch, 1, 19, 3, 4);
+    let distinct_genesis = nonce_domain(&epoch, 1, 19, 3);
     assert_eq!(
         backend
             .reserve_or_compare(&effect_id(20), &command_ref, &distinct_genesis, 42)
@@ -1158,7 +1143,7 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresBackend
         42
     );
 
-    let racing_domain = nonce_domain(&epoch, 21, 22, 23, 24);
+    let racing_domain = nonce_domain(&epoch, 21, 22, 23);
     let race = [effect_id(25), effect_id(26)]
         .into_iter()
         .map(|effect| {
@@ -1185,7 +1170,7 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresBackend
         1
     );
 
-    let same_effect_domain = nonce_domain(&epoch, 27, 28, 29, 30);
+    let same_effect_domain = nonce_domain(&epoch, 27, 28, 29);
     let same_effect = effect_id(31);
     let attempts = (0..2)
         .map(|_| {
@@ -1226,7 +1211,7 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresBackend
             .as_bytes()
     );
 
-    let fault_domain = nonce_domain(&epoch, 32, 33, 34, 35);
+    let fault_domain = nonce_domain(&epoch, 32, 33, 34);
     let fault_effect = effect_id(36);
     backend.inject_authority_commit_fault(evm_tx::AuthorityCommitFault::UnknownRolledBack);
     assert_eq!(
@@ -1425,19 +1410,16 @@ async fn managed_postgres_persistence_authority_contract() {
         .authority_epoch()
         .as_bytes()
         .expect("authority epoch bytes");
-    let signer_ref = reference("mfm.test.signer", &[49]);
     for invalid_chain_id in ["0", "18446744073709551616"] {
         assert!(sqlx::query(
             "INSERT INTO mfm_evm_tx.nonce_domains \
-             (authority_epoch, chain_id, genesis_hash, sender, signer_schema_id, signer_content_digest) \
-             VALUES ($1, $2::numeric, $3, $4, $5, $6)",
+             (authority_epoch, chain_id, genesis_hash, sender) \
+             VALUES ($1, $2::numeric, $3, $4)",
         )
         .bind(epoch_bytes.as_slice())
         .bind(invalid_chain_id)
         .bind([51_u8; 32].as_slice())
         .bind([52_u8; 20].as_slice())
-        .bind(signer_ref.schema_id().as_str())
-        .bind(signer_ref.content_digest().as_str())
         .execute(&mut connection)
         .await
         .is_err());
@@ -1553,7 +1535,7 @@ async fn managed_postgres_persistence_authority_contract() {
             .reserve_or_compare(
                 &effect_id(38),
                 &reference("mfm.test.evm-command", &[5]),
-                &nonce_domain(backend.authority_epoch(), 32, 33, 34, 35),
+                &nonce_domain(backend.authority_epoch(), 32, 33, 34),
                 6,
             )
             .await

@@ -6,11 +6,11 @@ address, hash, and EVM-word concepts. Their strict transparent wires preserve lo
 and canonical decimal forms across balance, transaction, receipt, and anchored-call values.
 
 `EvmTransactionEffect` executes one nonce-free, fixed type-2, empty-access-list command through
-`ExecuteEvmTransaction<K>`. The command contains a complete chain/route/epoch/wallet binding,
+`ExecuteEvmTransaction<K>`. The command contains a complete chain/route/epoch/sender binding,
 create-or-call action, value, nonzero gas limit, and ordered fee pair. Its settlement evidence binds
-the exact `EffectId`, reserved nonce, transaction hash, receipt anchor, and one closed terminal
-result. Caller context is retained outside the command and projected unchanged into a minimal
-confirmation or revert.
+the exact `EffectId`, reserved nonce, and one structured confirmation or revert containing the
+transaction hash and receipt anchor. Caller context is retained outside the command and projected
+unchanged with that exact confirmation or revert.
 
 `EvmAnchoredContractCallRead` and `ReadAnchoredContractCall<K>` carry one exact transaction-route
 reference, target, bounded calldata, and block anchor. Returned evidence retains only that anchor
@@ -40,5 +40,5 @@ block rather than the head, which the `EvmProvider` trait rustdoc states as a pr
 
 The domain validates chain/route binding, anchors, quantities, byte bounds, action/result shape,
 decimal scale, and closed evidence. Authenticated integrity evidence maps to the distinct
-`IntegrityBlocked` failure. This crate depends only on public signing identity contracts; it has no
-Runtime, Store, live client, signer handle, nonce authority, broadcast, or ambient IO dependency.
+`IntegrityBlocked` failure. This crate has no signing dependency and no Runtime, Store, live
+client, signer handle, nonce authority, broadcast, or ambient IO dependency.

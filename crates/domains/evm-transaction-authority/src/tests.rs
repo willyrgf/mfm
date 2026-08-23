@@ -1,7 +1,7 @@
 use mfm_canonical::raw_content_digest;
 use mfm_evm::{
     EvmAddress, EvmAuthorityEpoch, EvmBlockAnchor, EvmChainInstance, EvmHash,
-    EvmTransactionSettlement, EvmTransactionTerminalResult, EvmU256,
+    EvmTransactionConfirmation, EvmTransactionSettlement, EvmU256,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, EffectId, SchemaId};
 
@@ -23,29 +23,27 @@ fn reference(name: &str, byte: u8) -> ContentRef {
 
 fn domain() -> NonceDomain {
     NonceDomain::new(
-        NonceDomainKey::new(
-            EvmAuthorityEpoch::new([1; 32]),
-            EvmChainInstance::new(
-                1,
-                EvmHash::new(format!("0x{}", "02".repeat(32))).expect("genesis"),
-            )
-            .expect("chain"),
-            EvmAddress::new("0x0303030303030303030303030303030303030303").expect("sender"),
-        ),
-        reference("mfm.test.signer", 4),
+        EvmAuthorityEpoch::new([1; 32]),
+        EvmChainInstance::new(
+            1,
+            EvmHash::new(format!("0x{}", "02".repeat(32))).expect("genesis"),
+        )
+        .expect("chain"),
+        EvmAddress::new("0x0303030303030303030303030303030303030303").expect("sender"),
     )
 }
 
 fn settlement(effect_id: EffectId, nonce: u64, hash: EvmHash) -> EvmTransactionSettlement {
-    EvmTransactionSettlement::new(
+    EvmTransactionSettlement::confirmed(
         effect_id,
         nonce,
-        hash,
-        EvmBlockAnchor::new(
-            EvmU256::from_u64(8),
-            EvmHash::new(format!("0x{}", "09".repeat(32))).expect("block hash"),
-        ),
-        EvmTransactionTerminalResult::SuccessCall,
+        EvmTransactionConfirmation::Called {
+            block_anchor: EvmBlockAnchor::new(
+                EvmU256::from_u64(8),
+                EvmHash::new(format!("0x{}", "09".repeat(32))).expect("block hash"),
+            ),
+            transaction_hash: hash,
+        },
     )
 }
 

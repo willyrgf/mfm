@@ -1,8 +1,6 @@
 use mfm_ids::StableId;
 use mfm_keystore::{KeystoreError, KeystoreOwner, SecretSecp256k1Scalar, MAX_KEY_INSTANCES};
-use mfm_signing::{
-    recover_public_key, Signer, SigningDigest, SigningError, IN_PROCESS_KEYSTORE_SIGNER_ROUTE_ID,
-};
+use mfm_signing::{recover_public_key, Secp256k1Signer, SigningDigest, SigningError};
 
 #[test]
 fn keystore_remains_thread_affine() {
@@ -37,30 +35,13 @@ async fn duplicate_import_and_signing_are_key_and_purpose_bound_deterministic_an
         )
         .await
         .expect("same key under another purpose");
-    assert_eq!(first.public_identity(), duplicate.public_identity());
-    assert_eq!(first.public_identity(), other_purpose.public_identity());
+    assert!(first.public_key() == duplicate.public_key());
+    assert!(first.public_key() == other_purpose.public_key());
     assert_eq!(first.purpose(), &purpose);
     assert_eq!(duplicate.purpose(), &purpose);
     assert_ne!(first.purpose(), other_purpose.purpose());
-    assert_eq!(
-        first.public_identity().signer_route().as_str(),
-        IN_PROCESS_KEYSTORE_SIGNER_ROUTE_ID
-    );
-    assert_eq!(
-        first
-            .public_identity()
-            .key_instance_ref()
-            .expect("first key ref"),
-        duplicate
-            .public_identity()
-            .key_instance_ref()
-            .expect("duplicate key ref")
-    );
     let public_key_hex = first
-        .public_identity()
         .public_key()
-        .public_key()
-        .expect("public key")
         .as_bytes()
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -87,12 +68,8 @@ async fn duplicate_import_and_signing_are_key_and_purpose_bound_deterministic_an
     let parsed =
         k256::ecdsa::Signature::from_slice(first_signature.as_bytes()).expect("compact signature");
     assert!(parsed.normalize_s().is_none());
-    let expected_key = first
-        .public_identity()
-        .public_key()
-        .public_key()
-        .expect("public key");
-    assert!(recover_public_key(digest, first_signature).expect("recovered key") == expected_key);
+    let expected_key = first.public_key();
+    assert!(recover_public_key(digest, first_signature).expect("recovered key") == *expected_key);
 
     owner.shutdown().await.expect("shutdown");
     assert!(matches!(

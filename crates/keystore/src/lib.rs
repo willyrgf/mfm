@@ -7,14 +7,13 @@
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use k256::ecdsa::SigningKey;
-use mfm_ids::{ContentRef, StableId};
+use mfm_ids::StableId;
 use mfm_signing::{
-    CompactRecoverableSignature, PublicSignerIdentity, PublicSigningKey, Signer, SigningDigest,
-    SigningError, SigningFuture, UncompressedSec1PublicKey, IN_PROCESS_KEYSTORE_SIGNER_ROUTE_ID,
+    CompactRecoverableSignature, Secp256k1PublicKey, Secp256k1Signer, SigningDigest, SigningError,
+    SigningFuture,
 };
 use tokio::sync::{mpsc, oneshot};
 use zeroize::Zeroizing;
@@ -58,14 +57,9 @@ impl SecretSecp256k1Scalar {
     }
 }
 
-struct KeyEntry {
-    signing_key: SigningKey,
-    identity: PublicSignerIdentity,
-}
-
 /// Non-`Send`, non-`Sync` secret owner retained only by its OS thread.
 pub struct Keystore {
-    entries: BTreeMap<ContentRef, KeyEntry>,
+    entries: BTreeMap<[u8; 65], SigningKey>,
     _thread_affinity: Rc<()>,
 }
 
@@ -80,47 +74,31 @@ impl Keystore {
     fn import(
         &mut self,
         secret: SecretSecp256k1Scalar,
-    ) -> Result<PublicSignerIdentity, KeystoreError> {
+    ) -> Result<Secp256k1PublicKey, KeystoreError> {
         let signing_key = secret.into_signing_key()?;
         let encoded = signing_key.verifying_key().to_encoded_point(false);
         let public_bytes: [u8; 65] = encoded
             .as_bytes()
             .try_into()
             .map_err(|_| KeystoreError::Internal)?;
-        let public_key = PublicSigningKey::new(
-            UncompressedSec1PublicKey::new(public_bytes).map_err(map_signing_error)?,
-        )
-        .map_err(map_signing_error)?;
-        let identity = PublicSignerIdentity::new(
-            StableId::new(IN_PROCESS_KEYSTORE_SIGNER_ROUTE_ID)
-                .map_err(|_| KeystoreError::Internal)?,
-            public_key,
-        );
-        let key_ref = identity.key_instance_ref().map_err(map_signing_error)?;
-        if let Some(existing) = self.entries.get(&key_ref) {
-            return Ok(existing.identity.clone());
+        let public_key = Secp256k1PublicKey::new(public_bytes).map_err(map_signing_error)?;
+        if self.entries.contains_key(&public_bytes) {
+            return Ok(public_key);
         }
         if self.entries.len() >= MAX_KEY_INSTANCES {
             return Err(KeystoreError::Capacity);
         }
-        self.entries.insert(
-            key_ref,
-            KeyEntry {
-                signing_key,
-                identity: identity.clone(),
-            },
-        );
-        Ok(identity)
+        self.entries.insert(public_bytes, signing_key);
+        Ok(public_key)
     }
 
     fn sign(
         &self,
-        key_ref: &ContentRef,
+        public_key: &[u8; 65],
         digest: SigningDigest,
     ) -> Result<CompactRecoverableSignature, KeystoreError> {
-        let entry = self.entries.get(key_ref).ok_or(KeystoreError::Invalid)?;
-        let (signature, recovery_id) = entry
-            .signing_key
+        let signing_key = self.entries.get(public_key).ok_or(KeystoreError::Invalid)?;
+        let (signature, recovery_id) = signing_key
             .sign_prehash_recoverable(digest.as_bytes())
             .map_err(|_| KeystoreError::Internal)?;
         let bytes: [u8; 64] = signature.to_bytes().into();
@@ -131,10 +109,10 @@ impl Keystore {
 enum Command {
     Import {
         secret: SecretSecp256k1Scalar,
-        response: oneshot::Sender<Result<PublicSignerIdentity, KeystoreError>>,
+        response: oneshot::Sender<Result<Secp256k1PublicKey, KeystoreError>>,
     },
     Sign {
-        key_ref: ContentRef,
+        public_key: [u8; 65],
         digest: SigningDigest,
         response: oneshot::Sender<Result<CompactRecoverableSignature, KeystoreError>>,
     },
@@ -184,10 +162,10 @@ impl KeystoreOwner {
             .send(Command::Import { secret, response })
             .await
             .map_err(|_| KeystoreError::Unavailable)?;
-        let identity = result.await.map_err(|_| KeystoreError::Internal)??;
+        let public_key = result.await.map_err(|_| KeystoreError::Internal)??;
         Ok(KeystoreSigner {
             sender: sender.clone(),
-            identity: Arc::new(identity),
+            public_key,
             purpose,
         })
     }
@@ -218,13 +196,13 @@ impl KeystoreOwner {
 #[derive(Clone)]
 pub struct KeystoreSigner {
     sender: mpsc::Sender<Command>,
-    identity: Arc<PublicSignerIdentity>,
+    public_key: Secp256k1PublicKey,
     purpose: StableId,
 }
 
-impl Signer for KeystoreSigner {
-    fn public_identity(&self) -> &PublicSignerIdentity {
-        &self.identity
+impl Secp256k1Signer for KeystoreSigner {
+    fn public_key(&self) -> &Secp256k1PublicKey {
+        &self.public_key
     }
 
     fn purpose(&self) -> &StableId {
@@ -233,15 +211,12 @@ impl Signer for KeystoreSigner {
 
     fn sign(&self, digest: SigningDigest) -> SigningFuture {
         let sender = self.sender.clone();
-        let key_ref = match self.identity.key_instance_ref() {
-            Ok(reference) => reference,
-            Err(_) => return Box::pin(async { Err(SigningError::Failed) }),
-        };
+        let public_key = *self.public_key.as_bytes();
         Box::pin(async move {
             let (response, result) = oneshot::channel();
             sender
                 .send(Command::Sign {
-                    key_ref,
+                    public_key,
                     digest,
                     response,
                 })
@@ -263,11 +238,11 @@ fn owner_loop(mut receiver: mpsc::Receiver<Command>) {
                 let _ = response.send(keystore.import(secret));
             }
             Command::Sign {
-                key_ref,
+                public_key,
                 digest,
                 response,
             } => {
-                let _ = response.send(keystore.sign(&key_ref, digest));
+                let _ = response.send(keystore.sign(&public_key, digest));
             }
             Command::Shutdown { response } => {
                 let _ = response.send(());

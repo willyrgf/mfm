@@ -34,12 +34,12 @@ status remains a Runtime fold.
 PostgreSQL configuration custody owns exactly `mfm_config_schema` and `config_revisions` under
 `mfm.config-postgres.v2`. PostgreSQL EVM transaction authority owns exactly
 `mfm_evm_tx_schema`, `nonce_domains`, `nonce_reservations`, `prepared_transactions`, and
-`transaction_settlements` under `mfm.evm-transaction-postgres.v1`. One backend, pool, and admission
+`transaction_settlements` under `mfm.evm-transaction-postgres.v2`. One backend, pool, and admission
 gate check all three schemas, ownership, ACL, and durability together; the fixed runtime role owns
 none of them.
 
 Authority records are non-Program, non-serde port values. A reservation retains EffectId, command
-ref, nonce, and a domain consisting of epoch, chain instance, sender, and compared signer ref. A
+ref, nonce, and a domain consisting exactly of epoch, chain instance, and sender. A
 prepared record adds only exact raw transaction bytes and transaction hash. A settled record nests
 that predecessor and the qualified typed `EvmTransactionSettlement`. Raw bytes have no text/debug
 surface. The database stores canonical settlement bytes but no command copy, action, endpoint,
@@ -59,20 +59,20 @@ and identity are not added to the public view.
 Client JSON preserves that sum and embeds the terminal canonical bytes as a raw JSON value rather
 than a quoted string.
 
-`PublicSigningKey` and `PublicSignerIdentity` are content-addressed public MFM values. The key value
-contains only the fixed algorithm ID and exact 65-byte uncompressed SEC1 public key; its content ref
-is the key-instance identity. Signing digests, compact signatures, recovery IDs, private scalars,
-owner channels, and signer handles have no persisted serde surface.
+Signing public keys, digests, compact signatures, recovery IDs, private scalars, owner channels,
+and signer handles are transient and have no persisted serde surface. EVM binds durable authority
+to the sender address; a captured signer's checked public key is only a live witness for that
+account.
 
 EVM Program-visible transaction values are strict content-addressed values. The public chain
 instance is `(nonzero chain_id, expected_genesis_hash)`; a transaction route adds one endpoint ref;
-the wallet adds one checked sender and `PublicSignerIdentity`; and the Effect binding adds one exact
-32-byte authority epoch. `Eip1559TransactionCommand` contains only that binding, a bounded Create or
+the Effect binding adds one checked sender and one exact 32-byte authority epoch.
+`Eip1559TransactionCommand` contains only that binding, a bounded Create or
 Call action, value, nonzero gas limit, and ordered fee pair. It contains no nonce, provider locator,
 settlement policy, access list, timeout, or arbitrary metadata.
 
-`EvmTransactionSettlement` retains EffectId, nonce, transaction hash, receipt block anchor, and one
-closed terminal result. Workflow success and revert projections omit EffectId, nonce, command, raw
+`EvmTransactionSettlement` retains EffectId, nonce, and a structured confirmation or revert that
+contains the transaction hash and receipt block anchor. Workflow projections omit EffectId, nonce, command, raw
 receipt, logs, and provider response. Anchored contract-call intents retain target, bounded calldata,
 exact anchor, chain ID, operation ID, and transaction-route ref; returned evidence retains only the
 anchor and bounded return bytes. Transient signing digests/signatures and raw-transaction

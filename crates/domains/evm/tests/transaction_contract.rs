@@ -3,29 +3,15 @@ use mfm_evm::{
     AnchoredContractCallFailureReason, AnchoredContractCallResult, Eip1559TransactionCommand,
     EvmAddress, EvmAuthorityEpoch, EvmBlockAnchor, EvmChainInstance, EvmHash, EvmTransactionAction,
     EvmTransactionBinding, EvmTransactionConfirmation, EvmTransactionContext, EvmTransactionEffect,
-    EvmTransactionRevert, EvmTransactionRoute, EvmTransactionSettlement,
-    EvmTransactionTerminalResult, EvmU256, EvmWalletIdentity, ExecuteEvmTransaction,
-    EVM_TRANSACTION_EFFECT_CAPABILITY_ID, EXECUTE_EVM_TRANSACTION_STATE_ID, MAX_EVM_CALLDATA_BYTES,
-    MAX_EVM_INITCODE_BYTES,
+    EvmTransactionRevert, EvmTransactionRoute, EvmTransactionSettlement, EvmU256,
+    ExecuteEvmTransaction, EVM_TRANSACTION_EFFECT_CAPABILITY_ID, EXECUTE_EVM_TRANSACTION_STATE_ID,
+    MAX_EVM_CALLDATA_BYTES, MAX_EVM_INITCODE_BYTES,
 };
-use mfm_ids::{
-    ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, EffectId, SchemaId, StableId,
-};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, EffectId, SchemaId};
 use mfm_program::{CapabilityInjection, EffectState, ProposedStateOutcome, State};
 use mfm_program_derive::MfmValue;
-use mfm_signing::{
-    PublicSignerIdentity, PublicSigningKey, UncompressedSec1PublicKey,
-    IN_PROCESS_KEYSTORE_SIGNER_ROUTE_ID,
-};
 use mfm_values::{canonicalize_mfm_value, MfmValue as MfmValueTrait};
 use serde::{Deserialize, Serialize};
-
-const GENERATOR_PUBLIC_KEY: [u8; 65] = [
-    4, 121, 190, 102, 126, 249, 220, 187, 172, 85, 160, 98, 149, 206, 135, 11, 7, 2, 155, 252, 219,
-    45, 206, 40, 217, 89, 242, 129, 91, 22, 248, 23, 152, 72, 58, 218, 119, 38, 163, 196, 101, 93,
-    164, 251, 252, 14, 17, 8, 168, 253, 23, 180, 72, 166, 133, 84, 25, 156, 71, 208, 143, 251, 16,
-    212, 184,
-];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -66,17 +52,6 @@ fn content_ref() -> ContentRef {
     .expect("endpoint ref")
 }
 
-fn signer_identity() -> PublicSignerIdentity {
-    let key = PublicSigningKey::new(
-        UncompressedSec1PublicKey::new(GENERATOR_PUBLIC_KEY).expect("generator public key"),
-    )
-    .expect("public signing key");
-    PublicSignerIdentity::new(
-        StableId::new(IN_PROCESS_KEYSTORE_SIGNER_ROUTE_ID).expect("route"),
-        key,
-    )
-}
-
 fn route() -> EvmTransactionRoute {
     EvmTransactionRoute::new(
         EvmChainInstance::new(
@@ -92,10 +67,7 @@ fn binding() -> EvmTransactionBinding {
     EvmTransactionBinding::new(
         route(),
         EvmAuthorityEpoch::new([0x11; 32]),
-        EvmWalletIdentity::new(
-            EvmAddress::new("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf").expect("sender"),
-            signer_identity(),
-        ),
+        EvmAddress::new("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf").expect("sender"),
     )
 }
 
@@ -204,7 +176,7 @@ fn fixed_eip1559_command_has_exact_wire_and_rejects_shape_or_relationship_drift(
     let (canonical, _) = canonicalize_mfm_value(&command).expect("canonical command");
     assert_eq!(
         canonical.as_str(),
-        "{\"action\":{\"kind\":\"create\",\"value\":{\"initcode\":\"AQID\"}},\"binding\":{\"authority_epoch\":\"ERERERERERERERERERERERERERERERERERERERERERE\",\"route\":{\"chain_instance\":{\"chain_id\":1,\"expected_genesis_hash\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"endpoint_ref\":{\"content_digest\":\"content:sha256-v1:0202020202020202020202020202020202020202020202020202020202020202\",\"schema_id\":\"schema:mfm.test.endpoint:1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101\"}},\"wallet\":{\"sender\":\"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\",\"signer_identity\":{\"public_key\":{\"algorithm\":\"mfm.signing.secp256k1-ecdsa-recoverable@1\",\"public_key\":\"BHm-Zn753LusVaBilc6HCwcCm_zbLc4o2VnygVsW-BeYSDradyajxGVdpPv8DhEIqP0XtEimhVQZnEfQj_sQ1Lg\"},\"signer_route\":\"mfm.signer.in-process-keystore@1\"}}},\"gas_limit\":2000000,\"max_fee_per_gas\":\"10000000000\",\"max_priority_fee_per_gas\":\"1000000000\",\"value\":\"0\"}"
+        "{\"action\":{\"kind\":\"create\",\"value\":{\"initcode\":\"AQID\"}},\"binding\":{\"authority_epoch\":\"ERERERERERERERERERERERERERERERERERERERERERE\",\"route\":{\"chain_instance\":{\"chain_id\":1,\"expected_genesis_hash\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"endpoint_ref\":{\"content_digest\":\"content:sha256-v1:0202020202020202020202020202020202020202020202020202020202020202\",\"schema_id\":\"schema:mfm.test.endpoint:1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101\"}},\"sender\":\"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\"},\"gas_limit\":2000000,\"max_fee_per_gas\":\"10000000000\",\"max_priority_fee_per_gas\":\"1000000000\",\"value\":\"0\"}"
     );
 
     let mut wire = serde_json::to_value(&command).expect("wire");
@@ -219,16 +191,14 @@ fn fixed_eip1559_command_has_exact_wire_and_rejects_shape_or_relationship_drift(
     let mut wire = serde_json::to_value(&command).expect("wire");
     wire["action"]["value"]["initcode"] = serde_json::json!("AQID=");
     assert!(serde_json::from_value::<Eip1559TransactionCommand>(wire).is_err());
-    assert!(serde_json::from_str::<EvmTransactionTerminalResult>(
+    assert!(serde_json::from_str::<EvmTransactionSettlement>(
         r#"{"kind":"reverted","value":null}"#
     )
     .is_err());
-    assert!(
-        serde_json::from_str::<mfm_evm::EvmTransactionConfirmationResult>(
-            r#"{"kind":"called","value":null}"#
-        )
-        .is_err()
-    );
+    assert!(serde_json::from_str::<EvmTransactionConfirmation>(
+        r#"{"kind":"called","value":null}"#
+    )
+    .is_err());
 }
 
 #[test]
@@ -262,14 +232,15 @@ fn effect_binding_and_interpretation_are_exact_and_context_preserving() {
         .expect("prepared command"),
         command
     );
-    let settlement = EvmTransactionSettlement::new(
+    let settlement = EvmTransactionSettlement::confirmed(
         effect_id(0x33),
         9,
-        EvmHash::new(format!("0x{}", "cc".repeat(32))).expect("transaction hash"),
-        anchor(1),
-        EvmTransactionTerminalResult::SuccessCreate {
+        EvmTransactionConfirmation::Created {
+            block_anchor: anchor(1),
             created_address: EvmAddress::new("0x2222222222222222222222222222222222222222")
                 .expect("created address"),
+            transaction_hash: EvmHash::new(format!("0x{}", "cc".repeat(32)))
+                .expect("transaction hash"),
         },
     );
     EvmTransactionEffect::bind_evidence(&effect_id(0x33), &command, &settlement)
@@ -292,12 +263,14 @@ fn effect_binding_and_interpretation_are_exact_and_context_preserving() {
     assert!(
         EvmTransactionEffect::bind_evidence(&effect_id(0x33), &call_command, &settlement).is_err()
     );
-    let call_settlement = EvmTransactionSettlement::new(
+    let call_settlement = EvmTransactionSettlement::confirmed(
         effect_id(0x33),
         10,
-        EvmHash::new(format!("0x{}", "ee".repeat(32))).expect("transaction hash"),
-        anchor(2),
-        EvmTransactionTerminalResult::SuccessCall,
+        EvmTransactionConfirmation::Called {
+            block_anchor: anchor(2),
+            transaction_hash: EvmHash::new(format!("0x{}", "ee".repeat(32)))
+                .expect("transaction hash"),
+        },
     );
     EvmTransactionEffect::bind_evidence(&effect_id(0x33), &call_command, &call_settlement)
         .expect("bound call evidence");
@@ -315,7 +288,7 @@ fn effect_binding_and_interpretation_are_exact_and_context_preserving() {
     };
     assert_eq!(
         serde_json::to_string(&call_output).expect("call output"),
-        "{\"caller_context\":{\"step\":6},\"confirmed\":{\"block_anchor\":{\"hash\":\"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"number\":\"2\"},\"result\":{\"kind\":\"called\"},\"transaction_hash\":\"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}}"
+        "{\"caller_context\":{\"step\":6},\"confirmed\":{\"kind\":\"called\",\"value\":{\"block_anchor\":{\"hash\":\"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"number\":\"2\"},\"transaction_hash\":\"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}}}"
     );
 
     let ProposedStateOutcome::Success { output } =
@@ -329,18 +302,19 @@ fn effect_binding_and_interpretation_are_exact_and_context_preserving() {
     let output_json = serde_json::to_string(&output).expect("output");
     assert_eq!(
         output_json,
-        "{\"caller_context\":{\"step\":7},\"confirmed\":{\"block_anchor\":{\"hash\":\"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"number\":\"1\"},\"result\":{\"kind\":\"created\",\"value\":{\"created_address\":\"0x2222222222222222222222222222222222222222\"}},\"transaction_hash\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}}"
+        "{\"caller_context\":{\"step\":7},\"confirmed\":{\"kind\":\"created\",\"value\":{\"block_anchor\":{\"hash\":\"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"number\":\"1\"},\"created_address\":\"0x2222222222222222222222222222222222222222\",\"transaction_hash\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}}}"
     );
     assert!(!output_json.contains("effect_id"));
     assert!(!output_json.contains("nonce"));
     assert!(!output_json.contains("command"));
 
-    let reverted = EvmTransactionSettlement::new(
+    let reverted = EvmTransactionSettlement::reverted(
         effect_id(0x33),
         9,
-        EvmHash::new(format!("0x{}", "cc".repeat(32))).expect("transaction hash"),
-        anchor(2),
-        EvmTransactionTerminalResult::Reverted,
+        EvmTransactionRevert::new(
+            anchor(2),
+            EvmHash::new(format!("0x{}", "cc".repeat(32))).expect("transaction hash"),
+        ),
     );
     let ProposedStateOutcome::Failure { failure } =
         <ExecuteEvmTransaction<ObjectContext> as EffectState<EvmTransactionEffect>>::interpret(
@@ -357,17 +331,20 @@ fn effect_binding_and_interpretation_are_exact_and_context_preserving() {
 #[test]
 fn public_transaction_value_identities_are_frozen() {
     let result = AnchoredContractCallResult::new(anchor(3), vec![1, 2]).expect("call result");
-    let settlement = EvmTransactionSettlement::new(
+    let settlement = EvmTransactionSettlement::reverted(
         effect_id(0x33),
         9,
-        EvmHash::new(format!("0x{}", "cc".repeat(32))).expect("transaction hash"),
-        anchor(1),
-        EvmTransactionTerminalResult::Reverted,
+        EvmTransactionRevert::new(
+            anchor(1),
+            EvmHash::new(format!("0x{}", "cc".repeat(32))).expect("transaction hash"),
+        ),
     );
     let confirmation: EvmTransactionConfirmation = serde_json::from_value(serde_json::json!({
-        "block_anchor": anchor(1),
-        "result": {"kind": "called"},
-        "transaction_hash": format!("0x{}", "cc".repeat(32)),
+        "kind": "called",
+        "value": {
+            "block_anchor": anchor(1),
+            "transaction_hash": format!("0x{}", "cc".repeat(32)),
+        }
     }))
     .expect("confirmation");
     let revert: EvmTransactionRevert = serde_json::from_value(serde_json::json!({
@@ -377,11 +354,11 @@ fn public_transaction_value_identities_are_frozen() {
     .expect("revert");
     assert_eq!(
         serde_json::to_string(&settlement).expect("settlement wire"),
-        "{\"block_anchor\":{\"hash\":\"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"number\":\"1\"},\"effect_id\":\"effect:sha256-jcs-v1:3333333333333333333333333333333333333333333333333333333333333333\",\"nonce\":9,\"result\":{\"kind\":\"reverted\"},\"transaction_hash\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}"
+        "{\"kind\":\"reverted\",\"value\":{\"effect_id\":\"effect:sha256-jcs-v1:3333333333333333333333333333333333333333333333333333333333333333\",\"nonce\":9,\"revert\":{\"block_anchor\":{\"hash\":\"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"number\":\"1\"},\"transaction_hash\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}}}"
     );
     assert_eq!(
         serde_json::to_string(&confirmation).expect("confirmation wire"),
-        "{\"block_anchor\":{\"hash\":\"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"number\":\"1\"},\"result\":{\"kind\":\"called\"},\"transaction_hash\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}"
+        "{\"kind\":\"called\",\"value\":{\"block_anchor\":{\"hash\":\"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"number\":\"1\"},\"transaction_hash\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}}"
     );
     assert_eq!(
         serde_json::to_string(&revert).expect("revert wire"),
@@ -419,11 +396,6 @@ fn public_transaction_value_identities_are_frozen() {
             "transaction_route",
             semantic_id::<EvmTransactionRoute>(),
             schema_id::<EvmTransactionRoute>(),
-        ),
-        (
-            "wallet_identity",
-            semantic_id::<EvmWalletIdentity>(),
-            schema_id::<EvmWalletIdentity>(),
         ),
         (
             "transaction_binding",
@@ -493,29 +465,24 @@ fn public_transaction_value_identities_are_frozen() {
             "schema:mfm.evm-transaction-route:1:sha256-jcs-v1:ed1444b8cc704f9406fc89bef4d4b43a7e02a0814ee9db5ddf2adc23f8204c5a",
         ),
         (
-            "wallet_identity",
-            "semantic:mfm.evm:wallet-identity:1:sha256-jcs-v1:1d0ce121a3ecae214c9bc7fc434c0367f3573a2ff5ea87fae7ad70a909419606",
-            "schema:mfm.evm-wallet-identity:1:sha256-jcs-v1:9cba6e04f78865d4d979d9326c86d1b6073566d83d82b62fbce631b5cfd5d9c4",
-        ),
-        (
             "transaction_binding",
             "semantic:mfm.evm:transaction-binding:1:sha256-jcs-v1:d79c1b7fabc0bc262e3067bda16dc3912bdac331532fbb59e0ba1def71db2458",
-            "schema:mfm.evm-transaction-binding:1:sha256-jcs-v1:16e7ca4ed55aa7b27da5fa74918d8b8c44c3e203714474764455995a27523c82",
+            "schema:mfm.evm-transaction-binding:1:sha256-jcs-v1:aa28e9a4ee8e3d5dcec3694ccfd9f20da75a781d9aa29fc694a9767d4858fbec",
         ),
         (
             "command",
             "semantic:mfm.evm:eip1559-transaction-command:1:sha256-jcs-v1:72ec2fe60bd6430fa1a548442f9090d1f66e028f2e155959ef3bbd3aa141841c",
-            "schema:mfm.evm-eip1559-transaction-command:1:sha256-jcs-v1:1a2baff81aca08b831cd929aa87e4561a1ad086ef17d22e350648bb45bc47e82",
+            "schema:mfm.evm-eip1559-transaction-command:1:sha256-jcs-v1:55ddb103fada5d9a721b50b725ff2b3a58ac87c8b01c602287eb1b98b9ab6107",
         ),
         (
             "settlement",
             "semantic:mfm.evm:transaction-settlement:1:sha256-jcs-v1:4c958b57f53af59186964196610ee7625069a22212f3df585b2d8ff0c58447d8",
-            "schema:mfm.evm-transaction-settlement:1:sha256-jcs-v1:583417ec4395638d58c1c2e28a55e24dd23f07d6e729e9fe41217cf2c164a322",
+            "schema:mfm.evm-transaction-settlement:1:sha256-jcs-v1:420eb72f41c6174f437789953d480a70749eba108f7ad857ff2e9876620105d0",
         ),
         (
             "confirmation",
             "semantic:mfm.evm:transaction-confirmation:1:sha256-jcs-v1:85ca70680feabbb9b3c1c5057db6b11548a89d8e67e127fa42d27ebf343569c7",
-            "schema:mfm.evm-transaction-confirmation:1:sha256-jcs-v1:4c6aa0e16b888c58e2852fcde53ffcbca34118502ec81d51f2f8be4587d519ee",
+            "schema:mfm.evm-transaction-confirmation:1:sha256-jcs-v1:e2c1a18ee304d660a340b237b4d1e719884339c3a1f2b9750ea6634973904a6c",
         ),
         (
             "revert",
