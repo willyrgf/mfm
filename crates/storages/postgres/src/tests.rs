@@ -177,6 +177,8 @@ async fn reset_schemas(connection: &mut PgConnection) {
 
 #[test]
 fn migration_and_classifier_contracts_are_exact() {
+    static_assertions::assert_not_impl_any!(PostgresBackend: EvmTransactionAuthority);
+    static_assertions::assert_not_impl_any!(PostgresEvmTransactionAuthority: Store, RunIndex, ConfigRepository);
     assert_eq!(SCHEMA_CONTRACT, "mfm.run-history-postgres.v2");
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_store_schema"));
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_frames"));
@@ -875,7 +877,7 @@ async fn assert_delete_fault(
     );
 }
 
-async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresBackend>) {
+async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTransactionAuthority>) {
     let epoch = backend.authority_epoch().clone();
     let domain = nonce_domain(&epoch, 1, 2, 3);
     let command_ref = reference("mfm.test.evm-command", &[5]);
@@ -1321,20 +1323,42 @@ async fn managed_postgres_persistence_authority_contract() {
     provision_postgres(&admin, &runtime)
         .await
         .expect("idempotent provisioning verification");
+    let evm_schema_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'mfm_evm_tx')",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .expect("optional schema absence");
+    assert!(!evm_schema_exists);
+    assert!(matches!(
+        PostgresEvmTransactionAuthority::connect(&runtime).await,
+        Err(PostgresOpenError::Incompatible)
+    ));
 
     let backend = Arc::new(
         PostgresBackend::connect(&runtime)
             .await
             .expect("postgres backend"),
     );
-    provision_postgres(&admin, &runtime)
+    provision_evm_transaction_authority(&admin, &runtime)
         .await
-        .expect("stable epoch verification");
-    let stable_backend = PostgresBackend::connect(&runtime)
+        .expect("authority provisioning");
+    provision_evm_transaction_authority(&admin, &runtime)
         .await
-        .expect("stable backend");
-    assert_eq!(stable_backend.authority_epoch(), backend.authority_epoch());
-    drop(stable_backend);
+        .expect("idempotent authority provisioning");
+    let authority = Arc::new(
+        PostgresEvmTransactionAuthority::connect(&runtime)
+            .await
+            .expect("transaction authority"),
+    );
+    let stable_authority = PostgresEvmTransactionAuthority::connect(&runtime)
+        .await
+        .expect("stable authority");
+    assert_eq!(
+        stable_authority.authority_epoch(),
+        authority.authority_epoch()
+    );
+    drop(stable_authority);
     let options = runtime
         .connect_options("mfm-local-transport-contract-test")
         .expect("production connection options");
@@ -1404,9 +1428,9 @@ async fn managed_postgres_persistence_authority_contract() {
     assert_snapshot_and_blocking_contract(&backend).await;
     assert_commit_and_hostile_contract(&backend, &mut connection).await;
     assert_config_mutation_contract(&backend).await;
-    assert_evm_transaction_authority_contract(&backend).await;
+    assert_evm_transaction_authority_contract(&authority).await;
 
-    let epoch_bytes = backend
+    let epoch_bytes = authority
         .authority_epoch()
         .as_bytes()
         .expect("authority epoch bytes");
@@ -1501,9 +1525,10 @@ async fn managed_postgres_persistence_authority_contract() {
         .await
         .expect("grant excess transaction privilege");
     assert!(matches!(
-        PostgresBackend::connect(&runtime).await,
+        PostgresEvmTransactionAuthority::connect(&runtime).await,
         Err(PostgresOpenError::Incompatible)
     ));
+    assert!(PostgresBackend::connect(&runtime).await.is_ok());
     connection
         .execute("REVOKE DELETE ON mfm_evm_tx.nonce_reservations FROM mfm_runtime")
         .await
@@ -1517,7 +1542,7 @@ async fn managed_postgres_persistence_authority_contract() {
         .await
         .expect("inject noncanonical settlement bytes");
     assert_eq!(
-        backend
+        authority
             .load(&effect_id(36), &reference("mfm.test.evm-command", &[5]),)
             .await
             .err(),
@@ -1531,11 +1556,11 @@ async fn managed_postgres_persistence_authority_contract() {
         .await
         .expect("inject malformed settlement bytes");
     assert_eq!(
-        backend
+        authority
             .reserve_or_compare(
                 &effect_id(38),
                 &reference("mfm.test.evm-command", &[5]),
-                &nonce_domain(backend.authority_epoch(), 32, 33, 34),
+                &nonce_domain(authority.authority_epoch(), 32, 33, 34),
                 6,
             )
             .await
@@ -1543,24 +1568,27 @@ async fn managed_postgres_persistence_authority_contract() {
         Some(AuthorityError::Internal)
     );
 
-    let original_epoch = backend.authority_epoch().clone();
+    let original_epoch = authority.authority_epoch().clone();
     reset_schemas(&mut connection).await;
     provision_postgres(&admin, &runtime)
         .await
-        .expect("fresh authority recreation");
-    let replacement = PostgresBackend::connect(&runtime)
+        .expect("fresh base recreation");
+    provision_evm_transaction_authority(&admin, &runtime)
         .await
-        .expect("replacement backend");
+        .expect("fresh authority recreation");
+    let replacement = PostgresEvmTransactionAuthority::connect(&runtime)
+        .await
+        .expect("replacement authority");
     assert_ne!(replacement.authority_epoch(), &original_epoch);
     assert_eq!(
-        backend
+        authority
             .load(&effect_id(6), &reference("mfm.test.evm-command", &[5]),)
             .await
             .err(),
         Some(AuthorityError::Internal)
     );
 
-    drop(backend);
+    drop(authority);
     drop(replacement);
     connection
         .execute("DELETE FROM mfm_config.mfm_config_schema")
@@ -1587,15 +1615,55 @@ async fn managed_postgres_persistence_authority_contract() {
     reset_schemas(&mut connection).await;
     provision_postgres(&admin, &runtime)
         .await
-        .expect("complete baseline before mixed-state test");
+        .expect("complete base before optional-state test");
     connection
-        .execute("DROP SCHEMA mfm_evm_tx CASCADE")
+        .execute("CREATE SCHEMA mfm_evm_tx")
         .await
-        .expect("drop one managed schema");
+        .expect("partial optional schema");
+    provision_postgres(&admin, &runtime)
+        .await
+        .expect("base ignores optional authority state");
+    assert!(PostgresBackend::connect(&runtime).await.is_ok());
     assert_eq!(
-        provision_postgres(&admin, &runtime).await,
+        provision_evm_transaction_authority(&admin, &runtime).await,
         Err(ProvisionError::Incompatible)
     );
+
+    reset_schemas(&mut connection).await;
+    provision_evm_transaction_authority(&admin, &runtime)
+        .await
+        .expect("standalone authority provisioning");
+    assert!(PostgresEvmTransactionAuthority::connect(&runtime)
+        .await
+        .is_ok());
+    assert!(matches!(
+        PostgresBackend::connect(&runtime).await,
+        Err(PostgresOpenError::Incompatible)
+    ));
+    provision_postgres(&admin, &runtime)
+        .await
+        .expect("base provisioning after authority");
+    assert!(PostgresBackend::connect(&runtime).await.is_ok());
+
+    connection
+        .execute(
+            "ALTER TABLE mfm_evm_tx.mfm_evm_tx_schema \
+             DROP CONSTRAINT mfm_evm_tx_schema_contract_check",
+        )
+        .await
+        .expect("remove current marker constraint");
+    connection
+        .execute(
+            "UPDATE mfm_evm_tx.mfm_evm_tx_schema \
+             SET schema_contract = 'mfm.evm-transaction-postgres.v1'",
+        )
+        .await
+        .expect("install obsolete marker");
+    assert!(matches!(
+        PostgresEvmTransactionAuthority::connect(&runtime).await,
+        Err(PostgresOpenError::Incompatible)
+    ));
+    assert!(PostgresBackend::connect(&runtime).await.is_ok());
 
     reset_schemas(&mut connection).await;
     connection

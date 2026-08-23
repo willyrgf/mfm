@@ -33,7 +33,8 @@ use mfm_program_derive::MfmValue;
 use mfm_runtime::{RunView, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError};
 use mfm_signing::Secp256k1Signer;
 use mfm_storage_postgres::{
-    provision_postgres, AdminPostgresLocator, PostgresBackend, RuntimePostgresLocator,
+    provision_evm_transaction_authority, provision_postgres, AdminPostgresLocator, PostgresBackend,
+    PostgresEvmTransactionAuthority, RuntimePostgresLocator,
 };
 use mfm_store::Store;
 use serde::de;
@@ -444,7 +445,7 @@ impl Operation for EffectFixtureOperation {
 }
 
 struct ReservationAcknowledgementFault {
-    inner: Arc<PostgresBackend>,
+    inner: Arc<PostgresEvmTransactionAuthority>,
     consumed: Arc<AtomicBool>,
 }
 
@@ -508,16 +509,28 @@ async fn runtime(
     binding: &EvmTransactionBinding,
     signer: Arc<dyn Secp256k1Signer>,
     consumed: Arc<AtomicBool>,
-) -> (Runtime, Arc<PostgresBackend>) {
+) -> (
+    Runtime,
+    Arc<PostgresBackend>,
+    Arc<PostgresEvmTransactionAuthority>,
+) {
     let backend = Arc::new(
         PostgresBackend::connect(runtime_locator)
             .await
             .expect("admitted backend"),
     );
-    assert_eq!(backend.authority_epoch(), binding.authority_epoch());
+    let transaction_authority = Arc::new(
+        PostgresEvmTransactionAuthority::connect(runtime_locator)
+            .await
+            .expect("admitted transaction authority"),
+    );
+    assert_eq!(
+        transaction_authority.authority_epoch(),
+        binding.authority_epoch()
+    );
     let provider = Arc::new(JsonRpcEvmProvider::connect(rpc_locator).expect("provider"));
     let authority: Arc<dyn EvmTransactionAuthority> = Arc::new(ReservationAcknowledgementFault {
-        inner: Arc::clone(&backend),
+        inner: Arc::clone(&transaction_authority),
         consumed,
     });
     let transaction_provider: Arc<dyn EvmTransactionProvider> = provider.clone();
@@ -565,6 +578,7 @@ async fn runtime(
     (
         Runtime::new(builder.finish().expect("assembly"), store),
         backend,
+        transaction_authority,
     )
 }
 
@@ -1199,13 +1213,16 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     let runtime_locator = RuntimePostgresLocator::parse(&runtime_raw).expect("runtime locator");
     provision_postgres(&admin_locator, &runtime_locator)
         .await
-        .expect("fresh schemas");
+        .expect("fresh base schemas");
+    provision_evm_transaction_authority(&admin_locator, &runtime_locator)
+        .await
+        .expect("fresh transaction authority");
     let rpc_locator = EvmAdapterLocator::parse(&rpc_raw).expect("RPC locator");
     let observer = RethDevObserver::new(&rpc_raw).expect("observer");
 
-    let setup_backend = PostgresBackend::connect(&runtime_locator)
+    let setup_authority = PostgresEvmTransactionAuthority::connect(&runtime_locator)
         .await
-        .expect("setup backend");
+        .expect("setup authority");
     let setup_provider = JsonRpcEvmProvider::connect(&rpc_locator).expect("setup provider");
     let chain = setup_provider
         .chain_instance()
@@ -1223,11 +1240,11 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     let sender = ethereum_address(signer.public_key());
     let binding = EvmTransactionBinding::new(
         route.clone(),
-        setup_backend.authority_epoch().clone(),
+        setup_authority.authority_epoch().clone(),
         sender.clone(),
     );
     drop(setup_provider);
-    drop(setup_backend);
+    drop(setup_authority);
 
     assert!(observer.base_fee().await.expect("base fee") <= MAX_FEE);
     let funding_source = observer.unlocked_account().await.expect("unlocked account");
@@ -1287,7 +1304,7 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     let consumed = Arc::new(AtomicBool::new(false));
     let mut invocations = 0_u8;
 
-    let (first_runtime, first_backend) = runtime(
+    let (first_runtime, first_backend, first_authority) = runtime(
         &runtime_locator,
         &rpc_locator,
         &binding,
@@ -1312,7 +1329,7 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     assert_eq!(first_effects.len(), 1);
     assert_eq!(first_conclusions, 0);
     assert!(matches!(
-        first_backend
+        first_authority
             .load(&first_effects[0].0, &first_effects[0].1)
             .await
             .expect("reservation"),
@@ -1320,8 +1337,9 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     ));
     drop(first_runtime);
     drop(first_backend);
+    drop(first_authority);
 
-    let (second_runtime, second_backend) = runtime(
+    let (second_runtime, second_backend, second_authority) = runtime(
         &runtime_locator,
         &rpc_locator,
         &binding,
@@ -1338,7 +1356,7 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     let (second_effects, second_conclusions) = journal_effects(&second_backend, &run_id).await;
     assert_eq!(second_effects.len(), 1);
     assert_eq!(second_conclusions, 0);
-    let Some(AuthorityState::Prepared(deployment_prepared)) = second_backend
+    let Some(AuthorityState::Prepared(deployment_prepared)) = second_authority
         .load(&second_effects[0].0, &second_effects[0].1)
         .await
         .expect("prepared deployment")
@@ -1357,8 +1375,9 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     );
     drop(second_runtime);
     drop(second_backend);
+    drop(second_authority);
 
-    let (third_runtime, third_backend) = runtime(
+    let (third_runtime, third_backend, third_authority) = runtime(
         &runtime_locator,
         &rpc_locator,
         &binding,
@@ -1375,7 +1394,7 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     let (third_effects, third_conclusions) = journal_effects(&third_backend, &run_id).await;
     assert_eq!(third_effects.len(), 2);
     assert_eq!(third_conclusions, 1);
-    let Some(AuthorityState::Prepared(configuration_prepared)) = third_backend
+    let Some(AuthorityState::Prepared(configuration_prepared)) = third_authority
         .load(&third_effects[1].0, &third_effects[1].1)
         .await
         .expect("prepared configuration")
@@ -1388,8 +1407,9 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
         .expect("independently observed configuration");
     drop(third_runtime);
     drop(third_backend);
+    drop(third_authority);
 
-    let (fourth_runtime, fourth_backend) = runtime(
+    let (fourth_runtime, fourth_backend, fourth_authority) = runtime(
         &runtime_locator,
         &rpc_locator,
         &binding,
@@ -1426,7 +1446,7 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     assert_eq!(final_effects[1].2, configuration_command);
     let mut settled = Vec::new();
     for (effect_id, command_ref, _) in &final_effects {
-        let Some(AuthorityState::Settled(state)) = fourth_backend
+        let Some(AuthorityState::Settled(state)) = fourth_authority
             .load(effect_id, command_ref)
             .await
             .expect("settled authority")
@@ -1533,7 +1553,8 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
 
     drop(fourth_runtime);
     drop(fourth_backend);
-    let (cold_runtime, _cold_backend) =
+    drop(fourth_authority);
+    let (cold_runtime, _cold_backend, _cold_authority) =
         runtime(&runtime_locator, &rpc_locator, &binding, signer, consumed).await;
     let cold_read = cold_runtime.read(&run_id).await.expect("cold read");
     let cold_bytes = match cold_read.state() {

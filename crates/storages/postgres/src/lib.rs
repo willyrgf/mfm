@@ -1,9 +1,8 @@
 #![warn(missing_docs)]
-//! PostgreSQL implementation of mechanical persistence and EVM transaction authority.
+//! PostgreSQL implementations of mechanical persistence and optional EVM transaction authority.
 //!
-//! Production construction verifies all fresh static schemas and durability prerequisites before
-//! exposing one pool-backed Store, config repository, RunIndex, and append-only transaction
-//! authority handle.
+//! Each concrete handle independently verifies only the static schemas and durability prerequisites
+//! required by the authority it exposes.
 
 use std::future::Future;
 use std::time::Duration;
@@ -32,10 +31,15 @@ mod provision;
 pub use locator::{
     AdminPostgresLocator, PostgresLocatorError, RuntimePostgresLocator, MAX_POSTGRES_LOCATOR_BYTES,
 };
-pub use provision::{provision_postgres, ProvisionError};
+pub use provision::{provision_evm_transaction_authority, provision_postgres, ProvisionError};
 
 /// Complete PostgreSQL persistence backend after its connection gate succeeds.
 pub struct PostgresBackend {
+    pool: PgPool,
+}
+
+/// Independently gated PostgreSQL EVM transaction-authority handle.
+pub struct PostgresEvmTransactionAuthority {
     pool: PgPool,
     authority_epoch: EvmAuthorityEpoch,
     #[cfg(test)]
@@ -54,7 +58,7 @@ pub enum PostgresOpenError {
 }
 
 impl PostgresBackend {
-    /// Connects and verifies both static schemas and durability prerequisites.
+    /// Connects and verifies run-history, configuration, and durability prerequisites.
     pub async fn connect(
         locator: &RuntimePostgresLocator,
     ) -> std::result::Result<Self, PostgresOpenError> {
@@ -84,7 +88,49 @@ impl PostgresBackend {
             .await
             .map_err(classify_open_error)?;
         let mut admitted_connection = pool.acquire().await.map_err(classify_open_error)?;
-        let authority_epoch = verify_connection(&mut admitted_connection)
+        verify_connection(&mut admitted_connection)
+            .await
+            .map_err(classify_gate_error)?;
+        drop(admitted_connection);
+        Ok(Self { pool })
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn test_pool(&self) -> &PgPool {
+        &self.pool
+    }
+}
+
+impl PostgresEvmTransactionAuthority {
+    /// Connects and verifies only the EVM transaction-authority schema and shared posture.
+    pub async fn connect(
+        locator: &RuntimePostgresLocator,
+    ) -> std::result::Result<Self, PostgresOpenError> {
+        let options = locator
+            .connect_options("mfm-evm-transaction-authority")
+            .map_err(|_| PostgresOpenError::Unavailable)?;
+        let mut gate_connection = PgConnection::connect_with(&options)
+            .await
+            .map_err(|_| PostgresOpenError::Unavailable)?;
+        verify_evm_connection(&mut gate_connection)
+            .await
+            .map_err(classify_gate_error)?;
+        drop(gate_connection);
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(2))
+            .after_connect(|connection, _metadata| {
+                Box::pin(async move {
+                    verify_evm_connection(connection)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| sqlx::Error::Protocol(error.marker().to_owned()))
+                })
+            })
+            .connect_with(options)
+            .await
+            .map_err(classify_open_error)?;
+        let mut admitted_connection = pool.acquire().await.map_err(classify_open_error)?;
+        let authority_epoch = verify_evm_connection(&mut admitted_connection)
             .await
             .map_err(classify_gate_error)?;
         drop(admitted_connection);
@@ -253,14 +299,28 @@ async fn verify_durability(connection: &mut PgConnection) -> std::result::Result
     Ok(())
 }
 
-async fn verify_connection(
-    connection: &mut PgConnection,
-) -> std::result::Result<EvmAuthorityEpoch, GateError> {
+async fn verify_connection(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
     verify_durability(connection).await?;
     verify_runtime_authority(connection).await?;
     verify_run_schema(connection).await?;
     verify_config_schema(connection).await?;
-    evm_tx::verify_evm_tx_schema(connection).await
+    verify_schema_privileges(connection, &["public", "mfm_config"]).await?;
+    let accepted =
+        verify_run_privileges(connection).await? && verify_config_privileges(connection).await?;
+    accepted.then_some(()).ok_or(GateError::Incompatible)
+}
+
+async fn verify_evm_connection(
+    connection: &mut PgConnection,
+) -> std::result::Result<EvmAuthorityEpoch, GateError> {
+    verify_durability(connection).await?;
+    verify_runtime_authority(connection).await?;
+    let epoch = evm_tx::verify_evm_tx_schema(connection).await?;
+    verify_schema_privileges(connection, &["mfm_evm_tx"]).await?;
+    evm_tx::verify_evm_tx_privileges(connection)
+        .await?
+        .then_some(epoch)
+        .ok_or(GateError::Incompatible)
 }
 
 async fn verify_run_schema(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
@@ -464,12 +524,19 @@ async fn verify_runtime_authority(
     if owns_objects {
         return Err(GateError::Incompatible);
     }
-    for schema in ["public", "mfm_config", "mfm_evm_tx"] {
+    Ok(())
+}
+
+async fn verify_schema_privileges(
+    connection: &mut PgConnection,
+    schemas: &[&str],
+) -> std::result::Result<(), GateError> {
+    for schema in schemas {
         let schema_privileges: (bool, bool) = sqlx::query_as(
             "SELECT has_schema_privilege(current_user, $1, 'USAGE'), \
                     has_schema_privilege(current_user, $1, 'CREATE')",
         )
-        .bind(schema)
+        .bind(*schema)
         .fetch_one(&mut *connection)
         .await
         .map_err(|_| GateError::Unavailable)?;
@@ -477,10 +544,7 @@ async fn verify_runtime_authority(
             return Err(GateError::Incompatible);
         }
     }
-    let accepted = verify_run_privileges(connection).await?
-        && verify_config_privileges(connection).await?
-        && evm_tx::verify_evm_tx_privileges(connection).await?;
-    accepted.then_some(()).ok_or(GateError::Incompatible)
+    Ok(())
 }
 
 async fn verify_run_privileges(

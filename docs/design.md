@@ -92,22 +92,22 @@ same block before returning bounded bytes. An absent named block is SafeFailure,
 Rejected, and a replaced authenticated anchor is IntegrityBlocked; RPC and malformed-ingress
 failures remain Unavailable.
 
-PostgreSQL has three fresh baselines behind one backend, pool, and connection gate. Run history owns
+PostgreSQL has three fresh baselines behind two independently gated handles. Run history owns
 `mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads` in `public`; opaque versioned
 configuration custody owns `mfm_config_schema` and `config_revisions` in `mfm_config`; and EVM
 transaction authority owns its marker plus four append-only fact tables in `mfm_evm_tx`. Run heads
-also provide the mechanical RunIndex projection without parsing frames. Every connection admission
-checks all three schemas' exact logged relations, constraints, ownership and privileges, plus
-primary status, `fsync`, and `full_page_writes`; a partially compatible installation is never
-exposed.
+also provide the mechanical RunIndex projection without parsing frames. `PostgresBackend` gates
+only run history and configuration; `PostgresEvmTransactionAuthority` owns a separate pool and
+gates only its optional schema. Every admission checks its owned exact catalog, privileges, primary
+status, `fsync`, and `full_page_writes`.
 
 Loads use one read-only repeatable snapshot. Appends take the per-RunId advisory transaction lock
 before observing state and force synchronous COMMIT. Configuration imports use the `(name, digest)`
 primary key to create or compare immutable revisions. Import and exact idempotent delete force
 synchronous COMMIT and preserve ambiguous acknowledgement. There is no revision-count limit. A
-short-lived admin provisioner accepts separate typed admin/runtime locators for one normalized
-target, installs only when all three managed surfaces are absent, and grants the fixed
-`mfm_runtime` role exact DML authority.
+base and optional authority provisioners accept separate typed admin/runtime locators for one
+normalized target, install or verify only their owned surfaces, and grant the fixed `mfm_runtime`
+role exact DML authority. Production invokes only the base provisioner.
 Runtime connections have no ownership or DDL authority. Existing installations are verified and
 never migrated, repaired, re-owned, or reset.
 
