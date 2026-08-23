@@ -48,14 +48,14 @@ aggregate; each document remains bounded, but the collection has no count limit.
 uses ascending `RunId` keyset pages and makes no cross-request snapshot claim.
 
 PostgreSQL owns its raw private locator grammar, target equivalence, SQLx wiring, split-role
-provisioner, loopback-only plaintext policy, ambient-input exclusion, and one full-persistence gate.
-One backend and pool implement Store, RunIndex, config custody, and the EVM transaction-authority
-port. The authority schema owns only append-only nonce-domain, reservation, exact prepared-wire,
+provisioner, loopback-only plaintext policy, and ambient-input exclusion. `PostgresBackend` owns one
+pool gated only for Store, RunIndex, and config custody. Optional
+`PostgresEvmTransactionAuthority` owns a separate pool gated only for its port. The authority schema owns only append-only nonce-domain, reservation, exact prepared-wire,
 and canonical settlement facts. It does not own commands, transaction action semantics, provider
 truth, signing, broadcast, Runtime folding, or Program association. PostgreSQL uses stock SQLx
 directly.
-Administrative database authority exists only in the CLI provisioning path and is never retained by
-Application.
+Administrative database authority exists only in short-lived provisioning paths and is never
+retained by Application. Production CLI provisioning installs only the base persistence surfaces.
 
 `ComposedRuntime` is the only live Portfolio assembly constructor. One opaque binding set supplies
 typed EVM targets and provider handles in stable order; composition derives both adapter

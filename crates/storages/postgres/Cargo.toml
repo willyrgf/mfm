@@ -33,4 +33,5 @@ tokio = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+static_assertions = "1.1"
 tokio = { workspace = true }

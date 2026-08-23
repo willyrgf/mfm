@@ -10,7 +10,7 @@ use sqlx::{PgConnection, Row};
 
 use crate::{
     column, constraint, index, relation, runtime_table_privilege_mask, verify_schema_ownership,
-    GateError, PostgresBackend, TABLE_INSERT, TABLE_SELECT,
+    GateError, PostgresEvmTransactionAuthority, TABLE_INSERT, TABLE_SELECT,
 };
 
 pub(crate) const EVM_TX_SCHEMA_CONTRACT: &str = "mfm.evm-transaction-postgres.v2";
@@ -18,7 +18,7 @@ pub(crate) const EVM_TX_SCHEMA_SQL: &str =
     include_str!("../migrations/evm_transaction_postgres_v2.sql");
 const MAX_SETTLEMENT_BYTES: usize = 65_536;
 
-impl EvmTransactionAuthority for PostgresBackend {
+impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
     fn authority_epoch(&self) -> &EvmAuthorityEpoch {
         &self.authority_epoch
     }
@@ -269,7 +269,7 @@ pub(crate) enum AuthorityCommitFault {
 }
 
 #[cfg(test)]
-impl PostgresBackend {
+impl PostgresEvmTransactionAuthority {
     pub(crate) fn inject_authority_commit_fault(&self, fault: AuthorityCommitFault) {
         use std::sync::atomic::Ordering;
 
@@ -282,7 +282,7 @@ impl PostgresBackend {
 }
 
 async fn commit_authority(
-    backend: &PostgresBackend,
+    backend: &PostgresEvmTransactionAuthority,
     transaction: sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), AuthorityError> {
     #[cfg(test)]

@@ -34,9 +34,9 @@ status remains a Runtime fold.
 PostgreSQL configuration custody owns exactly `mfm_config_schema` and `config_revisions` under
 `mfm.config-postgres.v2`. PostgreSQL EVM transaction authority owns exactly
 `mfm_evm_tx_schema`, `nonce_domains`, `nonce_reservations`, `prepared_transactions`, and
-`transaction_settlements` under `mfm.evm-transaction-postgres.v2`. One backend, pool, and admission
-gate check all three schemas, ownership, ACL, and durability together; the fixed runtime role owns
-none of them.
+`transaction_settlements` under `mfm.evm-transaction-postgres.v2`. `PostgresBackend` independently
+gates only run history and configuration; optional `PostgresEvmTransactionAuthority` owns a second
+pool and gates only the authority schema. The fixed runtime role owns none of them.
 
 Authority records are non-Program, non-serde port values. A reservation retains EffectId, command
 ref, nonce, and a domain consisting exactly of epoch, chain instance, and sender. A
