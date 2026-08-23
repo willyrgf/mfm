@@ -17,7 +17,6 @@ mfm-canonical = { path = "../../kernel/canonical" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }
-mfm-signing = { path = "../../signing" }
 mfm-values = { path = "../../kernel/values" }
 serde = { workspace = true }
 thiserror = { workspace = true }

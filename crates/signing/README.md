@@ -1,10 +1,10 @@
 # mfm-signing
 
-`mfm-signing` owns checked public signing values, exact transient digest/signature types, public
-recoverable-secp256k1 verification, and the key- and purpose-bound `Signer` interface. A signer
-request contains only one exact 32-byte digest; the selected handle already fixes its immutable
-purpose, signer route, algorithm, and public key instance.
+`mfm-signing` owns checked transient recoverable-secp256k1 public keys, exact digest/signature
+values, public recovery, and the key- and purpose-bound `Secp256k1Signer` interface. A request
+contains only one exact 32-byte digest; the selected handle already fixes its immutable purpose and
+public key.
 
-`PublicSigningKey` and `PublicSignerIdentity` are secret-free content-addressed MFM values. Secret
-scalars, signer implementation state, EVM address derivation, transaction encoding, and provider
-IO remain outside this crate.
+These values have no serde or diagnostic surface. Persisted account identity, secret scalars,
+custody-provider selection, EVM address derivation, transaction encoding, and provider IO remain
+outside this crate.

@@ -5,7 +5,7 @@ CREATE TABLE mfm_evm_tx.mfm_evm_tx_schema (
     authority_epoch BYTEA NOT NULL,
     CONSTRAINT mfm_evm_tx_schema_pkey PRIMARY KEY (schema_contract),
     CONSTRAINT mfm_evm_tx_schema_contract_check
-        CHECK (schema_contract = 'mfm.evm-transaction-postgres.v1'),
+        CHECK (schema_contract = 'mfm.evm-transaction-postgres.v2'),
     CONSTRAINT mfm_evm_tx_schema_epoch_check
         CHECK (octet_length(authority_epoch) = 32),
     CONSTRAINT mfm_evm_tx_schema_epoch_key UNIQUE (authority_epoch)
@@ -16,8 +16,6 @@ CREATE TABLE mfm_evm_tx.nonce_domains (
     chain_id              NUMERIC(20,0) NOT NULL,
     genesis_hash          BYTEA NOT NULL,
     sender                BYTEA NOT NULL,
-    signer_schema_id      TEXT COLLATE "C" NOT NULL,
-    signer_content_digest TEXT COLLATE "C" NOT NULL,
     CONSTRAINT nonce_domains_pkey
         PRIMARY KEY (authority_epoch, chain_id, genesis_hash, sender),
     CONSTRAINT nonce_domains_epoch_check
@@ -28,11 +26,6 @@ CREATE TABLE mfm_evm_tx.nonce_domains (
         CHECK (octet_length(genesis_hash) = 32),
     CONSTRAINT nonce_domains_sender_check
         CHECK (octet_length(sender) = 20),
-    CONSTRAINT nonce_domains_signer_schema_id_check
-        CHECK (octet_length(signer_schema_id) BETWEEN 1 AND 512 AND
-               signer_schema_id ~ '^schema:[a-z0-9][a-z0-9._/-]*:[1-9][0-9]*:sha256-jcs-v1:[0-9a-f]{64}$'),
-    CONSTRAINT nonce_domains_signer_digest_check
-        CHECK (signer_content_digest ~ '^content:sha256-v1:[0-9a-f]{64}$'),
     CONSTRAINT nonce_domains_epoch_fkey
         FOREIGN KEY (authority_epoch)
         REFERENCES mfm_evm_tx.mfm_evm_tx_schema (authority_epoch)

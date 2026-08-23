@@ -2,7 +2,7 @@
 
 One durable PostgreSQL backend implementing the append-only Store, mechanical RunIndex, opaque
 versioned configuration repository, and EVM transaction authority. One pool and one connection
-gate cover run history, `mfm.config-postgres.v2`, and `mfm.evm-transaction-postgres.v1`, so
+gate cover run history, `mfm.config-postgres.v2`, and `mfm.evm-transaction-postgres.v2`, so
 production never admits a partially compatible persistence installation.
 
 Production constructors accept only one bounded private `postgresql` URI with an explicit password,

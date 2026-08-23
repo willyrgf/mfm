@@ -1954,7 +1954,6 @@ dependencies = [
  "mfm-ids",
  "mfm-program",
  "mfm-program-derive",
- "mfm-signing",
  "mfm-values",
  "serde",
  "serde_json",
@@ -2117,13 +2116,10 @@ name = "mfm-signing"
 version = "0.1.0"
 dependencies = [
  "k256",
- "mfm-canonical",
  "mfm-ids",
- "mfm-program-derive",
- "mfm-values",
  "serde",
- "serde_json",
  "thiserror",
+ "trybuild",
 ]
 
 [[package]]

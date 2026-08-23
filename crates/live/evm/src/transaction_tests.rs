@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use mfm_evm::{
     Eip1559TransactionCommand, EvmAuthorityEpoch, EvmChainInstance, EvmEndpoint,
-    EvmTransactionAction, EvmTransactionBinding, EvmTransactionRoute, EvmU256, EvmWalletIdentity,
+    EvmTransactionAction, EvmTransactionBinding, EvmTransactionConfirmation, EvmTransactionRoute,
+    EvmTransactionSettlement, EvmU256,
 };
 use mfm_evm_transaction_authority::{
     AuthorityFuture, AuthorityState, EvmTransactionAuthority, PreparedRecord, Reservation,
@@ -11,7 +12,7 @@ use mfm_evm_transaction_authority::{
 };
 use mfm_ids::{DigestBytes, EffectId, StableId};
 use mfm_keystore::{KeystoreOwner, KeystoreSigner, SecretSecp256k1Scalar};
-use mfm_signing::{PublicSignerIdentity, Signer, SigningDigest, SigningFuture};
+use mfm_signing::{Secp256k1PublicKey, Secp256k1Signer, SigningDigest, SigningFuture};
 use tokio::sync::Notify;
 
 use super::*;
@@ -37,7 +38,7 @@ fn public_keccak_and_ethereum_address_helpers_are_exact_and_bounded() {
     )
     .expect("generator SEC1");
     let public_key =
-        mfm_signing::UncompressedSec1PublicKey::new(public_bytes.try_into().expect("65 bytes"))
+        mfm_signing::Secp256k1PublicKey::new(public_bytes.try_into().expect("65 bytes"))
             .expect("generator key");
     assert_eq!(
         ethereum_address(&public_key).as_str(),
@@ -50,9 +51,29 @@ struct RecordingSigner {
     calls: AtomicUsize,
 }
 
-impl Signer for RecordingSigner {
-    fn public_identity(&self) -> &PublicSignerIdentity {
-        self.inner.public_identity()
+struct WrongDigestSigner {
+    inner: KeystoreSigner,
+    calls: AtomicUsize,
+}
+
+impl Secp256k1Signer for WrongDigestSigner {
+    fn public_key(&self) -> &Secp256k1PublicKey {
+        self.inner.public_key()
+    }
+
+    fn purpose(&self) -> &StableId {
+        self.inner.purpose()
+    }
+
+    fn sign(&self, _digest: SigningDigest) -> SigningFuture {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.sign(SigningDigest::from_bytes([0x44; 32]))
+    }
+}
+
+impl Secp256k1Signer for RecordingSigner {
+    fn public_key(&self) -> &Secp256k1PublicKey {
+        self.inner.public_key()
     }
 
     fn purpose(&self) -> &StableId {
@@ -308,13 +329,7 @@ async fn fixture() -> (
         )
         .await
         .expect("signer");
-    let sender = ethereum_address(
-        &signer
-            .public_identity()
-            .public_key()
-            .public_key()
-            .expect("public key"),
-    );
+    let sender = ethereum_address(signer.public_key());
     let signer = Arc::new(RecordingSigner {
         inner: signer,
         calls: AtomicUsize::new(0),
@@ -326,11 +341,7 @@ async fn fixture() -> (
             .endpoint_ref()
             .expect("endpoint ref"),
     );
-    let binding = EvmTransactionBinding::new(
-        route,
-        EvmAuthorityEpoch::new([3; 32]),
-        EvmWalletIdentity::new(sender, signer.public_identity().clone()),
-    );
+    let binding = EvmTransactionBinding::new(route, EvmAuthorityEpoch::new([3; 32]), sender);
     let command = Eip1559TransactionCommand::new(
         binding.clone(),
         EvmTransactionAction::create(vec![0x60, 0x00]).expect("initcode"),
@@ -355,7 +366,7 @@ async fn transaction_registration_uses_the_complete_binding_as_its_only_key() {
     let authority: Arc<dyn EvmTransactionAuthority> =
         Arc::new(MemoryAuthority::new(binding.authority_epoch().clone()));
     let provider: Arc<dyn EvmTransactionProvider> = Arc::new(Provider::new(1337));
-    let signer: Arc<dyn Signer> = signer;
+    let signer: Arc<dyn Secp256k1Signer> = signer;
     let mut builder = RuntimeAssemblyBuilder::new();
     register_evm_transaction_effect(
         &mut builder,
@@ -408,10 +419,10 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
     assert_eq!(provider.submits.load(Ordering::SeqCst), 1);
     assert_eq!(signer.purpose().as_str(), EVM_EIP1559_SIGNING_PURPOSE_ID);
 
-    let created = create_address(binding.wallet().sender(), 7).expect("created address");
+    let created = create_address(binding.sender(), 7).expect("created address");
     *provider.receipt.lock().expect("receipt lock") = Some(ProviderReceipt::new(
         prepared.transaction_hash().clone(),
-        binding.wallet().sender().clone(),
+        binding.sender().clone(),
         ProviderReceiptResult::SuccessCreate {
             contract_address: created.clone(),
         },
@@ -431,8 +442,11 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
     };
     assert_eq!(evidence.nonce(), 7);
     assert!(matches!(
-        evidence.result(),
-        EvmTransactionTerminalResult::SuccessCreate { created_address }
+        &evidence,
+        EvmTransactionSettlement::Confirmed {
+            confirmation: EvmTransactionConfirmation::Created { created_address, .. },
+            ..
+        }
             if created_address == &created
     ));
     assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
@@ -449,7 +463,7 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
             &binding,
             &effect_id,
             &command,
-            signer.as_ref(),
+            &signer.inner,
             &authority,
             &provider,
         )
@@ -512,6 +526,29 @@ async fn cancellation_after_prepare_leaves_one_resumable_exact_transaction() {
 }
 
 #[tokio::test]
+async fn wrong_returned_signature_is_rejected_before_preparation_or_submission() {
+    let (_owner, signer, binding, command, effect_id) = fixture().await;
+    let signer = WrongDigestSigner {
+        inner: signer.inner.clone(),
+        calls: AtomicUsize::new(0),
+    };
+    let authority = MemoryAuthority::new(binding.authority_epoch().clone());
+    let provider = Provider::new(1337);
+
+    assert_eq!(
+        execute(&binding, &effect_id, &command, &signer, &authority, &provider,).await,
+        Err(AdapterError::Internal)
+    );
+    assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        authority.state(),
+        Some(AuthorityState::Reserved(_))
+    ));
+    assert_eq!(provider.submits.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.receipt_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_entry() {
     let (owner, signer, binding, command, effect_id) = fixture().await;
     let authority = MemoryAuthority::new(binding.authority_epoch().clone());
@@ -519,7 +556,7 @@ async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_e
     let wrong_binding = EvmTransactionBinding::new(
         binding.route().clone(),
         EvmAuthorityEpoch::new([4; 32]),
-        binding.wallet().clone(),
+        binding.sender().clone(),
     );
     assert_eq!(
         execute(
@@ -565,6 +602,32 @@ async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_e
     assert_eq!(provider.receipt_calls.load(Ordering::SeqCst), 0);
     assert_eq!(provider.canonical_calls.load(Ordering::SeqCst), 0);
     assert_eq!(provider.submits.load(Ordering::SeqCst), 0);
+
+    let wrong_key = Arc::new(RecordingSigner {
+        inner: owner
+            .import_secp256k1(
+                SecretSecp256k1Scalar::new([8; 32]).expect("different fixture secret"),
+                StableId::new(EVM_EIP1559_SIGNING_PURPOSE_ID).expect("signing purpose"),
+            )
+            .await
+            .expect("different key under correct purpose"),
+        calls: AtomicUsize::new(0),
+    });
+    assert_eq!(
+        execute(
+            &binding,
+            &effect_id,
+            &command,
+            wrong_key.as_ref(),
+            &authority,
+            &provider,
+        )
+        .await,
+        Err(AdapterError::Internal)
+    );
+    assert_eq!(wrong_key.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(authority.loads.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.chain_calls.load(Ordering::SeqCst), 0);
 
     let local = validate_local(&binding, &command, signer.as_ref(), &authority).expect("local");
     let reservation = Reservation::new(

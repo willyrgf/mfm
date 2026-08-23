@@ -9,9 +9,9 @@ use mfm_evm::{
     AnchoredContractCallCompletion, AnchoredContractCallContext, AnchoredContractCallFailure,
     Eip1559TransactionCommand, EvmAddress, EvmAnchoredContractCallRead, EvmAuthorityEpoch,
     EvmBlockAnchor, EvmChainInstance, EvmEndpoint, EvmHash, EvmTransactionAction,
-    EvmTransactionBinding, EvmTransactionCompletion, EvmTransactionConfirmationResult,
+    EvmTransactionBinding, EvmTransactionCompletion, EvmTransactionConfirmation,
     EvmTransactionContext, EvmTransactionEffect, EvmTransactionReversion, EvmTransactionRoute,
-    EvmU256, EvmWalletIdentity, ExecuteEvmTransaction, ReadAnchoredContractCall,
+    EvmU256, ExecuteEvmTransaction, ReadAnchoredContractCall,
 };
 use mfm_evm_live::{
     ethereum_address, evm_keccak256, register_evm_anchored_contract_calls,
@@ -31,12 +31,11 @@ use mfm_program::{
 };
 use mfm_program_derive::MfmValue;
 use mfm_runtime::{RunView, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError};
-use mfm_signing::Signer;
+use mfm_signing::Secp256k1Signer;
 use mfm_storage_postgres::{
     provision_postgres, AdminPostgresLocator, PostgresBackend, RuntimePostgresLocator,
 };
 use mfm_store::Store;
-use mfm_values::canonicalize_mfm_value;
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 use zeroize::Zeroizing;
@@ -225,8 +224,9 @@ impl PureState for PrepareConfiguration {
         else {
             unreachable!("deployment completion retains the deployment context")
         };
-        let EvmTransactionConfirmationResult::Created { created_address } =
-            input.confirmed().result()
+        let EvmTransactionConfirmation::Created {
+            created_address, ..
+        } = input.confirmed()
         else {
             unreachable!("a successful create command yields a created address")
         };
@@ -279,8 +279,8 @@ impl PureState for PrepareObservation {
             unreachable!("configuration completion retains its context")
         };
         assert!(matches!(
-            input.confirmed().result(),
-            EvmTransactionConfirmationResult::Called
+            input.confirmed(),
+            EvmTransactionConfirmation::Called { .. }
         ));
         let anchor = input.confirmed().block_anchor().clone();
         let context = EffectFlowContext::Observation {
@@ -506,7 +506,7 @@ async fn runtime(
     runtime_locator: &RuntimePostgresLocator,
     rpc_locator: &EvmAdapterLocator,
     binding: &EvmTransactionBinding,
-    signer: Arc<dyn Signer>,
+    signer: Arc<dyn Secp256k1Signer>,
     consumed: Arc<AtomicBool>,
 ) -> (Runtime, Arc<PostgresBackend>) {
     let backend = Arc::new(
@@ -1092,7 +1092,7 @@ fn expected_create_address(sender: &EvmAddress) -> EvmAddress {
     EvmAddress::new(format!("0x{}", &hash.as_str()[26..])).expect("derived CREATE address")
 }
 
-async fn generated_signer(owner: &KeystoreOwner) -> Arc<dyn Signer> {
+async fn generated_signer(owner: &KeystoreOwner) -> Arc<dyn Secp256k1Signer> {
     for _ in 0..4 {
         let mut candidate = Zeroizing::new([0_u8; 32]);
         getrandom::fill(candidate.as_mut()).expect("OS entropy");
@@ -1220,16 +1220,11 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     );
     let owner = KeystoreOwner::start().expect("keystore owner");
     let signer = generated_signer(&owner).await;
-    let public_key = signer
-        .public_identity()
-        .public_key()
-        .public_key()
-        .expect("public key");
-    let sender = ethereum_address(&public_key);
+    let sender = ethereum_address(signer.public_key());
     let binding = EvmTransactionBinding::new(
         route.clone(),
         setup_backend.authority_epoch().clone(),
-        EvmWalletIdentity::new(sender.clone(), signer.public_identity().clone()),
+        sender.clone(),
     );
     drop(setup_provider);
     drop(setup_backend);
@@ -1439,36 +1434,14 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
             panic!("both Effects must be settled")
         };
         assert_eq!(
-            state
-                .prepared()
-                .reservation()
-                .domain()
-                .key()
-                .authority_epoch(),
+            state.prepared().reservation().domain().authority_epoch(),
             binding.authority_epoch()
         );
         assert_eq!(
-            state
-                .prepared()
-                .reservation()
-                .domain()
-                .key()
-                .chain_instance(),
+            state.prepared().reservation().domain().chain_instance(),
             binding.route().chain_instance()
         );
-        assert_eq!(
-            state.prepared().reservation().domain().key().sender(),
-            &sender
-        );
-        let (_, signer_ref) = canonicalize_mfm_value(signer.public_identity()).expect("signer ref");
-        assert_eq!(
-            state
-                .prepared()
-                .reservation()
-                .domain()
-                .signer_identity_ref(),
-            &signer_ref
-        );
+        assert_eq!(state.prepared().reservation().domain().sender(), &sender);
         assert_eq!(
             evm_keccak256(state.prepared().raw_transaction().as_bytes()).expect("raw hash"),
             *state.prepared().transaction_hash()

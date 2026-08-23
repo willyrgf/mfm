@@ -30,16 +30,16 @@ pub type Result<T> = std::result::Result<T, AuthorityError>;
 /// Boxed object-safe asynchronous authority operation.
 pub type AuthorityFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
-/// Exact nonce-domain key, excluding endpoint and signer-label dimensions.
+/// Exact nonce domain, excluding endpoint and custody-provider dimensions.
 #[derive(Clone, PartialEq, Eq)]
-pub struct NonceDomainKey {
+pub struct NonceDomain {
     authority_epoch: EvmAuthorityEpoch,
     chain_instance: EvmChainInstance,
     sender: EvmAddress,
 }
 
-impl NonceDomainKey {
-    /// Constructs a domain key from checked public identities.
+impl NonceDomain {
+    /// Constructs a nonce domain from checked public identities.
     pub fn new(
         authority_epoch: EvmAuthorityEpoch,
         chain_instance: EvmChainInstance,
@@ -65,33 +65,6 @@ impl NonceDomainKey {
     /// Returns the exact sender address.
     pub const fn sender(&self) -> &EvmAddress {
         &self.sender
-    }
-}
-
-/// Nonce domain plus its immutable compared signer identity.
-#[derive(Clone, PartialEq, Eq)]
-pub struct NonceDomain {
-    key: NonceDomainKey,
-    signer_identity_ref: ContentRef,
-}
-
-impl NonceDomain {
-    /// Constructs one exact nonce domain.
-    pub fn new(key: NonceDomainKey, signer_identity_ref: ContentRef) -> Self {
-        Self {
-            key,
-            signer_identity_ref,
-        }
-    }
-
-    /// Returns the exact nonce-domain key.
-    pub const fn key(&self) -> &NonceDomainKey {
-        &self.key
-    }
-
-    /// Returns the immutable compared signer identity reference.
-    pub const fn signer_identity_ref(&self) -> &ContentRef {
-        &self.signer_identity_ref
     }
 }
 

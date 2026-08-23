@@ -2,7 +2,7 @@
 name = "mfm-signing"
 version = "0.1.0"
 edition = "2021"
-description = "Public signing metadata and bounded signer contracts for MFM"
+description = "Transient checked recoverable-secp256k1 signing contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
@@ -12,12 +12,9 @@ layer = "signing"
 
 [dependencies]
 k256 = { workspace = true }
-mfm-canonical = { path = "../kernel/canonical" }
 mfm-ids = { path = "../kernel/ids" }
-mfm-program-derive = { path = "../kernel/program-derive" }
-mfm-values = { path = "../kernel/values" }
-serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
+serde = { workspace = true }
+trybuild = "1.0"
