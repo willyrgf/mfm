@@ -133,13 +133,6 @@ pub(crate) fn qualify_hot<T: MfmValue>(
 }
 
 #[derive(Clone, PartialEq, Eq)]
-enum StateMode {
-    Pure,
-    Read(Box<ReadSignature>),
-    Effect(Box<EffectSignature>),
-}
-
-#[derive(Clone, PartialEq, Eq)]
 struct ReadSignature {
     capability_type: TypeId,
     capability_contract_ref: ContentRef,
@@ -156,359 +149,177 @@ struct EffectSignature {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct StateSignature {
+struct StateSignature {
     state_type: TypeId,
     state_implementation_ref: ContentRef,
     input_contract_ref: ContentRef,
     output_contract_ref: ContentRef,
     failure_contract_ref: ContentRef,
-    mode: StateMode,
 }
 
-pub(crate) trait RegisteredState: Send + Sync {
-    fn signature(&self) -> &StateSignature;
+pub(crate) type PureStart =
+    for<'a> fn(QualifiedValue, DriverContext<'a>) -> BoxFuture<'a, Result<DriverDisposition>>;
+pub(crate) type ReadStart = for<'a> fn(
+    QualifiedValue,
+    DriverContext<'a>,
+    Arc<ErasedReadAdapterCallback>,
+) -> BoxFuture<'a, Result<DriverDisposition>>;
+pub(crate) type EffectPrepareStart =
+    for<'a> fn(QualifiedValue, DriverContext<'a>) -> BoxFuture<'a, Result<DriverDisposition>>;
+pub(crate) type EffectPendingStart = for<'a> fn(
+    QualifiedValue,
+    EffectId,
+    QualifiedValue,
+    DriverContext<'a>,
+    Arc<ErasedEffectAdapterCallback>,
+) -> BoxFuture<'a, Result<DriverDisposition>>;
+type ReadValidator = fn(&QualifiedValue, &QualifiedValue) -> Result<()>;
+type EffectPrepareValidator = fn(&QualifiedValue, &QualifiedValue) -> Result<()>;
+type EffectEvidenceValidator = fn(&EffectId, &QualifiedValue, &QualifiedValue) -> Result<()>;
 
-    fn associate(
-        &self,
-        declaration: &StateDeclaration,
-        read_adapters: &ReadAdapterRegistry,
-        effect_adapters: &EffectAdapterRegistry,
-    ) -> Result<Arc<dyn RegisteredState>>;
-
-    fn validate_retained_read(
-        &self,
-        intent: &QualifiedValue,
-        evidence: &QualifiedValue,
-    ) -> Result<()>;
-
-    fn validate_retained_effect_prepare(
-        &self,
-        input: &QualifiedValue,
-        command: &QualifiedValue,
-    ) -> Result<()>;
-
-    fn validate_retained_effect_evidence(
-        &self,
-        effect_id: &EffectId,
-        command: &QualifiedValue,
-        evidence: &QualifiedValue,
-    ) -> Result<()>;
-
-    fn start<'a>(
-        &'a self,
-        input: QualifiedValue,
-        context: DriverContext<'a>,
-    ) -> BoxFuture<'a, Result<DriverDisposition>>;
-
-    fn start_pending<'a>(
-        &'a self,
-        input: QualifiedValue,
-        effect_id: EffectId,
-        command: QualifiedValue,
-        context: DriverContext<'a>,
-    ) -> BoxFuture<'a, Result<DriverDisposition>>;
-}
-
-struct PureDriver<S> {
+struct RegisteredState {
     signature: StateSignature,
-    marker: std::marker::PhantomData<fn() -> S>,
+    mode: RegisteredMode,
 }
 
-impl<S: PureState> RegisteredState for PureDriver<S> {
-    fn signature(&self) -> &StateSignature {
-        &self.signature
-    }
+enum RegisteredMode {
+    Pure {
+        start: PureStart,
+    },
+    Read {
+        signature: ReadSignature,
+        start: ReadStart,
+        validate_retained: ReadValidator,
+    },
+    Effect {
+        signature: EffectSignature,
+        prepare: EffectPrepareStart,
+        start_pending: EffectPendingStart,
+        validate_prepare: EffectPrepareValidator,
+        validate_evidence: EffectEvidenceValidator,
+    },
+}
 
-    fn associate(
-        &self,
-        declaration: &StateDeclaration,
-        _read_adapters: &ReadAdapterRegistry,
-        _effect_adapters: &EffectAdapterRegistry,
-    ) -> Result<Arc<dyn RegisteredState>> {
-        if !declaration.execution().is_pure() || !declaration_matches(&self.signature, declaration)
-        {
-            return Err(RuntimeError::IncompatibleAssembly);
+impl RegisteredState {
+    fn has_same_registration(&self, other: &Self) -> bool {
+        if self.signature != other.signature {
+            return false;
         }
-        Ok(Arc::new(Self {
-            signature: self.signature.clone(),
-            marker: std::marker::PhantomData,
-        }))
-    }
-
-    fn validate_retained_read(
-        &self,
-        _intent: &QualifiedValue,
-        _evidence: &QualifiedValue,
-    ) -> Result<()> {
-        Err(RuntimeError::InvalidHistory)
-    }
-
-    fn validate_retained_effect_prepare(
-        &self,
-        _input: &QualifiedValue,
-        _command: &QualifiedValue,
-    ) -> Result<()> {
-        Err(RuntimeError::InvalidHistory)
-    }
-
-    fn validate_retained_effect_evidence(
-        &self,
-        _effect_id: &EffectId,
-        _command: &QualifiedValue,
-        _evidence: &QualifiedValue,
-    ) -> Result<()> {
-        Err(RuntimeError::InvalidHistory)
-    }
-
-    fn start<'a>(
-        &'a self,
-        input: QualifiedValue,
-        context: DriverContext<'a>,
-    ) -> BoxFuture<'a, Result<DriverDisposition>> {
-        Box::pin(engine::start_pure::<S>(input, context))
-    }
-
-    fn start_pending<'a>(
-        &'a self,
-        _input: QualifiedValue,
-        _effect_id: EffectId,
-        _command: QualifiedValue,
-        _context: DriverContext<'a>,
-    ) -> BoxFuture<'a, Result<DriverDisposition>> {
-        Box::pin(async { Err(RuntimeError::Internal) })
+        match (&self.mode, &other.mode) {
+            (RegisteredMode::Pure { .. }, RegisteredMode::Pure { .. }) => true,
+            (
+                RegisteredMode::Read { signature, .. },
+                RegisteredMode::Read {
+                    signature: other, ..
+                },
+            ) => signature == other,
+            (
+                RegisteredMode::Effect { signature, .. },
+                RegisteredMode::Effect {
+                    signature: other, ..
+                },
+            ) => signature == other,
+            _ => false,
+        }
     }
 }
 
-struct ReadDriver<S, C>
-where
-    C: ReadCapabilityContract,
-{
-    signature: StateSignature,
-    adapter: Option<Arc<ErasedReadAdapterCallback>>,
-    marker: std::marker::PhantomData<fn() -> (S, C)>,
+fn start_pure<'a, S: PureState>(
+    input: QualifiedValue,
+    context: DriverContext<'a>,
+) -> BoxFuture<'a, Result<DriverDisposition>> {
+    Box::pin(engine::start_pure::<S>(input, context))
 }
 
-impl<S, C> RegisteredState for ReadDriver<S, C>
+fn start_read<'a, S, C>(
+    input: QualifiedValue,
+    context: DriverContext<'a>,
+    adapter: Arc<ErasedReadAdapterCallback>,
+) -> BoxFuture<'a, Result<DriverDisposition>>
 where
     S: ReadState<C>,
     C: ReadCapabilityContract,
 {
-    fn signature(&self) -> &StateSignature {
-        &self.signature
-    }
-
-    fn associate(
-        &self,
-        declaration: &StateDeclaration,
-        read_adapters: &ReadAdapterRegistry,
-        _effect_adapters: &EffectAdapterRegistry,
-    ) -> Result<Arc<dyn RegisteredState>> {
-        if !declaration.execution().is_read() || !declaration_matches(&self.signature, declaration)
-        {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
-        let StateMode::Read(read) = &self.signature.mode else {
-            return Err(RuntimeError::IncompatibleAssembly);
-        };
-        let binding_ref = declaration
-            .execution()
-            .binding_ref()
-            .ok_or(RuntimeError::IncompatibleAssembly)?;
-        let entry = read_adapters
-            .get(&read.capability_contract_ref)
-            .and_then(|bindings| bindings.get(binding_ref))
-            .ok_or(RuntimeError::IncompatibleAssembly)?;
-        if entry.capability_type != TypeId::of::<C>() {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
-        Ok(Arc::new(Self {
-            signature: self.signature.clone(),
-            adapter: Some(Arc::clone(&entry.callback)),
-            marker: std::marker::PhantomData,
-        }))
-    }
-
-    fn validate_retained_read(
-        &self,
-        intent: &QualifiedValue,
-        evidence: &QualifiedValue,
-    ) -> Result<()> {
-        let intent = intent
-            .typed
-            .downcast_ref::<C::Intent>()
-            .ok_or(RuntimeError::InvalidHistory)?;
-        let evidence = evidence
-            .typed
-            .downcast_ref::<C::Evidence>()
-            .ok_or(RuntimeError::InvalidHistory)?;
-        C::bind_evidence(intent, evidence).map_err(|_| RuntimeError::InvalidHistory)
-    }
-
-    fn validate_retained_effect_prepare(
-        &self,
-        _input: &QualifiedValue,
-        _command: &QualifiedValue,
-    ) -> Result<()> {
-        Err(RuntimeError::InvalidHistory)
-    }
-
-    fn validate_retained_effect_evidence(
-        &self,
-        _effect_id: &EffectId,
-        _command: &QualifiedValue,
-        _evidence: &QualifiedValue,
-    ) -> Result<()> {
-        Err(RuntimeError::InvalidHistory)
-    }
-
-    fn start<'a>(
-        &'a self,
-        input: QualifiedValue,
-        context: DriverContext<'a>,
-    ) -> BoxFuture<'a, Result<DriverDisposition>> {
-        let Some(adapter) = self.adapter.as_ref() else {
-            return Box::pin(async { Err(RuntimeError::Internal) });
-        };
-        Box::pin(engine::start_read::<S, C>(
-            input,
-            context,
-            Arc::clone(adapter),
-        ))
-    }
-
-    fn start_pending<'a>(
-        &'a self,
-        _input: QualifiedValue,
-        _effect_id: EffectId,
-        _command: QualifiedValue,
-        _context: DriverContext<'a>,
-    ) -> BoxFuture<'a, Result<DriverDisposition>> {
-        Box::pin(async { Err(RuntimeError::Internal) })
-    }
+    Box::pin(engine::start_read::<S, C>(input, context, adapter))
 }
 
-struct EffectDriver<S, C>
-where
-    C: EffectCapabilityContract,
-{
-    signature: StateSignature,
-    adapter: Option<Arc<ErasedEffectAdapterCallback>>,
-    marker: std::marker::PhantomData<fn() -> (S, C)>,
+fn validate_read<C: ReadCapabilityContract>(
+    intent: &QualifiedValue,
+    evidence: &QualifiedValue,
+) -> Result<()> {
+    let intent = intent
+        .typed
+        .downcast_ref::<C::Intent>()
+        .ok_or(RuntimeError::InvalidHistory)?;
+    let evidence = evidence
+        .typed
+        .downcast_ref::<C::Evidence>()
+        .ok_or(RuntimeError::InvalidHistory)?;
+    C::bind_evidence(intent, evidence).map_err(|_| RuntimeError::InvalidHistory)
 }
 
-impl<S, C> RegisteredState for EffectDriver<S, C>
+fn prepare_effect<'a, S, C>(
+    input: QualifiedValue,
+    context: DriverContext<'a>,
+) -> BoxFuture<'a, Result<DriverDisposition>>
 where
     S: EffectState<C>,
     C: EffectCapabilityContract,
 {
-    fn signature(&self) -> &StateSignature {
-        &self.signature
-    }
-
-    fn associate(
-        &self,
-        declaration: &StateDeclaration,
-        _read_adapters: &ReadAdapterRegistry,
-        effect_adapters: &EffectAdapterRegistry,
-    ) -> Result<Arc<dyn RegisteredState>> {
-        if !declaration.execution().is_effect()
-            || !declaration_matches(&self.signature, declaration)
-        {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
-        let StateMode::Effect(effect) = &self.signature.mode else {
-            return Err(RuntimeError::IncompatibleAssembly);
-        };
-        let binding_ref = declaration
-            .execution()
-            .binding_ref()
-            .ok_or(RuntimeError::IncompatibleAssembly)?;
-        let entry = effect_adapters
-            .get(&effect.capability_contract_ref)
-            .and_then(|bindings| bindings.get(binding_ref))
-            .ok_or(RuntimeError::IncompatibleAssembly)?;
-        if entry.capability_type != TypeId::of::<C>() {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
-        Ok(Arc::new(Self {
-            signature: self.signature.clone(),
-            adapter: Some(Arc::clone(&entry.callback)),
-            marker: std::marker::PhantomData,
-        }))
-    }
-
-    fn validate_retained_read(
-        &self,
-        _intent: &QualifiedValue,
-        _evidence: &QualifiedValue,
-    ) -> Result<()> {
-        Err(RuntimeError::InvalidHistory)
-    }
-
-    fn validate_retained_effect_prepare(
-        &self,
-        input: &QualifiedValue,
-        command: &QualifiedValue,
-    ) -> Result<()> {
-        let input = input
-            .typed
-            .downcast_ref::<S::Input>()
-            .ok_or(RuntimeError::InvalidHistory)?;
-        let expected = S::prepare(input).map_err(|_| RuntimeError::InvalidHistory)?;
-        let expected = qualify_hot(expected).map_err(|_| RuntimeError::InvalidHistory)?;
-        ((expected.contract_ref == command.contract_ref)
-            && (expected.value_ref == command.value_ref)
-            && (expected.canonical == command.canonical))
-            .then_some(())
-            .ok_or(RuntimeError::InvalidHistory)
-    }
-
-    fn validate_retained_effect_evidence(
-        &self,
-        effect_id: &EffectId,
-        command: &QualifiedValue,
-        evidence: &QualifiedValue,
-    ) -> Result<()> {
-        let command = command
-            .typed
-            .downcast_ref::<C::Command>()
-            .ok_or(RuntimeError::InvalidHistory)?;
-        let evidence = evidence
-            .typed
-            .downcast_ref::<C::Evidence>()
-            .ok_or(RuntimeError::InvalidHistory)?;
-        C::bind_evidence(effect_id, command, evidence).map_err(|_| RuntimeError::InvalidHistory)
-    }
-
-    fn start<'a>(
-        &'a self,
-        input: QualifiedValue,
-        context: DriverContext<'a>,
-    ) -> BoxFuture<'a, Result<DriverDisposition>> {
-        Box::pin(engine::start_effect::<S, C>(input, context))
-    }
-
-    fn start_pending<'a>(
-        &'a self,
-        input: QualifiedValue,
-        effect_id: EffectId,
-        command: QualifiedValue,
-        context: DriverContext<'a>,
-    ) -> BoxFuture<'a, Result<DriverDisposition>> {
-        let Some(adapter) = self.adapter.as_ref() else {
-            return Box::pin(async { Err(RuntimeError::Internal) });
-        };
-        Box::pin(engine::start_pending_effect::<S, C>(
-            input,
-            effect_id,
-            command,
-            context,
-            Arc::clone(adapter),
-        ))
-    }
+    Box::pin(engine::start_effect::<S, C>(input, context))
 }
 
-fn declaration_matches(signature: &StateSignature, declaration: &StateDeclaration) -> bool {
+fn start_pending_effect<'a, S, C>(
+    input: QualifiedValue,
+    effect_id: EffectId,
+    command: QualifiedValue,
+    context: DriverContext<'a>,
+    adapter: Arc<ErasedEffectAdapterCallback>,
+) -> BoxFuture<'a, Result<DriverDisposition>>
+where
+    S: EffectState<C>,
+    C: EffectCapabilityContract,
+{
+    Box::pin(engine::start_pending_effect::<S, C>(
+        input, effect_id, command, context, adapter,
+    ))
+}
+
+fn validate_effect_prepare<S, C>(input: &QualifiedValue, command: &QualifiedValue) -> Result<()>
+where
+    S: EffectState<C>,
+    C: EffectCapabilityContract,
+{
+    let input = input
+        .typed
+        .downcast_ref::<S::Input>()
+        .ok_or(RuntimeError::InvalidHistory)?;
+    let expected = S::prepare(input).map_err(|_| RuntimeError::InvalidHistory)?;
+    let expected = qualify_hot(expected).map_err(|_| RuntimeError::InvalidHistory)?;
+    ((expected.contract_ref == command.contract_ref)
+        && (expected.value_ref == command.value_ref)
+        && (expected.canonical == command.canonical))
+        .then_some(())
+        .ok_or(RuntimeError::InvalidHistory)
+}
+
+fn validate_effect_evidence<C: EffectCapabilityContract>(
+    effect_id: &EffectId,
+    command: &QualifiedValue,
+    evidence: &QualifiedValue,
+) -> Result<()> {
+    let command = command
+        .typed
+        .downcast_ref::<C::Command>()
+        .ok_or(RuntimeError::InvalidHistory)?;
+    let evidence = evidence
+        .typed
+        .downcast_ref::<C::Evidence>()
+        .ok_or(RuntimeError::InvalidHistory)?;
+    C::bind_evidence(effect_id, command, evidence).map_err(|_| RuntimeError::InvalidHistory)
+}
+
+fn state_contract_matches(signature: &StateSignature, declaration: &StateDeclaration) -> bool {
     if declaration.state_implementation_ref() != &signature.state_implementation_ref
         || declaration.input_contract_ref() != &signature.input_contract_ref
         || declaration.output_contract_ref() != &signature.output_contract_ref
@@ -516,26 +327,7 @@ fn declaration_matches(signature: &StateSignature, declaration: &StateDeclaratio
     {
         return false;
     }
-    match &signature.mode {
-        StateMode::Pure => declaration.execution().is_pure(),
-        StateMode::Read(read) => {
-            declaration.execution().is_read()
-                && declaration.execution().capability_contract_ref()
-                    == Some(&read.capability_contract_ref)
-                && declaration.execution().intent_contract_ref() == Some(&read.intent_contract_ref)
-                && declaration.execution().evidence_contract_ref()
-                    == Some(&read.evidence_contract_ref)
-        }
-        StateMode::Effect(effect) => {
-            declaration.execution().is_effect()
-                && declaration.execution().capability_contract_ref()
-                    == Some(&effect.capability_contract_ref)
-                && declaration.execution().command_contract_ref()
-                    == Some(&effect.command_contract_ref)
-                && declaration.execution().evidence_contract_ref()
-                    == Some(&effect.evidence_contract_ref)
-        }
-    }
+    true
 }
 
 struct CatchAdapterPanic<'a, T> {
@@ -654,7 +446,7 @@ struct EffectCapabilitySignature {
 pub struct RuntimeAssemblyBuilder {
     values: BTreeMap<ContentRef, Arc<ValueCodec>>,
     semantics: BTreeMap<SemanticTypeId, ContentRef>,
-    states: BTreeMap<ContentRef, Arc<dyn RegisteredState>>,
+    states: BTreeMap<ContentRef, RegisteredState>,
     read_capabilities: BTreeMap<ContentRef, CapabilitySignature>,
     effect_capabilities: BTreeMap<ContentRef, EffectCapabilitySignature>,
     read_adapters: ReadAdapterRegistry,
@@ -727,14 +519,12 @@ impl RuntimeAssemblyBuilder {
         self.register_value::<S::Input>()?;
         self.register_value::<S::Output>()?;
         self.register_value::<S::Failure>()?;
-        let signature = state_signature::<S>(StateMode::Pure)?;
-        self.register_state(
-            signature.clone(),
-            Arc::new(PureDriver::<S> {
-                signature,
-                marker: std::marker::PhantomData,
-            }),
-        )
+        self.register_state(RegisteredState {
+            signature: state_signature::<S>()?,
+            mode: RegisteredMode::Pure {
+                start: start_pure::<S>,
+            },
+        })
     }
 
     /// Registers one Read State, capability, and complete value ABI.
@@ -749,21 +539,20 @@ impl RuntimeAssemblyBuilder {
         self.register_value::<C::Intent>()?;
         self.register_value::<C::Evidence>()?;
         let capability = self.ensure_capability::<C>()?;
-        let signature = state_signature::<S>(StateMode::Read(Box::new(ReadSignature {
-            capability_type: TypeId::of::<C>(),
-            capability_contract_ref: capability_contract_ref::<C>()
-                .map_err(|_| RuntimeError::IncompatibleAssembly)?,
-            intent_contract_ref: capability.intent_contract_ref,
-            evidence_contract_ref: capability.evidence_contract_ref,
-        })))?;
-        self.register_state(
-            signature.clone(),
-            Arc::new(ReadDriver::<S, C> {
-                signature,
-                adapter: None,
-                marker: std::marker::PhantomData,
-            }),
-        )
+        self.register_state(RegisteredState {
+            signature: state_signature::<S>()?,
+            mode: RegisteredMode::Read {
+                signature: ReadSignature {
+                    capability_type: TypeId::of::<C>(),
+                    capability_contract_ref: capability_contract_ref::<C>()
+                        .map_err(|_| RuntimeError::IncompatibleAssembly)?,
+                    intent_contract_ref: capability.intent_contract_ref,
+                    evidence_contract_ref: capability.evidence_contract_ref,
+                },
+                start: start_read::<S, C>,
+                validate_retained: validate_read::<C>,
+            },
+        })
     }
 
     /// Registers one Effect State, capability, and complete value ABI.
@@ -778,21 +567,22 @@ impl RuntimeAssemblyBuilder {
         self.register_value::<C::Command>()?;
         self.register_value::<C::Evidence>()?;
         let capability = self.ensure_effect_capability::<C>()?;
-        let signature = state_signature::<S>(StateMode::Effect(Box::new(EffectSignature {
-            capability_type: TypeId::of::<C>(),
-            capability_contract_ref: effect_capability_contract_ref::<C>()
-                .map_err(|_| RuntimeError::IncompatibleAssembly)?,
-            command_contract_ref: capability.command_contract_ref,
-            evidence_contract_ref: capability.evidence_contract_ref,
-        })))?;
-        self.register_state(
-            signature.clone(),
-            Arc::new(EffectDriver::<S, C> {
-                signature,
-                adapter: None,
-                marker: std::marker::PhantomData,
-            }),
-        )
+        self.register_state(RegisteredState {
+            signature: state_signature::<S>()?,
+            mode: RegisteredMode::Effect {
+                signature: EffectSignature {
+                    capability_type: TypeId::of::<C>(),
+                    capability_contract_ref: effect_capability_contract_ref::<C>()
+                        .map_err(|_| RuntimeError::IncompatibleAssembly)?,
+                    command_contract_ref: capability.command_contract_ref,
+                    evidence_contract_ref: capability.evidence_contract_ref,
+                },
+                prepare: prepare_effect::<S, C>,
+                start_pending: start_pending_effect::<S, C>,
+                validate_prepare: validate_effect_prepare::<S, C>,
+                validate_evidence: validate_effect_evidence::<C>,
+            },
+        })
     }
 
     /// Registers one typed adapter under its internally derived binding ref.
@@ -891,18 +681,15 @@ impl RuntimeAssemblyBuilder {
         })
     }
 
-    fn register_state(
-        &mut self,
-        signature: StateSignature,
-        driver: Arc<dyn RegisteredState>,
-    ) -> Result<()> {
-        let key = signature.state_implementation_ref.clone();
+    fn register_state(&mut self, state: RegisteredState) -> Result<()> {
+        let key = state.signature.state_implementation_ref.clone();
         if let Some(previous) = self.states.get(&key) {
-            return (previous.signature() == &signature)
+            return previous
+                .has_same_registration(&state)
                 .then_some(())
                 .ok_or(RuntimeError::IncompatibleAssembly);
         }
-        self.states.insert(key, driver);
+        self.states.insert(key, state);
         Ok(())
     }
 
@@ -961,7 +748,7 @@ impl RuntimeAssemblyBuilder {
     }
 }
 
-fn state_signature<S: mfm_program::State>(mode: StateMode) -> Result<StateSignature> {
+fn state_signature<S: mfm_program::State>() -> Result<StateSignature> {
     Ok(StateSignature {
         state_type: TypeId::of::<S>(),
         state_implementation_ref: state_implementation_ref::<S>()
@@ -972,7 +759,6 @@ fn state_signature<S: mfm_program::State>(mode: StateMode) -> Result<StateSignat
             .map_err(|_| RuntimeError::IncompatibleAssembly)?,
         failure_contract_ref: nominal_contract_ref::<S::Failure>()
             .map_err(|_| RuntimeError::IncompatibleAssembly)?,
-        mode,
     })
 }
 
@@ -983,7 +769,7 @@ pub struct RuntimeAssembly {
 
 pub(crate) struct AssemblyInner {
     values: BTreeMap<ContentRef, Arc<ValueCodec>>,
-    states: BTreeMap<ContentRef, Arc<dyn RegisteredState>>,
+    states: BTreeMap<ContentRef, RegisteredState>,
     read_adapters: ReadAdapterRegistry,
     effect_adapters: EffectAdapterRegistry,
 }
@@ -1011,68 +797,111 @@ impl RuntimeAssembly {
                         .states
                         .get(state.state_implementation_ref())
                         .ok_or(RuntimeError::IncompatibleAssembly)?;
-                    let bound = registered.associate(
-                        state,
-                        &self.inner.read_adapters,
-                        &self.inner.effect_adapters,
-                    )?;
+                    if !state_contract_matches(&registered.signature, state) {
+                        return Err(RuntimeError::IncompatibleAssembly);
+                    }
                     let output_codec = self
                         .codec(state.output_contract_ref())
                         .ok_or(RuntimeError::IncompatibleAssembly)?;
                     let failure_codec = self
                         .codec(state.failure_contract_ref())
                         .ok_or(RuntimeError::IncompatibleAssembly)?;
-                    let (read_codecs, effect_codecs) = if state.execution().is_pure() {
-                        (None, None)
-                    } else if state.execution().is_read() {
-                        let intent = state
-                            .execution()
-                            .intent_contract_ref()
-                            .ok_or(RuntimeError::IncompatibleAssembly)?;
-                        let evidence = state
-                            .execution()
-                            .evidence_contract_ref()
-                            .ok_or(RuntimeError::IncompatibleAssembly)?;
-                        (
-                            Some(ReadCodecs {
-                                intent: self
-                                    .codec(intent)
+                    let mode = match &registered.mode {
+                        RegisteredMode::Pure { start } => {
+                            if !state.execution().is_pure() {
+                                return Err(RuntimeError::IncompatibleAssembly);
+                            }
+                            ExecutableMode::Pure { start: *start }
+                        }
+                        RegisteredMode::Read {
+                            signature,
+                            start,
+                            validate_retained,
+                        } => {
+                            if !state.execution().is_read()
+                                || state.execution().capability_contract_ref()
+                                    != Some(&signature.capability_contract_ref)
+                                || state.execution().intent_contract_ref()
+                                    != Some(&signature.intent_contract_ref)
+                                || state.execution().evidence_contract_ref()
+                                    != Some(&signature.evidence_contract_ref)
+                            {
+                                return Err(RuntimeError::IncompatibleAssembly);
+                            }
+                            let binding_ref = state
+                                .execution()
+                                .binding_ref()
+                                .ok_or(RuntimeError::IncompatibleAssembly)?;
+                            let adapter = self
+                                .inner
+                                .read_adapters
+                                .get(&signature.capability_contract_ref)
+                                .and_then(|bindings| bindings.get(binding_ref))
+                                .ok_or(RuntimeError::IncompatibleAssembly)?;
+                            if adapter.capability_type != signature.capability_type {
+                                return Err(RuntimeError::IncompatibleAssembly);
+                            }
+                            ExecutableMode::Read {
+                                start: *start,
+                                validate_retained: *validate_retained,
+                                adapter: Arc::clone(&adapter.callback),
+                                intent_codec: self
+                                    .codec(&signature.intent_contract_ref)
                                     .ok_or(RuntimeError::IncompatibleAssembly)?,
-                                evidence: self
-                                    .codec(evidence)
+                                evidence_codec: self
+                                    .codec(&signature.evidence_contract_ref)
                                     .ok_or(RuntimeError::IncompatibleAssembly)?,
-                            }),
-                            None,
-                        )
-                    } else if state.execution().is_effect() {
-                        let command = state
-                            .execution()
-                            .command_contract_ref()
-                            .ok_or(RuntimeError::IncompatibleAssembly)?;
-                        let evidence = state
-                            .execution()
-                            .evidence_contract_ref()
-                            .ok_or(RuntimeError::IncompatibleAssembly)?;
-                        (
-                            None,
-                            Some(EffectCodecs {
-                                command: self
-                                    .codec(command)
+                            }
+                        }
+                        RegisteredMode::Effect {
+                            signature,
+                            prepare,
+                            start_pending,
+                            validate_prepare,
+                            validate_evidence,
+                        } => {
+                            if !state.execution().is_effect()
+                                || state.execution().capability_contract_ref()
+                                    != Some(&signature.capability_contract_ref)
+                                || state.execution().command_contract_ref()
+                                    != Some(&signature.command_contract_ref)
+                                || state.execution().evidence_contract_ref()
+                                    != Some(&signature.evidence_contract_ref)
+                            {
+                                return Err(RuntimeError::IncompatibleAssembly);
+                            }
+                            let binding_ref = state
+                                .execution()
+                                .binding_ref()
+                                .ok_or(RuntimeError::IncompatibleAssembly)?;
+                            let adapter = self
+                                .inner
+                                .effect_adapters
+                                .get(&signature.capability_contract_ref)
+                                .and_then(|bindings| bindings.get(binding_ref))
+                                .ok_or(RuntimeError::IncompatibleAssembly)?;
+                            if adapter.capability_type != signature.capability_type {
+                                return Err(RuntimeError::IncompatibleAssembly);
+                            }
+                            ExecutableMode::Effect {
+                                prepare: *prepare,
+                                start_pending: *start_pending,
+                                validate_prepare: *validate_prepare,
+                                validate_evidence: *validate_evidence,
+                                adapter: Arc::clone(&adapter.callback),
+                                command_codec: self
+                                    .codec(&signature.command_contract_ref)
                                     .ok_or(RuntimeError::IncompatibleAssembly)?,
-                                evidence: self
-                                    .codec(evidence)
+                                evidence_codec: self
+                                    .codec(&signature.evidence_contract_ref)
                                     .ok_or(RuntimeError::IncompatibleAssembly)?,
-                            }),
-                        )
-                    } else {
-                        return Err(RuntimeError::IncompatibleAssembly);
+                            }
+                        }
                     };
                     declarations.push(ExecutableDeclaration::State(ExecutableState {
-                        driver: bound,
                         output_codec,
                         failure_codec,
-                        read_codecs,
-                        effect_codecs,
+                        mode,
                     }));
                 }
                 Declaration::Match(selector) => {
@@ -1118,21 +947,31 @@ pub(crate) enum ExecutableDeclaration {
 }
 
 pub(crate) struct ExecutableState {
-    pub(crate) driver: Arc<dyn RegisteredState>,
     pub(crate) output_codec: Arc<ValueCodec>,
     pub(crate) failure_codec: Arc<ValueCodec>,
-    pub(crate) read_codecs: Option<ReadCodecs>,
-    pub(crate) effect_codecs: Option<EffectCodecs>,
+    pub(crate) mode: ExecutableMode,
 }
 
-pub(crate) struct ReadCodecs {
-    pub(crate) intent: Arc<ValueCodec>,
-    pub(crate) evidence: Arc<ValueCodec>,
-}
-
-pub(crate) struct EffectCodecs {
-    pub(crate) command: Arc<ValueCodec>,
-    pub(crate) evidence: Arc<ValueCodec>,
+pub(crate) enum ExecutableMode {
+    Pure {
+        start: PureStart,
+    },
+    Read {
+        start: ReadStart,
+        validate_retained: ReadValidator,
+        adapter: Arc<ErasedReadAdapterCallback>,
+        intent_codec: Arc<ValueCodec>,
+        evidence_codec: Arc<ValueCodec>,
+    },
+    Effect {
+        prepare: EffectPrepareStart,
+        start_pending: EffectPendingStart,
+        validate_prepare: EffectPrepareValidator,
+        validate_evidence: EffectEvidenceValidator,
+        adapter: Arc<ErasedEffectAdapterCallback>,
+        command_codec: Arc<ValueCodec>,
+        evidence_codec: Arc<ValueCodec>,
+    },
 }
 
 pub(crate) struct MatchProjection {

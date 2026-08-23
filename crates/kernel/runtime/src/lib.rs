@@ -2,8 +2,8 @@
 //! Immutable typed Runtime assembly and caller-driven run progression.
 //!
 //! Runtime is the sole semantic fold owner. Store supplies complete opaque
-//! prefixes, Journal qualifies them, and registered typed drivers execute only
-//! the currently selected State.
+//! prefixes, Journal qualifies them, and the associated mode-specific
+//! executable runs only the currently selected State.
 
 mod assembly;
 mod engine;

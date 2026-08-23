@@ -2,7 +2,9 @@
 
 RuntimeAssemblyBuilder registers typed values, Pure/Read/Effect States, Match descriptors, and
 separate Read and Effect adapters. `finish` produces one immutable assembly. Program association
-pre-resolves all exact contracts and callbacks before execution.
+pre-resolves each State into one closed mode-specific executable with only its valid functions,
+codecs, validators, and exact callback. Fold state keeps only declaration identity and qualified
+values; execution never performs a registry lookup or carries a second driver object.
 
 Runtime owns `start`, `resume`, `read`, and the sole hot/cold semantic fold. It appends genesis and
 fused Pure/Read conclusions through Store. An Effect first appends its exact command and derived
