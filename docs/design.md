@@ -16,9 +16,9 @@ setup, and scope boundaries are erased; only the immutable State/Match graph is 
 
 Pure States deterministically map typed input to typed success/failure. Read States deterministically
 prepare typed intent, then interpret typed evidence. Effect States deterministically prepare a
-complete command and interpret typed settlement evidence. Runtime associates all values, State
-drivers, Match projections, and mode-specific `(capability contract, binding ref)` adapters before
-execution. State code has no ambient IO.
+complete command and interpret typed settlement evidence. Runtime associates all values,
+mode-specific State executables, Match projections, and exact `(capability contract, binding ref)`
+adapters before execution. State code has no ambient IO.
 
 Each Read or Effect occurrence applies the exact capability/State pair's authoring-time injection
 policy. Injection may add deterministic Pure topology before or after the one kernel-owned

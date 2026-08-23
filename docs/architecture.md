@@ -18,10 +18,12 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning and compiled component inventory; shared client RunId generation and JSON models | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
 | Binaries | bounded transport parsing, one Application call, transport policy, and redacted rendering | composition, domain planning, environment resolution, execution lifecycle, or run semantics |
 
-RuntimeAssemblyBuilder registers exact value codecs, Pure/Read/Effect State drivers, Match
-descriptors, and mode-specific callbacks. `finish` freezes one immutable assembly. Program
-association pre-resolves every implementation and callback; the fold performs no public registry
-lookup and exposes no erased value workflow.
+RuntimeAssemblyBuilder registers exact value codecs, closed Pure/Read/Effect State modes, Match
+descriptors, and separate Read/Effect callbacks. `finish` freezes one immutable assembly. Program
+association converts each registered mode into one mode-specific executable carrying only its valid
+functions, codecs, validators, and exact callback. Fold state retains declaration identity and
+qualified values only; hot execution and cold qualification index the already-associated executable
+Program. The fold performs no public registry lookup and exposes no erased value workflow.
 
 Application's private compiled State table couples each State's domain-owned inspection metadata to
 the same monomorphized Runtime registration function used by live composition. The component
@@ -32,7 +34,7 @@ The progression sequence is:
 
 ```text
 caller -> Application -> Runtime -> Journal frame -> Store append
-                                  -> Pure driver
+                                  -> Pure State
                                   -> Read adapter -> provider
                                   -> Effect prepare -> Store append -> Effect adapter
                                                      -> Effect conclusion -> Store append

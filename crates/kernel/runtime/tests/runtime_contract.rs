@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -901,76 +902,58 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
     );
 }
 
-struct SequenceIndeterminateStore {
-    inner: MemoryStore,
-    sequence: u64,
-    commit_before_error: bool,
-    fired: std::sync::atomic::AtomicBool,
+#[derive(Clone, Copy)]
+enum AppendAction {
+    RetainThenNotInserted,
+    Indeterminate,
+    RetainThenIndeterminate,
 }
 
-struct SequenceNotInsertedStore {
+struct ScriptedStore {
     inner: MemoryStore,
-    sequence: u64,
-    fired: std::sync::atomic::AtomicBool,
+    actions: std::sync::Mutex<VecDeque<(u64, AppendAction)>>,
+    frames: std::sync::Mutex<Vec<Vec<u8>>>,
+    retained: Option<Vec<Vec<u8>>>,
 }
 
-impl SequenceNotInsertedStore {
-    fn new(sequence: u64) -> Self {
+impl ScriptedStore {
+    fn new(actions: impl IntoIterator<Item = (u64, AppendAction)>) -> Self {
         Self {
             inner: MemoryStore::new(),
-            sequence,
-            fired: std::sync::atomic::AtomicBool::new(false),
+            actions: std::sync::Mutex::new(actions.into_iter().collect()),
+            frames: std::sync::Mutex::new(Vec::new()),
+            retained: None,
         }
     }
-}
 
-impl Store for SequenceNotInsertedStore {
-    fn load_run<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        self.inner.load_run(run_id)
+    fn recording() -> Self {
+        Self::new([])
     }
 
-    fn append_run<'a>(
-        &'a self,
-        frame: &'a EncodedRunFrame,
-    ) -> Pin<Box<dyn Future<Output = Result<AppendResult, StoreError>> + Send + 'a>> {
-        Box::pin(async move {
-            if frame.run_sequence() == self.sequence && !self.fired.swap(true, Ordering::SeqCst) {
-                let _ = self.inner.append_run(frame).await?;
-                return Ok(AppendResult::NotInserted);
-            }
-            self.inner.append_run(frame).await
-        })
-    }
-}
-
-struct RecordingStore {
-    inner: MemoryStore,
-    frames: std::sync::Mutex<Vec<Vec<u8>>>,
-}
-
-impl RecordingStore {
-    fn new() -> Self {
+    fn with_retained(frames: Vec<Vec<u8>>) -> Self {
         Self {
             inner: MemoryStore::new(),
+            actions: std::sync::Mutex::new(VecDeque::new()),
             frames: std::sync::Mutex::new(Vec::new()),
+            retained: Some(frames),
         }
     }
 
     fn snapshot(&self) -> Vec<Vec<u8>> {
         self.frames.lock().expect("recorded frames").clone()
     }
+
+    fn record_if_inserted(&self, frame: &EncodedRunFrame, result: AppendResult) {
+        if result == AppendResult::Inserted {
+            self.frames
+                .lock()
+                .expect("recorded frames")
+                .push(frame.canonical_bytes().to_vec());
+        }
+    }
 }
 
-impl Store for RecordingStore {
+impl Store for ScriptedStore {
     fn load_run<'a>(
         &'a self,
         run_id: &'a RunId,
@@ -981,6 +964,11 @@ impl Store for RecordingStore {
                 + 'a,
         >,
     > {
+        if let Some(frames) = &self.retained {
+            let retained =
+                StoredRunBytes::new(frames.clone()).map_err(|_| StoreError::CorruptPhysicalState);
+            return Box::pin(async move { retained.map(Some) });
+        }
         self.inner.load_run(run_id)
     }
 
@@ -989,14 +977,35 @@ impl Store for RecordingStore {
         frame: &'a EncodedRunFrame,
     ) -> Pin<Box<dyn Future<Output = Result<AppendResult, StoreError>> + Send + 'a>> {
         Box::pin(async move {
-            let result = self.inner.append_run(frame).await?;
-            if result == AppendResult::Inserted {
-                self.frames
-                    .lock()
-                    .expect("recorded frames")
-                    .push(frame.canonical_bytes().to_vec());
+            if self.retained.is_some() {
+                return Err(StoreError::CorruptPhysicalState);
             }
-            Ok(result)
+            let action = {
+                let mut actions = self.actions.lock().expect("append actions");
+                actions
+                    .iter()
+                    .position(|(sequence, _)| *sequence == frame.run_sequence())
+                    .and_then(|index| actions.remove(index))
+                    .map(|(_, action)| action)
+            };
+            match action {
+                Some(AppendAction::RetainThenNotInserted) => {
+                    let result = self.inner.append_run(frame).await?;
+                    self.record_if_inserted(frame, result);
+                    Ok(AppendResult::NotInserted)
+                }
+                Some(AppendAction::Indeterminate) => Err(StoreError::Indeterminate),
+                Some(AppendAction::RetainThenIndeterminate) => {
+                    let result = self.inner.append_run(frame).await?;
+                    self.record_if_inserted(frame, result);
+                    Err(StoreError::Indeterminate)
+                }
+                None => {
+                    let result = self.inner.append_run(frame).await?;
+                    self.record_if_inserted(frame, result);
+                    Ok(result)
+                }
+            }
         })
     }
 }
@@ -1032,51 +1041,10 @@ impl Store for RetainedStore {
     }
 }
 
-impl SequenceIndeterminateStore {
-    fn new(sequence: u64, commit_before_error: bool) -> Self {
-        Self {
-            inner: MemoryStore::new(),
-            sequence,
-            commit_before_error,
-            fired: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-}
-
-impl Store for SequenceIndeterminateStore {
-    fn load_run<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        self.inner.load_run(run_id)
-    }
-
-    fn append_run<'a>(
-        &'a self,
-        frame: &'a EncodedRunFrame,
-    ) -> Pin<Box<dyn Future<Output = Result<AppendResult, StoreError>> + Send + 'a>> {
-        Box::pin(async move {
-            if frame.run_sequence() == self.sequence && !self.fired.swap(true, Ordering::SeqCst) {
-                if self.commit_before_error {
-                    self.inner.append_run(frame).await?;
-                }
-                return Err(StoreError::Indeterminate);
-            }
-            self.inner.append_run(frame).await
-        })
-    }
-}
-
 #[tokio::test]
 async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
     let prepare_calls = Arc::new(AtomicUsize::new(0));
-    let prepare_store = Arc::new(SequenceIndeterminateStore::new(2, false));
+    let prepare_store = Arc::new(ScriptedStore::new([(2, AppendAction::Indeterminate)]));
     let mut prepare_builder = RuntimeAssemblyBuilder::new();
     prepare_builder
         .register_effect::<Mutate, Mutation>()
@@ -1131,7 +1099,10 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
     assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
 
     let conclusion_calls = Arc::new(AtomicUsize::new(0));
-    let conclusion_store = Arc::new(SequenceIndeterminateStore::new(3, true));
+    let conclusion_store = Arc::new(ScriptedStore::new([(
+        3,
+        AppendAction::RetainThenIndeterminate,
+    )]));
     let mut conclusion_builder = RuntimeAssemblyBuilder::new();
     conclusion_builder
         .register_effect::<Mutate, Mutation>()
@@ -1179,7 +1150,10 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
     assert_eq!(conclusion_calls.load(Ordering::SeqCst), 1);
 
     let committed_prepare_calls = Arc::new(AtomicUsize::new(0));
-    let committed_prepare_store = Arc::new(SequenceIndeterminateStore::new(2, true));
+    let committed_prepare_store = Arc::new(ScriptedStore::new([(
+        2,
+        AppendAction::RetainThenIndeterminate,
+    )]));
     let mut committed_prepare_builder = RuntimeAssemblyBuilder::new();
     committed_prepare_builder
         .register_effect::<Mutate, Mutation>()
@@ -1238,7 +1212,7 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
     assert_eq!(committed_prepare_calls.load(Ordering::SeqCst), 1);
 
     let absent_conclusion_calls = Arc::new(AtomicUsize::new(0));
-    let absent_conclusion_store = Arc::new(SequenceIndeterminateStore::new(3, false));
+    let absent_conclusion_store = Arc::new(ScriptedStore::new([(3, AppendAction::Indeterminate)]));
     let mut absent_conclusion_builder = RuntimeAssemblyBuilder::new();
     absent_conclusion_builder
         .register_effect::<Mutate, Mutation>()
@@ -1301,7 +1275,10 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
 async fn effect_not_inserted_reloads_the_committed_prepare_or_conclusion() {
     for (offset, sequence) in [2_u64, 3].into_iter().enumerate() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let store = Arc::new(SequenceNotInsertedStore::new(sequence));
+        let store = Arc::new(ScriptedStore::new([(
+            sequence,
+            AppendAction::RetainThenNotInserted,
+        )]));
         let mut builder = RuntimeAssemblyBuilder::new();
         builder
             .register_effect::<Mutate, Mutation>()
@@ -1414,7 +1391,7 @@ async fn every_adapter_failure_leaves_one_pending_prepare() {
 
 #[tokio::test]
 async fn retained_effect_facts_are_validated_without_adapter_io() {
-    let pending_store = Arc::new(RecordingStore::new());
+    let pending_store = Arc::new(ScriptedStore::recording());
     let mut pending_builder = RuntimeAssemblyBuilder::new();
     pending_builder
         .register_effect::<Mutate, Mutation>()
@@ -1470,9 +1447,7 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
         .expect("adapter");
     let read_runtime = Runtime::new(
         read_builder.finish().expect("assembly"),
-        Arc::new(RetainedStore {
-            frames: pending_frames.clone(),
-        }),
+        Arc::new(ScriptedStore::with_retained(pending_frames.clone())),
     );
     let pending = read_runtime.read(&run_id).await.expect("pending view");
     assert_eq!(pending.head_sequence(), 2);
@@ -1544,7 +1519,7 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
-    let settled_store = Arc::new(RecordingStore::new());
+    let settled_store = Arc::new(ScriptedStore::recording());
     let mut settled_builder = RuntimeAssemblyBuilder::new();
     settled_builder
         .register_effect::<Mutate, Mutation>()

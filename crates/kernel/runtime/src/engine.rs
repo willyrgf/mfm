@@ -13,9 +13,9 @@ use mfm_values::{MfmValue, ValueError};
 use serde::Serialize;
 
 use crate::assembly::{
-    qualify_hot, AssemblyInner, ErasedEffectAdapterCallback, ErasedReadAdapterCallback,
-    ExecutableDeclaration, ExecutableProgram, QualifiedValue, RegisteredState, RuntimeAssembly,
-    ValueCodec,
+    qualify_hot, AssemblyInner, EffectPendingStart, EffectPrepareStart,
+    ErasedEffectAdapterCallback, ErasedReadAdapterCallback, ExecutableDeclaration, ExecutableMode,
+    ExecutableProgram, PureStart, QualifiedValue, ReadStart, RuntimeAssembly, ValueCodec,
 };
 use crate::{
     AdapterError, EffectAdapterOutcome, Result, RetainedValueView, RunView, RunViewState,
@@ -43,12 +43,10 @@ struct Accumulator {
 enum FoldState {
     Runnable {
         declaration_index: usize,
-        driver: Arc<dyn RegisteredState>,
         input: QualifiedValue,
     },
     EffectPending {
         declaration_index: usize,
-        driver: Arc<dyn RegisteredState>,
         input: QualifiedValue,
         effect_id: EffectId,
         command: Box<QualifiedValue>,
@@ -213,42 +211,71 @@ async fn advance_until_stable(store: Arc<dyn Store>, accumulator: Accumulator) -
             return view(accumulator);
         }
 
-        let (driver, invocation, declaration_index, reload_run_id, reload_assembly) = {
+        let (invocation, declaration_index, reload_run_id, reload_assembly) = {
             let accumulator = slot.as_mut().ok_or(RuntimeError::Internal)?;
             let reload_run_id = accumulator.history.run_id().clone();
             let reload_assembly = Arc::clone(&accumulator.executable._assembly);
             let state = accumulator.state.take().ok_or(RuntimeError::Internal)?;
-            let (declaration_index, driver, invocation) = match state {
+            let (declaration_index, invocation) = match state {
                 FoldState::Runnable {
                     declaration_index,
-                    driver,
                     input,
-                } => (
-                    declaration_index,
-                    driver,
-                    DriverInvocation::Selected { input },
-                ),
+                } => {
+                    let selected = executable_state(&accumulator.executable, declaration_index)
+                        .map_err(|_| RuntimeError::Internal)?;
+                    let invocation = match &selected.mode {
+                        ExecutableMode::Pure { start } => DriverInvocation::Pure {
+                            start: *start,
+                            input,
+                        },
+                        ExecutableMode::Read { start, adapter, .. } => DriverInvocation::Read {
+                            start: *start,
+                            adapter: Arc::clone(adapter),
+                            input,
+                        },
+                        ExecutableMode::Effect {
+                            prepare,
+                            adapter: _,
+                            ..
+                        } => DriverInvocation::EffectPrepare {
+                            start: *prepare,
+                            input,
+                        },
+                    };
+                    (declaration_index, invocation)
+                }
                 FoldState::EffectPending {
                     declaration_index,
-                    driver,
                     input,
                     effect_id,
                     command,
-                } => (
-                    declaration_index,
-                    driver,
-                    DriverInvocation::EffectPending {
-                        input,
-                        effect_id,
-                        command,
-                    },
-                ),
+                } => {
+                    let selected = executable_state(&accumulator.executable, declaration_index)
+                        .map_err(|_| RuntimeError::Internal)?;
+                    let ExecutableMode::Effect {
+                        start_pending,
+                        adapter,
+                        ..
+                    } = &selected.mode
+                    else {
+                        return Err(RuntimeError::Internal);
+                    };
+                    (
+                        declaration_index,
+                        DriverInvocation::EffectPending {
+                            start: *start_pending,
+                            adapter: Arc::clone(adapter),
+                            input,
+                            effect_id,
+                            command,
+                        },
+                    )
+                }
                 FoldState::Succeeded(_) | FoldState::Failed(_) => {
                     return Err(RuntimeError::Internal);
                 }
             };
             (
-                driver,
                 invocation,
                 declaration_index,
                 reload_run_id,
@@ -261,16 +288,20 @@ async fn advance_until_stable(store: Arc<dyn Store>, accumulator: Accumulator) -
             declaration_index,
         };
         let disposition = match invocation {
-            DriverInvocation::Selected { input } => driver.start(input, context).await?,
+            DriverInvocation::Pure { start, input }
+            | DriverInvocation::EffectPrepare { start, input } => start(input, context).await?,
+            DriverInvocation::Read {
+                start,
+                adapter,
+                input,
+            } => start(input, context, adapter).await?,
             DriverInvocation::EffectPending {
+                start,
+                adapter,
                 input,
                 effect_id,
                 command,
-            } => {
-                driver
-                    .start_pending(input, effect_id, *command, context)
-                    .await?
-            }
+            } => start(input, effect_id, *command, context, adapter).await?,
         };
         match disposition {
             DriverDisposition::Continue => {}
@@ -285,10 +316,22 @@ async fn advance_until_stable(store: Arc<dyn Store>, accumulator: Accumulator) -
 }
 
 enum DriverInvocation {
-    Selected {
+    Pure {
+        start: PureStart,
+        input: QualifiedValue,
+    },
+    Read {
+        start: ReadStart,
+        adapter: Arc<ErasedReadAdapterCallback>,
+        input: QualifiedValue,
+    },
+    EffectPrepare {
+        start: EffectPrepareStart,
         input: QualifiedValue,
     },
     EffectPending {
+        start: EffectPendingStart,
+        adapter: Arc<ErasedEffectAdapterCallback>,
         input: QualifiedValue,
         effect_id: EffectId,
         command: Box<QualifiedValue>,
@@ -489,18 +532,8 @@ fn apply_inserted_effect_prepare(mut prepared: PreparedEffect) -> Result<Accumul
     if !matches {
         return Err(RuntimeError::Internal);
     }
-    let driver = match prepared
-        .accumulator
-        .executable
-        .declarations
-        .get(prepared.declaration_index)
-    {
-        Some(ExecutableDeclaration::State(state)) => Arc::clone(&state.driver),
-        _ => return Err(RuntimeError::Internal),
-    };
     prepared.accumulator.state = Some(FoldState::EffectPending {
         declaration_index: prepared.declaration_index,
-        driver,
         input: prepared.input,
         effect_id: prepared.effect_id,
         command: Box::new(prepared.command),
@@ -525,18 +558,9 @@ where
         .map_err(map_adapter_error)?;
     let qualify_evidence = match outcome {
         EffectAdapterOutcome::Pending => {
-            let driver = match accumulator
-                .executable
-                .declarations
-                .get(context.declaration_index)
-            {
-                Some(ExecutableDeclaration::State(state)) => Arc::clone(&state.driver),
-                _ => return Err(RuntimeError::Internal),
-            };
             let mut accumulator = accumulator;
             accumulator.state = Some(FoldState::EffectPending {
                 declaration_index: context.declaration_index,
-                driver,
                 input,
                 effect_id,
                 command: Box::new(command),
@@ -791,10 +815,9 @@ fn select_declaration(
             .get(index)
             .ok_or(RuntimeError::InvalidHistory)?
         {
-            ExecutableDeclaration::State(state) => {
+            ExecutableDeclaration::State(_) => {
                 return Ok(FoldState::Runnable {
                     declaration_index: index,
-                    driver: Arc::clone(&state.driver),
                     input,
                 });
             }
@@ -817,13 +840,12 @@ fn apply_retained_record(
         (
             FoldState::Runnable {
                 declaration_index,
-                driver: _,
                 input: _,
             },
             JournalRecord::StateConcludedPure { kind, outcome },
         ) => {
             let selected = executable_state(executable, declaration_index)?;
-            if selected.read_codecs.is_some() || selected.effect_codecs.is_some() {
+            if !matches!(selected.mode, ExecutableMode::Pure { .. }) {
                 return Err(RuntimeError::InvalidHistory);
             }
             let outcome = qualify_retained_outcome(selected, kind, outcome)?;
@@ -832,7 +854,6 @@ fn apply_retained_record(
         (
             FoldState::Runnable {
                 declaration_index,
-                driver,
                 input: _,
             },
             JournalRecord::StateConcludedRead {
@@ -843,37 +864,39 @@ fn apply_retained_record(
             },
         ) => {
             let selected = executable_state(executable, declaration_index)?;
-            let codecs = selected
-                .read_codecs
-                .as_ref()
-                .ok_or(RuntimeError::InvalidHistory)?;
-            if selected.effect_codecs.is_some() {
+            let ExecutableMode::Read {
+                validate_retained,
+                intent_codec,
+                evidence_codec,
+                ..
+            } = &selected.mode
+            else {
                 return Err(RuntimeError::InvalidHistory);
-            }
-            let intent = qualify_journal_object(&codecs.intent, intent)?;
-            let evidence = qualify_journal_object(&codecs.evidence, evidence)?;
-            driver.validate_retained_read(&intent, &evidence)?;
+            };
+            let intent = qualify_journal_object(intent_codec, intent)?;
+            let evidence = qualify_journal_object(evidence_codec, evidence)?;
+            validate_retained(&intent, &evidence)?;
             let outcome = qualify_retained_outcome(selected, kind, outcome)?;
             apply_outcome(executable, declaration_index, kind, outcome)
         }
         (
             FoldState::Runnable {
                 declaration_index,
-                driver,
                 input,
             },
             JournalRecord::StateEffectPrepared { effect_id, command },
         ) => {
             let selected = executable_state(executable, declaration_index)?;
-            let codecs = selected
-                .effect_codecs
-                .as_ref()
-                .ok_or(RuntimeError::InvalidHistory)?;
-            if selected.read_codecs.is_some() {
+            let ExecutableMode::Effect {
+                validate_prepare,
+                command_codec,
+                ..
+            } = &selected.mode
+            else {
                 return Err(RuntimeError::InvalidHistory);
-            }
-            let command = qualify_journal_object(&codecs.command, command)?;
-            driver.validate_retained_effect_prepare(&input, &command)?;
+            };
+            let command = qualify_journal_object(command_codec, command)?;
+            validate_prepare(&input, &command)?;
             let expected = derive_effect_id(
                 run_id,
                 executable.program.content_ref(),
@@ -885,7 +908,6 @@ fn apply_retained_record(
             }
             Ok(FoldState::EffectPending {
                 declaration_index,
-                driver,
                 input,
                 effect_id: expected,
                 command: Box::new(command),
@@ -894,7 +916,6 @@ fn apply_retained_record(
         (
             FoldState::EffectPending {
                 declaration_index,
-                driver,
                 input: _,
                 effect_id,
                 command,
@@ -906,12 +927,16 @@ fn apply_retained_record(
             },
         ) => {
             let selected = executable_state(executable, declaration_index)?;
-            let codecs = selected
-                .effect_codecs
-                .as_ref()
-                .ok_or(RuntimeError::InvalidHistory)?;
-            let evidence = qualify_journal_object(&codecs.evidence, evidence)?;
-            driver.validate_retained_effect_evidence(&effect_id, &command, &evidence)?;
+            let ExecutableMode::Effect {
+                validate_evidence,
+                evidence_codec,
+                ..
+            } = &selected.mode
+            else {
+                return Err(RuntimeError::InvalidHistory);
+            };
+            let evidence = qualify_journal_object(evidence_codec, evidence)?;
+            validate_evidence(&effect_id, &command, &evidence)?;
             let outcome = qualify_retained_outcome(selected, kind, outcome)?;
             apply_outcome(executable, declaration_index, kind, outcome)
         }
