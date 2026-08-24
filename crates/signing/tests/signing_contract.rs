@@ -9,11 +9,12 @@ const GENERATOR_PUBLIC_KEY: [u8; 65] = [
     212, 184,
 ];
 
-#[test]
-fn transient_values_have_no_diagnostic_or_serde_surface() {
-    let tests = trybuild::TestCases::new();
-    tests.compile_fail("tests/ui/*.rs");
-}
+static_assertions::assert_not_impl_any!(
+    SigningDigest: std::fmt::Debug, std::fmt::Display, serde::Serialize
+);
+static_assertions::assert_not_impl_any!(
+    CompactRecoverableSignature: std::fmt::Debug, std::fmt::Display, serde::Serialize
+);
 
 fn frozen_signature() -> CompactRecoverableSignature {
     CompactRecoverableSignature::new(

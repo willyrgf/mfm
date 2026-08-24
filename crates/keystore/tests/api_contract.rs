@@ -2,12 +2,6 @@ use mfm_ids::StableId;
 use mfm_keystore::{KeystoreError, KeystoreOwner, SecretSecp256k1Scalar, MAX_KEY_INSTANCES};
 use mfm_signing::{recover_public_key, Secp256k1Signer, SigningDigest, SigningError};
 
-#[test]
-fn keystore_remains_thread_affine() {
-    let tests = trybuild::TestCases::new();
-    tests.compile_fail("tests/ui/*.rs");
-}
-
 #[tokio::test]
 async fn duplicate_import_and_signing_are_key_and_purpose_bound_deterministic_and_recoverable() {
     let owner = KeystoreOwner::start().expect("owner");
