@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use alloy_primitives::{hex, Address, U256};
 use mfm_evm::{
-    AnchoredContractCallResult, EvmBalanceSource, EvmBlockAnchor, EvmHash, EvmReadIntent,
-    EvmReadSubject, EvmReadValue, EvmU256, MAX_EVM_CALL_RETURN_BYTES,
+    AnchoredContractCallResult, EvmBalanceSource, EvmBlockAnchor, EvmChainInstance, EvmHash,
+    EvmReadIntent, EvmReadSubject, EvmReadValue, EvmU256, MAX_EVM_CALL_RETURN_BYTES,
 };
 use mfm_evm_transaction_authority::ExactRawTransaction;
 use mfm_ids::StableId;
@@ -21,7 +21,7 @@ use url::Url;
 
 use crate::{
     EvmProvider, EvmProviderResponse, EvmTransactionProvider, EvmTransactionProviderFuture,
-    ObservedChainInstance, ProviderReceipt, ProviderReceiptResult,
+    ProviderReceipt, ProviderReceiptResult,
 };
 
 /// Largest admitted JSON-RPC response body.
@@ -392,14 +392,13 @@ impl EvmProvider for JsonRpcEvmProvider {
 }
 
 impl EvmTransactionProvider for JsonRpcEvmProvider {
-    fn chain_instance(&self) -> EvmTransactionProviderFuture<'_, ObservedChainInstance> {
+    fn chain_instance(&self) -> EvmTransactionProviderFuture<'_, EvmChainInstance> {
         Box::pin(async move {
             let chain_id = self
                 .call_strict("eth_chainId", serde_json::json!([]))
                 .await?
                 .as_str()
                 .and_then(quantity_to_u64)
-                .filter(|chain_id| *chain_id != 0)
                 .ok_or(AdapterError::Unavailable)?;
             let genesis = self
                 .call_strict("eth_getBlockByNumber", serde_json::json!(["0x0", false]))
@@ -411,7 +410,8 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
             if anchor.number().as_str() != "0" {
                 return Err(AdapterError::Unavailable);
             }
-            ObservedChainInstance::new(chain_id, anchor.hash().clone())
+            EvmChainInstance::new(chain_id, anchor.hash().clone())
+                .map_err(|_| AdapterError::Unavailable)
         })
     }
 
