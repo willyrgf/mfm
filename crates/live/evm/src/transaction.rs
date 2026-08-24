@@ -5,9 +5,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use mfm_evm::{
-    Eip1559TransactionCommand, EvmAddress, EvmBlockAnchor, EvmHash, EvmTransactionAction,
-    EvmTransactionBinding, EvmTransactionConfirmation, EvmTransactionEffect, EvmTransactionRevert,
-    EvmTransactionSettlement,
+    Eip1559TransactionCommand, EvmAddress, EvmBlockAnchor, EvmChainInstance, EvmHash,
+    EvmTransactionAction, EvmTransactionBinding, EvmTransactionConfirmation, EvmTransactionEffect,
+    EvmTransactionRevert, EvmTransactionSettlement,
 };
 use mfm_evm_transaction_authority::{
     AuthorityError, AuthorityState, EvmTransactionAuthority, ExactRawTransaction, NonceDomain,
@@ -29,36 +29,6 @@ pub const EVM_EIP1559_SIGNING_PURPOSE_ID: &str = "mfm.evm.sign-eip1559@1";
 /// Borrowing boxed transaction-provider operation.
 pub type EvmTransactionProviderFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, AdapterError>> + Send + 'a>>;
-
-/// Provider-observed chain ID and genesis hash.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObservedChainInstance {
-    chain_id: u64,
-    genesis_hash: EvmHash,
-}
-
-impl ObservedChainInstance {
-    /// Constructs one checked nonzero observed chain instance.
-    pub fn new(chain_id: u64, genesis_hash: EvmHash) -> Result<Self, AdapterError> {
-        if chain_id == 0 {
-            return Err(AdapterError::Unavailable);
-        }
-        Ok(Self {
-            chain_id,
-            genesis_hash,
-        })
-    }
-
-    /// Returns the observed nonzero chain ID.
-    pub const fn chain_id(&self) -> u64 {
-        self.chain_id
-    }
-
-    /// Returns the observed genesis block hash.
-    pub const fn genesis_hash(&self) -> &EvmHash {
-        &self.genesis_hash
-    }
-}
 
 /// Closed provider receipt result preserving create-or-call shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +101,7 @@ impl ProviderReceipt {
 /// Minimal transaction-only provider facet.
 pub trait EvmTransactionProvider: Send + Sync + 'static {
     /// Observes the endpoint's chain ID and genesis block hash.
-    fn chain_instance(&self) -> EvmTransactionProviderFuture<'_, ObservedChainInstance>;
+    fn chain_instance(&self) -> EvmTransactionProviderFuture<'_, EvmChainInstance>;
 
     /// Observes the sender's pending transaction count.
     fn pending_nonce<'a>(&'a self, sender: &'a EvmAddress)
@@ -475,9 +445,7 @@ async fn verify_chain(
 ) -> Result<(), AdapterError> {
     let expected = command.binding().route().chain_instance();
     let observed = provider.chain_instance().await?;
-    if observed.chain_id() != expected.chain_id()
-        || observed.genesis_hash() != expected.expected_genesis_hash()
-    {
+    if &observed != expected {
         return Err(AdapterError::Internal);
     }
     Ok(())

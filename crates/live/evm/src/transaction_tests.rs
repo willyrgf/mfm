@@ -17,7 +17,7 @@ use mfm_signing::{Secp256k1PublicKey, Secp256k1Signer, SigningDigest, SigningFut
 use tokio::sync::Notify;
 
 use super::*;
-use crate::{evm_keccak256, ObservedChainInstance};
+use crate::evm_keccak256;
 
 const GENESIS: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const BLOCK: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
@@ -261,7 +261,7 @@ enum ProviderOperation {
 }
 
 struct ScriptedProvider {
-    chain: ObservedChainInstance,
+    chain: EvmChainInstance,
     pending: u64,
     receipts: Mutex<VecDeque<Result<Option<ProviderReceipt>, AdapterError>>>,
     canonical: EvmBlockAnchor,
@@ -275,7 +275,7 @@ struct ScriptedProvider {
 impl ScriptedProvider {
     fn new(chain_id: u64) -> Self {
         Self {
-            chain: ObservedChainInstance::new(chain_id, EvmHash::new(GENESIS).expect("genesis"))
+            chain: EvmChainInstance::new(chain_id, EvmHash::new(GENESIS).expect("genesis"))
                 .expect("chain"),
             pending: 7,
             receipts: Mutex::new(VecDeque::new()),
@@ -311,7 +311,7 @@ impl ScriptedProvider {
 }
 
 impl EvmTransactionProvider for ScriptedProvider {
-    fn chain_instance(&self) -> EvmTransactionProviderFuture<'_, ObservedChainInstance> {
+    fn chain_instance(&self) -> EvmTransactionProviderFuture<'_, EvmChainInstance> {
         Box::pin(async move {
             self.operations
                 .lock()

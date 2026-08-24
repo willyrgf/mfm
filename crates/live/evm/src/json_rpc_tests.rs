@@ -554,7 +554,7 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         .await
         .expect("chain instance");
     assert_eq!(observed.chain_id(), 1337);
-    assert_eq!(observed.genesis_hash().as_str(), genesis);
+    assert_eq!(observed.expected_genesis_hash().as_str(), genesis);
     let requests = chain.observed_requests();
     assert_eq!(requests[0]["method"], "eth_chainId");
     assert_eq!(requests[1]["method"], "eth_getBlockByNumber");

@@ -7,10 +7,10 @@ use std::time::Duration;
 use mfm_evm::{
     AnchoredContractCallCompletion, AnchoredContractCallContext, AnchoredContractCallFailure,
     Eip1559TransactionCommand, EvmAddress, EvmAnchoredContractCallRead, EvmAuthorityEpoch,
-    EvmBlockAnchor, EvmChainInstance, EvmEndpoint, EvmHash, EvmTransactionAction,
-    EvmTransactionBinding, EvmTransactionCompletion, EvmTransactionConfirmation,
-    EvmTransactionContext, EvmTransactionEffect, EvmTransactionReversion, EvmTransactionRoute,
-    EvmU256, ExecuteEvmTransaction, ReadAnchoredContractCall,
+    EvmBlockAnchor, EvmEndpoint, EvmHash, EvmTransactionAction, EvmTransactionBinding,
+    EvmTransactionCompletion, EvmTransactionConfirmation, EvmTransactionContext,
+    EvmTransactionEffect, EvmTransactionReversion, EvmTransactionRoute, EvmU256,
+    ExecuteEvmTransaction, ReadAnchoredContractCall,
 };
 use mfm_evm_live::{
     ethereum_address, evm_keccak256, register_evm_anchored_contract_calls,
@@ -1219,7 +1219,7 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
         .await
         .expect("chain instance");
     let route = EvmTransactionRoute::new(
-        EvmChainInstance::new(chain.chain_id(), chain.genesis_hash().clone()).expect("chain"),
+        chain,
         EvmEndpoint::new("reth-effect-e2e")
             .expect("endpoint")
             .endpoint_ref()
