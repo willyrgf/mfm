@@ -1010,265 +1010,222 @@ impl Store for ScriptedStore {
     }
 }
 
-struct RetainedStore {
-    frames: Vec<Vec<u8>>,
+fn effect_runtime_with_counting_adapter(
+    store: Arc<dyn Store>,
+    calls: Arc<AtomicUsize>,
+    effect_ids: Arc<std::sync::Mutex<Vec<EffectId>>>,
+) -> Runtime {
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder
+        .register_effect::<Mutate, Mutation>()
+        .expect("Effect State");
+    builder
+        .register_effect_adapter::<Mutation, _, _>(
+            Binding { route: 8 },
+            move |effect_id, command| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let effect_id = effect_id.clone();
+                effect_ids
+                    .lock()
+                    .expect("effect ids")
+                    .push(effect_id.clone());
+                let value = command.value;
+                Box::pin(async move {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
+                        effect_id,
+                        value,
+                        accepted: true,
+                    }))
+                })
+            },
+        )
+        .expect("adapter");
+    Runtime::new(builder.finish().expect("assembly"), store)
 }
 
-impl Store for RetainedStore {
-    fn load_run<'a>(
-        &'a self,
-        _run_id: &'a RunId,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            Ok(Some(
-                StoredRunBytes::new(self.frames.clone())
-                    .map_err(|_| StoreError::CorruptPhysicalState)?,
-            ))
-        })
-    }
+fn retained_effect_reader(frames: Vec<Vec<u8>>, calls: Arc<AtomicUsize>) -> Runtime {
+    effect_runtime_with_counting_adapter(
+        Arc::new(ScriptedStore::with_retained(frames)),
+        calls,
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+    )
+}
 
-    fn append_run<'a>(
-        &'a self,
-        _frame: &'a EncodedRunFrame,
-    ) -> Pin<Box<dyn Future<Output = Result<AppendResult, StoreError>> + Send + 'a>> {
-        Box::pin(async { Err(StoreError::CorruptPhysicalState) })
-    }
+fn hostile_frame(encoded_frame: &[u8], mutate: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+    let mut frame: serde_json::Value =
+        serde_json::from_slice(encoded_frame).expect("retained frame wire");
+    mutate(&mut frame);
+    frame["objects"]
+        .as_array_mut()
+        .expect("frame objects")
+        .sort_by(|left, right| {
+            left["content_ref"]["schema_id"]
+                .as_str()
+                .expect("left schema")
+                .cmp(
+                    right["content_ref"]["schema_id"]
+                        .as_str()
+                        .expect("right schema"),
+                )
+                .then_with(|| {
+                    left["content_ref"]["content_digest"]
+                        .as_str()
+                        .expect("left digest")
+                        .cmp(
+                            right["content_ref"]["content_digest"]
+                                .as_str()
+                                .expect("right digest"),
+                        )
+                })
+        });
+    PlainCanonicalJsonBytes::from_json_str(&serde_json::to_string(&frame).expect("frame json"))
+        .expect("canonical hostile frame")
+        .to_vec()
 }
 
 #[tokio::test]
 async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
-    let prepare_calls = Arc::new(AtomicUsize::new(0));
-    let prepare_store = Arc::new(ScriptedStore::new([(2, AppendAction::Indeterminate)]));
-    let mut prepare_builder = RuntimeAssemblyBuilder::new();
-    prepare_builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    prepare_builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-            let prepare_calls = Arc::clone(&prepare_calls);
-            move |effect_id, command| {
-                prepare_calls.fetch_add(1, Ordering::SeqCst);
-                let effect_id = effect_id.clone();
-                let value = command.value;
-                Box::pin(async move {
-                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                        effect_id,
-                        value,
-                        accepted: true,
-                    }))
-                })
-            }
-        })
-        .expect("adapter");
-    let prepare_runtime = Runtime::new(prepare_builder.finish().expect("assembly"), prepare_store);
-    let prepare_run = RunId::from_digest(DigestBytes::from_array([33; 32]));
-    let program = expand_program(
-        EntryPointId::new("mfm.test.runtime/prepare-indeterminate@1").expect("entry point"),
-        &EffectProgram,
-    )
-    .expect("Program");
-    assert!(matches!(
-        prepare_runtime
-            .start(prepare_run.clone(), program, Number { value: 3 })
-            .await,
-        Err(RuntimeError::Indeterminate)
-    ));
-    assert_eq!(prepare_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        prepare_runtime
-            .read(&prepare_run)
-            .await
-            .expect("genesis")
-            .head_sequence(),
-        1
-    );
-    assert!(matches!(
-        prepare_runtime
-            .resume(&prepare_run)
-            .await
-            .expect("resume after absent prepare")
-            .state(),
-        RunViewState::Succeeded(_)
-    ));
-    assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
+    struct Case {
+        name: &'static str,
+        candidate_sequence: u64,
+        action: AppendAction,
+        candidate_retained: bool,
+        expected_head_after_start: u64,
+        expected_adapter_entries_after_start: usize,
+        expected_adapter_entries_after_resume: usize,
+        expected_terminal_head: u64,
+        expected_terminal_succeeded: bool,
+    }
 
-    let conclusion_calls = Arc::new(AtomicUsize::new(0));
-    let conclusion_store = Arc::new(ScriptedStore::new([(
-        3,
-        AppendAction::RetainThenIndeterminate,
-    )]));
-    let mut conclusion_builder = RuntimeAssemblyBuilder::new();
-    conclusion_builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    conclusion_builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-            let conclusion_calls = Arc::clone(&conclusion_calls);
-            move |effect_id, command| {
-                conclusion_calls.fetch_add(1, Ordering::SeqCst);
-                let effect_id = effect_id.clone();
-                let value = command.value;
-                Box::pin(async move {
-                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                        effect_id,
-                        value,
-                        accepted: true,
-                    }))
-                })
-            }
-        })
-        .expect("adapter");
-    let conclusion_runtime = Runtime::new(
-        conclusion_builder.finish().expect("assembly"),
-        conclusion_store,
-    );
-    let conclusion_run = RunId::from_digest(DigestBytes::from_array([34; 32]));
-    let program = expand_program(
-        EntryPointId::new("mfm.test.runtime/conclusion-indeterminate@1").expect("entry point"),
-        &EffectProgram,
-    )
-    .expect("Program");
-    assert!(matches!(
-        conclusion_runtime
-            .start(conclusion_run.clone(), program, Number { value: 4 })
-            .await,
-        Err(RuntimeError::Indeterminate)
-    ));
-    assert_eq!(conclusion_calls.load(Ordering::SeqCst), 1);
-    let recovered = conclusion_runtime
-        .resume(&conclusion_run)
-        .await
-        .expect("committed conclusion");
-    assert_eq!(recovered.head_sequence(), 3);
-    assert!(matches!(recovered.state(), RunViewState::Succeeded(_)));
-    assert_eq!(conclusion_calls.load(Ordering::SeqCst), 1);
+    let cases = [
+        Case {
+            name: "prepare-absent",
+            candidate_sequence: 2,
+            action: AppendAction::Indeterminate,
+            candidate_retained: false,
+            expected_head_after_start: 1,
+            expected_adapter_entries_after_start: 0,
+            expected_adapter_entries_after_resume: 1,
+            expected_terminal_head: 3,
+            expected_terminal_succeeded: true,
+        },
+        Case {
+            name: "prepare-retained",
+            candidate_sequence: 2,
+            action: AppendAction::RetainThenIndeterminate,
+            candidate_retained: true,
+            expected_head_after_start: 2,
+            expected_adapter_entries_after_start: 0,
+            expected_adapter_entries_after_resume: 1,
+            expected_terminal_head: 3,
+            expected_terminal_succeeded: true,
+        },
+        Case {
+            name: "conclusion-absent",
+            candidate_sequence: 3,
+            action: AppendAction::Indeterminate,
+            candidate_retained: false,
+            expected_head_after_start: 2,
+            expected_adapter_entries_after_start: 1,
+            expected_adapter_entries_after_resume: 2,
+            expected_terminal_head: 3,
+            expected_terminal_succeeded: true,
+        },
+        Case {
+            name: "conclusion-retained",
+            candidate_sequence: 3,
+            action: AppendAction::RetainThenIndeterminate,
+            candidate_retained: true,
+            expected_head_after_start: 3,
+            expected_adapter_entries_after_start: 1,
+            expected_adapter_entries_after_resume: 1,
+            expected_terminal_head: 3,
+            expected_terminal_succeeded: true,
+        },
+    ];
 
-    let committed_prepare_calls = Arc::new(AtomicUsize::new(0));
-    let committed_prepare_store = Arc::new(ScriptedStore::new([(
-        2,
-        AppendAction::RetainThenIndeterminate,
-    )]));
-    let mut committed_prepare_builder = RuntimeAssemblyBuilder::new();
-    committed_prepare_builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    committed_prepare_builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-            let committed_prepare_calls = Arc::clone(&committed_prepare_calls);
-            move |effect_id, command| {
-                committed_prepare_calls.fetch_add(1, Ordering::SeqCst);
-                let effect_id = effect_id.clone();
-                let value = command.value;
-                Box::pin(async move {
-                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                        effect_id,
-                        value,
-                        accepted: true,
-                    }))
-                })
-            }
-        })
-        .expect("adapter");
-    let committed_prepare_runtime = Runtime::new(
-        committed_prepare_builder.finish().expect("assembly"),
-        committed_prepare_store,
-    );
-    let committed_prepare_run = RunId::from_digest(DigestBytes::from_array([43; 32]));
-    assert!(matches!(
-        committed_prepare_runtime
-            .start(
-                committed_prepare_run.clone(),
-                expand_program(
-                    EntryPointId::new("mfm.test.runtime/prepare-committed-indeterminate@1")
-                        .expect("entry point"),
-                    &EffectProgram,
+    for (offset, case) in cases.into_iter().enumerate() {
+        assert_eq!(
+            case.expected_head_after_start,
+            if case.candidate_retained {
+                case.candidate_sequence
+            } else {
+                case.candidate_sequence - 1
+            },
+            "{} table contract",
+            case.name
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let effect_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let store = Arc::new(ScriptedStore::new([(case.candidate_sequence, case.action)]));
+        let runtime = effect_runtime_with_counting_adapter(
+            store,
+            Arc::clone(&calls),
+            Arc::clone(&effect_ids),
+        );
+        let run_id = RunId::from_digest(DigestBytes::from_array(
+            [u8::try_from(33 + offset).expect("RunId byte"); 32],
+        ));
+        let program = expand_program(
+            EntryPointId::new(format!("mfm.test.runtime/ambiguous-{}@1", case.name))
+                .expect("entry point"),
+            &EffectProgram,
+        )
+        .expect("Program");
+
+        assert!(matches!(
+            runtime
+                .start(
+                    run_id.clone(),
+                    program,
+                    Number {
+                        value: u64::try_from(offset + 3).expect("input value"),
+                    },
                 )
-                .expect("Program"),
-                Number { value: 5 },
-            )
-            .await,
-        Err(RuntimeError::Indeterminate)
-    ));
-    assert_eq!(committed_prepare_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        committed_prepare_runtime
-            .read(&committed_prepare_run)
-            .await
-            .expect("committed prepare")
-            .head_sequence(),
-        2
-    );
-    let completed = committed_prepare_runtime
-        .resume(&committed_prepare_run)
-        .await
-        .expect("resume committed prepare");
-    assert_eq!(completed.head_sequence(), 3);
-    assert_eq!(committed_prepare_calls.load(Ordering::SeqCst), 1);
+                .await,
+            Err(RuntimeError::Indeterminate)
+        ));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            case.expected_adapter_entries_after_start,
+            "{} adapter entries after start",
+            case.name
+        );
+        let after_start = runtime.read(&run_id).await.expect("retained prefix");
+        assert_eq!(
+            after_start.head_sequence(),
+            case.expected_head_after_start,
+            "{} retained head after start",
+            case.name
+        );
+        if case.expected_head_after_start == case.expected_terminal_head {
+            assert!(matches!(after_start.state(), RunViewState::Succeeded(_)));
+        } else {
+            assert!(matches!(after_start.state(), RunViewState::Runnable));
+        }
 
-    let absent_conclusion_calls = Arc::new(AtomicUsize::new(0));
-    let absent_conclusion_store = Arc::new(ScriptedStore::new([(3, AppendAction::Indeterminate)]));
-    let mut absent_conclusion_builder = RuntimeAssemblyBuilder::new();
-    absent_conclusion_builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    absent_conclusion_builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-            let absent_conclusion_calls = Arc::clone(&absent_conclusion_calls);
-            move |effect_id, command| {
-                absent_conclusion_calls.fetch_add(1, Ordering::SeqCst);
-                let effect_id = effect_id.clone();
-                let value = command.value;
-                Box::pin(async move {
-                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                        effect_id,
-                        value,
-                        accepted: true,
-                    }))
-                })
-            }
-        })
-        .expect("adapter");
-    let absent_conclusion_runtime = Runtime::new(
-        absent_conclusion_builder.finish().expect("assembly"),
-        absent_conclusion_store,
-    );
-    let absent_conclusion_run = RunId::from_digest(DigestBytes::from_array([44; 32]));
-    assert!(matches!(
-        absent_conclusion_runtime
-            .start(
-                absent_conclusion_run.clone(),
-                expand_program(
-                    EntryPointId::new("mfm.test.runtime/conclusion-absent-indeterminate@1")
-                        .expect("entry point"),
-                    &EffectProgram,
-                )
-                .expect("Program"),
-                Number { value: 6 },
-            )
-            .await,
-        Err(RuntimeError::Indeterminate)
-    ));
-    assert_eq!(absent_conclusion_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        absent_conclusion_runtime
-            .read(&absent_conclusion_run)
-            .await
-            .expect("absent conclusion")
-            .head_sequence(),
-        2
-    );
-    let completed = absent_conclusion_runtime
-        .resume(&absent_conclusion_run)
-        .await
-        .expect("retry absent conclusion");
-    assert_eq!(completed.head_sequence(), 3);
-    assert_eq!(absent_conclusion_calls.load(Ordering::SeqCst), 2);
+        let completed = runtime.resume(&run_id).await.expect("ambiguous recovery");
+        assert_eq!(
+            completed.head_sequence(),
+            case.expected_terminal_head,
+            "{} terminal head",
+            case.name
+        );
+        assert_eq!(
+            matches!(completed.state(), RunViewState::Succeeded(_)),
+            case.expected_terminal_succeeded,
+            "{} terminal state",
+            case.name
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            case.expected_adapter_entries_after_resume,
+            "{} adapter entries after resume",
+            case.name
+        );
+        let effect_ids = effect_ids.lock().expect("effect ids");
+        assert!(effect_ids.windows(2).all(|pair| pair[0] == pair[1]));
+    }
 }
 
 #[tokio::test]
@@ -1279,28 +1236,11 @@ async fn effect_not_inserted_reloads_the_committed_prepare_or_conclusion() {
             sequence,
             AppendAction::RetainThenNotInserted,
         )]));
-        let mut builder = RuntimeAssemblyBuilder::new();
-        builder
-            .register_effect::<Mutate, Mutation>()
-            .expect("Effect State");
-        builder
-            .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-                let calls = Arc::clone(&calls);
-                move |effect_id, command| {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    let effect_id = effect_id.clone();
-                    let value = command.value;
-                    Box::pin(async move {
-                        Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                            effect_id,
-                            value,
-                            accepted: true,
-                        }))
-                    })
-                }
-            })
-            .expect("adapter");
-        let runtime = Runtime::new(builder.finish().expect("assembly"), store);
+        let runtime = effect_runtime_with_counting_adapter(
+            store,
+            Arc::clone(&calls),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
         let run_id = RunId::from_digest(DigestBytes::from_array(
             [u8::try_from(38 + offset).expect("RunId byte"); 32],
         ));
@@ -1424,122 +1364,40 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
     assert_eq!(pending_frames.len(), 2);
 
     let read_calls = Arc::new(AtomicUsize::new(0));
-    let mut read_builder = RuntimeAssemblyBuilder::new();
-    read_builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    read_builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-            let read_calls = Arc::clone(&read_calls);
-            move |effect_id, command| {
-                read_calls.fetch_add(1, Ordering::SeqCst);
-                let effect_id = effect_id.clone();
-                let value = command.value;
-                Box::pin(async move {
-                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                        effect_id,
-                        value,
-                        accepted: true,
-                    }))
-                })
-            }
-        })
-        .expect("adapter");
-    let read_runtime = Runtime::new(
-        read_builder.finish().expect("assembly"),
-        Arc::new(ScriptedStore::with_retained(pending_frames.clone())),
-    );
+    let read_runtime = retained_effect_reader(pending_frames.clone(), Arc::clone(&read_calls));
     let pending = read_runtime.read(&run_id).await.expect("pending view");
     assert_eq!(pending.head_sequence(), 2);
     assert!(matches!(pending.state(), RunViewState::Runnable));
     assert_eq!(read_calls.load(Ordering::SeqCst), 0);
 
     let mut wrong_id_frames = pending_frames.clone();
-    let mut wrong_id: serde_json::Value =
-        serde_json::from_slice(&wrong_id_frames[1]).expect("prepare wire");
-    wrong_id["record"]["effect_id"] =
-        serde_json::json!(EffectId::from_digest(DigestBytes::from_array([88; 32])).as_str());
-    wrong_id_frames[1] =
-        PlainCanonicalJsonBytes::from_json_str(&serde_json::to_string(&wrong_id).expect("json"))
-            .expect("canonical")
-            .to_vec();
+    wrong_id_frames[1] = hostile_frame(&pending_frames[1], |frame| {
+        frame["record"]["effect_id"] =
+            serde_json::json!(EffectId::from_digest(DigestBytes::from_array([88; 32])).as_str());
+    });
 
-    let mut wrong_command_frames = pending_frames;
-    let mut wrong_command: serde_json::Value =
-        serde_json::from_slice(&wrong_command_frames[1]).expect("prepare wire");
     let replacement_command = br#"{"value":99}"#;
     let replacement_digest = raw_content_digest(replacement_command);
-    let original_command_ref = wrong_command["record"]["command"].clone();
-    wrong_command["record"]["command"]["content_digest"] =
-        serde_json::json!(replacement_digest.as_str());
-    for object in wrong_command["objects"].as_array_mut().expect("objects") {
-        if object["content_ref"] == original_command_ref {
-            object["content_ref"]["content_digest"] =
-                serde_json::json!(replacement_digest.as_str());
-            object["canonical"] = serde_json::from_slice(replacement_command).expect("command");
+    let mut wrong_command_frames = pending_frames.clone();
+    wrong_command_frames[1] = hostile_frame(&pending_frames[1], |frame| {
+        let original_command_ref = frame["record"]["command"].clone();
+        frame["record"]["command"]["content_digest"] =
+            serde_json::json!(replacement_digest.as_str());
+        for object in frame["objects"].as_array_mut().expect("objects") {
+            if object["content_ref"] == original_command_ref {
+                object["content_ref"]["content_digest"] =
+                    serde_json::json!(replacement_digest.as_str());
+                object["canonical"] = serde_json::from_slice(replacement_command).expect("command");
+            }
         }
-    }
-    wrong_command_frames[1] = PlainCanonicalJsonBytes::from_json_str(
-        &serde_json::to_string(&wrong_command).expect("json"),
-    )
-    .expect("canonical")
-    .to_vec();
-
-    for frames in [wrong_id_frames, wrong_command_frames] {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut builder = RuntimeAssemblyBuilder::new();
-        builder
-            .register_effect::<Mutate, Mutation>()
-            .expect("Effect State");
-        builder
-            .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-                let calls = Arc::clone(&calls);
-                move |effect_id, command| {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    let effect_id = effect_id.clone();
-                    let value = command.value;
-                    Box::pin(async move {
-                        Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                            effect_id,
-                            value,
-                            accepted: true,
-                        }))
-                    })
-                }
-            })
-            .expect("adapter");
-        let runtime = Runtime::new(
-            builder.finish().expect("assembly"),
-            Arc::new(RetainedStore { frames }),
-        );
-        assert!(matches!(
-            runtime.read(&run_id).await,
-            Err(RuntimeError::InvalidHistory)
-        ));
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-    }
+    });
 
     let settled_store = Arc::new(ScriptedStore::recording());
-    let mut settled_builder = RuntimeAssemblyBuilder::new();
-    settled_builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    settled_builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, |effect_id, command| {
-            let effect_id = effect_id.clone();
-            let value = command.value;
-            Box::pin(async move {
-                Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                    effect_id,
-                    value,
-                    accepted: true,
-                }))
-            })
-        })
-        .expect("adapter");
-    let settled_runtime = Runtime::new(
-        settled_builder.finish().expect("assembly"),
+    let settled_calls = Arc::new(AtomicUsize::new(0));
+    let settled_runtime = effect_runtime_with_counting_adapter(
         settled_store.clone(),
+        Arc::clone(&settled_calls),
+        Arc::new(std::sync::Mutex::new(Vec::new())),
     );
     let settled_run_id = RunId::from_digest(DigestBytes::from_array([37; 32]));
     settled_runtime
@@ -1554,8 +1412,20 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
         )
         .await
         .expect("settled Effect");
+    assert_eq!(settled_calls.load(Ordering::SeqCst), 1);
     let settled_frames = settled_store.snapshot();
     assert_eq!(settled_frames.len(), 3);
+
+    let settled_read_calls = Arc::new(AtomicUsize::new(0));
+    let settled_reader =
+        retained_effect_reader(settled_frames.clone(), Arc::clone(&settled_read_calls));
+    let settled = settled_reader
+        .read(&settled_run_id)
+        .await
+        .expect("settled view");
+    assert_eq!(settled.head_sequence(), 3);
+    assert!(matches!(settled.state(), RunViewState::Succeeded(_)));
+    assert_eq!(settled_read_calls.load(Ordering::SeqCst), 0);
 
     let mut swapped_evidence_frames = settled_frames.clone();
     let replacement_evidence = serde_json::json!({
@@ -1568,121 +1438,61 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
     )
     .expect("canonical");
     let replacement_evidence_digest = raw_content_digest(replacement_evidence_bytes.as_bytes());
-    let mut swapped_evidence: serde_json::Value =
-        serde_json::from_slice(&swapped_evidence_frames[2]).expect("conclusion wire");
-    let original_evidence_ref = swapped_evidence["record"]["evidence"].clone();
-    swapped_evidence["record"]["evidence"]["content_digest"] =
-        serde_json::json!(replacement_evidence_digest.as_str());
-    for object in swapped_evidence["objects"].as_array_mut().expect("objects") {
-        if object["content_ref"] == original_evidence_ref {
-            object["content_ref"]["content_digest"] =
-                serde_json::json!(replacement_evidence_digest.as_str());
-            object["canonical"] = replacement_evidence.clone();
+    swapped_evidence_frames[2] = hostile_frame(&settled_frames[2], |frame| {
+        let original_evidence_ref = frame["record"]["evidence"].clone();
+        frame["record"]["evidence"]["content_digest"] =
+            serde_json::json!(replacement_evidence_digest.as_str());
+        for object in frame["objects"].as_array_mut().expect("objects") {
+            if object["content_ref"] == original_evidence_ref {
+                object["content_ref"]["content_digest"] =
+                    serde_json::json!(replacement_evidence_digest.as_str());
+                object["canonical"] = replacement_evidence.clone();
+            }
         }
-    }
-    swapped_evidence["objects"]
-        .as_array_mut()
-        .expect("objects")
-        .sort_by(|left, right| {
-            left["content_ref"]["schema_id"]
-                .as_str()
-                .expect("left schema")
-                .cmp(
-                    right["content_ref"]["schema_id"]
-                        .as_str()
-                        .expect("right schema"),
-                )
-                .then_with(|| {
-                    left["content_ref"]["content_digest"]
-                        .as_str()
-                        .expect("left digest")
-                        .cmp(
-                            right["content_ref"]["content_digest"]
-                                .as_str()
-                                .expect("right digest"),
-                        )
-                })
-        });
-    swapped_evidence_frames[2] = PlainCanonicalJsonBytes::from_json_str(
-        &serde_json::to_string(&swapped_evidence).expect("json"),
-    )
-    .expect("canonical")
-    .to_vec();
+    });
 
-    let mut wrong_outcome_frames = settled_frames;
+    let mut wrong_outcome_frames = settled_frames.clone();
     let prepare: serde_json::Value =
         serde_json::from_slice(&wrong_outcome_frames[1]).expect("prepare wire");
     let command_schema = prepare["record"]["command"]["schema_id"].clone();
-    let mut wrong_outcome: serde_json::Value =
-        serde_json::from_slice(&wrong_outcome_frames[2]).expect("conclusion wire");
-    let original_outcome_ref = wrong_outcome["record"]["outcome"]["value"].clone();
-    wrong_outcome["record"]["outcome"]["value"]["schema_id"] = command_schema.clone();
-    for object in wrong_outcome["objects"].as_array_mut().expect("objects") {
-        if object["content_ref"] == original_outcome_ref {
-            object["content_ref"]["schema_id"] = command_schema.clone();
+    wrong_outcome_frames[2] = hostile_frame(&settled_frames[2], |frame| {
+        let original_outcome_ref = frame["record"]["outcome"]["value"].clone();
+        frame["record"]["outcome"]["value"]["schema_id"] = command_schema.clone();
+        for object in frame["objects"].as_array_mut().expect("objects") {
+            if object["content_ref"] == original_outcome_ref {
+                object["content_ref"]["schema_id"] = command_schema.clone();
+            }
         }
-    }
-    wrong_outcome["objects"]
-        .as_array_mut()
-        .expect("objects")
-        .sort_by(|left, right| {
-            left["content_ref"]["schema_id"]
-                .as_str()
-                .expect("left schema")
-                .cmp(
-                    right["content_ref"]["schema_id"]
-                        .as_str()
-                        .expect("right schema"),
-                )
-                .then_with(|| {
-                    left["content_ref"]["content_digest"]
-                        .as_str()
-                        .expect("left digest")
-                        .cmp(
-                            right["content_ref"]["content_digest"]
-                                .as_str()
-                                .expect("right digest"),
-                        )
-                })
-        });
-    wrong_outcome_frames[2] = PlainCanonicalJsonBytes::from_json_str(
-        &serde_json::to_string(&wrong_outcome).expect("json"),
-    )
-    .expect("canonical")
-    .to_vec();
+    });
 
-    for frames in [swapped_evidence_frames, wrong_outcome_frames] {
+    for (name, corrupt_run_id, frames) in [
+        ("wrong prepare effect id", run_id.clone(), wrong_id_frames),
+        ("replaced command", run_id, wrong_command_frames),
+        (
+            "swapped evidence effect id",
+            settled_run_id.clone(),
+            swapped_evidence_frames,
+        ),
+        (
+            "wrong conclusion outcome schema",
+            settled_run_id,
+            wrong_outcome_frames,
+        ),
+    ] {
         let calls = Arc::new(AtomicUsize::new(0));
-        let mut builder = RuntimeAssemblyBuilder::new();
-        builder
-            .register_effect::<Mutate, Mutation>()
-            .expect("Effect State");
-        builder
-            .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-                let calls = Arc::clone(&calls);
-                move |effect_id, command| {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    let effect_id = effect_id.clone();
-                    let value = command.value;
-                    Box::pin(async move {
-                        Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                            effect_id,
-                            value,
-                            accepted: true,
-                        }))
-                    })
-                }
-            })
-            .expect("adapter");
-        let runtime = Runtime::new(
-            builder.finish().expect("assembly"),
-            Arc::new(RetainedStore { frames }),
+        let runtime = retained_effect_reader(frames, Arc::clone(&calls));
+        assert!(
+            matches!(
+                runtime.read(&corrupt_run_id).await,
+                Err(RuntimeError::InvalidHistory),
+            ),
+            "{name}"
         );
-        assert!(matches!(
-            runtime.read(&settled_run_id).await,
-            Err(RuntimeError::InvalidHistory)
-        ));
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "{name} must not enter the adapter"
+        );
     }
 }
 
