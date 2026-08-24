@@ -23,4 +23,4 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 serde = { workspace = true }
-trybuild = "1.0"
+static_assertions = "1.1"

@@ -2021,9 +2021,9 @@ dependencies = [
  "mfm-ids",
  "mfm-signing",
  "serde",
+ "static_assertions",
  "thiserror",
  "tokio",
- "trybuild",
  "zeroize",
 ]
 
@@ -2118,8 +2118,8 @@ dependencies = [
  "k256",
  "mfm-ids",
  "serde",
+ "static_assertions",
  "thiserror",
- "trybuild",
 ]
 
 [[package]]

@@ -1,9 +1,9 @@
 #![warn(missing_docs)]
 //! Thread-affine in-process custody for recoverable secp256k1 keys.
 //!
-//! The non-`Send`, non-`Sync` [`Keystore`] exists only inside its dedicated owner thread. Async
-//! callers hold bounded command senders and key- and purpose-bound [`KeystoreSigner`] handles;
-//! private scalars never cross back out of the owner.
+//! A private non-`Send`, non-`Sync` key map exists only inside its dedicated owner thread. Async
+//! callers use [`KeystoreOwner`] and key- and purpose-bound [`KeystoreSigner`] handles; private
+//! scalars never cross back out of the owner.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -58,7 +58,7 @@ impl SecretSecp256k1Scalar {
 }
 
 /// Non-`Send`, non-`Sync` secret owner retained only by its OS thread.
-pub struct Keystore {
+struct Keystore {
     entries: BTreeMap<[u8; 65], SigningKey>,
     _thread_affinity: Rc<()>,
 }
@@ -268,6 +268,11 @@ fn map_signing_error(_error: SigningError) -> KeystoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static_assertions::assert_not_impl_any!(Keystore: Send, Sync);
+    static_assertions::assert_not_impl_any!(
+        SecretSecp256k1Scalar: std::fmt::Debug, std::fmt::Display, serde::Serialize
+    );
 
     #[test]
     fn last_sender_exit_and_owner_panic_are_joinable_without_secret_diagnostics() {
