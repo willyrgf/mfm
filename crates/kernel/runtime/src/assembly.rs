@@ -157,6 +157,36 @@ struct StateSignature {
     failure_contract_ref: ContentRef,
 }
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct StateAbiKey {
+    state_implementation_ref: ContentRef,
+    input_contract_ref: ContentRef,
+    output_contract_ref: ContentRef,
+    failure_contract_ref: ContentRef,
+}
+
+impl From<&StateSignature> for StateAbiKey {
+    fn from(signature: &StateSignature) -> Self {
+        Self {
+            state_implementation_ref: signature.state_implementation_ref.clone(),
+            input_contract_ref: signature.input_contract_ref.clone(),
+            output_contract_ref: signature.output_contract_ref.clone(),
+            failure_contract_ref: signature.failure_contract_ref.clone(),
+        }
+    }
+}
+
+impl From<&StateDeclaration> for StateAbiKey {
+    fn from(declaration: &StateDeclaration) -> Self {
+        Self {
+            state_implementation_ref: declaration.state_implementation_ref().clone(),
+            input_contract_ref: declaration.input_contract_ref().clone(),
+            output_contract_ref: declaration.output_contract_ref().clone(),
+            failure_contract_ref: declaration.failure_contract_ref().clone(),
+        }
+    }
+}
+
 pub(crate) type PureStart =
     for<'a> fn(QualifiedValue, DriverContext<'a>) -> BoxFuture<'a, Result<DriverDisposition>>;
 pub(crate) type ReadStart = for<'a> fn(
@@ -319,17 +349,6 @@ fn validate_effect_evidence<C: EffectCapabilityContract>(
     C::bind_evidence(effect_id, command, evidence).map_err(|_| RuntimeError::InvalidHistory)
 }
 
-fn state_contract_matches(signature: &StateSignature, declaration: &StateDeclaration) -> bool {
-    if declaration.state_implementation_ref() != &signature.state_implementation_ref
-        || declaration.input_contract_ref() != &signature.input_contract_ref
-        || declaration.output_contract_ref() != &signature.output_contract_ref
-        || declaration.failure_contract_ref() != &signature.failure_contract_ref
-    {
-        return false;
-    }
-    true
-}
-
 struct CatchAdapterPanic<'a, T> {
     inner: BoxFuture<'a, std::result::Result<T, AdapterError>>,
 }
@@ -445,8 +464,7 @@ struct EffectCapabilitySignature {
 /// Mutable builder for one immutable Runtime assembly.
 pub struct RuntimeAssemblyBuilder {
     values: BTreeMap<ContentRef, Arc<ValueCodec>>,
-    semantics: BTreeMap<SemanticTypeId, ContentRef>,
-    states: BTreeMap<ContentRef, RegisteredState>,
+    states: BTreeMap<StateAbiKey, RegisteredState>,
     read_capabilities: BTreeMap<ContentRef, CapabilitySignature>,
     effect_capabilities: BTreeMap<ContentRef, EffectCapabilitySignature>,
     read_adapters: ReadAdapterRegistry,
@@ -460,7 +478,6 @@ impl RuntimeAssemblyBuilder {
     pub fn new() -> Self {
         let mut builder = Self {
             values: BTreeMap::new(),
-            semantics: BTreeMap::new(),
             states: BTreeMap::new(),
             read_capabilities: BTreeMap::new(),
             effect_capabilities: BTreeMap::new(),
@@ -489,18 +506,11 @@ impl RuntimeAssemblyBuilder {
         let key = contract_ref.clone();
         if let Some(previous) = self.values.get(&key) {
             return (previous.codec_type_id == TypeId::of::<T>()
-                && previous.semantic_id == semantic)
+                && previous.semantic_id == semantic
+                && previous.descriptor == descriptor)
                 .then_some(())
                 .ok_or(RuntimeError::IncompatibleAssembly);
         }
-        if self
-            .semantics
-            .get(&semantic)
-            .is_some_and(|previous| previous != &key)
-        {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
-        self.semantics.insert(semantic.clone(), key.clone());
         self.values.insert(
             key,
             Arc::new(ValueCodec {
@@ -682,7 +692,7 @@ impl RuntimeAssemblyBuilder {
     }
 
     fn register_state(&mut self, state: RegisteredState) -> Result<()> {
-        let key = state.signature.state_implementation_ref.clone();
+        let key = StateAbiKey::from(&state.signature);
         if let Some(previous) = self.states.get(&key) {
             return previous
                 .has_same_registration(&state)
@@ -769,7 +779,7 @@ pub struct RuntimeAssembly {
 
 pub(crate) struct AssemblyInner {
     values: BTreeMap<ContentRef, Arc<ValueCodec>>,
-    states: BTreeMap<ContentRef, RegisteredState>,
+    states: BTreeMap<StateAbiKey, RegisteredState>,
     read_adapters: ReadAdapterRegistry,
     effect_adapters: EffectAdapterRegistry,
 }
@@ -792,14 +802,12 @@ impl RuntimeAssembly {
         for declaration in program.declarations() {
             match declaration {
                 Declaration::State(state) => {
+                    let key = StateAbiKey::from(state);
                     let registered = self
                         .inner
                         .states
-                        .get(state.state_implementation_ref())
+                        .get(&key)
                         .ok_or(RuntimeError::IncompatibleAssembly)?;
-                    if !state_contract_matches(&registered.signature, state) {
-                        return Err(RuntimeError::IncompatibleAssembly);
-                    }
                     let output_codec = self
                         .codec(state.output_contract_ref())
                         .ok_or(RuntimeError::IncompatibleAssembly)?;

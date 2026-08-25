@@ -18,7 +18,10 @@ Pure States deterministically map typed input to typed success/failure. Read Sta
 prepare typed intent, then interpret typed evidence. Effect States deterministically prepare a
 complete command and interpret typed settlement evidence. Runtime associates all values,
 mode-specific State executables, Match projections, and exact `(capability contract, binding ref)`
-adapters before execution. State code has no ambient IO.
+adapters before execution. A semantic type ID names a value family and may have multiple exact
+generic schemas; only the exact content ref selects a codec. State association likewise uses the
+exact implementation/input/output/failure ABI, so one implementation identity may own multiple
+generic ABIs without ambiguity. State code has no ambient IO.
 
 Each Read or Effect occurrence applies the exact capability/State pair's authoring-time injection
 policy. Injection may add deterministic Pure topology before or after the one kernel-owned

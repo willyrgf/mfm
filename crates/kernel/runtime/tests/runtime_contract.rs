@@ -1,12 +1,13 @@
 use std::collections::VecDeque;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_capabilities::{CapabilityError, EffectCapabilityContract, ReadCapabilityContract};
-use mfm_ids::{DigestBytes, EffectId, EntryPointId, RunId, StableId};
+use mfm_ids::{DigestBytes, EffectId, EntryPointId, RunId, SemanticTypeId, StableId};
 use mfm_journal::{EncodedRunFrame, StoredRunBytes};
 use mfm_program::{
     expand_program, CapabilityInjection, EffectState, Never, Operation, OperationExpansion,
@@ -17,13 +18,132 @@ use mfm_runtime::{
     AdapterError, EffectAdapterOutcome, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError,
 };
 use mfm_store::{AppendResult, MemoryStore, Store, StoreError};
-use mfm_values::canonicalize_mfm_value;
+use mfm_values::{
+    canonicalize_mfm_value, MfmValue as MfmValueTrait, SchemaAudit, SchemaDescriptor,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 struct Number {
     value: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NumberAlias {
+    value: u64,
+}
+
+impl MfmValueTrait for NumberAlias {
+    fn schema_descriptor() -> mfm_values::Result<SchemaDescriptor> {
+        Number::schema_descriptor()
+    }
+
+    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
+        Number::semantic_id()
+    }
+}
+
+static ALTERNATE_DESCRIPTOR_AUDIT: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MutableDescriptorNumber {
+    value: u64,
+}
+
+impl MfmValueTrait for MutableDescriptorNumber {
+    fn schema_descriptor() -> mfm_values::Result<SchemaDescriptor> {
+        let mut descriptor = Number::schema_descriptor()?;
+        let rust_type = if ALTERNATE_DESCRIPTOR_AUDIT.load(Ordering::SeqCst) {
+            "MutableDescriptorNumber::alternate"
+        } else {
+            "MutableDescriptorNumber"
+        };
+        descriptor.audit =
+            SchemaAudit::__derive_generated("mfm-runtime-tests", rust_type, "test-only");
+        Ok(descriptor)
+    }
+
+    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
+        Number::semantic_id()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct FirstGenericValue {
+    first: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct SecondGenericValue {
+    second: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.test.runtime",
+    name = "generic-state-value",
+    version = "1",
+    schema = "mfm.test.runtime-generic-state-value"
+)]
+struct GenericStateValue<K> {
+    value: K,
+}
+
+struct GenericState<K>(PhantomData<fn() -> K>);
+
+impl<K: MfmValueTrait> State for GenericState<K> {
+    type Input = GenericStateValue<K>;
+    type Output = GenericStateValue<K>;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.runtime/generic-state@1").map_err(|_| ProgramError::InvalidContract)
+    }
+}
+
+impl<K: MfmValueTrait> PureState for GenericState<K> {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+struct ConflictingGenericState<K>(PhantomData<fn() -> K>);
+
+impl<K: MfmValueTrait> State for ConflictingGenericState<K> {
+    type Input = GenericStateValue<K>;
+    type Output = GenericStateValue<K>;
+    type Failure = Never;
+
+    fn state_id() -> mfm_program::Result<StableId> {
+        GenericState::<K>::state_id()
+    }
+}
+
+impl<K: MfmValueTrait> PureState for ConflictingGenericState<K> {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        ProposedStateOutcome::Success { output: input }
+    }
+}
+
+struct GenericProgram<K>(PhantomData<fn() -> K>);
+
+impl<K: MfmValueTrait> Operation for GenericProgram<K> {
+    type Input = GenericStateValue<K>;
+    type Output = GenericStateValue<K>;
+    type Failure = Never;
+
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.pure::<GenericState<K>>()
+    }
 }
 
 struct Increment;
@@ -335,6 +455,146 @@ impl Operation for RejectEffectProgram {
     ) -> mfm_program::Result<()> {
         body.effect::<RejectEffect, Mutation>(&Binding { route: 8 })
     }
+}
+
+#[test]
+fn exact_value_and_state_abi_collisions_are_rejected() {
+    let mut different_type = RuntimeAssemblyBuilder::new();
+    different_type
+        .register_value::<Number>()
+        .expect("number codec");
+    assert_eq!(
+        different_type.register_value::<NumberAlias>(),
+        Err(RuntimeError::IncompatibleAssembly)
+    );
+
+    ALTERNATE_DESCRIPTOR_AUDIT.store(false, Ordering::SeqCst);
+    let mut different_descriptor = RuntimeAssemblyBuilder::new();
+    different_descriptor
+        .register_value::<MutableDescriptorNumber>()
+        .expect("first descriptor");
+    ALTERNATE_DESCRIPTOR_AUDIT.store(true, Ordering::SeqCst);
+    assert_eq!(
+        different_descriptor.register_value::<MutableDescriptorNumber>(),
+        Err(RuntimeError::IncompatibleAssembly)
+    );
+    ALTERNATE_DESCRIPTOR_AUDIT.store(false, Ordering::SeqCst);
+
+    let mut different_state_type = RuntimeAssemblyBuilder::new();
+    different_state_type
+        .register_pure::<GenericState<FirstGenericValue>>()
+        .expect("generic state");
+    assert_eq!(
+        different_state_type.register_pure::<ConflictingGenericState<FirstGenericValue>>(),
+        Err(RuntimeError::IncompatibleAssembly)
+    );
+}
+
+#[tokio::test]
+async fn one_semantic_family_executes_multiple_exact_schemas_hot_and_cold() {
+    assert_eq!(
+        GenericStateValue::<FirstGenericValue>::semantic_id().expect("first semantic id"),
+        GenericStateValue::<SecondGenericValue>::semantic_id().expect("second semantic id")
+    );
+    assert_ne!(
+        mfm_program::nominal_contract_ref::<GenericStateValue<FirstGenericValue>>()
+            .expect("first contract"),
+        mfm_program::nominal_contract_ref::<GenericStateValue<SecondGenericValue>>()
+            .expect("second contract")
+    );
+
+    let store = Arc::new(MemoryStore::new());
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder
+        .register_pure::<GenericState<FirstGenericValue>>()
+        .expect("first generic State ABI");
+    builder
+        .register_pure::<GenericState<SecondGenericValue>>()
+        .expect("second generic State ABI");
+    let runtime = Runtime::new(builder.finish().expect("generic assembly"), store.clone());
+
+    let first_run_id = RunId::from_digest(DigestBytes::from_array([60; 32]));
+    let first_hot = runtime
+        .start(
+            first_run_id.clone(),
+            expand_program(
+                EntryPointId::new("mfm.test.runtime/generic-first@1").expect("first entry point"),
+                &GenericProgram::<FirstGenericValue>(PhantomData),
+            )
+            .expect("first Program"),
+            GenericStateValue {
+                value: FirstGenericValue { first: 11 },
+            },
+        )
+        .await
+        .expect("first hot execution");
+    let RunViewState::Succeeded(first_hot_value) = first_hot.state() else {
+        panic!("first generic Program did not succeed");
+    };
+    assert_eq!(
+        first_hot_value.canonical_bytes(),
+        br#"{"value":{"first":11}}"#
+    );
+
+    let second_run_id = RunId::from_digest(DigestBytes::from_array([61; 32]));
+    let second_hot = runtime
+        .start(
+            second_run_id.clone(),
+            expand_program(
+                EntryPointId::new("mfm.test.runtime/generic-second@1").expect("second entry point"),
+                &GenericProgram::<SecondGenericValue>(PhantomData),
+            )
+            .expect("second Program"),
+            GenericStateValue {
+                value: SecondGenericValue {
+                    second: "two".to_owned(),
+                },
+            },
+        )
+        .await
+        .expect("second hot execution");
+    let RunViewState::Succeeded(second_hot_value) = second_hot.state() else {
+        panic!("second generic Program did not succeed");
+    };
+    assert_eq!(
+        second_hot_value.canonical_bytes(),
+        br#"{"value":{"second":"two"}}"#
+    );
+
+    let mut cold_builder = RuntimeAssemblyBuilder::new();
+    cold_builder
+        .register_pure::<GenericState<FirstGenericValue>>()
+        .expect("cold first generic State ABI");
+    cold_builder
+        .register_pure::<GenericState<SecondGenericValue>>()
+        .expect("cold second generic State ABI");
+    let cold_runtime = Runtime::new(cold_builder.finish().expect("cold assembly"), store);
+
+    let first_cold = cold_runtime
+        .read(&first_run_id)
+        .await
+        .expect("first cold read");
+    let RunViewState::Succeeded(first_cold_value) = first_cold.state() else {
+        panic!("first cold generic Program did not succeed");
+    };
+    assert_eq!(first_cold.head_digest(), first_hot.head_digest());
+    assert_eq!(
+        first_cold_value.canonical_bytes(),
+        first_hot_value.canonical_bytes()
+    );
+
+    let second_cold = cold_runtime
+        .read(&second_run_id)
+        .await
+        .expect("second cold read");
+    let RunViewState::Succeeded(second_cold_value) = second_cold.state() else {
+        panic!("second cold generic Program did not succeed");
+    };
+    assert_eq!(second_cold.head_digest(), second_hot.head_digest());
+    assert_eq!(
+        second_cold_value.canonical_bytes(),
+        second_hot_value.canonical_bytes()
+    );
 }
 
 #[test]
