@@ -3,27 +3,27 @@
 //! The provider owns exactly one endpoint URL and the bounded Read and transaction methods the EVM
 //! domain contracts require. It holds no key, nonce authority, or automatic retry.
 
-use std::future::Future;
 use std::num::NonZeroU64;
-use std::pin::Pin;
 #[cfg(test)]
 use std::str::FromStr;
 use std::time::Duration;
 
 use alloy_primitives::{hex, Address, U256};
-use mfm_canonical::CanonicalBytes;
 use mfm_evm::{
-    AnchoredContractCallResult, EvmBalanceSource, EvmBlockAnchor, EvmChainInstance, EvmHash,
-    EvmReadIntent, EvmReadSubject, EvmReadValue, EvmU256, MAX_EVM_CALL_RETURN_BYTES,
+    AnchoredContractCallEvidence, AnchoredContractCallIntent, AnchoredContractCallResult,
+    EvmAddress, EvmBalanceSource, EvmBlockAnchor, EvmChainInstance, EvmHash, EvmReadEvidence,
+    EvmReadIntent, EvmReadSubject, EvmReadValue, EvmTokenDecimals, EvmU256,
+    MAX_EVM_CALL_RETURN_BYTES,
 };
 use mfm_evm_transaction_authority::ExactRawTransaction;
-use mfm_ids::StableId;
+use mfm_ids::ContentRef;
 use mfm_runtime::AdapterError;
-use serde::Serialize;
+use serde::de::{self, DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
-    EvmProvider, EvmProviderResponse, EvmTransactionProvider, EvmTransactionProviderFuture,
+    EvmReadProvider, EvmTransactionProvider, EvmTransactionProviderFuture, ProviderFuture,
     ProviderReceipt, ProviderReceiptResult,
 };
 
@@ -102,12 +102,11 @@ impl JsonRpcEvmProvider {
         })
     }
 
-    /// Performs one bounded exact-envelope JSON-RPC call.
-    async fn call_outcome(
+    async fn rpc<P: Serialize + ?Sized, T: DeserializeOwned>(
         &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<RpcOutcome, AdapterError> {
+        method: &'static str,
+        params: &P,
+    ) -> Result<RpcEnvelope<T>, AdapterError> {
         let response = self
             .http
             .post(self.url.clone())
@@ -124,239 +123,174 @@ impl JsonRpcEvmProvider {
             return Err(AdapterError::Unavailable);
         }
         let body = bounded_body(response).await?;
-        let envelope: serde_json::Value =
-            serde_json::from_slice(&body).map_err(|_| AdapterError::Unavailable)?;
-        let object = envelope.as_object().ok_or(AdapterError::Unavailable)?;
-        if object.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0")
-            || object.get("id").and_then(serde_json::Value::as_u64) != Some(1)
-            || object
-                .keys()
-                .any(|key| !matches!(key.as_str(), "jsonrpc" | "id" | "result" | "error"))
-        {
-            return Err(AdapterError::Unavailable);
-        }
-        match (object.get("result"), object.get("error")) {
-            (Some(result), None) => Ok(RpcOutcome::Result(result.clone())),
-            (None, Some(error)) if valid_rpc_error(error) => Ok(RpcOutcome::Error),
-            _ => Err(AdapterError::Unavailable),
-        }
+        serde_json::from_slice(&body).map_err(|_| AdapterError::Unavailable)
     }
 
-    /// Preserves the existing Read policy where an RPC error object is a reviewed safe failure.
-    async fn call(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<Option<serde_json::Value>, AdapterError> {
-        match self.call_outcome(method, params).await? {
-            RpcOutcome::Result(result) => Ok(Some(result)),
-            RpcOutcome::Error => Ok(None),
-        }
-    }
-
-    /// Uses the transaction/anchored policy where every RPC error object is unavailable.
-    async fn call_strict(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, AdapterError> {
-        match self.call_outcome(method, params).await? {
-            RpcOutcome::Result(result) => Ok(result),
-            RpcOutcome::Error => Err(AdapterError::Unavailable),
-        }
-    }
-
-    /// Reads one block anchor by the supplied block tag.
-    async fn anchor(&self, tag: serde_json::Value) -> Result<EvmProviderResponse, AdapterError> {
-        let Some(block) = self
-            .call("eth_getBlockByNumber", serde_json::json!([tag, false]))
+    async fn broad_anchor(&self, tag: &str) -> Result<EvmBlockAnchor, AdapterError> {
+        self.rpc::<_, RpcBlock>("eth_getBlockByNumber", &(tag, false))
             .await?
-        else {
-            return Ok(EvmProviderResponse::SafeFailure);
-        };
-        let number = block
-            .get("number")
-            .and_then(serde_json::Value::as_str)
-            .and_then(quantity_to_decimal)
-            .and_then(|number| EvmU256::new(number).ok())
-            .ok_or(AdapterError::Unavailable)?;
-        let hash = block
-            .get("hash")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|hash| EvmHash::new(hash.to_owned()).ok())
-            .ok_or(AdapterError::Unavailable)?;
-        Ok(returned(EvmReadValue::Anchor(EvmBlockAnchor::new(
-            number, hash,
-        ))))
+            .into_result()?
+            .into_anchor()
     }
 
-    /// Performs one anchored `eth_call` and returns its result word.
-    ///
-    /// `Ok(None)` is a definite safe failure: a reviewed revert or a codeless address.
-    async fn contract_call(
+    async fn token_contract_call(
         &self,
         source: &EvmBalanceSource,
         anchor: &EvmBlockAnchor,
         data: String,
     ) -> Result<Option<AbiWord>, AdapterError> {
         let token = source.token().ok_or(AdapterError::Internal)?;
-        let to = token.to_string();
         let tag = block_tag(anchor.number())?;
-        let Some(result) = self
-            .call(
-                "eth_call",
-                serde_json::json!([{ "to": to, "data": data }, tag]),
-            )
+        let call = RpcCall { to: token, data };
+        let data = self
+            .rpc::<_, RpcDataText>("eth_call", &(call, tag))
             .await?
-        else {
-            return Ok(None);
-        };
-        let data = RpcData::parse(result.as_str().ok_or(AdapterError::Unavailable)?, 32)?;
+            .into_result()?
+            .parse(32)?;
         if data.0.is_empty() {
             return Ok(None);
         }
         AbiWord::try_from(data).map(Some)
     }
 
-    /// Routes one checked Read subject to its exact RPC call.
-    async fn observe(&self, subject: &EvmReadSubject) -> Result<EvmProviderResponse, AdapterError> {
-        match subject {
+    async fn observe_read(
+        &self,
+        intent_value_ref: &ContentRef,
+        intent: &EvmReadIntent,
+    ) -> Result<EvmReadEvidence, AdapterError> {
+        let value = match intent.subject() {
             EvmReadSubject::ChainIdentity => {
-                let Some(result) = self.call("eth_chainId", serde_json::json!([])).await? else {
-                    return Ok(EvmProviderResponse::SafeFailure);
-                };
-                let chain_id = result
-                    .as_str()
-                    .and_then(quantity_to_u64)
+                let chain_id = self
+                    .rpc::<_, RpcQuantity>("eth_chainId", &[] as &[u8; 0])
+                    .await?
+                    .into_result()?
+                    .to_u64()
                     .and_then(NonZeroU64::new)
                     .ok_or(AdapterError::Unavailable)?;
-                Ok(returned(EvmReadValue::ChainId(chain_id)))
+                EvmReadValue::ChainId(chain_id)
             }
-            EvmReadSubject::InitialAnchor => self.anchor(serde_json::json!("latest")).await,
+            EvmReadSubject::InitialAnchor => {
+                EvmReadValue::Anchor(self.broad_anchor("latest").await?)
+            }
             EvmReadSubject::NativeBalance { source, anchor } => {
-                let address = source.address().to_string();
                 let tag = block_tag(anchor.number())?;
-                let Some(result) = self
-                    .call("eth_getBalance", serde_json::json!([address, tag]))
+                let units = self
+                    .rpc::<_, RpcQuantity>("eth_getBalance", &(source.address(), tag))
                     .await?
-                else {
-                    return Ok(EvmProviderResponse::SafeFailure);
-                };
-                let units = result
-                    .as_str()
-                    .and_then(quantity_to_decimal)
-                    .ok_or(AdapterError::Unavailable)?;
-                Ok(returned(EvmReadValue::RawUnits(
-                    EvmU256::new(units).map_err(|_| AdapterError::Unavailable)?,
-                )))
+                    .into_result()?
+                    .decimal();
+                EvmReadValue::RawUnits(EvmU256::new(units).map_err(|_| AdapterError::Unavailable)?)
             }
             EvmReadSubject::TokenDecimals { source, anchor } => {
                 let Some(word) = self
-                    .contract_call(source, anchor, decimals_calldata())
+                    .token_contract_call(source, anchor, decimals_calldata())
                     .await?
                 else {
-                    return Ok(EvmProviderResponse::SafeFailure);
+                    return Ok(EvmReadEvidence::safe_failure(intent_value_ref.clone()));
                 };
                 let decimals = word_to_u8(word).ok_or(AdapterError::Unavailable)?;
-                Ok(returned(EvmReadValue::TokenDecimals(decimals)))
+                EvmReadValue::TokenDecimals(
+                    EvmTokenDecimals::new(decimals).map_err(|_| AdapterError::Unavailable)?,
+                )
             }
             EvmReadSubject::TokenBalance { source, anchor } => {
                 let holder = Address::from(*source.address().as_bytes());
                 let Some(word) = self
-                    .contract_call(source, anchor, balance_of_calldata(&holder))
+                    .token_contract_call(source, anchor, balance_of_calldata(&holder))
                     .await?
                 else {
-                    return Ok(EvmProviderResponse::SafeFailure);
+                    return Ok(EvmReadEvidence::safe_failure(intent_value_ref.clone()));
                 };
-                let units = decode_abi_u256(word).to_string();
-                Ok(returned(EvmReadValue::RawUnits(
-                    EvmU256::new(units).map_err(|_| AdapterError::Unavailable)?,
-                )))
+                EvmReadValue::RawUnits(
+                    EvmU256::new(decode_abi_u256(word).to_string())
+                        .map_err(|_| AdapterError::Unavailable)?,
+                )
             }
             // Confirmation reads the committed number, never the moving head.
             EvmReadSubject::ConfirmAnchor { anchor, .. } => {
                 let tag = block_tag(anchor.number())?;
-                self.anchor(serde_json::json!(tag)).await
+                EvmReadValue::Anchor(self.broad_anchor(&tag).await?)
             }
-            EvmReadSubject::AnchoredContractCall {
-                anchor,
-                calldata,
-                target,
-            } => self.anchored_contract_call(anchor, calldata, target).await,
-        }
+        };
+        Ok(EvmReadEvidence::returned(intent_value_ref.clone(), value))
     }
 
     async fn anchored_contract_call(
         &self,
-        authored_anchor: &EvmBlockAnchor,
-        calldata: &CanonicalBytes,
-        target: &mfm_evm::EvmAddress,
-    ) -> Result<EvmProviderResponse, AdapterError> {
+        intent_value_ref: &ContentRef,
+        intent: &AnchoredContractCallIntent,
+    ) -> Result<AnchoredContractCallEvidence, AdapterError> {
+        let authored_anchor = intent.anchor();
         let Some(observed_anchor) = self
             .strict_block_anchor(block_tag(authored_anchor.number())?)
             .await?
         else {
-            return Ok(EvmProviderResponse::SafeFailure);
+            return Ok(AnchoredContractCallEvidence::safe_failure(
+                intent_value_ref.clone(),
+            ));
         };
         if &observed_anchor != authored_anchor {
-            return Ok(EvmProviderResponse::IntegrityBlocked);
+            return Ok(AnchoredContractCallEvidence::integrity_blocked(
+                intent_value_ref.clone(),
+            ));
         }
-        let tag = serde_json::json!({
-            "blockHash": authored_anchor.hash().to_string(),
-            "requireCanonical": true
-        });
+
+        let selector = RpcBlockSelector {
+            block_hash: authored_anchor.hash(),
+            require_canonical: true,
+        };
         let code = self
-            .call_strict(
-                "eth_getCode",
-                serde_json::json!([target.to_string(), tag.clone()]),
-            )
-            .await?;
-        let code = RpcData::parse(
-            code.as_str().ok_or(AdapterError::Unavailable)?,
-            MAX_EVM_CONTRACT_CODE_BYTES,
-        )?;
+            .rpc::<_, RpcDataText>("eth_getCode", &(intent.target(), &selector))
+            .await?
+            .into_result()?
+            .parse(MAX_EVM_CONTRACT_CODE_BYTES)?;
         if code.0.is_empty() {
-            return Ok(EvmProviderResponse::Rejected);
+            return Ok(AnchoredContractCallEvidence::rejected(
+                intent_value_ref.clone(),
+            ));
         }
-        let result = self
-            .call_strict(
-                "eth_call",
-                serde_json::json!([{
-                    "to": target.to_string(),
-                    "data": format!("0x{}", hex::encode(calldata.as_bytes())),
-                }, tag]),
-            )
-            .await?;
-        let return_bytes = RpcData::parse(
-            result.as_str().ok_or(AdapterError::Unavailable)?,
-            MAX_EVM_CALL_RETURN_BYTES,
-        )?
-        .0;
+
+        let call = RpcCall {
+            to: intent.target(),
+            data: format!("0x{}", hex::encode(intent.calldata())),
+        };
+        let return_bytes = self
+            .rpc::<_, RpcDataText>("eth_call", &(call, &selector))
+            .await?
+            .into_result()?
+            .parse(MAX_EVM_CALL_RETURN_BYTES)?
+            .0;
+
         let Some(confirmed_anchor) = self
             .strict_block_anchor(block_tag(authored_anchor.number())?)
             .await?
         else {
-            return Ok(EvmProviderResponse::SafeFailure);
+            return Ok(AnchoredContractCallEvidence::safe_failure(
+                intent_value_ref.clone(),
+            ));
         };
         if &confirmed_anchor != authored_anchor {
-            return Ok(EvmProviderResponse::IntegrityBlocked);
+            return Ok(AnchoredContractCallEvidence::integrity_blocked(
+                intent_value_ref.clone(),
+            ));
         }
         let result = AnchoredContractCallResult::new(confirmed_anchor, return_bytes)
             .map_err(|_| AdapterError::Unavailable)?;
-        Ok(returned(EvmReadValue::AnchoredContractCall(result)))
+        Ok(AnchoredContractCallEvidence::returned(
+            intent_value_ref.clone(),
+            result,
+        ))
     }
 
     async fn strict_block_anchor(
         &self,
         tag: String,
     ) -> Result<Option<EvmBlockAnchor>, AdapterError> {
-        let block = self
-            .call_strict("eth_getBlockByNumber", serde_json::json!([tag, false]))
-            .await?;
-        if block.is_null() {
-            return Ok(None);
-        }
-        parse_block_anchor(&block).map(Some)
+        self.rpc::<_, Option<RpcBlock>>("eth_getBlockByNumber", &(tag, false))
+            .await?
+            .into_result()?
+            .map(RpcBlock::into_anchor)
+            .transpose()
     }
 }
 
@@ -371,22 +305,21 @@ fn http_client() -> Result<reqwest::Client, EvmProviderBuildError> {
         .map_err(|_| EvmProviderBuildError)
 }
 
-impl EvmProvider for JsonRpcEvmProvider {
-    fn request<'a>(
+impl EvmReadProvider for JsonRpcEvmProvider {
+    fn observe<'a>(
         &'a self,
-        operation: StableId,
-        request_bytes: Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = Result<EvmProviderResponse, AdapterError>> + Send + 'a>> {
-        Box::pin(async move {
-            // The request bytes are the serialized intent: decode with the domain's own
-            // checked deserializer so a subject change is a compile error, not wire drift.
-            let intent: EvmReadIntent =
-                serde_json::from_slice(&request_bytes).map_err(|_| AdapterError::Internal)?;
-            if intent.operation_and_chain_id().0 != operation.as_str() {
-                return Err(AdapterError::Internal);
-            }
-            self.observe(intent.subject()).await
-        })
+        intent_value_ref: &'a ContentRef,
+        intent: &'a EvmReadIntent,
+    ) -> ProviderFuture<'a, EvmReadEvidence> {
+        Box::pin(async move { self.observe_read(intent_value_ref, intent).await })
+    }
+
+    fn observe_anchored_call<'a>(
+        &'a self,
+        intent_value_ref: &'a ContentRef,
+        intent: &'a AnchoredContractCallIntent,
+    ) -> ProviderFuture<'a, AnchoredContractCallEvidence> {
+        Box::pin(async move { self.anchored_contract_call(intent_value_ref, intent).await })
     }
 }
 
@@ -394,40 +327,35 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
     fn chain_instance(&self) -> EvmTransactionProviderFuture<'_, EvmChainInstance> {
         Box::pin(async move {
             let chain_id = self
-                .call_strict("eth_chainId", serde_json::json!([]))
+                .rpc::<_, RpcQuantity>("eth_chainId", &[] as &[u8; 0])
                 .await?
-                .as_str()
-                .and_then(quantity_to_u64)
+                .into_result()?
+                .to_u64()
                 .and_then(NonZeroU64::new)
                 .ok_or(AdapterError::Unavailable)?;
             let genesis = self
-                .call_strict("eth_getBlockByNumber", serde_json::json!(["0x0", false]))
-                .await?;
-            if genesis.is_null() {
+                .rpc::<_, Option<RpcBlock>>("eth_getBlockByNumber", &("0x0", false))
+                .await?
+                .into_result()?
+                .ok_or(AdapterError::Unavailable)?
+                .into_anchor()?;
+            if genesis.number().as_str() != "0" {
                 return Err(AdapterError::Unavailable);
             }
-            let anchor = parse_block_anchor(&genesis)?;
-            if anchor.number().as_str() != "0" {
-                return Err(AdapterError::Unavailable);
-            }
-            Ok(EvmChainInstance::new(chain_id, anchor.hash().clone()))
+            Ok(EvmChainInstance::new(chain_id, genesis.hash().clone()))
         })
     }
 
     fn pending_nonce<'a>(
         &'a self,
-        sender: &'a mfm_evm::EvmAddress,
+        sender: &'a EvmAddress,
     ) -> EvmTransactionProviderFuture<'a, u64> {
-        let sender = sender.to_string();
         Box::pin(async move {
-            self.call_strict(
-                "eth_getTransactionCount",
-                serde_json::json!([sender, "pending"]),
-            )
-            .await?
-            .as_str()
-            .and_then(quantity_to_u64)
-            .ok_or(AdapterError::Unavailable)
+            self.rpc::<_, RpcQuantity>("eth_getTransactionCount", &(sender, "pending"))
+                .await?
+                .into_result()?
+                .to_u64()
+                .ok_or(AdapterError::Unavailable)
         })
     }
 
@@ -435,18 +363,12 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
         &'a self,
         transaction_hash: &'a EvmHash,
     ) -> EvmTransactionProviderFuture<'a, Option<ProviderReceipt>> {
-        let transaction_hash = transaction_hash.to_string();
         Box::pin(async move {
-            let result = self
-                .call_strict(
-                    "eth_getTransactionReceipt",
-                    serde_json::json!([transaction_hash]),
-                )
-                .await?;
-            if result.is_null() {
-                return Ok(None);
-            }
-            parse_receipt(&result).map(Some)
+            self.rpc::<_, Option<RpcReceipt>>("eth_getTransactionReceipt", &(transaction_hash,))
+                .await?
+                .into_result()?
+                .map(parse_receipt)
+                .transpose()
         })
     }
 
@@ -454,9 +376,8 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
         &'a self,
         block_number: &'a EvmU256,
     ) -> EvmTransactionProviderFuture<'a, EvmBlockAnchor> {
-        let tag = block_tag(block_number);
         Box::pin(async move {
-            let tag = tag?;
+            let tag = block_tag(block_number)?;
             self.strict_block_anchor(tag)
                 .await?
                 .ok_or(AdapterError::Unavailable)
@@ -469,26 +390,150 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
     ) -> EvmTransactionProviderFuture<'a, EvmHash> {
         let encoded = format!("0x{}", hex::encode(raw_transaction.as_bytes()));
         Box::pin(async move {
-            self.call_strict("eth_sendRawTransaction", serde_json::json!([encoded]))
+            self.rpc::<_, EvmHash>("eth_sendRawTransaction", &(encoded,))
                 .await?
-                .as_str()
-                .and_then(|hash| EvmHash::new(hash.to_owned()).ok())
-                .ok_or(AdapterError::Unavailable)
+                .into_result()
         })
     }
 }
 
 #[derive(Serialize)]
-struct JsonRpcRequest<'a> {
+struct JsonRpcRequest<'a, P: Serialize + ?Sized> {
     jsonrpc: &'static str,
     id: u8,
-    method: &'a str,
-    params: serde_json::Value,
+    method: &'static str,
+    params: &'a P,
 }
 
-enum RpcOutcome {
-    Result(serde_json::Value),
-    Error,
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RpcSuccess<T> {
+    jsonrpc: RpcVersion,
+    id: RpcId,
+    result: T,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RpcFailure {
+    jsonrpc: RpcVersion,
+    id: RpcId,
+    error: RpcError,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RpcEnvelope<T> {
+    Success(RpcSuccess<T>),
+    Failure(RpcFailure),
+}
+
+impl<T> RpcEnvelope<T> {
+    fn into_result(self) -> Result<T, AdapterError> {
+        match self {
+            Self::Success(RpcSuccess {
+                jsonrpc,
+                id,
+                result,
+            }) => {
+                let _ = (jsonrpc, id);
+                Ok(result)
+            }
+            Self::Failure(RpcFailure { jsonrpc, id, error }) => {
+                let _ = (jsonrpc, id, error.code, error.message.len(), error.data);
+                Err(AdapterError::Unavailable)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RpcVersion;
+
+impl<'de> Deserialize<'de> for RpcVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        (value == "2.0")
+            .then_some(Self)
+            .ok_or_else(|| de::Error::custom("invalid JSON-RPC version"))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RpcId;
+
+impl<'de> Deserialize<'de> for RpcId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        (value == 1)
+            .then_some(Self)
+            .ok_or_else(|| de::Error::custom("invalid JSON-RPC id"))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RpcError {
+    code: i64,
+    message: String,
+    data: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct RpcCall<'a> {
+    to: &'a EvmAddress,
+    data: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RpcBlockSelector<'a> {
+    block_hash: &'a EvmHash,
+    require_canonical: bool,
+}
+
+#[derive(Deserialize)]
+struct RpcBlock {
+    number: RpcQuantity,
+    hash: EvmHash,
+}
+
+impl RpcBlock {
+    fn into_anchor(self) -> Result<EvmBlockAnchor, AdapterError> {
+        Ok(EvmBlockAnchor::new(
+            EvmU256::new(self.number.decimal()).map_err(|_| AdapterError::Unavailable)?,
+            self.hash,
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RpcReceipt {
+    transaction_hash: EvmHash,
+    #[serde(rename = "from")]
+    sender: EvmAddress,
+    #[serde(deserialize_with = "required_nullable")]
+    to: Option<EvmAddress>,
+    #[serde(deserialize_with = "required_nullable")]
+    contract_address: Option<EvmAddress>,
+    status: RpcQuantity,
+    block_number: RpcQuantity,
+    block_hash: EvmHash,
+}
+
+fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 /// Checked JSON-RPC QUANTITY ingress.
@@ -515,6 +560,26 @@ impl RpcQuantity {
 
     fn to_u64(&self) -> Option<u64> {
         u64::try_from(self.0).ok()
+    }
+}
+
+impl<'de> Deserialize<'de> for RpcQuantity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct RpcDataText(String);
+
+impl RpcDataText {
+    fn parse(self, maximum: usize) -> Result<RpcData, AdapterError> {
+        RpcData::parse(&self.0, maximum)
     }
 }
 
@@ -569,10 +634,6 @@ async fn bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, Adapte
     Ok(body)
 }
 
-const fn returned(value: EvmReadValue) -> EvmProviderResponse {
-    EvmProviderResponse::Read(value)
-}
-
 /// Parses a 20-byte address and re-renders it; addresses are never spliced as text.
 #[cfg(test)]
 fn checked_address(value: &str) -> Result<String, AdapterError> {
@@ -604,10 +665,12 @@ fn is_lower_hex(digits: &str) -> bool {
         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+#[cfg(test)]
 fn quantity_to_u64(value: &str) -> Option<u64> {
     RpcQuantity::parse(value).ok()?.to_u64()
 }
 
+#[cfg(test)]
 fn quantity_to_decimal(value: &str) -> Option<String> {
     RpcQuantity::parse(value).ok().map(|value| value.decimal())
 }
@@ -620,106 +683,27 @@ fn word_to_u8(word: AbiWord) -> Option<u8> {
     u8::try_from(decode_abi_u256(word)).ok()
 }
 
-fn parse_block_anchor(value: &serde_json::Value) -> Result<EvmBlockAnchor, AdapterError> {
-    let number = value
-        .get("number")
-        .and_then(serde_json::Value::as_str)
-        .and_then(quantity_to_decimal)
-        .and_then(|number| EvmU256::new(number).ok())
-        .ok_or(AdapterError::Unavailable)?;
-    let hash = value
-        .get("hash")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|hash| EvmHash::new(hash.to_owned()).ok())
-        .ok_or(AdapterError::Unavailable)?;
-    Ok(EvmBlockAnchor::new(number, hash))
-}
-
-fn parse_receipt(value: &serde_json::Value) -> Result<ProviderReceipt, AdapterError> {
-    let transaction_hash = checked_hash_field(value, "transactionHash")?;
-    let sender = checked_address_field(value, "from")?;
-    let block_number = value
-        .get("blockNumber")
-        .and_then(serde_json::Value::as_str)
-        .and_then(quantity_to_decimal)
-        .and_then(|number| EvmU256::new(number).ok())
-        .ok_or(AdapterError::Unavailable)?;
-    let block_hash = checked_hash_field(value, "blockHash")?;
-    let block_anchor = EvmBlockAnchor::new(block_number, block_hash);
-    let status = value
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .and_then(quantity_to_u64)
-        .filter(|status| *status <= 1)
-        .ok_or(AdapterError::Unavailable)?;
-    let target = nullable_address_field(value, "to")?;
-    let contract_address = nullable_address_field(value, "contractAddress")?;
-    let result = match (status, target, contract_address) {
-        (1, None, Some(contract_address)) => {
+fn parse_receipt(value: RpcReceipt) -> Result<ProviderReceipt, AdapterError> {
+    let status = value.status.to_u64().filter(|status| *status <= 1);
+    let block_anchor = EvmBlockAnchor::new(
+        EvmU256::new(value.block_number.decimal()).map_err(|_| AdapterError::Unavailable)?,
+        value.block_hash,
+    );
+    let result = match (status, value.to, value.contract_address) {
+        (Some(1), None, Some(contract_address)) => {
             ProviderReceiptResult::SuccessCreate { contract_address }
         }
-        (0, None, None) => ProviderReceiptResult::RevertedCreate,
-        (1, Some(target), None) => ProviderReceiptResult::SuccessCall { target },
-        (0, Some(target), None) => ProviderReceiptResult::RevertedCall { target },
+        (Some(0), None, None) => ProviderReceiptResult::RevertedCreate,
+        (Some(1), Some(target), None) => ProviderReceiptResult::SuccessCall { target },
+        (Some(0), Some(target), None) => ProviderReceiptResult::RevertedCall { target },
         _ => return Err(AdapterError::Unavailable),
     };
     Ok(ProviderReceipt::new(
-        transaction_hash,
-        sender,
+        value.transaction_hash,
+        value.sender,
         result,
         block_anchor,
     ))
-}
-
-fn checked_hash_field(value: &serde_json::Value, field: &str) -> Result<EvmHash, AdapterError> {
-    value
-        .get(field)
-        .and_then(serde_json::Value::as_str)
-        .and_then(|value| EvmHash::new(value.to_owned()).ok())
-        .ok_or(AdapterError::Unavailable)
-}
-
-fn checked_address_field(
-    value: &serde_json::Value,
-    field: &str,
-) -> Result<mfm_evm::EvmAddress, AdapterError> {
-    value
-        .get(field)
-        .and_then(serde_json::Value::as_str)
-        .and_then(|value| mfm_evm::EvmAddress::new(value.to_owned()).ok())
-        .ok_or(AdapterError::Unavailable)
-}
-
-fn nullable_address_field(
-    value: &serde_json::Value,
-    field: &str,
-) -> Result<Option<mfm_evm::EvmAddress>, AdapterError> {
-    let field = value.get(field).ok_or(AdapterError::Unavailable)?;
-    if field.is_null() {
-        return Ok(None);
-    }
-    field
-        .as_str()
-        .and_then(|value| mfm_evm::EvmAddress::new(value.to_owned()).ok())
-        .map(Some)
-        .ok_or(AdapterError::Unavailable)
-}
-
-fn valid_rpc_error(value: &serde_json::Value) -> bool {
-    let Some(error) = value.as_object() else {
-        return false;
-    };
-    error
-        .get("code")
-        .and_then(serde_json::Value::as_i64)
-        .is_some()
-        && error
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .is_some()
-        && error
-            .keys()
-            .all(|key| matches!(key.as_str(), "code" | "message" | "data"))
 }
 
 #[cfg(test)]

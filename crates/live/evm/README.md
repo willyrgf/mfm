@@ -2,30 +2,30 @@
 
 Direct provider registration for the three balance-oriented EVM Read capabilities, the generic
 anchored contract-call Read, and the development-only durable EVM transaction Effect. The balance
-callbacks retain the existing `EvmProvider` contract. Anchored calls bind an `EvmTransactionRoute`;
+callbacks and anchored calls share the typed `EvmReadProvider` boundary. Anchored calls bind an
+`EvmTransactionRoute`;
 transaction execution binds the complete route, authority epoch, and sender account.
 
 `EvmAdapterLocator` is one bounded private HTTP(S) URL. It implements neither `Debug`, `Display`,
 nor serialization. Non-HTTP schemes, fragments, and control characters are rejected.
 
-`JsonRpcEvmProvider` implements both the existing observational `EvmProvider` and the separate
+`JsonRpcEvmProvider` implements both the observational `EvmReadProvider` and the separate
 typed `EvmTransactionProvider`. It owns one endpoint URL, one 10-second per-request deadline, a
 512 KiB response bound, exact JSON-RPC IDs, and no proxy, redirect, referer propagation, or automatic
 retry. The transaction facet exposes only chain/genesis, pending nonce, receipt, canonical block,
 and exact-raw submission operations. JSON values are discarded at ingress in favor of checked
 private-field types.
 
-The per-operation observation contract every `EvmProvider` owes the domain is on the `EvmProvider`
-trait rustdoc. Its one trap: `confirm-balance-anchor` re-observes the committed block its intent
-names and never the head. The domain compares that result to the anchor it pinned before the
-balance reads, so a head read would report ordinary chain progression as a reorg and fail every
-collection on a chain that produces blocks.
+The provider receives the checked broad or anchored intent plus Runtime's exact canonical intent
+value ref and returns evidence carrying that same ref. No operation ID, serialized-intent byte
+transport, adapter recanonicalization, or provider-side domain decode remains. The confirmation
+subject re-observes the committed block its intent names and never the head.
 
-Existing balance reads retain their reviewed JSON-RPC-error/empty-call SafeFailure policy. The
-transaction and anchored-call paths treat every JSON-RPC error, unexpected null, malformed field,
-oversize body, and transport failure as Unavailable; receipt null alone means not yet mined.
+Every JSON-RPC error, unexpected null, malformed field, oversize body, and transport failure is
+Unavailable. An empty broad token-call result alone is SafeFailure where the balance contract
+admits a missing token interface; receipt null alone means not yet mined.
 Anchored block absence is SafeFailure, codeless target is Rejected, and replacement of the authored
-block is authenticated IntegrityBlocked evidence. Local operation, route, binding, signer purpose,
+block is authenticated IntegrityBlocked evidence. Local capability, route, binding, signer purpose,
 public-key-derived sender, or retained-authority mismatch is Internal before authority/provider IO.
 
 The pure codec maps the checked domain command into pinned `alloy-consensus` 1.6.1 `TxEip1559`

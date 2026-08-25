@@ -113,7 +113,8 @@ any creation-to-call or call-to-observation projection as ordinary Pure States.
 intent/evidence and context-preserving State. Its route reference is the content ref of
 `EvmTransactionRoute`, while the transaction Effect binds the complete
 route/authority-epoch/sender value. Live registration and IO remain downstream adapters. Live EVM
-alone owns the checked command-to-consensus mapping, retained-wire and signer validation, the
+receives checked Read intents with Runtime's exact intent value ref and returns evidence bound to
+that same ref; it owns no duplicate serialized-intent transport. Live EVM alone owns the checked command-to-consensus mapping, retained-wire and signer validation, the
 separate transaction provider facet, append-only authority orchestration, and the anchored-call RPC
 sequence. Its narrow pinned Alloy dependency owns EIP-1559/EIP-2718 consensus encoding, decoding,
 hashing, and CREATE-address derivation. Version 1 transaction settlement is intentionally limited

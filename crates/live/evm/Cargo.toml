@@ -12,7 +12,6 @@ domain = "evm"
 domain-role = "live"
 
 [dependencies]
-mfm-canonical = { path = "../../kernel/canonical" }
 mfm-evm = { path = "../../domains/evm" }
 mfm-evm-transaction-authority = { path = "../../domains/evm-transaction-authority" }
 mfm-ids = { path = "../../kernel/ids" }

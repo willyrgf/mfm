@@ -378,18 +378,19 @@ fn json_response(status: StatusCode, value: &impl Serialize) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
     use std::num::NonZeroU64;
-    use std::pin::Pin;
 
     use axum::body::{to_bytes, Body};
     use axum::http::header::CONTENT_TYPE;
     use axum::http::{HeaderValue, Method, Request};
     use mfm_app::{Application, BoundCapabilitySet, ComposedRuntime, RunRecovery};
     use mfm_config::MemoryConfigRepository;
-    use mfm_evm::{EvmBlockAnchor, EvmEndpoint, EvmHash, EvmReadValue, EvmU256};
-    use mfm_evm_live::{EvmProvider, EvmProviderResponse};
-    use mfm_ids::StableId;
+    use mfm_evm::{
+        AnchoredContractCallEvidence, AnchoredContractCallIntent, EvmBlockAnchor, EvmEndpoint,
+        EvmHash, EvmReadEvidence, EvmReadIntent, EvmReadSubject, EvmReadValue, EvmU256,
+    };
+    use mfm_evm_live::{EvmReadProvider, ProviderFuture};
+    use mfm_ids::ContentRef;
     use mfm_runtime::AdapterError;
     use mfm_store::MemoryStore;
     use tower::ServiceExt;
@@ -405,31 +406,38 @@ mod tests {
 
     struct Provider;
 
-    impl EvmProvider for Provider {
-        fn request<'a>(
+    impl EvmReadProvider for Provider {
+        fn observe<'a>(
             &'a self,
-            operation: StableId,
-            _request_bytes: Vec<u8>,
-        ) -> Pin<Box<dyn Future<Output = Result<EvmProviderResponse, AdapterError>> + Send + 'a>>
-        {
+            intent_value_ref: &'a ContentRef,
+            intent: &'a EvmReadIntent,
+        ) -> ProviderFuture<'a, EvmReadEvidence> {
             Box::pin(async move {
-                let value = match operation.as_str() {
-                    "mfm.evm.read-chain-identity@1" => {
+                let value = match intent.subject() {
+                    EvmReadSubject::ChainIdentity => {
                         EvmReadValue::ChainId(NonZeroU64::new(1).expect("nonzero chain"))
                     }
-                    "mfm.evm.read-initial-anchor@1" | "mfm.evm.confirm-balance-anchor@1" => {
+                    EvmReadSubject::InitialAnchor | EvmReadSubject::ConfirmAnchor { .. } => {
                         EvmReadValue::Anchor(EvmBlockAnchor::new(
                             EvmU256::new("100").expect("number"),
                             EvmHash::new(ANCHOR).expect("hash"),
                         ))
                     }
-                    "mfm.evm.read-native-balance@1" => {
+                    EvmReadSubject::NativeBalance { .. } => {
                         EvmReadValue::RawUnits(EvmU256::new("1000000000000000000").expect("units"))
                     }
                     _ => return Err(AdapterError::Internal),
                 };
-                Ok(EvmProviderResponse::Read(value))
+                Ok(EvmReadEvidence::returned(intent_value_ref.clone(), value))
             })
+        }
+
+        fn observe_anchored_call<'a>(
+            &'a self,
+            _intent_value_ref: &'a ContentRef,
+            _intent: &'a AnchoredContractCallIntent,
+        ) -> ProviderFuture<'a, AnchoredContractCallEvidence> {
+            Box::pin(async { Err(AdapterError::Internal) })
         }
     }
 
@@ -438,7 +446,7 @@ mod tests {
         let bindings = BoundCapabilitySet::new(vec![(
             1,
             EvmEndpoint::new("alpha").expect("endpoint"),
-            Arc::new(Provider) as Arc<dyn EvmProvider>,
+            Arc::new(Provider) as Arc<dyn EvmReadProvider>,
         )])
         .expect("bindings");
         let composed = ComposedRuntime::compose(store, bindings).expect("composition");

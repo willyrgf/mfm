@@ -24,10 +24,11 @@ Operation or creation-to-call/call-to-observation bridge: consumers keep deploym
 observation as explicit Program nodes and own their policy.
 
 `EvmAnchoredContractCallRead` and `ReadAnchoredContractCall<K>` carry one exact transaction-route
-reference, target, bounded calldata, and block anchor. Returned evidence retains only that anchor
-and bounded return bytes; the State maps the other evidence variants to the closed rejected,
-safe-failure, or integrity-blocked reasons. The live provider algorithm is deliberately outside
-this crate.
+reference, target, bounded calldata, and block anchor in their own exact intent type. Every
+evidence variant carries Runtime's exact canonical intent value ref; returned evidence additionally
+retains the anchor and bounded return bytes. The State maps the other variants to the closed
+rejected, safe-failure, or integrity-blocked reasons. The live provider algorithm is deliberately
+outside this crate.
 
 Six balance Read States and two Pure States continue to implement the cumulative balance contract.
 `CollectEvmBalances<K>` deterministically unrolls the native/token topology per source without
@@ -47,9 +48,12 @@ Every source in one collection is observed at one pinned block. `ReadInitialAnch
 the balance and decimal reads carry it in their intent, and `ConfirmBalanceAnchor` re-reads the
 block that same anchor names. An equal number and hash prove the block still stands; a different
 hash proves a reorg replaced it. The confirmation depends on the adapter re-observing the named
-block rather than the head, which the `EvmProvider` trait rustdoc states as a provider contract.
+block rather than the head, which the typed `EvmReadProvider` contract requires.
 
-The domain validates chain/route binding, anchors, quantities, byte bounds, action/result shape,
-decimal scale, and closed evidence. Authenticated integrity evidence maps to the distinct
-`IntegrityBlocked` failure. This crate has no signing dependency and no Runtime, Store, live
-client, signer handle, nonce authority, broadcast, or ambient IO dependency.
+The broad balance intent contains only chain, route, and one of six typed subjects; the subject is
+the operation discriminator. `EvmTokenDecimals` admits only 0 through 30. Broad and anchored
+capability binders reject evidence carrying any other intent value ref before validating the typed
+result relationship. The domain also validates anchors, quantities, byte bounds, action/result
+shape, and closed evidence. Authenticated integrity evidence maps to the distinct
+`IntegrityBlocked` failure. This crate has no signing dependency and no Runtime, Store, live client,
+signer handle, nonce authority, broadcast, or ambient IO dependency.

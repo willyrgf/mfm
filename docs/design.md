@@ -75,10 +75,15 @@ Settlement evidence binds the pending EffectId and contains the reserved nonce, 
 one Created, Called, or Reverted outcome. The Effect binder rejects an opposite successful action
 before State interpretation.
 
-The context-preserving anchored contract-call Read fixes a transaction-route content ref, target,
-bounded calldata, and exact block anchor. Returned evidence contains only the same anchor and
-bounded return bytes. Rejected, safe-failure, and integrity-blocked evidence project to a closed
-failure reason. Caller-owned Pure States project transaction completions into subsequent checked
+The broad EVM Read intent fixes only a nonzero chain ID, physical-route content ref, and one of six
+balance subjects; that subject is the operation discriminator. Its returned sum contains checked
+chain IDs, anchors, raw units, or token decimals bounded to 0 through 30. The context-preserving
+anchored contract-call Read has separate intent and evidence types fixing a transaction-route
+content ref, target, bounded calldata, and exact block anchor. Every broad and anchored evidence
+outcome carries Runtime's exact qualified intent value ref, which the capability binder checks
+before its typed subject/result relationship. Returned anchored evidence additionally contains the
+same anchor and bounded return bytes. Rejected, safe-failure, and integrity-blocked evidence project
+to a closed failure reason. Caller-owned Pure States project transaction completions into subsequent checked
 commands and observations; EVM does not own action-specific bridges or a product lifecycle
 Operation. These domain contracts perform no provider, signing, nonce, or persistence IO; the
 authority and live adapter remain separate downstream responsibilities.
@@ -101,7 +106,10 @@ contract-call observation. Anchored calls re-observe the authored block by numbe
 code at its canonical block-hash selector, perform one call at that selector, and re-observe the
 same block before returning bounded bytes. An absent named block is SafeFailure, no code is
 Rejected, and a replaced authenticated anchor is IntegrityBlocked; RPC and malformed-ingress
-failures remain Unavailable.
+failures remain Unavailable. The observational provider boundary receives checked broad or anchored
+intents plus Runtime's exact canonical intent value ref. Its bounded generic JSON-RPC ingress uses
+typed parameters and exact success/failure envelopes; every RPC error is Unavailable, while empty
+broad token-call data alone retains the missing-interface SafeFailure policy.
 
 PostgreSQL has three fresh baselines behind two independently gated handles. Run history owns
 `mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads` in `public`; opaque versioned
