@@ -43,38 +43,61 @@ impl SigningDigest {
 
 /// Exact uncompressed SEC1 secp256k1 public key.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Secp256k1PublicKey([u8; 65]);
+pub struct Secp256k1PublicKey {
+    bytes: [u8; 65],
+    verifying_key: VerifyingKey,
+}
 
 impl Secp256k1PublicKey {
     /// Validates the uncompressed prefix and secp256k1 curve point.
     pub fn new(bytes: [u8; 65]) -> Result<Self> {
-        if bytes[0] != 0x04 || VerifyingKey::from_sec1_bytes(&bytes).is_err() {
+        if bytes[0] != 0x04 {
             return Err(SigningError::Invalid);
         }
-        Ok(Self(bytes))
+        let verifying_key =
+            VerifyingKey::from_sec1_bytes(&bytes).map_err(|_| SigningError::Invalid)?;
+        Ok(Self {
+            bytes,
+            verifying_key,
+        })
     }
 
     /// Returns the exact SEC1 bytes.
     pub const fn as_bytes(&self) -> &[u8; 65] {
-        &self.0
+        &self.bytes
+    }
+}
+
+impl TryFrom<VerifyingKey> for Secp256k1PublicKey {
+    type Error = SigningError;
+
+    fn try_from(verifying_key: VerifyingKey) -> Result<Self> {
+        let encoded = verifying_key.to_encoded_point(false);
+        let bytes = encoded
+            .as_bytes()
+            .try_into()
+            .map_err(|_| SigningError::Failed)?;
+        Ok(Self {
+            bytes,
+            verifying_key,
+        })
     }
 }
 
 /// Canonical compact low-S signature plus recoverable secp256k1 recovery ID.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CompactRecoverableSignature {
     bytes: [u8; 64],
-    recovery_id: u8,
+    signature: Signature,
+    recovery_id: RecoveryId,
 }
 
 impl CompactRecoverableSignature {
     /// Validates compact scalar encoding, low-S normalization, and recovery ID `0..=3`.
     pub fn new(bytes: [u8; 64], recovery_id: u8) -> Result<Self> {
         let signature = Signature::from_slice(&bytes).map_err(|_| SigningError::Invalid)?;
-        if signature.normalize_s().is_some() || RecoveryId::from_byte(recovery_id).is_none() {
-            return Err(SigningError::Invalid);
-        }
-        Ok(Self { bytes, recovery_id })
+        let recovery_id = RecoveryId::from_byte(recovery_id).ok_or(SigningError::Invalid)?;
+        Self::try_from((signature, recovery_id))
     }
 
     /// Returns the exact compact signature bytes.
@@ -84,27 +107,38 @@ impl CompactRecoverableSignature {
 
     /// Returns the checked recovery ID.
     pub const fn recovery_id(&self) -> u8 {
-        self.recovery_id
+        self.recovery_id.to_byte()
+    }
+}
+
+impl TryFrom<(Signature, RecoveryId)> for CompactRecoverableSignature {
+    type Error = SigningError;
+
+    fn try_from((signature, recovery_id): (Signature, RecoveryId)) -> Result<Self> {
+        if signature.normalize_s().is_some() {
+            return Err(SigningError::Invalid);
+        }
+        let bytes = signature.to_bytes().into();
+        Ok(Self {
+            bytes,
+            signature,
+            recovery_id,
+        })
     }
 }
 
 /// Recovers the public key that produced a compact signature over the exact digest.
 pub fn recover_public_key(
     digest: SigningDigest,
-    checked_signature: CompactRecoverableSignature,
+    checked_signature: &CompactRecoverableSignature,
 ) -> Result<Secp256k1PublicKey> {
-    let signature =
-        Signature::from_slice(checked_signature.as_bytes()).map_err(|_| SigningError::Invalid)?;
-    let recovery_id =
-        RecoveryId::from_byte(checked_signature.recovery_id()).ok_or(SigningError::Invalid)?;
-    let key = VerifyingKey::recover_from_prehash(digest.as_bytes(), &signature, recovery_id)
-        .map_err(|_| SigningError::Failed)?;
-    let encoded = key.to_encoded_point(false);
-    let bytes: [u8; 65] = encoded
-        .as_bytes()
-        .try_into()
-        .map_err(|_| SigningError::Failed)?;
-    Secp256k1PublicKey::new(bytes)
+    let key = VerifyingKey::recover_from_prehash(
+        digest.as_bytes(),
+        &checked_signature.signature,
+        checked_signature.recovery_id,
+    )
+    .map_err(|_| SigningError::Failed)?;
+    Secp256k1PublicKey::try_from(key)
 }
 
 /// Boxed signer future carrying only owned request and result data.

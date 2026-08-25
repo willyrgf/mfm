@@ -213,7 +213,7 @@ impl Secp256k1Signer for VaryingSigner {
             let bytes: [u8; 64] = signature.to_bytes().into();
             for recovery_id in 0..=1 {
                 let checked = CompactRecoverableSignature::new(bytes, recovery_id)?;
-                if recover_public_key(digest, checked).ok() == Some(public_key) {
+                if recover_public_key(digest, &checked).ok().as_ref() == Some(&public_key) {
                     return Ok(checked);
                 }
             }
