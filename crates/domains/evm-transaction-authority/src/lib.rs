@@ -207,7 +207,11 @@ impl SettledRecord {
 }
 
 /// Complete append-only state retained for one Effect.
+///
+/// The closed typed facts stay inline so authority loads do not add allocation or a second owned
+/// representation at this public boundary.
 #[derive(Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum AuthorityState {
     /// A nonce has been reserved.
     Reserved(Reservation),
