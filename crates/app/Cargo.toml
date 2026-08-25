@@ -29,11 +29,4 @@ tokio = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
-mfm-evm-transaction-authority = { path = "../domains/evm-transaction-authority" }
 mfm-journal = { path = "../kernel/journal" }
-mfm-keystore = { path = "../keystore" }
-mfm-program-derive = { path = "../kernel/program-derive" }
-mfm-signing = { path = "../signing" }
-mfm-values = { path = "../kernel/values" }
-reqwest = { workspace = true }
-zeroize = { workspace = true }

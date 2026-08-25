@@ -51,8 +51,8 @@ managed `client-e2e` task below; that task owns the complete fixture and binary 
 
 The contract-Effect recovery e2e is also ignored by default. Its managed task provisions the base
 run/configuration surfaces and the separate optional transaction-authority surface, plus pinned Reth
-and exact `solc 0.8.33`. It compiles the first-party fixture during the test and drives the ignored
-app test serially; compiler output is never committed.
+and exact `solc 0.8.33`. The task compiles the first-party fixture to a temporary initcode file and
+drives the ignored `mfm-evm-live` test serially; compiler output is never committed.
 
 ## Nixfied tasks
 
@@ -61,7 +61,7 @@ app test serially; compiler output is never committed.
 | `nix run .#model-check` | Admit the compiled model without project tasks. |
 | `nix run .#run -- --task postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
 | `nix run .#run -- --task client-e2e` | Generate and interrupt an exact historical REST run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it against Reth, validate and reload its exact snapshot through the CLI, then reimport the same revision and require an independent CLI-generated run to produce the same semantic result. |
-| `nix run .#run -- --task effect-e2e` | Generate and fund an ephemeral keystore wallet, admit deployment directly, execute two durable Effects through a bounded caller-driven cold-recovery loop, perform one anchored Read, and independently prove exact nonce/raw/hash/receipt/chain/history agreement against separately provisioned PostgreSQL surfaces and Reth. |
+| `nix run .#run -- --task effect-e2e` | Generate and fund an ephemeral keystore wallet, lose the first committed reservation acknowledgement before broadcast, cold-recover deployment and configuration through two durable Effects, decode the anchored getter as 42, prove pending nonce `0 -> 2`, and prove a fresh cold read/resume changes neither the terminal head/value nor the nonce. |
 | `nix run .#run -- --task capacity-app` | Exercise the exact 64/65-source Portfolio Program/C0 bound. |
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |

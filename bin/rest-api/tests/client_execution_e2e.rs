@@ -17,7 +17,7 @@ const INTERRUPTED_HEAD_SEQUENCE: u64 = 3;
 const TERMINAL_HEAD_SEQUENCE: u64 = 16;
 const OUTPUT_CONTRACT_DIGEST: &str =
     "content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927";
-const OUTPUT_SCHEMA_ID: &str = "schema:mfm.derived.portfolio_snapshot_output:1:sha256-jcs-v1:46fd4fd57bd2ba864c14b1013d3fe59815da0a01896fc097b5e4935eeec96116";
+const OUTPUT_SCHEMA_ID: &str = "schema:mfm.derived.portfolio_snapshot_output:1:sha256-jcs-v1:e9cf985feb7415fdcf3d4e84eb53a6273ac0a2330ca4137ca72c806d72d112f6";
 
 #[test]
 #[ignore = "requires explicit CLI/REST binaries and managed PostgreSQL/Reth services"]

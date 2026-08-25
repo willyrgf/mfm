@@ -28,10 +28,13 @@ thiserror = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+getrandom = { workspace = true }
 k256 = { workspace = true }
 mfm-keystore = { path = "../../keystore" }
 mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }
+mfm-storage-postgres = { path = "../../storages/postgres" }
 mfm-store = { path = "../../kernel/store" }
 mfm-values = { path = "../../kernel/values" }
 tokio = { workspace = true }
+zeroize = { workspace = true }
