@@ -8,7 +8,7 @@ use std::sync::Arc;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_config::{ConfigImportResult, ConfigRepository, ConfigRepositoryError};
 use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
-use mfm_evm_live::{register_evm_reads, EvmAdapterLocator, EvmProvider, JsonRpcEvmProvider};
+use mfm_evm_live::{register_evm_reads, EvmAdapterLocator, EvmReadProvider, JsonRpcEvmProvider};
 use mfm_ids::{ContentRef, RunId};
 use mfm_portfolio::PortfolioError;
 use mfm_runtime::{
@@ -95,7 +95,7 @@ pub enum PublicBindingView {
 struct BoundEvmRoute {
     target: EvmPhysicalTarget,
     endpoint_id: String,
-    provider: Arc<dyn EvmProvider>,
+    provider: Arc<dyn EvmReadProvider>,
 }
 
 /// Checked typed capability bindings consumed by one [`ComposedRuntime`].
@@ -108,7 +108,7 @@ impl BoundCapabilitySet {
     ///
     /// Empty sets are valid; at most 256 routes are accepted.
     pub fn new(
-        routes: Vec<(u64, EvmEndpoint, Arc<dyn EvmProvider>)>,
+        routes: Vec<(u64, EvmEndpoint, Arc<dyn EvmReadProvider>)>,
     ) -> Result<Self, ComposeError> {
         if routes.len() > MAX_EVM_BINDINGS
             || routes.windows(2).any(|pair| {
@@ -540,7 +540,7 @@ impl Application {
             let locator_value = resolve_environment(route.adapter_locator_env())?;
             let locator =
                 EvmAdapterLocator::parse(locator_value).map_err(|_| ComposeError::Provider)?;
-            let provider: Arc<dyn EvmProvider> = Arc::new(
+            let provider: Arc<dyn EvmReadProvider> = Arc::new(
                 JsonRpcEvmProvider::connect(&locator).map_err(|_| ComposeError::Provider)?,
             );
             routes.push((route.chain_id(), route.endpoint().clone(), provider));

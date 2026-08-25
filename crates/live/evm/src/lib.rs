@@ -10,11 +10,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use mfm_evm::{
-    EvmAnchorRead, EvmAnchoredContractCallRead, EvmBalanceRead, EvmChainIdentityRead,
-    EvmPhysicalTarget, EvmReadEvidence, EvmReadIntent, EvmReadSubject, EvmReadValue,
-    EvmTransactionRoute, EVM_ANCHORED_CONTRACT_CALL_OPERATION_ID,
+    AnchoredContractCallEvidence, AnchoredContractCallIntent, EvmAnchorRead,
+    EvmAnchoredContractCallRead, EvmBalanceRead, EvmChainIdentityRead, EvmPhysicalTarget,
+    EvmReadEvidence, EvmReadIntent, EvmReadSubject, EvmTransactionRoute,
 };
-use mfm_ids::StableId;
+use mfm_ids::ContentRef;
 use mfm_runtime::{AdapterError, RuntimeAssemblyBuilder};
 
 mod codec;
@@ -31,159 +31,144 @@ pub use transaction::{
 
 pub use codec::{ethereum_address, evm_keccak256, EvmCodecError};
 
-const MAX_EVM_REQUEST_BYTES: usize = 512 * 1024;
+/// Duplicate-safe typed provider future.
+pub type ProviderFuture<'a, T> =
+    Pin<Box<dyn Future<Output = std::result::Result<T, AdapterError>> + Send + 'a>>;
 
-/// Typed provider response after bounded authenticated ingress.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EvmProviderResponse {
-    /// Authenticated structured Read value.
-    Read(EvmReadValue),
-    /// Reviewed provider rejection.
-    Rejected,
-    /// Reviewed definite safe failure.
-    SafeFailure,
-    /// Authenticated external integrity failure safe to conclude.
-    IntegrityBlocked,
-}
-
-/// Provider transport paired with one immutable public target.
+/// Typed observational provider paired with one immutable public target.
 ///
-/// `request_bytes` is one serialized [`mfm_evm::EvmReadIntent`]. Decode it with the domain's own
-/// checked deserializer; do not mirror that wire. Every operation below must observe the exact
-/// subject the intent carries, on the target chain the adapter already checked.
-///
-/// | Operation | Subject | Required observation |
-/// | --- | --- | --- |
-/// | `mfm.evm.read-chain-identity@1` | `ChainIdentity` | the chain id |
-/// | `mfm.evm.read-initial-anchor@1` | `InitialAnchor` | the anchor of the current head block |
-/// | `mfm.evm.read-native-balance@1` | `NativeBalance { source, anchor }` | the native balance **at** `anchor` |
-/// | `mfm.evm.read-token-decimals@1` | `TokenDecimals { source, anchor }` | the token decimal scale **at** `anchor` |
-/// | `mfm.evm.read-token-balance@1` | `TokenBalance { source, anchor }` | the token balance **at** `anchor` |
-/// | `mfm.evm.confirm-balance-anchor@1` | `ConfirmAnchor { source, anchor }` | the anchor of the block **that `anchor.number()` names** |
-/// | `mfm.evm.read-anchored-contract-call@1` | `AnchoredContractCall { anchor, target, calldata }` | deployed code and call result **at** `anchor`, bracketed by named-block observations |
-///
-/// The confirmation is the one contract an implementor is most likely to get wrong. It must
-/// re-observe the named committed block. It must never return the head. The EVM domain compares
-/// the returned number and hash to the anchor it pinned before the balance reads: an equal pair
-/// proves the block still stands, and a different hash at the same number proves a reorg replaced
-/// it. A head read would instead report the ordinary progression of the chain, so every collection
-/// on a chain that produces blocks would fail with stage `confirm_anchor`.
-///
-/// All balance and decimal reads are anchored for the same reason: one collection must observe one
-/// block, so its sources cannot tear across chain progression.
-///
-/// Return [`EvmProviderResponse::IntegrityBlocked`] only for authenticated external evidence of an
-/// integrity block, such as replacement of an authored anchored-call block. A local decode,
-/// address, or operation mismatch is [`AdapterError::Internal`] before any IO. Reads must be
-/// duplicate-safe: a dropped run repeats the call.
-pub trait EvmProvider: Send + Sync + 'static {
-    /// Performs one observational request for the supplied operation.
-    fn request<'a>(
+/// The provider receives only checked domain values and Runtime's exact canonical intent value
+/// reference. It must preserve that reference in every returned evidence variant. Broad balance
+/// reads remain anchored to the subject's block, while anchored calls bracket code and call
+/// observations with the exact authored block.
+pub trait EvmReadProvider: Send + Sync + 'static {
+    /// Observes one broad balance-collection read intent.
+    fn observe<'a>(
         &'a self,
-        operation: StableId,
-        request_bytes: Vec<u8>,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = std::result::Result<EvmProviderResponse, AdapterError>> + Send + 'a,
-        >,
-    >;
+        intent_value_ref: &'a ContentRef,
+        intent: &'a EvmReadIntent,
+    ) -> ProviderFuture<'a, EvmReadEvidence>;
+
+    /// Observes one exact anchored contract-call intent.
+    fn observe_anchored_call<'a>(
+        &'a self,
+        intent_value_ref: &'a ContentRef,
+        intent: &'a AnchoredContractCallIntent,
+    ) -> ProviderFuture<'a, AnchoredContractCallEvidence>;
 }
 
 /// Registers the three surviving EVM Read capability callbacks for one target.
 pub fn register_evm_reads(
     builder: &mut RuntimeAssemblyBuilder,
     target: EvmPhysicalTarget,
-    provider: Arc<dyn EvmProvider>,
+    provider: Arc<dyn EvmReadProvider>,
 ) -> mfm_runtime::Result<()> {
     macro_rules! register {
-        ($capability:ty, $target:expr, $provider:expr) => {{
+        ($capability:ty, $family:ident, $target:expr, $provider:expr) => {{
             let binding = $target;
             let callback_target = binding.clone();
             let callback_provider = $provider;
             builder.register_adapter::<$capability, EvmPhysicalTarget, _>(
                 binding,
-                move |_intent_value_ref, intent| {
+                move |intent_value_ref, intent| {
                     let target = callback_target.clone();
                     let provider = Arc::clone(&callback_provider);
-                    Box::pin(async move { read(&target, provider.as_ref(), intent).await })
+                    Box::pin(async move {
+                        read(
+                            &target,
+                            provider.as_ref(),
+                            ReadRegistration::$family,
+                            intent_value_ref,
+                            intent,
+                        )
+                        .await
+                    })
                 },
             )
         }};
     }
-    register!(EvmChainIdentityRead, target.clone(), Arc::clone(&provider))?;
-    register!(EvmAnchorRead, target.clone(), Arc::clone(&provider))?;
-    register!(EvmBalanceRead, target, provider)
+    register!(
+        EvmChainIdentityRead,
+        ChainIdentity,
+        target.clone(),
+        Arc::clone(&provider)
+    )?;
+    register!(EvmAnchorRead, Anchor, target.clone(), Arc::clone(&provider))?;
+    register!(EvmBalanceRead, Balance, target, provider)
 }
 
 /// Registers the generic anchored contract-call Read callback for one transaction route.
 pub fn register_evm_anchored_contract_calls(
     builder: &mut RuntimeAssemblyBuilder,
     route: EvmTransactionRoute,
-    provider: Arc<dyn EvmProvider>,
+    provider: Arc<dyn EvmReadProvider>,
 ) -> mfm_runtime::Result<()> {
     let callback_route = route.clone();
     builder.register_adapter::<EvmAnchoredContractCallRead, EvmTransactionRoute, _>(
         route,
-        move |_intent_value_ref, intent| {
+        move |intent_value_ref, intent| {
             let route = callback_route.clone();
             let provider = Arc::clone(&provider);
-            Box::pin(async move { read_anchored(&route, provider.as_ref(), intent).await })
+            Box::pin(async move {
+                read_anchored(&route, provider.as_ref(), intent_value_ref, intent).await
+            })
         },
     )
 }
 
 async fn read_anchored(
     route: &EvmTransactionRoute,
-    provider: &dyn EvmProvider,
-    intent: &EvmReadIntent,
-) -> std::result::Result<EvmReadEvidence, AdapterError> {
-    let (operation, chain_id) = intent.operation_and_chain_id();
+    provider: &dyn EvmReadProvider,
+    intent_value_ref: &ContentRef,
+    intent: &AnchoredContractCallIntent,
+) -> std::result::Result<AnchoredContractCallEvidence, AdapterError> {
     let binding_ref = route.binding_ref().map_err(|_| AdapterError::Internal)?;
-    if operation != EVM_ANCHORED_CONTRACT_CALL_OPERATION_ID
-        || !matches!(
-            intent.subject(),
-            EvmReadSubject::AnchoredContractCall { .. }
-        )
-        || chain_id != route.chain_instance().chain_id()
-        || intent.route_ref() != &binding_ref
+    if intent.chain_id() != route.chain_instance().chain_id() || intent.route_ref() != &binding_ref
     {
         return Err(AdapterError::Internal);
     }
-    let operation = StableId::new(operation).map_err(|_| AdapterError::Internal)?;
-    let request_bytes = serde_json::to_vec(intent).map_err(|_| AdapterError::Internal)?;
-    if request_bytes.len() > MAX_EVM_REQUEST_BYTES {
-        return Err(AdapterError::Internal);
-    }
-    map_provider_response(provider.request(operation, request_bytes).await?)
+    provider
+        .observe_anchored_call(intent_value_ref, intent)
+        .await
+}
+
+#[derive(Clone, Copy)]
+enum ReadRegistration {
+    ChainIdentity,
+    Anchor,
+    Balance,
 }
 
 async fn read(
     target: &EvmPhysicalTarget,
-    provider: &dyn EvmProvider,
+    provider: &dyn EvmReadProvider,
+    registration: ReadRegistration,
+    intent_value_ref: &ContentRef,
     intent: &EvmReadIntent,
 ) -> std::result::Result<EvmReadEvidence, AdapterError> {
-    let (operation, chain_id) = intent.operation_and_chain_id();
     let binding_ref = target.binding_ref().map_err(|_| AdapterError::Internal)?;
-    if chain_id != target.chain_id() || intent.route_ref() != &binding_ref {
+    let subject_matches = match registration {
+        ReadRegistration::ChainIdentity => {
+            matches!(intent.subject(), EvmReadSubject::ChainIdentity)
+        }
+        ReadRegistration::Anchor => matches!(
+            intent.subject(),
+            EvmReadSubject::InitialAnchor | EvmReadSubject::ConfirmAnchor { .. }
+        ),
+        ReadRegistration::Balance => matches!(
+            intent.subject(),
+            EvmReadSubject::NativeBalance { .. }
+                | EvmReadSubject::TokenDecimals { .. }
+                | EvmReadSubject::TokenBalance { .. }
+        ),
+    };
+    if intent.chain_id() != target.chain_id()
+        || intent.route_ref() != &binding_ref
+        || !subject_matches
+    {
         return Err(AdapterError::Internal);
     }
-    let operation = StableId::new(operation).map_err(|_| AdapterError::Internal)?;
-    let request_bytes = serde_json::to_vec(intent).map_err(|_| AdapterError::Internal)?;
-    if request_bytes.len() > MAX_EVM_REQUEST_BYTES {
-        return Err(AdapterError::Internal);
-    }
-    map_provider_response(provider.request(operation, request_bytes).await?)
-}
-
-fn map_provider_response(
-    response: EvmProviderResponse,
-) -> std::result::Result<EvmReadEvidence, AdapterError> {
-    match response {
-        EvmProviderResponse::Read(value) => Ok(EvmReadEvidence::Returned { value }),
-        EvmProviderResponse::Rejected => Ok(EvmReadEvidence::Rejected),
-        EvmProviderResponse::SafeFailure => Ok(EvmReadEvidence::SafeFailure),
-        EvmProviderResponse::IntegrityBlocked => Ok(EvmReadEvidence::IntegrityBlocked),
-    }
+    provider.observe(intent_value_ref, intent).await
 }
 
 #[cfg(test)]
@@ -191,30 +176,45 @@ mod tests {
     use std::num::NonZeroU64;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use mfm_evm::{
+        AnchoredContractCallResult, EvmAddress, EvmBlockAnchor, EvmHash, EvmReadValue, EvmU256,
+    };
     use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 
     use super::*;
 
     struct Provider {
         calls: AtomicUsize,
-        response: EvmProviderResponse,
     }
 
-    impl EvmProvider for Provider {
-        fn request<'a>(
+    impl EvmReadProvider for Provider {
+        fn observe<'a>(
             &'a self,
-            _operation: StableId,
-            _request_bytes: Vec<u8>,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = std::result::Result<EvmProviderResponse, AdapterError>>
-                    + Send
-                    + 'a,
-            >,
-        > {
+            intent_value_ref: &'a ContentRef,
+            intent: &'a EvmReadIntent,
+        ) -> ProviderFuture<'a, EvmReadEvidence> {
             Box::pin(async move {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                Ok(self.response.clone())
+                Ok(EvmReadEvidence::returned(
+                    intent_value_ref.clone(),
+                    EvmReadValue::ChainId(intent.chain_id()),
+                ))
+            })
+        }
+
+        fn observe_anchored_call<'a>(
+            &'a self,
+            intent_value_ref: &'a ContentRef,
+            intent: &'a AnchoredContractCallIntent,
+        ) -> ProviderFuture<'a, AnchoredContractCallEvidence> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let result = AnchoredContractCallResult::new(intent.anchor().clone(), vec![])
+                    .map_err(|_| AdapterError::Internal)?;
+                Ok(AnchoredContractCallEvidence::returned(
+                    intent_value_ref.clone(),
+                    result,
+                ))
             })
         }
     }
@@ -238,50 +238,61 @@ mod tests {
     }
 
     fn intent(target: &EvmPhysicalTarget) -> EvmReadIntent {
-        serde_json::from_value(serde_json::json!({
-            "operation": "mfm.evm.read-chain-identity@1",
-            "chain_id": target.chain_id(),
-            "subject": { "kind": "chain_identity" },
-            "route_ref": target.binding_ref().expect("binding")
-        }))
+        EvmReadIntent::new(
+            target.chain_id(),
+            target.binding_ref().expect("binding"),
+            EvmReadSubject::ChainIdentity,
+        )
         .expect("intent")
+    }
+
+    fn route(physical: &EvmPhysicalTarget) -> EvmTransactionRoute {
+        EvmTransactionRoute::new(
+            mfm_evm::EvmChainInstance::new(
+                physical.chain_id(),
+                EvmHash::new("0x1111111111111111111111111111111111111111111111111111111111111111")
+                    .expect("genesis"),
+            ),
+            physical.endpoint_ref().clone(),
+        )
+    }
+
+    fn anchored_intent(route: &EvmTransactionRoute) -> AnchoredContractCallIntent {
+        AnchoredContractCallIntent::new(
+            route.chain_instance().chain_id(),
+            route.binding_ref().expect("binding"),
+            EvmBlockAnchor::new(
+                EvmU256::from_u64(7),
+                EvmHash::new("0x2222222222222222222222222222222222222222222222222222222222222222")
+                    .expect("anchor hash"),
+            ),
+            EvmAddress::new("0x3333333333333333333333333333333333333333").expect("target"),
+            vec![1, 2],
+        )
+        .expect("anchored intent")
     }
 
     fn assert_send<T: Send>(_: &T) {}
 
     #[tokio::test]
-    async fn every_typed_provider_response_maps_to_exact_evidence() {
+    async fn typed_provider_receives_and_preserves_the_runtime_intent_ref() {
         let target = target(1, 2);
-        let cases = [
-            (
-                EvmProviderResponse::Read(EvmReadValue::ChainId(
-                    NonZeroU64::new(1).expect("nonzero chain"),
-                )),
-                EvmReadEvidence::Returned {
-                    value: EvmReadValue::ChainId(NonZeroU64::new(1).expect("nonzero chain")),
-                },
-            ),
-            (EvmProviderResponse::Rejected, EvmReadEvidence::Rejected),
-            (
-                EvmProviderResponse::SafeFailure,
-                EvmReadEvidence::SafeFailure,
-            ),
-            (
-                EvmProviderResponse::IntegrityBlocked,
-                EvmReadEvidence::IntegrityBlocked,
-            ),
-        ];
-        for (response, expected) in cases {
-            let provider = Provider {
-                calls: AtomicUsize::new(0),
-                response,
-            };
-            let intent = intent(&target);
-            let future = read(&target, &provider, &intent);
-            assert_send(&future);
-            assert_eq!(future.await.expect("accepted evidence"), expected);
-            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
-        }
+        let provider = Provider {
+            calls: AtomicUsize::new(0),
+        };
+        let intent = intent(&target);
+        let intent_value_ref = target.endpoint_ref().clone();
+        let future = read(
+            &target,
+            &provider,
+            ReadRegistration::ChainIdentity,
+            &intent_value_ref,
+            &intent,
+        );
+        assert_send(&future);
+        let evidence = future.await.expect("accepted evidence");
+        assert_eq!(evidence.intent_value_ref(), &intent_value_ref);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -289,17 +300,42 @@ mod tests {
         let registered = target(1, 2);
         let provider = Provider {
             calls: AtomicUsize::new(0),
-            response: EvmProviderResponse::IntegrityBlocked,
         };
+        let intent_value_ref = registered.endpoint_ref().clone();
 
         let wrong_chain = target(2, 2);
         assert_eq!(
-            read(&registered, &provider, &intent(&wrong_chain)).await,
+            read(
+                &registered,
+                &provider,
+                ReadRegistration::ChainIdentity,
+                &intent_value_ref,
+                &intent(&wrong_chain),
+            )
+            .await,
             Err(AdapterError::Internal)
         );
         let wrong_route = target(1, 3);
         assert_eq!(
-            read(&registered, &provider, &intent(&wrong_route)).await,
+            read(
+                &registered,
+                &provider,
+                ReadRegistration::ChainIdentity,
+                &intent_value_ref,
+                &intent(&wrong_route),
+            )
+            .await,
+            Err(AdapterError::Internal)
+        );
+        assert_eq!(
+            read(
+                &registered,
+                &provider,
+                ReadRegistration::Balance,
+                &intent_value_ref,
+                &intent(&registered),
+            )
+            .await,
             Err(AdapterError::Internal)
         );
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
@@ -309,13 +345,11 @@ mod tests {
     fn one_target_registers_three_capabilities_and_rejects_duplicate_keys() {
         let target = target(1, 2);
         let binding = target.binding_ref().expect("binding");
-        let first_provider: Arc<dyn EvmProvider> = Arc::new(Provider {
+        let first_provider: Arc<dyn EvmReadProvider> = Arc::new(Provider {
             calls: AtomicUsize::new(0),
-            response: EvmProviderResponse::Rejected,
         });
-        let second_provider: Arc<dyn EvmProvider> = Arc::new(Provider {
+        let second_provider: Arc<dyn EvmReadProvider> = Arc::new(Provider {
             calls: AtomicUsize::new(0),
-            response: EvmProviderResponse::SafeFailure,
         });
 
         let mut first = RuntimeAssemblyBuilder::new().expect("builder");
@@ -335,34 +369,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anchored_registration_is_route_keyed_and_rejects_other_read_intents_locally() {
+    async fn anchored_registration_is_route_keyed_and_rejects_mismatches_locally() {
         let physical = target(1, 2);
-        let route = EvmTransactionRoute::new(
-            mfm_evm::EvmChainInstance::new(
-                NonZeroU64::new(1).expect("nonzero chain"),
-                mfm_evm::EvmHash::new(
-                    "0x1111111111111111111111111111111111111111111111111111111111111111",
-                )
-                .expect("genesis"),
-            ),
-            physical.endpoint_ref().clone(),
-        );
+        let registered_route = route(&physical);
         let provider = Arc::new(Provider {
             calls: AtomicUsize::new(0),
-            response: EvmProviderResponse::Rejected,
         });
+        let wrong = route(&target(1, 3));
+        let intent = anchored_intent(&wrong);
+        let intent_value_ref = physical.endpoint_ref().clone();
         assert_eq!(
-            read_anchored(&route, provider.as_ref(), &intent(&physical)).await,
+            read_anchored(
+                &registered_route,
+                provider.as_ref(),
+                &intent_value_ref,
+                &intent,
+            )
+            .await,
             Err(AdapterError::Internal)
         );
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 
-        let provider: Arc<dyn EvmProvider> = provider;
+        let provider: Arc<dyn EvmReadProvider> = provider;
         let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-        register_evm_anchored_contract_calls(&mut builder, route.clone(), Arc::clone(&provider))
-            .expect("anchored callback");
+        register_evm_anchored_contract_calls(
+            &mut builder,
+            registered_route.clone(),
+            Arc::clone(&provider),
+        )
+        .expect("anchored callback");
         assert_eq!(
-            register_evm_anchored_contract_calls(&mut builder, route, provider),
+            register_evm_anchored_contract_calls(&mut builder, registered_route, provider),
             Err(mfm_runtime::RuntimeError::IncompatibleAssembly)
         );
         builder.finish();

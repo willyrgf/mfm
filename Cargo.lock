@@ -2226,7 +2226,6 @@ dependencies = [
  "alloy-consensus",
  "alloy-eips",
  "alloy-primitives",
- "mfm-canonical",
  "mfm-evm",
  "mfm-evm-transaction-authority",
  "mfm-ids",

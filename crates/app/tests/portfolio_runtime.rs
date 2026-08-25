@@ -14,9 +14,12 @@ use mfm_config::{
     ConfigDigest, ConfigFuture, ConfigImportResult, ConfigName, ConfigRepository,
     ConfigRepositoryError, ConfigRevision, MemoryConfigRepository, MAX_CONFIG_DOCUMENT_BYTES,
 };
-use mfm_evm::{EvmBlockAnchor, EvmEndpoint, EvmHash, EvmReadValue, EvmU256};
-use mfm_evm_live::{EvmProvider, EvmProviderResponse};
-use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, RunId, StableId};
+use mfm_evm::{
+    AnchoredContractCallEvidence, AnchoredContractCallIntent, EvmBlockAnchor, EvmEndpoint, EvmHash,
+    EvmReadEvidence, EvmReadIntent, EvmReadSubject, EvmReadValue, EvmTokenDecimals, EvmU256,
+};
+use mfm_evm_live::{EvmReadProvider, ProviderFuture};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId};
 use mfm_runtime::{AdapterError, RunViewState};
 use mfm_store::{AppendResult, MemoryStore, Store, StoreError};
 
@@ -28,45 +31,47 @@ struct Provider {
     available: std::sync::atomic::AtomicBool,
 }
 
-impl EvmProvider for Provider {
-    fn request<'a>(
+impl EvmReadProvider for Provider {
+    fn observe<'a>(
         &'a self,
-        operation: StableId,
-        request_bytes: Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = Result<EvmProviderResponse, AdapterError>> + Send + 'a>> {
+        intent_value_ref: &'a ContentRef,
+        intent: &'a EvmReadIntent,
+    ) -> ProviderFuture<'a, EvmReadEvidence> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if !self.available.load(Ordering::SeqCst) {
                 return Err(AdapterError::Unavailable);
             }
-            let request: serde_json::Value =
-                serde_json::from_slice(&request_bytes).map_err(|_| AdapterError::Internal)?;
-            if request.get("operation").and_then(serde_json::Value::as_str)
-                != Some(operation.as_str())
-            {
-                return Err(AdapterError::Internal);
-            }
-            let value = match operation.as_str() {
-                "mfm.evm.read-chain-identity@1" => EvmReadValue::ChainId(
+            let value = match intent.subject() {
+                EvmReadSubject::ChainIdentity => EvmReadValue::ChainId(
                     NonZeroU64::new(self.chain_id).ok_or(AdapterError::Internal)?,
                 ),
-                "mfm.evm.read-initial-anchor@1" | "mfm.evm.confirm-balance-anchor@1" => {
+                EvmReadSubject::InitialAnchor | EvmReadSubject::ConfirmAnchor { .. } => {
                     EvmReadValue::Anchor(EvmBlockAnchor::new(
                         EvmU256::new("100").expect("number"),
                         EvmHash::new(ANCHOR).expect("hash"),
                     ))
                 }
-                "mfm.evm.read-native-balance@1" => {
+                EvmReadSubject::NativeBalance { .. } => {
                     EvmReadValue::RawUnits(EvmU256::new("1000000000000000000").expect("units"))
                 }
-                "mfm.evm.read-token-decimals@1" => EvmReadValue::TokenDecimals(6),
-                "mfm.evm.read-token-balance@1" => {
+                EvmReadSubject::TokenDecimals { .. } => {
+                    EvmReadValue::TokenDecimals(EvmTokenDecimals::new(6).expect("decimals"))
+                }
+                EvmReadSubject::TokenBalance { .. } => {
                     EvmReadValue::RawUnits(EvmU256::new("2500000").expect("units"))
                 }
-                _ => return Err(AdapterError::Internal),
             };
-            Ok(EvmProviderResponse::Read(value))
+            Ok(EvmReadEvidence::returned(intent_value_ref.clone(), value))
         })
+    }
+
+    fn observe_anchored_call<'a>(
+        &'a self,
+        _intent_value_ref: &'a ContentRef,
+        _intent: &'a AnchoredContractCallIntent,
+    ) -> ProviderFuture<'a, AnchoredContractCallEvidence> {
+        Box::pin(async { Err(AdapterError::Internal) })
     }
 }
 
@@ -156,7 +161,7 @@ fn application_with_backend(
             (
                 *chain_id,
                 EvmEndpoint::new(*endpoint_id).expect("endpoint"),
-                provider.clone() as Arc<dyn EvmProvider>,
+                provider.clone() as Arc<dyn EvmReadProvider>,
             )
         })
         .collect();
@@ -303,12 +308,12 @@ fn composed_runtime_owns_one_checked_multi_route_truth() {
         (
             1,
             EvmEndpoint::new("alpha").expect("endpoint"),
-            provider(1) as Arc<dyn EvmProvider>,
+            provider(1) as Arc<dyn EvmReadProvider>,
         ),
         (
             1,
             EvmEndpoint::new("alpha").expect("endpoint"),
-            provider(1) as Arc<dyn EvmProvider>,
+            provider(1) as Arc<dyn EvmReadProvider>,
         ),
     ];
     assert!(BoundCapabilitySet::new(duplicate).is_err());
@@ -317,7 +322,7 @@ fn composed_runtime_owns_one_checked_multi_route_truth() {
             (
                 (index + 1) as u64,
                 EvmEndpoint::new("endpoint").expect("endpoint"),
-                provider((index + 1) as u64) as Arc<dyn EvmProvider>,
+                provider((index + 1) as u64) as Arc<dyn EvmReadProvider>,
             )
         })
         .collect();

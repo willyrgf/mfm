@@ -15,15 +15,18 @@ capabilities directly. One target serves all six current Read State occurrences;
 map, descriptor wrapper, or live assembly contribution exists.
 
 Before IO, the callback checks intent chain and route against the captured target. A local mismatch
-returns `AdapterError::Internal`, enters no provider, and appends nothing. Timeout, transport, or
-malformed unauthenticated ingress returns `Unavailable`. Accepted provider results are the closed
-typed `Read`, `Rejected`, `SafeFailure`, and `IntegrityBlocked` cases. Only authenticated external
-integrity evidence becomes durable.
+or a subject presented to the wrong registered capability returns `AdapterError::Internal`, enters
+no provider, and appends nothing. The callback passes the checked intent and Runtime's exact
+canonical intent value ref to `EvmReadProvider`; no operation string or serialized domain-intent
+transport exists. Timeout, transport, or malformed unauthenticated ingress returns `Unavailable`.
+Every accepted evidence outcome carries that exact ref. Only authenticated external integrity
+evidence becomes durable.
 
 `JsonRpcEvmProvider` applies that map exactly: transport, timeout, non-success status, an oversized
-body, and any undecodable result are `Unavailable`; a JSON-RPC error object and an `eth_call` result
-of exactly `"0x"` are definite `SafeFailure`; an undecodable or operation-mismatched intent and a
-locally malformed address are `Internal` before the first byte of IO. It never produces
+body, every JSON-RPC error object, unexpected null, and any undecodable result are `Unavailable`.
+An `eth_call` result of exactly `"0x"` is `SafeFailure` only for the broad token-interface reads.
+The generic RPC ingress uses exact version/id envelopes and typed request parameters and response
+DTOs; structurally incomplete error objects do not parse. Broad reads never produce
 `IntegrityBlocked`.
 
 Endpoint identity changes the target ref and Program. Replacing credentials or a client handle
@@ -34,9 +37,10 @@ composition names the endpoint, `endpoint_ref` canonicalizes the name, and `EvmP
 binds it to the chain ID. The same name therefore derives the same route ref and the same Program in
 every process; an RPC URL, credential, or client handle never enters the derivation.
 
-The request bytes a provider receives are the serialized `EvmReadIntent`. A provider decodes them
-with the domain's own checked `EvmReadIntent` deserializer and matches `subject()`; it declares no
-serde mirror of the wire, so a domain subject change is a compile error rather than silent drift.
+The broad provider method receives `&EvmReadIntent`; the anchored method receives
+`&AnchoredContractCallIntent`. Both receive `&ContentRef` for the exact Runtime-qualified intent,
+and every returned or terminal evidence constructor requires that ref. A domain contract change is
+therefore a compile error at the provider boundary rather than silent wire drift.
 
 Transaction identity is stricter than observational routing. `EvmChainInstance` binds a nonzero
 chain ID to the expected genesis hash, and `EvmTransactionRoute` adds the endpoint ref. A complete

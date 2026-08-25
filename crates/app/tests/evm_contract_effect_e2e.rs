@@ -14,7 +14,7 @@ use mfm_evm::{
 };
 use mfm_evm_live::{
     ethereum_address, evm_keccak256, register_evm_anchored_contract_calls,
-    register_evm_transaction_effect, EvmAdapterLocator, EvmProvider, EvmTransactionProvider,
+    register_evm_transaction_effect, EvmAdapterLocator, EvmReadProvider, EvmTransactionProvider,
     JsonRpcEvmProvider, EVM_EIP1559_SIGNING_PURPOSE_ID,
 };
 use mfm_evm_transaction_authority::{
@@ -457,7 +457,7 @@ async fn runtime(
         consumed,
     });
     let transaction_provider: Arc<dyn EvmTransactionProvider> = provider.clone();
-    let read_provider: Arc<dyn EvmProvider> = provider;
+    let read_provider: Arc<dyn EvmReadProvider> = provider;
 
     let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
