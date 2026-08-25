@@ -87,6 +87,7 @@ impl ReadCapabilityContract for IdentityRead {
     }
 
     fn bind_evidence(
+        _intent_value_ref: &ContentRef,
         intent: &Self::Intent,
         evidence: &Self::Evidence,
     ) -> mfm_capabilities::Result<()> {
@@ -144,6 +145,7 @@ impl ReadCapabilityContract for InvalidIdentityRead {
     }
 
     fn bind_evidence(
+        _intent_value_ref: &ContentRef,
         _intent: &Self::Intent,
         _evidence: &Self::Evidence,
     ) -> mfm_capabilities::Result<()> {

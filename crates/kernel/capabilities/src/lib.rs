@@ -1,7 +1,10 @@
 #![warn(missing_docs)]
 //! Closed contracts for observational Read and mutating Effect capabilities.
+//!
+//! Read evidence binds to both the typed intent and its exact qualified value reference. Effect
+//! evidence binds to Runtime's Effect identity and typed command.
 
-use mfm_ids::{EffectId, StableId};
+use mfm_ids::{ContentRef, EffectId, StableId};
 use mfm_values::MfmValue;
 
 /// Result type for capability contract operations.
@@ -28,8 +31,12 @@ pub trait ReadCapabilityContract: Send + Sync + 'static {
     /// Returns the stable capability contract identity.
     fn contract_id() -> Result<StableId>;
 
-    /// Proves that evidence answers the exact intent.
-    fn bind_evidence(intent: &Self::Intent, evidence: &Self::Evidence) -> Result<()>;
+    /// Proves that evidence answers the exact qualified intent value.
+    fn bind_evidence(
+        intent_value_ref: &ContentRef,
+        intent: &Self::Intent,
+        evidence: &Self::Evidence,
+    ) -> Result<()>;
 }
 
 /// One mutating capability with a closed command/evidence contract.

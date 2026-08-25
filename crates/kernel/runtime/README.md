@@ -1,9 +1,11 @@
 # mfm-runtime
 
-RuntimeAssemblyBuilder registers typed values, Pure/Read/Effect States, Match descriptors, and
-separate Read and Effect adapters. `finish` produces one immutable assembly. Program association
-pre-resolves each State by its exact implementation/input/output/failure ABI into one closed
-mode-specific executable with only its valid functions, codecs, validators, and exact callback.
+`RuntimeAssemblyBuilder::new` fallibly installs the framework codec. The builder registers typed
+values, Pure/Read/Effect States, Match descriptors, and distinct Read and Effect callbacks through
+one private capability registry; later registration errors never poison it. Infallible `finish`
+freezes one immutable assembly. Program association pre-resolves each State by its exact
+implementation/input/output/failure ABI into one closed mode-specific executable with only its
+valid functions, codecs, validators, and exact callback.
 Multiple exact value schemas may belong to one semantic family; exact `ContentRef`, Rust `TypeId`,
 and descriptor equality own codec registration and lookup. Semantic identity is never a fallback
 lookup key. Fold state keeps only declaration identity and qualified values; execution never
@@ -17,6 +19,11 @@ adjacent conclusion. Runtime extends locally after `Inserted` and completely rel
 or calls an adapter; it re-prepares only to validate a retained Effect command and identity.
 The Match projection selects and qualifies the exact nested canonical payload bytes through the
 registered payload codec; it never serializes a typed selector or payload.
+
+Every Read callback receives `QualifiedValue.value_ref` for its exact intent, and hot and cold
+evidence binding receives that same reference. Every Effect callback receives the exact command
+value ref used in `EffectId` derivation. Neither callback receives the shared codec contract ref in
+its place.
 
 An Effect adapter returns `Pending` or `Settled(evidence)`. Pending appends no conclusion, restores
 the identical prepared fold state, and returns a publicly Runnable view without another adapter

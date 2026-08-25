@@ -169,19 +169,21 @@ fn anchored_capability_binds_only_the_exact_result_anchor() {
     >>::prepare(&input)
     .expect("prepared intent");
     assert_eq!(&prepared, input.intent());
+    let (_, intent_value_ref) = canonicalize_mfm_value(input.intent()).expect("intent ref");
 
     let result =
         AnchoredContractCallResult::new(anchor(7, "bb"), vec![1, 2, 3]).expect("anchored result");
     let returned = EvmReadEvidence::Returned {
         value: EvmReadValue::AnchoredContractCall(result.clone()),
     };
-    EvmAnchoredContractCallRead::bind_evidence(input.intent(), &returned).expect("bound result");
+    EvmAnchoredContractCallRead::bind_evidence(&intent_value_ref, input.intent(), &returned)
+        .expect("bound result");
     for terminal in [
         EvmReadEvidence::Rejected,
         EvmReadEvidence::SafeFailure,
         EvmReadEvidence::IntegrityBlocked,
     ] {
-        EvmAnchoredContractCallRead::bind_evidence(input.intent(), &terminal)
+        EvmAnchoredContractCallRead::bind_evidence(&intent_value_ref, input.intent(), &terminal)
             .expect("bound terminal evidence");
     }
     let wrong_anchor = EvmReadEvidence::Returned {
@@ -189,8 +191,14 @@ fn anchored_capability_binds_only_the_exact_result_anchor() {
             AnchoredContractCallResult::new(anchor(8, "cc"), vec![]).expect("wrong anchor"),
         ),
     };
-    assert!(EvmAnchoredContractCallRead::bind_evidence(input.intent(), &wrong_anchor).is_err());
     assert!(EvmAnchoredContractCallRead::bind_evidence(
+        &intent_value_ref,
+        input.intent(),
+        &wrong_anchor
+    )
+    .is_err());
+    assert!(EvmAnchoredContractCallRead::bind_evidence(
+        &intent_value_ref,
         input.intent(),
         &EvmReadEvidence::Returned {
             value: EvmReadValue::RawUnits(EvmU256::new("1").expect("units")),

@@ -21,7 +21,9 @@ mode-specific State executables, Match projections, and exact `(capability contr
 adapters before execution. A semantic type ID names a value family and may have multiple exact
 generic schemas; only the exact content ref selects a codec. State association likewise uses the
 exact implementation/input/output/failure ABI, so one implementation identity may own multiple
-generic ABIs without ambiguity. State code has no ambient IO.
+generic ABIs without ambiguity. Read callbacks and evidence binding receive the exact intent value
+ref; Effect callbacks receive the exact command value ref used for `EffectId` derivation. These are
+instance refs, never shared codec contract refs. State code has no ambient IO.
 
 Each Read or Effect occurrence applies the exact capability/State pair's authoring-time injection
 policy. Injection may add deterministic Pure topology before or after the one kernel-owned

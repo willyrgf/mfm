@@ -12,11 +12,12 @@ use mfm_evm_transaction_authority::{
     AuthorityFuture, AuthorityState, EvmTransactionAuthority, PreparedRecord, Reservation,
     SettledRecord, MAX_EXACT_RAW_TRANSACTION_BYTES,
 };
-use mfm_ids::{DigestBytes, EffectId, StableId};
+use mfm_ids::{ContentRef, DigestBytes, EffectId, StableId};
 use mfm_keystore::{KeystoreOwner, KeystoreSigner, SecretSecp256k1Scalar};
 use mfm_signing::{
     Secp256k1PublicKey, Secp256k1Signer, SigningDigest, SigningError, SigningFuture,
 };
+use mfm_values::canonicalize_mfm_value;
 use tokio::sync::Notify;
 
 use super::*;
@@ -27,6 +28,47 @@ const BLOCK: &str = "0x222222222222222222222222222222222222222222222222222222222
 
 fn nonzero(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).expect("nonzero fixture")
+}
+
+fn command_value_ref(command: &Eip1559TransactionCommand) -> ContentRef {
+    canonicalize_mfm_value(command)
+        .map(|(_, value_ref)| value_ref)
+        .expect("command value ref")
+}
+
+async fn execute(
+    binding: &EvmTransactionBinding,
+    effect_id: &EffectId,
+    command: &Eip1559TransactionCommand,
+    signer: &dyn Secp256k1Signer,
+    authority: &dyn EvmTransactionAuthority,
+    provider: &dyn EvmTransactionProvider,
+) -> Result<EffectAdapterOutcome<EvmTransactionSettlement>, AdapterError> {
+    super::execute_transaction(
+        binding,
+        effect_id,
+        &command_value_ref(command),
+        command,
+        signer,
+        authority,
+        provider,
+    )
+    .await
+}
+
+fn validate_local(
+    binding: &EvmTransactionBinding,
+    command: &Eip1559TransactionCommand,
+    signer: &dyn Secp256k1Signer,
+    authority: &dyn EvmTransactionAuthority,
+) -> Result<LocalExecution, AdapterError> {
+    super::validate_local(
+        binding,
+        &command_value_ref(command),
+        command,
+        signer,
+        authority,
+    )
 }
 
 #[test]
@@ -402,7 +444,7 @@ async fn transaction_registration_uses_the_complete_binding_as_its_only_key() {
         Arc::new(MemoryAuthority::new(binding.authority_epoch().clone()));
     let provider: Arc<dyn EvmTransactionProvider> = Arc::new(ScriptedProvider::new(1337));
     let signer: Arc<dyn Secp256k1Signer> = signer;
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     register_evm_transaction_effect(
         &mut builder,
         binding.clone(),
@@ -415,7 +457,7 @@ async fn transaction_registration_uses_the_complete_binding_as_its_only_key() {
         register_evm_transaction_effect(&mut builder, binding, signer, authority, provider),
         Err(mfm_runtime::RuntimeError::IncompatibleAssembly)
     );
-    builder.finish().expect("assembly");
+    builder.finish();
 }
 
 #[tokio::test]
@@ -661,7 +703,7 @@ async fn preloaded_reservation_skips_pending_nonce_and_resumes_preparation() {
     *authority.state.lock().expect("authority lock") =
         Some(AuthorityState::Reserved(Reservation::new(
             effect_id.clone(),
-            local.command_ref.clone(),
+            local.command_value_ref.clone(),
             local.domain,
             7,
         )));
@@ -1073,7 +1115,7 @@ async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_e
     *authority.state.lock().expect("authority lock") =
         Some(AuthorityState::Reserved(Reservation::new(
             effect_id.clone(),
-            local.command_ref.clone(),
+            local.command_value_ref.clone(),
             wrong_domain,
             7,
         )));
@@ -1093,7 +1135,7 @@ async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_e
 
     let reservation = Reservation::new(
         effect_id.clone(),
-        local.command_ref.clone(),
+        local.command_value_ref.clone(),
         local.domain.clone(),
         7,
     );

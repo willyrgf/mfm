@@ -100,11 +100,14 @@ pub fn register_evm_reads(
             let binding = $target;
             let callback_target = binding.clone();
             let callback_provider = $provider;
-            builder.register_adapter::<$capability, EvmPhysicalTarget, _>(binding, move |intent| {
-                let target = callback_target.clone();
-                let provider = Arc::clone(&callback_provider);
-                Box::pin(async move { read(&target, provider.as_ref(), intent).await })
-            })
+            builder.register_adapter::<$capability, EvmPhysicalTarget, _>(
+                binding,
+                move |_intent_value_ref, intent| {
+                    let target = callback_target.clone();
+                    let provider = Arc::clone(&callback_provider);
+                    Box::pin(async move { read(&target, provider.as_ref(), intent).await })
+                },
+            )
         }};
     }
     register!(EvmChainIdentityRead, target.clone(), Arc::clone(&provider))?;
@@ -121,7 +124,7 @@ pub fn register_evm_anchored_contract_calls(
     let callback_route = route.clone();
     builder.register_adapter::<EvmAnchoredContractCallRead, EvmTransactionRoute, _>(
         route,
-        move |intent| {
+        move |_intent_value_ref, intent| {
             let route = callback_route.clone();
             let provider = Arc::clone(&provider);
             Box::pin(async move { read_anchored(&route, provider.as_ref(), intent).await })
@@ -315,7 +318,7 @@ mod tests {
             response: EvmProviderResponse::SafeFailure,
         });
 
-        let mut first = RuntimeAssemblyBuilder::new();
+        let mut first = RuntimeAssemblyBuilder::new().expect("builder");
         register_evm_reads(&mut first, target.clone(), first_provider).expect("three callbacks");
         assert_eq!(target.binding_ref().expect("stable binding"), binding);
         assert_eq!(
@@ -323,12 +326,12 @@ mod tests {
             Err(mfm_runtime::RuntimeError::IncompatibleAssembly)
         );
 
-        let mut replacement = RuntimeAssemblyBuilder::new();
+        let mut replacement = RuntimeAssemblyBuilder::new().expect("builder");
         register_evm_reads(&mut replacement, target.clone(), second_provider)
             .expect("replacement handle");
         assert_eq!(target.binding_ref().expect("durable identity"), binding);
-        first.finish().expect("first assembly");
-        replacement.finish().expect("replacement assembly");
+        first.finish();
+        replacement.finish();
     }
 
     #[tokio::test]
@@ -355,13 +358,13 @@ mod tests {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 
         let provider: Arc<dyn EvmProvider> = provider;
-        let mut builder = RuntimeAssemblyBuilder::new();
+        let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
         register_evm_anchored_contract_calls(&mut builder, route.clone(), Arc::clone(&provider))
             .expect("anchored callback");
         assert_eq!(
             register_evm_anchored_contract_calls(&mut builder, route, provider),
             Err(mfm_runtime::RuntimeError::IncompatibleAssembly)
         );
-        builder.finish().expect("assembly");
+        builder.finish();
     }
 }

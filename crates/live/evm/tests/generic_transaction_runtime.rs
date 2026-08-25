@@ -110,7 +110,7 @@ fn command(
 }
 
 fn runtime(binding: &EvmTransactionBinding, store: Arc<MemoryStore>) -> Runtime {
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_effect::<ExecuteEvmTransaction<FirstContext>, EvmTransactionEffect>()
         .expect("first exact State ABI");
@@ -120,7 +120,7 @@ fn runtime(binding: &EvmTransactionBinding, store: Arc<MemoryStore>) -> Runtime 
     builder
         .register_effect_adapter::<EvmTransactionEffect, EvmTransactionBinding, _>(
             binding.clone(),
-            |effect_id, command| {
+            |effect_id, _command_value_ref, command| {
                 let effect_id = effect_id.clone();
                 let created = command.to().is_none();
                 Box::pin(async move {
@@ -143,7 +143,7 @@ fn runtime(binding: &EvmTransactionBinding, store: Arc<MemoryStore>) -> Runtime 
             },
         )
         .expect("shared transaction adapter");
-    Runtime::new(builder.finish().expect("transaction assembly"), store)
+    Runtime::new(builder.finish(), store)
 }
 
 #[tokio::test]

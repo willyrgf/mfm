@@ -16,7 +16,6 @@ use mfm_evm_transaction_authority::{
 use mfm_ids::{ContentRef, EffectId, StableId};
 use mfm_runtime::{AdapterError, EffectAdapterOutcome, RuntimeAssemblyBuilder};
 use mfm_signing::{recover_public_key, Secp256k1PublicKey, Secp256k1Signer};
-use mfm_values::canonicalize_mfm_value;
 
 use crate::codec::{
     create_address, signed_transaction, transaction_signing_digest, validate_signed_transaction,
@@ -137,17 +136,19 @@ pub fn register_evm_transaction_effect(
     let callback_binding = binding.clone();
     builder.register_effect_adapter::<EvmTransactionEffect, EvmTransactionBinding, _>(
         binding,
-        move |effect_id, command| {
+        move |effect_id, command_value_ref, command| {
             let binding = callback_binding.clone();
             let effect_id = effect_id.clone();
+            let command_value_ref = command_value_ref.clone();
             let command = command.clone();
             let signer = Arc::clone(&signer);
             let authority = Arc::clone(&authority);
             let provider = Arc::clone(&provider);
             Box::pin(async move {
-                execute(
+                execute_transaction(
                     &binding,
                     &effect_id,
+                    &command_value_ref,
                     &command,
                     signer.as_ref(),
                     authority.as_ref(),
@@ -159,17 +160,18 @@ pub fn register_evm_transaction_effect(
     )
 }
 
-async fn execute(
+async fn execute_transaction(
     binding: &EvmTransactionBinding,
     effect_id: &EffectId,
+    command_value_ref: &ContentRef,
     command: &Eip1559TransactionCommand,
     signer: &dyn Secp256k1Signer,
     authority: &dyn EvmTransactionAuthority,
     provider: &dyn EvmTransactionProvider,
 ) -> Result<EffectAdapterOutcome<EvmTransactionSettlement>, AdapterError> {
-    let local = validate_local(binding, command, signer, authority)?;
+    let local = validate_local(binding, command_value_ref, command, signer, authority)?;
     let state = authority
-        .load(effect_id, &local.command_ref)
+        .load(effect_id, &local.command_value_ref)
         .await
         .map_err(map_authority_error)?;
 
@@ -178,7 +180,7 @@ async fn execute(
             validate_reservation(
                 settled.prepared().reservation(),
                 effect_id,
-                &local.command_ref,
+                &local.command_value_ref,
                 &local.domain,
             )?;
             validate_prepared(settled.prepared(), command, &local)?;
@@ -195,14 +197,19 @@ async fn execute(
             validate_reservation(
                 prepared.reservation(),
                 effect_id,
-                &local.command_ref,
+                &local.command_value_ref,
                 &local.domain,
             )?;
             validate_prepared(&prepared, command, &local)?;
             (prepared, false)
         }
         Some(AuthorityState::Reserved(reservation)) => {
-            validate_reservation(&reservation, effect_id, &local.command_ref, &local.domain)?;
+            validate_reservation(
+                &reservation,
+                effect_id,
+                &local.command_value_ref,
+                &local.domain,
+            )?;
             (
                 prepare(effect_id, command, &local, reservation, signer, authority).await?,
                 false,
@@ -212,10 +219,15 @@ async fn execute(
             verify_chain(command, provider).await?;
             let pending = provider.pending_nonce(&local.sender).await?;
             let reservation = authority
-                .reserve_or_compare(effect_id, &local.command_ref, &local.domain, pending)
+                .reserve_or_compare(effect_id, &local.command_value_ref, &local.domain, pending)
                 .await
                 .map_err(map_authority_error)?;
-            validate_reservation(&reservation, effect_id, &local.command_ref, &local.domain)?;
+            validate_reservation(
+                &reservation,
+                effect_id,
+                &local.command_value_ref,
+                &local.domain,
+            )?;
             (
                 prepare(effect_id, command, &local, reservation, signer, authority).await?,
                 true,
@@ -236,7 +248,7 @@ async fn execute(
 }
 
 struct LocalExecution {
-    command_ref: ContentRef,
+    command_value_ref: ContentRef,
     domain: NonceDomain,
     public_key: Secp256k1PublicKey,
     sender: EvmAddress,
@@ -244,6 +256,7 @@ struct LocalExecution {
 
 fn validate_local(
     binding: &EvmTransactionBinding,
+    command_value_ref: &ContentRef,
     command: &Eip1559TransactionCommand,
     signer: &dyn Secp256k1Signer,
     authority: &dyn EvmTransactionAuthority,
@@ -264,9 +277,8 @@ fn validate_local(
     if &sender != binding.sender() {
         return Err(AdapterError::Internal);
     }
-    let (_, command_ref) = canonicalize_mfm_value(command).map_err(|_| AdapterError::Internal)?;
     Ok(LocalExecution {
-        command_ref,
+        command_value_ref: command_value_ref.clone(),
         domain: NonceDomain::new(
             binding.authority_epoch().clone(),
             binding.route().chain_instance().clone(),
@@ -307,13 +319,13 @@ async fn prepare(
     )
     .map_err(|_| AdapterError::Internal)?;
     let prepared = authority
-        .retain_prepared(effect_id, &local.command_ref, &transaction_hash, &raw)
+        .retain_prepared(effect_id, &local.command_value_ref, &transaction_hash, &raw)
         .await
         .map_err(map_authority_error)?;
     validate_reservation(
         prepared.reservation(),
         effect_id,
-        &local.command_ref,
+        &local.command_value_ref,
         &local.domain,
     )?;
     validate_prepared(&prepared, command, local)?;
@@ -348,13 +360,13 @@ async fn reconcile(
     }
 
     let settled = authority
-        .retain_settlement(effect_id, &local.command_ref, &evidence)
+        .retain_settlement(effect_id, &local.command_value_ref, &evidence)
         .await
         .map_err(map_authority_error)?;
     validate_reservation(
         settled.prepared().reservation(),
         effect_id,
-        &local.command_ref,
+        &local.command_value_ref,
         &local.domain,
     )?;
     validate_prepared(settled.prepared(), command, local)?;

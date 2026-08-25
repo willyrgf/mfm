@@ -20,30 +20,12 @@ use crate::engine::{self, DriverContext, DriverDisposition};
 use crate::{AdapterError, EffectAdapterOutcome, Result, RuntimeError};
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-type ReadAdapterCallback<C> = dyn for<'a> Fn(
-        &'a <C as ReadCapabilityContract>::Intent,
-    ) -> BoxFuture<
-        'a,
-        std::result::Result<<C as ReadCapabilityContract>::Evidence, AdapterError>,
-    > + Send
-    + Sync;
 pub(crate) type EvidenceQualification =
     Box<dyn FnOnce() -> std::result::Result<QualifiedValue, mfm_values::ValueError> + Send>;
 pub(crate) type ErasedReadAdapterCallback = dyn for<'a> Fn(
         &'a QualifiedValue,
     ) -> BoxFuture<'a, std::result::Result<EvidenceQualification, AdapterError>>
     + Send
-    + Sync;
-type EffectAdapterCallback<C> = dyn for<'a> Fn(
-        &'a EffectId,
-        &'a <C as EffectCapabilityContract>::Command,
-    ) -> BoxFuture<
-        'a,
-        std::result::Result<
-            EffectAdapterOutcome<<C as EffectCapabilityContract>::Evidence>,
-            AdapterError,
-        >,
-    > + Send
     + Sync;
 pub(crate) type ErasedEffectAdapterCallback = dyn for<'a> Fn(
         &'a EffectId,
@@ -133,22 +115,6 @@ pub(crate) fn qualify_hot<T: MfmValue>(
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct ReadSignature {
-    capability_type: TypeId,
-    capability_contract_ref: ContentRef,
-    intent_contract_ref: ContentRef,
-    evidence_contract_ref: ContentRef,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-struct EffectSignature {
-    capability_type: TypeId,
-    capability_contract_ref: ContentRef,
-    command_contract_ref: ContentRef,
-    evidence_contract_ref: ContentRef,
-}
-
-#[derive(Clone, PartialEq, Eq)]
 struct StateSignature {
     state_type: TypeId,
     state_implementation_ref: ContentRef,
@@ -217,12 +183,12 @@ enum RegisteredMode {
         start: PureStart,
     },
     Read {
-        signature: ReadSignature,
+        capability_contract_ref: ContentRef,
         start: ReadStart,
         validate_retained: ReadValidator,
     },
     Effect {
-        signature: EffectSignature,
+        capability_contract_ref: ContentRef,
         prepare: EffectPrepareStart,
         start_pending: EffectPendingStart,
         validate_prepare: EffectPrepareValidator,
@@ -238,17 +204,25 @@ impl RegisteredState {
         match (&self.mode, &other.mode) {
             (RegisteredMode::Pure { .. }, RegisteredMode::Pure { .. }) => true,
             (
-                RegisteredMode::Read { signature, .. },
                 RegisteredMode::Read {
-                    signature: other, ..
+                    capability_contract_ref,
+                    ..
                 },
-            ) => signature == other,
+                RegisteredMode::Read {
+                    capability_contract_ref: other,
+                    ..
+                },
+            ) => capability_contract_ref == other,
             (
-                RegisteredMode::Effect { signature, .. },
                 RegisteredMode::Effect {
-                    signature: other, ..
+                    capability_contract_ref,
+                    ..
                 },
-            ) => signature == other,
+                RegisteredMode::Effect {
+                    capability_contract_ref: other,
+                    ..
+                },
+            ) => capability_contract_ref == other,
             _ => false,
         }
     }
@@ -277,7 +251,7 @@ fn validate_read<C: ReadCapabilityContract>(
     intent: &QualifiedValue,
     evidence: &QualifiedValue,
 ) -> Result<()> {
-    let intent = intent
+    let typed_intent = intent
         .typed
         .downcast_ref::<C::Intent>()
         .ok_or(RuntimeError::InvalidHistory)?;
@@ -285,7 +259,8 @@ fn validate_read<C: ReadCapabilityContract>(
         .typed
         .downcast_ref::<C::Evidence>()
         .ok_or(RuntimeError::InvalidHistory)?;
-    C::bind_evidence(intent, evidence).map_err(|_| RuntimeError::InvalidHistory)
+    C::bind_evidence(&intent.value_ref, typed_intent, evidence)
+        .map_err(|_| RuntimeError::InvalidHistory)
 }
 
 fn prepare_effect<'a, S, C>(
@@ -368,6 +343,7 @@ fn erase_read_adapter<C, F>(callback: F) -> Arc<ErasedReadAdapterCallback>
 where
     C: ReadCapabilityContract,
     F: for<'a> Fn(
+            &'a ContentRef,
             &'a C::Intent,
         ) -> Pin<
             Box<dyn Future<Output = std::result::Result<C::Evidence, AdapterError>> + Send + 'a>,
@@ -375,16 +351,16 @@ where
         + Sync
         + 'static,
 {
-    let callback: Arc<ReadAdapterCallback<C>> = Arc::new(callback);
     Arc::new(move |qualified_intent| {
         let Some(intent) = qualified_intent.typed.downcast_ref::<C::Intent>() else {
             return Box::pin(async { Err(AdapterError::Internal) });
         };
-        let future =
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (callback)(intent))) {
-                Ok(future) => future,
-                Err(_) => return Box::pin(async { Err(AdapterError::Internal) }),
-            };
+        let future = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            callback(&qualified_intent.value_ref, intent)
+        })) {
+            Ok(future) => future,
+            Err(_) => return Box::pin(async { Err(AdapterError::Internal) }),
+        };
         Box::pin(async move {
             let evidence = CatchAdapterPanic { inner: future }.await?;
             Ok(Box::new(move || qualify_hot(evidence)) as EvidenceQualification)
@@ -397,6 +373,7 @@ where
     C: EffectCapabilityContract,
     F: for<'a> Fn(
             &'a EffectId,
+            &'a ContentRef,
             &'a C::Command,
         ) -> Pin<
             Box<
@@ -412,13 +389,12 @@ where
         + Sync
         + 'static,
 {
-    let callback: Arc<EffectAdapterCallback<C>> = Arc::new(callback);
     Arc::new(move |effect_id, qualified_command| {
         let Some(command) = qualified_command.typed.downcast_ref::<C::Command>() else {
             return Box::pin(async { Err(AdapterError::Internal) });
         };
         let future = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (callback)(effect_id, command)
+            callback(effect_id, &qualified_command.value_ref, command)
         })) {
             Ok(future) => future,
             Err(_) => return Box::pin(async { Err(AdapterError::Internal) }),
@@ -434,103 +410,62 @@ where
     })
 }
 
-pub(crate) struct ReadAdapterEntry {
-    capability_type: TypeId,
-    callback: Arc<ErasedReadAdapterCallback>,
+fn adapter_binding_ref<B: MfmValue>(binding: &B) -> Result<ContentRef> {
+    canonicalize_mfm_value(binding)
+        .map(|(_, value_ref)| value_ref)
+        .map_err(|_| RuntimeError::IncompatibleAssembly)
 }
 
-pub(crate) struct EffectAdapterEntry {
-    capability_type: TypeId,
-    callback: Arc<ErasedEffectAdapterCallback>,
-}
-
-type ReadAdapterRegistry = BTreeMap<ContentRef, BTreeMap<ContentRef, ReadAdapterEntry>>;
-type EffectAdapterRegistry = BTreeMap<ContentRef, BTreeMap<ContentRef, EffectAdapterEntry>>;
-
-#[derive(Clone, PartialEq, Eq)]
-struct CapabilitySignature {
-    capability_type: TypeId,
-    intent_contract_ref: ContentRef,
-    evidence_contract_ref: ContentRef,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-struct EffectCapabilitySignature {
-    capability_type: TypeId,
-    command_contract_ref: ContentRef,
-    evidence_contract_ref: ContentRef,
+enum CapabilityRegistration {
+    Read {
+        capability_type: TypeId,
+        intent_codec: Arc<ValueCodec>,
+        evidence_codec: Arc<ValueCodec>,
+        bindings: BTreeMap<ContentRef, Arc<ErasedReadAdapterCallback>>,
+    },
+    Effect {
+        capability_type: TypeId,
+        command_codec: Arc<ValueCodec>,
+        evidence_codec: Arc<ValueCodec>,
+        bindings: BTreeMap<ContentRef, Arc<ErasedEffectAdapterCallback>>,
+    },
 }
 
 /// Mutable builder for one immutable Runtime assembly.
 pub struct RuntimeAssemblyBuilder {
     values: BTreeMap<ContentRef, Arc<ValueCodec>>,
     states: BTreeMap<StateAbiKey, RegisteredState>,
-    read_capabilities: BTreeMap<ContentRef, CapabilitySignature>,
-    effect_capabilities: BTreeMap<ContentRef, EffectCapabilitySignature>,
-    read_adapters: ReadAdapterRegistry,
-    effect_adapters: EffectAdapterRegistry,
-    invalid: bool,
+    capabilities: BTreeMap<ContentRef, CapabilityRegistration>,
 }
 
-#[allow(clippy::new_without_default)] // The frozen public surface intentionally has no Default impl.
 impl RuntimeAssemblyBuilder {
     /// Constructs an empty builder with the framework Never codec installed.
-    pub fn new() -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::IncompatibleAssembly`] if the framework codec contract is invalid.
+    pub fn new() -> Result<Self> {
         let mut builder = Self {
             values: BTreeMap::new(),
             states: BTreeMap::new(),
-            read_capabilities: BTreeMap::new(),
-            effect_capabilities: BTreeMap::new(),
-            read_adapters: BTreeMap::new(),
-            effect_adapters: BTreeMap::new(),
-            invalid: false,
+            capabilities: BTreeMap::new(),
         };
-        if builder.register_value::<Never>().is_err() {
-            builder.invalid = true;
-        }
-        builder
+        builder.ensure_value::<Never>()?;
+        Ok(builder)
     }
 
     /// Registers one exact value codec, idempotently.
     pub fn register_value<T: MfmValue>(&mut self) -> Result<()> {
-        if self.invalid {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
-        let descriptor = T::schema_descriptor().map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        let semantic = T::semantic_id().map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        if descriptor.identity().semantic_type_id.as_ref() != Some(&semantic) {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
-        let contract_ref =
-            nominal_contract_ref::<T>().map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        let key = contract_ref.clone();
-        if let Some(previous) = self.values.get(&key) {
-            return (previous.codec_type_id == TypeId::of::<T>()
-                && previous.semantic_id == semantic
-                && previous.descriptor == descriptor)
-                .then_some(())
-                .ok_or(RuntimeError::IncompatibleAssembly);
-        }
-        self.values.insert(
-            key,
-            Arc::new(ValueCodec {
-                codec_type_id: TypeId::of::<T>(),
-                semantic_id: semantic,
-                contract_ref,
-                descriptor,
-                qualify: qualify_typed::<T>,
-            }),
-        );
-        Ok(())
+        self.ensure_value::<T>().map(|_| ())
     }
 
     /// Registers one Pure State and its complete value ABI.
     pub fn register_pure<S: PureState>(&mut self) -> Result<()> {
-        self.register_value::<S::Input>()?;
-        self.register_value::<S::Output>()?;
-        self.register_value::<S::Failure>()?;
+        let input = self.ensure_value::<S::Input>()?;
+        let output = self.ensure_value::<S::Output>()?;
+        let failure = self.ensure_value::<S::Failure>()?;
         self.register_state(RegisteredState {
-            signature: state_signature::<S>()?,
+            signature: state_signature::<S>(&input, &output, &failure)?,
             mode: RegisteredMode::Pure {
                 start: start_pure::<S>,
             },
@@ -543,22 +478,14 @@ impl RuntimeAssemblyBuilder {
         S: ReadState<C>,
         C: ReadCapabilityContract,
     {
-        self.register_value::<S::Input>()?;
-        self.register_value::<S::Output>()?;
-        self.register_value::<S::Failure>()?;
-        self.register_value::<C::Intent>()?;
-        self.register_value::<C::Evidence>()?;
-        let capability = self.ensure_capability::<C>()?;
+        let input = self.ensure_value::<S::Input>()?;
+        let output = self.ensure_value::<S::Output>()?;
+        let failure = self.ensure_value::<S::Failure>()?;
+        let capability_contract_ref = self.ensure_read_capability::<C>()?;
         self.register_state(RegisteredState {
-            signature: state_signature::<S>()?,
+            signature: state_signature::<S>(&input, &output, &failure)?,
             mode: RegisteredMode::Read {
-                signature: ReadSignature {
-                    capability_type: TypeId::of::<C>(),
-                    capability_contract_ref: capability_contract_ref::<C>()
-                        .map_err(|_| RuntimeError::IncompatibleAssembly)?,
-                    intent_contract_ref: capability.intent_contract_ref,
-                    evidence_contract_ref: capability.evidence_contract_ref,
-                },
+                capability_contract_ref,
                 start: start_read::<S, C>,
                 validate_retained: validate_read::<C>,
             },
@@ -571,22 +498,14 @@ impl RuntimeAssemblyBuilder {
         S: EffectState<C>,
         C: EffectCapabilityContract,
     {
-        self.register_value::<S::Input>()?;
-        self.register_value::<S::Output>()?;
-        self.register_value::<S::Failure>()?;
-        self.register_value::<C::Command>()?;
-        self.register_value::<C::Evidence>()?;
-        let capability = self.ensure_effect_capability::<C>()?;
+        let input = self.ensure_value::<S::Input>()?;
+        let output = self.ensure_value::<S::Output>()?;
+        let failure = self.ensure_value::<S::Failure>()?;
+        let capability_contract_ref = self.ensure_effect_capability::<C>()?;
         self.register_state(RegisteredState {
-            signature: state_signature::<S>()?,
+            signature: state_signature::<S>(&input, &output, &failure)?,
             mode: RegisteredMode::Effect {
-                signature: EffectSignature {
-                    capability_type: TypeId::of::<C>(),
-                    capability_contract_ref: effect_capability_contract_ref::<C>()
-                        .map_err(|_| RuntimeError::IncompatibleAssembly)?,
-                    command_contract_ref: capability.command_contract_ref,
-                    evidence_contract_ref: capability.evidence_contract_ref,
-                },
+                capability_contract_ref,
                 prepare: prepare_effect::<S, C>,
                 start_pending: start_pending_effect::<S, C>,
                 validate_prepare: validate_effect_prepare::<S, C>,
@@ -595,12 +514,16 @@ impl RuntimeAssemblyBuilder {
         })
     }
 
-    /// Registers one typed adapter under its internally derived binding ref.
+    /// Registers one typed Read adapter under its internally derived binding ref.
+    ///
+    /// Runtime supplies the callback with the exact qualified intent value ref, followed by the
+    /// typed intent. The reference is the intent instance identity, not its codec contract.
     pub fn register_adapter<C, B, F>(&mut self, binding: B, callback: F) -> Result<()>
     where
         C: ReadCapabilityContract,
         B: MfmValue,
         F: for<'a> Fn(
+                &'a ContentRef,
                 &'a C::Intent,
             ) -> Pin<
                 Box<
@@ -610,35 +533,38 @@ impl RuntimeAssemblyBuilder {
             + Sync
             + 'static,
     {
-        let capability = self.ensure_capability::<C>()?;
-        let capability_ref =
-            capability_contract_ref::<C>().map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        if capability.capability_type != TypeId::of::<C>() {
+        let capability_ref = self.ensure_read_capability::<C>()?;
+        let binding_ref = adapter_binding_ref(&binding)?;
+        let Some(CapabilityRegistration::Read {
+            capability_type,
+            bindings,
+            ..
+        }) = self.capabilities.get_mut(&capability_ref)
+        else {
+            return Err(RuntimeError::IncompatibleAssembly);
+        };
+        if *capability_type != TypeId::of::<C>() {
             return Err(RuntimeError::IncompatibleAssembly);
         }
-        let (_, binding_ref) =
-            canonicalize_mfm_value(&binding).map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        let bindings = self.read_adapters.entry(capability_ref).or_default();
         if bindings.contains_key(&binding_ref) {
             return Err(RuntimeError::IncompatibleAssembly);
         }
-        bindings.insert(
-            binding_ref,
-            ReadAdapterEntry {
-                capability_type: TypeId::of::<C>(),
-                callback: erase_read_adapter::<C, F>(callback),
-            },
-        );
+        bindings.insert(binding_ref, erase_read_adapter::<C, F>(callback));
         Ok(())
     }
 
     /// Registers one typed Effect adapter under its internally derived binding ref.
+    ///
+    /// Runtime supplies the exact Effect ID, qualified command value ref, and typed command. The
+    /// command reference is the instance identity used to derive the Effect ID, not its codec
+    /// contract.
     pub fn register_effect_adapter<C, B, F>(&mut self, binding: B, callback: F) -> Result<()>
     where
         C: EffectCapabilityContract,
         B: MfmValue,
         F: for<'a> Fn(
                 &'a EffectId,
+                &'a ContentRef,
                 &'a C::Command,
             ) -> Pin<
                 Box<
@@ -654,41 +580,35 @@ impl RuntimeAssemblyBuilder {
             + Sync
             + 'static,
     {
-        let capability = self.ensure_effect_capability::<C>()?;
-        let capability_ref = effect_capability_contract_ref::<C>()
-            .map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        if capability.capability_type != TypeId::of::<C>() {
+        let capability_ref = self.ensure_effect_capability::<C>()?;
+        let binding_ref = adapter_binding_ref(&binding)?;
+        let Some(CapabilityRegistration::Effect {
+            capability_type,
+            bindings,
+            ..
+        }) = self.capabilities.get_mut(&capability_ref)
+        else {
+            return Err(RuntimeError::IncompatibleAssembly);
+        };
+        if *capability_type != TypeId::of::<C>() {
             return Err(RuntimeError::IncompatibleAssembly);
         }
-        let (_, binding_ref) =
-            canonicalize_mfm_value(&binding).map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        let bindings = self.effect_adapters.entry(capability_ref).or_default();
         if bindings.contains_key(&binding_ref) {
             return Err(RuntimeError::IncompatibleAssembly);
         }
-        bindings.insert(
-            binding_ref,
-            EffectAdapterEntry {
-                capability_type: TypeId::of::<C>(),
-                callback: erase_effect_adapter::<C, F>(callback),
-            },
-        );
+        bindings.insert(binding_ref, erase_effect_adapter::<C, F>(callback));
         Ok(())
     }
 
     /// Finalizes the immutable assembly.
-    pub fn finish(self) -> Result<RuntimeAssembly> {
-        if self.invalid {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
-        Ok(RuntimeAssembly {
+    pub fn finish(self) -> RuntimeAssembly {
+        RuntimeAssembly {
             inner: Arc::new(AssemblyInner {
                 values: self.values,
                 states: self.states,
-                read_adapters: self.read_adapters,
-                effect_adapters: self.effect_adapters,
+                capabilities: self.capabilities,
             }),
-        })
+        }
     }
 
     fn register_state(&mut self, state: RegisteredState) -> Result<()> {
@@ -703,72 +623,115 @@ impl RuntimeAssemblyBuilder {
         Ok(())
     }
 
-    fn ensure_capability<C: ReadCapabilityContract>(&mut self) -> Result<CapabilitySignature> {
-        self.register_value::<C::Intent>()?;
-        self.register_value::<C::Evidence>()?;
-        let contract =
-            capability_contract_ref::<C>().map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        let signature = CapabilitySignature {
-            capability_type: TypeId::of::<C>(),
-            intent_contract_ref: nominal_contract_ref::<C::Intent>()
-                .map_err(|_| RuntimeError::IncompatibleAssembly)?,
-            evidence_contract_ref: nominal_contract_ref::<C::Evidence>()
-                .map_err(|_| RuntimeError::IncompatibleAssembly)?,
-        };
-        let key = contract;
-        if self.effect_capabilities.contains_key(&key) {
+    fn ensure_value<T: MfmValue>(&mut self) -> Result<Arc<ValueCodec>> {
+        let descriptor = T::schema_descriptor().map_err(|_| RuntimeError::IncompatibleAssembly)?;
+        let semantic_id = T::semantic_id().map_err(|_| RuntimeError::IncompatibleAssembly)?;
+        if descriptor.identity().semantic_type_id.as_ref() != Some(&semantic_id) {
             return Err(RuntimeError::IncompatibleAssembly);
         }
-        if let Some(previous) = self.read_capabilities.get(&key) {
-            if previous != &signature {
-                return Err(RuntimeError::IncompatibleAssembly);
-            }
-        } else {
-            self.read_capabilities.insert(key, signature.clone());
+        let contract_ref =
+            nominal_contract_ref::<T>().map_err(|_| RuntimeError::IncompatibleAssembly)?;
+        if let Some(previous) = self.values.get(&contract_ref) {
+            return (previous.codec_type_id == TypeId::of::<T>()
+                && previous.semantic_id == semantic_id
+                && previous.descriptor == descriptor)
+                .then(|| Arc::clone(previous))
+                .ok_or(RuntimeError::IncompatibleAssembly);
         }
-        Ok(signature)
+        let codec = Arc::new(ValueCodec {
+            codec_type_id: TypeId::of::<T>(),
+            semantic_id,
+            contract_ref: contract_ref.clone(),
+            descriptor,
+            qualify: qualify_typed::<T>,
+        });
+        self.values.insert(contract_ref, Arc::clone(&codec));
+        Ok(codec)
     }
 
-    fn ensure_effect_capability<C: EffectCapabilityContract>(
-        &mut self,
-    ) -> Result<EffectCapabilitySignature> {
-        self.register_value::<C::Command>()?;
-        self.register_value::<C::Evidence>()?;
-        let contract = effect_capability_contract_ref::<C>()
-            .map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        let signature = EffectCapabilitySignature {
-            capability_type: TypeId::of::<C>(),
-            command_contract_ref: nominal_contract_ref::<C::Command>()
-                .map_err(|_| RuntimeError::IncompatibleAssembly)?,
-            evidence_contract_ref: nominal_contract_ref::<C::Evidence>()
-                .map_err(|_| RuntimeError::IncompatibleAssembly)?,
-        };
-        let key = contract;
-        if self.read_capabilities.contains_key(&key) {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
-        if let Some(previous) = self.effect_capabilities.get(&key) {
-            if previous != &signature {
+    fn ensure_read_capability<C: ReadCapabilityContract>(&mut self) -> Result<ContentRef> {
+        let intent_codec = self.ensure_value::<C::Intent>()?;
+        let evidence_codec = self.ensure_value::<C::Evidence>()?;
+        let capability_ref =
+            capability_contract_ref::<C>().map_err(|_| RuntimeError::IncompatibleAssembly)?;
+        if let Some(registration) = self.capabilities.get(&capability_ref) {
+            let CapabilityRegistration::Read {
+                capability_type,
+                intent_codec: registered_intent,
+                evidence_codec: registered_evidence,
+                ..
+            } = registration
+            else {
+                return Err(RuntimeError::IncompatibleAssembly);
+            };
+            if *capability_type != TypeId::of::<C>()
+                || !Arc::ptr_eq(registered_intent, &intent_codec)
+                || !Arc::ptr_eq(registered_evidence, &evidence_codec)
+            {
                 return Err(RuntimeError::IncompatibleAssembly);
             }
-        } else {
-            self.effect_capabilities.insert(key, signature.clone());
+            return Ok(capability_ref);
         }
-        Ok(signature)
+        self.capabilities.insert(
+            capability_ref.clone(),
+            CapabilityRegistration::Read {
+                capability_type: TypeId::of::<C>(),
+                intent_codec,
+                evidence_codec,
+                bindings: BTreeMap::new(),
+            },
+        );
+        Ok(capability_ref)
+    }
+
+    fn ensure_effect_capability<C: EffectCapabilityContract>(&mut self) -> Result<ContentRef> {
+        let command_codec = self.ensure_value::<C::Command>()?;
+        let evidence_codec = self.ensure_value::<C::Evidence>()?;
+        let capability_ref = effect_capability_contract_ref::<C>()
+            .map_err(|_| RuntimeError::IncompatibleAssembly)?;
+        if let Some(registration) = self.capabilities.get(&capability_ref) {
+            let CapabilityRegistration::Effect {
+                capability_type,
+                command_codec: registered_command,
+                evidence_codec: registered_evidence,
+                ..
+            } = registration
+            else {
+                return Err(RuntimeError::IncompatibleAssembly);
+            };
+            if *capability_type != TypeId::of::<C>()
+                || !Arc::ptr_eq(registered_command, &command_codec)
+                || !Arc::ptr_eq(registered_evidence, &evidence_codec)
+            {
+                return Err(RuntimeError::IncompatibleAssembly);
+            }
+            return Ok(capability_ref);
+        }
+        self.capabilities.insert(
+            capability_ref.clone(),
+            CapabilityRegistration::Effect {
+                capability_type: TypeId::of::<C>(),
+                command_codec,
+                evidence_codec,
+                bindings: BTreeMap::new(),
+            },
+        );
+        Ok(capability_ref)
     }
 }
 
-fn state_signature<S: mfm_program::State>() -> Result<StateSignature> {
+fn state_signature<S: mfm_program::State>(
+    input: &ValueCodec,
+    output: &ValueCodec,
+    failure: &ValueCodec,
+) -> Result<StateSignature> {
     Ok(StateSignature {
         state_type: TypeId::of::<S>(),
         state_implementation_ref: state_implementation_ref::<S>()
             .map_err(|_| RuntimeError::IncompatibleAssembly)?,
-        input_contract_ref: nominal_contract_ref::<S::Input>()
-            .map_err(|_| RuntimeError::IncompatibleAssembly)?,
-        output_contract_ref: nominal_contract_ref::<S::Output>()
-            .map_err(|_| RuntimeError::IncompatibleAssembly)?,
-        failure_contract_ref: nominal_contract_ref::<S::Failure>()
-            .map_err(|_| RuntimeError::IncompatibleAssembly)?,
+        input_contract_ref: input.contract_ref.clone(),
+        output_contract_ref: output.contract_ref.clone(),
+        failure_contract_ref: failure.contract_ref.clone(),
     })
 }
 
@@ -780,8 +743,7 @@ pub struct RuntimeAssembly {
 pub(crate) struct AssemblyInner {
     values: BTreeMap<ContentRef, Arc<ValueCodec>>,
     states: BTreeMap<StateAbiKey, RegisteredState>,
-    read_adapters: ReadAdapterRegistry,
-    effect_adapters: EffectAdapterRegistry,
+    capabilities: BTreeMap<ContentRef, CapabilityRegistration>,
 }
 
 impl RuntimeAssembly {
@@ -822,17 +784,26 @@ impl RuntimeAssembly {
                             ExecutableMode::Pure { start: *start }
                         }
                         RegisteredMode::Read {
-                            signature,
+                            capability_contract_ref,
                             start,
                             validate_retained,
                         } => {
+                            let Some(CapabilityRegistration::Read {
+                                intent_codec,
+                                evidence_codec,
+                                bindings,
+                                ..
+                            }) = self.inner.capabilities.get(capability_contract_ref)
+                            else {
+                                return Err(RuntimeError::IncompatibleAssembly);
+                            };
                             if !state.execution().is_read()
                                 || state.execution().capability_contract_ref()
-                                    != Some(&signature.capability_contract_ref)
+                                    != Some(capability_contract_ref)
                                 || state.execution().intent_contract_ref()
-                                    != Some(&signature.intent_contract_ref)
+                                    != Some(&intent_codec.contract_ref)
                                 || state.execution().evidence_contract_ref()
-                                    != Some(&signature.evidence_contract_ref)
+                                    != Some(&evidence_codec.contract_ref)
                             {
                                 return Err(RuntimeError::IncompatibleAssembly);
                             }
@@ -840,41 +811,40 @@ impl RuntimeAssembly {
                                 .execution()
                                 .binding_ref()
                                 .ok_or(RuntimeError::IncompatibleAssembly)?;
-                            let adapter = self
-                                .inner
-                                .read_adapters
-                                .get(&signature.capability_contract_ref)
-                                .and_then(|bindings| bindings.get(binding_ref))
+                            let adapter = bindings
+                                .get(binding_ref)
                                 .ok_or(RuntimeError::IncompatibleAssembly)?;
-                            if adapter.capability_type != signature.capability_type {
-                                return Err(RuntimeError::IncompatibleAssembly);
-                            }
                             ExecutableMode::Read {
                                 start: *start,
                                 validate_retained: *validate_retained,
-                                adapter: Arc::clone(&adapter.callback),
-                                intent_codec: self
-                                    .codec(&signature.intent_contract_ref)
-                                    .ok_or(RuntimeError::IncompatibleAssembly)?,
-                                evidence_codec: self
-                                    .codec(&signature.evidence_contract_ref)
-                                    .ok_or(RuntimeError::IncompatibleAssembly)?,
+                                adapter: Arc::clone(adapter),
+                                intent_codec: Arc::clone(intent_codec),
+                                evidence_codec: Arc::clone(evidence_codec),
                             }
                         }
                         RegisteredMode::Effect {
-                            signature,
+                            capability_contract_ref,
                             prepare,
                             start_pending,
                             validate_prepare,
                             validate_evidence,
                         } => {
+                            let Some(CapabilityRegistration::Effect {
+                                command_codec,
+                                evidence_codec,
+                                bindings,
+                                ..
+                            }) = self.inner.capabilities.get(capability_contract_ref)
+                            else {
+                                return Err(RuntimeError::IncompatibleAssembly);
+                            };
                             if !state.execution().is_effect()
                                 || state.execution().capability_contract_ref()
-                                    != Some(&signature.capability_contract_ref)
+                                    != Some(capability_contract_ref)
                                 || state.execution().command_contract_ref()
-                                    != Some(&signature.command_contract_ref)
+                                    != Some(&command_codec.contract_ref)
                                 || state.execution().evidence_contract_ref()
-                                    != Some(&signature.evidence_contract_ref)
+                                    != Some(&evidence_codec.contract_ref)
                             {
                                 return Err(RuntimeError::IncompatibleAssembly);
                             }
@@ -882,27 +852,17 @@ impl RuntimeAssembly {
                                 .execution()
                                 .binding_ref()
                                 .ok_or(RuntimeError::IncompatibleAssembly)?;
-                            let adapter = self
-                                .inner
-                                .effect_adapters
-                                .get(&signature.capability_contract_ref)
-                                .and_then(|bindings| bindings.get(binding_ref))
+                            let adapter = bindings
+                                .get(binding_ref)
                                 .ok_or(RuntimeError::IncompatibleAssembly)?;
-                            if adapter.capability_type != signature.capability_type {
-                                return Err(RuntimeError::IncompatibleAssembly);
-                            }
                             ExecutableMode::Effect {
                                 prepare: *prepare,
                                 start_pending: *start_pending,
                                 validate_prepare: *validate_prepare,
                                 validate_evidence: *validate_evidence,
-                                adapter: Arc::clone(&adapter.callback),
-                                command_codec: self
-                                    .codec(&signature.command_contract_ref)
-                                    .ok_or(RuntimeError::IncompatibleAssembly)?,
-                                evidence_codec: self
-                                    .codec(&signature.evidence_contract_ref)
-                                    .ok_or(RuntimeError::IncompatibleAssembly)?,
+                                adapter: Arc::clone(adapter),
+                                command_codec: Arc::clone(command_codec),
+                                evidence_codec: Arc::clone(evidence_codec),
                             }
                         }
                     };
