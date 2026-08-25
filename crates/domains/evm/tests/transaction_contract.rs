@@ -1,12 +1,15 @@
+use std::num::NonZeroU64;
+
+use mfm_canonical::CanonicalBytes;
 use mfm_capabilities::EffectCapabilityContract;
 use mfm_evm::{
     AnchoredContractCallContext, AnchoredContractCallFailureReason, AnchoredContractCallResult,
     CallEvmContract, CreateEvmContract, Eip1559TransactionCommand, EvmAddress, EvmAuthorityEpoch,
     EvmBlockAnchor, EvmChainInstance, EvmContractCallCompletion, EvmContractCallContext,
     EvmContractCallFailure, EvmContractCreationCompletion, EvmContractCreationContext,
-    EvmContractCreationFailure, EvmHash, EvmTransactionAction, EvmTransactionBinding,
-    EvmTransactionConfirmation, EvmTransactionEffect, EvmTransactionRevert, EvmTransactionRoute,
-    EvmTransactionSettlement, EvmU256, CALL_EVM_CONTRACT_STATE_ID, CREATE_EVM_CONTRACT_STATE_ID,
+    EvmContractCreationFailure, EvmHash, EvmTransactionBinding, EvmTransactionConfirmation,
+    EvmTransactionEffect, EvmTransactionRevert, EvmTransactionRoute, EvmTransactionSettlement,
+    EvmU256, CALL_EVM_CONTRACT_STATE_ID, CREATE_EVM_CONTRACT_STATE_ID,
     EVM_TRANSACTION_EFFECT_CAPABILITY_ID, MAX_EVM_CALLDATA_BYTES, MAX_EVM_INITCODE_BYTES,
 };
 use mfm_ids::{
@@ -43,13 +46,16 @@ fn content_ref() -> ContentRef {
     .expect("endpoint ref")
 }
 
+fn nonzero(value: u64) -> NonZeroU64 {
+    NonZeroU64::new(value).expect("nonzero fixture")
+}
+
 fn route() -> EvmTransactionRoute {
     EvmTransactionRoute::new(
         EvmChainInstance::new(
-            1,
+            nonzero(1),
             EvmHash::new(format!("0x{}", "aa".repeat(32))).expect("genesis"),
-        )
-        .expect("chain"),
+        ),
         content_ref(),
     )
 }
@@ -63,11 +69,11 @@ fn binding() -> EvmTransactionBinding {
 }
 
 fn create_command() -> Eip1559TransactionCommand {
-    Eip1559TransactionCommand::new(
+    Eip1559TransactionCommand::create(
         binding(),
-        EvmTransactionAction::create(vec![1, 2, 3]).expect("create"),
+        vec![1, 2, 3],
         EvmU256::new("0").expect("value"),
-        2_000_000,
+        nonzero(2_000_000),
         EvmU256::new("1000000000").expect("priority fee"),
         EvmU256::new("10000000000").expect("max fee"),
     )
@@ -75,15 +81,12 @@ fn create_command() -> Eip1559TransactionCommand {
 }
 
 fn call_command() -> Eip1559TransactionCommand {
-    Eip1559TransactionCommand::new(
+    Eip1559TransactionCommand::call(
         binding(),
-        EvmTransactionAction::call(
-            EvmAddress::new("0x3333333333333333333333333333333333333333").expect("target"),
-            vec![4, 5, 6],
-        )
-        .expect("call"),
+        EvmAddress::new("0x3333333333333333333333333333333333333333").expect("target"),
+        vec![4, 5, 6],
         EvmU256::new("7").expect("value"),
-        200_000,
+        nonzero(200_000),
         EvmU256::new("1").expect("priority"),
         EvmU256::new("2").expect("max"),
     )
@@ -127,7 +130,17 @@ fn identity<T: MfmValueTrait>() -> String {
 
 #[test]
 fn checked_evm_primitives_reject_every_noncanonical_boundary() {
-    assert!(EvmAddress::new("0x1111111111111111111111111111111111111111").is_ok());
+    let address = EvmAddress::from_bytes([0x11; 20]);
+    assert_eq!(address.as_bytes(), &[0x11; 20]);
+    assert_eq!(
+        address.to_string(),
+        "0x1111111111111111111111111111111111111111"
+    );
+    assert_eq!(
+        serde_json::from_str::<EvmAddress>(r#""0x1111111111111111111111111111111111111111""#,)
+            .expect("address"),
+        address
+    );
     for invalid in [
         "0X1111111111111111111111111111111111111111",
         "0x111111111111111111111111111111111111111A",
@@ -136,7 +149,9 @@ fn checked_evm_primitives_reject_every_noncanonical_boundary() {
         assert!(EvmAddress::new(invalid).is_err());
     }
 
-    assert!(EvmHash::new(format!("0x{}", "ab".repeat(32))).is_ok());
+    let hash = EvmHash::from_bytes([0xab; 32]);
+    assert_eq!(hash.as_bytes(), &[0xab; 32]);
+    assert_eq!(hash.to_string(), format!("0x{}", "ab".repeat(32)));
     assert!(EvmHash::new(format!("0x{}", "AB".repeat(32))).is_err());
     assert!(EvmHash::new(format!("0x{}", "ab".repeat(31))).is_err());
 
@@ -160,8 +175,9 @@ fn checked_evm_primitives_reject_every_noncanonical_boundary() {
     assert!(serde_json::from_str::<EvmU256>("1").is_err());
 
     let genesis = format!("0x{}", "ab".repeat(32));
-    assert!(EvmChainInstance::new(1, EvmHash::new(&genesis).expect("genesis")).is_ok());
-    assert!(EvmChainInstance::new(0, EvmHash::new(&genesis).expect("genesis")).is_err());
+    let chain = EvmChainInstance::new(nonzero(1), EvmHash::new(&genesis).expect("genesis"));
+    assert_eq!(chain.chain_id(), nonzero(1));
+    assert!(NonZeroU64::new(0).is_none());
     assert!(
         serde_json::from_value::<EvmChainInstance>(serde_json::json!({
             "chain_id": 0,
@@ -182,16 +198,56 @@ fn checked_evm_primitives_reject_every_noncanonical_boundary() {
         assert!(serde_json::from_str::<EvmAuthorityEpoch>(invalid).is_err());
     }
 
-    assert!(EvmTransactionAction::create(vec![0; MAX_EVM_INITCODE_BYTES]).is_ok());
-    assert!(EvmTransactionAction::create(vec![0; MAX_EVM_INITCODE_BYTES + 1]).is_err());
+    assert!(Eip1559TransactionCommand::create(
+        binding(),
+        vec![0; MAX_EVM_INITCODE_BYTES],
+        EvmU256::from_u64(0),
+        nonzero(1),
+        EvmU256::from_u64(1),
+        EvmU256::from_u64(1),
+    )
+    .is_ok());
+    assert!(Eip1559TransactionCommand::create(
+        binding(),
+        vec![0; MAX_EVM_INITCODE_BYTES + 1],
+        EvmU256::from_u64(0),
+        nonzero(1),
+        EvmU256::from_u64(1),
+        EvmU256::from_u64(1),
+    )
+    .is_err());
     let target = EvmAddress::new("0x1111111111111111111111111111111111111111").expect("target");
-    assert!(EvmTransactionAction::call(target.clone(), vec![0; MAX_EVM_CALLDATA_BYTES]).is_ok());
-    assert!(EvmTransactionAction::call(target, vec![0; MAX_EVM_CALLDATA_BYTES + 1]).is_err());
+    assert!(Eip1559TransactionCommand::call(
+        binding(),
+        target.clone(),
+        vec![0; MAX_EVM_CALLDATA_BYTES],
+        EvmU256::from_u64(0),
+        nonzero(1),
+        EvmU256::from_u64(1),
+        EvmU256::from_u64(1),
+    )
+    .is_ok());
+    assert!(Eip1559TransactionCommand::call(
+        binding(),
+        target,
+        vec![0; MAX_EVM_CALLDATA_BYTES + 1],
+        EvmU256::from_u64(0),
+        nonzero(1),
+        EvmU256::from_u64(1),
+        EvmU256::from_u64(1),
+    )
+    .is_err());
 }
 
 #[test]
 fn fixed_eip1559_command_has_exact_wire_and_rejects_shape_or_relationship_drift() {
     let command = create_command();
+    assert_eq!(command.input(), [1, 2, 3]);
+    assert_eq!(command.to(), None);
+    assert_eq!(
+        call_command().to().map(ToString::to_string).as_deref(),
+        Some("0x3333333333333333333333333333333333333333")
+    );
     let (canonical, _) = canonicalize_mfm_value(&command).expect("canonical command");
     assert_eq!(
         canonical.as_str(),
@@ -210,6 +266,34 @@ fn fixed_eip1559_command_has_exact_wire_and_rejects_shape_or_relationship_drift(
     let mut wire = serde_json::to_value(&command).expect("wire");
     wire["action"]["value"]["initcode"] = serde_json::json!("AQID=");
     assert!(serde_json::from_value::<Eip1559TransactionCommand>(wire).is_err());
+    let mut wire = serde_json::to_value(&command).expect("wire");
+    wire["action"]["value"]["initcode"] =
+        serde_json::json!(CanonicalBytes::new(vec![0; MAX_EVM_INITCODE_BYTES + 1]).encoded());
+    assert!(serde_json::from_value::<Eip1559TransactionCommand>(wire).is_err());
+    let above_u128 = "340282366920938463463374607431768211456";
+    assert!(Eip1559TransactionCommand::create(
+        binding(),
+        Vec::new(),
+        EvmU256::from_u64(0),
+        nonzero(1),
+        EvmU256::from_u64(0),
+        EvmU256::new(u128::MAX.to_string()).expect("maximum u128"),
+    )
+    .is_ok());
+    assert!(Eip1559TransactionCommand::create(
+        binding(),
+        Vec::new(),
+        EvmU256::from_u64(0),
+        nonzero(1),
+        EvmU256::from_u64(0),
+        EvmU256::new(above_u128).expect("valid U256"),
+    )
+    .is_err());
+    for field in ["max_fee_per_gas", "max_priority_fee_per_gas"] {
+        let mut wire = serde_json::to_value(&command).expect("wire");
+        wire[field] = serde_json::json!(above_u128);
+        assert!(serde_json::from_value::<Eip1559TransactionCommand>(wire).is_err());
+    }
     assert!(serde_json::from_str::<EvmTransactionSettlement>(
         r#"{"kind":"reverted","value":null}"#
     )
@@ -394,12 +478,12 @@ fn action_specific_transaction_contract_is_exact_and_context_preserving() {
         panic!("expected inconsistent call");
     };
 
-    let expected_call = Eip1559TransactionCommand::new(
+    let expected_call = Eip1559TransactionCommand::call(
         deployment.binding().clone(),
-        EvmTransactionAction::call(deployment.created_address().clone(), vec![0xaa, 0xbb])
-            .expect("call"),
+        deployment.created_address().clone(),
+        vec![0xaa, 0xbb],
         EvmU256::from_u64(5),
-        300_000,
+        nonzero(300_000),
         EvmU256::from_u64(6),
         EvmU256::from_u64(7),
     )
@@ -408,17 +492,17 @@ fn action_specific_transaction_contract_is_exact_and_context_preserving() {
         deployment.clone(),
         vec![0xaa, 0xbb],
         EvmU256::from_u64(5),
-        300_000,
+        nonzero(300_000),
         EvmU256::from_u64(6),
         EvmU256::from_u64(7),
     )
     .expect("bridged call");
     assert_eq!(bridged_call.caller_context(), &deployment);
     assert_eq!(bridged_call.command(), &expected_call);
+    assert!(NonZeroU64::new(0).is_none());
     for (calldata, gas, priority, maximum) in [
-        (vec![0; MAX_EVM_CALLDATA_BYTES + 1], 1, 1, 1),
-        (vec![], 0, 1, 1),
-        (vec![], 1, 2, 1),
+        (vec![0; MAX_EVM_CALLDATA_BYTES + 1], nonzero(1), 1, 1),
+        (vec![], nonzero(1), 2, 1),
     ] {
         assert!(EvmContractCallContext::for_created_contract(
             deployment.clone(),
@@ -435,15 +519,12 @@ fn action_specific_transaction_contract_is_exact_and_context_preserving() {
         EvmAuthorityEpoch::new([0x22; 32]),
         EvmAddress::new("0x4444444444444444444444444444444444444444").expect("sender"),
     );
-    let alternate_call = Eip1559TransactionCommand::new(
+    let alternate_call = Eip1559TransactionCommand::call(
         alternate_binding,
-        EvmTransactionAction::call(
-            EvmAddress::new("0x5555555555555555555555555555555555555555").expect("target"),
-            vec![],
-        )
-        .expect("call"),
+        EvmAddress::new("0x5555555555555555555555555555555555555555").expect("target"),
+        vec![],
         EvmU256::from_u64(0),
-        1,
+        nonzero(1),
         EvmU256::from_u64(1),
         EvmU256::from_u64(1),
     )
@@ -478,10 +559,9 @@ fn action_specific_transaction_contract_is_exact_and_context_preserving() {
     .is_err());
     let alternate_route = EvmTransactionRoute::new(
         EvmChainInstance::new(
-            2,
+            nonzero(2),
             EvmHash::new(format!("0x{}", "aa".repeat(32))).expect("genesis"),
-        )
-        .expect("chain"),
+        ),
         content_ref(),
     );
     assert!(AnchoredContractCallContext::for_route(

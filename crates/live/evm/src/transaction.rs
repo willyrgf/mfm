@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use mfm_evm::{
     Eip1559TransactionCommand, EvmAddress, EvmBlockAnchor, EvmChainInstance, EvmHash,
-    EvmTransactionAction, EvmTransactionBinding, EvmTransactionConfirmation, EvmTransactionEffect,
-    EvmTransactionRevert, EvmTransactionSettlement,
+    EvmTransactionBinding, EvmTransactionConfirmation, EvmTransactionEffect, EvmTransactionRevert,
+    EvmTransactionSettlement,
 };
 use mfm_evm_transaction_authority::{
     AuthorityError, AuthorityState, EvmTransactionAuthority, ExactRawTransaction, NonceDomain,
@@ -380,11 +380,8 @@ fn validate_receipt(
     {
         return Err(AdapterError::Unavailable);
     }
-    match (command.action(), receipt.result()) {
-        (
-            EvmTransactionAction::Create { .. },
-            ProviderReceiptResult::SuccessCreate { contract_address },
-        ) => {
+    match (command.to(), receipt.result()) {
+        (None, ProviderReceiptResult::SuccessCreate { contract_address }) => {
             if contract_address
                 != &create_address(&local.sender, prepared.reservation().nonce())
                     .map_err(|_| AdapterError::Internal)?
@@ -401,19 +398,15 @@ fn validate_receipt(
                 },
             ))
         }
-        (EvmTransactionAction::Create { .. }, ProviderReceiptResult::RevertedCreate) => {
-            Ok(EvmTransactionSettlement::reverted(
-                effect_id.clone(),
-                prepared.reservation().nonce(),
-                EvmTransactionRevert::new(
-                    receipt.block_anchor().clone(),
-                    prepared.transaction_hash().clone(),
-                ),
-            ))
-        }
-        (EvmTransactionAction::Call { to, .. }, ProviderReceiptResult::SuccessCall { target })
-            if target == to =>
-        {
+        (None, ProviderReceiptResult::RevertedCreate) => Ok(EvmTransactionSettlement::reverted(
+            effect_id.clone(),
+            prepared.reservation().nonce(),
+            EvmTransactionRevert::new(
+                receipt.block_anchor().clone(),
+                prepared.transaction_hash().clone(),
+            ),
+        )),
+        (Some(to), ProviderReceiptResult::SuccessCall { target }) if target == to => {
             Ok(EvmTransactionSettlement::confirmed(
                 effect_id.clone(),
                 prepared.reservation().nonce(),
@@ -423,9 +416,7 @@ fn validate_receipt(
                 },
             ))
         }
-        (EvmTransactionAction::Call { to, .. }, ProviderReceiptResult::RevertedCall { target })
-            if target == to =>
-        {
+        (Some(to), ProviderReceiptResult::RevertedCall { target }) if target == to => {
             Ok(EvmTransactionSettlement::reverted(
                 effect_id.clone(),
                 prepared.reservation().nonce(),
@@ -493,15 +484,15 @@ fn validate_settlement(
         || evidence.nonce() != prepared.reservation().nonce()
         || evidence.transaction_hash() != prepared.transaction_hash()
         || !matches!(
-            (command.action(), evidence),
+            (command.to(), evidence),
             (
-                EvmTransactionAction::Create { .. },
+                None,
                 EvmTransactionSettlement::Confirmed {
                     confirmation: EvmTransactionConfirmation::Created { .. },
                     ..
                 } | EvmTransactionSettlement::Reverted { .. }
             ) | (
-                EvmTransactionAction::Call { .. },
+                Some(_),
                 EvmTransactionSettlement::Confirmed {
                     confirmation: EvmTransactionConfirmation::Called { .. },
                     ..

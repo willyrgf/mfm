@@ -1,10 +1,11 @@
 use std::collections::VecDeque;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mfm_evm::{
     Eip1559TransactionCommand, EvmAuthorityEpoch, EvmChainInstance, EvmEndpoint,
-    EvmTransactionAction, EvmTransactionBinding, EvmTransactionConfirmation, EvmTransactionRoute,
+    EvmTransactionBinding, EvmTransactionConfirmation, EvmTransactionRoute,
     EvmTransactionSettlement, EvmU256,
 };
 use mfm_evm_transaction_authority::{
@@ -24,10 +25,14 @@ use crate::evm_keccak256;
 const GENESIS: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const BLOCK: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
 
+fn nonzero(value: u64) -> NonZeroU64 {
+    NonZeroU64::new(value).expect("nonzero fixture")
+}
+
 #[test]
 fn public_keccak_and_ethereum_address_helpers_are_exact_and_bounded() {
     assert_eq!(
-        evm_keccak256(&[]).expect("empty Keccak").as_str(),
+        evm_keccak256(&[]).expect("empty Keccak").to_string(),
         "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
     );
     assert!(evm_keccak256(&vec![0; MAX_EXACT_RAW_TRANSACTION_BYTES]).is_ok());
@@ -44,7 +49,7 @@ fn public_keccak_and_ethereum_address_helpers_are_exact_and_bounded() {
         mfm_signing::Secp256k1PublicKey::new(public_bytes.try_into().expect("65 bytes"))
             .expect("generator key");
     assert_eq!(
-        ethereum_address(&public_key).as_str(),
+        ethereum_address(&public_key).to_string(),
         "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
     );
 }
@@ -228,8 +233,10 @@ struct ScriptedProvider {
 impl ScriptedProvider {
     fn new(chain_id: u64) -> Self {
         Self {
-            chain: EvmChainInstance::new(chain_id, EvmHash::new(GENESIS).expect("genesis"))
-                .expect("chain"),
+            chain: EvmChainInstance::new(
+                nonzero(chain_id),
+                EvmHash::new(GENESIS).expect("genesis"),
+            ),
             pending: 7,
             receipts: Mutex::new(VecDeque::new()),
             canonical: EvmBlockAnchor::new(
@@ -363,18 +370,18 @@ async fn fixture() -> (
     let sender = ethereum_address(signer.public_key());
     let signer = Arc::new(signer);
     let route = EvmTransactionRoute::new(
-        EvmChainInstance::new(1337, EvmHash::new(GENESIS).expect("genesis")).expect("chain"),
+        EvmChainInstance::new(nonzero(1337), EvmHash::new(GENESIS).expect("genesis")),
         EvmEndpoint::new("transaction-test")
             .expect("endpoint")
             .endpoint_ref()
             .expect("endpoint ref"),
     );
     let binding = EvmTransactionBinding::new(route, EvmAuthorityEpoch::new([3; 32]), sender);
-    let command = Eip1559TransactionCommand::new(
+    let command = Eip1559TransactionCommand::create(
         binding.clone(),
-        EvmTransactionAction::create(vec![0x60, 0x00]).expect("initcode"),
+        vec![0x60, 0x00],
         EvmU256::from_u64(0),
-        100_000,
+        nonzero(100_000),
         EvmU256::from_u64(2),
         EvmU256::from_u64(10),
     )
@@ -437,7 +444,7 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
         "02f85382053907020a830186a08080826000c001a07ffd3c6f6e2217de62458b59faca6e9a3a829c7bcf9ebaa04e0414c1eb0d0419a06f5a761a7bb9c0dab816d83eb5472e2dfd61c8da2eca46924c500c54efe5d58b"
     );
     assert_eq!(
-        prepared.transaction_hash().as_str(),
+        prepared.transaction_hash().to_string(),
         "0x1c491e5220c082f1be50e5e78738147d1416633942ac5e689d65798127a5e71b"
     );
     assert_eq!(prepared.reservation().nonce(), 7);
@@ -749,11 +756,12 @@ async fn receipt_shape_validation_covers_create_call_revert_and_mismatch_matrix(
         .expect("local binding");
     let target =
         EvmAddress::new("0x4444444444444444444444444444444444444444").expect("call target");
-    let call_command = Eip1559TransactionCommand::new(
+    let call_command = Eip1559TransactionCommand::call(
         binding.clone(),
-        EvmTransactionAction::call(target.clone(), vec![1, 2]).expect("call action"),
+        target.clone(),
+        vec![1, 2],
         EvmU256::from_u64(0),
-        100_000,
+        nonzero(100_000),
         EvmU256::from_u64(2),
         EvmU256::from_u64(10),
     )
@@ -980,8 +988,7 @@ async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_e
         ),
         EvmTransactionBinding::new(
             EvmTransactionRoute::new(
-                EvmChainInstance::new(1338, EvmHash::new(GENESIS).expect("genesis"))
-                    .expect("other chain"),
+                EvmChainInstance::new(nonzero(1338), EvmHash::new(GENESIS).expect("genesis")),
                 binding.route().endpoint_ref().clone(),
             ),
             binding.authority_epoch().clone(),
@@ -989,7 +996,7 @@ async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_e
         ),
         EvmTransactionBinding::new(
             EvmTransactionRoute::new(
-                EvmChainInstance::new(1337, other_genesis).expect("other genesis chain"),
+                EvmChainInstance::new(nonzero(1337), other_genesis),
                 binding.route().endpoint_ref().clone(),
             ),
             binding.authority_epoch().clone(),

@@ -60,11 +60,13 @@ carry different purposes without consuming another key slot. Explicit async shut
 and immediately awaits an OS-thread join in blocking work; dropping the final sender also ends the
 owner loop.
 
-EVM Program values use one checked lowercase `EvmAddress`, lowercase `EvmHash`, canonical decimal
-`EvmU256`, and exact 32-byte authority epoch. A transaction binding fixes chain ID plus expected
-genesis hash, endpoint reference, authority epoch, and sender account. The sole
-transaction command is nonce-free EIP-1559 type 2 with an empty access list and a distinct bounded
-Create or Call action. Independent creation and call Effect States admit only their matching action
+EVM Program values use byte-backed checked lowercase `EvmAddress` and `EvmHash`, canonical decimal
+`EvmU256`, exact `CanonicalBytes`, and `NonZeroU64` chain IDs and gas limits. A transaction binding
+fixes chain ID plus expected genesis hash, endpoint reference, authority epoch, and sender account.
+The sole transaction command is nonce-free EIP-1559 type 2 with an empty access list and a private
+bounded Create or Call action. Its complete factories and checked deserializer enforce input bounds,
+the `u128` fee ceiling, priority-fee ordering, and nonzero gas. Independent creation and call Effect
+States admit only their matching action
 and prepare the shared `EvmTransactionEffect` command unchanged. Their specialized success values
 retain caller context while projecting only binding, receipt anchor, hash, and the created address or
 called target. Action-specific failures retain caller context and the minimal revert. Settlement

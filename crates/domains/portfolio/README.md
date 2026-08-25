@@ -3,6 +3,8 @@
 Portfolio owns checked secret-free selector/config authoring, exact target-set resolution, Program/C0
 planning, cumulative aggregation, EVM child-failure mapping, and frozen snapshot/report values.
 Targets must be sorted and unique by chain ID; total sources are bounded at 64.
+Balance-request fields remain private behind checked accessors, and their constructor fixes one
+nonzero chain across the declaration-ordered source set.
 
 The maximum current public Portfolio config shape, including 64 route selections, fits the shared
 256 KiB config-custody ceiling. Naming, persistence, and lifecycle remain outside the domain.

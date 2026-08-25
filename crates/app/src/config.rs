@@ -1,4 +1,5 @@
 use std::fmt;
+use std::num::NonZeroU64;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_config::{ConfigDigest, ConfigName, ConfigRevision, MAX_CONFIG_DOCUMENT_BYTES};
@@ -200,8 +201,8 @@ impl EvmRouteWire {
         let endpoint_ref = endpoint
             .endpoint_ref()
             .map_err(|_| ConfigDocumentError::Internal)?;
-        EvmPhysicalTarget::new(self.chain_id, endpoint_ref)
-            .map_err(|_| ConfigDocumentError::Invalid)
+        let chain_id = NonZeroU64::new(self.chain_id).ok_or(ConfigDocumentError::Invalid)?;
+        Ok(EvmPhysicalTarget::new(chain_id, endpoint_ref))
     }
 }
 

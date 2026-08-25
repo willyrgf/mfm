@@ -5,9 +5,8 @@ metadata and delegates canonical qualification to `mfm-values`; it does not crea
 configuration, output-marker, or field-path APIs.
 
 Checked identity fields, including `EffectId`, lower to their owner-specific bounded string grammar.
-String fields carrying canonical base64url public bytes may declare exact decoded bounds with
+`CanonicalBytes` fields may declare exact decoded bounds with
 `#[mfm(minimum_bytes = N, maximum_bytes = M)]`; the generated shape is `BoundedBytes`.
-Checked transparent public-byte newtypes use `#[mfm(transparent_bytes)]` with the same field bounds.
-Bounded `#[mfm(transparent_string)]` newtypes use those bounds as exact UTF-8 byte limits.
-Unsigned fields may declare exact inclusive bounds with
-`#[mfm(unsigned_minimum = N, unsigned_maximum = M)]`.
+One-field `#[serde(transparent)]` wrappers inherit the checked shape of `String`,
+`CanonicalBytes`, `NonZeroU64`, and supported ordered maps. Wrappers with explicit
+`serde(try_from = "String", into = "String")` conversion describe a canonical string wire.

@@ -379,6 +379,7 @@ fn json_response(status: StatusCode, value: &impl Serialize) -> Response {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::num::NonZeroU64;
     use std::pin::Pin;
 
     use axum::body::{to_bytes, Body};
@@ -413,7 +414,9 @@ mod tests {
         {
             Box::pin(async move {
                 let value = match operation.as_str() {
-                    "mfm.evm.read-chain-identity@1" => EvmReadValue::ChainId(1),
+                    "mfm.evm.read-chain-identity@1" => {
+                        EvmReadValue::ChainId(NonZeroU64::new(1).expect("nonzero chain"))
+                    }
                     "mfm.evm.read-initial-anchor@1" | "mfm.evm.confirm-balance-anchor@1" => {
                         EvmReadValue::Anchor(EvmBlockAnchor::new(
                             EvmU256::new("100").expect("number"),

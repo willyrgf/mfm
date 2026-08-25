@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 
 use mfm_canonical::CanonicalBytes;
 use mfm_capabilities::{CapabilityError, EffectCapabilityContract};
@@ -53,104 +54,98 @@ macro_rules! checked_deserialize {
 }
 
 /// Exact lowercase 20-byte EVM address.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, MfmValue)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
+#[serde(try_from = "String", into = "String")]
 #[mfm(
     namespace = "mfm.evm",
     name = "address",
     version = "1",
-    schema = "mfm.evm-address",
-    transparent_string
+    schema = "mfm.evm-address"
 )]
-pub struct EvmAddress {
-    #[mfm(minimum_bytes = 42, maximum_bytes = 42)]
-    value: String,
-}
+pub struct EvmAddress(#[mfm(minimum_bytes = 42, maximum_bytes = 42)] [u8; 20]);
 
 impl EvmAddress {
     /// Parses exact lowercase `0x` plus 40 lowercase hexadecimal digits.
-    pub fn new(value: impl Into<String>) -> Result<Self, EvmDomainError> {
-        let value = value.into();
-        if value.len() != 42
-            || !value.starts_with("0x")
-            || !value[2..]
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(Self { value })
+    pub fn new(value: impl AsRef<str>) -> Result<Self, EvmDomainError> {
+        decode_fixed_hex(value.as_ref()).map(Self)
     }
 
-    /// Returns the exact checked address text.
-    pub fn as_str(&self) -> &str {
-        &self.value
+    /// Constructs one address from exactly 20 bytes.
+    pub const fn from_bytes(bytes: [u8; 20]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the exact address bytes.
+    pub const fn as_bytes(&self) -> &[u8; 20] {
+        &self.0
     }
 }
 
 impl fmt::Display for EvmAddress {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
+        write_fixed_hex(&self.0, formatter)
     }
 }
 
-impl<'de> Deserialize<'de> for EvmAddress {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+impl TryFrom<String> for EvmAddress {
+    type Error = EvmDomainError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<EvmAddress> for String {
+    fn from(value: EvmAddress) -> Self {
+        encode_fixed_hex(&value.0)
     }
 }
 
 /// Exact lowercase 32-byte EVM hash.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, MfmValue)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
+#[serde(try_from = "String", into = "String")]
 #[mfm(
     namespace = "mfm.evm",
     name = "hash",
     version = "1",
-    schema = "mfm.evm-hash",
-    transparent_string
+    schema = "mfm.evm-hash"
 )]
-pub struct EvmHash {
-    #[mfm(minimum_bytes = 66, maximum_bytes = 66)]
-    value: String,
-}
+pub struct EvmHash(#[mfm(minimum_bytes = 66, maximum_bytes = 66)] [u8; 32]);
 
 impl EvmHash {
     /// Parses exact lowercase `0x` plus 64 lowercase hexadecimal digits.
-    pub fn new(value: impl Into<String>) -> Result<Self, EvmDomainError> {
-        let value = value.into();
-        if value.len() != 66
-            || !value.starts_with("0x")
-            || !value[2..]
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(Self { value })
+    pub fn new(value: impl AsRef<str>) -> Result<Self, EvmDomainError> {
+        decode_fixed_hex(value.as_ref()).map(Self)
     }
 
-    /// Returns the exact checked hash text.
-    pub fn as_str(&self) -> &str {
-        &self.value
+    /// Constructs one hash from exactly 32 bytes.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the exact hash bytes.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
 impl fmt::Display for EvmHash {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
+        write_fixed_hex(&self.0, formatter)
     }
 }
 
-impl<'de> Deserialize<'de> for EvmHash {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+impl TryFrom<String> for EvmHash {
+    type Error = EvmDomainError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<EvmHash> for String {
+    fn from(value: EvmHash) -> Self {
+        encode_fixed_hex(&value.0)
     }
 }
 
@@ -161,8 +156,7 @@ impl<'de> Deserialize<'de> for EvmHash {
     namespace = "mfm.evm",
     name = "uint256",
     version = "1",
-    schema = "mfm.evm-uint256",
-    transparent_string
+    schema = "mfm.evm-uint256"
 )]
 pub struct EvmU256 {
     #[mfm(minimum_bytes = 1, maximum_bytes = 78)]
@@ -197,6 +191,11 @@ impl EvmU256 {
         &self.value
     }
 
+    /// Returns this value as `u128` when it fits that checked range.
+    pub fn to_u128(&self) -> Option<u128> {
+        self.value.parse().ok()
+    }
+
     pub(crate) fn numeric_cmp(&self, other: &Self) -> Ordering {
         self.value
             .len()
@@ -227,25 +226,24 @@ impl<'de> Deserialize<'de> for EvmU256 {
     namespace = "mfm.evm",
     name = "transaction-authority-epoch",
     version = "1",
-    schema = "mfm.evm-transaction-authority-epoch",
-    transparent_bytes
+    schema = "mfm.evm-transaction-authority-epoch"
 )]
 pub struct EvmAuthorityEpoch {
     #[mfm(minimum_bytes = 32, maximum_bytes = 32)]
-    value: String,
+    value: CanonicalBytes,
 }
 
 impl EvmAuthorityEpoch {
     /// Constructs an epoch from exactly 32 public bytes.
     pub fn new(bytes: [u8; 32]) -> Self {
         Self {
-            value: CanonicalBytes::new(bytes.to_vec()).encoded().to_owned(),
+            value: CanonicalBytes::new(bytes),
         }
     }
 
-    /// Decodes the exact public epoch bytes.
-    pub fn as_bytes(&self) -> Result<[u8; 32], EvmDomainError> {
-        decode_exact_bytes::<32>(&self.value)
+    /// Returns the exact 32 public epoch bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.value.as_bytes()
     }
 }
 
@@ -254,14 +252,16 @@ impl<'de> Deserialize<'de> for EvmAuthorityEpoch {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = String::deserialize(deserializer)?;
-        decode_exact_bytes::<32>(&value).map_err(de::Error::custom)?;
+        let value = CanonicalBytes::deserialize(deserializer)?;
+        if value.as_bytes().len() != 32 {
+            return Err(de::Error::custom(EvmDomainError::InvalidValue));
+        }
         Ok(Self { value })
     }
 }
 
 /// Chain identity pinned by chain ID and expected genesis block hash.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
@@ -270,24 +270,21 @@ impl<'de> Deserialize<'de> for EvmAuthorityEpoch {
     schema = "mfm.evm-chain-instance"
 )]
 pub struct EvmChainInstance {
-    #[mfm(unsigned_minimum = 1, unsigned_maximum = 18446744073709551615)]
-    chain_id: u64,
+    chain_id: NonZeroU64,
     expected_genesis_hash: EvmHash,
 }
 
 impl EvmChainInstance {
     /// Constructs one exact nonzero chain instance.
-    pub fn new(chain_id: u64, expected_genesis_hash: EvmHash) -> Result<Self, EvmDomainError> {
-        let value = Self {
+    pub fn new(chain_id: NonZeroU64, expected_genesis_hash: EvmHash) -> Self {
+        Self {
             chain_id,
             expected_genesis_hash,
-        };
-        value.validate()?;
-        Ok(value)
+        }
     }
 
     /// Returns the nonzero chain ID.
-    pub const fn chain_id(&self) -> u64 {
+    pub const fn chain_id(&self) -> NonZeroU64 {
         self.chain_id
     }
 
@@ -295,18 +292,7 @@ impl EvmChainInstance {
     pub const fn expected_genesis_hash(&self) -> &EvmHash {
         &self.expected_genesis_hash
     }
-
-    fn validate(&self) -> Result<(), EvmDomainError> {
-        (self.chain_id != 0)
-            .then_some(())
-            .ok_or(EvmDomainError::InvalidValue)
-    }
 }
-
-checked_deserialize!(EvmChainInstance {
-    chain_id: u64,
-    expected_genesis_hash: EvmHash,
-});
 
 /// Public route used to bind transaction execution and anchored observations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -401,8 +387,8 @@ impl EvmTransactionBinding {
     }
 }
 
-/// Fixed EIP-1559 transaction action with no optional target ambiguity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+/// Private fixed EIP-1559 action retained inside a complete command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(
     tag = "kind",
     content = "value",
@@ -415,55 +401,27 @@ impl EvmTransactionBinding {
     version = "1",
     schema = "mfm.evm-eip1559-transaction-action"
 )]
-pub enum EvmTransactionAction {
-    /// Creates a contract from bounded initcode.
+enum TransactionAction {
     Create {
-        /// Canonical base64url-no-pad initcode bytes.
         #[mfm(minimum_bytes = 0, maximum_bytes = 49152)]
-        initcode: String,
+        initcode: CanonicalBytes,
     },
-    /// Calls one address with bounded calldata.
     Call {
-        /// Exact call target.
         to: EvmAddress,
-        /// Canonical base64url-no-pad calldata bytes.
         #[mfm(minimum_bytes = 0, maximum_bytes = 131072)]
-        calldata: String,
+        calldata: CanonicalBytes,
     },
 }
 
-impl EvmTransactionAction {
-    /// Constructs a contract-creation action.
-    pub fn create(initcode: Vec<u8>) -> Result<Self, EvmDomainError> {
-        if initcode.len() > MAX_EVM_INITCODE_BYTES {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(Self::Create {
-            initcode: encode_bytes(initcode),
-        })
-    }
-
-    /// Constructs a contract-call action.
-    pub fn call(to: EvmAddress, calldata: Vec<u8>) -> Result<Self, EvmDomainError> {
-        if calldata.len() > MAX_EVM_CALLDATA_BYTES {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(Self::Call {
-            to,
-            calldata: encode_bytes(calldata),
-        })
-    }
-
-    /// Returns creation initcode or call calldata bytes.
-    pub fn input_bytes(&self) -> Result<Vec<u8>, EvmDomainError> {
+impl TransactionAction {
+    fn input(&self) -> &[u8] {
         match self {
-            Self::Create { initcode } => decode_bounded_bytes(initcode, MAX_EVM_INITCODE_BYTES),
-            Self::Call { calldata, .. } => decode_bounded_bytes(calldata, MAX_EVM_CALLDATA_BYTES),
+            Self::Create { initcode } => initcode.as_bytes(),
+            Self::Call { calldata, .. } => calldata.as_bytes(),
         }
     }
 
-    /// Returns the call target, or `None` for creation.
-    pub const fn call_target(&self) -> Option<&EvmAddress> {
+    const fn to(&self) -> Option<&EvmAddress> {
         match self {
             Self::Create { .. } => None,
             Self::Call { to, .. } => Some(to),
@@ -472,38 +430,14 @@ impl EvmTransactionAction {
 
     fn validate(&self) -> Result<(), EvmDomainError> {
         match self {
-            Self::Create { initcode } => {
-                decode_bounded_bytes(initcode, MAX_EVM_INITCODE_BYTES).map(|_| ())
+            Self::Create { initcode } if initcode.as_bytes().len() <= MAX_EVM_INITCODE_BYTES => {
+                Ok(())
             }
-            Self::Call { calldata, .. } => {
-                decode_bounded_bytes(calldata, MAX_EVM_CALLDATA_BYTES).map(|_| ())
+            Self::Call { calldata, .. } if calldata.as_bytes().len() <= MAX_EVM_CALLDATA_BYTES => {
+                Ok(())
             }
+            _ => Err(EvmDomainError::InvalidValue),
         }
-    }
-}
-
-impl<'de> Deserialize<'de> for EvmTransactionAction {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(
-            tag = "kind",
-            content = "value",
-            rename_all = "snake_case",
-            deny_unknown_fields
-        )]
-        enum Wire {
-            Create { initcode: String },
-            Call { to: EvmAddress, calldata: String },
-        }
-
-        let value = match Wire::deserialize(deserializer)? {
-            Wire::Create { initcode } => Self::Create { initcode },
-            Wire::Call { to, calldata } => Self::Call { to, calldata },
-        };
-        value.validate().map(|_| value).map_err(de::Error::custom)
     }
 }
 
@@ -517,22 +451,70 @@ impl<'de> Deserialize<'de> for EvmTransactionAction {
     schema = "mfm.evm-eip1559-transaction-command"
 )]
 pub struct Eip1559TransactionCommand {
-    action: EvmTransactionAction,
+    action: TransactionAction,
     binding: EvmTransactionBinding,
-    #[mfm(unsigned_minimum = 1, unsigned_maximum = 18446744073709551615)]
-    gas_limit: u64,
+    gas_limit: NonZeroU64,
     max_fee_per_gas: EvmU256,
     max_priority_fee_per_gas: EvmU256,
     value: EvmU256,
 }
 
 impl Eip1559TransactionCommand {
-    /// Constructs one complete EIP-1559 command with an intrinsically empty access list.
-    pub fn new(
+    /// Constructs one complete contract-creation command.
+    pub fn create(
         binding: EvmTransactionBinding,
-        action: EvmTransactionAction,
+        initcode: Vec<u8>,
         value: EvmU256,
-        gas_limit: u64,
+        gas_limit: NonZeroU64,
+        max_priority_fee_per_gas: EvmU256,
+        max_fee_per_gas: EvmU256,
+    ) -> Result<Self, EvmDomainError> {
+        if initcode.len() > MAX_EVM_INITCODE_BYTES {
+            return Err(EvmDomainError::InvalidValue);
+        }
+        Self::new(
+            binding,
+            TransactionAction::Create {
+                initcode: CanonicalBytes::new(initcode),
+            },
+            value,
+            gas_limit,
+            max_priority_fee_per_gas,
+            max_fee_per_gas,
+        )
+    }
+
+    /// Constructs one complete contract-call command.
+    pub fn call(
+        binding: EvmTransactionBinding,
+        to: EvmAddress,
+        calldata: Vec<u8>,
+        value: EvmU256,
+        gas_limit: NonZeroU64,
+        max_priority_fee_per_gas: EvmU256,
+        max_fee_per_gas: EvmU256,
+    ) -> Result<Self, EvmDomainError> {
+        if calldata.len() > MAX_EVM_CALLDATA_BYTES {
+            return Err(EvmDomainError::InvalidValue);
+        }
+        Self::new(
+            binding,
+            TransactionAction::Call {
+                to,
+                calldata: CanonicalBytes::new(calldata),
+            },
+            value,
+            gas_limit,
+            max_priority_fee_per_gas,
+            max_fee_per_gas,
+        )
+    }
+
+    fn new(
+        binding: EvmTransactionBinding,
+        action: TransactionAction,
+        value: EvmU256,
+        gas_limit: NonZeroU64,
         max_priority_fee_per_gas: EvmU256,
         max_fee_per_gas: EvmU256,
     ) -> Result<Self, EvmDomainError> {
@@ -548,9 +530,14 @@ impl Eip1559TransactionCommand {
         Ok(command)
     }
 
-    /// Returns the fixed create-or-call action.
-    pub const fn action(&self) -> &EvmTransactionAction {
-        &self.action
+    /// Returns the call target, or `None` for contract creation.
+    pub const fn to(&self) -> Option<&EvmAddress> {
+        self.action.to()
+    }
+
+    /// Returns the checked creation initcode or call calldata.
+    pub fn input(&self) -> &[u8] {
+        self.action.input()
     }
 
     /// Returns the complete public transaction binding.
@@ -559,7 +546,7 @@ impl Eip1559TransactionCommand {
     }
 
     /// Returns the exact nonzero gas limit.
-    pub const fn gas_limit(&self) -> u64 {
+    pub const fn gas_limit(&self) -> NonZeroU64 {
         self.gas_limit
     }
 
@@ -579,8 +566,9 @@ impl Eip1559TransactionCommand {
     }
 
     fn validate(&self) -> Result<(), EvmDomainError> {
-        if self.gas_limit == 0
-            || self.action.validate().is_err()
+        if self.action.validate().is_err()
+            || self.max_fee_per_gas.to_u128().is_none()
+            || self.max_priority_fee_per_gas.to_u128().is_none()
             || self
                 .max_fee_per_gas
                 .numeric_cmp(&self.max_priority_fee_per_gas)
@@ -593,9 +581,9 @@ impl Eip1559TransactionCommand {
 }
 
 checked_deserialize!(Eip1559TransactionCommand {
-    action: EvmTransactionAction,
+    action: TransactionAction,
     binding: EvmTransactionBinding,
-    gas_limit: u64,
+    gas_limit: NonZeroU64,
     max_fee_per_gas: EvmU256,
     max_priority_fee_per_gas: EvmU256,
     value: EvmU256,
@@ -660,7 +648,9 @@ impl<K: MfmValueTrait> EvmContractCreationContext<K> {
 
     fn validate(&self) -> Result<(), EvmDomainError> {
         self.command.validate()?;
-        matches!(self.command.action(), EvmTransactionAction::Create { .. })
+        self.command
+            .to()
+            .is_none()
             .then_some(())
             .ok_or(EvmDomainError::InvalidValue)
     }
@@ -715,7 +705,9 @@ impl<K: MfmValueTrait> EvmContractCallContext<K> {
 
     fn validate(&self) -> Result<(), EvmDomainError> {
         self.command.validate()?;
-        matches!(self.command.action(), EvmTransactionAction::Call { .. })
+        self.command
+            .to()
+            .is_some()
             .then_some(())
             .ok_or(EvmDomainError::InvalidValue)
     }
@@ -727,16 +719,16 @@ impl<K: MfmValueTrait> EvmContractCallContext<EvmContractCreationCompletion<K>> 
         deployment: EvmContractCreationCompletion<K>,
         calldata: Vec<u8>,
         value: EvmU256,
-        gas_limit: u64,
+        gas_limit: NonZeroU64,
         max_priority_fee_per_gas: EvmU256,
         max_fee_per_gas: EvmU256,
     ) -> Result<Self, EvmDomainError> {
         let binding = deployment.binding().clone();
         let target = deployment.created_address().clone();
-        let action = EvmTransactionAction::call(target, calldata)?;
-        let command = Eip1559TransactionCommand::new(
+        let command = Eip1559TransactionCommand::call(
             binding,
-            action,
+            target,
+            calldata,
             value,
             gas_limit,
             max_priority_fee_per_gas,
@@ -1095,15 +1087,15 @@ impl EffectCapabilityContract for EvmTransactionEffect {
         evidence: &Self::Evidence,
     ) -> mfm_capabilities::Result<()> {
         let action_matches = matches!(
-            (command.action(), evidence),
+            (command.to(), evidence),
             (
-                EvmTransactionAction::Create { .. },
+                None,
                 EvmTransactionSettlement::Confirmed {
                     confirmation: EvmTransactionConfirmation::Created { .. },
                     ..
                 } | EvmTransactionSettlement::Reverted { .. }
             ) | (
-                EvmTransactionAction::Call { .. },
+                Some(_),
                 EvmTransactionSettlement::Confirmed {
                     confirmation: EvmTransactionConfirmation::Called { .. },
                     ..
@@ -1223,7 +1215,7 @@ impl<K: MfmValueTrait> EffectState<EvmTransactionEffect> for CallEvmContract<K> 
                     },
                 ..
             } => {
-                let EvmTransactionAction::Call { to, .. } = input.command.action() else {
+                let Some(to) = input.command.to() else {
                     return ProposedStateOutcome::Failure {
                         failure: EvmContractCallFailure::InconsistentSettlement {
                             caller_context: input.caller_context,
@@ -1270,21 +1262,49 @@ impl<K: MfmValueTrait> CapabilityInjection<CallEvmContract<K>> for EvmTransactio
     }
 }
 
-fn encode_bytes(bytes: Vec<u8>) -> String {
-    CanonicalBytes::new(bytes).encoded().to_owned()
+fn decode_fixed_hex<const N: usize>(encoded: &str) -> Result<[u8; N], EvmDomainError> {
+    if encoded.len() != 2 + N * 2 || !encoded.starts_with("0x") {
+        return Err(EvmDomainError::InvalidValue);
+    }
+    let mut decoded = [0_u8; N];
+    for (output, pair) in decoded
+        .iter_mut()
+        .zip(encoded.as_bytes()[2..].chunks_exact(2))
+    {
+        let high = decode_lower_hex_nibble(pair[0]).ok_or(EvmDomainError::InvalidValue)?;
+        let low = decode_lower_hex_nibble(pair[1]).ok_or(EvmDomainError::InvalidValue)?;
+        *output = (high << 4) | low;
+    }
+    Ok(decoded)
 }
 
-pub(crate) fn decode_bounded_bytes(value: &str, maximum: usize) -> Result<Vec<u8>, EvmDomainError> {
-    let bytes = CanonicalBytes::from_base64url_no_pad(value.to_owned())
-        .map_err(|_| EvmDomainError::InvalidValue)?
-        .into_bytes();
-    (bytes.len() <= maximum)
-        .then_some(bytes)
-        .ok_or(EvmDomainError::InvalidValue)
+fn decode_lower_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
-fn decode_exact_bytes<const N: usize>(value: &str) -> Result<[u8; N], EvmDomainError> {
-    decode_bounded_bytes(value, N)?
-        .try_into()
-        .map_err(|_| EvmDomainError::InvalidValue)
+fn encode_fixed_hex<const N: usize>(bytes: &[u8; N]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+    let mut encoded = String::with_capacity(2 + N * 2);
+    encoded.push_str("0x");
+    for byte in bytes {
+        encoded.push(DIGITS[usize::from(byte >> 4)] as char);
+        encoded.push(DIGITS[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
+}
+
+fn write_fixed_hex<const N: usize>(
+    bytes: &[u8; N],
+    formatter: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    formatter.write_str("0x")?;
+    for byte in bytes {
+        formatter.write_fmt(format_args!("{byte:02x}"))?;
+    }
+    Ok(())
 }

@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
 use mfm_portfolio::{plan_snapshot, PortfolioConfig, PortfolioError, PortfolioSnapshotSelector};
 
@@ -40,19 +42,17 @@ fn planning_uses_the_selected_routes_and_rejects_unusable_route_sets() {
     }))
     .expect("selector");
     let alpha = EvmPhysicalTarget::new(
-        1,
+        NonZeroU64::new(1).expect("nonzero chain"),
         EvmEndpoint::new("alpha")
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("alpha endpoint"),
-    )
-    .expect("alpha target");
+    );
     let beta = EvmPhysicalTarget::new(
-        2,
+        NonZeroU64::new(2).expect("nonzero chain"),
         EvmEndpoint::new("beta")
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("beta endpoint"),
-    )
-    .expect("beta target");
+    );
 
     let (program, input) = plan_snapshot(selector.clone(), &config, &[alpha.clone(), beta.clone()])
         .expect("planned snapshot");
@@ -77,12 +77,11 @@ fn planning_uses_the_selected_routes_and_rejects_unusable_route_sets() {
     );
 
     let replacement = EvmPhysicalTarget::new(
-        2,
+        NonZeroU64::new(2).expect("nonzero chain"),
         EvmEndpoint::new("replacement")
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("replacement endpoint"),
-    )
-    .expect("replacement target");
+    );
     let (replacement_program, replacement_input) =
         plan_snapshot(selector.clone(), &config, &[alpha.clone(), replacement])
             .expect("replacement plan");
@@ -132,12 +131,11 @@ fn the_supported_source_capacity_plans_and_one_more_is_rejected() {
     }))
     .expect("selector");
     let target = EvmPhysicalTarget::new(
-        1,
+        NonZeroU64::new(1).expect("nonzero chain"),
         EvmEndpoint::new("alpha")
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("endpoint"),
-    )
-    .expect("target");
+    );
 
     let (program, input) = plan_snapshot(selector, &config, &[target]).expect("maximum plan");
     assert_eq!(program.declarations().len(), 518);

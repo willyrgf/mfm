@@ -1,3 +1,4 @@
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -46,7 +47,10 @@ fn nonce_domain(
 ) -> NonceDomain {
     NonceDomain::new(
         epoch.clone(),
-        EvmChainInstance::new(chain_id, evm_hash(genesis_byte)).expect("chain instance"),
+        EvmChainInstance::new(
+            NonZeroU64::new(chain_id).expect("nonzero chain"),
+            evm_hash(genesis_byte),
+        ),
         evm_address(sender_byte),
     )
 }
@@ -239,10 +243,9 @@ fn evm_nonce_domain_lock_vector_is_frozen() {
     let key = NonceDomain::new(
         EvmAuthorityEpoch::new([1; 32]),
         EvmChainInstance::new(
-            1,
+            NonZeroU64::new(1).expect("nonzero chain"),
             EvmHash::new(format!("0x{}", "02".repeat(32))).expect("genesis"),
-        )
-        .expect("chain"),
+        ),
         EvmAddress::new("0x0303030303030303030303030303030303030303").expect("sender"),
     );
     let (preimage, digest, lock_key) = evm_tx::test_lock_vector(&key).expect("lock vector");
@@ -1444,17 +1447,14 @@ async fn managed_postgres_persistence_authority_contract() {
     assert_config_mutation_contract(&backend).await;
     assert_evm_transaction_authority_contract(&authority).await;
 
-    let epoch_bytes = authority
-        .authority_epoch()
-        .as_bytes()
-        .expect("authority epoch bytes");
+    let epoch_bytes = authority.authority_epoch().as_bytes();
     for invalid_chain_id in ["0", "18446744073709551616"] {
         assert!(sqlx::query(
             "INSERT INTO mfm_evm_tx.nonce_domains \
              (authority_epoch, chain_id, genesis_hash, sender) \
              VALUES ($1, $2::numeric, $3, $4)",
         )
-        .bind(epoch_bytes.as_slice())
+        .bind(epoch_bytes)
         .bind(invalid_chain_id)
         .bind([51_u8; 32].as_slice())
         .bind([52_u8; 20].as_slice())
@@ -1472,7 +1472,7 @@ async fn managed_postgres_persistence_authority_contract() {
     .bind(effect_id(52).as_str())
     .bind(command_ref.schema_id().as_str())
     .bind(command_ref.content_digest().as_str())
-    .bind(epoch_bytes.as_slice())
+    .bind(epoch_bytes)
     .bind([47_u8; 32].as_slice())
     .bind([48_u8; 20].as_slice())
     .execute(&mut connection)

@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::num::NonZeroU64;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -10,8 +11,8 @@ use mfm_evm::{
     EvmAnchoredContractCallRead, EvmAuthorityEpoch, EvmBlockAnchor, EvmContractCallCompletion,
     EvmContractCallContext, EvmContractCallFailure, EvmContractCreationCompletion,
     EvmContractCreationContext, EvmContractCreationFailure, EvmEndpoint, EvmHash,
-    EvmTransactionAction, EvmTransactionBinding, EvmTransactionEffect, EvmTransactionRoute,
-    EvmU256, ReadAnchoredContractCall,
+    EvmTransactionBinding, EvmTransactionEffect, EvmTransactionRoute, EvmU256,
+    ReadAnchoredContractCall,
 };
 use mfm_evm_live::{
     ethereum_address, evm_keccak256, register_evm_anchored_contract_calls,
@@ -53,6 +54,10 @@ const MAX_FEE: u64 = 10_000_000_000;
 const FUNDING_WEI_HEX: &str = "0xde0b6b3a7640000";
 const CONFIGURE_SELECTOR: [u8; 4] = [0x1e, 0xb2, 0x5e, 0x0a];
 const VALUE_SELECTOR: [u8; 4] = [0x3f, 0xa4, 0xf2, 0x45];
+
+fn nonzero(value: u64) -> NonZeroU64 {
+    NonZeroU64::new(value).expect("nonzero fixture")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -116,7 +121,7 @@ impl PureState for PrepareConfiguration {
             input,
             fixture_configure_calldata(),
             EvmU256::from_u64(0),
-            CONFIGURATION_GAS,
+            nonzero(CONFIGURATION_GAS),
             EvmU256::from_u64(PRIORITY_FEE),
             EvmU256::from_u64(MAX_FEE),
         )
@@ -164,10 +169,7 @@ impl PureState for FinalizeReport {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
         let configuration = input.caller_context();
         let deployment = configuration.caller_context();
-        let Ok(return_bytes) = input.result().return_bytes() else {
-            return invalid_return_data();
-        };
-        let Ok(value) = decode_fixture_value(&return_bytes) else {
+        let Ok(value) = decode_fixture_value(input.result().return_bytes()) else {
             return invalid_return_data();
         };
         ProposedStateOutcome::Success {
@@ -647,9 +649,7 @@ fn abi_types<'a>(entry: &'a serde_json::Value, field: &str) -> Option<Vec<&'a st
 }
 
 fn selector_bytes(hash: &EvmHash) -> Result<[u8; 4], CompileError> {
-    decode_hex_data(&hash.as_str()[2..10], 4)?
-        .try_into()
-        .map_err(|_| CompileError)
+    hash.as_bytes()[..4].try_into().map_err(|_| CompileError)
 }
 
 fn abi_word(value: u64) -> [u8; 32] {
@@ -756,11 +756,11 @@ impl RethDevObserver {
         self.rpc(
             "eth_sendTransaction",
             serde_json::json!([{
-                "from": from.as_str(),
+                "from": from.to_string(),
                 "gas": format!("{:#x}", 21_000_u64),
                 "maxFeePerGas": format!("{MAX_FEE:#x}"),
                 "maxPriorityFeePerGas": format!("{PRIORITY_FEE:#x}"),
-                "to": to.as_str(),
+                "to": to.to_string(),
                 "value": FUNDING_WEI_HEX,
             }]),
         )
@@ -782,7 +782,7 @@ impl RethDevObserver {
     async fn pending_nonce(&self, sender: &EvmAddress) -> Result<u64, ObserverError> {
         self.rpc(
             "eth_getTransactionCount",
-            serde_json::json!([sender.as_str(), "pending"]),
+            serde_json::json!([sender.to_string(), "pending"]),
         )
         .await?
         .as_str()
@@ -795,7 +795,7 @@ impl RethDevObserver {
             let receipt = self
                 .rpc(
                     "eth_getTransactionReceipt",
-                    serde_json::json!([hash.as_str()]),
+                    serde_json::json!([hash.to_string()]),
                 )
                 .await?;
             if !receipt.is_null() {
@@ -810,7 +810,7 @@ impl RethDevObserver {
         let result = self
             .rpc(
                 "eth_getCode",
-                serde_json::json!([address.as_str(), "latest"]),
+                serde_json::json!([address.to_string(), "latest"]),
             )
             .await?;
         decode_rpc_data(result.as_str().ok_or(ObserverError)?, 24_576)
@@ -826,10 +826,10 @@ impl RethDevObserver {
             .rpc(
                 "eth_call",
                 serde_json::json!([{
-                    "to": address.as_str(),
+                    "to": address.to_string(),
                     "data": format!("0x{}", encode_hex(calldata)),
                 }, {
-                    "blockHash": anchor.hash().as_str(),
+                    "blockHash": anchor.hash().to_string(),
                     "requireCanonical": true,
                 }]),
             )
@@ -870,7 +870,7 @@ impl RethDevObserver {
             }
             for transaction in transactions {
                 if transaction.get("from").and_then(serde_json::Value::as_str)
-                    == Some(sender.as_str())
+                    == Some(sender.to_string().as_str())
                 {
                     let observed = ObservedTransaction::from_rpc(transaction)?;
                     let receipt = self.await_receipt(&observed.hash).await?;
@@ -1006,13 +1006,15 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn expected_create_address(sender: &EvmAddress) -> EvmAddress {
-    let sender = decode_hex_data(sender.as_str(), 20).expect("checked sender bytes");
     let mut preimage = Vec::with_capacity(23);
     preimage.extend_from_slice(&[0xd6, 0x94]);
-    preimage.extend_from_slice(&sender);
+    preimage.extend_from_slice(sender.as_bytes());
     preimage.push(0x80);
     let hash = evm_keccak256(&preimage).expect("CREATE address hash");
-    EvmAddress::new(format!("0x{}", &hash.as_str()[26..])).expect("derived CREATE address")
+    let bytes = hash.as_bytes()[12..]
+        .try_into()
+        .expect("Keccak suffix is exactly 20 bytes");
+    EvmAddress::from_bytes(bytes)
 }
 
 async fn generated_signer(owner: &KeystoreOwner) -> Arc<dyn Secp256k1Signer> {
@@ -1087,9 +1089,9 @@ fn assert_transaction(
     assert_eq!(transaction.transaction_type, 2);
     assert_eq!(
         transaction.chain_id,
-        command.binding().route().chain_instance().chain_id()
+        command.binding().route().chain_instance().chain_id().get()
     );
-    assert_eq!(transaction.gas, command.gas_limit());
+    assert_eq!(transaction.gas, command.gas_limit().get());
     assert_eq!(transaction.max_priority_fee, PRIORITY_FEE);
     assert_eq!(transaction.max_fee, MAX_FEE);
     assert_eq!(transaction.value, 0);
@@ -1179,24 +1181,21 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     );
 
     let expected_contract = expected_create_address(&sender);
-    let deployment_command = Eip1559TransactionCommand::new(
+    let deployment_command = Eip1559TransactionCommand::create(
         binding.clone(),
-        EvmTransactionAction::create(compiled.creation.clone()).expect("creation action"),
+        compiled.creation.clone(),
         EvmU256::from_u64(0),
-        DEPLOYMENT_GAS,
+        nonzero(DEPLOYMENT_GAS),
         EvmU256::from_u64(PRIORITY_FEE),
         EvmU256::from_u64(MAX_FEE),
     )
     .expect("deployment command");
-    let configuration_command = Eip1559TransactionCommand::new(
+    let configuration_command = Eip1559TransactionCommand::call(
         binding.clone(),
-        EvmTransactionAction::call(
-            expected_contract.clone(),
-            compiled.configure_calldata.clone(),
-        )
-        .expect("configuration action"),
+        expected_contract.clone(),
+        compiled.configure_calldata.clone(),
         EvmU256::from_u64(0),
-        CONFIGURATION_GAS,
+        nonzero(CONFIGURATION_GAS),
         EvmU256::from_u64(PRIORITY_FEE),
         EvmU256::from_u64(MAX_FEE),
     )
@@ -1287,7 +1286,7 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
                             receipt
                                 .get("contractAddress")
                                 .and_then(serde_json::Value::as_str),
-                            Some(expected_contract.as_str())
+                            Some(expected_contract.to_string().as_str())
                         );
                     }
                     independently_observed.push(prepared);
@@ -1428,13 +1427,14 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
         .iter()
         .filter(|log| {
             log.get("address").and_then(serde_json::Value::as_str)
-                == Some(expected_contract.as_str())
+                == Some(expected_contract.to_string().as_str())
                 && log
                     .get("topics")
                     .and_then(serde_json::Value::as_array)
                     .is_some_and(|topics| {
                         topics.len() == 1
-                            && topics[0].as_str() == Some(compiled.configured_topic.as_str())
+                            && topics[0].as_str()
+                                == Some(compiled.configured_topic.to_string().as_str())
                     })
                 && log.get("data").and_then(serde_json::Value::as_str)
                     == Some(expected_word.as_str())

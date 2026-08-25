@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -46,7 +47,9 @@ impl EvmProvider for Provider {
                 return Err(AdapterError::Internal);
             }
             let value = match operation.as_str() {
-                "mfm.evm.read-chain-identity@1" => EvmReadValue::ChainId(self.chain_id),
+                "mfm.evm.read-chain-identity@1" => EvmReadValue::ChainId(
+                    NonZeroU64::new(self.chain_id).ok_or(AdapterError::Internal)?,
+                ),
                 "mfm.evm.read-initial-anchor@1" | "mfm.evm.confirm-balance-anchor@1" => {
                     EvmReadValue::Anchor(EvmBlockAnchor::new(
                         EvmU256::new("100").expect("number"),
@@ -289,7 +292,10 @@ fn composed_runtime_owns_one_checked_multi_route_truth() {
         let endpoint_ref = EvmEndpoint::new(expected_endpoint)
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("endpoint ref");
-        let target = mfm_evm::EvmPhysicalTarget::new(expected_chain, endpoint_ref).expect("target");
+        let target = mfm_evm::EvmPhysicalTarget::new(
+            NonZeroU64::new(expected_chain).expect("nonzero chain"),
+            endpoint_ref,
+        );
         assert_eq!(binding_ref, &target.binding_ref().expect("binding ref"));
     }
 

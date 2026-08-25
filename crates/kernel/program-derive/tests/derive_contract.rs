@@ -1,3 +1,7 @@
+use std::collections::BTreeMap;
+use std::num::NonZeroU64;
+
+use mfm_canonical::CanonicalBytes;
 use mfm_program_derive::{MfmValue, PersistedSchema};
 use mfm_values::{MfmValue as _, PersistedSchema as _};
 use serde::{Deserialize, Serialize};
@@ -68,20 +72,18 @@ struct EffectIdentityContainer {
 #[serde(deny_unknown_fields)]
 struct FixedPublicBytes {
     #[mfm(minimum_bytes = 2, maximum_bytes = 2)]
-    value: String,
+    value: CanonicalBytes,
 }
 
 #[derive(Serialize, Deserialize, MfmValue)]
 #[serde(transparent)]
-#[mfm(transparent_bytes)]
 struct TransparentFixedPublicBytes {
     #[mfm(minimum_bytes = 2, maximum_bytes = 2)]
-    value: String,
+    value: CanonicalBytes,
 }
 
 #[derive(Serialize, Deserialize, MfmValue)]
 #[serde(transparent)]
-#[mfm(transparent_string)]
 struct TransparentFixedPublicText {
     #[mfm(minimum_bytes = 2, maximum_bytes = 2)]
     value: String,
@@ -90,9 +92,16 @@ struct TransparentFixedPublicText {
 #[derive(Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 struct NonzeroPublicNumber {
-    #[mfm(unsigned_minimum = 1, unsigned_maximum = 10)]
-    value: u64,
+    value: NonZeroU64,
 }
+
+#[derive(Serialize, Deserialize, MfmValue)]
+#[serde(transparent)]
+struct TransparentNonzero(NonZeroU64);
+
+#[derive(Serialize, Deserialize, MfmValue)]
+#[serde(transparent)]
+struct TransparentMap(BTreeMap<String, u64>);
 
 #[test]
 fn surviving_value_derives_generate_complete_schema_descriptors() {
@@ -121,6 +130,13 @@ fn surviving_value_derives_generate_complete_schema_descriptors() {
         .identity()
         .validate_canonical_value(br#"{"value":"AQ"}"#)
         .is_err());
+    assert_eq!(
+        serde_json::to_string(&FixedPublicBytes {
+            value: CanonicalBytes::new([1, 2]),
+        })
+        .expect("canonical bytes wire"),
+        r#"{"value":"AQI"}"#
+    );
     let transparent_bytes =
         TransparentFixedPublicBytes::schema_descriptor().expect("transparent bytes descriptor");
     assert!(transparent_bytes
@@ -150,6 +166,25 @@ fn surviving_value_derives_generate_complete_schema_descriptors() {
         .identity()
         .validate_canonical_value(br#"{"value":0}"#)
         .is_err());
+    assert!(number
+        .identity()
+        .validate_canonical_value(br#"{"value":18446744073709551615}"#)
+        .is_ok());
+    let transparent_nonzero =
+        TransparentNonzero::schema_descriptor().expect("transparent nonzero descriptor");
+    assert!(transparent_nonzero
+        .identity()
+        .validate_canonical_value(b"1")
+        .is_ok());
+    assert!(transparent_nonzero
+        .identity()
+        .validate_canonical_value(b"0")
+        .is_err());
+    let transparent_map = TransparentMap::schema_descriptor().expect("transparent map descriptor");
+    assert!(transparent_map
+        .identity()
+        .validate_canonical_value(br#"{"key":1}"#)
+        .is_ok());
 }
 
 #[test]

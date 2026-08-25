@@ -4,11 +4,14 @@
 //! domain contracts require. It holds no key, nonce authority, or automatic retry.
 
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::pin::Pin;
+#[cfg(test)]
 use std::str::FromStr;
 use std::time::Duration;
 
 use alloy_primitives::{hex, Address, U256};
+use mfm_canonical::CanonicalBytes;
 use mfm_evm::{
     AnchoredContractCallResult, EvmBalanceSource, EvmBlockAnchor, EvmChainInstance, EvmHash,
     EvmReadIntent, EvmReadSubject, EvmReadValue, EvmU256, MAX_EVM_CALL_RETURN_BYTES,
@@ -197,7 +200,7 @@ impl JsonRpcEvmProvider {
         data: String,
     ) -> Result<Option<AbiWord>, AdapterError> {
         let token = source.token().ok_or(AdapterError::Internal)?;
-        let to = checked_address(token.as_str())?;
+        let to = token.to_string();
         let tag = block_tag(anchor.number())?;
         let Some(result) = self
             .call(
@@ -225,12 +228,13 @@ impl JsonRpcEvmProvider {
                 let chain_id = result
                     .as_str()
                     .and_then(quantity_to_u64)
+                    .and_then(NonZeroU64::new)
                     .ok_or(AdapterError::Unavailable)?;
                 Ok(returned(EvmReadValue::ChainId(chain_id)))
             }
             EvmReadSubject::InitialAnchor => self.anchor(serde_json::json!("latest")).await,
             EvmReadSubject::NativeBalance { source, anchor } => {
-                let address = checked_address(source.address().as_str())?;
+                let address = source.address().to_string();
                 let tag = block_tag(anchor.number())?;
                 let Some(result) = self
                     .call("eth_getBalance", serde_json::json!([address, tag]))
@@ -257,10 +261,7 @@ impl JsonRpcEvmProvider {
                 Ok(returned(EvmReadValue::TokenDecimals(decimals)))
             }
             EvmReadSubject::TokenBalance { source, anchor } => {
-                let holder = Address::from_str(source.address().as_str()).map_err(|_| {
-                    // A malformed address is a local domain-value defect, never a node error.
-                    AdapterError::Internal
-                })?;
+                let holder = Address::from(*source.address().as_bytes());
                 let Some(word) = self
                     .contract_call(source, anchor, balance_of_calldata(&holder))
                     .await?
@@ -288,7 +289,7 @@ impl JsonRpcEvmProvider {
     async fn anchored_contract_call(
         &self,
         authored_anchor: &EvmBlockAnchor,
-        calldata: &str,
+        calldata: &CanonicalBytes,
         target: &mfm_evm::EvmAddress,
     ) -> Result<EvmProviderResponse, AdapterError> {
         let Some(observed_anchor) = self
@@ -301,13 +302,13 @@ impl JsonRpcEvmProvider {
             return Ok(EvmProviderResponse::IntegrityBlocked);
         }
         let tag = serde_json::json!({
-            "blockHash": authored_anchor.hash().as_str(),
+            "blockHash": authored_anchor.hash().to_string(),
             "requireCanonical": true
         });
         let code = self
             .call_strict(
                 "eth_getCode",
-                serde_json::json!([target.as_str(), tag.clone()]),
+                serde_json::json!([target.to_string(), tag.clone()]),
             )
             .await?;
         let code = RpcData::parse(
@@ -317,15 +318,12 @@ impl JsonRpcEvmProvider {
         if code.0.is_empty() {
             return Ok(EvmProviderResponse::Rejected);
         }
-        let calldata = mfm_canonical::CanonicalBytes::from_base64url_no_pad(calldata.to_owned())
-            .map_err(|_| AdapterError::Internal)?
-            .into_bytes();
         let result = self
             .call_strict(
                 "eth_call",
                 serde_json::json!([{
-                    "to": target.as_str(),
-                    "data": format!("0x{}", hex::encode(calldata)),
+                    "to": target.to_string(),
+                    "data": format!("0x{}", hex::encode(calldata.as_bytes())),
                 }, tag]),
             )
             .await?;
@@ -400,6 +398,7 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
                 .await?
                 .as_str()
                 .and_then(quantity_to_u64)
+                .and_then(NonZeroU64::new)
                 .ok_or(AdapterError::Unavailable)?;
             let genesis = self
                 .call_strict("eth_getBlockByNumber", serde_json::json!(["0x0", false]))
@@ -411,8 +410,7 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
             if anchor.number().as_str() != "0" {
                 return Err(AdapterError::Unavailable);
             }
-            EvmChainInstance::new(chain_id, anchor.hash().clone())
-                .map_err(|_| AdapterError::Unavailable)
+            Ok(EvmChainInstance::new(chain_id, anchor.hash().clone()))
         })
     }
 
@@ -420,7 +418,7 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
         &'a self,
         sender: &'a mfm_evm::EvmAddress,
     ) -> EvmTransactionProviderFuture<'a, u64> {
-        let sender = sender.as_str().to_owned();
+        let sender = sender.to_string();
         Box::pin(async move {
             self.call_strict(
                 "eth_getTransactionCount",
@@ -437,7 +435,7 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
         &'a self,
         transaction_hash: &'a EvmHash,
     ) -> EvmTransactionProviderFuture<'a, Option<ProviderReceipt>> {
-        let transaction_hash = transaction_hash.as_str().to_owned();
+        let transaction_hash = transaction_hash.to_string();
         Box::pin(async move {
             let result = self
                 .call_strict(
@@ -576,6 +574,7 @@ const fn returned(value: EvmReadValue) -> EvmProviderResponse {
 }
 
 /// Parses a 20-byte address and re-renders it; addresses are never spliced as text.
+#[cfg(test)]
 fn checked_address(value: &str) -> Result<String, AdapterError> {
     Address::from_str(value)
         .map(|address| format!("0x{}", hex::encode(address)))

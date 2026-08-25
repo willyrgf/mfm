@@ -1,13 +1,16 @@
 # mfm-evm
 
 Secret-free typed EVM Read and transaction Effect contracts, cumulative balance semantics, and
-domain-owned route identities. `EvmAddress`, `EvmHash`, and `EvmU256` are the only provider-facing
-address, hash, and EVM-word concepts. Their strict transparent wires preserve lowercase hexadecimal
-and canonical decimal forms across balance, transaction, receipt, and anchored-call values.
+domain-owned route identities. `EvmAddress` and `EvmHash` retain fixed raw bytes and expose
+infallible exact byte access; their strict string wires remain lowercase `0x` hexadecimal.
+`EvmU256` owns canonical decimal EVM words, while canonical base64 values retain
+`CanonicalBytes` directly and chain IDs and gas limits retain `NonZeroU64`.
 
 `EvmTransactionEffect` executes one nonce-free, fixed type-2, empty-access-list command shared by
-the independent `CreateEvmContract<K>` and `CallEvmContract<K>` States. Their checked contexts admit
-only the matching Create or Call action. Creation completion exposes the command binding, receipt
+the independent `CreateEvmContract<K>` and `CallEvmContract<K>` States. The action is a private
+command detail: complete `create` and `call` factories check byte bounds, nonzero gas, the `u128`
+fee ceiling, and priority-fee ordering, and checked deserialization enforces the same contract.
+Their checked contexts admit only the matching action. Creation completion exposes the command binding, receipt
 anchor, created address, and transaction hash; call completion exposes the binding, receipt anchor,
 target, and hash. Their action-specific failures retain caller context and the minimal revert, while
 settlement evidence keeps its exact `EffectId`, nonce, confirmation, and revert contract unchanged.
