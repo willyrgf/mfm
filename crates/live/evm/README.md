@@ -35,14 +35,20 @@ retained bytes, invalid or high-S signatures, wrong hashes, recovered-key mismat
 mismatches. Keccak helpers expose only checked public hash/address results; private key custody
 remains in `mfm-keystore`.
 
-Transaction execution is caller-driven and loop-free. It loads authority first, reserves one
-pending nonce, signs once through the captured immutable-purpose handle, retains exact raw bytes,
-checks receipt before submission, and submits at most once per invocation. A matching submission
+Transaction execution is caller-driven and loop-free. Registration validates the immutable
+binding/epoch/purpose/public-key/sender composition once. Each invocation compares only the command
+binding and exact Runtime-supplied command value ref, loads authority first, verifies the chain at
+most once when not already settled, reserves one pending nonce, signs once through the captured
+immutable-purpose handle, retains exact raw bytes, checks receipt before submission, and submits at
+most once per invocation. Fresh Alloy transactions are not decoded again; retained wire is decoded
+and fully compared before provider IO. A matching submission
 response returns normal Runtime `Pending` progress;
 transport failure, a dropped acknowledgement, malformed ingress, or a mismatched returned hash is
 `Unavailable`. Receipt settlement is inserted after one validated receipt and one matching
 canonical block observation. Settled evidence is an authority fast path with no signer/provider
-call. Dropped futures resume from the append-only reservation/preparation/settlement facts.
+call. A different concurrent Prepared or Settled candidate returns `Unavailable`; reload qualifies
+the retained first winner before any retry. Dropped futures resume from the append-only
+reservation/preparation/settlement facts.
 Runtime supplies the exact qualified command value ref to the Effect callback; the adapter passes
 that identity to authority qualification and does not recanonicalize the command.
 

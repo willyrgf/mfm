@@ -113,39 +113,35 @@ impl PostgresEvmTransactionAuthority {
         let mut gate_connection = PgConnection::connect_with(&options)
             .await
             .map_err(|_| PostgresOpenError::Unavailable)?;
-        verify_evm_connection(&mut gate_connection)
+        let authority_epoch = verify_evm_connection(&mut gate_connection)
             .await
             .map_err(classify_gate_error)?;
         drop(gate_connection);
+        let pooled_epoch = authority_epoch.clone();
         let pool = PgPoolOptions::new()
             .acquire_timeout(Duration::from_secs(2))
-            .after_connect(|connection, _metadata| {
+            .after_connect(move |connection, _metadata| {
+                let expected_epoch = pooled_epoch.clone();
                 Box::pin(async move {
                     verify_evm_connection(connection)
                         .await
-                        .map(|_| ())
+                        .and_then(|observed_epoch| {
+                            (observed_epoch == expected_epoch)
+                                .then_some(())
+                                .ok_or(GateError::Incompatible)
+                        })
                         .map_err(|error| sqlx::Error::Protocol(error.marker().to_owned()))
                 })
             })
             .connect_with(options)
             .await
             .map_err(classify_open_error)?;
-        let mut admitted_connection = pool.acquire().await.map_err(classify_open_error)?;
-        let authority_epoch = verify_evm_connection(&mut admitted_connection)
-            .await
-            .map_err(classify_gate_error)?;
-        drop(admitted_connection);
         Ok(Self {
             pool,
             authority_epoch,
             #[cfg(test)]
             authority_commit_fault: std::sync::atomic::AtomicU8::new(0),
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn test_pool(&self) -> &PgPool {
-        &self.pool
     }
 }
 

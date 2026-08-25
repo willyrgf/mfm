@@ -5,31 +5,10 @@ CREATE TABLE mfm_evm_tx.mfm_evm_tx_schema (
     authority_epoch BYTEA NOT NULL,
     CONSTRAINT mfm_evm_tx_schema_pkey PRIMARY KEY (schema_contract),
     CONSTRAINT mfm_evm_tx_schema_contract_check
-        CHECK (schema_contract = 'mfm.evm-transaction-postgres.v2'),
+        CHECK (schema_contract = 'mfm.evm-transaction-postgres.v1'),
     CONSTRAINT mfm_evm_tx_schema_epoch_check
         CHECK (octet_length(authority_epoch) = 32),
     CONSTRAINT mfm_evm_tx_schema_epoch_key UNIQUE (authority_epoch)
-);
-
-CREATE TABLE mfm_evm_tx.nonce_domains (
-    authority_epoch       BYTEA NOT NULL,
-    chain_id              NUMERIC(20,0) NOT NULL,
-    genesis_hash          BYTEA NOT NULL,
-    sender                BYTEA NOT NULL,
-    CONSTRAINT nonce_domains_pkey
-        PRIMARY KEY (authority_epoch, chain_id, genesis_hash, sender),
-    CONSTRAINT nonce_domains_epoch_check
-        CHECK (octet_length(authority_epoch) = 32),
-    CONSTRAINT nonce_domains_chain_id_check
-        CHECK (chain_id BETWEEN 1 AND 18446744073709551615),
-    CONSTRAINT nonce_domains_genesis_hash_check
-        CHECK (octet_length(genesis_hash) = 32),
-    CONSTRAINT nonce_domains_sender_check
-        CHECK (octet_length(sender) = 20),
-    CONSTRAINT nonce_domains_epoch_fkey
-        FOREIGN KEY (authority_epoch)
-        REFERENCES mfm_evm_tx.mfm_evm_tx_schema (authority_epoch)
-        ON UPDATE NO ACTION ON DELETE NO ACTION
 );
 
 CREATE TABLE mfm_evm_tx.nonce_reservations (
@@ -61,10 +40,9 @@ CREATE TABLE mfm_evm_tx.nonce_reservations (
         CHECK (octet_length(sender) = 20),
     CONSTRAINT nonce_reservations_nonce_check
         CHECK (reserved_nonce BETWEEN 0 AND 18446744073709551615),
-    CONSTRAINT nonce_reservations_domain_fkey
-        FOREIGN KEY (authority_epoch, chain_id, genesis_hash, sender)
-        REFERENCES mfm_evm_tx.nonce_domains
-            (authority_epoch, chain_id, genesis_hash, sender)
+    CONSTRAINT nonce_reservations_epoch_fkey
+        FOREIGN KEY (authority_epoch)
+        REFERENCES mfm_evm_tx.mfm_evm_tx_schema (authority_epoch)
         ON UPDATE NO ACTION ON DELETE NO ACTION
 );
 
@@ -99,13 +77,11 @@ CREATE TABLE mfm_evm_tx.transaction_settlements (
 
 REVOKE ALL ON SCHEMA mfm_evm_tx FROM PUBLIC, mfm_runtime;
 REVOKE ALL ON TABLE mfm_evm_tx.mfm_evm_tx_schema FROM PUBLIC, mfm_runtime;
-REVOKE ALL ON TABLE mfm_evm_tx.nonce_domains FROM PUBLIC, mfm_runtime;
 REVOKE ALL ON TABLE mfm_evm_tx.nonce_reservations FROM PUBLIC, mfm_runtime;
 REVOKE ALL ON TABLE mfm_evm_tx.prepared_transactions FROM PUBLIC, mfm_runtime;
 REVOKE ALL ON TABLE mfm_evm_tx.transaction_settlements FROM PUBLIC, mfm_runtime;
 GRANT USAGE ON SCHEMA mfm_evm_tx TO mfm_runtime;
 GRANT SELECT ON TABLE mfm_evm_tx.mfm_evm_tx_schema TO mfm_runtime;
-GRANT SELECT, INSERT ON TABLE mfm_evm_tx.nonce_domains TO mfm_runtime;
 GRANT SELECT, INSERT ON TABLE mfm_evm_tx.nonce_reservations TO mfm_runtime;
 GRANT SELECT, INSERT ON TABLE mfm_evm_tx.prepared_transactions TO mfm_runtime;
 GRANT SELECT, INSERT ON TABLE mfm_evm_tx.transaction_settlements TO mfm_runtime;

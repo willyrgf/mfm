@@ -12,6 +12,7 @@ domain = "evm"
 domain-role = "live"
 
 [dependencies]
+mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-evm = { path = "../../domains/evm" }
 mfm-evm-transaction-authority = { path = "../../domains/evm-transaction-authority" }
 mfm-ids = { path = "../../kernel/ids" }
@@ -27,6 +28,7 @@ thiserror = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+k256 = { workspace = true }
 mfm-keystore = { path = "../../keystore" }
 mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }

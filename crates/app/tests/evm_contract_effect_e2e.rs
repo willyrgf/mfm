@@ -377,25 +377,21 @@ impl EvmTransactionAuthority for ReservationAcknowledgementFault {
         self.inner.authority_epoch()
     }
 
-    fn load<'a>(
-        &'a self,
-        effect_id: &'a EffectId,
-        expected_command_ref: &'a ContentRef,
-    ) -> AuthorityFuture<'a, Option<AuthorityState>> {
-        self.inner.load(effect_id, expected_command_ref)
+    fn load<'a>(&'a self, effect_id: &'a EffectId) -> AuthorityFuture<'a, Option<AuthorityState>> {
+        self.inner.load(effect_id)
     }
 
     fn reserve_or_compare<'a>(
         &'a self,
         effect_id: &'a EffectId,
-        command_ref: &'a ContentRef,
+        command_value_ref: &'a ContentRef,
         domain: &'a mfm_evm_transaction_authority::NonceDomain,
         observed_pending_nonce: u64,
     ) -> AuthorityFuture<'a, Reservation> {
         Box::pin(async move {
             let retained = self
                 .inner
-                .reserve_or_compare(effect_id, command_ref, domain, observed_pending_nonce)
+                .reserve_or_compare(effect_id, command_value_ref, domain, observed_pending_nonce)
                 .await?;
             if !self.consumed.swap(true, Ordering::SeqCst) {
                 return Err(AuthorityError::Unavailable);
@@ -404,25 +400,12 @@ impl EvmTransactionAuthority for ReservationAcknowledgementFault {
         })
     }
 
-    fn retain_prepared<'a>(
-        &'a self,
-        effect_id: &'a EffectId,
-        command_ref: &'a ContentRef,
-        transaction_hash: &'a EvmHash,
-        raw_transaction: &'a mfm_evm_transaction_authority::ExactRawTransaction,
-    ) -> AuthorityFuture<'a, PreparedRecord> {
-        self.inner
-            .retain_prepared(effect_id, command_ref, transaction_hash, raw_transaction)
+    fn retain_prepared<'a>(&'a self, candidate: &'a PreparedRecord) -> AuthorityFuture<'a, ()> {
+        self.inner.retain_prepared(candidate)
     }
 
-    fn retain_settlement<'a>(
-        &'a self,
-        effect_id: &'a EffectId,
-        command_ref: &'a ContentRef,
-        evidence: &'a mfm_evm::EvmTransactionSettlement,
-    ) -> AuthorityFuture<'a, SettledRecord> {
-        self.inner
-            .retain_settlement(effect_id, command_ref, evidence)
+    fn retain_settlement<'a>(&'a self, candidate: &'a SettledRecord) -> AuthorityFuture<'a, ()> {
+        self.inner.retain_settlement(candidate)
     }
 }
 
@@ -1272,10 +1255,7 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
             assert_eq!(effects.len(), 1);
             assert_eq!(conclusions, 0);
             assert!(matches!(
-                authority
-                    .load(&effects[0].0, &effects[0].1)
-                    .await
-                    .expect("reservation"),
+                authority.load(&effects[0].0).await.expect("reservation"),
                 Some(AuthorityState::Reserved(_))
             ));
             drop(runtime);
@@ -1288,9 +1268,9 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
             Ok(view) if matches!(view.state(), RunViewState::Runnable) => {
                 let (effects, _) = journal_effects(&backend, &run_id).await;
                 let mut newly_prepared = 0;
-                for (effect_id, command_ref, _) in effects {
+                for (effect_id, _command_value_ref, _) in effects {
                     let state = authority
-                        .load(&effect_id, &command_ref)
+                        .load(&effect_id)
                         .await
                         .expect("public authority state")
                         .expect("retained authority state");
@@ -1360,9 +1340,9 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     assert_eq!(final_effects[0].2, deployment_command);
     assert_eq!(final_effects[1].2, configuration_command);
     let mut settled = Vec::new();
-    for (effect_id, command_ref, _) in &final_effects {
+    for (effect_id, _command_value_ref, _) in &final_effects {
         let Some(AuthorityState::Settled(state)) = final_authority
-            .load(effect_id, command_ref)
+            .load(effect_id)
             .await
             .expect("settled authority")
         else {

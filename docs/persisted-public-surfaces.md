@@ -33,13 +33,13 @@ status remains a Runtime fold.
 
 PostgreSQL configuration custody owns exactly `mfm_config_schema` and `config_revisions` under
 `mfm.config-postgres.v2`. PostgreSQL EVM transaction authority owns exactly
-`mfm_evm_tx_schema`, `nonce_domains`, `nonce_reservations`, `prepared_transactions`, and
-`transaction_settlements` under `mfm.evm-transaction-postgres.v2`. `PostgresBackend` independently
+`mfm_evm_tx_schema`, `nonce_reservations`, `prepared_transactions`, and
+`transaction_settlements` under `mfm.evm-transaction-postgres.v1`. `PostgresBackend` independently
 gates only run history and configuration; optional `PostgresEvmTransactionAuthority` owns a second
 pool and gates only the authority schema. The fixed runtime role owns none of them.
 
-Authority records are non-Program, non-serde port values. A reservation retains EffectId, command
-ref, nonce, and a domain consisting exactly of epoch, chain instance, and sender. A
+Authority records are non-Program, non-serde port values. A reservation retains EffectId, exact
+command value ref, nonce, and a domain consisting exactly of epoch, chain instance, and sender. A
 prepared record adds only exact raw transaction bytes and transaction hash. A settled record nests
 that predecessor and the qualified typed `EvmTransactionSettlement`. Raw bytes have no text/debug
 surface. The database stores canonical settlement bytes but no command copy, action, endpoint,

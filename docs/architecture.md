@@ -54,8 +54,10 @@ uses ascending `RunId` keyset pages and makes no cross-request snapshot claim.
 PostgreSQL owns its raw private locator grammar, target equivalence, SQLx wiring, split-role
 provisioner, loopback-only plaintext policy, and ambient-input exclusion. `PostgresBackend` owns one
 pool gated only for Store, RunIndex, and config custody. Optional
-`PostgresEvmTransactionAuthority` owns a separate pool gated only for its port. The authority schema owns only append-only nonce-domain, reservation, exact prepared-wire,
-and canonical settlement facts. It does not own commands, transaction action semantics, provider
+`PostgresEvmTransactionAuthority` owns a separate pool gated only for its port. The authority schema
+owns only its epoch marker and append-only reservation, exact prepared-wire, and canonical
+settlement facts; the reservation contains the complete nonce domain. It does not own commands,
+transaction action semantics, provider
 truth, signing, broadcast, Runtime folding, or Program association. PostgreSQL uses stock SQLx
 directly.
 Administrative database authority exists only in short-lived provisioning paths and is never

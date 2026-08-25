@@ -1,6 +1,6 @@
 use std::num::NonZeroU64;
 
-use mfm_canonical::{sha256_digest_bytes, CanonicalBytes, PlainCanonicalJsonBytes};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_evm::{EvmAddress, EvmAuthorityEpoch, EvmChainInstance, EvmHash, EvmTransactionSettlement};
 use mfm_evm_transaction_authority::{
     AuthorityError, AuthorityFuture, AuthorityState, EvmTransactionAuthority, ExactRawTransaction,
@@ -12,9 +12,9 @@ use sqlx::{PgConnection, Row};
 
 use crate::{GateError, PostgresEvmTransactionAuthority};
 
-pub(crate) const EVM_TX_SCHEMA_CONTRACT: &str = "mfm.evm-transaction-postgres.v2";
+pub(crate) const EVM_TX_SCHEMA_CONTRACT: &str = "mfm.evm-transaction-postgres.v1";
 pub(crate) const EVM_TX_SCHEMA_SQL: &str =
-    include_str!("../migrations/evm_transaction_postgres_v2.sql");
+    include_str!("../migrations/evm_transaction_postgres_v1.sql");
 const MAX_SETTLEMENT_BYTES: usize = 65_536;
 
 impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
@@ -22,34 +22,17 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
         &self.authority_epoch
     }
 
-    fn load<'a>(
-        &'a self,
-        effect_id: &'a EffectId,
-        expected_command_ref: &'a ContentRef,
-    ) -> AuthorityFuture<'a, Option<AuthorityState>> {
+    fn load<'a>(&'a self, effect_id: &'a EffectId) -> AuthorityFuture<'a, Option<AuthorityState>> {
         Box::pin(async move {
-            let mut transaction = self.pool.begin().await.map_err(unavailable)?;
-            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-                .execute(&mut *transaction)
-                .await
-                .map_err(unavailable)?;
-            verify_captured_epoch(&mut transaction, &self.authority_epoch).await?;
-            let retained = load_state(&mut transaction, effect_id).await?;
-            if retained
-                .as_ref()
-                .is_some_and(|state| state_reservation(state).command_ref() != expected_command_ref)
-            {
-                return Err(AuthorityError::Internal);
-            }
-            transaction.commit().await.map_err(unavailable)?;
-            Ok(retained)
+            let mut connection = self.pool.acquire().await.map_err(unavailable)?;
+            load_state(&mut connection, effect_id, &self.authority_epoch).await
         })
     }
 
     fn reserve_or_compare<'a>(
         &'a self,
         effect_id: &'a EffectId,
-        command_ref: &'a ContentRef,
+        command_value_ref: &'a ContentRef,
         domain: &'a NonceDomain,
         observed_pending_nonce: u64,
     ) -> AuthorityFuture<'a, Reservation> {
@@ -62,7 +45,6 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
                 .execute(&mut *transaction)
                 .await
                 .map_err(unavailable)?;
-            verify_captured_epoch(&mut transaction, &self.authority_epoch).await?;
             let lock_key = nonce_domain_lock_key(domain)?;
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
                 .bind(lock_key)
@@ -70,22 +52,23 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
                 .await
                 .map_err(unavailable)?;
 
-            if let Some(state) = load_state(&mut transaction, effect_id).await? {
+            if let Some(state) =
+                load_state(&mut transaction, effect_id, &self.authority_epoch).await?
+            {
                 let reservation = state_reservation(&state);
-                ensure_reservation(reservation, command_ref, domain)?;
+                ensure_reservation(reservation, effect_id, command_value_ref, domain)?;
                 let retained = reservation.clone();
                 commit_authority(self, transaction).await?;
                 return Ok(retained);
             }
 
-            let domain_exists = load_domain(&mut transaction, domain).await?;
-
             let nonce = match latest_reservation_effect(&mut transaction, domain).await? {
                 None => observed_pending_nonce,
                 Some(previous_effect_id) => {
-                    let previous = load_state(&mut transaction, &previous_effect_id)
-                        .await?
-                        .ok_or(AuthorityError::Internal)?;
+                    let previous =
+                        load_state(&mut transaction, &previous_effect_id, &self.authority_epoch)
+                            .await?
+                            .ok_or(AuthorityError::Internal)?;
                     let AuthorityState::Settled(previous) = previous else {
                         return Err(AuthorityError::Unavailable);
                     };
@@ -102,24 +85,27 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
                 }
             };
 
-            if !domain_exists {
-                insert_domain(&mut transaction, domain).await?;
-            }
-            let inserted =
-                insert_reservation(&mut transaction, effect_id, command_ref, domain, nonce).await?;
+            let inserted = insert_reservation(
+                &mut transaction,
+                effect_id,
+                command_value_ref,
+                domain,
+                nonce,
+            )
+            .await?;
             let retained = if inserted {
                 Reservation::new(
                     effect_id.clone(),
-                    command_ref.clone(),
+                    command_value_ref.clone(),
                     domain.clone(),
                     nonce,
                 )
             } else {
-                let state = load_state(&mut transaction, effect_id)
+                let state = load_state(&mut transaction, effect_id, &self.authority_epoch)
                     .await?
-                    .ok_or(AuthorityError::Unavailable)?;
+                    .ok_or(AuthorityError::Internal)?;
                 let reservation = state_reservation(&state);
-                ensure_reservation(reservation, command_ref, domain)?;
+                ensure_reservation(reservation, effect_id, command_value_ref, domain)?;
                 reservation.clone()
             };
             commit_authority(self, transaction).await?;
@@ -127,35 +113,30 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
         })
     }
 
-    fn retain_prepared<'a>(
-        &'a self,
-        effect_id: &'a EffectId,
-        command_ref: &'a ContentRef,
-        transaction_hash: &'a EvmHash,
-        raw_transaction: &'a ExactRawTransaction,
-    ) -> AuthorityFuture<'a, PreparedRecord> {
+    fn retain_prepared<'a>(&'a self, candidate: &'a PreparedRecord) -> AuthorityFuture<'a, ()> {
         Box::pin(async move {
+            let effect_id = candidate.reservation().effect_id();
             let mut transaction = self.pool.begin().await.map_err(unavailable)?;
             sqlx::query("SET LOCAL synchronous_commit = on")
                 .execute(&mut *transaction)
                 .await
                 .map_err(unavailable)?;
-            verify_captured_epoch(&mut transaction, &self.authority_epoch).await?;
-            let state = load_state(&mut transaction, effect_id)
+            let state = load_state(&mut transaction, effect_id, &self.authority_epoch)
                 .await?
                 .ok_or(AuthorityError::Internal)?;
             let reservation = state_reservation(&state);
-            if reservation.command_ref() != command_ref {
+            if reservation != candidate.reservation() {
                 return Err(AuthorityError::Internal);
             }
             if let Some(prepared) = state_prepared(&state) {
-                ensure_prepared(prepared, transaction_hash, raw_transaction)?;
-                let retained = prepared.clone();
+                if prepared != candidate {
+                    return Err(AuthorityError::Unavailable);
+                }
                 commit_authority(self, transaction).await?;
-                return Ok(retained);
+                return Ok(());
             }
 
-            let transaction_hash_bytes = transaction_hash.as_bytes();
+            let transaction_hash_bytes = candidate.transaction_hash().as_bytes();
             let inserted = sqlx::query(
                 "INSERT INTO mfm_evm_tx.prepared_transactions \
                  (effect_id, transaction_hash, raw_transaction) VALUES ($1, $2, $3) \
@@ -163,40 +144,34 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
             )
             .bind(effect_id.as_str())
             .bind(transaction_hash_bytes.as_slice())
-            .bind(raw_transaction.as_bytes())
+            .bind(candidate.raw_transaction().as_bytes())
             .execute(&mut *transaction)
             .await
             .map_err(unavailable)?
             .rows_affected()
                 == 1;
-            let retained = if inserted {
-                PreparedRecord::new(
-                    reservation.clone(),
-                    transaction_hash.clone(),
-                    raw_transaction.clone(),
-                )
-            } else {
-                let state = load_state(&mut transaction, effect_id)
+            if !inserted {
+                let state = load_state(&mut transaction, effect_id, &self.authority_epoch)
                     .await?
                     .ok_or(AuthorityError::Internal)?;
+                if state_reservation(&state) != candidate.reservation() {
+                    return Err(AuthorityError::Internal);
+                }
                 let prepared = state_prepared(&state).ok_or(AuthorityError::Internal)?;
-                ensure_prepared(prepared, transaction_hash, raw_transaction)?;
-                prepared.clone()
-            };
+                if prepared != candidate {
+                    return Err(AuthorityError::Unavailable);
+                }
+            }
             commit_authority(self, transaction).await?;
-            Ok(retained)
+            Ok(())
         })
     }
 
-    fn retain_settlement<'a>(
-        &'a self,
-        effect_id: &'a EffectId,
-        command_ref: &'a ContentRef,
-        evidence: &'a EvmTransactionSettlement,
-    ) -> AuthorityFuture<'a, SettledRecord> {
+    fn retain_settlement<'a>(&'a self, candidate: &'a SettledRecord) -> AuthorityFuture<'a, ()> {
         Box::pin(async move {
-            let (canonical, _) =
-                canonicalize_mfm_value(evidence).map_err(|_| AuthorityError::Internal)?;
+            let effect_id = candidate.prepared().reservation().effect_id();
+            let (canonical, _) = canonicalize_mfm_value(candidate.evidence())
+                .map_err(|_| AuthorityError::Internal)?;
             if canonical.as_bytes().is_empty() || canonical.as_bytes().len() > MAX_SETTLEMENT_BYTES
             {
                 return Err(AuthorityError::Internal);
@@ -206,23 +181,19 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
                 .execute(&mut *transaction)
                 .await
                 .map_err(unavailable)?;
-            verify_captured_epoch(&mut transaction, &self.authority_epoch).await?;
-            let state = load_state(&mut transaction, effect_id)
+            let state = load_state(&mut transaction, effect_id, &self.authority_epoch)
                 .await?
                 .ok_or(AuthorityError::Internal)?;
-            let reservation = state_reservation(&state);
-            if reservation.command_ref() != command_ref || evidence.effect_id() != effect_id {
+            let prepared = state_prepared(&state).ok_or(AuthorityError::Internal)?;
+            if prepared != candidate.prepared() {
                 return Err(AuthorityError::Internal);
             }
-            let prepared = state_prepared(&state).ok_or(AuthorityError::Internal)?;
-            let candidate = SettledRecord::new(prepared.clone(), evidence.clone())?;
             if let AuthorityState::Settled(retained) = &state {
-                if retained != &candidate {
-                    return Err(AuthorityError::Internal);
+                if retained != candidate {
+                    return Err(AuthorityError::Unavailable);
                 }
-                let retained = retained.clone();
                 commit_authority(self, transaction).await?;
-                return Ok(retained);
+                return Ok(());
             }
 
             let inserted = sqlx::query(
@@ -236,22 +207,23 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
             .map_err(unavailable)?
             .rows_affected()
                 == 1;
-            let retained = if inserted {
-                candidate
-            } else {
-                let AuthorityState::Settled(retained) = load_state(&mut transaction, effect_id)
-                    .await?
-                    .ok_or(AuthorityError::Internal)?
+            if !inserted {
+                let AuthorityState::Settled(retained) =
+                    load_state(&mut transaction, effect_id, &self.authority_epoch)
+                        .await?
+                        .ok_or(AuthorityError::Internal)?
                 else {
                     return Err(AuthorityError::Internal);
                 };
-                if retained != candidate {
+                if retained.prepared() != candidate.prepared() {
                     return Err(AuthorityError::Internal);
                 }
-                retained
-            };
+                if &retained != candidate {
+                    return Err(AuthorityError::Unavailable);
+                }
+            }
             commit_authority(self, transaction).await?;
-            Ok(retained)
+            Ok(())
         })
     }
 }
@@ -323,98 +295,128 @@ fn state_prepared(state: &AuthorityState) -> Option<&PreparedRecord> {
 
 fn ensure_reservation(
     reservation: &Reservation,
-    command_ref: &ContentRef,
+    effect_id: &EffectId,
+    command_value_ref: &ContentRef,
     domain: &NonceDomain,
 ) -> Result<(), AuthorityError> {
-    (reservation.command_ref() == command_ref && reservation.domain() == domain)
+    (reservation.effect_id() == effect_id
+        && reservation.command_value_ref() == command_value_ref
+        && reservation.domain() == domain)
         .then_some(())
         .ok_or(AuthorityError::Internal)
-}
-
-fn ensure_prepared(
-    prepared: &PreparedRecord,
-    transaction_hash: &EvmHash,
-    raw_transaction: &ExactRawTransaction,
-) -> Result<(), AuthorityError> {
-    (prepared.transaction_hash() == transaction_hash
-        && prepared.raw_transaction() == raw_transaction)
-        .then_some(())
-        .ok_or(AuthorityError::Internal)
-}
-
-async fn verify_captured_epoch(
-    connection: &mut PgConnection,
-    captured: &EvmAuthorityEpoch,
-) -> Result<(), AuthorityError> {
-    let rows: Vec<Vec<u8>> = sqlx::query_scalar(
-        "SELECT authority_epoch FROM mfm_evm_tx.mfm_evm_tx_schema \
-         WHERE schema_contract = $1",
-    )
-    .bind(EVM_TX_SCHEMA_CONTRACT)
-    .fetch_all(connection)
-    .await
-    .map_err(unavailable)?;
-    if rows.len() != 1 || epoch_from_bytes(&rows[0])? != *captured {
-        return Err(AuthorityError::Internal);
-    }
-    Ok(())
 }
 
 async fn load_state(
     connection: &mut PgConnection,
     effect_id: &EffectId,
+    captured_epoch: &EvmAuthorityEpoch,
 ) -> Result<Option<AuthorityState>, AuthorityError> {
-    let row = sqlx::query(
-        "SELECT r.effect_id, r.command_schema_id, r.command_content_digest, \
-                r.authority_epoch, r.chain_id::text, r.genesis_hash, r.sender, \
-                r.reserved_nonce::text, \
-                p.transaction_hash, p.raw_transaction, s.settlement_bytes \
-         FROM mfm_evm_tx.nonce_reservations r \
-         JOIN mfm_evm_tx.nonce_domains d \
-           ON d.authority_epoch = r.authority_epoch AND d.chain_id = r.chain_id \
-          AND d.genesis_hash = r.genesis_hash AND d.sender = r.sender \
-         LEFT JOIN mfm_evm_tx.prepared_transactions p ON p.effect_id = r.effect_id \
-         LEFT JOIN mfm_evm_tx.transaction_settlements s ON s.effect_id = r.effect_id \
-         WHERE r.effect_id = $1",
+    let mut rows = sqlx::query(
+        "SELECT marker.schema_contract, marker.authority_epoch AS admitted_epoch, \
+                reservation.effect_id, reservation.command_schema_id, \
+                reservation.command_content_digest, \
+                reservation.authority_epoch AS reservation_epoch, \
+                reservation.chain_id::text, reservation.genesis_hash, reservation.sender, \
+                reservation.reserved_nonce::text, \
+                prepared.transaction_hash, prepared.raw_transaction, settled.settlement_bytes \
+         FROM mfm_evm_tx.mfm_evm_tx_schema AS marker \
+         LEFT JOIN mfm_evm_tx.nonce_reservations AS reservation \
+           ON reservation.effect_id = $1 \
+         LEFT JOIN mfm_evm_tx.prepared_transactions AS prepared \
+           ON prepared.effect_id = reservation.effect_id \
+         LEFT JOIN mfm_evm_tx.transaction_settlements AS settled \
+           ON settled.effect_id = prepared.effect_id",
     )
     .bind(effect_id.as_str())
-    .fetch_optional(connection)
+    .fetch_all(connection)
     .await
     .map_err(unavailable)?;
-    row.map(parse_authority_state).transpose()
+    if rows.len() != 1 {
+        return Err(AuthorityError::Internal);
+    }
+    parse_authority_state(rows.pop().ok_or(AuthorityError::Internal)?, captured_epoch)
 }
 
-fn parse_authority_state(row: sqlx::postgres::PgRow) -> Result<AuthorityState, AuthorityError> {
-    let retained_effect = EffectId::parse(row.try_get::<String, _>("effect_id").map_err(internal)?)
-        .map_err(internal)?;
-    let command_ref = parse_content_ref(
-        row.try_get("command_schema_id").map_err(internal)?,
-        row.try_get("command_content_digest").map_err(internal)?,
-    )?;
-    let epoch = epoch_from_bytes(
-        &row.try_get::<Vec<u8>, _>("authority_epoch")
+fn parse_authority_state(
+    row: sqlx::postgres::PgRow,
+    captured_epoch: &EvmAuthorityEpoch,
+) -> Result<Option<AuthorityState>, AuthorityError> {
+    let schema_contract: String = row.try_get("schema_contract").map_err(internal)?;
+    let admitted_epoch = epoch_from_bytes(
+        &row.try_get::<Vec<u8>, _>("admitted_epoch")
             .map_err(internal)?,
     )?;
-    let chain_id = NonZeroU64::new(parse_u64(
-        &row.try_get::<String, _>("chain_id").map_err(internal)?,
-    )?)
-    .ok_or(AuthorityError::Internal)?;
-    let genesis = evm_hash_from_bytes(
-        &row.try_get::<Vec<u8>, _>("genesis_hash")
-            .map_err(internal)?,
-    )?;
-    let sender = evm_address_from_bytes(&row.try_get::<Vec<u8>, _>("sender").map_err(internal)?)?;
-    let nonce = parse_u64(
-        &row.try_get::<String, _>("reserved_nonce")
-            .map_err(internal)?,
-    )?;
-    let domain = NonceDomain::new(epoch, EvmChainInstance::new(chain_id, genesis), sender);
-    let reservation = Reservation::new(retained_effect, command_ref, domain, nonce);
+    if schema_contract != EVM_TX_SCHEMA_CONTRACT || &admitted_epoch != captured_epoch {
+        return Err(AuthorityError::Internal);
+    }
+
+    let retained_effect: Option<String> = row.try_get("effect_id").map_err(internal)?;
+    let command_schema: Option<String> = row.try_get("command_schema_id").map_err(internal)?;
+    let command_digest: Option<String> = row.try_get("command_content_digest").map_err(internal)?;
+    let reservation_epoch: Option<Vec<u8>> = row.try_get("reservation_epoch").map_err(internal)?;
+    let chain_id: Option<String> = row.try_get("chain_id").map_err(internal)?;
+    let genesis_hash: Option<Vec<u8>> = row.try_get("genesis_hash").map_err(internal)?;
+    let sender: Option<Vec<u8>> = row.try_get("sender").map_err(internal)?;
+    let reserved_nonce: Option<String> = row.try_get("reserved_nonce").map_err(internal)?;
     let hash: Option<Vec<u8>> = row.try_get("transaction_hash").map_err(internal)?;
     let raw: Option<Vec<u8>> = row.try_get("raw_transaction").map_err(internal)?;
     let settlement: Option<Vec<u8>> = row.try_get("settlement_bytes").map_err(internal)?;
+
+    let reservation_absent = retained_effect.is_none()
+        && command_schema.is_none()
+        && command_digest.is_none()
+        && reservation_epoch.is_none()
+        && chain_id.is_none()
+        && genesis_hash.is_none()
+        && sender.is_none()
+        && reserved_nonce.is_none();
+    if reservation_absent {
+        return if hash.is_none() && raw.is_none() && settlement.is_none() {
+            Ok(None)
+        } else {
+            Err(AuthorityError::Internal)
+        };
+    }
+
+    let (
+        Some(retained_effect),
+        Some(command_schema),
+        Some(command_digest),
+        Some(reservation_epoch),
+        Some(chain_id),
+        Some(genesis_hash),
+        Some(sender),
+        Some(reserved_nonce),
+    ) = (
+        retained_effect,
+        command_schema,
+        command_digest,
+        reservation_epoch,
+        chain_id,
+        genesis_hash,
+        sender,
+        reserved_nonce,
+    )
+    else {
+        return Err(AuthorityError::Internal);
+    };
+
+    let retained_effect = EffectId::parse(retained_effect).map_err(internal)?;
+    let command_value_ref = parse_content_ref(command_schema, command_digest)?;
+    let epoch = epoch_from_bytes(&reservation_epoch)?;
+    if epoch != admitted_epoch {
+        return Err(AuthorityError::Internal);
+    }
+    let chain_id = NonZeroU64::new(parse_u64(&chain_id)?).ok_or(AuthorityError::Internal)?;
+    let genesis = evm_hash_from_bytes(&genesis_hash)?;
+    let sender = evm_address_from_bytes(&sender)?;
+    let nonce = parse_u64(&reserved_nonce)?;
+    let domain = NonceDomain::new(epoch, EvmChainInstance::new(chain_id, genesis), sender);
+    let reservation = Reservation::new(retained_effect, command_value_ref, domain, nonce);
     let (hash, raw) = match (hash, raw) {
-        (None, None) if settlement.is_none() => return Ok(AuthorityState::Reserved(reservation)),
+        (None, None) if settlement.is_none() => {
+            return Ok(Some(AuthorityState::Reserved(reservation)))
+        }
         (Some(hash), Some(raw)) => (hash, raw),
         _ => return Err(AuthorityError::Internal),
     };
@@ -424,34 +426,12 @@ fn parse_authority_state(row: sqlx::postgres::PgRow) -> Result<AuthorityState, A
         ExactRawTransaction::new(raw)?,
     );
     let Some(settlement) = settlement else {
-        return Ok(AuthorityState::Prepared(prepared));
+        return Ok(Some(AuthorityState::Prepared(prepared)));
     };
     let evidence = qualify_settlement(&settlement)?;
-    Ok(AuthorityState::Settled(SettledRecord::new(
+    Ok(Some(AuthorityState::Settled(SettledRecord::new(
         prepared, evidence,
-    )?))
-}
-
-async fn load_domain(
-    connection: &mut PgConnection,
-    key: &NonceDomain,
-) -> Result<bool, AuthorityError> {
-    let epoch = key.authority_epoch().as_bytes();
-    let genesis = key.chain_instance().expected_genesis_hash().as_bytes();
-    let sender = key.sender().as_bytes();
-    let retained: Option<i32> = sqlx::query_scalar(
-        "SELECT 1 FROM mfm_evm_tx.nonce_domains \
-         WHERE authority_epoch = $1 AND chain_id = $2::numeric \
-           AND genesis_hash = $3 AND sender = $4",
-    )
-    .bind(epoch)
-    .bind(key.chain_instance().chain_id().to_string())
-    .bind(genesis.as_slice())
-    .bind(sender.as_slice())
-    .fetch_optional(connection)
-    .await
-    .map_err(unavailable)?;
-    Ok(retained.is_some())
+    )?)))
 }
 
 async fn latest_reservation_effect(
@@ -479,36 +459,10 @@ async fn latest_reservation_effect(
         .transpose()
 }
 
-async fn insert_domain(
-    connection: &mut PgConnection,
-    domain: &NonceDomain,
-) -> Result<(), AuthorityError> {
-    let epoch = domain.authority_epoch().as_bytes();
-    let genesis = domain.chain_instance().expected_genesis_hash().as_bytes();
-    let sender = domain.sender().as_bytes();
-    let inserted = sqlx::query(
-        "INSERT INTO mfm_evm_tx.nonce_domains \
-         (authority_epoch, chain_id, genesis_hash, sender) \
-         VALUES ($1, $2::numeric, $3, $4) ON CONFLICT DO NOTHING",
-    )
-    .bind(epoch)
-    .bind(domain.chain_instance().chain_id().to_string())
-    .bind(genesis.as_slice())
-    .bind(sender.as_slice())
-    .execute(&mut *connection)
-    .await
-    .map_err(unavailable)?
-    .rows_affected();
-    if inserted == 0 && !load_domain(connection, domain).await? {
-        return Err(AuthorityError::Internal);
-    }
-    Ok(())
-}
-
 async fn insert_reservation(
     connection: &mut PgConnection,
     effect_id: &EffectId,
-    command_ref: &ContentRef,
+    command_value_ref: &ContentRef,
     key: &NonceDomain,
     nonce: u64,
 ) -> Result<bool, AuthorityError> {
@@ -523,8 +477,8 @@ async fn insert_reservation(
          ON CONFLICT DO NOTHING",
     )
     .bind(effect_id.as_str())
-    .bind(command_ref.schema_id().as_str())
-    .bind(command_ref.content_digest().as_str())
+    .bind(command_value_ref.schema_id().as_str())
+    .bind(command_value_ref.content_digest().as_str())
     .bind(epoch)
     .bind(key.chain_instance().chain_id().to_string())
     .bind(genesis.as_slice())
@@ -579,22 +533,14 @@ fn evm_address_from_bytes(bytes: &[u8]) -> Result<EvmAddress, AuthorityError> {
     Ok(EvmAddress::from_bytes(exact))
 }
 
-fn nonce_domain_lock_preimage(key: &NonceDomain) -> Result<String, AuthorityError> {
-    let epoch = key.authority_epoch().as_bytes();
-    let json = format!(
-        "{{\"authority_epoch\":\"{}\",\"chain_id\":{},\"domain\":\"mfm.evm.nonce-domain-lock.v1\",\"expected_genesis_hash\":\"{}\",\"sender\":\"{}\"}}",
-        CanonicalBytes::new(epoch.to_vec()).encoded(),
-        key.chain_instance().chain_id(),
-        key.chain_instance().expected_genesis_hash(),
-        key.sender(),
-    );
-    PlainCanonicalJsonBytes::from_canonical_json_slice(json.as_bytes()).map_err(internal)?;
-    Ok(json)
-}
-
 fn nonce_domain_lock_key(key: &NonceDomain) -> Result<i64, AuthorityError> {
-    let preimage = nonce_domain_lock_preimage(key)?;
-    let digest = sha256_digest_bytes(preimage.as_bytes());
+    let mut preimage = Vec::with_capacity(119);
+    preimage.extend_from_slice(b"mfm.evm.nonce-domain-lock.v1\0");
+    preimage.extend_from_slice(key.authority_epoch().as_bytes());
+    preimage.extend_from_slice(&key.chain_instance().chain_id().get().to_be_bytes());
+    preimage.extend_from_slice(key.chain_instance().expected_genesis_hash().as_bytes());
+    preimage.extend_from_slice(key.sender().as_bytes());
+    let digest = sha256_digest_bytes(&preimage);
     let first: [u8; 8] = digest.as_bytes()[..8].try_into().map_err(internal)?;
     Ok(i64::from_be_bytes(first))
 }
@@ -622,13 +568,4 @@ pub(crate) async fn load_evm_tx_epoch(
         return Err(GateError::Incompatible);
     }
     epoch_from_bytes(&markers[0].1).map_err(|_| GateError::Incompatible)
-}
-
-#[cfg(test)]
-pub(crate) fn test_lock_vector(
-    key: &NonceDomain,
-) -> Result<(String, [u8; 32], i64), AuthorityError> {
-    let preimage = nonce_domain_lock_preimage(key)?;
-    let digest = *sha256_digest_bytes(preimage.as_bytes()).as_bytes();
-    Ok((preimage, digest, nonce_domain_lock_key(key)?))
 }

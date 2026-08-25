@@ -72,7 +72,7 @@ impl NonceDomain {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Reservation {
     effect_id: EffectId,
-    command_ref: ContentRef,
+    command_value_ref: ContentRef,
     domain: NonceDomain,
     nonce: u64,
 }
@@ -81,13 +81,13 @@ impl Reservation {
     /// Constructs one checked reservation from checked public identities.
     pub fn new(
         effect_id: EffectId,
-        command_ref: ContentRef,
+        command_value_ref: ContentRef,
         domain: NonceDomain,
         nonce: u64,
     ) -> Self {
         Self {
             effect_id,
-            command_ref,
+            command_value_ref,
             domain,
             nonce,
         }
@@ -99,8 +99,8 @@ impl Reservation {
     }
 
     /// Returns the exact prepared-command reference.
-    pub const fn command_ref(&self) -> &ContentRef {
-        &self.command_ref
+    pub const fn command_value_ref(&self) -> &ContentRef {
+        &self.command_value_ref
     }
 
     /// Returns the complete nonce domain.
@@ -222,38 +222,23 @@ pub trait EvmTransactionAuthority: Send + Sync {
     /// Returns the immutable epoch captured during concrete authority construction.
     fn authority_epoch(&self) -> &EvmAuthorityEpoch;
 
-    /// Loads and qualifies one Effect under its expected command identity.
-    fn load<'a>(
-        &'a self,
-        effect_id: &'a EffectId,
-        expected_command_ref: &'a ContentRef,
-    ) -> AuthorityFuture<'a, Option<AuthorityState>>;
+    /// Loads and qualifies every retained fact for one Effect.
+    fn load<'a>(&'a self, effect_id: &'a EffectId) -> AuthorityFuture<'a, Option<AuthorityState>>;
 
     /// Atomically creates or exactly compares one nonce reservation.
     fn reserve_or_compare<'a>(
         &'a self,
         effect_id: &'a EffectId,
-        command_ref: &'a ContentRef,
+        command_value_ref: &'a ContentRef,
         domain: &'a NonceDomain,
         observed_pending_nonce: u64,
     ) -> AuthorityFuture<'a, Reservation>;
 
     /// Appends or exactly compares one prepared transaction fact.
-    fn retain_prepared<'a>(
-        &'a self,
-        effect_id: &'a EffectId,
-        command_ref: &'a ContentRef,
-        transaction_hash: &'a EvmHash,
-        raw_transaction: &'a ExactRawTransaction,
-    ) -> AuthorityFuture<'a, PreparedRecord>;
+    fn retain_prepared<'a>(&'a self, candidate: &'a PreparedRecord) -> AuthorityFuture<'a, ()>;
 
     /// Appends or exactly compares one terminal settlement fact.
-    fn retain_settlement<'a>(
-        &'a self,
-        effect_id: &'a EffectId,
-        command_ref: &'a ContentRef,
-        evidence: &'a EvmTransactionSettlement,
-    ) -> AuthorityFuture<'a, SettledRecord>;
+    fn retain_settlement<'a>(&'a self, candidate: &'a SettledRecord) -> AuthorityFuture<'a, ()>;
 }
 
 #[cfg(test)]
