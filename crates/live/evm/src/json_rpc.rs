@@ -134,7 +134,7 @@ impl JsonRpcEvmProvider {
         }
         match (object.get("result"), object.get("error")) {
             (Some(result), None) => Ok(RpcOutcome::Result(result.clone())),
-            (None, Some(error)) if error.is_object() => Ok(RpcOutcome::Error),
+            (None, Some(error)) if valid_rpc_error(error) => Ok(RpcOutcome::Error),
             _ => Err(AdapterError::Unavailable),
         }
     }
@@ -195,7 +195,7 @@ impl JsonRpcEvmProvider {
         source: &EvmBalanceSource,
         anchor: &EvmBlockAnchor,
         data: String,
-    ) -> Result<Option<String>, AdapterError> {
+    ) -> Result<Option<AbiWord>, AdapterError> {
         let token = source.token().ok_or(AdapterError::Internal)?;
         let to = checked_address(token.as_str())?;
         let tag = block_tag(anchor.number())?;
@@ -208,11 +208,11 @@ impl JsonRpcEvmProvider {
         else {
             return Ok(None);
         };
-        let word = result.as_str().ok_or(AdapterError::Unavailable)?;
-        if word == "0x" {
+        let data = RpcData::parse(result.as_str().ok_or(AdapterError::Unavailable)?, 32)?;
+        if data.0.is_empty() {
             return Ok(None);
         }
-        Ok(Some(word.to_owned()))
+        AbiWord::try_from(data).map(Some)
     }
 
     /// Routes one checked Read subject to its exact RPC call.
@@ -253,7 +253,7 @@ impl JsonRpcEvmProvider {
                 else {
                     return Ok(EvmProviderResponse::SafeFailure);
                 };
-                let decimals = word_to_u8(&word).ok_or(AdapterError::Unavailable)?;
+                let decimals = word_to_u8(word).ok_or(AdapterError::Unavailable)?;
                 Ok(returned(EvmReadValue::TokenDecimals(decimals)))
             }
             EvmReadSubject::TokenBalance { source, anchor } => {
@@ -267,7 +267,7 @@ impl JsonRpcEvmProvider {
                 else {
                     return Ok(EvmProviderResponse::SafeFailure);
                 };
-                let units = quantity_to_decimal(&word).ok_or(AdapterError::Unavailable)?;
+                let units = decode_abi_u256(word).to_string();
                 Ok(returned(EvmReadValue::RawUnits(
                     EvmU256::new(units).map_err(|_| AdapterError::Unavailable)?,
                 )))
@@ -310,11 +310,11 @@ impl JsonRpcEvmProvider {
                 serde_json::json!([target.as_str(), tag.clone()]),
             )
             .await?;
-        let code = decode_data(
+        let code = RpcData::parse(
             code.as_str().ok_or(AdapterError::Unavailable)?,
             MAX_EVM_CONTRACT_CODE_BYTES,
         )?;
-        if code.is_empty() {
+        if code.0.is_empty() {
             return Ok(EvmProviderResponse::Rejected);
         }
         let calldata = mfm_canonical::CanonicalBytes::from_base64url_no_pad(calldata.to_owned())
@@ -329,10 +329,11 @@ impl JsonRpcEvmProvider {
                 }, tag]),
             )
             .await?;
-        let return_bytes = decode_data(
+        let return_bytes = RpcData::parse(
             result.as_str().ok_or(AdapterError::Unavailable)?,
             MAX_EVM_CALL_RETURN_BYTES,
-        )?;
+        )?
+        .0;
         let Some(confirmed_anchor) = self
             .strict_block_anchor(block_tag(authored_anchor.number())?)
             .await?
@@ -492,6 +493,63 @@ enum RpcOutcome {
     Error,
 }
 
+/// Checked JSON-RPC QUANTITY ingress.
+struct RpcQuantity(U256);
+
+impl RpcQuantity {
+    fn parse(value: &str) -> Result<Self, AdapterError> {
+        let digits = value.strip_prefix("0x").ok_or(AdapterError::Unavailable)?;
+        if digits.is_empty()
+            || (digits.len() > 1 && digits.starts_with('0'))
+            || digits.len() > 64
+            || !is_lower_hex(digits)
+        {
+            return Err(AdapterError::Unavailable);
+        }
+        U256::from_str_radix(digits, 16)
+            .map(Self)
+            .map_err(|_| AdapterError::Unavailable)
+    }
+
+    fn decimal(&self) -> String {
+        self.0.to_string()
+    }
+
+    fn to_u64(&self) -> Option<u64> {
+        u64::try_from(self.0).ok()
+    }
+}
+
+/// Checked JSON-RPC DATA ingress.
+#[derive(Debug, PartialEq, Eq)]
+struct RpcData(Vec<u8>);
+
+impl RpcData {
+    fn parse(value: &str, maximum: usize) -> Result<Self, AdapterError> {
+        let digits = value.strip_prefix("0x").ok_or(AdapterError::Unavailable)?;
+        if digits.len() % 2 != 0 || digits.len() / 2 > maximum || !is_lower_hex(digits) {
+            return Err(AdapterError::Unavailable);
+        }
+        hex::decode(digits)
+            .map(Self)
+            .map_err(|_| AdapterError::Unavailable)
+    }
+}
+
+/// One exact ABI word decoded from JSON-RPC DATA.
+struct AbiWord([u8; 32]);
+
+impl TryFrom<RpcData> for AbiWord {
+    type Error = AdapterError;
+
+    fn try_from(data: RpcData) -> Result<Self, Self::Error> {
+        data.0
+            .try_into()
+            .map(Self)
+            .map_err(|_| AdapterError::Unavailable)
+    }
+}
+
 async fn bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, AdapterError> {
     if response
         .content_length()
@@ -529,7 +587,7 @@ fn decimals_calldata() -> String {
 }
 
 fn balance_of_calldata(holder: &Address) -> String {
-    format!("0x{BALANCE_OF_SELECTOR}{:0>64}", hex::encode(holder))
+    format!("0x{BALANCE_OF_SELECTOR}{}", hex::encode(holder.into_word()))
 }
 
 /// Renders one checked decimal block number as its `0x` quantity tag.
@@ -541,45 +599,26 @@ fn block_tag(number: &EvmU256) -> Result<String, AdapterError> {
         .map_err(|_| AdapterError::Internal)
 }
 
-fn quantity_digits(value: &str) -> Option<&str> {
-    let digits = value.strip_prefix("0x")?;
-    (!digits.is_empty()
-        && (digits.len() == 1 || !digits.starts_with('0'))
-        && digits
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-    .then_some(digits)
-}
-
-fn data_digits(value: &str) -> Option<&str> {
-    let digits = value.strip_prefix("0x")?;
-    (!digits.is_empty()
-        && digits
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-    .then_some(digits)
+fn is_lower_hex(digits: &str) -> bool {
+    digits
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn quantity_to_u64(value: &str) -> Option<u64> {
-    let digits = quantity_digits(value)?;
-    (digits.len() <= 16).then_some(())?;
-    u64::from_str_radix(digits, 16).ok()
+    RpcQuantity::parse(value).ok()?.to_u64()
 }
 
 fn quantity_to_decimal(value: &str) -> Option<String> {
-    let digits = quantity_digits(value)?;
-    (digits.len() <= 64).then_some(())?;
-    U256::from_str_radix(digits, 16)
-        .ok()
-        .map(|value| value.to_string())
+    RpcQuantity::parse(value).ok().map(|value| value.decimal())
 }
 
-fn word_to_u8(value: &str) -> Option<u8> {
-    let digits = data_digits(value)?;
-    (digits.len() == 64).then_some(())?;
-    let (leading, last) = digits.split_at(62);
-    leading.bytes().all(|byte| byte == b'0').then_some(())?;
-    u8::from_str_radix(last, 16).ok()
+fn decode_abi_u256(word: AbiWord) -> U256 {
+    U256::from_be_bytes(word.0)
+}
+
+fn word_to_u8(word: AbiWord) -> Option<u8> {
+    u8::try_from(decode_abi_u256(word)).ok()
 }
 
 fn parse_block_anchor(value: &serde_json::Value) -> Result<EvmBlockAnchor, AdapterError> {
@@ -667,17 +706,21 @@ fn nullable_address_field(
         .ok_or(AdapterError::Unavailable)
 }
 
-fn decode_data(value: &str, maximum: usize) -> Result<Vec<u8>, AdapterError> {
-    let digits = value.strip_prefix("0x").ok_or(AdapterError::Unavailable)?;
-    if digits.len() % 2 != 0
-        || digits.len() / 2 > maximum
-        || !digits
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(AdapterError::Unavailable);
-    }
-    hex::decode(digits).map_err(|_| AdapterError::Unavailable)
+fn valid_rpc_error(value: &serde_json::Value) -> bool {
+    let Some(error) = value.as_object() else {
+        return false;
+    };
+    error
+        .get("code")
+        .and_then(serde_json::Value::as_i64)
+        .is_some()
+        && error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && error
+            .keys()
+            .all(|key| matches!(key.as_str(), "code" | "message" | "data"))
 }
 
 #[cfg(test)]
