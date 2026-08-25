@@ -32,25 +32,8 @@ pub(super) fn schema_shape_tokens(
     attrs: &ContainerAttrs,
     generic_params: &[Ident],
 ) -> syn::Result<SchemaShapeOutput> {
-    if attrs.unsigned_minimum.is_some()
-        && (kind != DeriveKind::PersistedContract || !attrs.serde_transparent)
-    {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            "unsigned bounds require PersistedSchema on a serde-transparent newtype",
-        ));
-    }
-    if attrs.transparent_string {
-        return transparent_string_shape_tokens(data, kind);
-    }
-    if attrs.transparent_bytes {
-        return transparent_bytes_shape_tokens(data);
-    }
-    if attrs.transparent_map {
-        return transparent_map_shape_tokens(data, kind, generic_params);
-    }
-    if kind == DeriveKind::PersistedContract && attrs.serde_transparent {
-        return transparent_newtype_shape_tokens(data, kind, attrs, generic_params);
+    if attrs.serde_transparent || attrs.serde_try_from.is_some() {
+        return transparent_wrapper_shape_tokens(data, kind, attrs, generic_params);
     }
 
     match data {
@@ -84,7 +67,7 @@ pub(super) fn schema_shape_tokens(
 ///
 /// The retained bytes are exactly the inner value's bytes, so the contract's
 /// shape is the inner shape rather than a wrapper object.
-fn transparent_newtype_shape_tokens(
+fn transparent_wrapper_shape_tokens(
     data: &Data,
     kind: DeriveKind,
     attrs: &ContainerAttrs,
@@ -93,173 +76,45 @@ fn transparent_newtype_shape_tokens(
     let Data::Struct(DataStruct { fields, .. }) = data else {
         return Err(syn::Error::new(
             Span::call_site(),
-            "serde(transparent) requires a one-field struct",
+            "transparent MFM wire conversion requires a one-field struct",
         ));
     };
     let mut iter = fields.iter();
     let (Some(field), None) = (iter.next(), iter.next()) else {
         return Err(syn::Error::new(
             fields.span(),
-            "serde(transparent) requires exactly one field",
+            "transparent MFM wire conversion requires exactly one field",
         ));
     };
-    let shape = if let Some((minimum, maximum)) = attrs.unsigned_minimum.zip(attrs.unsigned_maximum)
-    {
-        let Type::Path(path) = &field.ty else {
-            return Err(syn::Error::new_spanned(
-                &field.ty,
-                "unsigned bounds require an unsigned integer newtype",
-            ));
-        };
-        let supported = path.path.segments.last().is_some_and(|segment| {
-            matches!(
-                segment.ident.to_string().as_str(),
-                "u8" | "u16" | "u32" | "u64"
-            )
-        });
-        if !supported {
-            return Err(syn::Error::new_spanned(
-                &field.ty,
-                "unsigned bounds require an unsigned integer newtype",
-            ));
-        }
-        quote!(::mfm_values::SchemaShape::UnsignedRange {
-            minimum: #minimum,
-            maximum: #maximum,
-        })
-    } else {
-        shape_tokens(&field.ty, kind, generic_params)?
-    };
-    Ok(SchemaShapeOutput {
-        shape,
-        default_bounds: Vec::new(),
-    })
-}
-
-fn transparent_map_shape_tokens(
-    data: &Data,
-    kind: DeriveKind,
-    generic_params: &[Ident],
-) -> syn::Result<SchemaShapeOutput> {
-    let Data::Struct(DataStruct {
-        fields: Fields::Named(fields),
-        ..
-    }) = data
-    else {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            "mfm(transparent_map) requires a named struct",
-        ));
-    };
-
-    if fields.named.len() != 1 {
-        return Err(syn::Error::new(
-            fields.span(),
-            "mfm(transparent_map) requires exactly one BTreeMap field",
-        ));
-    }
-
-    let field = fields
-        .named
-        .first()
-        .expect("field count checked before access");
-    let Type::Path(type_path) = &field.ty else {
-        return Err(syn::Error::new_spanned(
-            &field.ty,
-            "mfm(transparent_map) field must be BTreeMap<String, V>",
-        ));
-    };
-    let Some(segment) = type_path.path.segments.last() else {
-        return Err(syn::Error::new_spanned(
-            &field.ty,
-            "unsupported empty type path",
-        ));
-    };
-    if segment.ident != "BTreeMap" {
-        return Err(syn::Error::new_spanned(
-            &field.ty,
-            "mfm(transparent_map) field must be BTreeMap<String, V>",
-        ));
-    }
-    let (key, value) = two_generic_types(segment, "BTreeMap")?;
-    if !is_string_type(key) {
-        return Err(syn::Error::new_spanned(
-            key,
-            "mfm(transparent_map) BTreeMap keys must be String",
-        ));
-    }
-    let value_shape = shape_tokens(value, kind, generic_params)?;
-
-    Ok(SchemaShapeOutput {
-        shape: if kind == DeriveKind::PersistedContract {
-            quote!(::mfm_values::SchemaShape::BoundedStringMap {
-                key_grammar: ::mfm_values::StringGrammar::UnicodeScalarText,
-                key_minimum_bytes: 0,
-                key_maximum_bytes: ::mfm_values::MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES as u32,
-                value: Box::new(#value_shape),
-                minimum_entries: 0,
-                maximum_entries: ::mfm_values::MAX_OBJECT_ENTRIES as u32,
-            })
-        } else {
-            quote!(::mfm_values::SchemaShape::BTreeMapString {
-                value: Box::new(#value_shape)
-            })
-        },
-        default_bounds: Vec::new(),
-    })
-}
-
-fn transparent_string_shape_tokens(
-    data: &Data,
-    kind: DeriveKind,
-) -> syn::Result<SchemaShapeOutput> {
-    let Data::Struct(DataStruct {
-        fields: Fields::Named(fields),
-        ..
-    }) = data
-    else {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            "mfm(transparent_string) requires a named struct",
-        ));
-    };
-
-    if fields.named.len() != 1 {
-        return Err(syn::Error::new(
-            fields.span(),
-            "mfm(transparent_string) requires exactly one String field",
-        ));
-    }
-
-    let field = fields
-        .named
-        .first()
-        .expect("field count checked before access");
-    if !is_string_type(&field.ty) {
-        return Err(syn::Error::new_spanned(
-            &field.ty,
-            "mfm(transparent_string) field must be String",
-        ));
-    }
     let field_attrs = FieldAttrs::parse(&field.attrs)?;
     if field_attrs.minimum_items.is_some()
         || field_attrs.maximum_items.is_some()
         || field_attrs.literal.is_some()
         || field_attrs.default
         || field_attrs.optional_absent
-        || field_attrs.unsigned_minimum.is_some()
-        || field_attrs.unsigned_maximum.is_some()
+        || field_attrs.persisted
     {
         return Err(syn::Error::new_spanned(
             field,
-            "transparent strings accept only UTF-8 byte bounds",
+            "transparent wrappers accept only byte bounds",
         ));
     }
 
-    Ok(SchemaShapeOutput {
-        shape: if let Some((minimum, maximum)) =
-            field_attrs.minimum_bytes.zip(field_attrs.maximum_bytes)
-        {
+    let string_conversion = match (&attrs.serde_try_from, &attrs.serde_into) {
+        (Some(from), Some(into)) if from == "String" && into == "String" => true,
+        (Some(_), Some(_)) => {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "MFM derives support only String serde conversions",
+            ));
+        }
+        (None, None) => false,
+        _ => unreachable!("container attributes require paired serde conversions"),
+    };
+
+    let bounds = field_attrs.minimum_bytes.zip(field_attrs.maximum_bytes);
+    let shape = if string_conversion {
+        if let Some((minimum, maximum)) = bounds {
             quote!(::mfm_values::SchemaShape::BoundedString {
                 minimum_bytes: #minimum,
                 maximum_bytes: #maximum,
@@ -269,66 +124,45 @@ fn transparent_string_shape_tokens(
             bounded_persisted_string()
         } else {
             quote!(::mfm_values::SchemaShape::String)
-        },
-        default_bounds: Vec::new(),
-    })
-}
-
-fn transparent_bytes_shape_tokens(data: &Data) -> syn::Result<SchemaShapeOutput> {
-    let Data::Struct(DataStruct {
-        fields: Fields::Named(fields),
-        ..
-    }) = data
-    else {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            "mfm(transparent_bytes) requires a named struct",
-        ));
+        }
+    } else if let Some((minimum, maximum)) = bounds {
+        let Type::Path(path) = &field.ty else {
+            return Err(syn::Error::new_spanned(
+                &field.ty,
+                "bounded transparent wrappers require String or CanonicalBytes",
+            ));
+        };
+        match path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        {
+            Some(ident) if ident == "String" => {
+                quote!(::mfm_values::SchemaShape::BoundedString {
+                    minimum_bytes: #minimum,
+                    maximum_bytes: #maximum,
+                    grammar: ::mfm_values::StringGrammar::UnicodeScalarText,
+                })
+            }
+            Some(ident) if ident == "CanonicalBytes" => {
+                quote!(::mfm_values::SchemaShape::BoundedBytes {
+                    minimum_decoded_bytes: #minimum,
+                    maximum_decoded_bytes: #maximum,
+                })
+            }
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    &field.ty,
+                    "bounded transparent wrappers require String or CanonicalBytes",
+                ));
+            }
+        }
+    } else {
+        shape_tokens(&field.ty, kind, generic_params)?
     };
-    if fields.named.len() != 1 {
-        return Err(syn::Error::new(
-            fields.span(),
-            "mfm(transparent_bytes) requires exactly one String field",
-        ));
-    }
-    let field = fields
-        .named
-        .first()
-        .expect("field count checked before access");
-    if !is_string_type(&field.ty) {
-        return Err(syn::Error::new_spanned(
-            &field.ty,
-            "mfm(transparent_bytes) field must be String",
-        ));
-    }
-    let attrs = FieldAttrs::parse(&field.attrs)?;
-    let (minimum, maximum) = attrs
-        .minimum_bytes
-        .zip(attrs.maximum_bytes)
-        .ok_or_else(|| {
-            syn::Error::new_spanned(
-                field,
-                "transparent bytes require minimum_bytes and maximum_bytes",
-            )
-        })?;
-    if attrs.minimum_items.is_some()
-        || attrs.maximum_items.is_some()
-        || attrs.literal.is_some()
-        || attrs.default
-        || attrs.optional_absent
-        || attrs.unsigned_minimum.is_some()
-        || attrs.unsigned_maximum.is_some()
-    {
-        return Err(syn::Error::new_spanned(
-            field,
-            "transparent bytes accept only decoded byte bounds",
-        ));
-    }
     Ok(SchemaShapeOutput {
-        shape: quote!(::mfm_values::SchemaShape::BoundedBytes {
-            minimum_decoded_bytes: #minimum,
-            maximum_decoded_bytes: #maximum,
-        }),
+        shape,
         default_bounds: Vec::new(),
     })
 }
@@ -492,38 +326,15 @@ fn field_descriptor_tokens(
             ));
         }
         if let Some((minimum_bytes, maximum_bytes)) = attrs.minimum_bytes.zip(attrs.maximum_bytes) {
-            if !is_string_type(&field.ty) {
+            if !is_string_type(&field.ty) && !is_type_named(&field.ty, "CanonicalBytes") {
                 return Err(syn::Error::new_spanned(
                     &field.ty,
-                    "decoded byte bounds require a base64url String field",
+                    "decoded byte bounds require String or CanonicalBytes",
                 ));
             }
             shape = quote!(::mfm_values::SchemaShape::BoundedBytes {
                 minimum_decoded_bytes: #minimum_bytes,
                 maximum_decoded_bytes: #maximum_bytes,
-            });
-        }
-        if let Some((minimum, maximum)) = attrs.unsigned_minimum.zip(attrs.unsigned_maximum) {
-            let Type::Path(path) = &field.ty else {
-                return Err(syn::Error::new_spanned(
-                    &field.ty,
-                    "unsigned bounds require an unsigned integer field",
-                ));
-            };
-            if !path.path.segments.last().is_some_and(|segment| {
-                matches!(
-                    segment.ident.to_string().as_str(),
-                    "u8" | "u16" | "u32" | "u64"
-                )
-            }) {
-                return Err(syn::Error::new_spanned(
-                    &field.ty,
-                    "unsigned bounds require an unsigned integer field",
-                ));
-            }
-            shape = quote!(::mfm_values::SchemaShape::UnsignedRange {
-                minimum: #minimum,
-                maximum: #maximum,
             });
         }
         if attrs.minimum_items.is_some() || attrs.maximum_items.is_some() {
@@ -654,7 +465,10 @@ fn shape_tokens_for_path(
         "u16" => Ok(unsigned_integer(16)),
         "u32" => Ok(unsigned_integer(32)),
         "u64" => Ok(unsigned_integer(64)),
-        "NonZeroU64" => Ok(unsigned_integer(64)),
+        "NonZeroU64" => Ok(quote!(::mfm_values::SchemaShape::UnsignedRange {
+            minimum: 1,
+            maximum: u64::MAX
+        })),
         "NonZeroU16" => Ok(quote!(::mfm_values::SchemaShape::UnsignedRange {
             minimum: 1,
             maximum: u64::from(u16::MAX)
@@ -779,7 +593,11 @@ fn unsigned_integer(bits: u16) -> proc_macro2::TokenStream {
 }
 
 fn is_string_type(ty: &Type) -> bool {
-    matches!(ty, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "String"))
+    is_type_named(ty, "String")
+}
+
+fn is_type_named(ty: &Type, expected: &str) -> bool {
+    matches!(ty, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == expected))
 }
 
 /// Maps a checked identity type to its bounded-string shape and grammar.

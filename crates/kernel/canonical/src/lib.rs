@@ -37,6 +37,7 @@ use ring::digest::{digest, Context, SHA256};
 use serde::de::{
     self, Deserialize, DeserializeSeed, Deserializer, Error as _, MapAccess, SeqAccess, Visitor,
 };
+use serde::{Serialize, Serializer};
 
 use crate::limits::MAX_BASE64URL_CHARACTERS;
 
@@ -708,6 +709,25 @@ pub struct CanonicalBytes {
     encoded: String,
 }
 
+impl Serialize for CanonicalBytes {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.encoded())
+    }
+}
+
+impl<'de> Deserialize<'de> for CanonicalBytes {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        Self::from_base64url_no_pad(encoded).map_err(de::Error::custom)
+    }
+}
+
 impl CanonicalBytes {
     /// Creates canonical bytes from raw binary data.
     pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
@@ -1104,5 +1124,28 @@ fn decode_base64url_char(byte: u8) -> Option<u8> {
         b'-' => Some(62),
         b'_' => Some(63),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CanonicalBytes;
+
+    #[test]
+    fn canonical_bytes_serde_is_exact_base64url_without_padding() {
+        let bytes = CanonicalBytes::new([0xfb, 0xff]);
+        assert_eq!(
+            serde_json::to_string(&bytes).expect("serialize"),
+            r#""-_8""#
+        );
+        assert_eq!(
+            serde_json::from_str::<CanonicalBytes>(r#""-_8""#)
+                .expect("deserialize")
+                .as_bytes(),
+            [0xfb, 0xff]
+        );
+        for invalid in [r#""-_8=""#, r#""+/8""#, r#""AB""#, "null", "[]"] {
+            assert!(serde_json::from_str::<CanonicalBytes>(invalid).is_err());
+        }
     }
 }

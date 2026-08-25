@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use mfm_canonical::raw_content_digest;
 use mfm_evm::{
     EvmAddress, EvmAuthorityEpoch, EvmBlockAnchor, EvmChainInstance, EvmHash,
@@ -25,10 +27,9 @@ fn domain() -> NonceDomain {
     NonceDomain::new(
         EvmAuthorityEpoch::new([1; 32]),
         EvmChainInstance::new(
-            1,
+            NonZeroU64::new(1).expect("nonzero chain"),
             EvmHash::new(format!("0x{}", "02".repeat(32))).expect("genesis"),
-        )
-        .expect("chain"),
+        ),
         EvmAddress::new("0x0303030303030303030303030303030303030303").expect("sender"),
     )
 }

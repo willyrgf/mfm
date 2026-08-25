@@ -6,6 +6,7 @@
 //! loop, output map, parallel branch, or multi-result join.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU64;
 
 use mfm_evm::{
     CollectEvmBalances, EvmBalanceCollectionCompletion, EvmBalanceContext, EvmBalanceFailure,
@@ -61,7 +62,6 @@ enum QuoteCode {
 /// One public Portfolio identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(transparent)]
-#[mfm(transparent_string)]
 pub struct PortfolioId {
     /// Stable public spelling.
     pub value: String,
@@ -273,16 +273,16 @@ fn completed_collection_scaled_total(
 ) -> Option<String> {
     if demand
         .request
-        .sources
+        .sources()
         .first()
         .is_none_or(|source| result.chain_id != source.chain_id())
         || result.collection_ordinal != ordinal
         || result.anchor.validate().is_err()
-        || result.holdings.len() != demand.request.sources.len()
+        || result.holdings.len() != demand.request.sources().len()
         || result
             .holdings
             .iter()
-            .zip(&demand.request.sources)
+            .zip(demand.request.sources())
             .any(|(holding, source)| {
                 holding.source_id != source.source_id()
                     || holding.decimals > 30
@@ -308,7 +308,7 @@ fn completed_collection_scaled_total(
 fn holding_matches_planned_source(holding: &PortfolioHolding, source: &EvmBalanceSource) -> bool {
     match (&holding.asset, source.token()) {
         (PortfolioAsset::Native, None) => true,
-        (PortfolioAsset::Token { contract }, Some(token)) => contract == token.as_str(),
+        (PortfolioAsset::Token { contract }, Some(token)) => contract == &token.to_string(),
         _ => false,
     }
 }
@@ -339,7 +339,7 @@ struct PortfolioHolding {
 #[serde(deny_unknown_fields)]
 struct PortfolioSnapshotCollection {
     pub collection_ordinal: u32,
-    pub chain_id: u64,
+    pub chain_id: NonZeroU64,
     pub anchor: PortfolioAnchor,
     pub holdings: Vec<PortfolioHolding>,
 }
@@ -430,10 +430,7 @@ fn collection_total_value_dec(
     collection: &PortfolioSnapshotCollection,
     source_ids: &mut BTreeSet<String>,
 ) -> Option<String> {
-    if collection.chain_id == 0
-        || collection.anchor.validate().is_err()
-        || collection.holdings.is_empty()
-    {
+    if collection.anchor.validate().is_err() || collection.holdings.is_empty() {
         return None;
     }
     let mut values = Vec::with_capacity(collection.holdings.len());
@@ -720,7 +717,7 @@ fn consolidate_portfolio(
         else {
             return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed);
         };
-        let total_value_dec = decimal_amount(&total_scaled, demand.request.decimals);
+        let total_value_dec = decimal_amount(&total_scaled, demand.request.decimals());
         let total_value_dec = canonical_decimal(total_value_dec);
         totals.push(total_value_dec.clone());
         summaries.push(PortfolioCollectionSummary {
@@ -1011,7 +1008,7 @@ pub fn plan_snapshot(
     let required_chains = config
         .collections
         .iter()
-        .filter_map(|collection| collection.request.sources.first())
+        .filter_map(|collection| collection.request.sources().first())
         .map(EvmBalanceSource::chain_id)
         .collect::<BTreeSet<_>>();
     if required_chains.len() != targets.len()
@@ -1028,7 +1025,7 @@ pub fn plan_snapshot(
     for collection in &config.collections {
         let chain_id = collection
             .request
-            .sources
+            .sources()
             .first()
             .map(EvmBalanceSource::chain_id)
             .ok_or(PortfolioError::Program)?;
@@ -1045,7 +1042,7 @@ pub fn plan_snapshot(
         checked_collections.push(
             CollectEvmBalances::<PortfolioContinuation>::new(
                 route_ref,
-                collection.request.sources.len(),
+                collection.request.sources().len(),
             )
             .map_err(|_| PortfolioError::Program)?,
         );
@@ -1121,7 +1118,7 @@ fn valid_public_text(value: &str, maximum: usize) -> bool {
 
 fn total_sources<'a>(requests: impl Iterator<Item = &'a EvmBalanceRequest>) -> usize {
     requests
-        .map(|request| request.sources.len())
+        .map(|request| request.sources().len())
         .try_fold(0usize, usize::checked_add)
         .unwrap_or(usize::MAX)
 }
@@ -1134,6 +1131,6 @@ fn duplicate_text<'a>(mut values: impl Iterator<Item = &'a str>) -> bool {
 fn duplicate_source_ids<'a>(requests: impl Iterator<Item = &'a EvmBalanceRequest>) -> bool {
     let mut source_ids = BTreeSet::new();
     requests
-        .flat_map(|request| &request.sources)
+        .flat_map(EvmBalanceRequest::sources)
         .any(|source| !source_ids.insert(source.source_id()))
 }

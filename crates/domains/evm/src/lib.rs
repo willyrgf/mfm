@@ -8,7 +8,9 @@
 
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 
+use mfm_canonical::CanonicalBytes;
 use mfm_capabilities::ReadCapabilityContract;
 use mfm_ids::{ContentRef, StableId};
 use mfm_program::{
@@ -34,10 +36,10 @@ pub use transaction::{
     CallEvmContract, CreateEvmContract, Eip1559TransactionCommand, EvmAddress, EvmAuthorityEpoch,
     EvmChainInstance, EvmContractCallCompletion, EvmContractCallContext, EvmContractCallFailure,
     EvmContractCreationCompletion, EvmContractCreationContext, EvmContractCreationFailure, EvmHash,
-    EvmTransactionAction, EvmTransactionBinding, EvmTransactionConfirmation, EvmTransactionEffect,
-    EvmTransactionRevert, EvmTransactionRoute, EvmTransactionSettlement, EvmU256,
-    CALL_EVM_CONTRACT_STATE_ID, CREATE_EVM_CONTRACT_STATE_ID, EVM_TRANSACTION_EFFECT_CAPABILITY_ID,
-    MAX_EVM_CALLDATA_BYTES, MAX_EVM_INITCODE_BYTES,
+    EvmTransactionBinding, EvmTransactionConfirmation, EvmTransactionEffect, EvmTransactionRevert,
+    EvmTransactionRoute, EvmTransactionSettlement, EvmU256, CALL_EVM_CONTRACT_STATE_ID,
+    CREATE_EVM_CONTRACT_STATE_ID, EVM_TRANSACTION_EFFECT_CAPABILITY_ID, MAX_EVM_CALLDATA_BYTES,
+    MAX_EVM_INITCODE_BYTES,
 };
 
 macro_rules! impl_checked_deserialize {
@@ -73,30 +75,26 @@ macro_rules! impl_checked_deserialize {
     schema = "mfm.evm-physical-target"
 )]
 pub struct EvmPhysicalTarget {
-    #[mfm(unsigned_minimum = 1, unsigned_maximum = 18446744073709551615)]
-    chain_id: u64,
+    chain_id: NonZeroU64,
     endpoint_ref: ContentRef,
 }
 
 impl_checked_deserialize!(EvmPhysicalTarget {
-    chain_id: u64,
+    chain_id: NonZeroU64,
     endpoint_ref: ContentRef,
 });
 
 impl EvmPhysicalTarget {
     /// Constructs one public route identity.
-    pub fn new(chain_id: u64, endpoint_ref: ContentRef) -> Result<Self, EvmDomainError> {
-        if chain_id == 0 {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(Self {
+    pub fn new(chain_id: NonZeroU64, endpoint_ref: ContentRef) -> Self {
+        Self {
             chain_id,
             endpoint_ref,
-        })
+        }
     }
 
     /// Returns the public EVM chain id.
-    pub const fn chain_id(&self) -> u64 {
+    pub const fn chain_id(&self) -> NonZeroU64 {
         self.chain_id
     }
 
@@ -113,7 +111,7 @@ impl EvmPhysicalTarget {
     }
 
     fn validate(&self) -> Result<(), EvmDomainError> {
-        Self::new(self.chain_id, self.endpoint_ref.clone()).map(|_| ())
+        Ok(())
     }
 }
 
@@ -174,15 +172,14 @@ pub const EVM_BALANCE_SOURCE_LIMIT: usize = 64;
 #[serde(deny_unknown_fields)]
 pub struct EvmBalanceSource {
     source_id: String,
-    #[mfm(unsigned_minimum = 1, unsigned_maximum = 18446744073709551615)]
-    chain_id: u64,
+    chain_id: NonZeroU64,
     address: EvmAddress,
     token: Option<EvmAddress>,
 }
 
 impl_checked_deserialize!(EvmBalanceSource {
     source_id: String,
-    chain_id: u64,
+    chain_id: NonZeroU64,
     address: EvmAddress,
     token: Option<EvmAddress>,
 });
@@ -191,7 +188,7 @@ impl EvmBalanceSource {
     /// Constructs one checked balance source.
     pub fn new(
         source_id: impl Into<String>,
-        chain_id: u64,
+        chain_id: NonZeroU64,
         address: EvmAddress,
         token: Option<EvmAddress>,
     ) -> Result<Self, EvmDomainError> {
@@ -211,7 +208,7 @@ impl EvmBalanceSource {
     }
 
     /// Returns the nonzero chain ID.
-    pub const fn chain_id(&self) -> u64 {
+    pub const fn chain_id(&self) -> NonZeroU64 {
         self.chain_id
     }
 
@@ -227,7 +224,7 @@ impl EvmBalanceSource {
 
     /// Validates one public source identity without changing ownership.
     fn validate(&self) -> Result<(), EvmDomainError> {
-        if !valid_public_text(&self.source_id, 256) || self.chain_id == 0 {
+        if !valid_public_text(&self.source_id, 256) {
             return Err(EvmDomainError::InvalidValue);
         }
         Ok(())
@@ -239,9 +236,9 @@ impl EvmBalanceSource {
 #[serde(deny_unknown_fields)]
 pub struct EvmBalanceRequest {
     /// Ordered sources; the sequential Program expands one State per source.
-    pub sources: Vec<EvmBalanceSource>,
+    sources: Vec<EvmBalanceSource>,
     /// Integer decimal scale for public amounts.
-    pub decimals: u8,
+    decimals: u8,
 }
 
 impl_checked_deserialize!(EvmBalanceRequest {
@@ -289,6 +286,16 @@ impl EvmBalanceRequest {
     /// Scales one exact observed raw amount to this request's declared decimal scale.
     pub fn scale_units(&self, raw_units: &str, source_decimals: u8) -> Option<String> {
         scale_units(raw_units, source_decimals, self.decimals)
+    }
+
+    /// Returns the checked declaration-ordered sources.
+    pub fn sources(&self) -> &[EvmBalanceSource] {
+        &self.sources
+    }
+
+    /// Returns the checked output decimal scale.
+    pub const fn decimals(&self) -> u8 {
+        self.decimals
     }
 }
 
@@ -371,27 +378,27 @@ impl EvmBlockAnchor {
 enum EvmBalanceWork {
     CheckChainIdentity,
     ReadInitialAnchor {
-        checked_chain_id: u64,
+        checked_chain_id: NonZeroU64,
     },
     SelectAsset {
-        checked_chain_id: u64,
+        checked_chain_id: NonZeroU64,
         initial_anchor: EvmBlockAnchor,
     },
     ReadNativeBalance {
-        checked_chain_id: u64,
+        checked_chain_id: NonZeroU64,
         initial_anchor: EvmBlockAnchor,
     },
     ReadTokenDecimals {
-        checked_chain_id: u64,
+        checked_chain_id: NonZeroU64,
         initial_anchor: EvmBlockAnchor,
     },
     ReadTokenBalance {
-        checked_chain_id: u64,
+        checked_chain_id: NonZeroU64,
         initial_anchor: EvmBlockAnchor,
         token_decimals: u8,
     },
     ConfirmAnchor {
-        checked_chain_id: u64,
+        checked_chain_id: NonZeroU64,
         initial_anchor: EvmBlockAnchor,
         source_decimals: u8,
         raw_balance: EvmU256,
@@ -685,14 +692,14 @@ impl EvmCollectedAsset {
 #[serde(deny_unknown_fields)]
 struct EvmCollectedBalanceSource {
     source_id: String,
-    chain_id: u64,
+    chain_id: NonZeroU64,
     address: EvmAddress,
     asset: EvmCollectedAsset,
 }
 
 impl_checked_deserialize!(EvmCollectedBalanceSource {
     source_id: String,
-    chain_id: u64,
+    chain_id: NonZeroU64,
     address: EvmAddress,
     asset: EvmCollectedAsset,
 });
@@ -713,7 +720,7 @@ impl EvmCollectedBalanceSource {
     }
 
     fn validate(&self) -> Result<(), EvmDomainError> {
-        if !valid_public_text(&self.source_id, 256) || self.chain_id == 0 {
+        if !valid_public_text(&self.source_id, 256) {
             return Err(EvmDomainError::InvalidValue);
         }
         self.asset.validate()
@@ -752,11 +759,16 @@ impl EvmCollectedBalance {
 }
 
 type EvmCollectedBalanceParts = (String, String, Option<String>, u8, String);
-type EvmBalanceCollectionParts = (u64, EvmBlockAnchor, Vec<EvmCollectedBalanceParts>, String);
+type EvmBalanceCollectionParts = (
+    NonZeroU64,
+    EvmBlockAnchor,
+    Vec<EvmCollectedBalanceParts>,
+    String,
+);
 type EvmBalanceCollectionCompletionParts<K> = (
     K,
     u32,
-    u64,
+    NonZeroU64,
     String,
     String,
     Vec<EvmCollectedBalanceParts>,
@@ -766,14 +778,14 @@ type EvmBalanceCollectionCompletionParts<K> = (
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 struct EvmBalanceCollectionResult {
-    chain_id: u64,
+    chain_id: NonZeroU64,
     anchor: EvmBlockAnchor,
     balances: Vec<EvmCollectedBalance>,
     total_scaled: String,
 }
 
 impl_checked_deserialize!(EvmBalanceCollectionResult {
-    chain_id: u64,
+    chain_id: NonZeroU64,
     anchor: EvmBlockAnchor,
     balances: Vec<EvmCollectedBalance>,
     total_scaled: String,
@@ -781,8 +793,7 @@ impl_checked_deserialize!(EvmBalanceCollectionResult {
 
 impl EvmBalanceCollectionResult {
     fn validate(&self) -> Result<(), EvmDomainError> {
-        if self.chain_id == 0
-            || self.anchor.validate().is_err()
+        if self.anchor.validate().is_err()
             || self.balances.is_empty()
             || self.balances.len() > EVM_BALANCE_SOURCE_LIMIT
             || self
@@ -808,11 +819,11 @@ impl EvmBalanceCollectionResult {
             .map(|balance| {
                 let token = match balance.source.asset {
                     EvmCollectedAsset::Native => None,
-                    EvmCollectedAsset::Token { contract } => Some(contract.as_str().to_owned()),
+                    EvmCollectedAsset::Token { contract } => Some(contract.to_string()),
                 };
                 (
                     balance.source.source_id,
-                    balance.source.address.as_str().to_owned(),
+                    balance.source.address.to_string(),
                     token,
                     balance.decimals,
                     balance.raw_units.as_str().to_owned(),
@@ -964,7 +975,7 @@ pub enum EvmReadSubject {
         anchor: EvmBlockAnchor,
         /// Canonical base64url-no-pad calldata bytes.
         #[mfm(minimum_bytes = 0, maximum_bytes = 131072)]
-        calldata: String,
+        calldata: CanonicalBytes,
         /// Exact contract target.
         target: EvmAddress,
     },
@@ -1015,7 +1026,7 @@ impl<'de> Deserialize<'de> for EvmReadSubject {
         #[serde(deny_unknown_fields)]
         struct AnchoredValue {
             anchor: EvmBlockAnchor,
-            calldata: String,
+            calldata: CanonicalBytes,
             target: EvmAddress,
         }
         #[derive(Deserialize)]
@@ -1095,7 +1106,9 @@ impl EvmReadSubject {
                 anchor, calldata, ..
             } => {
                 anchor.validate()?;
-                transaction::decode_bounded_bytes(calldata, MAX_EVM_CALLDATA_BYTES).map(|_| ())
+                (calldata.as_bytes().len() <= MAX_EVM_CALLDATA_BYTES)
+                    .then_some(())
+                    .ok_or(EvmDomainError::InvalidValue)
             }
         }
     }
@@ -1106,15 +1119,14 @@ impl EvmReadSubject {
 #[serde(deny_unknown_fields)]
 pub struct EvmReadIntent {
     operation: String,
-    #[mfm(unsigned_minimum = 1, unsigned_maximum = 18446744073709551615)]
-    chain_id: u64,
+    chain_id: NonZeroU64,
     subject: EvmReadSubject,
     route_ref: ContentRef,
 }
 
 impl_checked_deserialize!(EvmReadIntent {
     operation: String,
-    chain_id: u64,
+    chain_id: NonZeroU64,
     subject: EvmReadSubject,
     route_ref: ContentRef,
 });
@@ -1122,7 +1134,7 @@ impl_checked_deserialize!(EvmReadIntent {
 impl EvmReadIntent {
     pub(crate) fn new(
         operation: String,
-        chain_id: u64,
+        chain_id: NonZeroU64,
         subject: EvmReadSubject,
         route_ref: ContentRef,
     ) -> Result<Self, EvmDomainError> {
@@ -1137,7 +1149,7 @@ impl EvmReadIntent {
     }
 
     /// Returns the exact operation and public chain target fixed by this intent.
-    pub fn operation_and_chain_id(&self) -> (&str, u64) {
+    pub fn operation_and_chain_id(&self) -> (&str, NonZeroU64) {
         (&self.operation, self.chain_id)
     }
 
@@ -1152,7 +1164,7 @@ impl EvmReadIntent {
     }
 
     fn validate(&self) -> Result<(), EvmDomainError> {
-        if StableId::new(&self.operation).is_err() || self.chain_id == 0 {
+        if StableId::new(&self.operation).is_err() {
             return Err(EvmDomainError::InvalidValue);
         }
         self.subject.validate()?;
@@ -1197,7 +1209,7 @@ impl EvmReadIntent {
 )]
 pub enum EvmReadValue {
     /// Authenticated chain id.
-    ChainId(u64),
+    ChainId(NonZeroU64),
     /// Authenticated block anchor components.
     Anchor(EvmBlockAnchor),
     /// Canonical unsigned raw units.
@@ -1221,7 +1233,7 @@ impl<'de> Deserialize<'de> for EvmReadValue {
             deny_unknown_fields
         )]
         enum Wire {
-            ChainId(u64),
+            ChainId(NonZeroU64),
             Anchor(EvmBlockAnchor),
             RawUnits(EvmU256),
             TokenDecimals(u8),
@@ -1683,7 +1695,7 @@ impl_balance_state!(
 fn balance_read_intent<K: MfmValueTrait>(
     input: &EvmBalanceContext<K>,
     operation: &str,
-    chain_id: u64,
+    chain_id: NonZeroU64,
     subject: EvmReadSubject,
 ) -> Result<EvmReadIntent, EvmDomainError> {
     EvmReadIntent::new(
@@ -2416,7 +2428,7 @@ fn is_decimal_integer(value: &str) -> bool {
 
 fn read_value_valid(value: &EvmReadValue) -> bool {
     match value {
-        EvmReadValue::ChainId(chain_id) => *chain_id != 0,
+        EvmReadValue::ChainId(_) => true,
         EvmReadValue::Anchor(_) | EvmReadValue::RawUnits(_) => true,
         EvmReadValue::TokenDecimals(decimals) => *decimals <= 30,
         EvmReadValue::AnchoredContractCall(result) => result.validate().is_ok(),
@@ -2497,12 +2509,14 @@ mod tests {
     fn context() -> EvmBalanceContext<Continuation> {
         let source = EvmBalanceSource::new(
             "wallet.native",
-            1,
+            NonZeroU64::new(1).expect("nonzero chain"),
             EvmAddress::new("0x1111111111111111111111111111111111111111").expect("address"),
             None,
         )
         .expect("source");
         let request = EvmBalanceRequest::new(vec![source], 18).expect("request");
+        assert_eq!(request.sources().len(), 1);
+        assert_eq!(request.decimals(), 18);
         EvmBalanceContext::new(
             request,
             Continuation { value: 1 },

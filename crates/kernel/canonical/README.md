@@ -12,5 +12,9 @@ neither can mint a domain-separated semantic identity. Exact retained-byte
 content addressing remains distinct from semantic envelope hashing, which each
 owner performs under its own domain.
 
+`CanonicalBytes` is the checked owner of the canonical base64url-without-padding JSON string. Its
+deserializer rejects padding, alternate alphabets, and noncanonical trailing bits; callers retain
+and observe the decoded bytes directly.
+
 There is no schema registry here. Persisted schema identity, shape validation,
 and reference projection belong to `mfm-values` and to each retained owner.

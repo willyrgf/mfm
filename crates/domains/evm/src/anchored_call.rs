@@ -1,5 +1,6 @@
 use std::marker::PhantomData;
 
+use mfm_canonical::CanonicalBytes;
 use mfm_capabilities::{CapabilityError, ReadCapabilityContract};
 use mfm_ids::{ContentRef, StableId};
 use mfm_program::{
@@ -10,7 +11,6 @@ use mfm_values::MfmValue as MfmValueTrait;
 use serde::de;
 use serde::{Deserialize, Serialize};
 
-use crate::transaction::decode_bounded_bytes;
 use crate::transaction::EvmContractCallCompletion;
 use crate::{
     EvmAddress, EvmBlockAnchor, EvmDomainError, EvmReadEvidence, EvmReadIntent, EvmReadSubject,
@@ -40,7 +40,7 @@ pub const MAX_EVM_CALL_RETURN_BYTES: usize = 131_072;
 pub struct AnchoredContractCallResult {
     anchor: EvmBlockAnchor,
     #[mfm(minimum_bytes = 0, maximum_bytes = 131072)]
-    return_bytes: String,
+    return_bytes: CanonicalBytes,
 }
 
 impl AnchoredContractCallResult {
@@ -51,9 +51,7 @@ impl AnchoredContractCallResult {
         }
         Ok(Self {
             anchor,
-            return_bytes: mfm_canonical::CanonicalBytes::new(return_bytes)
-                .encoded()
-                .to_owned(),
+            return_bytes: CanonicalBytes::new(return_bytes),
         })
     }
 
@@ -62,13 +60,15 @@ impl AnchoredContractCallResult {
         &self.anchor
     }
 
-    /// Decodes the bounded returned bytes.
-    pub fn return_bytes(&self) -> Result<Vec<u8>, EvmDomainError> {
-        decode_bounded_bytes(&self.return_bytes, MAX_EVM_CALL_RETURN_BYTES)
+    /// Returns the bounded call return bytes.
+    pub fn return_bytes(&self) -> &[u8] {
+        self.return_bytes.as_bytes()
     }
 
     pub(crate) fn validate(&self) -> Result<(), EvmDomainError> {
-        decode_bounded_bytes(&self.return_bytes, MAX_EVM_CALL_RETURN_BYTES).map(|_| ())
+        (self.return_bytes.as_bytes().len() <= MAX_EVM_CALL_RETURN_BYTES)
+            .then_some(())
+            .ok_or(EvmDomainError::InvalidValue)
     }
 }
 
@@ -81,7 +81,7 @@ impl<'de> Deserialize<'de> for AnchoredContractCallResult {
         #[serde(deny_unknown_fields)]
         struct Wire {
             anchor: EvmBlockAnchor,
-            return_bytes: String,
+            return_bytes: CanonicalBytes,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -208,9 +208,7 @@ impl<K: MfmValueTrait> AnchoredContractCallContext<K> {
             route.chain_instance().chain_id(),
             EvmReadSubject::AnchoredContractCall {
                 anchor,
-                calldata: mfm_canonical::CanonicalBytes::new(calldata)
-                    .encoded()
-                    .to_owned(),
+                calldata: CanonicalBytes::new(calldata),
                 target,
             },
             route.binding_ref()?,

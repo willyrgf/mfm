@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_values::{canonicalize_mfm_value, MfmValue};
@@ -15,7 +17,8 @@ fn a_physical_target_has_one_interoperable_checked_identity() {
         ContentDigest::from_digest(DigestAlgorithm::Sha256V1, DigestBytes::from_array([2; 32])),
     )
     .expect("endpoint");
-    let target = EvmPhysicalTarget::new(1, endpoint.clone()).expect("target");
+    let target =
+        EvmPhysicalTarget::new(NonZeroU64::new(1).expect("nonzero chain"), endpoint.clone());
     let (canonical, reference) = canonicalize_mfm_value(&target).expect("canonical target");
     let semantic = EvmPhysicalTarget::semantic_id().expect("semantic identity");
     assert_eq!(semantic.canonical_name(), Some("mfm.evm/physical-target"));
@@ -30,7 +33,7 @@ fn a_physical_target_has_one_interoperable_checked_identity() {
         r#"{"content_digest":"content:sha256-v1:7701e82ec5bd36b79b7e361b85bfe358494b531ad687b2683a397eaf7f44037e","schema_id":"schema:mfm.evm-physical-target:1:sha256-jcs-v1:2ee09931b3289c2a2169788badc06101af145d6628751550bbd21d30d6ac346c"}"#
     );
 
-    assert!(EvmPhysicalTarget::new(0, endpoint.clone()).is_err());
+    assert!(NonZeroU64::new(0).is_none());
     assert!(
         serde_json::from_value::<EvmPhysicalTarget>(serde_json::json!({
             "chain_id": 0,
@@ -47,21 +50,19 @@ fn endpoint_names_are_the_only_stable_route_material() {
     assert_eq!(canonical.as_bytes(), br#"{"endpoint_id":"reth-dev"}"#);
     assert_eq!(endpoint.endpoint_ref().expect("endpoint ref"), reference);
 
-    let target = EvmPhysicalTarget::new(1337, reference).expect("target");
+    let target = EvmPhysicalTarget::new(NonZeroU64::new(1337).expect("nonzero chain"), reference);
     let same = EvmPhysicalTarget::new(
-        1337,
+        NonZeroU64::new(1337).expect("nonzero chain"),
         EvmEndpoint::new("reth-dev")
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("same endpoint"),
-    )
-    .expect("same target");
+    );
     let other = EvmPhysicalTarget::new(
-        1337,
+        NonZeroU64::new(1337).expect("nonzero chain"),
         EvmEndpoint::new("reth-other")
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("other endpoint"),
-    )
-    .expect("other target");
+    );
     assert_eq!(
         target.binding_ref().expect("binding"),
         same.binding_ref().expect("same binding")

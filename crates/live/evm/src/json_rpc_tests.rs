@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::num::NonZeroU64;
 use std::thread::JoinHandle;
 
 use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
@@ -141,13 +142,12 @@ fn content_length(headers: &[u8]) -> usize {
 
 fn target() -> EvmPhysicalTarget {
     EvmPhysicalTarget::new(
-        1337,
+        NonZeroU64::new(1337).expect("nonzero chain"),
         EvmEndpoint::new("reth-dev")
             .expect("endpoint")
             .endpoint_ref()
             .expect("endpoint ref"),
     )
-    .expect("target")
 }
 
 fn intent_bytes(operation: &str, subject: serde_json::Value) -> Vec<u8> {
@@ -163,8 +163,10 @@ fn intent_bytes(operation: &str, subject: serde_json::Value) -> Vec<u8> {
 
 fn anchored_intent_bytes(subject: serde_json::Value) -> Vec<u8> {
     let route = mfm_evm::EvmTransactionRoute::new(
-        mfm_evm::EvmChainInstance::new(1337, EvmHash::new(BLOCK_HASH).expect("genesis"))
-            .expect("chain"),
+        mfm_evm::EvmChainInstance::new(
+            NonZeroU64::new(1337).expect("nonzero chain"),
+            EvmHash::new(BLOCK_HASH).expect("genesis"),
+        ),
         EvmEndpoint::new("reth-dev")
             .expect("endpoint")
             .endpoint_ref()
@@ -306,7 +308,9 @@ async fn chain_identity_reads_the_exact_json_rpc_envelope() {
         .expect("chain identity");
     assert_eq!(
         response,
-        EvmProviderResponse::Read(EvmReadValue::ChainId(1337))
+        EvmProviderResponse::Read(EvmReadValue::ChainId(
+            NonZeroU64::new(1337).expect("nonzero chain"),
+        ))
     );
     assert_eq!(
         stub.observed_request(),
@@ -665,8 +669,11 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         .chain_instance()
         .await
         .expect("chain instance");
-    assert_eq!(observed.chain_id(), 1337);
-    assert_eq!(observed.expected_genesis_hash().as_str(), genesis);
+    assert_eq!(
+        observed.chain_id(),
+        NonZeroU64::new(1337).expect("nonzero chain")
+    );
+    assert_eq!(observed.expected_genesis_hash().to_string(), genesis);
     let requests = chain.observed_requests();
     assert_eq!(requests[0]["method"], "eth_chainId");
     assert_eq!(requests[1]["method"], "eth_getBlockByNumber");
@@ -677,7 +684,7 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
             .expect("transaction hash");
     let receipt_body = format!(
         r#"{{"jsonrpc":"2.0","id":1,"result":{{"transactionHash":"{}","from":"{HOLDER}","to":"{TOKEN}","contractAddress":null,"status":"0x1","blockNumber":"0x11","blockHash":"{BLOCK_HASH}"}}}}"#,
-        transaction_hash.as_str()
+        transaction_hash
     );
     let mut receipt_stub = Stub::new(receipt_body);
     let receipt = receipt_stub
@@ -689,11 +696,11 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
     assert_eq!(receipt.transaction_hash(), &transaction_hash);
     assert!(matches!(
         receipt.result(),
-        ProviderReceiptResult::SuccessCall { target } if target.as_str() == TOKEN
+        ProviderReceiptResult::SuccessCall { target } if target.to_string() == TOKEN
     ));
     assert_eq!(
         receipt_stub.observed_request()["params"],
-        serde_json::json!([transaction_hash.as_str()])
+        serde_json::json!([transaction_hash.to_string()])
     );
 
     let mut pending_stub = Stub::new(r#"{"jsonrpc":"2.0","id":1,"result":"0x7"}"#);
@@ -712,7 +719,7 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
     let raw = ExactRawTransaction::new(vec![0x02, 0xc0]).expect("bounded raw");
     let mut submit_stub = Stub::new(format!(
         r#"{{"jsonrpc":"2.0","id":1,"result":"{}"}}"#,
-        transaction_hash.as_str()
+        transaction_hash
     ));
     assert_eq!(
         submit_stub.provider().submit_raw(&raw).await,
@@ -777,8 +784,8 @@ async fn anchored_call_observes_code_and_same_anchor_before_returning_bytes() {
     let EvmProviderResponse::Read(EvmReadValue::AnchoredContractCall(result)) = response else {
         panic!("expected anchored result")
     };
-    assert_eq!(result.return_bytes().expect("return bytes"), [1, 2]);
-    assert_eq!(result.anchor().hash().as_str(), BLOCK_HASH);
+    assert_eq!(result.return_bytes(), [1, 2]);
+    assert_eq!(result.anchor().hash().to_string(), BLOCK_HASH);
     let requests = stub.observed_requests();
     assert_eq!(
         requests

@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use mfm_capabilities::ReadCapabilityContract;
 use mfm_evm::{
     AnchoredContractCallCompletion, AnchoredContractCallContext, AnchoredContractCallFailure,
@@ -55,10 +57,9 @@ fn endpoint_ref() -> ContentRef {
 fn route() -> EvmTransactionRoute {
     EvmTransactionRoute::new(
         EvmChainInstance::new(
-            1,
+            NonZeroU64::new(1).expect("nonzero chain"),
             EvmHash::new(format!("0x{}", "aa".repeat(32))).expect("genesis"),
-        )
-        .expect("chain"),
+        ),
         endpoint_ref(),
     )
 }
@@ -105,7 +106,10 @@ fn anchored_intent_wire_and_generic_descriptor_composition_are_exact() {
     );
     assert_eq!(
         context().intent().operation_and_chain_id(),
-        (EVM_ANCHORED_CONTRACT_CALL_OPERATION_ID, 1)
+        (
+            EVM_ANCHORED_CONTRACT_CALL_OPERATION_ID,
+            NonZeroU64::new(1).expect("nonzero chain"),
+        )
     );
     assert_eq!(
         <EvmAnchoredContractCallRead as CapabilityInjection<

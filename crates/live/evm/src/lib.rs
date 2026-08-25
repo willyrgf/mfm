@@ -185,6 +185,7 @@ fn map_provider_response(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
@@ -230,7 +231,7 @@ mod tests {
             ),
         )
         .expect("endpoint");
-        EvmPhysicalTarget::new(chain_id, endpoint).expect("target")
+        EvmPhysicalTarget::new(NonZeroU64::new(chain_id).expect("nonzero chain"), endpoint)
     }
 
     fn intent(target: &EvmPhysicalTarget) -> EvmReadIntent {
@@ -250,9 +251,11 @@ mod tests {
         let target = target(1, 2);
         let cases = [
             (
-                EvmProviderResponse::Read(EvmReadValue::ChainId(1)),
+                EvmProviderResponse::Read(EvmReadValue::ChainId(
+                    NonZeroU64::new(1).expect("nonzero chain"),
+                )),
                 EvmReadEvidence::Returned {
-                    value: EvmReadValue::ChainId(1),
+                    value: EvmReadValue::ChainId(NonZeroU64::new(1).expect("nonzero chain")),
                 },
             ),
             (EvmProviderResponse::Rejected, EvmReadEvidence::Rejected),
@@ -333,13 +336,12 @@ mod tests {
         let physical = target(1, 2);
         let route = EvmTransactionRoute::new(
             mfm_evm::EvmChainInstance::new(
-                1,
+                NonZeroU64::new(1).expect("nonzero chain"),
                 mfm_evm::EvmHash::new(
                     "0x1111111111111111111111111111111111111111111111111111111111111111",
                 )
                 .expect("genesis"),
-            )
-            .expect("chain"),
+            ),
             physical.endpoint_ref().clone(),
         );
         let provider = Arc::new(Provider {

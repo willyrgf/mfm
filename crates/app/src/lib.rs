@@ -2,6 +2,7 @@
 //! Typed transport-neutral client use cases over one checked live composition.
 
 use std::fmt;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use mfm_canonical::sha256_digest_bytes;
@@ -120,11 +121,11 @@ impl BoundCapabilitySet {
         evm.try_reserve_exact(routes.len())
             .map_err(|_| ComposeError::Assembly)?;
         for (chain_id, endpoint, provider) in routes {
+            let chain_id = NonZeroU64::new(chain_id).ok_or(ComposeError::Assembly)?;
             let endpoint_ref = endpoint
                 .endpoint_ref()
                 .map_err(|_| ComposeError::Assembly)?;
-            let target = EvmPhysicalTarget::new(chain_id, endpoint_ref)
-                .map_err(|_| ComposeError::Assembly)?;
+            let target = EvmPhysicalTarget::new(chain_id, endpoint_ref);
             evm.push(BoundEvmRoute {
                 target,
                 endpoint_id: endpoint.endpoint_id().to_owned(),
@@ -165,7 +166,7 @@ impl ComposedRuntime {
                 .binding_ref()
                 .map_err(|_| ComposeError::Assembly)?;
             views.push(PublicBindingView::Evm {
-                chain_id: binding.target.chain_id(),
+                chain_id: binding.target.chain_id().get(),
                 endpoint_id: binding.endpoint_id,
                 binding_ref,
             });

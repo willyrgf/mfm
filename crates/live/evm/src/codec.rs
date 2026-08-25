@@ -2,9 +2,11 @@
 
 use std::str::FromStr;
 
-use alloy_primitives::{hex, keccak256, U256};
+#[cfg(test)]
+use alloy_primitives::hex;
+use alloy_primitives::{keccak256, U256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
-use mfm_evm::{Eip1559TransactionCommand, EvmAddress, EvmHash, EvmTransactionAction, EvmU256};
+use mfm_evm::{Eip1559TransactionCommand, EvmAddress, EvmHash, EvmU256};
 use mfm_evm_transaction_authority::{ExactRawTransaction, MAX_EXACT_RAW_TRANSACTION_BYTES};
 use mfm_signing::{
     recover_public_key, CompactRecoverableSignature, Secp256k1PublicKey, SigningDigest,
@@ -23,8 +25,9 @@ pub enum EvmCodecError {
 /// Derives the Ethereum address of one checked uncompressed secp256k1 public key.
 pub fn ethereum_address(key: &Secp256k1PublicKey) -> EvmAddress {
     let digest = keccak256(&key.as_bytes()[1..]);
-    let value = format!("0x{}", hex::encode(&digest[12..]));
-    EvmAddress::new(value).expect("derived Ethereum address has a fixed valid encoding")
+    let mut address = [0_u8; 20];
+    address.copy_from_slice(&digest[12..]);
+    EvmAddress::from_bytes(address)
 }
 
 /// Computes bounded public Keccak-256 without copying the input.
@@ -86,23 +89,15 @@ pub(crate) fn validate_signed_transaction(
         return Err(EvmCodecError::Invalid);
     }
     let decoded = decode_signed(raw.as_bytes())?;
-    let input = command
-        .action()
-        .input_bytes()
-        .map_err(|_| EvmCodecError::Invalid)?;
-    let expected_target = command
-        .action()
-        .call_target()
-        .map(address_bytes)
-        .transpose()?;
-    if decoded.chain_id != command.binding().route().chain_instance().chain_id()
+    let expected_target = command.to().map(|address| *address.as_bytes());
+    if decoded.chain_id != command.binding().route().chain_instance().chain_id().get()
         || decoded.nonce != nonce
         || decoded.max_priority_fee_per_gas != parse_u256(command.max_priority_fee_per_gas())?
         || decoded.max_fee_per_gas != parse_u256(command.max_fee_per_gas())?
-        || decoded.gas_limit != command.gas_limit()
+        || decoded.gas_limit != command.gas_limit().get()
         || decoded.target != expected_target
         || decoded.value != parse_u256(command.value())?
-        || decoded.input != input
+        || decoded.input != command.input()
     {
         return Err(EvmCodecError::Invalid);
     }
@@ -120,7 +115,7 @@ pub(crate) fn validate_signed_transaction(
 }
 
 pub(crate) fn create_address(sender: &EvmAddress, nonce: u64) -> Result<EvmAddress, EvmCodecError> {
-    let sender = address_bytes(sender)?;
+    let sender = sender.as_bytes();
     let mut payload = Vec::new();
     sender.as_slice().encode(&mut payload);
     nonce.encode(&mut payload);
@@ -132,7 +127,9 @@ pub(crate) fn create_address(sender: &EvmAddress, nonce: u64) -> Result<EvmAddre
     .encode(&mut encoded);
     encoded.extend_from_slice(&payload);
     let digest = keccak256(&encoded);
-    EvmAddress::new(format!("0x{}", hex::encode(&digest[12..]))).map_err(|_| EvmCodecError::Invalid)
+    let mut address = [0_u8; 20];
+    address.copy_from_slice(&digest[12..]);
+    Ok(EvmAddress::from_bytes(address))
 }
 
 fn encode_unsigned(
@@ -160,24 +157,18 @@ fn transaction_payload(
         .route()
         .chain_instance()
         .chain_id()
+        .get()
         .encode(&mut payload);
     nonce.encode(&mut payload);
     encode_u256(command.max_priority_fee_per_gas(), &mut payload)?;
     encode_u256(command.max_fee_per_gas(), &mut payload)?;
-    command.gas_limit().encode(&mut payload);
-    match command.action() {
-        EvmTransactionAction::Create { .. } => [].as_slice().encode(&mut payload),
-        EvmTransactionAction::Call { to, .. } => {
-            address_bytes(to)?.as_slice().encode(&mut payload);
-        }
+    command.gas_limit().get().encode(&mut payload);
+    match command.to() {
+        None => [].as_slice().encode(&mut payload),
+        Some(to) => to.as_bytes().as_slice().encode(&mut payload),
     }
     encode_u256(command.value(), &mut payload)?;
-    command
-        .action()
-        .input_bytes()
-        .map_err(|_| EvmCodecError::Invalid)?
-        .as_slice()
-        .encode(&mut payload);
+    command.input().encode(&mut payload);
     Header {
         list: true,
         payload_length: 0,
@@ -204,15 +195,8 @@ fn parse_u256(value: &EvmU256) -> Result<U256, EvmCodecError> {
     U256::from_str(value.as_str()).map_err(|_| EvmCodecError::Invalid)
 }
 
-fn address_bytes(address: &EvmAddress) -> Result<[u8; 20], EvmCodecError> {
-    let mut bytes = [0u8; 20];
-    hex::decode_to_slice(&address.as_str()[2..], &mut bytes).map_err(|_| EvmCodecError::Invalid)?;
-    Ok(bytes)
-}
-
 fn hash(bytes: &[u8]) -> EvmHash {
-    EvmHash::new(format!("{:#x}", keccak256(bytes)))
-        .expect("Keccak-256 always renders as one exact EVM hash")
+    EvmHash::from_bytes(keccak256(bytes).into())
 }
 
 struct DecodedTransaction {

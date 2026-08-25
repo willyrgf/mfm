@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use mfm_canonical::{sha256_digest_bytes, CanonicalBytes, PlainCanonicalJsonBytes};
 use mfm_evm::{EvmAddress, EvmAuthorityEpoch, EvmChainInstance, EvmHash, EvmTransactionSettlement};
 use mfm_evm_transaction_authority::{
@@ -153,7 +155,7 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
                 return Ok(retained);
             }
 
-            let transaction_hash_bytes = decode_hex::<32>(transaction_hash.as_str())?;
+            let transaction_hash_bytes = transaction_hash.as_bytes();
             let inserted = sqlx::query(
                 "INSERT INTO mfm_evm_tx.prepared_transactions \
                  (effect_id, transaction_hash, raw_transaction) VALUES ($1, $2, $3) \
@@ -393,7 +395,10 @@ fn parse_authority_state(row: sqlx::postgres::PgRow) -> Result<AuthorityState, A
         &row.try_get::<Vec<u8>, _>("authority_epoch")
             .map_err(internal)?,
     )?;
-    let chain_id = parse_u64(&row.try_get::<String, _>("chain_id").map_err(internal)?)?;
+    let chain_id = NonZeroU64::new(parse_u64(
+        &row.try_get::<String, _>("chain_id").map_err(internal)?,
+    )?)
+    .ok_or(AuthorityError::Internal)?;
     let genesis = evm_hash_from_bytes(
         &row.try_get::<Vec<u8>, _>("genesis_hash")
             .map_err(internal)?,
@@ -403,11 +408,7 @@ fn parse_authority_state(row: sqlx::postgres::PgRow) -> Result<AuthorityState, A
         &row.try_get::<String, _>("reserved_nonce")
             .map_err(internal)?,
     )?;
-    let domain = NonceDomain::new(
-        epoch,
-        EvmChainInstance::new(chain_id, genesis).map_err(internal)?,
-        sender,
-    );
+    let domain = NonceDomain::new(epoch, EvmChainInstance::new(chain_id, genesis), sender);
     let reservation = Reservation::new(retained_effect, command_ref, domain, nonce);
     let hash: Option<Vec<u8>> = row.try_get("transaction_hash").map_err(internal)?;
     let raw: Option<Vec<u8>> = row.try_get("raw_transaction").map_err(internal)?;
@@ -435,15 +436,15 @@ async fn load_domain(
     connection: &mut PgConnection,
     key: &NonceDomain,
 ) -> Result<bool, AuthorityError> {
-    let epoch = key.authority_epoch().as_bytes().map_err(internal)?;
-    let genesis = decode_hex::<32>(key.chain_instance().expected_genesis_hash().as_str())?;
-    let sender = decode_hex::<20>(key.sender().as_str())?;
+    let epoch = key.authority_epoch().as_bytes();
+    let genesis = key.chain_instance().expected_genesis_hash().as_bytes();
+    let sender = key.sender().as_bytes();
     let retained: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM mfm_evm_tx.nonce_domains \
          WHERE authority_epoch = $1 AND chain_id = $2::numeric \
            AND genesis_hash = $3 AND sender = $4",
     )
-    .bind(epoch.as_slice())
+    .bind(epoch)
     .bind(key.chain_instance().chain_id().to_string())
     .bind(genesis.as_slice())
     .bind(sender.as_slice())
@@ -457,16 +458,16 @@ async fn latest_reservation_effect(
     connection: &mut PgConnection,
     key: &NonceDomain,
 ) -> Result<Option<EffectId>, AuthorityError> {
-    let epoch = key.authority_epoch().as_bytes().map_err(internal)?;
-    let genesis = decode_hex::<32>(key.chain_instance().expected_genesis_hash().as_str())?;
-    let sender = decode_hex::<20>(key.sender().as_str())?;
+    let epoch = key.authority_epoch().as_bytes();
+    let genesis = key.chain_instance().expected_genesis_hash().as_bytes();
+    let sender = key.sender().as_bytes();
     let retained: Option<String> = sqlx::query_scalar(
         "SELECT effect_id FROM mfm_evm_tx.nonce_reservations \
          WHERE authority_epoch = $1 AND chain_id = $2::numeric \
            AND genesis_hash = $3 AND sender = $4 \
          ORDER BY reserved_nonce DESC LIMIT 1",
     )
-    .bind(epoch.as_slice())
+    .bind(epoch)
     .bind(key.chain_instance().chain_id().to_string())
     .bind(genesis.as_slice())
     .bind(sender.as_slice())
@@ -482,15 +483,15 @@ async fn insert_domain(
     connection: &mut PgConnection,
     domain: &NonceDomain,
 ) -> Result<(), AuthorityError> {
-    let epoch = domain.authority_epoch().as_bytes().map_err(internal)?;
-    let genesis = decode_hex::<32>(domain.chain_instance().expected_genesis_hash().as_str())?;
-    let sender = decode_hex::<20>(domain.sender().as_str())?;
+    let epoch = domain.authority_epoch().as_bytes();
+    let genesis = domain.chain_instance().expected_genesis_hash().as_bytes();
+    let sender = domain.sender().as_bytes();
     let inserted = sqlx::query(
         "INSERT INTO mfm_evm_tx.nonce_domains \
          (authority_epoch, chain_id, genesis_hash, sender) \
          VALUES ($1, $2::numeric, $3, $4) ON CONFLICT DO NOTHING",
     )
-    .bind(epoch.as_slice())
+    .bind(epoch)
     .bind(domain.chain_instance().chain_id().to_string())
     .bind(genesis.as_slice())
     .bind(sender.as_slice())
@@ -511,9 +512,9 @@ async fn insert_reservation(
     key: &NonceDomain,
     nonce: u64,
 ) -> Result<bool, AuthorityError> {
-    let epoch = key.authority_epoch().as_bytes().map_err(internal)?;
-    let genesis = decode_hex::<32>(key.chain_instance().expected_genesis_hash().as_str())?;
-    let sender = decode_hex::<20>(key.sender().as_str())?;
+    let epoch = key.authority_epoch().as_bytes();
+    let genesis = key.chain_instance().expected_genesis_hash().as_bytes();
+    let sender = key.sender().as_bytes();
     let result = sqlx::query(
         "INSERT INTO mfm_evm_tx.nonce_reservations \
          (effect_id, command_schema_id, command_content_digest, authority_epoch, chain_id, \
@@ -524,7 +525,7 @@ async fn insert_reservation(
     .bind(effect_id.as_str())
     .bind(command_ref.schema_id().as_str())
     .bind(command_ref.content_digest().as_str())
-    .bind(epoch.as_slice())
+    .bind(epoch)
     .bind(key.chain_instance().chain_id().to_string())
     .bind(genesis.as_slice())
     .bind(sender.as_slice())
@@ -570,47 +571,16 @@ fn epoch_from_bytes(bytes: &[u8]) -> Result<EvmAuthorityEpoch, AuthorityError> {
 
 fn evm_hash_from_bytes(bytes: &[u8]) -> Result<EvmHash, AuthorityError> {
     let exact: [u8; 32] = bytes.try_into().map_err(internal)?;
-    EvmHash::new(hex_prefixed(&exact)).map_err(internal)
+    Ok(EvmHash::from_bytes(exact))
 }
 
 fn evm_address_from_bytes(bytes: &[u8]) -> Result<EvmAddress, AuthorityError> {
     let exact: [u8; 20] = bytes.try_into().map_err(internal)?;
-    EvmAddress::new(hex_prefixed(&exact)).map_err(internal)
-}
-
-fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N], AuthorityError> {
-    let digits = value.strip_prefix("0x").ok_or(AuthorityError::Internal)?;
-    if digits.len() != N * 2 {
-        return Err(AuthorityError::Internal);
-    }
-    let mut output = [0_u8; N];
-    for (index, pair) in digits.as_bytes().chunks_exact(2).enumerate() {
-        output[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
-    }
-    Ok(output)
-}
-
-fn hex_nibble(value: u8) -> Result<u8, AuthorityError> {
-    match value {
-        b'0'..=b'9' => Ok(value - b'0'),
-        b'a'..=b'f' => Ok(value - b'a' + 10),
-        _ => Err(AuthorityError::Internal),
-    }
-}
-
-fn hex_prefixed(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(2 + bytes.len() * 2);
-    output.push_str("0x");
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
+    Ok(EvmAddress::from_bytes(exact))
 }
 
 fn nonce_domain_lock_preimage(key: &NonceDomain) -> Result<String, AuthorityError> {
-    let epoch = key.authority_epoch().as_bytes().map_err(internal)?;
+    let epoch = key.authority_epoch().as_bytes();
     let json = format!(
         "{{\"authority_epoch\":\"{}\",\"chain_id\":{},\"domain\":\"mfm.evm.nonce-domain-lock.v1\",\"expected_genesis_hash\":\"{}\",\"sender\":\"{}\"}}",
         CanonicalBytes::new(epoch.to_vec()).encoded(),

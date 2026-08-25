@@ -9,12 +9,9 @@ pub(super) struct ContainerAttrs {
     pub(super) rename_all: Option<String>,
     pub(super) enum_tag: Option<String>,
     pub(super) enum_content: Option<String>,
-    pub(super) transparent_string: bool,
-    pub(super) transparent_bytes: bool,
-    pub(super) transparent_map: bool,
     pub(super) serde_transparent: bool,
-    pub(super) unsigned_minimum: Option<u64>,
-    pub(super) unsigned_maximum: Option<u64>,
+    pub(super) serde_try_from: Option<String>,
+    pub(super) serde_into: Option<String>,
 }
 
 impl ContainerAttrs {
@@ -28,12 +25,9 @@ impl ContainerAttrs {
             rename_all: None,
             enum_tag: None,
             enum_content: None,
-            transparent_string: false,
-            transparent_bytes: false,
-            transparent_map: false,
             serde_transparent: false,
-            unsigned_minimum: None,
-            unsigned_maximum: None,
+            serde_try_from: None,
+            serde_into: None,
         };
 
         for attr in attrs {
@@ -47,24 +41,6 @@ impl ContainerAttrs {
                         output.version = meta.value()?.parse::<LitStr>()?.value();
                     } else if meta.path.is_ident("schema") {
                         output.schema_name = meta.value()?.parse::<LitStr>()?.value();
-                    } else if meta.path.is_ident("transparent_string") {
-                        output.transparent_string = true;
-                    } else if meta.path.is_ident("transparent_bytes") {
-                        output.transparent_bytes = true;
-                    } else if meta.path.is_ident("transparent_map") {
-                        output.transparent_map = true;
-                    } else if meta.path.is_ident("unsigned_minimum") {
-                        output.unsigned_minimum = Some(
-                            meta.value()?
-                                .parse::<syn::LitInt>()?
-                                .base10_parse::<u64>()?,
-                        );
-                    } else if meta.path.is_ident("unsigned_maximum") {
-                        output.unsigned_maximum = Some(
-                            meta.value()?
-                                .parse::<syn::LitInt>()?
-                                .base10_parse::<u64>()?,
-                        );
                     } else {
                         return Err(meta.error("unsupported #[mfm(...)] container attribute"));
                     }
@@ -90,8 +66,11 @@ impl ContainerAttrs {
                     } else if meta.path.is_ident("content") {
                         output.enum_content = Some(meta.value()?.parse::<LitStr>()?.value());
                         Ok(())
-                    } else if meta.path.is_ident("try_from") || meta.path.is_ident("into") {
-                        let _ = meta.value()?.parse::<LitStr>()?;
+                    } else if meta.path.is_ident("try_from") {
+                        output.serde_try_from = Some(meta.value()?.parse::<LitStr>()?.value());
+                        Ok(())
+                    } else if meta.path.is_ident("into") {
+                        output.serde_into = Some(meta.value()?.parse::<LitStr>()?.value());
                         Ok(())
                     } else if meta.path.is_ident("bound") {
                         if meta.input.peek(syn::token::Paren) {
@@ -120,40 +99,10 @@ impl ContainerAttrs {
             }
         }
 
-        if [
-            output.transparent_string,
-            output.transparent_bytes,
-            output.transparent_map,
-        ]
-        .into_iter()
-        .filter(|selected| *selected)
-        .count()
-            > 1
-        {
+        if output.serde_try_from.is_some() != output.serde_into.is_some() {
             return Err(syn::Error::new(
                 Span::call_site(),
-                "MFM derives accept only one transparent container mode",
-            ));
-        }
-        if output
-            .unsigned_minimum
-            .zip(output.unsigned_maximum)
-            .is_none()
-            && (output.unsigned_minimum.is_some() || output.unsigned_maximum.is_some())
-        {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "unsigned bounds require both unsigned_minimum and unsigned_maximum",
-            ));
-        }
-        if output
-            .unsigned_minimum
-            .zip(output.unsigned_maximum)
-            .is_some_and(|(minimum, maximum)| minimum > maximum)
-        {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "unsigned_minimum cannot exceed unsigned_maximum",
+                "MFM derives require serde(try_from) and serde(into) together",
             ));
         }
 
@@ -172,8 +121,6 @@ pub(super) struct FieldAttrs {
     pub(super) maximum_items: Option<u32>,
     pub(super) minimum_bytes: Option<u32>,
     pub(super) maximum_bytes: Option<u32>,
-    pub(super) unsigned_minimum: Option<u64>,
-    pub(super) unsigned_maximum: Option<u64>,
 }
 
 impl FieldAttrs {
@@ -217,20 +164,6 @@ impl FieldAttrs {
                             meta.value()?
                                 .parse::<syn::LitInt>()?
                                 .base10_parse::<u32>()?,
-                        );
-                        Ok(())
-                    } else if meta.path.is_ident("unsigned_minimum") {
-                        output.unsigned_minimum = Some(
-                            meta.value()?
-                                .parse::<syn::LitInt>()?
-                                .base10_parse::<u64>()?,
-                        );
-                        Ok(())
-                    } else if meta.path.is_ident("unsigned_maximum") {
-                        output.unsigned_maximum = Some(
-                            meta.value()?
-                                .parse::<syn::LitInt>()?
-                                .base10_parse::<u64>()?,
                         );
                         Ok(())
                     } else {
@@ -291,24 +224,11 @@ impl FieldAttrs {
                 "byte bounds require both minimum_bytes and maximum_bytes",
             ));
         }
-        if output
-            .unsigned_minimum
-            .zip(output.unsigned_maximum)
-            .is_none()
-            && (output.unsigned_minimum.is_some() || output.unsigned_maximum.is_some())
-        {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "unsigned bounds require both unsigned_minimum and unsigned_maximum",
-            ));
-        }
         if output.literal.is_some()
             && (output.minimum_items.is_some()
                 || output.maximum_items.is_some()
                 || output.minimum_bytes.is_some()
                 || output.maximum_bytes.is_some()
-                || output.unsigned_minimum.is_some()
-                || output.unsigned_maximum.is_some()
                 || output.default)
         {
             return Err(syn::Error::new(
@@ -327,7 +247,6 @@ impl FieldAttrs {
         let selected_bounds = [
             output.minimum_items.is_some(),
             output.minimum_bytes.is_some(),
-            output.unsigned_minimum.is_some(),
         ]
         .into_iter()
         .filter(|selected| *selected)
@@ -335,7 +254,7 @@ impl FieldAttrs {
         if selected_bounds > 1 {
             return Err(syn::Error::new(
                 Span::call_site(),
-                "a field cannot combine sequence, byte, and unsigned bounds",
+                "a field cannot combine sequence and byte bounds",
             ));
         }
         if output
@@ -346,16 +265,6 @@ impl FieldAttrs {
             return Err(syn::Error::new(
                 Span::call_site(),
                 "minimum_items cannot exceed maximum_items",
-            ));
-        }
-        if output
-            .unsigned_minimum
-            .zip(output.unsigned_maximum)
-            .is_some_and(|(minimum, maximum)| minimum > maximum)
-        {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "unsigned_minimum cannot exceed unsigned_maximum",
             ));
         }
         if output
