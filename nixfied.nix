@@ -142,6 +142,18 @@ let
     export NO_PROXY="" no_proxy=""
     ${cargoArgs}
   '';
+  localPostgresEvmRun = cargoArgs:
+    localPostgresRun (localEvmRun ''
+      env -u PGSERVICE -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE \
+        -u PGPASSWORD -u PGPASSFILE \
+        psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+      DROP SCHEMA IF EXISTS mfm_evm_tx CASCADE;
+      DROP SCHEMA IF EXISTS mfm_config CASCADE;
+      DROP SCHEMA IF EXISTS public CASCADE;
+      CREATE SCHEMA public AUTHORIZATION CURRENT_USER;
+      SQL
+      ${cargoArgs}
+    '');
 in
 {
   imports = [
@@ -267,15 +279,7 @@ in
         run = [
           "bash"
           "-c"
-          (localPostgresRun (localEvmRun ''
-            env -u PGSERVICE -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE \
-              -u PGPASSWORD -u PGPASSFILE \
-              psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
-            DROP SCHEMA IF EXISTS mfm_evm_tx CASCADE;
-            DROP SCHEMA IF EXISTS mfm_config CASCADE;
-            DROP SCHEMA IF EXISTS public CASCADE;
-            CREATE SCHEMA public AUTHORIZATION CURRENT_USER;
-            SQL
+          (localPostgresEvmRun ''
             export MFM_E2E_ADMIN_POSTGRES_LOCATOR="$MFM_TEST_ADMIN_POSTGRES_LOCATOR"
             export MFM_E2E_RUNTIME_POSTGRES_LOCATOR="$MFM_TEST_RUNTIME_POSTGRES_LOCATOR"
             export MFM_E2E_EVM_ADAPTER_LOCATOR="$MFM_TEST_EVM_ADAPTER_LOCATOR"
@@ -285,7 +289,7 @@ in
             test -x "$MFM_E2E_CLI_BIN" -a -x "$MFM_E2E_REST_BIN"
             exec cargo test -p mfm-rest-api --test client_execution_e2e -- \
               --include-ignored --test-threads=1
-          ''))
+          '')
         ];
         tools = [
           "pg-psql"
@@ -303,21 +307,16 @@ in
         run = [
           "bash"
           "-c"
-          (localPostgresRun (localEvmRun ''
-            env -u PGSERVICE -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE \
-              -u PGPASSWORD -u PGPASSFILE \
-              psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
-            DROP SCHEMA IF EXISTS mfm_evm_tx CASCADE;
-            DROP SCHEMA IF EXISTS mfm_config CASCADE;
-            DROP SCHEMA IF EXISTS public CASCADE;
-            CREATE SCHEMA public AUTHORIZATION CURRENT_USER;
-            SQL
-            export MFM_EFFECT_E2E_ADMIN_POSTGRES_LOCATOR="$MFM_TEST_ADMIN_POSTGRES_LOCATOR"
-            export MFM_EFFECT_E2E_RUNTIME_POSTGRES_LOCATOR="$MFM_TEST_RUNTIME_POSTGRES_LOCATOR"
-            export MFM_EFFECT_E2E_EVM_ADAPTER_LOCATOR="$MFM_TEST_EVM_ADAPTER_LOCATOR"
-            exec cargo test -p mfm-app --test evm_contract_effect_e2e -- \
-              --include-ignored --test-threads=1
-          ''))
+          (localPostgresEvmRun ''
+            fixture_dir="$(mktemp -d)"
+            trap 'rm -rf "$fixture_dir"' EXIT
+            solc --bin --overwrite --evm-version cancun \
+              --output-dir "$fixture_dir" \
+              crates/live/evm/tests/fixtures/MfmEffectFixture.sol >/dev/null
+            export MFM_EFFECT_E2E_INITCODE_PATH="$fixture_dir/MfmEffectFixture.bin"
+            cargo test -p mfm-evm-live --test evm_contract_effect_e2e -- \
+              --ignored --exact evm_contract_effect_recovers_cold_and_mutates_exactly_twice
+          '')
         ];
         tools = [
           "pg-psql"

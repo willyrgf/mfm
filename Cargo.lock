@@ -2151,25 +2151,18 @@ dependencies = [
  "mfm-config",
  "mfm-evm",
  "mfm-evm-live",
- "mfm-evm-transaction-authority",
  "mfm-ids",
  "mfm-journal",
- "mfm-keystore",
  "mfm-portfolio",
  "mfm-program",
- "mfm-program-derive",
  "mfm-runtime",
- "mfm-signing",
  "mfm-storage-postgres",
  "mfm-store",
- "mfm-values",
- "reqwest",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
  "toml 0.8.23",
- "zeroize",
 ]
 
 [[package]]
@@ -2226,6 +2219,7 @@ dependencies = [
  "alloy-consensus",
  "alloy-eips",
  "alloy-primitives",
+ "getrandom 0.3.4",
  "k256",
  "mfm-capabilities",
  "mfm-evm",
@@ -2236,6 +2230,7 @@ dependencies = [
  "mfm-program-derive",
  "mfm-runtime",
  "mfm-signing",
+ "mfm-storage-postgres",
  "mfm-store",
  "mfm-values",
  "reqwest",
@@ -2244,6 +2239,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "url",
+ "zeroize",
 ]
 
 [[package]]

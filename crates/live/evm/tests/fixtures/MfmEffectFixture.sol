@@ -1,19 +1,15 @@
 pragma solidity 0.8.33;
 
 contract MfmEffectFixture {
-    address public owner;
+    address private immutable owner;
     uint256 public value;
 
-    event Configured(uint256 value);
-
-    constructor(uint256 initialValue) {
+    constructor() {
         owner = msg.sender;
-        value = initialValue;
     }
 
     function configure(uint256 nextValue) external {
         require(msg.sender == owner);
         value = nextValue;
-        emit Configured(nextValue);
     }
 }
