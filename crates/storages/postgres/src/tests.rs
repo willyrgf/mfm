@@ -9,7 +9,7 @@ use mfm_config::{
 };
 use mfm_evm::{
     EvmAddress, EvmAuthorityEpoch, EvmBlockAnchor, EvmChainInstance, EvmHash,
-    EvmTransactionConfirmation, EvmTransactionRevert, EvmTransactionSettlement, EvmU256,
+    EvmTransactionReceipt, EvmTransactionSettlement, EvmU256,
 };
 use mfm_evm_transaction_authority::{
     AuthorityError, AuthorityState, EvmTransactionAuthority, ExactRawTransaction, NonceDomain,
@@ -60,13 +60,13 @@ fn transaction_settlement(
     nonce: u64,
     transaction_hash: EvmHash,
 ) -> EvmTransactionSettlement {
-    EvmTransactionSettlement::confirmed(
+    EvmTransactionSettlement::called(
         effect_id,
         nonce,
-        EvmTransactionConfirmation::Called {
-            block_anchor: EvmBlockAnchor::new(EvmU256::from_u64(12), evm_hash(12)),
+        EvmTransactionReceipt::new(
+            EvmBlockAnchor::new(EvmU256::from_u64(12), evm_hash(12)),
             transaction_hash,
-        },
+        ),
     )
 }
 
@@ -1089,7 +1089,7 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
     let reverted = EvmTransactionSettlement::reverted(
         second_effect.clone(),
         8,
-        EvmTransactionRevert::new(
+        EvmTransactionReceipt::new(
             EvmBlockAnchor::new(EvmU256::from_u64(13), evm_hash(44)),
             second_hash,
         ),

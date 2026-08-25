@@ -18,10 +18,8 @@ use crate::EvmDomainError;
 
 /// Exact Effect capability identity for EIP-1559 transaction execution.
 pub const EVM_TRANSACTION_EFFECT_CAPABILITY_ID: &str = "mfm.evm.capability.execute-transaction@1";
-/// Exact State identity for EVM contract creation.
-pub const CREATE_EVM_CONTRACT_STATE_ID: &str = "mfm.evm.state.create-contract@1";
-/// Exact State identity for EVM contract calls.
-pub const CALL_EVM_CONTRACT_STATE_ID: &str = "mfm.evm.state.call-contract@1";
+/// Exact State identity for EVM transaction execution.
+pub const EXECUTE_EVM_TRANSACTION_STATE_ID: &str = "mfm.evm.state.execute-transaction@1";
 
 const MAX_U256_DECIMAL: &str =
     "115792089237316195423570985008687907853269984665640564039457584007913129639935";
@@ -599,21 +597,21 @@ struct TransactionContextWire<K> {
     command: Eip1559TransactionCommand,
 }
 
-/// Caller-owned context paired with one checked contract-creation command.
+/// Caller-owned context paired with one complete checked transaction command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
-    name = "contract-creation-context",
+    name = "transaction-context",
     version = "1",
-    schema = "mfm.evm-contract-creation-context"
+    schema = "mfm.evm-transaction-context"
 )]
-pub struct EvmContractCreationContext<K: MfmValueTrait> {
+pub struct EvmTransactionContext<K: MfmValueTrait> {
     caller_context: K,
     command: Eip1559TransactionCommand,
 }
 
-impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmContractCreationContext<K> {
+impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmTransactionContext<K> {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -623,8 +621,8 @@ impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmContractCreationContext<K> {
     }
 }
 
-impl<K: MfmValueTrait> EvmContractCreationContext<K> {
-    /// Constructs a context-preserving contract-creation input.
+impl<K: MfmValueTrait> EvmTransactionContext<K> {
+    /// Constructs one context-preserving transaction input.
     pub fn new(
         caller_context: K,
         command: Eip1559TransactionCommand,
@@ -641,173 +639,32 @@ impl<K: MfmValueTrait> EvmContractCreationContext<K> {
         &self.caller_context
     }
 
-    /// Returns the complete command.
+    /// Returns the complete checked command.
     pub const fn command(&self) -> &Eip1559TransactionCommand {
         &self.command
     }
 
     fn validate(&self) -> Result<(), EvmDomainError> {
-        self.command.validate()?;
-        self.command
-            .to()
-            .is_none()
-            .then_some(())
-            .ok_or(EvmDomainError::InvalidValue)
+        self.command.validate()
     }
 }
 
-/// Caller-owned context paired with one checked contract-call command.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "contract-call-context",
-    version = "1",
-    schema = "mfm.evm-contract-call-context"
-)]
-pub struct EvmContractCallContext<K: MfmValueTrait> {
-    caller_context: K,
-    command: Eip1559TransactionCommand,
-}
-
-impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmContractCallContext<K> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = TransactionContextWire::<K>::deserialize(deserializer)?;
-        Self::new(wire.caller_context, wire.command).map_err(de::Error::custom)
-    }
-}
-
-impl<K: MfmValueTrait> EvmContractCallContext<K> {
-    /// Constructs a context-preserving contract-call input.
-    pub fn new(
-        caller_context: K,
-        command: Eip1559TransactionCommand,
-    ) -> Result<Self, EvmDomainError> {
-        let context = Self {
-            caller_context,
-            command,
-        };
-        context.validate().map(|_| context)
-    }
-
-    /// Returns the caller-owned context.
-    pub const fn caller_context(&self) -> &K {
-        &self.caller_context
-    }
-
-    /// Returns the complete command.
-    pub const fn command(&self) -> &Eip1559TransactionCommand {
-        &self.command
-    }
-
-    fn validate(&self) -> Result<(), EvmDomainError> {
-        self.command.validate()?;
-        self.command
-            .to()
-            .is_some()
-            .then_some(())
-            .ok_or(EvmDomainError::InvalidValue)
-    }
-}
-
-impl<K: MfmValueTrait> EvmContractCallContext<EvmContractCreationCompletion<K>> {
-    /// Constructs a call to the contract created by the preceding completion.
-    pub fn for_created_contract(
-        deployment: EvmContractCreationCompletion<K>,
-        calldata: Vec<u8>,
-        value: EvmU256,
-        gas_limit: NonZeroU64,
-        max_priority_fee_per_gas: EvmU256,
-        max_fee_per_gas: EvmU256,
-    ) -> Result<Self, EvmDomainError> {
-        let binding = deployment.binding().clone();
-        let target = deployment.created_address().clone();
-        let command = Eip1559TransactionCommand::call(
-            binding,
-            target,
-            calldata,
-            value,
-            gas_limit,
-            max_priority_fee_per_gas,
-            max_fee_per_gas,
-        )?;
-        Self::new(deployment, command)
-    }
-}
-
-/// Confirmed transaction evidence exposed directly to workflows.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "transaction-confirmation",
-    version = "1",
-    schema = "mfm.evm-transaction-confirmation"
-)]
-pub enum EvmTransactionConfirmation {
-    /// A contract creation succeeded.
-    Created {
-        /// Canonical receipt block anchor.
-        block_anchor: crate::EvmBlockAnchor,
-        /// Receipt-derived created address.
-        created_address: EvmAddress,
-        /// Exact signed transaction hash.
-        transaction_hash: EvmHash,
-    },
-    /// An ordinary call succeeded.
-    Called {
-        /// Canonical receipt block anchor.
-        block_anchor: crate::EvmBlockAnchor,
-        /// Exact signed transaction hash.
-        transaction_hash: EvmHash,
-    },
-}
-
-impl EvmTransactionConfirmation {
-    /// Returns the canonical receipt block anchor.
-    pub const fn block_anchor(&self) -> &crate::EvmBlockAnchor {
-        match self {
-            Self::Created { block_anchor, .. } | Self::Called { block_anchor, .. } => block_anchor,
-        }
-    }
-
-    /// Returns the exact signed transaction hash.
-    pub const fn transaction_hash(&self) -> &EvmHash {
-        match self {
-            Self::Created {
-                transaction_hash, ..
-            }
-            | Self::Called {
-                transaction_hash, ..
-            } => transaction_hash,
-        }
-    }
-}
-
-/// Minimal reverted transaction projection exposed to workflows.
+/// Shared receipt facts authenticated for one settled transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
-    name = "transaction-revert",
+    name = "transaction-receipt",
     version = "1",
-    schema = "mfm.evm-transaction-revert"
+    schema = "mfm.evm-transaction-receipt"
 )]
-pub struct EvmTransactionRevert {
+pub struct EvmTransactionReceipt {
     block_anchor: crate::EvmBlockAnchor,
     transaction_hash: EvmHash,
 }
 
-impl EvmTransactionRevert {
-    /// Constructs one reverted receipt projection.
+impl EvmTransactionReceipt {
+    /// Constructs one checked receipt projection.
     pub fn new(block_anchor: crate::EvmBlockAnchor, transaction_hash: EvmHash) -> Self {
         Self {
             block_anchor,
@@ -820,13 +677,13 @@ impl EvmTransactionRevert {
         &self.block_anchor
     }
 
-    /// Returns the transaction hash.
+    /// Returns the exact signed transaction hash.
     pub const fn transaction_hash(&self) -> &EvmHash {
         &self.transaction_hash
     }
 }
 
-/// Complete durable settlement evidence for one Effect.
+/// Closed outcome authenticated for one settled transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(
     tag = "kind",
@@ -836,237 +693,238 @@ impl EvmTransactionRevert {
 )]
 #[mfm(
     namespace = "mfm.evm",
+    name = "transaction-outcome",
+    version = "1",
+    schema = "mfm.evm-transaction-outcome"
+)]
+pub enum EvmTransactionOutcome {
+    /// A contract creation succeeded.
+    Created {
+        /// Receipt-derived created contract address.
+        created_address: EvmAddress,
+    },
+    /// An ordinary contract call succeeded.
+    Called,
+    /// The transaction was mined with a reverted status.
+    Reverted,
+}
+
+impl EvmTransactionOutcome {
+    /// Returns the created contract address when this is a successful creation.
+    pub const fn created_address(&self) -> Option<&EvmAddress> {
+        match self {
+            Self::Created { created_address } => Some(created_address),
+            Self::Called | Self::Reverted => None,
+        }
+    }
+}
+
+/// Complete durable settlement evidence for one Effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.evm",
     name = "transaction-settlement",
     version = "1",
     schema = "mfm.evm-transaction-settlement"
 )]
-pub enum EvmTransactionSettlement {
-    /// A transaction was confirmed successfully.
-    Confirmed {
-        /// Settled Effect identity.
-        effect_id: EffectId,
-        /// Reserved account nonce.
-        nonce: u64,
-        /// Complete confirmation evidence.
-        confirmation: EvmTransactionConfirmation,
-    },
-    /// A transaction was confirmed reverted.
-    Reverted {
-        /// Settled Effect identity.
-        effect_id: EffectId,
-        /// Reserved account nonce.
-        nonce: u64,
-        /// Complete revert evidence.
-        revert: EvmTransactionRevert,
-    },
+pub struct EvmTransactionSettlement {
+    effect_id: EffectId,
+    nonce: u64,
+    receipt: EvmTransactionReceipt,
+    outcome: EvmTransactionOutcome,
 }
 
 impl EvmTransactionSettlement {
-    /// Constructs a confirmed settlement.
-    pub fn confirmed(
+    /// Constructs one successful contract-creation settlement.
+    pub fn created(
         effect_id: EffectId,
         nonce: u64,
-        confirmation: EvmTransactionConfirmation,
+        receipt: EvmTransactionReceipt,
+        created_address: EvmAddress,
     ) -> Self {
-        Self::Confirmed {
+        Self {
             effect_id,
             nonce,
-            confirmation,
+            receipt,
+            outcome: EvmTransactionOutcome::Created { created_address },
         }
     }
 
-    /// Constructs a reverted settlement.
-    pub fn reverted(effect_id: EffectId, nonce: u64, revert: EvmTransactionRevert) -> Self {
-        Self::Reverted {
+    /// Constructs one successful contract-call settlement.
+    pub fn called(effect_id: EffectId, nonce: u64, receipt: EvmTransactionReceipt) -> Self {
+        Self {
             effect_id,
             nonce,
-            revert,
+            receipt,
+            outcome: EvmTransactionOutcome::Called,
+        }
+    }
+
+    /// Constructs one reverted transaction settlement.
+    pub fn reverted(effect_id: EffectId, nonce: u64, receipt: EvmTransactionReceipt) -> Self {
+        Self {
+            effect_id,
+            nonce,
+            receipt,
+            outcome: EvmTransactionOutcome::Reverted,
         }
     }
 
     /// Returns the settled Effect identity.
     pub const fn effect_id(&self) -> &EffectId {
-        match self {
-            Self::Confirmed { effect_id, .. } | Self::Reverted { effect_id, .. } => effect_id,
-        }
+        &self.effect_id
     }
 
     /// Returns the reserved transaction nonce.
     pub const fn nonce(&self) -> u64 {
-        match self {
-            Self::Confirmed { nonce, .. } | Self::Reverted { nonce, .. } => *nonce,
-        }
+        self.nonce
+    }
+
+    /// Returns the shared checked receipt facts.
+    pub const fn receipt(&self) -> &EvmTransactionReceipt {
+        &self.receipt
+    }
+
+    /// Returns the closed settlement outcome.
+    pub const fn outcome(&self) -> &EvmTransactionOutcome {
+        &self.outcome
     }
 
     /// Returns the transaction hash.
     pub const fn transaction_hash(&self) -> &EvmHash {
-        match self {
-            Self::Confirmed { confirmation, .. } => confirmation.transaction_hash(),
-            Self::Reverted { revert, .. } => revert.transaction_hash(),
-        }
+        self.receipt.transaction_hash()
     }
 
     /// Returns the canonical receipt block anchor.
     pub const fn block_anchor(&self) -> &crate::EvmBlockAnchor {
-        match self {
-            Self::Confirmed { confirmation, .. } => confirmation.block_anchor(),
-            Self::Reverted { revert, .. } => revert.block_anchor(),
-        }
+        self.receipt.block_anchor()
     }
 }
 
-/// Caller context and action-specific facts from successful contract creation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(
-    deny_unknown_fields,
-    bound(deserialize = "K: serde::de::DeserializeOwned")
-)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "contract-creation-completion",
-    version = "1",
-    schema = "mfm.evm-contract-creation-completion"
-)]
-pub struct EvmContractCreationCompletion<K: MfmValueTrait> {
-    block_anchor: crate::EvmBlockAnchor,
-    binding: EvmTransactionBinding,
-    caller_context: K,
-    created_address: EvmAddress,
-    transaction_hash: EvmHash,
-}
-
-impl<K: MfmValueTrait> EvmContractCreationCompletion<K> {
-    /// Returns the unchanged caller context.
-    pub const fn caller_context(&self) -> &K {
-        &self.caller_context
-    }
-
-    /// Returns the execution binding selected by the creation command.
-    pub const fn binding(&self) -> &EvmTransactionBinding {
-        &self.binding
-    }
-
-    /// Returns the canonical receipt block anchor.
-    pub const fn block_anchor(&self) -> &crate::EvmBlockAnchor {
-        &self.block_anchor
-    }
-
-    /// Returns the receipt-derived contract address.
-    pub const fn created_address(&self) -> &EvmAddress {
-        &self.created_address
-    }
-
-    /// Returns the exact signed transaction hash.
-    pub const fn transaction_hash(&self) -> &EvmHash {
-        &self.transaction_hash
-    }
-}
-
-/// Caller context and action-specific facts from a successful contract call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(
-    deny_unknown_fields,
-    bound(deserialize = "K: serde::de::DeserializeOwned")
-)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "contract-call-completion",
-    version = "1",
-    schema = "mfm.evm-contract-call-completion"
-)]
-pub struct EvmContractCallCompletion<K: MfmValueTrait> {
-    block_anchor: crate::EvmBlockAnchor,
-    binding: EvmTransactionBinding,
-    caller_context: K,
-    target: EvmAddress,
-    transaction_hash: EvmHash,
-}
-
-impl<K: MfmValueTrait> EvmContractCallCompletion<K> {
-    /// Returns the unchanged caller context.
-    pub const fn caller_context(&self) -> &K {
-        &self.caller_context
-    }
-
-    /// Returns the execution binding selected by the call command.
-    pub const fn binding(&self) -> &EvmTransactionBinding {
-        &self.binding
-    }
-
-    /// Returns the canonical receipt block anchor.
-    pub const fn block_anchor(&self) -> &crate::EvmBlockAnchor {
-        &self.block_anchor
-    }
-
-    /// Returns the target selected by the checked call command.
-    pub const fn target(&self) -> &EvmAddress {
-        &self.target
-    }
-
-    /// Returns the exact signed transaction hash.
-    pub const fn transaction_hash(&self) -> &EvmHash {
-        &self.transaction_hash
-    }
-}
-
-/// Context-preserving failure from contract creation.
+/// Action-specific success facts projected by the transaction State.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(
     tag = "kind",
     content = "value",
     rename_all = "snake_case",
-    deny_unknown_fields,
-    bound(deserialize = "K: serde::de::DeserializeOwned")
+    deny_unknown_fields
 )]
 #[mfm(
     namespace = "mfm.evm",
-    name = "contract-creation-failure",
+    name = "transaction-success",
     version = "1",
-    schema = "mfm.evm-contract-creation-failure"
+    schema = "mfm.evm-transaction-success"
 )]
-pub enum EvmContractCreationFailure<K: MfmValueTrait> {
-    /// The creation transaction was confirmed reverted.
-    Reverted {
-        /// Unchanged caller-owned context.
-        caller_context: K,
-        /// Minimal receipt-derived revert projection.
-        revert: EvmTransactionRevert,
+pub enum EvmTransactionSuccess {
+    /// A contract creation succeeded.
+    Created {
+        /// Receipt-derived created contract address.
+        created_address: EvmAddress,
     },
-    /// Direct interpretation received a successful settlement for the opposite action.
-    InconsistentSettlement {
-        /// Unchanged caller-owned context.
-        caller_context: K,
+    /// A contract call succeeded.
+    Called {
+        /// Target fixed by the checked command.
+        target: EvmAddress,
     },
 }
 
-/// Context-preserving failure from a contract call.
+impl EvmTransactionSuccess {
+    /// Returns the created address for a successful creation.
+    pub const fn created_address(&self) -> Option<&EvmAddress> {
+        match self {
+            Self::Created { created_address } => Some(created_address),
+            Self::Called { .. } => None,
+        }
+    }
+
+    /// Returns the target for a successful call.
+    pub const fn target(&self) -> Option<&EvmAddress> {
+        match self {
+            Self::Created { .. } => None,
+            Self::Called { target } => Some(target),
+        }
+    }
+}
+
+/// Caller context and authenticated facts from one successful transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
     deny_unknown_fields,
     bound(deserialize = "K: serde::de::DeserializeOwned")
 )]
 #[mfm(
     namespace = "mfm.evm",
-    name = "contract-call-failure",
+    name = "transaction-completion",
     version = "1",
-    schema = "mfm.evm-contract-call-failure"
+    schema = "mfm.evm-transaction-completion"
 )]
-pub enum EvmContractCallFailure<K: MfmValueTrait> {
-    /// The call transaction was confirmed reverted.
-    Reverted {
-        /// Unchanged caller-owned context.
-        caller_context: K,
-        /// Minimal receipt-derived revert projection.
-        revert: EvmTransactionRevert,
-    },
-    /// Direct interpretation received a successful settlement for the opposite action.
-    InconsistentSettlement {
-        /// Unchanged caller-owned context.
-        caller_context: K,
-    },
+pub struct EvmTransactionCompletion<K: MfmValueTrait> {
+    caller_context: K,
+    binding: EvmTransactionBinding,
+    receipt: EvmTransactionReceipt,
+    outcome: EvmTransactionSuccess,
+}
+
+impl<K: MfmValueTrait> EvmTransactionCompletion<K> {
+    /// Returns the unchanged caller context.
+    pub const fn caller_context(&self) -> &K {
+        &self.caller_context
+    }
+
+    /// Returns the execution binding selected by the command.
+    pub const fn binding(&self) -> &EvmTransactionBinding {
+        &self.binding
+    }
+
+    /// Returns the shared checked receipt facts.
+    pub const fn receipt(&self) -> &EvmTransactionReceipt {
+        &self.receipt
+    }
+
+    /// Returns the action-specific successful outcome.
+    pub const fn outcome(&self) -> &EvmTransactionSuccess {
+        &self.outcome
+    }
+
+    /// Returns the canonical receipt block anchor.
+    pub const fn block_anchor(&self) -> &crate::EvmBlockAnchor {
+        self.receipt.block_anchor()
+    }
+
+    /// Returns the exact signed transaction hash.
+    pub const fn transaction_hash(&self) -> &EvmHash {
+        self.receipt.transaction_hash()
+    }
+}
+
+/// Caller context and receipt facts from one reverted transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(
+    deny_unknown_fields,
+    bound(deserialize = "K: serde::de::DeserializeOwned")
+)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "transaction-reversion",
+    version = "1",
+    schema = "mfm.evm-transaction-reversion"
+)]
+pub struct EvmTransactionReversion<K: MfmValueTrait> {
+    caller_context: K,
+    receipt: EvmTransactionReceipt,
+}
+
+impl<K: MfmValueTrait> EvmTransactionReversion<K> {
+    /// Returns the unchanged caller context.
+    pub const fn caller_context(&self) -> &K {
+        &self.caller_context
+    }
+
+    /// Returns the shared checked receipt facts.
+    pub const fn receipt(&self) -> &EvmTransactionReceipt {
+        &self.receipt
+    }
 }
 
 /// Mutating EVM transaction Effect capability.
@@ -1087,19 +945,13 @@ impl EffectCapabilityContract for EvmTransactionEffect {
         evidence: &Self::Evidence,
     ) -> mfm_capabilities::Result<()> {
         let action_matches = matches!(
-            (command.to(), evidence),
+            (command.to(), evidence.outcome()),
             (
                 None,
-                EvmTransactionSettlement::Confirmed {
-                    confirmation: EvmTransactionConfirmation::Created { .. },
-                    ..
-                } | EvmTransactionSettlement::Reverted { .. }
+                EvmTransactionOutcome::Created { .. } | EvmTransactionOutcome::Reverted
             ) | (
                 Some(_),
-                EvmTransactionSettlement::Confirmed {
-                    confirmation: EvmTransactionConfirmation::Called { .. },
-                    ..
-                } | EvmTransactionSettlement::Reverted { .. }
+                EvmTransactionOutcome::Called | EvmTransactionOutcome::Reverted
             )
         );
         (evidence.effect_id() == effect_id && action_matches)
@@ -1108,20 +960,20 @@ impl EffectCapabilityContract for EvmTransactionEffect {
     }
 }
 
-/// Context-preserving EVM contract-creation State.
-pub struct CreateEvmContract<K: MfmValueTrait>(PhantomData<fn() -> K>);
+/// Context-preserving EVM transaction State.
+pub struct ExecuteEvmTransaction<K: MfmValueTrait>(PhantomData<fn() -> K>);
 
-impl<K: MfmValueTrait> State for CreateEvmContract<K> {
-    type Input = EvmContractCreationContext<K>;
-    type Output = EvmContractCreationCompletion<K>;
-    type Failure = EvmContractCreationFailure<K>;
+impl<K: MfmValueTrait> State for ExecuteEvmTransaction<K> {
+    type Input = EvmTransactionContext<K>;
+    type Output = EvmTransactionCompletion<K>;
+    type Failure = EvmTransactionReversion<K>;
 
     fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new(CREATE_EVM_CONTRACT_STATE_ID).map_err(|_| ProgramError::InvalidContract)
+        StableId::new(EXECUTE_EVM_TRANSACTION_STATE_ID).map_err(|_| ProgramError::InvalidContract)
     }
 }
 
-impl<K: MfmValueTrait> EffectState<EvmTransactionEffect> for CreateEvmContract<K> {
+impl<K: MfmValueTrait> EffectState<EvmTransactionEffect> for ExecuteEvmTransaction<K> {
     fn prepare(input: &Self::Input) -> Result<Eip1559TransactionCommand, PreparationError> {
         input
             .validate()
@@ -1133,127 +985,54 @@ impl<K: MfmValueTrait> EffectState<EvmTransactionEffect> for CreateEvmContract<K
         input: Self::Input,
         evidence: &EvmTransactionSettlement,
     ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        match evidence {
-            EvmTransactionSettlement::Confirmed {
-                confirmation:
-                    EvmTransactionConfirmation::Created {
-                        block_anchor,
-                        created_address,
-                        transaction_hash,
-                    },
-                ..
-            } => ProposedStateOutcome::Success {
-                output: EvmContractCreationCompletion {
-                    block_anchor: block_anchor.clone(),
-                    binding: input.command.binding().clone(),
-                    caller_context: input.caller_context,
-                    created_address: created_address.clone(),
-                    transaction_hash: transaction_hash.clone(),
-                },
-            },
-            EvmTransactionSettlement::Confirmed {
-                confirmation: EvmTransactionConfirmation::Called { .. },
-                ..
-            } => ProposedStateOutcome::Failure {
-                failure: EvmContractCreationFailure::InconsistentSettlement {
-                    caller_context: input.caller_context,
-                },
-            },
-            EvmTransactionSettlement::Reverted { revert, .. } => ProposedStateOutcome::Failure {
-                failure: EvmContractCreationFailure::Reverted {
-                    caller_context: input.caller_context,
-                    revert: revert.clone(),
-                },
-            },
-        }
-    }
-}
-
-impl<K: MfmValueTrait> CapabilityInjection<CreateEvmContract<K>> for EvmTransactionEffect {
-    type Setup = EvmTransactionBinding;
-    type ExpandedInput = EvmContractCreationContext<K>;
-    type ExpandedOutput = EvmContractCreationCompletion<K>;
-
-    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
-        setup
-            .binding_ref()
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-/// Context-preserving EVM contract-call State.
-pub struct CallEvmContract<K: MfmValueTrait>(PhantomData<fn() -> K>);
-
-impl<K: MfmValueTrait> State for CallEvmContract<K> {
-    type Input = EvmContractCallContext<K>;
-    type Output = EvmContractCallCompletion<K>;
-    type Failure = EvmContractCallFailure<K>;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new(CALL_EVM_CONTRACT_STATE_ID).map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl<K: MfmValueTrait> EffectState<EvmTransactionEffect> for CallEvmContract<K> {
-    fn prepare(input: &Self::Input) -> Result<Eip1559TransactionCommand, PreparationError> {
-        input
-            .validate()
-            .map(|_| input.command.clone())
-            .map_err(|_| PreparationError)
-    }
-
-    fn interpret(
-        input: Self::Input,
-        evidence: &EvmTransactionSettlement,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        match evidence {
-            EvmTransactionSettlement::Confirmed {
-                confirmation:
-                    EvmTransactionConfirmation::Called {
-                        block_anchor,
-                        transaction_hash,
-                    },
-                ..
-            } => {
-                let Some(to) = input.command.to() else {
-                    return ProposedStateOutcome::Failure {
-                        failure: EvmContractCallFailure::InconsistentSettlement {
-                            caller_context: input.caller_context,
-                        },
-                    };
-                };
+        let EvmTransactionContext {
+            caller_context,
+            command,
+        } = input;
+        let receipt = evidence.receipt().clone();
+        let binding = command.binding().clone();
+        match (command.to(), evidence.outcome()) {
+            (None, EvmTransactionOutcome::Created { created_address }) => {
                 ProposedStateOutcome::Success {
-                    output: EvmContractCallCompletion {
-                        block_anchor: block_anchor.clone(),
-                        binding: input.command.binding().clone(),
-                        caller_context: input.caller_context,
-                        target: to.clone(),
-                        transaction_hash: transaction_hash.clone(),
+                    output: EvmTransactionCompletion {
+                        caller_context,
+                        binding,
+                        receipt,
+                        outcome: EvmTransactionSuccess::Created {
+                            created_address: created_address.clone(),
+                        },
                     },
                 }
             }
-            EvmTransactionSettlement::Confirmed {
-                confirmation: EvmTransactionConfirmation::Created { .. },
-                ..
-            } => ProposedStateOutcome::Failure {
-                failure: EvmContractCallFailure::InconsistentSettlement {
-                    caller_context: input.caller_context,
+            (Some(target), EvmTransactionOutcome::Called) => ProposedStateOutcome::Success {
+                output: EvmTransactionCompletion {
+                    caller_context,
+                    binding,
+                    receipt,
+                    outcome: EvmTransactionSuccess::Called {
+                        target: target.clone(),
+                    },
                 },
             },
-            EvmTransactionSettlement::Reverted { revert, .. } => ProposedStateOutcome::Failure {
-                failure: EvmContractCallFailure::Reverted {
-                    caller_context: input.caller_context,
-                    revert: revert.clone(),
+            // Runtime binds evidence before interpretation. The same closed failure shape handles
+            // an authenticated reversion and keeps direct trait misuse non-panicking without
+            // retaining an inconsistent-settlement value.
+            (_, EvmTransactionOutcome::Reverted)
+            | (Some(_), EvmTransactionOutcome::Created { .. })
+            | (None, EvmTransactionOutcome::Called) => ProposedStateOutcome::Failure {
+                failure: EvmTransactionReversion {
+                    caller_context,
+                    receipt,
                 },
             },
         }
     }
 }
 
-impl<K: MfmValueTrait> CapabilityInjection<CallEvmContract<K>> for EvmTransactionEffect {
+impl<K: MfmValueTrait> CapabilityInjection<ExecuteEvmTransaction<K>> for EvmTransactionEffect {
     type Setup = EvmTransactionBinding;
-    type ExpandedInput = EvmContractCallContext<K>;
-    type ExpandedOutput = EvmContractCallCompletion<K>;
+    type ExpandedInput = EvmTransactionContext<K>;
+    type ExpandedOutput = EvmTransactionCompletion<K>;
 
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         setup
@@ -1307,4 +1086,52 @@ fn write_fixed_hex<const N: usize>(
         formatter.write_fmt(format_args!("{byte:02x}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use mfm_values::{canonicalize_mfm_value, MfmValue as _};
+
+    use super::*;
+
+    #[test]
+    fn private_action_identity_and_wire_are_frozen() {
+        let semantic = TransactionAction::semantic_id()
+            .expect("action semantic id")
+            .to_string();
+        let schema = TransactionAction::schema_descriptor()
+            .expect("action descriptor")
+            .schema_id()
+            .expect("action schema id")
+            .to_string();
+        assert_eq!(
+            semantic,
+            "semantic:mfm.evm:eip1559-transaction-action:1:sha256-jcs-v1:e9ea0b242e14471a3ed2996b657ec0e3b3d9b8aeaa00b215e2d866afd8af1bd9"
+        );
+        assert_eq!(
+            schema,
+            "schema:mfm.evm-eip1559-transaction-action:1:sha256-jcs-v1:071ba5027b04d00c5d85d91070c9f8d62ff02ec213bbcc94a55568ba73b9b05e"
+        );
+        let create = TransactionAction::Create {
+            initcode: CanonicalBytes::new([1, 2, 3]),
+        };
+        assert_eq!(
+            canonicalize_mfm_value(&create)
+                .expect("canonical action")
+                .0
+                .as_str(),
+            r#"{"kind":"create","value":{"initcode":"AQID"}}"#
+        );
+        let call = TransactionAction::Call {
+            to: EvmAddress::from_bytes([0x22; 20]),
+            calldata: CanonicalBytes::new([4, 5, 6]),
+        };
+        assert_eq!(
+            canonicalize_mfm_value(&call)
+                .expect("canonical action")
+                .0
+                .as_str(),
+            r#"{"kind":"call","value":{"calldata":"BAUG","to":"0x2222222222222222222222222222222222222222"}}"#
+        );
+    }
 }

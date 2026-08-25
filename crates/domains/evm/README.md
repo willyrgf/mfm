@@ -6,20 +6,22 @@ infallible exact byte access; their strict string wires remain lowercase `0x` he
 `EvmU256` owns canonical decimal EVM words, while canonical base64 values retain
 `CanonicalBytes` directly and chain IDs and gas limits retain `NonZeroU64`.
 
-`EvmTransactionEffect` executes one nonce-free, fixed type-2, empty-access-list command shared by
-the independent `CreateEvmContract<K>` and `CallEvmContract<K>` States. The action is a private
-command detail: complete `create` and `call` factories check byte bounds, nonzero gas, the `u128`
-fee ceiling, and priority-fee ordering, and checked deserialization enforces the same contract.
-Their checked contexts admit only the matching action. Creation completion exposes the command binding, receipt
-anchor, created address, and transaction hash; call completion exposes the binding, receipt anchor,
-target, and hash. Their action-specific failures retain caller context and the minimal revert, while
-settlement evidence keeps its exact `EffectId`, nonce, confirmation, and revert contract unchanged.
+`EvmTransactionEffect` executes one nonce-free, fixed type-2, empty-access-list command through the
+single generic `ExecuteEvmTransaction<K>` State. The action is a private command detail: complete
+`create` and `call` factories check byte bounds, nonzero gas, the `u128` fee ceiling, and
+priority-fee ordering, and checked deserialization enforces the same contract. One checked
+`EvmTransactionContext<K>` admits either complete command.
 
-`EvmContractCallContext::for_created_contract` consumes a confirmed creation and fixes the next
-call's binding and target from that evidence. `AnchoredContractCallContext::for_confirmed_call`
-consumes a confirmed call and fixes the observation route, target, and receipt anchor. The general
-checked constructors remain available for explicit alternate policy. EVM supplies no lifecycle
-Operation: consumers keep deployment, call, and observation as explicit Program nodes.
+Settlement evidence is one `EvmTransactionReceipt` plus a closed Created, Called, or Reverted
+outcome, together with the exact `EffectId` and nonce. The Effect binder rejects an opposite
+successful action before interpretation. A successful State completion preserves caller context
+and binding, retains the shared receipt, and projects either the created address or checked call
+target. A reversion preserves caller context and that same receipt.
+
+When a product needs action-specific chaining, its own Pure State projects the transaction
+completion into the next checked command or anchored-call context. EVM supplies no lifecycle
+Operation or creation-to-call/call-to-observation bridge: consumers keep deployment, call, and
+observation as explicit Program nodes and own their policy.
 
 `EvmAnchoredContractCallRead` and `ReadAnchoredContractCall<K>` carry one exact transaction-route
 reference, target, bounded calldata, and block anchor. Returned evidence retains only that anchor

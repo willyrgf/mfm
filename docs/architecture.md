@@ -104,11 +104,11 @@ jobs. Dropping an operation is safe: no candidate exists yet, or the one in-flig
 atomically and the next complete reload resolves it.
 
 EVM owns one shared checked address, hash, and U256 vocabulary across existing balance Reads and
-transaction contracts. Independent Create and Call Effect States project action-specific inputs,
-successes, and failures through the same deterministic `EvmTransactionEffect`; it owns no nonce
-reservation, signing, provider, or settlement loop. EVM also owns the checked creation-to-call
-binding/target transition and call-to-observation route/target/anchor transition, but no product
-lifecycle Operation. `EvmAnchoredContractCallRead` owns only the exact Program-visible
+transaction contracts. One generic `ExecuteEvmTransaction<K>` State projects a complete command
+through the deterministic `EvmTransactionEffect` into shared receipt plus closed success or
+reversion facts; it owns no nonce reservation, signing, provider, or settlement loop. Products own
+any creation-to-call or call-to-observation projection as ordinary Pure States.
+`EvmAnchoredContractCallRead` owns only the exact Program-visible
 intent/evidence and context-preserving State. Its route reference is the content ref of
 `EvmTransactionRoute`, while the transaction Effect binds the complete
 route/authority-epoch/sender value. Live registration and IO remain downstream adapters. Live EVM

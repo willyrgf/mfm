@@ -3,7 +3,7 @@ use std::num::NonZeroU64;
 use mfm_canonical::raw_content_digest;
 use mfm_evm::{
     EvmAddress, EvmAuthorityEpoch, EvmBlockAnchor, EvmChainInstance, EvmHash,
-    EvmTransactionConfirmation, EvmTransactionSettlement, EvmU256,
+    EvmTransactionReceipt, EvmTransactionSettlement, EvmU256,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, EffectId, SchemaId};
 
@@ -35,16 +35,16 @@ fn domain() -> NonceDomain {
 }
 
 fn settlement(effect_id: EffectId, nonce: u64, hash: EvmHash) -> EvmTransactionSettlement {
-    EvmTransactionSettlement::confirmed(
+    EvmTransactionSettlement::called(
         effect_id,
         nonce,
-        EvmTransactionConfirmation::Called {
-            block_anchor: EvmBlockAnchor::new(
+        EvmTransactionReceipt::new(
+            EvmBlockAnchor::new(
                 EvmU256::from_u64(8),
                 EvmHash::new(format!("0x{}", "09".repeat(32))).expect("block hash"),
             ),
-            transaction_hash: hash,
-        },
+            hash,
+        ),
     )
 }
 

@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use mfm_evm::{
     Eip1559TransactionCommand, EvmAuthorityEpoch, EvmChainInstance, EvmEndpoint,
-    EvmTransactionBinding, EvmTransactionConfirmation, EvmTransactionRoute,
-    EvmTransactionSettlement, EvmU256,
+    EvmTransactionBinding, EvmTransactionOutcome, EvmTransactionRoute, EvmTransactionSettlement,
+    EvmU256,
 };
 use mfm_evm_transaction_authority::{
     AuthorityFuture, AuthorityState, EvmTransactionAuthority, PreparedRecord, Reservation,
@@ -490,12 +490,8 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
     };
     assert_eq!(evidence.nonce(), 7);
     assert!(matches!(
-        &evidence,
-        EvmTransactionSettlement::Confirmed {
-            confirmation: EvmTransactionConfirmation::Created { created_address, .. },
-            ..
-        }
-            if created_address == &created
+        evidence.outcome(),
+        EvmTransactionOutcome::Created { created_address } if created_address == &created
     ));
     let operations = provider.operations();
     let canonical_position = operations
@@ -856,26 +852,18 @@ async fn receipt_shape_validation_covers_create_call_revert_and_mismatch_matrix(
         let receipt = ProviderReceipt::new(hash, sender, result, provider.canonical.clone());
         let actual = validate_receipt(&effect_id, &receipt, &prepared, command, &local);
         match expected {
-            Expected::Created => assert!(matches!(
-                actual,
-                Ok(EvmTransactionSettlement::Confirmed {
-                    confirmation: EvmTransactionConfirmation::Created { .. },
-                    ..
-                })
-            )),
-            Expected::Called => assert!(matches!(
-                actual,
-                Ok(EvmTransactionSettlement::Confirmed {
-                    confirmation: EvmTransactionConfirmation::Called { .. },
-                    ..
-                })
-            )),
-            Expected::Reverted => {
-                assert!(matches!(
-                    actual,
-                    Ok(EvmTransactionSettlement::Reverted { .. })
-                ))
-            }
+            Expected::Created => assert!(actual.is_ok_and(|settlement| matches!(
+                settlement.outcome(),
+                EvmTransactionOutcome::Created { .. }
+            ))),
+            Expected::Called => assert!(actual.is_ok_and(|settlement| matches!(
+                settlement.outcome(),
+                EvmTransactionOutcome::Called
+            ))),
+            Expected::Reverted => assert!(actual.is_ok_and(|settlement| matches!(
+                settlement.outcome(),
+                EvmTransactionOutcome::Reverted
+            ))),
             Expected::Error => assert_eq!(actual, Err(AdapterError::Unavailable)),
         }
     }

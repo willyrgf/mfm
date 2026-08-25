@@ -65,22 +65,21 @@ EVM Program values use byte-backed checked lowercase `EvmAddress` and `EvmHash`,
 fixes chain ID plus expected genesis hash, endpoint reference, authority epoch, and sender account.
 The sole transaction command is nonce-free EIP-1559 type 2 with an empty access list and a private
 bounded Create or Call action. Its complete factories and checked deserializer enforce input bounds,
-the `u128` fee ceiling, priority-fee ordering, and nonzero gas. Independent creation and call Effect
-States admit only their matching action
-and prepare the shared `EvmTransactionEffect` command unchanged. Their specialized success values
-retain caller context while projecting only binding, receipt anchor, hash, and the created address or
-called target. Action-specific failures retain caller context and the minimal revert. Settlement
-evidence still binds the pending EffectId and contains only the reserved nonce, transaction hash,
-receipt anchor, and matching success-create, success-call, or reverted result.
+the `u128` fee ceiling, priority-fee ordering, and nonzero gas. One generic
+`ExecuteEvmTransaction<K>` Effect State prepares the shared `EvmTransactionEffect` command
+unchanged. Its completion retains caller context, binding, a shared receipt, and only the created
+address or checked call target; its reversion retains caller context and the same receipt.
+Settlement evidence binds the pending EffectId and contains the reserved nonce, shared receipt, and
+one Created, Called, or Reverted outcome. The Effect binder rejects an opposite successful action
+before State interpretation.
 
 The context-preserving anchored contract-call Read fixes a transaction-route content ref, target,
 bounded calldata, and exact block anchor. Returned evidence contains only the same anchor and
 bounded return bytes. Rejected, safe-failure, and integrity-blocked evidence project to a closed
-failure reason. Checked domain transitions consume a creation completion to fix a subsequent call's
-binding and created target, then consume a call completion to fix an observation's route, target, and
-receipt anchor. General constructors keep deliberate alternate policy explicit. EVM owns no product
-lifecycle Operation. These domain contracts perform no provider, signing, nonce, or persistence IO;
-the authority and live adapter remain separate downstream responsibilities.
+failure reason. Caller-owned Pure States project transaction completions into subsequent checked
+commands and observations; EVM does not own action-specific bridges or a product lifecycle
+Operation. These domain contracts perform no provider, signing, nonce, or persistence IO; the
+authority and live adapter remain separate downstream responsibilities.
 
 The live EVM transaction adapter captures one exact binding, key- and purpose-bound signer,
 append-only transaction authority, and transaction-only provider facet. Before authority or
