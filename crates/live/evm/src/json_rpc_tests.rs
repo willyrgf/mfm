@@ -197,10 +197,15 @@ fn operation(name: &str) -> StableId {
     StableId::new(name).expect("operation")
 }
 
+fn abi_word(value: &str) -> Result<AbiWord, AdapterError> {
+    AbiWord::try_from(RpcData::parse(value, 33)?)
+}
+
 #[test]
 fn conversions_and_calldata_are_exact() {
     assert_eq!(quantity_to_u64("0x539"), Some(1337));
     assert_eq!(quantity_to_u64("0x0"), Some(0));
+    assert_eq!(quantity_to_u64("0x1"), Some(1));
     assert_eq!(quantity_to_u64("0x00"), None);
     assert_eq!(quantity_to_u64("0xA"), None);
     assert_eq!(quantity_to_u64(&format!("0x{}", "f".repeat(17))), None);
@@ -213,8 +218,27 @@ fn conversions_and_calldata_are_exact() {
         Some("1000000000000000000000000")
     );
     assert_eq!(quantity_to_decimal("0x0").as_deref(), Some("0"));
+    assert_eq!(quantity_to_decimal("0x00"), None);
     assert_eq!(quantity_to_decimal("0x01"), None);
     assert_eq!(quantity_to_decimal(&format!("0x{}", "f".repeat(65))), None);
+
+    assert!(RpcData::parse("0x", 1).expect("empty data").0.is_empty());
+    assert_eq!(RpcData::parse("0x00", 1).expect("zero byte").0, [0_u8]);
+    assert_eq!(RpcData::parse("0x0", 1), Err(AdapterError::Unavailable));
+    assert_eq!(RpcData::parse("0x0000", 1), Err(AdapterError::Unavailable));
+
+    let zero_word = format!("0x{}", "00".repeat(32));
+    let one_word = format!("0x{}01", "00".repeat(31));
+    assert_eq!(
+        decode_abi_u256(abi_word(&zero_word).expect("zero word")),
+        U256::ZERO
+    );
+    assert_eq!(
+        decode_abi_u256(abi_word(&one_word).expect("one word")),
+        U256::from(1)
+    );
+    assert!(abi_word(&format!("0x{}", "00".repeat(31))).is_err());
+    assert!(abi_word(&format!("0x{}", "00".repeat(33))).is_err());
 
     assert_eq!(
         block_tag(&EvmU256::new("17").expect("block number")),
@@ -226,14 +250,19 @@ fn conversions_and_calldata_are_exact() {
     );
 
     assert_eq!(
-        word_to_u8("0x0000000000000000000000000000000000000000000000000000000000000012"),
+        word_to_u8(
+            abi_word("0x0000000000000000000000000000000000000000000000000000000000000012")
+                .expect("decimals word")
+        ),
         Some(18)
     );
     assert_eq!(
-        word_to_u8("0x0000000000000000000000000000000000000000000000000000000000000100"),
+        word_to_u8(
+            abi_word("0x0000000000000000000000000000000000000000000000000000000000000100")
+                .expect("oversized decimals")
+        ),
         None
     );
-    assert_eq!(word_to_u8("0x12"), None);
 
     assert!(EvmHash::new(BLOCK_HASH).is_ok());
     assert!(EvmHash::new("0xAAAA").is_err());
@@ -381,6 +410,64 @@ async fn token_decimals_splices_no_address_and_decodes_one_word() {
 }
 
 #[tokio::test]
+async fn token_balance_decodes_a_zero_padded_abi_word() {
+    let mut stub = Stub::new(
+        r#"{"jsonrpc":"2.0","id":1,"result":"0x0000000000000000000000000000000000000000000000000000000000000001"}"#,
+    );
+    let response = stub
+        .provider()
+        .request(
+            operation("mfm.evm.read-token-balance@1"),
+            intent_bytes(
+                "mfm.evm.read-token-balance@1",
+                serde_json::json!({
+                    "kind": "token_balance",
+                    "value": { "source": source(Some(TOKEN)), "anchor": anchor() }
+                }),
+            ),
+        )
+        .await
+        .expect("token balance");
+    assert_eq!(
+        response,
+        EvmProviderResponse::Read(EvmReadValue::RawUnits(EvmU256::new("1").expect("units")))
+    );
+    assert_eq!(
+        stub.observed_request()["params"],
+        serde_json::json!([{
+            "to": TOKEN,
+            "data": "0x70a0823100000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c8"
+        }, "0x11"])
+    );
+}
+
+#[tokio::test]
+async fn malformed_or_wrong_sized_abi_data_is_unavailable() {
+    for result in [
+        format!("0x{}", "00".repeat(31)),
+        format!("0x{}", "00".repeat(33)),
+        "0x0".to_owned(),
+        "0xgg".to_owned(),
+    ] {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result });
+        let response = Stub::new(body.to_string())
+            .provider()
+            .request(
+                operation("mfm.evm.read-token-balance@1"),
+                intent_bytes(
+                    "mfm.evm.read-token-balance@1",
+                    serde_json::json!({
+                        "kind": "token_balance",
+                        "value": { "source": source(Some(TOKEN)), "anchor": anchor() }
+                    }),
+                ),
+            )
+            .await;
+        assert_eq!(response, Err(AdapterError::Unavailable));
+    }
+}
+
+#[tokio::test]
 async fn revert_and_codeless_call_are_definite_safe_failures() {
     for body in [
         r#"{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}"#,
@@ -439,6 +526,31 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
         )
         .await;
     assert_eq!(response, Err(AdapterError::Unavailable));
+}
+
+#[tokio::test]
+async fn incomplete_or_malformed_rpc_errors_are_unavailable() {
+    for error in [
+        serde_json::json!({}),
+        serde_json::json!({ "code": -1 }),
+        serde_json::json!({ "message": "opaque" }),
+        serde_json::json!({ "code": "-1", "message": "opaque" }),
+        serde_json::json!({ "code": -1, "message": 1 }),
+        serde_json::json!({ "code": -1, "message": "opaque", "unexpected": true }),
+    ] {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "error": error });
+        let response = Stub::new(body.to_string())
+            .provider()
+            .request(
+                operation("mfm.evm.read-chain-identity@1"),
+                intent_bytes(
+                    "mfm.evm.read-chain-identity@1",
+                    serde_json::json!({ "kind": "chain_identity" }),
+                ),
+            )
+            .await;
+        assert_eq!(response, Err(AdapterError::Unavailable));
+    }
 }
 
 #[tokio::test]
