@@ -17,7 +17,7 @@ parser, open Journal DTO, portable codec, or independent semantic record hash is
 
 Store persists immutable frame bytes and one current head only. PostgreSQL owns exactly
 `mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads`; the static schema contract is
-`mfm.run-history-postgres.v2`. Those three relations remain the complete run-history authority even
+`mfm.run-history-postgres.v1`. Those three relations remain the complete run-history authority even
 when the sibling `mfm_config` schema is installed.
 
 The configuration repository port defines an immutable revision containing only a checked name, a

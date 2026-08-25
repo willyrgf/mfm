@@ -193,7 +193,7 @@ async fn reset_schemas(connection: &mut PgConnection) {
 fn migration_and_classifier_contracts_are_exact() {
     static_assertions::assert_not_impl_any!(PostgresBackend: EvmTransactionAuthority);
     static_assertions::assert_not_impl_any!(PostgresEvmTransactionAuthority: Store, RunIndex, ConfigRepository);
-    assert_eq!(SCHEMA_CONTRACT, "mfm.run-history-postgres.v2");
+    assert_eq!(SCHEMA_CONTRACT, "mfm.run-history-postgres.v1");
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_store_schema"));
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_frames"));
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_heads"));
