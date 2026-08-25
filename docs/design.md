@@ -104,7 +104,10 @@ transaction authority owns its marker plus four append-only fact tables in `mfm_
 also provide the mechanical RunIndex projection without parsing frames. `PostgresBackend` gates
 only run history and configuration; `PostgresEvmTransactionAuthority` owns a separate pool and
 gates only its optional schema. Every admission checks its owned exact catalog, privileges, primary
-status, `fsync`, and `full_page_writes`.
+status, `fsync`, and `full_page_writes`. One declarative catalog specification and normalized
+verifier owns run-history, configuration, and EVM admission, including expanded column ACLs,
+`MAINTAIN`, RLS/policies/rules/triggers, storage options and tablespaces, validated constraints, and
+live/ready/valid indexes.
 
 Loads use one read-only repeatable snapshot. Appends take the per-RunId advisory transaction lock
 before observing state and force synchronous COMMIT. Configuration imports use the `(name, digest)`

@@ -23,6 +23,7 @@ use sqlx::{Arguments, Connection, PgConnection, PgPool, Row};
 
 const SCHEMA_CONTRACT: &str = "mfm.run-history-postgres.v2";
 
+mod catalog;
 mod config;
 mod evm_tx;
 mod index;
@@ -156,17 +157,6 @@ const fn classify_gate_error(error: GateError) -> PostgresOpenError {
 }
 
 /// Counts every `mfm_`-prefixed relation, indexes included, in the public schema.
-async fn mfm_relation_count(connection: &mut PgConnection) -> std::result::Result<i64, GateError> {
-    sqlx::query_scalar(
-        "SELECT count(*) FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = 'public' AND left(c.relname, 4) = 'mfm_'",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|_| GateError::Unavailable)
-}
-
 impl Store for PostgresBackend {
     fn load_run<'a>(
         &'a self,
@@ -302,12 +292,10 @@ async fn verify_durability(connection: &mut PgConnection) -> std::result::Result
 async fn verify_connection(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
     verify_durability(connection).await?;
     verify_runtime_authority(connection).await?;
-    verify_run_schema(connection).await?;
-    verify_config_schema(connection).await?;
-    verify_schema_privileges(connection, &["public", "mfm_config"]).await?;
-    let accepted =
-        verify_run_privileges(connection).await? && verify_config_privileges(connection).await?;
-    accepted.then_some(()).ok_or(GateError::Incompatible)
+    catalog::verify_surface(connection, &catalog::RUN_SURFACE, None).await?;
+    verify_run_marker(connection).await?;
+    catalog::verify_surface(connection, &catalog::CONFIG_SURFACE, None).await?;
+    verify_config_marker(connection).await
 }
 
 async fn verify_evm_connection(
@@ -315,145 +303,38 @@ async fn verify_evm_connection(
 ) -> std::result::Result<EvmAuthorityEpoch, GateError> {
     verify_durability(connection).await?;
     verify_runtime_authority(connection).await?;
-    let epoch = evm_tx::verify_evm_tx_schema(connection).await?;
-    verify_schema_privileges(connection, &["mfm_evm_tx"]).await?;
-    evm_tx::verify_evm_tx_privileges(connection)
-        .await?
-        .then_some(epoch)
-        .ok_or(GateError::Incompatible)
+    catalog::verify_surface(connection, &catalog::EVM_TX_SURFACE, None).await?;
+    evm_tx::load_evm_tx_epoch(connection).await
 }
 
-async fn verify_run_schema(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
-    let relations: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT c.relname, c.relkind::text, c.relpersistence::text \
-         FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = 'public' \
-           AND left(c.relname, 4) = 'mfm_' \
-           AND c.relkind <> 'i' \
-         ORDER BY c.relname",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|_| GateError::Unavailable)?;
-    let expected_relations = vec![
-        relation("mfm_run_frames", "r", "p"),
-        relation("mfm_run_heads", "r", "p"),
-        relation("mfm_store_schema", "r", "p"),
-    ];
-    if relations != expected_relations {
-        return Err(GateError::Incompatible);
-    }
-    verify_schema_ownership(
-        connection,
-        "public",
-        &["mfm_store_schema", "mfm_run_frames", "mfm_run_heads"],
-    )
-    .await?;
-
-    let columns: Vec<(String, String, String, bool, Option<String>)> = sqlx::query_as(
-        "SELECT c.relname, a.attname, t.typname, a.attnotnull, coll.collname \
-         FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid \
-         JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
-         LEFT JOIN pg_catalog.pg_collation coll ON coll.oid = a.attcollation \
-         WHERE n.nspname = 'public' \
-           AND c.relname IN ('mfm_store_schema','mfm_run_frames','mfm_run_heads') \
-           AND a.attnum > 0 AND NOT a.attisdropped \
-         ORDER BY c.relname, a.attnum",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|_| GateError::Unavailable)?;
-    let expected_columns = vec![
-        column("mfm_run_frames", "run_id", "text", true, Some("C")),
-        column("mfm_run_frames", "run_sequence", "int8", true, None),
-        column("mfm_run_frames", "frame_bytes", "bytea", true, None),
-        column("mfm_run_frames", "head_digest", "text", true, Some("C")),
-        column("mfm_run_heads", "run_id", "text", true, Some("C")),
-        column("mfm_run_heads", "head_sequence", "int8", true, None),
-        column("mfm_run_heads", "total_bytes", "int8", true, None),
-        column(
-            "mfm_store_schema",
-            "schema_contract",
-            "text",
-            true,
-            Some("C"),
-        ),
-    ];
-    if columns != expected_columns {
-        return Err(GateError::Incompatible);
-    }
-
+async fn verify_run_marker(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
     let markers: Vec<String> =
         sqlx::query_scalar("SELECT schema_contract FROM public.mfm_store_schema ORDER BY 1")
             .fetch_all(&mut *connection)
             .await
-            .map_err(|error| {
-                if is_undefined_schema_object(&error) {
-                    GateError::Incompatible
-                } else {
-                    GateError::Unavailable
-                }
-            })?;
-    if markers != [SCHEMA_CONTRACT] {
-        return Err(GateError::Incompatible);
-    }
+            .map_err(classify_catalog_query)?;
+    (markers == [SCHEMA_CONTRACT])
+        .then_some(())
+        .ok_or(GateError::Incompatible)
+}
 
-    let indexes: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT table_class.relname, index_class.relname, pg_get_indexdef(index_class.oid) \
-         FROM pg_catalog.pg_index idx \
-         JOIN pg_catalog.pg_class table_class ON table_class.oid = idx.indrelid \
-         JOIN pg_catalog.pg_class index_class ON index_class.oid = idx.indexrelid \
-         JOIN pg_catalog.pg_namespace n ON n.oid = table_class.relnamespace \
-         WHERE n.nspname = 'public' \
-           AND (left(table_class.relname, 4) = 'mfm_' \
-                OR left(index_class.relname, 4) = 'mfm_') \
-         ORDER BY table_class.relname, index_class.relname",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|_| GateError::Unavailable)?;
-    let expected_indexes = vec![
-        index(
-            "mfm_run_frames",
-            "mfm_run_frames_pkey",
-            "CREATE UNIQUE INDEX mfm_run_frames_pkey ON public.mfm_run_frames USING btree (run_id, run_sequence)",
-        ),
-        index(
-            "mfm_run_heads",
-            "mfm_run_heads_pkey",
-            "CREATE UNIQUE INDEX mfm_run_heads_pkey ON public.mfm_run_heads USING btree (run_id)",
-        ),
-        index(
-            "mfm_store_schema",
-            "mfm_store_schema_pkey",
-            "CREATE UNIQUE INDEX mfm_store_schema_pkey ON public.mfm_store_schema USING btree (schema_contract)",
-        ),
-    ];
-    if indexes != expected_indexes {
-        return Err(GateError::Incompatible);
-    }
+async fn verify_config_marker(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
+    let markers: Vec<String> =
+        sqlx::query_scalar("SELECT schema_contract FROM mfm_config.mfm_config_schema ORDER BY 1")
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(classify_catalog_query)?;
+    (markers == ["mfm.config-postgres.v2"])
+        .then_some(())
+        .ok_or(GateError::Incompatible)
+}
 
-    let constraints: Vec<(String, String, String, String)> = sqlx::query_as(
-        "SELECT c.relname, con.conname, con.contype::text, \
-                pg_get_constraintdef(con.oid, false) \
-         FROM pg_catalog.pg_constraint con \
-         JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = 'public' \
-           AND c.relname IN ('mfm_store_schema','mfm_run_frames','mfm_run_heads') \
-           AND con.contype IN ('c','f','p') \
-         ORDER BY c.relname, con.conname",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|_| GateError::Unavailable)?;
-    if !constraints_match(&constraints) {
-        return Err(GateError::Incompatible);
+fn classify_catalog_query(error: sqlx::Error) -> GateError {
+    if is_undefined_schema_object(&error) {
+        GateError::Incompatible
+    } else {
+        GateError::Unavailable
     }
-    Ok(())
 }
 
 type RuntimeRoleRow = (String, bool, bool, bool, bool, bool, bool, bool);
@@ -527,279 +408,8 @@ async fn verify_runtime_authority(
     Ok(())
 }
 
-async fn verify_schema_privileges(
-    connection: &mut PgConnection,
-    schemas: &[&str],
-) -> std::result::Result<(), GateError> {
-    for schema in schemas {
-        let schema_privileges: (bool, bool) = sqlx::query_as(
-            "SELECT has_schema_privilege(current_user, $1, 'USAGE'), \
-                    has_schema_privilege(current_user, $1, 'CREATE')",
-        )
-        .bind(*schema)
-        .fetch_one(&mut *connection)
-        .await
-        .map_err(|_| GateError::Unavailable)?;
-        if schema_privileges != (true, false) {
-            return Err(GateError::Incompatible);
-        }
-    }
-    Ok(())
-}
-
-async fn verify_run_privileges(
-    connection: &mut PgConnection,
-) -> std::result::Result<bool, GateError> {
-    let marker = runtime_table_privilege_mask(connection, "public.mfm_store_schema").await?;
-    let frames = runtime_table_privilege_mask(connection, "public.mfm_run_frames").await?;
-    let heads = runtime_table_privilege_mask(connection, "public.mfm_run_heads").await?;
-    Ok(marker == TABLE_SELECT
-        && frames == TABLE_SELECT | TABLE_INSERT
-        && heads == TABLE_SELECT | TABLE_INSERT | TABLE_UPDATE)
-}
-
-async fn verify_config_privileges(
-    connection: &mut PgConnection,
-) -> std::result::Result<bool, GateError> {
-    let marker = runtime_table_privilege_mask(connection, "mfm_config.mfm_config_schema").await?;
-    let revisions = runtime_table_privilege_mask(connection, "mfm_config.config_revisions").await?;
-    Ok(marker == TABLE_SELECT && revisions == TABLE_SELECT | TABLE_INSERT | TABLE_DELETE)
-}
-
-const TABLE_SELECT: i32 = 1;
-const TABLE_INSERT: i32 = 2;
-const TABLE_UPDATE: i32 = 4;
-const TABLE_DELETE: i32 = 8;
-
-async fn runtime_table_privilege_mask(
-    connection: &mut PgConnection,
-    table: &str,
-) -> std::result::Result<i32, GateError> {
-    sqlx::query_scalar(
-        "SELECT has_table_privilege('mfm_runtime', $1, 'SELECT')::int \
-              + has_table_privilege('mfm_runtime', $1, 'INSERT')::int * 2 \
-              + has_table_privilege('mfm_runtime', $1, 'UPDATE')::int * 4 \
-              + has_table_privilege('mfm_runtime', $1, 'DELETE')::int * 8 \
-              + has_table_privilege('mfm_runtime', $1, 'TRUNCATE')::int * 16 \
-              + has_table_privilege('mfm_runtime', $1, 'REFERENCES')::int * 32 \
-              + has_table_privilege('mfm_runtime', $1, 'TRIGGER')::int * 64",
-    )
-    .bind(table)
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|error| {
-        if is_undefined_schema_object(&error) {
-            GateError::Incompatible
-        } else {
-            GateError::Unavailable
-        }
-    })
-}
-
-async fn verify_schema_ownership(
-    connection: &mut PgConnection,
-    schema: &str,
-    relations: &[&str],
-) -> std::result::Result<(), GateError> {
-    let owners: Vec<String> = sqlx::query_scalar(
-        "SELECT pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n \
-         WHERE n.nspname = $1 \
-         UNION \
-         SELECT pg_get_userbyid(c.relowner) FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relname = ANY($2) \
-         ORDER BY 1",
-    )
-    .bind(schema)
-    .bind(relations)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|_| GateError::Unavailable)?;
-    if owners.len() != 1 || owners[0] == "mfm_runtime" {
-        return Err(GateError::Incompatible);
-    }
-    Ok(())
-}
-
-async fn verify_config_schema(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
-    let relations: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT c.relname, c.relkind::text, c.relpersistence::text \
-         FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = 'mfm_config' AND c.relkind <> 'i' ORDER BY c.relname",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|_| GateError::Unavailable)?;
-    if relations
-        != [
-            relation("config_revisions", "r", "p"),
-            relation("mfm_config_schema", "r", "p"),
-        ]
-    {
-        return Err(GateError::Incompatible);
-    }
-    verify_schema_ownership(
-        connection,
-        "mfm_config",
-        &["mfm_config_schema", "config_revisions"],
-    )
-    .await?;
-    let columns: Vec<(String, String, String, bool, Option<String>)> = sqlx::query_as(
-        "SELECT c.relname, a.attname, t.typname, a.attnotnull, coll.collname \
-         FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid \
-         JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
-         LEFT JOIN pg_catalog.pg_collation coll ON coll.oid = a.attcollation \
-         WHERE n.nspname = 'mfm_config' \
-           AND c.relname IN ('mfm_config_schema','config_revisions') \
-           AND a.attnum > 0 AND NOT a.attisdropped ORDER BY c.relname, a.attnum",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|_| GateError::Unavailable)?;
-    if columns
-        != [
-            column("config_revisions", "config_name", "text", true, Some("C")),
-            column("config_revisions", "config_digest", "text", true, Some("C")),
-            column("config_revisions", "canonical", "bytea", true, None),
-            column(
-                "mfm_config_schema",
-                "schema_contract",
-                "text",
-                true,
-                Some("C"),
-            ),
-        ]
-    {
-        return Err(GateError::Incompatible);
-    }
-    let markers: Vec<String> =
-        sqlx::query_scalar("SELECT schema_contract FROM mfm_config.mfm_config_schema ORDER BY 1")
-            .fetch_all(&mut *connection)
-            .await
-            .map_err(|error| {
-                if is_undefined_schema_object(&error) {
-                    GateError::Incompatible
-                } else {
-                    GateError::Unavailable
-                }
-            })?;
-    if markers != ["mfm.config-postgres.v2"] {
-        return Err(GateError::Incompatible);
-    }
-    let indexes: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT table_class.relname, index_class.relname, pg_get_indexdef(index_class.oid) \
-         FROM pg_catalog.pg_index idx \
-         JOIN pg_catalog.pg_class table_class ON table_class.oid = idx.indrelid \
-         JOIN pg_catalog.pg_class index_class ON index_class.oid = idx.indexrelid \
-         JOIN pg_catalog.pg_namespace n ON n.oid = table_class.relnamespace \
-         WHERE n.nspname = 'mfm_config' ORDER BY table_class.relname, index_class.relname",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|_| GateError::Unavailable)?;
-    if indexes
-        != [
-            index(
-                "config_revisions",
-                "mfm_config_revisions_pkey",
-                "CREATE UNIQUE INDEX mfm_config_revisions_pkey ON mfm_config.config_revisions USING btree (config_name, config_digest)",
-            ),
-            index(
-                "mfm_config_schema",
-                "mfm_config_schema_pkey",
-                "CREATE UNIQUE INDEX mfm_config_schema_pkey ON mfm_config.mfm_config_schema USING btree (schema_contract)",
-            ),
-        ]
-    {
-        return Err(GateError::Incompatible);
-    }
-    let constraints: Vec<(String, String, String, String)> = sqlx::query_as(
-        "SELECT c.relname, con.conname, con.contype::text, pg_get_constraintdef(con.oid, false) \
-         FROM pg_catalog.pg_constraint con \
-         JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = 'mfm_config' AND con.contype IN ('c','p') \
-         ORDER BY c.relname, con.conname",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|_| GateError::Unavailable)?;
-    let expected = [
-        constraint("config_revisions", "mfm_config_revisions_bytes_check", "c", "CHECK (((octet_length(canonical) >= 1) AND (octet_length(canonical) <= 262144)))"),
-        constraint("config_revisions", "mfm_config_revisions_digest_check", "c", "CHECK ((config_digest ~ '^content:sha256-jcs-v1:[0-9a-f]{64}$'::text))"),
-        constraint("config_revisions", "mfm_config_revisions_name_grammar_check", "c", "CHECK (((config_name ~ '^[a-z0-9][a-z0-9-]*$'::text) AND (\"right\"(config_name, 1) <> '-'::text)))"),
-        constraint("config_revisions", "mfm_config_revisions_name_length_check", "c", "CHECK (((octet_length(config_name) >= 1) AND (octet_length(config_name) <= 64)))"),
-        constraint("config_revisions", "mfm_config_revisions_pkey", "p", "PRIMARY KEY (config_name, config_digest)"),
-        constraint("mfm_config_schema", "mfm_config_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.config-postgres.v2'::text))"),
-        constraint("mfm_config_schema", "mfm_config_schema_pkey", "p", "PRIMARY KEY (schema_contract)"),
-    ];
-    if constraints != expected {
-        return Err(GateError::Incompatible);
-    }
-    Ok(())
-}
-
 fn durability_matches(primary: bool, fsync: &str, full_page_writes: &str) -> bool {
     primary && fsync == "on" && full_page_writes == "on"
-}
-
-fn column(
-    table: &str,
-    name: &str,
-    kind: &str,
-    not_null: bool,
-    collation: Option<&str>,
-) -> (String, String, String, bool, Option<String>) {
-    (
-        table.to_owned(),
-        name.to_owned(),
-        kind.to_owned(),
-        not_null,
-        collation.map(str::to_owned),
-    )
-}
-
-fn relation(table: &str, kind: &str, persistence: &str) -> (String, String, String) {
-    (table.to_owned(), kind.to_owned(), persistence.to_owned())
-}
-
-fn index(table: &str, name: &str, definition: &str) -> (String, String, String) {
-    (table.to_owned(), name.to_owned(), definition.to_owned())
-}
-
-fn constraints_match(constraints: &[(String, String, String, String)]) -> bool {
-    let expected = [
-        constraint("mfm_run_frames", "mfm_run_frames_bytes_check", "c", "CHECK (((octet_length(frame_bytes) >= 1) AND (octet_length(frame_bytes) <= 25231360)))"),
-        constraint("mfm_run_frames", "mfm_run_frames_digest_check", "c", "CHECK ((head_digest ~ '^content:sha256-v1:[0-9a-f]{64}$'::text))"),
-        constraint("mfm_run_frames", "mfm_run_frames_pkey", "p", "PRIMARY KEY (run_id, run_sequence)"),
-        constraint("mfm_run_frames", "mfm_run_frames_run_id_check", "c", "CHECK ((run_id ~ '^run:sha256-jcs-v1:[0-9a-f]{64}$'::text))"),
-        constraint("mfm_run_frames", "mfm_run_frames_sequence_check", "c", "CHECK (((run_sequence >= 1) AND (run_sequence <= 65536)))"),
-        constraint("mfm_run_heads", "mfm_run_heads_frame_fkey", "f", "FOREIGN KEY (run_id, head_sequence) REFERENCES mfm_run_frames(run_id, run_sequence)"),
-        constraint("mfm_run_heads", "mfm_run_heads_pkey", "p", "PRIMARY KEY (run_id)"),
-        constraint("mfm_run_heads", "mfm_run_heads_run_id_check", "c", "CHECK ((run_id ~ '^run:sha256-jcs-v1:[0-9a-f]{64}$'::text))"),
-        constraint("mfm_run_heads", "mfm_run_heads_sequence_check", "c", "CHECK (((head_sequence >= 1) AND (head_sequence <= 65536)))"),
-        constraint("mfm_run_heads", "mfm_run_heads_total_bytes_check", "c", "CHECK (((total_bytes >= 1) AND (total_bytes <= 536870912)))"),
-        constraint("mfm_store_schema", "mfm_store_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.run-history-postgres.v2'::text))"),
-        constraint("mfm_store_schema", "mfm_store_schema_pkey", "p", "PRIMARY KEY (schema_contract)"),
-    ];
-    constraints == expected
-}
-
-fn constraint(
-    table: &str,
-    name: &str,
-    kind: &str,
-    definition: &str,
-) -> (String, String, String, String) {
-    (
-        table.to_owned(),
-        name.to_owned(),
-        kind.to_owned(),
-        definition.to_owned(),
-    )
 }
 
 fn is_undefined_schema_object(error: &sqlx::Error) -> bool {
