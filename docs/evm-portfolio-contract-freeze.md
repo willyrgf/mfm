@@ -45,8 +45,10 @@ route mismatch is Runtime `Internal`, never manufactured durable evidence.
 
 The generic Effect protocol, EVM transaction contracts, append-only nonce/raw/settlement authority,
 live transaction adapter, and first-party contract fixture now exist as reusable lower-level
-contracts. The managed fixture owns its lifecycle Operation and Program locally and proves two
-mutations plus an anchored call; none of that topology is part of Portfolio.
+contracts. EVM owns the public action-specific creation/call projections and checked anchored
+transitions. The managed fixture still owns its exact lifecycle topology, ABI, policy, Operation,
+report, and registrations locally and proves two mutations plus an anchored call; none of that
+topology is part of Portfolio.
 
 Portfolio still exposes no transaction entry point, capability use, signer/authority composition,
 contract lifecycle, or mutation result. Production `ComposedRuntime`, configuration, CLI, and REST

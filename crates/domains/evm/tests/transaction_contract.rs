@@ -1,13 +1,17 @@
 use mfm_capabilities::EffectCapabilityContract;
 use mfm_evm::{
-    AnchoredContractCallFailureReason, AnchoredContractCallResult, Eip1559TransactionCommand,
-    EvmAddress, EvmAuthorityEpoch, EvmBlockAnchor, EvmChainInstance, EvmHash, EvmTransactionAction,
-    EvmTransactionBinding, EvmTransactionConfirmation, EvmTransactionContext, EvmTransactionEffect,
-    EvmTransactionRevert, EvmTransactionRoute, EvmTransactionSettlement, EvmU256,
-    ExecuteEvmTransaction, EVM_TRANSACTION_EFFECT_CAPABILITY_ID, EXECUTE_EVM_TRANSACTION_STATE_ID,
-    MAX_EVM_CALLDATA_BYTES, MAX_EVM_INITCODE_BYTES,
+    AnchoredContractCallContext, AnchoredContractCallFailureReason, AnchoredContractCallResult,
+    CallEvmContract, CreateEvmContract, Eip1559TransactionCommand, EvmAddress, EvmAuthorityEpoch,
+    EvmBlockAnchor, EvmChainInstance, EvmContractCallCompletion, EvmContractCallContext,
+    EvmContractCallFailure, EvmContractCreationCompletion, EvmContractCreationContext,
+    EvmContractCreationFailure, EvmHash, EvmTransactionAction, EvmTransactionBinding,
+    EvmTransactionConfirmation, EvmTransactionEffect, EvmTransactionRevert, EvmTransactionRoute,
+    EvmTransactionSettlement, EvmU256, CALL_EVM_CONTRACT_STATE_ID, CREATE_EVM_CONTRACT_STATE_ID,
+    EVM_TRANSACTION_EFFECT_CAPABILITY_ID, MAX_EVM_CALLDATA_BYTES, MAX_EVM_INITCODE_BYTES,
 };
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, EffectId, SchemaId};
+use mfm_ids::{
+    ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, EffectId, SchemaId, StableId,
+};
 use mfm_program::{CapabilityInjection, EffectState, ProposedStateOutcome, State};
 use mfm_program_derive::MfmValue;
 use mfm_values::{canonicalize_mfm_value, MfmValue as MfmValueTrait};
@@ -23,19 +27,6 @@ use serde::{Deserialize, Serialize};
 )]
 struct ObjectContext {
     step: u8,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.test",
-    name = "sequence-context",
-    version = "1",
-    schema = "mfm.test-sequence-context"
-)]
-struct SequenceContext {
-    #[mfm(persisted, minimum_items = 1, maximum_items = 4)]
-    labels: Vec<String>,
 }
 
 fn content_ref() -> ContentRef {
@@ -83,6 +74,22 @@ fn create_command() -> Eip1559TransactionCommand {
     .expect("command")
 }
 
+fn call_command() -> Eip1559TransactionCommand {
+    Eip1559TransactionCommand::new(
+        binding(),
+        EvmTransactionAction::call(
+            EvmAddress::new("0x3333333333333333333333333333333333333333").expect("target"),
+            vec![4, 5, 6],
+        )
+        .expect("call"),
+        EvmU256::new("7").expect("value"),
+        200_000,
+        EvmU256::new("1").expect("priority"),
+        EvmU256::new("2").expect("max"),
+    )
+    .expect("call command")
+}
+
 fn anchor(number: u64) -> EvmBlockAnchor {
     EvmBlockAnchor::new(
         EvmU256::from_u64(number),
@@ -104,6 +111,18 @@ fn schema_id<T: MfmValueTrait>() -> String {
 
 fn semantic_id<T: MfmValueTrait>() -> String {
     T::semantic_id().expect("semantic id").to_string()
+}
+
+fn canonical<T: MfmValueTrait>(value: &T) -> String {
+    canonicalize_mfm_value(value)
+        .expect("canonical value")
+        .0
+        .as_str()
+        .to_owned()
+}
+
+fn identity<T: MfmValueTrait>() -> String {
+    format!("{}|{}", semantic_id::<T>(), schema_id::<T>())
 }
 
 #[test]
@@ -202,7 +221,7 @@ fn fixed_eip1559_command_has_exact_wire_and_rejects_shape_or_relationship_drift(
 }
 
 #[test]
-fn effect_binding_and_interpretation_are_exact_and_context_preserving() {
+fn action_specific_transaction_contract_is_exact_and_context_preserving() {
     assert_eq!(
         EvmTransactionEffect::contract_id()
             .expect("capability id")
@@ -210,122 +229,287 @@ fn effect_binding_and_interpretation_are_exact_and_context_preserving() {
         EVM_TRANSACTION_EFFECT_CAPABILITY_ID
     );
     assert_eq!(
-        ExecuteEvmTransaction::<ObjectContext>::state_id()
-            .expect("state id")
-            .as_str(),
-        EXECUTE_EVM_TRANSACTION_STATE_ID
+        (
+            CreateEvmContract::<ObjectContext>::state_id().expect("creation id"),
+            CallEvmContract::<ObjectContext>::state_id().expect("call id"),
+        ),
+        (
+            StableId::new(CREATE_EVM_CONTRACT_STATE_ID).expect("creation id"),
+            StableId::new(CALL_EVM_CONTRACT_STATE_ID).expect("call id"),
+        )
     );
     assert_eq!(
         <EvmTransactionEffect as CapabilityInjection<
-            ExecuteEvmTransaction<ObjectContext>,
+            CreateEvmContract<ObjectContext>,
         >>::original_binding_ref(&binding())
-        .expect("injected binding"),
+        .expect("creation binding"),
+        binding().binding_ref().expect("binding ref")
+    );
+    assert_eq!(
+        <EvmTransactionEffect as CapabilityInjection<
+            CallEvmContract<ObjectContext>,
+        >>::original_binding_ref(&binding())
+        .expect("call binding"),
         binding().binding_ref().expect("binding ref")
     );
 
-    let command = create_command();
-    let input = EvmTransactionContext::new(ObjectContext { step: 7 }, command.clone());
+    let create = create_command();
+    let call = call_command();
+    let creation = EvmContractCreationContext::new(ObjectContext { step: 22 }, create.clone())
+        .expect("creation context");
+    let calling = EvmContractCallContext::new(ObjectContext { step: 25 }, call.clone())
+        .expect("call context");
+    assert!(EvmContractCreationContext::new(ObjectContext { step: 1 }, call.clone()).is_err());
+    assert!(EvmContractCallContext::new(ObjectContext { step: 1 }, create.clone()).is_err());
+    for (mut wire, creation_wire) in [
+        (serde_json::to_value(&creation).expect("wire"), true),
+        (serde_json::to_value(&calling).expect("wire"), false),
+    ] {
+        wire["status"] = serde_json::json!("invalid");
+        if creation_wire {
+            assert!(
+                serde_json::from_value::<EvmContractCreationContext<ObjectContext>>(wire).is_err()
+            );
+        } else {
+            assert!(serde_json::from_value::<EvmContractCallContext<ObjectContext>>(wire).is_err());
+        }
+    }
+    let mut wire = serde_json::to_value(&creation).expect("wire");
+    wire["command"] = serde_json::to_value(&call).expect("call wire");
+    assert!(serde_json::from_value::<EvmContractCreationContext<ObjectContext>>(wire).is_err());
+    let mut wire = serde_json::to_value(&calling).expect("wire");
+    wire["command"] = serde_json::to_value(&create).expect("create wire");
+    assert!(serde_json::from_value::<EvmContractCallContext<ObjectContext>>(wire).is_err());
     assert_eq!(
-        <ExecuteEvmTransaction<ObjectContext> as EffectState<EvmTransactionEffect>>::prepare(
-            &input
-        )
-        .expect("prepared command"),
-        command
+        <CreateEvmContract<ObjectContext> as EffectState<EvmTransactionEffect>>::prepare(&creation)
+            .expect("prepared creation"),
+        create
     );
-    let settlement = EvmTransactionSettlement::confirmed(
+    assert_eq!(
+        <CallEvmContract<ObjectContext> as EffectState<EvmTransactionEffect>>::prepare(&calling)
+            .expect("prepared call"),
+        call
+    );
+
+    let created = EvmTransactionSettlement::confirmed(
         effect_id(0x33),
         9,
         EvmTransactionConfirmation::Created {
             block_anchor: anchor(1),
             created_address: EvmAddress::new("0x2222222222222222222222222222222222222222")
                 .expect("created address"),
-            transaction_hash: EvmHash::new(format!("0x{}", "cc".repeat(32)))
-                .expect("transaction hash"),
+            transaction_hash: EvmHash::new(format!("0x{}", "cc".repeat(32))).expect("hash"),
         },
     );
-    EvmTransactionEffect::bind_evidence(&effect_id(0x33), &command, &settlement)
-        .expect("bound evidence");
-    assert!(EvmTransactionEffect::bind_evidence(&effect_id(0x44), &command, &settlement).is_err());
-
-    let call_command = Eip1559TransactionCommand::new(
-        binding(),
-        EvmTransactionAction::call(
-            EvmAddress::new("0x3333333333333333333333333333333333333333").expect("target"),
-            vec![],
-        )
-        .expect("call"),
-        EvmU256::new("0").expect("value"),
-        200_000,
-        EvmU256::new("1").expect("priority"),
-        EvmU256::new("2").expect("max"),
-    )
-    .expect("call command");
-    assert!(
-        EvmTransactionEffect::bind_evidence(&effect_id(0x33), &call_command, &settlement).is_err()
-    );
-    let call_settlement = EvmTransactionSettlement::confirmed(
+    let called = EvmTransactionSettlement::confirmed(
         effect_id(0x33),
         10,
         EvmTransactionConfirmation::Called {
             block_anchor: anchor(2),
-            transaction_hash: EvmHash::new(format!("0x{}", "ee".repeat(32)))
-                .expect("transaction hash"),
+            transaction_hash: EvmHash::new(format!("0x{}", "ee".repeat(32))).expect("hash"),
         },
     );
-    EvmTransactionEffect::bind_evidence(&effect_id(0x33), &call_command, &call_settlement)
-        .expect("bound call evidence");
-    assert!(
-        EvmTransactionEffect::bind_evidence(&effect_id(0x33), &command, &call_settlement).is_err()
-    );
+    EvmTransactionEffect::bind_evidence(&effect_id(0x33), &create, &created)
+        .expect("bound creation");
+    EvmTransactionEffect::bind_evidence(&effect_id(0x33), &call, &called).expect("bound call");
+    for (effect, command, evidence) in [
+        (effect_id(0x44), &create, &created),
+        (effect_id(0x33), &create, &called),
+        (effect_id(0x33), &call, &created),
+    ] {
+        assert!(EvmTransactionEffect::bind_evidence(&effect, command, evidence).is_err());
+    }
+    let ProposedStateOutcome::Success { output: deployment } =
+        <CreateEvmContract<ObjectContext> as EffectState<EvmTransactionEffect>>::interpret(
+            creation.clone(),
+            &created,
+        )
+    else {
+        panic!("expected creation");
+    };
     let ProposedStateOutcome::Success {
-        output: call_output,
-    } = <ExecuteEvmTransaction<ObjectContext> as EffectState<EvmTransactionEffect>>::interpret(
-        EvmTransactionContext::new(ObjectContext { step: 6 }, call_command),
-        &call_settlement,
+        output: configuration,
+    } = <CallEvmContract<ObjectContext> as EffectState<EvmTransactionEffect>>::interpret(
+        calling.clone(),
+        &called,
     )
     else {
-        panic!("expected call success");
+        panic!("expected call");
     };
-    assert_eq!(
-        serde_json::to_string(&call_output).expect("call output"),
-        "{\"caller_context\":{\"step\":6},\"confirmed\":{\"kind\":\"called\",\"value\":{\"block_anchor\":{\"hash\":\"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"number\":\"2\"},\"transaction_hash\":\"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}}}"
-    );
 
-    let ProposedStateOutcome::Success { output } =
-        <ExecuteEvmTransaction<ObjectContext> as EffectState<EvmTransactionEffect>>::interpret(
-            input,
-            &settlement,
-        )
+    let revert = EvmTransactionRevert::new(
+        anchor(3),
+        EvmHash::new(format!("0x{}", "ab".repeat(32))).expect("revert hash"),
+    );
+    let reverted = EvmTransactionSettlement::reverted(effect_id(0x33), 11, revert.clone());
+    let ProposedStateOutcome::Failure {
+        failure: creation_failure,
+    } = <CreateEvmContract<ObjectContext> as EffectState<EvmTransactionEffect>>::interpret(
+        EvmContractCreationContext::new(ObjectContext { step: 23 }, create.clone())
+            .expect("creation context"),
+        &reverted,
+    )
     else {
-        panic!("expected success");
+        panic!("expected creation failure");
     };
-    let output_json = serde_json::to_string(&output).expect("output");
-    assert_eq!(
-        output_json,
-        "{\"caller_context\":{\"step\":7},\"confirmed\":{\"kind\":\"created\",\"value\":{\"block_anchor\":{\"hash\":\"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"number\":\"1\"},\"created_address\":\"0x2222222222222222222222222222222222222222\",\"transaction_hash\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}}}"
-    );
-    assert!(!output_json.contains("effect_id"));
-    assert!(!output_json.contains("nonce"));
-    assert!(!output_json.contains("command"));
-
-    let reverted = EvmTransactionSettlement::reverted(
-        effect_id(0x33),
-        9,
-        EvmTransactionRevert::new(
-            anchor(2),
-            EvmHash::new(format!("0x{}", "cc".repeat(32))).expect("transaction hash"),
-        ),
-    );
-    let ProposedStateOutcome::Failure { failure } =
-        <ExecuteEvmTransaction<ObjectContext> as EffectState<EvmTransactionEffect>>::interpret(
-            EvmTransactionContext::new(ObjectContext { step: 8 }, command),
+    assert!(matches!(
+        &creation_failure,
+        EvmContractCreationFailure::Reverted {
+            caller_context: ObjectContext { step: 23 },
+            revert: actual,
+        } if actual == &revert
+    ));
+    let call_failure =
+        <CallEvmContract<ObjectContext> as EffectState<EvmTransactionEffect>>::interpret(
+            EvmContractCallContext::new(ObjectContext { step: 24 }, call.clone())
+                .expect("call context"),
             &reverted,
-        )
+        );
+    assert!(matches!(
+        call_failure,
+        ProposedStateOutcome::Failure {
+            failure: EvmContractCallFailure::Reverted {
+                caller_context: ObjectContext { step: 24 },
+                revert: actual,
+            },
+        } if actual == revert
+    ));
+    assert!(matches!(
+        <CreateEvmContract<ObjectContext> as EffectState<EvmTransactionEffect>>::interpret(
+            creation.clone(),
+            &called,
+        ),
+        ProposedStateOutcome::Failure {
+            failure: EvmContractCreationFailure::InconsistentSettlement { .. },
+        }
+    ));
+    let ProposedStateOutcome::Failure {
+        failure: call_inconsistent,
+    } = <CallEvmContract<ObjectContext> as EffectState<EvmTransactionEffect>>::interpret(
+        EvmContractCallContext::new(ObjectContext { step: 26 }, call.clone())
+            .expect("call context"),
+        &created,
+    )
     else {
-        panic!("expected revert");
+        panic!("expected inconsistent call");
     };
-    assert_eq!(failure.caller_context().step, 8);
-    assert_eq!(failure.reverted().block_anchor(), &anchor(2));
+
+    let expected_call = Eip1559TransactionCommand::new(
+        deployment.binding().clone(),
+        EvmTransactionAction::call(deployment.created_address().clone(), vec![0xaa, 0xbb])
+            .expect("call"),
+        EvmU256::from_u64(5),
+        300_000,
+        EvmU256::from_u64(6),
+        EvmU256::from_u64(7),
+    )
+    .expect("expected call");
+    let bridged_call = EvmContractCallContext::for_created_contract(
+        deployment.clone(),
+        vec![0xaa, 0xbb],
+        EvmU256::from_u64(5),
+        300_000,
+        EvmU256::from_u64(6),
+        EvmU256::from_u64(7),
+    )
+    .expect("bridged call");
+    assert_eq!(bridged_call.caller_context(), &deployment);
+    assert_eq!(bridged_call.command(), &expected_call);
+    for (calldata, gas, priority, maximum) in [
+        (vec![0; MAX_EVM_CALLDATA_BYTES + 1], 1, 1, 1),
+        (vec![], 0, 1, 1),
+        (vec![], 1, 2, 1),
+    ] {
+        assert!(EvmContractCallContext::for_created_contract(
+            deployment.clone(),
+            calldata,
+            EvmU256::from_u64(0),
+            gas,
+            EvmU256::from_u64(priority),
+            EvmU256::from_u64(maximum),
+        )
+        .is_err());
+    }
+    let alternate_binding = EvmTransactionBinding::new(
+        route(),
+        EvmAuthorityEpoch::new([0x22; 32]),
+        EvmAddress::new("0x4444444444444444444444444444444444444444").expect("sender"),
+    );
+    let alternate_call = Eip1559TransactionCommand::new(
+        alternate_binding,
+        EvmTransactionAction::call(
+            EvmAddress::new("0x5555555555555555555555555555555555555555").expect("target"),
+            vec![],
+        )
+        .expect("call"),
+        EvmU256::from_u64(0),
+        1,
+        EvmU256::from_u64(1),
+        EvmU256::from_u64(1),
+    )
+    .expect("alternate call");
+    assert_eq!(
+        EvmContractCallContext::new(ObjectContext { step: 27 }, alternate_call.clone())
+            .expect("general call")
+            .command(),
+        &alternate_call
+    );
+
+    let expected_observation = AnchoredContractCallContext::for_route(
+        configuration.clone(),
+        configuration.binding().route(),
+        configuration.target().clone(),
+        vec![0xde, 0xad, 0xbe, 0xef],
+        configuration.block_anchor().clone(),
+    )
+    .expect("expected observation");
+    assert_eq!(
+        AnchoredContractCallContext::for_confirmed_call(
+            configuration.clone(),
+            vec![0xde, 0xad, 0xbe, 0xef],
+        )
+        .expect("bridged observation"),
+        expected_observation
+    );
+    assert!(AnchoredContractCallContext::for_confirmed_call(
+        configuration.clone(),
+        vec![0; MAX_EVM_CALLDATA_BYTES + 1],
+    )
+    .is_err());
+    let alternate_route = EvmTransactionRoute::new(
+        EvmChainInstance::new(
+            2,
+            EvmHash::new(format!("0x{}", "aa".repeat(32))).expect("genesis"),
+        )
+        .expect("chain"),
+        content_ref(),
+    );
+    assert!(AnchoredContractCallContext::for_route(
+        configuration.clone(),
+        &alternate_route,
+        EvmAddress::new("0x6666666666666666666666666666666666666666").expect("target"),
+        vec![1, 2],
+        anchor(10),
+    )
+    .is_ok());
+
+    let actual_wires = [
+        canonical(&creation),
+        canonical(&deployment),
+        canonical(&creation_failure),
+        canonical(&calling),
+        canonical(&configuration),
+        canonical(&call_inconsistent),
+    ];
+    let expected_wires = [
+        r#"{"caller_context":{"step":22},"command":{"action":{"kind":"create","value":{"initcode":"AQID"}},"binding":{"authority_epoch":"ERERERERERERERERERERERERERERERERERERERERERE","route":{"chain_instance":{"chain_id":1,"expected_genesis_hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"endpoint_ref":{"content_digest":"content:sha256-v1:0202020202020202020202020202020202020202020202020202020202020202","schema_id":"schema:mfm.test.endpoint:1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101"}},"sender":"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"},"gas_limit":2000000,"max_fee_per_gas":"10000000000","max_priority_fee_per_gas":"1000000000","value":"0"}}"#,
+        r#"{"binding":{"authority_epoch":"ERERERERERERERERERERERERERERERERERERERERERE","route":{"chain_instance":{"chain_id":1,"expected_genesis_hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"endpoint_ref":{"content_digest":"content:sha256-v1:0202020202020202020202020202020202020202020202020202020202020202","schema_id":"schema:mfm.test.endpoint:1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101"}},"sender":"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"},"block_anchor":{"hash":"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","number":"1"},"caller_context":{"step":22},"created_address":"0x2222222222222222222222222222222222222222","transaction_hash":"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}"#,
+        r#"{"kind":"reverted","value":{"caller_context":{"step":23},"revert":{"block_anchor":{"hash":"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","number":"3"},"transaction_hash":"0xabababababababababababababababababababababababababababababababab"}}}"#,
+        r#"{"caller_context":{"step":25},"command":{"action":{"kind":"call","value":{"calldata":"BAUG","to":"0x3333333333333333333333333333333333333333"}},"binding":{"authority_epoch":"ERERERERERERERERERERERERERERERERERERERERERE","route":{"chain_instance":{"chain_id":1,"expected_genesis_hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"endpoint_ref":{"content_digest":"content:sha256-v1:0202020202020202020202020202020202020202020202020202020202020202","schema_id":"schema:mfm.test.endpoint:1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101"}},"sender":"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"},"gas_limit":200000,"max_fee_per_gas":"2","max_priority_fee_per_gas":"1","value":"7"}}"#,
+        r#"{"binding":{"authority_epoch":"ERERERERERERERERERERERERERERERERERERERERERE","route":{"chain_instance":{"chain_id":1,"expected_genesis_hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"endpoint_ref":{"content_digest":"content:sha256-v1:0202020202020202020202020202020202020202020202020202020202020202","schema_id":"schema:mfm.test.endpoint:1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101"}},"sender":"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"},"block_anchor":{"hash":"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","number":"2"},"caller_context":{"step":25},"target":"0x3333333333333333333333333333333333333333","transaction_hash":"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}"#,
+        r#"{"kind":"inconsistent_settlement","value":{"caller_context":{"step":26}}}"#,
+    ];
+    assert_eq!(actual_wires, expected_wires.map(str::to_owned));
 }
 
 #[test]
@@ -507,20 +691,24 @@ fn public_transaction_value_identities_are_frozen() {
         );
     }
 
+    let action_identities = [
+        identity::<EvmContractCreationContext<ObjectContext>>(),
+        identity::<EvmContractCreationCompletion<ObjectContext>>(),
+        identity::<EvmContractCreationFailure<ObjectContext>>(),
+        identity::<EvmContractCallContext<ObjectContext>>(),
+        identity::<EvmContractCallCompletion<ObjectContext>>(),
+        identity::<EvmContractCallFailure<ObjectContext>>(),
+    ];
+    let expected_action_identities = [
+        "semantic:mfm.evm:contract-creation-context:1:sha256-jcs-v1:4a0a0a3350984fa1f2b875d808fb5fcb6b4f75d7b484cfbb92ba74344f906c86|schema:mfm.evm-contract-creation-context:1:sha256-jcs-v1:e2d28ee15fb94f878db1b1da236a909c77bd695f6ad62548f3c43cd9a48e038c",
+        "semantic:mfm.evm:contract-creation-completion:1:sha256-jcs-v1:a81c52877c66c577004987b59db58ece9187bc574f51d5d0ffe7fe6afa5701c9|schema:mfm.evm-contract-creation-completion:1:sha256-jcs-v1:7c94d41176122faae541f9f4f55735b2009b1edff169f7975c51362e37d42239",
+        "semantic:mfm.evm:contract-creation-failure:1:sha256-jcs-v1:8fe5ed4ecf66645bf75f83893433ad8801f7fed65f2051e2172125e57e167782|schema:mfm.evm-contract-creation-failure:1:sha256-jcs-v1:f7ee4dfc53967598a889dc7c566061fe25391a8c3b5da33aa0fee264d87233ad",
+        "semantic:mfm.evm:contract-call-context:1:sha256-jcs-v1:fae0d8b5bfd4e061e350f239d4809f60ae5dd6bf269adb1c62848f865ae15369|schema:mfm.evm-contract-call-context:1:sha256-jcs-v1:0ebd7db3b0820086d8bc91b63cd090a8c3a9ec9e49687e577c64cca20666fbb8",
+        "semantic:mfm.evm:contract-call-completion:1:sha256-jcs-v1:42822654b45d00b2dbea83ae850618b50ccd697e51b0b07a51b5acb406bf1984|schema:mfm.evm-contract-call-completion:1:sha256-jcs-v1:ed032185e3b138ea3f54bd01ff827656a339542f5df398b0faed7cd11aa0a7dd",
+        "semantic:mfm.evm:contract-call-failure:1:sha256-jcs-v1:1545e6651d77788e823251900ef6d66fc1530c5f4877370278c6c3690a0f4d99|schema:mfm.evm-contract-call-failure:1:sha256-jcs-v1:3eee0a9ee61d566fa9ef32c02b76ff1e28f2ee914f559639264a223b77cdbd24",
+    ];
     assert_eq!(
-        EvmTransactionContext::<ObjectContext>::semantic_id().expect("object context semantic"),
-        EvmTransactionContext::<SequenceContext>::semantic_id().expect("sequence context semantic")
-    );
-    assert_ne!(
-        schema_id::<EvmTransactionContext<ObjectContext>>(),
-        schema_id::<EvmTransactionContext<SequenceContext>>()
-    );
-    assert_ne!(
-        schema_id::<mfm_evm::EvmTransactionCompletion<ObjectContext>>(),
-        schema_id::<mfm_evm::EvmTransactionCompletion<SequenceContext>>()
-    );
-    assert_ne!(
-        schema_id::<mfm_evm::EvmTransactionReversion<ObjectContext>>(),
-        schema_id::<mfm_evm::EvmTransactionReversion<SequenceContext>>()
+        action_identities,
+        expected_action_identities.map(str::to_owned)
     );
 }

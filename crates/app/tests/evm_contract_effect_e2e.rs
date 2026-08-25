@@ -6,11 +6,12 @@ use std::time::Duration;
 
 use mfm_evm::{
     AnchoredContractCallCompletion, AnchoredContractCallContext, AnchoredContractCallFailure,
-    Eip1559TransactionCommand, EvmAddress, EvmAnchoredContractCallRead, EvmAuthorityEpoch,
-    EvmBlockAnchor, EvmEndpoint, EvmHash, EvmTransactionAction, EvmTransactionBinding,
-    EvmTransactionCompletion, EvmTransactionConfirmation, EvmTransactionContext,
-    EvmTransactionEffect, EvmTransactionReversion, EvmTransactionRoute, EvmU256,
-    ExecuteEvmTransaction, ReadAnchoredContractCall,
+    CallEvmContract, CreateEvmContract, Eip1559TransactionCommand, EvmAddress,
+    EvmAnchoredContractCallRead, EvmAuthorityEpoch, EvmBlockAnchor, EvmContractCallCompletion,
+    EvmContractCallContext, EvmContractCallFailure, EvmContractCreationCompletion,
+    EvmContractCreationContext, EvmContractCreationFailure, EvmEndpoint, EvmHash,
+    EvmTransactionAction, EvmTransactionBinding, EvmTransactionEffect, EvmTransactionRoute,
+    EvmU256, ReadAnchoredContractCall,
 };
 use mfm_evm_live::{
     ethereum_address, evm_keccak256, register_evm_anchored_contract_calls,
@@ -54,31 +55,17 @@ const CONFIGURE_SELECTOR: [u8; 4] = [0x1e, 0xb2, 0x5e, 0x0a];
 const VALUE_SELECTOR: [u8; 4] = [0x3f, 0xa4, 0xf2, 0x45];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.test.evm-effect",
-    name = "lifecycle-context",
+    name = "request",
     version = "1",
-    schema = "mfm.test.evm-effect-lifecycle-context"
+    schema = "mfm.test.evm-effect-request"
 )]
-enum LifecycleContext {
-    AwaitingDeployment {
-        binding: EvmTransactionBinding,
-    },
-    AwaitingConfiguration {
-        binding: EvmTransactionBinding,
-        deployment: EvmTransactionConfirmation,
-    },
-    BothTransactionsComplete {
-        deployment: EvmTransactionConfirmation,
-        configuration: EvmTransactionConfirmation,
-    },
-}
+struct EffectFixtureRequest {}
+
+type Deployment = EvmContractCreationCompletion<EffectFixtureRequest>;
+type Configuration = EvmContractCallCompletion<Deployment>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -107,15 +94,14 @@ struct EffectFixtureReport {
 enum EffectFixtureFailure {
     TransactionReverted,
     AnchoredObservationFailed,
-    InvalidLifecycle,
     InvalidReturnData,
 }
 
 struct PrepareConfiguration;
 
 impl State for PrepareConfiguration {
-    type Input = EvmTransactionCompletion<LifecycleContext>;
-    type Output = EvmTransactionContext<LifecycleContext>;
+    type Input = Deployment;
+    type Output = EvmContractCallContext<Deployment>;
     type Failure = EffectFixtureFailure;
 
     fn state_id() -> mfm_program::Result<StableId> {
@@ -126,44 +112,24 @@ impl State for PrepareConfiguration {
 
 impl PureState for PrepareConfiguration {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        let LifecycleContext::AwaitingDeployment { binding } = input.caller_context().clone()
-        else {
-            return invalid_lifecycle();
-        };
-        let deployment = input.confirmed().clone();
-        let EvmTransactionConfirmation::Created {
-            created_address, ..
-        } = &deployment
-        else {
-            return invalid_lifecycle();
-        };
-        let command = Eip1559TransactionCommand::new(
-            binding.clone(),
-            EvmTransactionAction::call(created_address.clone(), fixture_configure_calldata())
-                .expect("fixed fixture calldata is bounded"),
+        let output = EvmContractCallContext::for_created_contract(
+            input,
+            fixture_configure_calldata(),
             EvmU256::from_u64(0),
             CONFIGURATION_GAS,
             EvmU256::from_u64(PRIORITY_FEE),
             EvmU256::from_u64(MAX_FEE),
         )
-        .expect("fixed configuration command is valid");
-        ProposedStateOutcome::Success {
-            output: EvmTransactionContext::new(
-                LifecycleContext::AwaitingConfiguration {
-                    binding,
-                    deployment,
-                },
-                command,
-            ),
-        }
+        .expect("fixed fixture call policy is valid");
+        ProposedStateOutcome::Success { output }
     }
 }
 
 struct PrepareObservation;
 
 impl State for PrepareObservation {
-    type Input = EvmTransactionCompletion<LifecycleContext>;
-    type Output = AnchoredContractCallContext<LifecycleContext>;
+    type Input = Configuration;
+    type Output = AnchoredContractCallContext<Configuration>;
     type Failure = EffectFixtureFailure;
 
     fn state_id() -> mfm_program::Result<StableId> {
@@ -174,37 +140,9 @@ impl State for PrepareObservation {
 
 impl PureState for PrepareObservation {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        let LifecycleContext::AwaitingConfiguration {
-            binding,
-            deployment,
-        } = input.caller_context().clone()
-        else {
-            return invalid_lifecycle();
-        };
-        let EvmTransactionConfirmation::Created {
-            created_address, ..
-        } = &deployment
-        else {
-            return invalid_lifecycle();
-        };
-        let created_address = created_address.clone();
-        let configuration = input.confirmed().clone();
-        let EvmTransactionConfirmation::Called { block_anchor, .. } = &configuration else {
-            return invalid_lifecycle();
-        };
-        let block_anchor = block_anchor.clone();
-        let context = LifecycleContext::BothTransactionsComplete {
-            deployment,
-            configuration,
-        };
-        let output = AnchoredContractCallContext::for_route(
-            context,
-            binding.route(),
-            created_address,
-            VALUE_SELECTOR.to_vec(),
-            block_anchor,
-        )
-        .expect("fixed anchored call is valid");
+        let output =
+            AnchoredContractCallContext::for_confirmed_call(input, VALUE_SELECTOR.to_vec())
+                .expect("fixed fixture observation policy is valid");
         ProposedStateOutcome::Success { output }
     }
 }
@@ -212,7 +150,7 @@ impl PureState for PrepareObservation {
 struct FinalizeReport;
 
 impl State for FinalizeReport {
-    type Input = AnchoredContractCallCompletion<LifecycleContext>;
+    type Input = AnchoredContractCallCompletion<Configuration>;
     type Output = EffectFixtureReport;
     type Failure = EffectFixtureFailure;
 
@@ -224,31 +162,8 @@ impl State for FinalizeReport {
 
 impl PureState for FinalizeReport {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        let LifecycleContext::BothTransactionsComplete {
-            deployment,
-            configuration,
-        } = input.caller_context().clone()
-        else {
-            return invalid_lifecycle();
-        };
-        let EvmTransactionConfirmation::Created {
-            created_address,
-            transaction_hash: deployment_hash,
-            ..
-        } = deployment
-        else {
-            return invalid_lifecycle();
-        };
-        let EvmTransactionConfirmation::Called {
-            block_anchor,
-            transaction_hash: configuration_hash,
-        } = configuration
-        else {
-            return invalid_lifecycle();
-        };
-        if input.result().anchor() != &block_anchor {
-            return invalid_lifecycle();
-        }
+        let configuration = input.caller_context();
+        let deployment = configuration.caller_context();
         let Ok(return_bytes) = input.result().return_bytes() else {
             return invalid_return_data();
         };
@@ -258,9 +173,9 @@ impl PureState for FinalizeReport {
         ProposedStateOutcome::Success {
             output: EffectFixtureReport {
                 anchor: input.result().anchor().clone(),
-                configuration_hash,
-                contract_address: created_address,
-                deployment_hash,
+                configuration_hash: configuration.transaction_hash().clone(),
+                contract_address: deployment.created_address().clone(),
+                deployment_hash: deployment.transaction_hash().clone(),
                 value,
             },
         }
@@ -307,10 +222,16 @@ fn fixture_return_projection_rejects_malformed_or_wider_values() {
     );
 }
 
-fn invalid_lifecycle<O>() -> ProposedStateOutcome<O, EffectFixtureFailure> {
-    ProposedStateOutcome::Failure {
-        failure: EffectFixtureFailure::InvalidLifecycle,
-    }
+#[test]
+fn creation_and_nested_call_states_coexist_in_one_runtime_assembly() {
+    let mut builder = RuntimeAssemblyBuilder::new();
+    builder
+        .register_effect::<CreateEvmContract<EffectFixtureRequest>, EvmTransactionEffect>()
+        .expect("creation state");
+    builder
+        .register_effect::<CallEvmContract<Deployment>, EvmTransactionEffect>()
+        .expect("nested call state");
+    builder.finish().expect("compatible assembly");
 }
 
 fn invalid_return_data<O>() -> ProposedStateOutcome<O, EffectFixtureFailure> {
@@ -343,21 +264,21 @@ macro_rules! failure_mapper {
 
 failure_mapper!(
     MapDeploymentFailure,
-    EvmTransactionReversion<LifecycleContext>,
-    EvmTransactionContext<LifecycleContext>,
+    EvmContractCreationFailure<EffectFixtureRequest>,
+    EvmContractCallContext<Deployment>,
     "mfm.test.evm-effect/map-deployment-failure@1",
     EffectFixtureFailure::TransactionReverted
 );
 failure_mapper!(
     MapConfigurationFailure,
-    EvmTransactionReversion<LifecycleContext>,
-    AnchoredContractCallContext<LifecycleContext>,
+    EvmContractCallFailure<Deployment>,
+    AnchoredContractCallContext<Configuration>,
     "mfm.test.evm-effect/map-configuration-failure@1",
     EffectFixtureFailure::TransactionReverted
 );
 failure_mapper!(
     MapAnchoredFailure,
-    AnchoredContractCallFailure<LifecycleContext>,
+    AnchoredContractCallFailure<Configuration>,
     EffectFixtureReport,
     "mfm.test.evm-effect/map-anchored-failure@1",
     EffectFixtureFailure::AnchoredObservationFailed
@@ -365,11 +286,10 @@ failure_mapper!(
 
 struct EffectFixtureOperation {
     binding: EvmTransactionBinding,
-    route: EvmTransactionRoute,
 }
 
 impl Operation for EffectFixtureOperation {
-    type Input = EvmTransactionContext<LifecycleContext>;
+    type Input = EvmContractCreationContext<EffectFixtureRequest>;
     type Output = EffectFixtureReport;
     type Failure = EffectFixtureFailure;
 
@@ -378,23 +298,24 @@ impl Operation for EffectFixtureOperation {
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
         body.with_failure_handler::<
-            EvmTransactionReversion<LifecycleContext>,
-            EvmTransactionContext<LifecycleContext>,
+            EvmContractCreationFailure<EffectFixtureRequest>,
+            EvmContractCallContext<Deployment>,
         >(
             |protected| {
-                protected.effect::<ExecuteEvmTransaction<LifecycleContext>, EvmTransactionEffect>(
-                    &self.binding,
-                )?;
+                protected.effect::<
+                    CreateEvmContract<EffectFixtureRequest>,
+                    EvmTransactionEffect,
+                >(&self.binding)?;
                 protected.pure::<PrepareConfiguration>()
             },
             |handler| handler.pure::<MapDeploymentFailure>(),
         )?;
         body.with_failure_handler::<
-            EvmTransactionReversion<LifecycleContext>,
-            AnchoredContractCallContext<LifecycleContext>,
+            EvmContractCallFailure<Deployment>,
+            AnchoredContractCallContext<Configuration>,
         >(
             |protected| {
-                protected.effect::<ExecuteEvmTransaction<LifecycleContext>, EvmTransactionEffect>(
+                protected.effect::<CallEvmContract<Deployment>, EvmTransactionEffect>(
                     &self.binding,
                 )?;
                 protected.pure::<PrepareObservation>()
@@ -402,14 +323,14 @@ impl Operation for EffectFixtureOperation {
             |handler| handler.pure::<MapConfigurationFailure>(),
         )?;
         body.with_failure_handler::<
-            AnchoredContractCallFailure<LifecycleContext>,
+            AnchoredContractCallFailure<Configuration>,
             EffectFixtureReport,
         >(
             |protected| {
                 protected.read::<
-                    ReadAnchoredContractCall<LifecycleContext>,
+                    ReadAnchoredContractCall<Configuration>,
                     EvmAnchoredContractCallRead,
-                >(&self.route)?;
+                >(self.binding.route())?;
                 protected.pure::<FinalizeReport>()
             },
             |handler| handler.pure::<MapAnchoredFailure>(),
@@ -529,10 +450,13 @@ async fn runtime(
         .register_pure::<MapAnchoredFailure>()
         .expect("anchored failure");
     builder
-        .register_effect::<ExecuteEvmTransaction<LifecycleContext>, EvmTransactionEffect>()
-        .expect("transaction state");
+        .register_effect::<CreateEvmContract<EffectFixtureRequest>, EvmTransactionEffect>()
+        .expect("creation state");
     builder
-        .register_read::<ReadAnchoredContractCall<LifecycleContext>, EvmAnchoredContractCallRead>()
+        .register_effect::<CallEvmContract<Deployment>, EvmTransactionEffect>()
+        .expect("call state");
+    builder
+        .register_read::<ReadAnchoredContractCall<Configuration>, EvmAnchoredContractCallRead>()
         .expect("anchored state");
     register_evm_transaction_effect(
         &mut builder,
@@ -1229,7 +1153,7 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
     let signer = generated_signer(&owner).await;
     let sender = ethereum_address(signer.public_key());
     let binding = EvmTransactionBinding::new(
-        route.clone(),
+        route,
         setup_authority.authority_epoch().clone(),
         sender.clone(),
     );
@@ -1277,17 +1201,13 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
         EvmU256::from_u64(MAX_FEE),
     )
     .expect("configuration command");
-    let input = EvmTransactionContext::new(
-        LifecycleContext::AwaitingDeployment {
-            binding: binding.clone(),
-        },
-        deployment_command.clone(),
-    );
+    let input =
+        EvmContractCreationContext::new(EffectFixtureRequest {}, deployment_command.clone())
+            .expect("deployment input");
     let program = expand_program(
         EntryPointId::new("mfm.test.evm-effect/run@1").expect("entry point"),
         &EffectFixtureOperation {
             binding: binding.clone(),
-            route,
         },
     )
     .expect("fixture Program");

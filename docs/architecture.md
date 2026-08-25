@@ -101,15 +101,18 @@ jobs. Dropping an operation is safe: no candidate exists yet, or the one in-flig
 atomically and the next complete reload resolves it.
 
 EVM owns one shared checked address, hash, and U256 vocabulary across existing balance Reads and
-new transaction contracts. `EvmTransactionEffect` is a deterministic identity-prepare and
-settlement-interpret pair; it owns no nonce reservation, signing, provider, or settlement loop.
-`EvmAnchoredContractCallRead` likewise owns only the exact Program-visible intent/evidence and
-context-preserving State. Its route reference is the content ref of `EvmTransactionRoute`, while the
-transaction Effect binds the complete route/authority-epoch/sender value. Live registration and IO
-remain downstream adapters. Live EVM alone owns exact type-2 RLP/Keccak, the separate transaction
-provider facet, append-only authority orchestration, and the anchored-call RPC sequence. Its version
-1 transaction settlement is intentionally limited to the pinned non-reorging development fixture;
-`ComposedRuntime` registers neither transaction Effects nor anchored transaction-route Reads.
+transaction contracts. Independent Create and Call Effect States project action-specific inputs,
+successes, and failures through the same deterministic `EvmTransactionEffect`; it owns no nonce
+reservation, signing, provider, or settlement loop. EVM also owns the checked creation-to-call
+binding/target transition and call-to-observation route/target/anchor transition, but no product
+lifecycle Operation. `EvmAnchoredContractCallRead` owns only the exact Program-visible
+intent/evidence and context-preserving State. Its route reference is the content ref of
+`EvmTransactionRoute`, while the transaction Effect binds the complete
+route/authority-epoch/sender value. Live registration and IO remain downstream adapters. Live EVM
+alone owns exact type-2 RLP/Keccak, the separate transaction provider facet, append-only authority
+orchestration, and the anchored-call RPC sequence. Its version 1 transaction settlement is
+intentionally limited to the pinned non-reorging development fixture; `ComposedRuntime` registers
+neither transaction Effects nor anchored transaction-route Reads.
 
 The domain graph is one-way: Portfolio depends on EVM domain contracts; EVM depends on foundations
 and Program; live EVM depends on EVM plus Runtime and captures concrete
