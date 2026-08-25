@@ -382,10 +382,7 @@ fn validate_receipt(
     }
     match (command.to(), receipt.result()) {
         (None, ProviderReceiptResult::SuccessCreate { contract_address }) => {
-            if contract_address
-                != &create_address(&local.sender, prepared.reservation().nonce())
-                    .map_err(|_| AdapterError::Internal)?
-            {
+            if contract_address != &create_address(&local.sender, prepared.reservation().nonce()) {
                 return Err(AdapterError::Unavailable);
             }
             Ok(EvmTransactionSettlement::created(
@@ -497,8 +494,7 @@ fn validate_settlement(
         return Err(AdapterError::Internal);
     }
     if let EvmTransactionOutcome::Created { created_address } = evidence.outcome() {
-        let expected = create_address(&local.sender, prepared.reservation().nonce())
-            .map_err(|_| AdapterError::Internal)?;
+        let expected = create_address(&local.sender, prepared.reservation().nonce());
         if created_address != &expected {
             return Err(AdapterError::Internal);
         }

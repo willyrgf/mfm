@@ -112,10 +112,12 @@ any creation-to-call or call-to-observation projection as ordinary Pure States.
 intent/evidence and context-preserving State. Its route reference is the content ref of
 `EvmTransactionRoute`, while the transaction Effect binds the complete
 route/authority-epoch/sender value. Live registration and IO remain downstream adapters. Live EVM
-alone owns exact type-2 RLP/Keccak, the separate transaction provider facet, append-only authority
-orchestration, and the anchored-call RPC sequence. Its version 1 transaction settlement is
-intentionally limited to the pinned non-reorging development fixture; `ComposedRuntime` registers
-neither transaction Effects nor anchored transaction-route Reads.
+alone owns the checked command-to-consensus mapping, retained-wire and signer validation, the
+separate transaction provider facet, append-only authority orchestration, and the anchored-call RPC
+sequence. Its narrow pinned Alloy dependency owns EIP-1559/EIP-2718 consensus encoding, decoding,
+hashing, and CREATE-address derivation. Version 1 transaction settlement is intentionally limited
+to the pinned non-reorging development fixture; `ComposedRuntime` registers neither transaction
+Effects nor anchored transaction-route Reads.
 
 The domain graph is one-way: Portfolio depends on EVM domain contracts; EVM depends on foundations
 and Program; live EVM depends on EVM plus Runtime and captures concrete

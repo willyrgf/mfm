@@ -466,7 +466,7 @@ async fn absent_prepare_submit_resume_settle_and_fast_path_are_phase_exact() {
     assert_eq!(submissions[0].1, prepared.raw_transaction().as_bytes());
     assert_eq!(signer.purpose().as_str(), EVM_EIP1559_SIGNING_PURPOSE_ID);
 
-    let created = create_address(binding.sender(), 7).expect("created address");
+    let created = create_address(binding.sender(), 7);
     provider.push_receipt(Ok(Some(ProviderReceipt::new(
         prepared.transaction_hash().clone(),
         binding.sender().clone(),
@@ -762,8 +762,7 @@ async fn receipt_shape_validation_covers_create_call_revert_and_mismatch_matrix(
         EvmU256::from_u64(10),
     )
     .expect("call command");
-    let created =
-        create_address(binding.sender(), prepared.reservation().nonce()).expect("created address");
+    let created = create_address(binding.sender(), prepared.reservation().nonce());
 
     enum Expected {
         Created,
