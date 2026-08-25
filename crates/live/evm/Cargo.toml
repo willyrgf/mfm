@@ -29,4 +29,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 mfm-keystore = { path = "../../keystore" }
+mfm-program = { path = "../../kernel/program" }
+mfm-program-derive = { path = "../../kernel/program-derive" }
+mfm-store = { path = "../../kernel/store" }
 tokio = { workspace = true }

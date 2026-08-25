@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use mfm_evm::{
     Eip1559TransactionCommand, EvmAddress, EvmBlockAnchor, EvmChainInstance, EvmHash,
-    EvmTransactionBinding, EvmTransactionConfirmation, EvmTransactionEffect, EvmTransactionRevert,
+    EvmTransactionBinding, EvmTransactionEffect, EvmTransactionOutcome, EvmTransactionReceipt,
     EvmTransactionSettlement,
 };
 use mfm_evm_transaction_authority::{
@@ -388,39 +388,39 @@ fn validate_receipt(
             {
                 return Err(AdapterError::Unavailable);
             }
-            Ok(EvmTransactionSettlement::confirmed(
+            Ok(EvmTransactionSettlement::created(
                 effect_id.clone(),
                 prepared.reservation().nonce(),
-                EvmTransactionConfirmation::Created {
-                    block_anchor: receipt.block_anchor().clone(),
-                    created_address: contract_address.clone(),
-                    transaction_hash: prepared.transaction_hash().clone(),
-                },
+                EvmTransactionReceipt::new(
+                    receipt.block_anchor().clone(),
+                    prepared.transaction_hash().clone(),
+                ),
+                contract_address.clone(),
             ))
         }
         (None, ProviderReceiptResult::RevertedCreate) => Ok(EvmTransactionSettlement::reverted(
             effect_id.clone(),
             prepared.reservation().nonce(),
-            EvmTransactionRevert::new(
+            EvmTransactionReceipt::new(
                 receipt.block_anchor().clone(),
                 prepared.transaction_hash().clone(),
             ),
         )),
         (Some(to), ProviderReceiptResult::SuccessCall { target }) if target == to => {
-            Ok(EvmTransactionSettlement::confirmed(
+            Ok(EvmTransactionSettlement::called(
                 effect_id.clone(),
                 prepared.reservation().nonce(),
-                EvmTransactionConfirmation::Called {
-                    block_anchor: receipt.block_anchor().clone(),
-                    transaction_hash: prepared.transaction_hash().clone(),
-                },
+                EvmTransactionReceipt::new(
+                    receipt.block_anchor().clone(),
+                    prepared.transaction_hash().clone(),
+                ),
             ))
         }
         (Some(to), ProviderReceiptResult::RevertedCall { target }) if target == to => {
             Ok(EvmTransactionSettlement::reverted(
                 effect_id.clone(),
                 prepared.reservation().nonce(),
-                EvmTransactionRevert::new(
+                EvmTransactionReceipt::new(
                     receipt.block_anchor().clone(),
                     prepared.transaction_hash().clone(),
                 ),
@@ -484,32 +484,19 @@ fn validate_settlement(
         || evidence.nonce() != prepared.reservation().nonce()
         || evidence.transaction_hash() != prepared.transaction_hash()
         || !matches!(
-            (command.to(), evidence),
+            (command.to(), evidence.outcome()),
             (
                 None,
-                EvmTransactionSettlement::Confirmed {
-                    confirmation: EvmTransactionConfirmation::Created { .. },
-                    ..
-                } | EvmTransactionSettlement::Reverted { .. }
+                EvmTransactionOutcome::Created { .. } | EvmTransactionOutcome::Reverted
             ) | (
                 Some(_),
-                EvmTransactionSettlement::Confirmed {
-                    confirmation: EvmTransactionConfirmation::Called { .. },
-                    ..
-                } | EvmTransactionSettlement::Reverted { .. }
+                EvmTransactionOutcome::Called | EvmTransactionOutcome::Reverted
             )
         )
     {
         return Err(AdapterError::Internal);
     }
-    if let EvmTransactionSettlement::Confirmed {
-        confirmation:
-            EvmTransactionConfirmation::Created {
-                created_address, ..
-            },
-        ..
-    } = evidence
-    {
+    if let EvmTransactionOutcome::Created { created_address } = evidence.outcome() {
         let expected = create_address(&local.sender, prepared.reservation().nonce())
             .map_err(|_| AdapterError::Internal)?;
         if created_address != &expected {
