@@ -19,11 +19,14 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Binaries | bounded transport parsing, one Application call, transport policy, and redacted rendering | composition, domain planning, environment resolution, execution lifecycle, or run semantics |
 
 RuntimeAssemblyBuilder registers exact value codecs, closed Pure/Read/Effect State modes, Match
-descriptors, and separate Read/Effect callbacks. `finish` freezes one immutable assembly. Program
-association converts each registered mode into one mode-specific executable carrying only its valid
-functions, codecs, validators, and exact callback. Fold state retains declaration identity and
-qualified values only; hot execution and cold qualification index the already-associated executable
-Program. The fold performs no public registry lookup and exposes no erased value workflow.
+descriptors, and separate Read/Effect callbacks. Multiple exact schemas may share one semantic type
+identity; exact content refs select codecs, and the exact implementation/input/output/failure ABI
+selects a State registration. Neither lookup falls back to semantic identity. `finish` freezes one
+immutable assembly. Program association converts each registered mode into one mode-specific
+executable carrying only its valid functions, codecs, validators, and exact callback. Fold state
+retains declaration identity and qualified values only; hot execution and cold qualification index
+the already-associated executable Program. The fold performs no public registry lookup and exposes
+no erased value workflow.
 
 Application's private compiled State table couples each State's domain-owned inspection metadata to
 the same monomorphized Runtime registration function used by live composition. The component
