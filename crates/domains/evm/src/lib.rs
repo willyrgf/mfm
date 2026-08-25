@@ -1412,6 +1412,7 @@ macro_rules! impl_read_capability {
             }
 
             fn bind_evidence(
+                _intent_value_ref: &ContentRef,
                 intent: &Self::Intent,
                 evidence: &Self::Evidence,
             ) -> mfm_capabilities::Result<()> {

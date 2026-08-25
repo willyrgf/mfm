@@ -18,7 +18,6 @@ mfm-evm-transaction-authority = { path = "../../domains/evm-transaction-authorit
 mfm-ids = { path = "../../kernel/ids" }
 mfm-runtime = { path = "../../kernel/runtime" }
 mfm-signing = { path = "../../signing" }
-mfm-values = { path = "../../kernel/values" }
 alloy-consensus = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-primitives = { workspace = true }
@@ -33,4 +32,5 @@ mfm-keystore = { path = "../../keystore" }
 mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-store = { path = "../../kernel/store" }
+mfm-values = { path = "../../kernel/values" }
 tokio = { workspace = true }

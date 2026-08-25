@@ -150,7 +150,7 @@ impl ComposedRuntime {
     where
         B: Store + RunIndex + 'static,
     {
-        let mut builder = RuntimeAssemblyBuilder::new();
+        let mut builder = RuntimeAssemblyBuilder::new().map_err(|_| ComposeError::Assembly)?;
         register_portfolio_states(&mut builder).map_err(|_| ComposeError::Assembly)?;
         let mut targets = Vec::new();
         let mut views = Vec::new();
@@ -174,7 +174,7 @@ impl ComposedRuntime {
             register_evm_reads(&mut builder, binding.target, binding.provider)
                 .map_err(|_| ComposeError::Assembly)?;
         }
-        let assembly = builder.finish().map_err(|_| ComposeError::Assembly)?;
+        let assembly = builder.finish();
         let store: Arc<dyn Store> = backend.clone();
         let run_index: Arc<dyn RunIndex> = backend;
         Ok(Self {

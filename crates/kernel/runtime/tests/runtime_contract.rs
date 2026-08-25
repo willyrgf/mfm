@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_capabilities::{CapabilityError, EffectCapabilityContract, ReadCapabilityContract};
-use mfm_ids::{DigestBytes, EffectId, EntryPointId, RunId, SemanticTypeId, StableId};
+use mfm_ids::{ContentRef, DigestBytes, EffectId, EntryPointId, RunId, SemanticTypeId, StableId};
 use mfm_journal::{EncodedRunFrame, StoredRunBytes};
 use mfm_program::{
     expand_program, CapabilityInjection, EffectState, Never, Operation, OperationExpansion,
@@ -207,6 +207,7 @@ struct Intent {
 #[derive(Debug, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 struct Evidence {
+    intent_value_ref: ContentRef,
     value: u64,
     accepted: bool,
 }
@@ -229,10 +230,16 @@ impl ReadCapabilityContract for Observation {
     }
 
     fn bind_evidence(
+        intent_value_ref: &ContentRef,
         intent: &Self::Intent,
         evidence: &Self::Evidence,
     ) -> mfm_capabilities::Result<()> {
-        (intent.value == evidence.value)
+        let expected_value_ref = canonicalize_mfm_value(intent)
+            .map(|(_, value_ref)| value_ref)
+            .map_err(|_| CapabilityError::EvidenceBinding)?;
+        (intent_value_ref == &expected_value_ref
+            && intent_value_ref == &evidence.intent_value_ref
+            && intent.value == evidence.value)
             .then_some(())
             .ok_or(CapabilityError::EvidenceBinding)
     }
@@ -340,6 +347,7 @@ impl ReadCapabilityContract for ConflictingReadCapability {
     }
 
     fn bind_evidence(
+        _intent_value_ref: &ContentRef,
         intent: &Self::Intent,
         evidence: &Self::Evidence,
     ) -> mfm_capabilities::Result<()> {
@@ -459,7 +467,7 @@ impl Operation for RejectEffectProgram {
 
 #[test]
 fn exact_value_and_state_abi_collisions_are_rejected() {
-    let mut different_type = RuntimeAssemblyBuilder::new();
+    let mut different_type = RuntimeAssemblyBuilder::new().expect("builder");
     different_type
         .register_value::<Number>()
         .expect("number codec");
@@ -467,9 +475,13 @@ fn exact_value_and_state_abi_collisions_are_rejected() {
         different_type.register_value::<NumberAlias>(),
         Err(RuntimeError::IncompatibleAssembly)
     );
+    different_type
+        .register_value::<Number>()
+        .expect("failed registration does not poison the builder");
+    different_type.finish();
 
     ALTERNATE_DESCRIPTOR_AUDIT.store(false, Ordering::SeqCst);
-    let mut different_descriptor = RuntimeAssemblyBuilder::new();
+    let mut different_descriptor = RuntimeAssemblyBuilder::new().expect("builder");
     different_descriptor
         .register_value::<MutableDescriptorNumber>()
         .expect("first descriptor");
@@ -480,7 +492,7 @@ fn exact_value_and_state_abi_collisions_are_rejected() {
     );
     ALTERNATE_DESCRIPTOR_AUDIT.store(false, Ordering::SeqCst);
 
-    let mut different_state_type = RuntimeAssemblyBuilder::new();
+    let mut different_state_type = RuntimeAssemblyBuilder::new().expect("builder");
     different_state_type
         .register_pure::<GenericState<FirstGenericValue>>()
         .expect("generic state");
@@ -504,14 +516,14 @@ async fn one_semantic_family_executes_multiple_exact_schemas_hot_and_cold() {
     );
 
     let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_pure::<GenericState<FirstGenericValue>>()
         .expect("first generic State ABI");
     builder
         .register_pure::<GenericState<SecondGenericValue>>()
         .expect("second generic State ABI");
-    let runtime = Runtime::new(builder.finish().expect("generic assembly"), store.clone());
+    let runtime = Runtime::new(builder.finish(), store.clone());
 
     let first_run_id = RunId::from_digest(DigestBytes::from_array([60; 32]));
     let first_hot = runtime
@@ -561,14 +573,14 @@ async fn one_semantic_family_executes_multiple_exact_schemas_hot_and_cold() {
         br#"{"value":{"second":"two"}}"#
     );
 
-    let mut cold_builder = RuntimeAssemblyBuilder::new();
+    let mut cold_builder = RuntimeAssemblyBuilder::new().expect("builder");
     cold_builder
         .register_pure::<GenericState<FirstGenericValue>>()
         .expect("cold first generic State ABI");
     cold_builder
         .register_pure::<GenericState<SecondGenericValue>>()
         .expect("cold second generic State ABI");
-    let cold_runtime = Runtime::new(cold_builder.finish().expect("cold assembly"), store);
+    let cold_runtime = Runtime::new(cold_builder.finish(), store);
 
     let first_cold = cold_runtime
         .read(&first_run_id)
@@ -599,27 +611,30 @@ async fn one_semantic_family_executes_multiple_exact_schemas_hot_and_cold() {
 
 #[test]
 fn effect_registration_rejects_duplicate_and_wrong_kind_capability_entries() {
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_effect::<Mutate, Mutation>()
         .expect("Effect State");
     builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, |effect_id, command| {
-            let effect_id = effect_id.clone();
-            let value = command.value;
-            Box::pin(async move {
-                Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                    effect_id,
-                    value,
-                    accepted: true,
-                }))
-            })
-        })
+        .register_effect_adapter::<Mutation, _, _>(
+            Binding { route: 8 },
+            |effect_id, _command_value_ref, command| {
+                let effect_id = effect_id.clone();
+                let value = command.value;
+                Box::pin(async move {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
+                        effect_id,
+                        value,
+                        accepted: true,
+                    }))
+                })
+            },
+        )
         .expect("Effect adapter");
     assert_eq!(
         builder.register_effect_adapter::<Mutation, _, _>(
             Binding { route: 8 },
-            |effect_id, command| {
+            |effect_id, _command_value_ref, command| {
                 let effect_id = effect_id.clone();
                 let value = command.value;
                 Box::pin(async move {
@@ -634,24 +649,21 @@ fn effect_registration_rejects_duplicate_and_wrong_kind_capability_entries() {
         Err(RuntimeError::IncompatibleAssembly)
     );
     assert_eq!(
-        builder
-            .register_adapter::<ConflictingReadCapability, _, _>(Binding { route: 8 }, |_intent| {
-                Box::pin(async { Err(AdapterError::Internal) })
-            },),
+        builder.register_adapter::<ConflictingReadCapability, _, _>(
+            Binding { route: 8 },
+            |_, _intent| { Box::pin(async { Err(AdapterError::Internal) }) },
+        ),
         Err(RuntimeError::IncompatibleAssembly)
     );
 }
 
 #[tokio::test]
 async fn missing_effect_adapter_is_rejected_before_store_io() {
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_effect::<Mutate, Mutation>()
         .expect("Effect State");
-    let runtime = Runtime::new(
-        builder.finish().expect("assembly"),
-        Arc::new(MemoryStore::new()),
-    );
+    let runtime = Runtime::new(builder.finish(), Arc::new(MemoryStore::new()));
     let run_id = RunId::from_digest(DigestBytes::from_array([29; 32]));
     assert!(matches!(
         runtime
@@ -677,9 +689,9 @@ async fn missing_effect_adapter_is_rejected_before_store_io() {
 #[tokio::test]
 async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
     let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder.register_pure::<Increment>().expect("Pure State");
-    let runtime = Runtime::new(builder.finish().expect("assembly"), store);
+    let runtime = Runtime::new(builder.finish(), store);
     let run_id = RunId::from_digest(DigestBytes::from_array([1; 32]));
     let program = expand_program(
         EntryPointId::new("mfm.test.runtime/pure@1").expect("entry point"),
@@ -705,14 +717,11 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
     assert_eq!(cold.head_digest(), hot.head_digest());
     assert_eq!(cold_value.canonical_bytes(), hot_value.canonical_bytes());
 
-    let mut empty_builder = RuntimeAssemblyBuilder::new();
+    let mut empty_builder = RuntimeAssemblyBuilder::new().expect("builder");
     empty_builder
         .register_value::<Number>()
         .expect("root value");
-    let empty = Runtime::new(
-        empty_builder.finish().expect("empty assembly"),
-        Arc::new(MemoryStore::new()),
-    );
+    let empty = Runtime::new(empty_builder.finish(), Arc::new(MemoryStore::new()));
     let empty_program = expand_program(
         EntryPointId::new("mfm.test.runtime/empty@1").expect("entry point"),
         &EmptyProgram,
@@ -737,17 +746,19 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
 async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
     let calls = Arc::new(AtomicUsize::new(0));
     let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_read::<Observe, Observation>()
         .expect("Read State");
     builder
         .register_adapter::<Observation, _, _>(Binding { route: 7 }, {
             let calls = Arc::clone(&calls);
-            move |intent| {
+            move |intent_value_ref, intent| {
                 calls.fetch_add(1, Ordering::SeqCst);
+                let intent_value_ref = intent_value_ref.clone();
                 Box::pin(async move {
                     Ok(Evidence {
+                        intent_value_ref,
                         value: intent.value,
                         accepted: true,
                     })
@@ -755,7 +766,7 @@ async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
             }
         })
         .expect("adapter");
-    let runtime = Runtime::new(builder.finish().expect("assembly"), store);
+    let runtime = Runtime::new(builder.finish(), store);
     let run_id = RunId::from_digest(DigestBytes::from_array([3; 32]));
     let program = expand_program(
         EntryPointId::new("mfm.test.runtime/read@1").expect("entry point"),
@@ -773,19 +784,16 @@ async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let unavailable_store = Arc::new(MemoryStore::new());
-    let mut unavailable_builder = RuntimeAssemblyBuilder::new();
+    let mut unavailable_builder = RuntimeAssemblyBuilder::new().expect("builder");
     unavailable_builder
         .register_read::<Observe, Observation>()
         .expect("Read State");
     unavailable_builder
-        .register_adapter::<Observation, _, _>(Binding { route: 7 }, |_| {
+        .register_adapter::<Observation, _, _>(Binding { route: 7 }, |_, _| {
             Box::pin(async { Err(AdapterError::Unavailable) })
         })
         .expect("unavailable adapter");
-    let unavailable = Runtime::new(
-        unavailable_builder.finish().expect("assembly"),
-        unavailable_store.clone(),
-    );
+    let unavailable = Runtime::new(unavailable_builder.finish(), unavailable_store.clone());
     let interrupted_run_id = RunId::from_digest(DigestBytes::from_array([4; 32]));
     let interrupted_program = expand_program(
         EntryPointId::new("mfm.test.runtime/read@1").expect("entry point"),
@@ -809,27 +817,26 @@ async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
     assert_eq!(prefix.head_sequence(), 1);
     assert!(matches!(prefix.state(), RunViewState::Runnable));
 
-    let mut resumed_builder = RuntimeAssemblyBuilder::new();
+    let mut resumed_builder = RuntimeAssemblyBuilder::new().expect("builder");
     resumed_builder
         .register_read::<Observe, Observation>()
         .expect("Read State");
     resumed_builder
-        .register_adapter::<Observation, _, _>(Binding { route: 7 }, |intent| {
+        .register_adapter::<Observation, _, _>(Binding { route: 7 }, |intent_value_ref, intent| {
+            let intent_value_ref = intent_value_ref.clone();
             Box::pin(async move {
                 Ok(Evidence {
+                    intent_value_ref,
                     value: intent.value,
                     accepted: false,
                 })
             })
         })
         .expect("replacement adapter");
-    let resumed = Runtime::new(
-        resumed_builder.finish().expect("assembly"),
-        unavailable_store,
-    )
-    .resume(&interrupted_run_id)
-    .await
-    .expect("resume");
+    let resumed = Runtime::new(resumed_builder.finish(), unavailable_store)
+        .resume(&interrupted_run_id)
+        .await
+        .expect("resume");
     let RunViewState::Failed(value) = resumed.state() else {
         panic!("rejected observation did not follow the Program failure path");
     };
@@ -842,7 +849,7 @@ async fn cancellation_during_observation_preserves_a_runnable_prefix() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_read::<Observe, Observation>()
         .expect("Read State");
@@ -850,13 +857,15 @@ async fn cancellation_during_observation_preserves_a_runnable_prefix() {
         .register_adapter::<Observation, _, _>(Binding { route: 7 }, {
             let entered = Arc::clone(&entered);
             let release = Arc::clone(&release);
-            move |intent| {
+            move |intent_value_ref, intent| {
                 let entered = Arc::clone(&entered);
                 let release = Arc::clone(&release);
+                let intent_value_ref = intent_value_ref.clone();
                 Box::pin(async move {
                     entered.notify_one();
                     release.notified().await;
                     Ok(Evidence {
+                        intent_value_ref,
                         value: intent.value,
                         accepted: true,
                     })
@@ -864,7 +873,7 @@ async fn cancellation_during_observation_preserves_a_runnable_prefix() {
             }
         })
         .expect("adapter");
-    let runtime = Arc::new(Runtime::new(builder.finish().expect("assembly"), store));
+    let runtime = Arc::new(Runtime::new(builder.finish(), store));
     let run_id = RunId::from_digest(DigestBytes::from_array([5; 32]));
     let task = {
         let runtime = Arc::clone(&runtime);
@@ -902,7 +911,7 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
     let release = Arc::new(tokio::sync::Notify::new());
     let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
     let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_effect::<Mutate, Mutation>()
         .expect("Effect State");
@@ -911,13 +920,15 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
             let entered = Arc::clone(&entered);
             let release = Arc::clone(&release);
             let observed = Arc::clone(&observed);
-            move |effect_id, command| {
+            move |effect_id, command_value_ref, command| {
                 let effect_id = effect_id.clone();
+                let command_value_ref = command_value_ref.clone();
                 let value = command.value;
-                observed
-                    .lock()
-                    .expect("observations")
-                    .push((effect_id.clone(), value));
+                observed.lock().expect("observations").push((
+                    effect_id.clone(),
+                    command_value_ref,
+                    value,
+                ));
                 let entered = Arc::clone(&entered);
                 let release = Arc::clone(&release);
                 Box::pin(async move {
@@ -932,10 +943,7 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
             }
         })
         .expect("Effect adapter");
-    let runtime = Arc::new(Runtime::new(
-        builder.finish().expect("assembly"),
-        store.clone(),
-    ));
+    let runtime = Arc::new(Runtime::new(builder.finish(), store.clone()));
     let run_id = RunId::from_digest(DigestBytes::from_array([30; 32]));
     let task = {
         let runtime = Arc::clone(&runtime);
@@ -965,23 +973,33 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
         Ok(_) => panic!("Effect task was not cancelled"),
     }
     release.notify_waiters();
-    let first_effect = observed.lock().expect("observations")[0].0.clone();
+    let (first_effect, first_command_value_ref) = {
+        let observations = observed.lock().expect("observations");
+        (observations[0].0.clone(), observations[0].1.clone())
+    };
+    assert_eq!(
+        first_command_value_ref,
+        canonicalize_mfm_value(&Command { value: 34 })
+            .map(|(_, value_ref)| value_ref)
+            .expect("command value ref")
+    );
 
     let resumed_observed = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut resumed_builder = RuntimeAssemblyBuilder::new();
+    let mut resumed_builder = RuntimeAssemblyBuilder::new().expect("builder");
     resumed_builder
         .register_effect::<Mutate, Mutation>()
         .expect("Effect State");
     resumed_builder
         .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
             let resumed_observed = Arc::clone(&resumed_observed);
-            move |effect_id, command| {
+            move |effect_id, command_value_ref, command| {
                 let effect_id = effect_id.clone();
+                let command_value_ref = command_value_ref.clone();
                 let value = command.value;
                 resumed_observed
                     .lock()
                     .expect("resumed observations")
-                    .push((effect_id.clone(), value));
+                    .push((effect_id.clone(), command_value_ref, value));
                 Box::pin(async move {
                     Ok(EffectAdapterOutcome::Settled(EffectEvidence {
                         effect_id,
@@ -992,13 +1010,16 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
             }
         })
         .expect("Effect adapter");
-    let resumed_runtime = Runtime::new(resumed_builder.finish().expect("assembly"), store);
+    let resumed_runtime = Runtime::new(resumed_builder.finish(), store);
     let resumed = resumed_runtime.resume(&run_id).await.expect("cold resume");
     assert_eq!(resumed.head_sequence(), 3);
     assert!(matches!(resumed.state(), RunViewState::Succeeded(_)));
     {
         let resumed_calls = resumed_observed.lock().expect("resumed observations");
-        assert_eq!(resumed_calls.as_slice(), &[(first_effect, 34)]);
+        assert_eq!(
+            resumed_calls.as_slice(),
+            &[(first_effect, first_command_value_ref, 34)]
+        );
     }
 
     let cold = resumed_runtime.read(&run_id).await.expect("cold view");
@@ -1013,14 +1034,14 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
 async fn pending_yields_once_and_a_later_settlement_closes_the_same_prepare() {
     let calls = Arc::new(AtomicUsize::new(0));
     let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_effect::<Mutate, Mutation>()
         .expect("Effect State");
     builder
         .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
             let calls = Arc::clone(&calls);
-            move |effect_id, command| {
+            move |effect_id, _command_value_ref, command| {
                 let invocation = calls.fetch_add(1, Ordering::SeqCst);
                 let effect_id = effect_id.clone();
                 let value = command.value;
@@ -1038,7 +1059,7 @@ async fn pending_yields_once_and_a_later_settlement_closes_the_same_prepare() {
             }
         })
         .expect("Effect adapter");
-    let runtime = Runtime::new(builder.finish().expect("assembly"), store);
+    let runtime = Runtime::new(builder.finish(), store);
     let run_id = RunId::from_digest(DigestBytes::from_array([45; 32]));
 
     let pending = runtime
@@ -1072,14 +1093,14 @@ async fn pending_yields_once_and_a_later_settlement_closes_the_same_prepare() {
 async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
     let calls = Arc::new(AtomicUsize::new(0));
     let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_effect::<RejectEffect, Mutation>()
         .expect("Effect State");
     builder
         .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
             let calls = Arc::clone(&calls);
-            move |effect_id, command| {
+            move |effect_id, _command_value_ref, command| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 let effect_id = effect_id.clone();
                 let value = command.value;
@@ -1093,7 +1114,7 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
             }
         })
         .expect("adapter");
-    let runtime = Runtime::new(builder.finish().expect("assembly"), store);
+    let runtime = Runtime::new(builder.finish(), store);
     let run_id = RunId::from_digest(DigestBytes::from_array([31; 32]));
     assert!(matches!(
         runtime
@@ -1120,23 +1141,26 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
     );
 
     let invalid_store = Arc::new(MemoryStore::new());
-    let mut invalid_builder = RuntimeAssemblyBuilder::new();
+    let mut invalid_builder = RuntimeAssemblyBuilder::new().expect("builder");
     invalid_builder
         .register_effect::<Mutate, Mutation>()
         .expect("Effect State");
     invalid_builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, |_effect_id, command| {
-            let value = command.value;
-            Box::pin(async move {
-                Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                    effect_id: EffectId::from_digest(DigestBytes::from_array([99; 32])),
-                    value,
-                    accepted: true,
-                }))
-            })
-        })
+        .register_effect_adapter::<Mutation, _, _>(
+            Binding { route: 8 },
+            |_effect_id, _command_value_ref, command| {
+                let value = command.value;
+                Box::pin(async move {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
+                        effect_id: EffectId::from_digest(DigestBytes::from_array([99; 32])),
+                        value,
+                        accepted: true,
+                    }))
+                })
+            },
+        )
         .expect("adapter");
-    let invalid = Runtime::new(invalid_builder.finish().expect("assembly"), invalid_store);
+    let invalid = Runtime::new(invalid_builder.finish(), invalid_store);
     let invalid_run_id = RunId::from_digest(DigestBytes::from_array([32; 32]));
     assert!(matches!(
         invalid
@@ -1275,14 +1299,14 @@ fn effect_runtime_with_counting_adapter(
     calls: Arc<AtomicUsize>,
     effect_ids: Arc<std::sync::Mutex<Vec<EffectId>>>,
 ) -> Runtime {
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_effect::<Mutate, Mutation>()
         .expect("Effect State");
     builder
         .register_effect_adapter::<Mutation, _, _>(
             Binding { route: 8 },
-            move |effect_id, command| {
+            move |effect_id, _command_value_ref, command| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 let effect_id = effect_id.clone();
                 effect_ids
@@ -1300,7 +1324,7 @@ fn effect_runtime_with_counting_adapter(
             },
         )
         .expect("adapter");
-    Runtime::new(builder.finish().expect("assembly"), store)
+    Runtime::new(builder.finish(), store)
 }
 
 fn retained_effect_reader(frames: Vec<Vec<u8>>, calls: Arc<AtomicUsize>) -> Runtime {
@@ -1542,14 +1566,14 @@ async fn every_adapter_failure_leaves_one_pending_prepare() {
     {
         let calls = Arc::new(AtomicUsize::new(0));
         let store = Arc::new(MemoryStore::new());
-        let mut builder = RuntimeAssemblyBuilder::new();
+        let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
         builder
             .register_effect::<Mutate, Mutation>()
             .expect("Effect State");
         builder
             .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
                 let calls = Arc::clone(&calls);
-                move |_effect_id, _command| {
+                move |_effect_id, _command_value_ref, _command| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     match mode {
                         FailureMode::Unavailable => {
@@ -1561,7 +1585,7 @@ async fn every_adapter_failure_leaves_one_pending_prepare() {
                 }
             })
             .expect("adapter");
-        let runtime = Runtime::new(builder.finish().expect("assembly"), store);
+        let runtime = Runtime::new(builder.finish(), store);
         let run_id = RunId::from_digest(DigestBytes::from_array(
             [u8::try_from(40 + offset).expect("RunId byte"); 32],
         ));
@@ -1592,19 +1616,16 @@ async fn every_adapter_failure_leaves_one_pending_prepare() {
 #[tokio::test]
 async fn retained_effect_facts_are_validated_without_adapter_io() {
     let pending_store = Arc::new(ScriptedStore::recording());
-    let mut pending_builder = RuntimeAssemblyBuilder::new();
+    let mut pending_builder = RuntimeAssemblyBuilder::new().expect("builder");
     pending_builder
         .register_effect::<Mutate, Mutation>()
         .expect("Effect State");
     pending_builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, |_, _| {
+        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, |_, _, _| {
             Box::pin(async { Err(AdapterError::Unavailable) })
         })
         .expect("adapter");
-    let pending_runtime = Runtime::new(
-        pending_builder.finish().expect("assembly"),
-        pending_store.clone(),
-    );
+    let pending_runtime = Runtime::new(pending_builder.finish(), pending_store.clone());
     let run_id = RunId::from_digest(DigestBytes::from_array([36; 32]));
     assert!(matches!(
         pending_runtime
@@ -1759,19 +1780,16 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
 #[tokio::test]
 async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
     let store = Arc::new(MemoryStore::new());
-    let mut unavailable_builder = RuntimeAssemblyBuilder::new();
+    let mut unavailable_builder = RuntimeAssemblyBuilder::new().expect("builder");
     unavailable_builder
         .register_effect::<Mutate, Mutation>()
         .expect("Effect State");
     unavailable_builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, |_, _| {
+        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, |_, _, _| {
             Box::pin(async { Err(AdapterError::Unavailable) })
         })
         .expect("adapter");
-    let unavailable = Runtime::new(
-        unavailable_builder.finish().expect("assembly"),
-        store.clone(),
-    );
+    let unavailable = Runtime::new(unavailable_builder.finish(), store.clone());
     let run_id = RunId::from_digest(DigestBytes::from_array([35; 32]));
     assert!(matches!(
         unavailable
@@ -1790,7 +1808,7 @@ async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
 
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let ids = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_effect::<Mutate, Mutation>()
         .expect("Effect State");
@@ -1798,7 +1816,7 @@ async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
         .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
             let barrier = Arc::clone(&barrier);
             let ids = Arc::clone(&ids);
-            move |effect_id, command| {
+            move |effect_id, _command_value_ref, command| {
                 let effect_id = effect_id.clone();
                 let value = command.value;
                 ids.lock().expect("ids").push(effect_id.clone());
@@ -1814,7 +1832,7 @@ async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
             }
         })
         .expect("adapter");
-    let runtime = Arc::new(Runtime::new(builder.finish().expect("assembly"), store));
+    let runtime = Arc::new(Runtime::new(builder.finish(), store));
     let left = {
         let runtime = Arc::clone(&runtime);
         let run_id = run_id.clone();
@@ -1887,12 +1905,9 @@ async fn store_failures_map_by_load_or_append_authority() {
     .into_iter()
     .enumerate()
     {
-        let mut builder = RuntimeAssemblyBuilder::new();
+        let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
         builder.register_value::<Number>().expect("root value");
-        let runtime = Runtime::new(
-            builder.finish().expect("assembly"),
-            Arc::new(FaultStore { failure }),
-        );
+        let runtime = Runtime::new(builder.finish(), Arc::new(FaultStore { failure }));
         let run_id = RunId::from_digest(DigestBytes::from_array(
             [u8::try_from(offset + 10).expect("RunId byte"); 32],
         ));

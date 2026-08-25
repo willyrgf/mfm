@@ -7,8 +7,8 @@ start(RunId, Program, C0)
   -> append RunAdmitted(Program, C0)
   -> fold exact qualified prefix
   -> Pure: evaluate input -> append outcome
-  -> Read: prepare intent -> await typed adapter evidence -> interpret -> append fused conclusion
-  -> Effect: append exact command/EffectId -> await Pending or Settled evidence
+  -> Read: prepare intent/value ref -> await typed adapter evidence -> interpret -> append fused conclusion
+  -> Effect: append exact command/value ref/EffectId -> await Pending or Settled evidence
        -> Pending: append nothing -> return Runnable
        -> Settled: bind evidence -> interpret -> append adjacent conclusion
   -> Match: project closed-sum tag/payload without an append
@@ -24,6 +24,11 @@ Runtime associates the entire Program with one immutable RuntimeAssembly before 
 Association checks exact codecs, State implementations, Read capability/binding callbacks, and
 closed Match projection contracts. Runtime then owns the only semantic fold. Neither Application nor
 Store inspects frames to derive state.
+
+The typed Read callback and hot/cold evidence binder receive the exact qualified intent value ref.
+The typed Effect callback receives the exact qualified command value ref used in `EffectId`
+derivation. A value ref identifies one canonical instance; a codec contract ref identifies only its
+shared schema and is never substituted at these boundaries.
 
 After an inserted frame, Runtime extends its private hot accumulator without loading. A
 `NotInserted` result triggers one complete reload because another writer may have advanced the run.

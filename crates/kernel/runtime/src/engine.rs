@@ -396,10 +396,7 @@ where
     })
     .await?;
 
-    let qualify_evidence = adapter(&intent).await.map_err(|error| match error {
-        AdapterError::Unavailable => RuntimeError::Unavailable,
-        AdapterError::Internal => RuntimeError::Internal,
-    })?;
+    let qualify_evidence = adapter(&intent).await.map_err(map_adapter_error)?;
 
     let declaration_index = context.declaration_index;
     let prepared = run_blocking(move || {
@@ -412,7 +409,8 @@ where
             .typed
             .downcast_ref::<C::Evidence>()
             .ok_or(RuntimeError::Internal)?;
-        C::bind_evidence(typed_intent, typed_evidence).map_err(|_| RuntimeError::Internal)?;
+        C::bind_evidence(&intent.value_ref, typed_intent, typed_evidence)
+            .map_err(|_| RuntimeError::Internal)?;
         let proposed = S::interpret(*typed_input, typed_evidence);
         let (kind, outcome) = match proposed {
             ProposedStateOutcome::Success { output } => (OutcomeKind::Success, qualify_hot(output)),

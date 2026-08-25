@@ -247,14 +247,14 @@ fn fixture_return_projection_rejects_malformed_or_wider_values() {
 
 #[test]
 fn generic_transaction_states_coexist_in_one_runtime_assembly() {
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_effect::<ExecuteEvmTransaction<EffectFixtureRequest>, EvmTransactionEffect>()
         .expect("creation state");
     builder
         .register_effect::<ExecuteEvmTransaction<Deployment>, EvmTransactionEffect>()
         .expect("nested call state");
-    builder.finish().expect("compatible assembly");
+    builder.finish();
 }
 
 fn invalid_return_data<O>() -> ProposedStateOutcome<O, EffectFixtureFailure> {
@@ -459,7 +459,7 @@ async fn runtime(
     let transaction_provider: Arc<dyn EvmTransactionProvider> = provider.clone();
     let read_provider: Arc<dyn EvmProvider> = provider;
 
-    let mut builder = RuntimeAssemblyBuilder::new();
+    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_pure::<PrepareConfiguration>()
         .expect("prepare configuration");
@@ -499,7 +499,7 @@ async fn runtime(
         .expect("anchored adapter");
     let store: Arc<dyn Store> = backend.clone();
     (
-        Runtime::new(builder.finish().expect("assembly"), store),
+        Runtime::new(builder.finish(), store),
         backend,
         transaction_authority,
     )

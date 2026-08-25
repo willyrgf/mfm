@@ -43,6 +43,8 @@ transport failure, a dropped acknowledgement, malformed ingress, or a mismatched
 `Unavailable`. Receipt settlement is inserted after one validated receipt and one matching
 canonical block observation. Settled evidence is an authority fast path with no signer/provider
 call. Dropped futures resume from the append-only reservation/preparation/settlement facts.
+Runtime supplies the exact qualified command value ref to the Effect callback; the adapter passes
+that identity to authority qualification and does not recanonicalize the command.
 
 This is the ONLY crate allowed to depend on `alloy-*`. The direct `alloy-consensus` and
 `alloy-eips` dependencies are pinned to 1.6.1; the latter exposes the public EIP-2718 traits already
