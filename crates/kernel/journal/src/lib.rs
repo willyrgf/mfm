@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use mfm_canonical::{raw_content_digest, sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, EffectId, RunId, SchemaId};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, EffectId, RunId};
 use mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -157,7 +157,7 @@ impl EncodedRunFrame {
             run_id.clone(),
             1,
             None,
-            RecordOwned::RunAdmitted {
+            Record::RunAdmitted {
                 program_ref: program_ref.clone(),
                 admitted_context: context_ref.clone(),
             },
@@ -284,14 +284,14 @@ impl JournalHistory {
             }
             if offset == 0 {
                 if frame.previous_head_digest.is_some()
-                    || !matches!(frame.record, RecordOwned::RunAdmitted { .. })
+                    || !matches!(frame.record, Record::RunAdmitted { .. })
                 {
                     return Err(JournalError::InvalidHistory);
                 }
             } else {
                 let previous = frames.last().ok_or(JournalError::InvalidHistory)?;
                 if frame.previous_head_digest.as_ref() != Some(&previous.head_digest)
-                    || matches!(frame.record, RecordOwned::RunAdmitted { .. })
+                    || matches!(frame.record, Record::RunAdmitted { .. })
                     || !records_are_adjacent(&previous.record, &frame.record)
                 {
                     return Err(JournalError::InvalidHistory);
@@ -309,7 +309,7 @@ impl JournalHistory {
     pub fn from_genesis(frame: EncodedRunFrame) -> std::result::Result<Self, JournalError> {
         if frame.run_sequence() != 1
             || frame.previous_head_digest().is_some()
-            || !matches!(frame.frame.record, RecordOwned::RunAdmitted { .. })
+            || !matches!(frame.frame.record, Record::RunAdmitted { .. })
         {
             return Err(JournalError::InvalidFrame);
         }
@@ -329,11 +329,8 @@ impl JournalHistory {
         value: &[u8],
     ) -> std::result::Result<EncodedRunFrame, JournalError> {
         self.construct_successor(
-            RecordOwned::StateConcludedPure {
-                outcome: OutcomeOwned {
-                    kind,
-                    value: value_ref.clone(),
-                },
+            Record::StateConcludedPure {
+                outcome: Outcome::new(kind, value_ref.clone()),
             },
             vec![(value_ref.clone(), value)],
         )
@@ -352,13 +349,10 @@ impl JournalHistory {
         value: &[u8],
     ) -> std::result::Result<EncodedRunFrame, JournalError> {
         self.construct_successor(
-            RecordOwned::StateConcludedRead {
+            Record::StateConcludedRead {
                 intent: intent_ref.clone(),
                 evidence: evidence_ref.clone(),
-                outcome: OutcomeOwned {
-                    kind,
-                    value: value_ref.clone(),
-                },
+                outcome: Outcome::new(kind, value_ref.clone()),
             },
             vec![
                 (intent_ref.clone(), intent),
@@ -376,7 +370,7 @@ impl JournalHistory {
         command: &[u8],
     ) -> std::result::Result<EncodedRunFrame, JournalError> {
         self.construct_successor(
-            RecordOwned::StateEffectPrepared {
+            Record::StateEffectPrepared {
                 effect_id: effect_id.clone(),
                 command: command_ref.clone(),
             },
@@ -394,12 +388,9 @@ impl JournalHistory {
         value: &[u8],
     ) -> std::result::Result<EncodedRunFrame, JournalError> {
         self.construct_successor(
-            RecordOwned::StateEffectConcluded {
+            Record::StateEffectConcluded {
                 evidence: evidence_ref.clone(),
-                outcome: OutcomeOwned {
-                    kind,
-                    value: value_ref.clone(),
-                },
+                outcome: Outcome::new(kind, value_ref.clone()),
             },
             vec![(evidence_ref.clone(), evidence), (value_ref.clone(), value)],
         )
@@ -407,7 +398,7 @@ impl JournalHistory {
 
     fn construct_successor(
         &self,
-        record: RecordOwned,
+        record: Record,
         objects: Vec<(ContentRef, &[u8])>,
     ) -> std::result::Result<EncodedRunFrame, JournalError> {
         let previous = &self.frames[self.frames.len() - 1].record;
@@ -502,7 +493,7 @@ struct QualifiedFrame {
     run_id: RunId,
     run_sequence: u64,
     previous_head_digest: Option<ContentDigest>,
-    record: RecordOwned,
+    record: Record,
     objects: Vec<ObjectOwned>,
     canonical: PlainCanonicalJsonBytes,
     head_digest: ContentDigest,
@@ -511,38 +502,38 @@ struct QualifiedFrame {
 impl QualifiedFrame {
     fn record_view(&self) -> JournalRecord<'_> {
         match &self.record {
-            RecordOwned::RunAdmitted {
+            Record::RunAdmitted {
                 program_ref,
                 admitted_context,
             } => JournalRecord::RunAdmitted {
                 program: self.object(program_ref),
                 admitted_context: self.object(admitted_context),
             },
-            RecordOwned::StateConcludedPure { outcome } => JournalRecord::StateConcludedPure {
-                kind: outcome.kind,
-                outcome: self.object(&outcome.value),
+            Record::StateConcludedPure { outcome } => JournalRecord::StateConcludedPure {
+                kind: outcome.kind(),
+                outcome: self.object(outcome.value()),
             },
-            RecordOwned::StateConcludedRead {
+            Record::StateConcludedRead {
                 intent,
                 evidence,
                 outcome,
             } => JournalRecord::StateConcludedRead {
                 intent: self.object(intent),
                 evidence: self.object(evidence),
-                kind: outcome.kind,
-                outcome: self.object(&outcome.value),
+                kind: outcome.kind(),
+                outcome: self.object(outcome.value()),
             },
-            RecordOwned::StateEffectPrepared { effect_id, command } => {
+            Record::StateEffectPrepared { effect_id, command } => {
                 JournalRecord::StateEffectPrepared {
                     effect_id,
                     command: self.object(command),
                 }
             }
-            RecordOwned::StateEffectConcluded { evidence, outcome } => {
+            Record::StateEffectConcluded { evidence, outcome } => {
                 JournalRecord::StateEffectConcluded {
                     evidence: self.object(evidence),
-                    kind: outcome.kind,
-                    outcome: self.object(&outcome.value),
+                    kind: outcome.kind(),
+                    outcome: self.object(outcome.value()),
                 }
             }
         }
@@ -566,18 +557,20 @@ struct ObjectOwned {
     canonical: PlainCanonicalJsonBytes,
 }
 
-enum RecordOwned {
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Record {
     RunAdmitted {
         program_ref: ContentRef,
         admitted_context: ContentRef,
     },
     StateConcludedPure {
-        outcome: OutcomeOwned,
+        outcome: Outcome,
     },
     StateConcludedRead {
         intent: ContentRef,
         evidence: ContentRef,
-        outcome: OutcomeOwned,
+        outcome: Outcome,
     },
     StateEffectPrepared {
         effect_id: EffectId,
@@ -585,20 +578,44 @@ enum RecordOwned {
     },
     StateEffectConcluded {
         evidence: ContentRef,
-        outcome: OutcomeOwned,
+        outcome: Outcome,
     },
 }
 
-struct OutcomeOwned {
-    kind: OutcomeKind,
-    value: ContentRef,
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Outcome {
+    Success { value: ContentRef },
+    Failure { value: ContentRef },
+}
+
+impl Outcome {
+    fn new(kind: OutcomeKind, value: ContentRef) -> Self {
+        match kind {
+            OutcomeKind::Success => Self::Success { value },
+            OutcomeKind::Failure => Self::Failure { value },
+        }
+    }
+
+    fn kind(&self) -> OutcomeKind {
+        match self {
+            Self::Success { .. } => OutcomeKind::Success,
+            Self::Failure { .. } => OutcomeKind::Failure,
+        }
+    }
+
+    fn value(&self) -> &ContentRef {
+        match self {
+            Self::Success { value } | Self::Failure { value } => value,
+        }
+    }
 }
 
 fn construct_frame(
     run_id: RunId,
     run_sequence: u64,
     previous_head_digest: Option<ContentDigest>,
-    record: RecordOwned,
+    record: Record,
     raw_objects: Vec<(ContentRef, &[u8])>,
 ) -> std::result::Result<EncodedRunFrame, JournalError> {
     if run_sequence == 0
@@ -640,7 +657,7 @@ fn construct_frame(
 fn qualify_local_objects(
     raw_objects: Vec<(ContentRef, &[u8])>,
 ) -> std::result::Result<Vec<ObjectOwned>, JournalError> {
-    let mut objects: BTreeMap<(String, String), ObjectOwned> = BTreeMap::new();
+    let mut objects: BTreeMap<ContentRef, PlainCanonicalJsonBytes> = BTreeMap::new();
     for (content_ref, bytes) in raw_objects {
         if bytes.len() > MAX_RUN_OBJECT_CANONICAL_BYTES {
             return Err(JournalError::Capacity);
@@ -650,29 +667,28 @@ fn qualify_local_objects(
         if content_ref.content_digest() != &raw_content_digest(canonical.as_bytes()) {
             return Err(JournalError::InvalidFrame);
         }
-        let key = content_key(&content_ref);
-        if let Some(previous) = objects.get(&key) {
-            if previous.canonical.as_bytes() != canonical.as_bytes() {
+        if let Some(previous) = objects.get(&content_ref) {
+            if previous.as_bytes() != canonical.as_bytes() {
                 return Err(JournalError::InvalidFrame);
             }
         } else {
-            objects.insert(
-                key,
-                ObjectOwned {
-                    content_ref,
-                    canonical,
-                },
-            );
+            objects.insert(content_ref, canonical);
         }
     }
-    Ok(objects.into_values().collect())
+    Ok(objects
+        .into_iter()
+        .map(|(content_ref, canonical)| ObjectOwned {
+            content_ref,
+            canonical,
+        })
+        .collect())
 }
 
-fn validate_closure(record: &RecordOwned, objects: &[ObjectOwned]) -> Result<()> {
+fn validate_closure(record: &Record, objects: &[ObjectOwned]) -> Result<()> {
     let required = record_refs(record);
     let actual = objects
         .iter()
-        .map(|object| content_key(&object.content_ref))
+        .map(|object| &object.content_ref)
         .collect::<BTreeSet<_>>();
     if required != actual {
         return Err(JournalError::InvalidFrame);
@@ -680,69 +696,50 @@ fn validate_closure(record: &RecordOwned, objects: &[ObjectOwned]) -> Result<()>
     Ok(())
 }
 
-fn record_refs(record: &RecordOwned) -> BTreeSet<(String, String)> {
+fn record_refs(record: &Record) -> BTreeSet<&ContentRef> {
     match record {
-        RecordOwned::RunAdmitted {
+        Record::RunAdmitted {
             program_ref,
             admitted_context,
-        } => [program_ref, admitted_context]
-            .into_iter()
-            .map(content_key)
-            .collect(),
-        RecordOwned::StateConcludedPure { outcome } => {
-            BTreeSet::from([content_key(&outcome.value)])
-        }
-        RecordOwned::StateConcludedRead {
+        } => BTreeSet::from([program_ref, admitted_context]),
+        Record::StateConcludedPure { outcome } => BTreeSet::from([outcome.value()]),
+        Record::StateConcludedRead {
             intent,
             evidence,
             outcome,
-        } => [intent, evidence, &outcome.value]
-            .into_iter()
-            .map(content_key)
-            .collect(),
-        RecordOwned::StateEffectPrepared { command, .. } => BTreeSet::from([content_key(command)]),
-        RecordOwned::StateEffectConcluded { evidence, outcome } => [evidence, &outcome.value]
-            .into_iter()
-            .map(content_key)
-            .collect(),
+        } => BTreeSet::from([intent, evidence, outcome.value()]),
+        Record::StateEffectPrepared { command, .. } => BTreeSet::from([command]),
+        Record::StateEffectConcluded { evidence, outcome } => {
+            BTreeSet::from([evidence, outcome.value()])
+        }
     }
-}
-
-fn content_key(content_ref: &ContentRef) -> (String, String) {
-    (
-        content_ref.schema_id().as_str().to_owned(),
-        content_ref.content_digest().as_str().to_owned(),
-    )
 }
 
 fn encode_frame(
     run_id: &RunId,
     run_sequence: u64,
     previous_head_digest: Option<&ContentDigest>,
-    record: &RecordOwned,
+    record: &Record,
     objects: &[ObjectOwned],
 ) -> Result<PlainCanonicalJsonBytes> {
-    let mut raw_values = Vec::with_capacity(objects.len());
-    for object in objects {
-        let text = std::str::from_utf8(object.canonical.as_bytes())
-            .map_err(|_| JournalError::InvalidFrame)?;
-        raw_values
-            .push(RawValue::from_string(text.to_owned()).map_err(|_| JournalError::InvalidFrame)?);
-    }
     let wire_objects = objects
         .iter()
-        .zip(raw_values.iter())
-        .map(|(object, canonical)| ObjectWire {
-            content_ref: &object.content_ref,
-            canonical: canonical.as_ref(),
+        .map(|object| {
+            let text = std::str::from_utf8(object.canonical.as_bytes())
+                .map_err(|_| JournalError::InvalidFrame)?;
+            Ok(ObjectWire {
+                content_ref: object.content_ref.clone(),
+                canonical: RawValue::from_string(text.to_owned())
+                    .map_err(|_| JournalError::InvalidFrame)?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     let wire = FrameWire {
-        domain: "mfm.run.frame.v2",
-        run_id: run_id.as_str(),
+        domain: "mfm.run.frame.v2".to_owned(),
+        run_id: run_id.clone(),
         run_sequence,
-        previous_head_digest: previous_head_digest.map(ContentDigest::as_str),
-        record: RecordWire::from(record),
+        previous_head_digest: previous_head_digest.cloned(),
+        record: record.clone(),
         objects: wire_objects,
     };
     let json = serde_json::to_string(&wire).map_err(|_| JournalError::InvalidFrame)?;
@@ -767,165 +764,22 @@ fn encode_frame(
     Ok(canonical)
 }
 
-#[derive(Serialize)]
-struct FrameWire<'a> {
-    domain: &'static str,
-    run_id: &'a str,
-    run_sequence: u64,
-    previous_head_digest: Option<&'a str>,
-    record: RecordWire<'a>,
-    objects: Vec<ObjectWire<'a>>,
-}
-
-#[derive(Serialize)]
-struct ObjectWire<'a> {
-    content_ref: &'a ContentRef,
-    canonical: &'a RawValue,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum RecordWire<'a> {
-    RunAdmitted {
-        program_ref: &'a ContentRef,
-        admitted_context: &'a ContentRef,
-    },
-    StateConcludedPure {
-        outcome: OutcomeWire<'a>,
-    },
-    StateConcludedRead {
-        intent: &'a ContentRef,
-        evidence: &'a ContentRef,
-        outcome: OutcomeWire<'a>,
-    },
-    StateEffectPrepared {
-        effect_id: &'a str,
-        command: &'a ContentRef,
-    },
-    StateEffectConcluded {
-        evidence: &'a ContentRef,
-        outcome: OutcomeWire<'a>,
-    },
-}
-
-impl<'a> From<&'a RecordOwned> for RecordWire<'a> {
-    fn from(record: &'a RecordOwned) -> Self {
-        match record {
-            RecordOwned::RunAdmitted {
-                program_ref,
-                admitted_context,
-            } => Self::RunAdmitted {
-                program_ref,
-                admitted_context,
-            },
-            RecordOwned::StateConcludedPure { outcome } => Self::StateConcludedPure {
-                outcome: OutcomeWire::from(outcome),
-            },
-            RecordOwned::StateConcludedRead {
-                intent,
-                evidence,
-                outcome,
-            } => Self::StateConcludedRead {
-                intent,
-                evidence,
-                outcome: OutcomeWire::from(outcome),
-            },
-            RecordOwned::StateEffectPrepared { effect_id, command } => Self::StateEffectPrepared {
-                effect_id: effect_id.as_str(),
-                command,
-            },
-            RecordOwned::StateEffectConcluded { evidence, outcome } => Self::StateEffectConcluded {
-                evidence,
-                outcome: OutcomeWire::from(outcome),
-            },
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum OutcomeWire<'a> {
-    Success { value: &'a ContentRef },
-    Failure { value: &'a ContentRef },
-}
-
-impl<'a> From<&'a OutcomeOwned> for OutcomeWire<'a> {
-    fn from(outcome: &'a OutcomeOwned) -> Self {
-        match outcome.kind {
-            OutcomeKind::Success => Self::Success {
-                value: &outcome.value,
-            },
-            OutcomeKind::Failure => Self::Failure {
-                value: &outcome.value,
-            },
-        }
-    }
-}
-
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawFrame {
+struct FrameWire {
     domain: String,
-    run_id: String,
+    run_id: RunId,
     run_sequence: u64,
-    previous_head_digest: Option<String>,
-    record: RawRecord,
-    objects: Vec<RawObject>,
+    previous_head_digest: Option<ContentDigest>,
+    record: Record,
+    objects: Vec<ObjectWire>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawObject {
-    content_ref: RawContentRef,
+struct ObjectWire {
+    content_ref: ContentRef,
     canonical: Box<RawValue>,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum RawRecord {
-    RunAdmitted {
-        program_ref: RawContentRef,
-        admitted_context: RawContentRef,
-    },
-    StateConcludedPure {
-        outcome: RawOutcome,
-    },
-    StateConcludedRead {
-        intent: RawContentRef,
-        evidence: RawContentRef,
-        outcome: RawOutcome,
-    },
-    StateEffectPrepared {
-        effect_id: String,
-        command: RawContentRef,
-    },
-    StateEffectConcluded {
-        evidence: RawContentRef,
-        outcome: RawOutcome,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum RawOutcome {
-    Success { value: RawContentRef },
-    Failure { value: RawContentRef },
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawContentRef {
-    schema_id: String,
-    content_digest: String,
-}
-
-impl RawContentRef {
-    fn checked(self) -> Result<ContentRef> {
-        let schema = SchemaId::parse(self.schema_id).map_err(|_| JournalError::InvalidHistory)?;
-        let digest =
-            ContentDigest::parse(self.content_digest).map_err(|_| JournalError::InvalidHistory)?;
-        ContentRef::new(schema, digest).map_err(|_| JournalError::InvalidHistory)
-    }
 }
 
 fn qualify_frame(bytes: &[u8]) -> std::result::Result<QualifiedFrame, JournalError> {
@@ -934,39 +788,37 @@ fn qualify_frame(bytes: &[u8]) -> std::result::Result<QualifiedFrame, JournalErr
     }
     let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
         .map_err(|_| JournalError::InvalidHistory)?;
-    let raw: RawFrame =
+    let wire: FrameWire =
         serde_json::from_slice(canonical.as_bytes()).map_err(|_| JournalError::InvalidHistory)?;
-    if raw.domain != "mfm.run.frame.v2"
-        || raw.run_sequence == 0
-        || raw.run_sequence > MAX_RUN_FRAMES
-        || (raw.run_sequence == 1) != raw.previous_head_digest.is_none()
+    let FrameWire {
+        domain,
+        run_id,
+        run_sequence,
+        previous_head_digest,
+        record,
+        objects: wire_objects,
+    } = wire;
+    if domain != "mfm.run.frame.v2"
+        || run_sequence == 0
+        || run_sequence > MAX_RUN_FRAMES
+        || (run_sequence == 1) != previous_head_digest.is_none()
     {
         return Err(JournalError::InvalidHistory);
     }
-    let run_id = RunId::parse(raw.run_id).map_err(|_| JournalError::InvalidHistory)?;
-    let previous_head_digest = raw
-        .previous_head_digest
-        .map(|digest| ContentDigest::parse(digest).map_err(|_| JournalError::InvalidHistory))
-        .transpose()?;
     if previous_head_digest
         .as_ref()
         .is_some_and(|digest| digest.algorithm() != DigestAlgorithm::Sha256V1)
     {
         return Err(JournalError::InvalidHistory);
     }
-    let record = raw.record.checked()?;
-    let mut objects = Vec::with_capacity(raw.objects.len());
-    let mut previous_key = None;
-    for object in raw.objects {
-        let content_ref = object.content_ref.checked()?;
-        let key = content_key(&content_ref);
-        if previous_key
-            .as_ref()
-            .is_some_and(|previous| previous >= &key)
+    let mut objects = Vec::with_capacity(wire_objects.len());
+    for object in wire_objects {
+        if objects
+            .last()
+            .is_some_and(|previous: &ObjectOwned| previous.content_ref >= object.content_ref)
         {
             return Err(JournalError::InvalidHistory);
         }
-        previous_key = Some(key);
         let canonical_text = object.canonical.get();
         if canonical_text.len() > MAX_RUN_OBJECT_CANONICAL_BYTES {
             return Err(JournalError::InvalidHistory);
@@ -974,18 +826,18 @@ fn qualify_frame(bytes: &[u8]) -> std::result::Result<QualifiedFrame, JournalErr
         let object_canonical =
             PlainCanonicalJsonBytes::from_canonical_json_slice(canonical_text.as_bytes())
                 .map_err(|_| JournalError::InvalidHistory)?;
-        if content_ref.content_digest() != &raw_content_digest(object_canonical.as_bytes()) {
+        if object.content_ref.content_digest() != &raw_content_digest(object_canonical.as_bytes()) {
             return Err(JournalError::InvalidHistory);
         }
         objects.push(ObjectOwned {
-            content_ref,
+            content_ref: object.content_ref,
             canonical: object_canonical,
         });
     }
     validate_closure(&record, &objects).map_err(|_| JournalError::InvalidHistory)?;
     let reencoded = encode_frame(
         &run_id,
-        raw.run_sequence,
+        run_sequence,
         previous_head_digest.as_ref(),
         &record,
         &objects,
@@ -997,7 +849,7 @@ fn qualify_frame(bytes: &[u8]) -> std::result::Result<QualifiedFrame, JournalErr
     let head_digest = frame_head_digest(bytes);
     Ok(QualifiedFrame {
         run_id,
-        run_sequence: raw.run_sequence,
+        run_sequence,
         previous_head_digest,
         record,
         objects,
@@ -1006,67 +858,18 @@ fn qualify_frame(bytes: &[u8]) -> std::result::Result<QualifiedFrame, JournalErr
     })
 }
 
-impl RawRecord {
-    fn checked(self) -> Result<RecordOwned> {
-        Ok(match self {
-            Self::RunAdmitted {
-                program_ref,
-                admitted_context,
-            } => RecordOwned::RunAdmitted {
-                program_ref: program_ref.checked()?,
-                admitted_context: admitted_context.checked()?,
-            },
-            Self::StateConcludedPure { outcome } => RecordOwned::StateConcludedPure {
-                outcome: outcome.checked()?,
-            },
-            Self::StateConcludedRead {
-                intent,
-                evidence,
-                outcome,
-            } => RecordOwned::StateConcludedRead {
-                intent: intent.checked()?,
-                evidence: evidence.checked()?,
-                outcome: outcome.checked()?,
-            },
-            Self::StateEffectPrepared { effect_id, command } => RecordOwned::StateEffectPrepared {
-                effect_id: EffectId::parse(effect_id).map_err(|_| JournalError::InvalidHistory)?,
-                command: command.checked()?,
-            },
-            Self::StateEffectConcluded { evidence, outcome } => RecordOwned::StateEffectConcluded {
-                evidence: evidence.checked()?,
-                outcome: outcome.checked()?,
-            },
-        })
-    }
-}
-
-fn records_are_adjacent(previous: &RecordOwned, next: &RecordOwned) -> bool {
+fn records_are_adjacent(previous: &Record, next: &Record) -> bool {
     match previous {
-        RecordOwned::StateEffectPrepared { .. } => {
-            matches!(next, RecordOwned::StateEffectConcluded { .. })
+        Record::StateEffectPrepared { .. } => {
+            matches!(next, Record::StateEffectConcluded { .. })
         }
-        _ => !matches!(next, RecordOwned::StateEffectConcluded { .. }),
-    }
-}
-
-impl RawOutcome {
-    fn checked(self) -> Result<OutcomeOwned> {
-        Ok(match self {
-            Self::Success { value } => OutcomeOwned {
-                kind: OutcomeKind::Success,
-                value: value.checked()?,
-            },
-            Self::Failure { value } => OutcomeOwned {
-                kind: OutcomeKind::Failure,
-                value: value.checked()?,
-            },
-        })
+        _ => !matches!(next, Record::StateEffectConcluded { .. }),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use mfm_ids::DigestBytes;
+    use mfm_ids::{DigestBytes, SchemaId};
 
     use super::*;
 
@@ -1117,13 +920,10 @@ mod tests {
                 DigestAlgorithm::Sha256V1,
                 DigestBytes::from_array([7; 32]),
             )),
-            RecordOwned::StateConcludedRead {
+            Record::StateConcludedRead {
                 intent: intent_ref.clone(),
                 evidence: evidence_ref.clone(),
-                outcome: OutcomeOwned {
-                    kind: OutcomeKind::Success,
-                    value: outcome_ref.clone(),
-                },
+                outcome: Outcome::new(OutcomeKind::Success, outcome_ref.clone()),
             },
             vec![
                 (outcome_ref, outcome.as_bytes()),

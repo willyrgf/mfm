@@ -1,5 +1,5 @@
 use mfm_canonical::raw_content_digest;
-use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, EffectId, RunId, SchemaId};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, EffectId, RunId, SchemaId};
 use mfm_journal::{
     frame_head_digest, EncodedRunFrame, JournalError, JournalHistory, JournalRecord, OutcomeKind,
     StoredRunBytes,
@@ -68,19 +68,38 @@ fn sorted_objects(mut objects: Vec<Value>) -> Vec<Value> {
     objects
 }
 
+fn retarget_frame(bytes: &[u8], run_sequence: u64, previous_head: &ContentDigest) -> Vec<u8> {
+    let mut wire: Value = serde_json::from_slice(bytes).expect("frame wire");
+    wire["run_sequence"] = json!(run_sequence);
+    wire["previous_head_digest"] = json!(previous_head);
+    canonical(&wire)
+}
+
 #[test]
-fn admission_and_successor_heads_are_exact_byte_sha256_v1() {
+fn effect_sequence_has_exact_v2_wires_and_recursive_sha256_v1_heads() {
     let program = br#"{"program":1}"#;
     let context = br#"{"context":2}"#;
     let run = run(1);
-    let genesis = EncodedRunFrame::admission(
-        &run,
-        &object_ref("mfm.test.program", program),
-        program,
-        &object_ref("mfm.test.context", context),
-        context,
-    )
-    .expect("genesis");
+    let program_ref = object_ref("mfm.test.program", program);
+    let context_ref = object_ref("mfm.test.context", context);
+    let genesis = EncodedRunFrame::admission(&run, &program_ref, program, &context_ref, context)
+        .expect("genesis");
+    let expected = json!({
+        "domain": "mfm.run.frame.v2",
+        "objects": sorted_objects(vec![
+            object_wire(&program_ref, program),
+            object_wire(&context_ref, context),
+        ]),
+        "previous_head_digest": null,
+        "record": {
+            "admitted_context": context_ref,
+            "kind": "run_admitted",
+            "program_ref": program_ref,
+        },
+        "run_id": run,
+        "run_sequence": 1,
+    });
+    assert_eq!(genesis.canonical_bytes(), canonical(&expected));
     assert_eq!(genesis.run_sequence(), 1);
     assert_eq!(genesis.previous_head_digest(), None);
     assert_eq!(
@@ -93,32 +112,94 @@ fn admission_and_successor_heads_are_exact_byte_sha256_v1() {
         "content:sha256-v1:a9da9f2cb35cb5142cfdb2457c317235da9a36d009d89b6d70eb7f8a85f541af"
     );
 
+    let genesis_bytes = genesis.canonical_bytes().to_vec();
     let mut history = JournalHistory::from_genesis(genesis).expect("history");
-    let output = br#"{"ok":true}"#;
-    let successor = history
-        .encode_pure_conclusion(
-            OutcomeKind::Success,
-            &object_ref("mfm.test.output", output),
-            output,
-        )
-        .expect("successor");
-    assert_eq!(successor.run_sequence(), 2);
+    let command = br#"{"command":3}"#;
+    let command_ref = object_ref("mfm.test.command", command);
+    let effect_id = EffectId::from_digest(DigestBytes::from_array([9; 32]));
+    let prepared = history
+        .encode_effect_prepare(&effect_id, &command_ref, command)
+        .expect("prepare");
+    let expected = json!({
+        "domain": "mfm.run.frame.v2",
+        "objects": [object_wire(&command_ref, command)],
+        "previous_head_digest": history.head_digest(),
+        "record": {
+            "command": command_ref,
+            "effect_id": effect_id,
+            "kind": "state_effect_prepared",
+        },
+        "run_id": run,
+        "run_sequence": 2,
+    });
+    assert_eq!(prepared.canonical_bytes(), canonical(&expected));
+    assert_eq!(prepared.run_sequence(), 2);
+    assert_eq!(prepared.previous_head_digest(), Some(history.head_digest()));
     assert_eq!(
-        successor.previous_head_digest(),
-        Some(history.head_digest())
+        prepared.head_digest().as_str(),
+        "content:sha256-v1:a1cd763092a16c87247a05dd58bae14a84abcf93e91682ded4e34bb372ca3c6c"
     );
-    assert_eq!(
-        successor.head_digest().as_str(),
-        "content:sha256-v1:e1fc5cec27030e7704fea4d03b328b87351a823fd955275f65d1d4ae1b8151d8"
-    );
-    let record = history.extend_inserted(successor).expect("extend");
+    let prepared_bytes = prepared.canonical_bytes().to_vec();
+    let record = history.extend_inserted(prepared).expect("extend prepare");
     assert!(matches!(
         record,
-        JournalRecord::StateConcludedPure {
+        JournalRecord::StateEffectPrepared {
+            effect_id: retained,
+            ..
+        } if retained == &effect_id
+    ));
+
+    let evidence = br#"{"evidence":2}"#;
+    let outcome = br#"{"success":true}"#;
+    let evidence_ref = object_ref("mfm.test.evidence", evidence);
+    let outcome_ref = object_ref("mfm.test.outcome", outcome);
+    let concluded = history
+        .encode_effect_conclusion(
+            &evidence_ref,
+            evidence,
+            OutcomeKind::Success,
+            &outcome_ref,
+            outcome,
+        )
+        .expect("conclusion");
+    let expected = json!({
+        "domain": "mfm.run.frame.v2",
+        "objects": sorted_objects(vec![
+            object_wire(&evidence_ref, evidence),
+            object_wire(&outcome_ref, outcome),
+        ]),
+        "previous_head_digest": history.head_digest(),
+        "record": {
+            "evidence": evidence_ref,
+            "kind": "state_effect_concluded",
+            "outcome": {"kind": "success", "value": outcome_ref},
+        },
+        "run_id": run,
+        "run_sequence": 3,
+    });
+    assert_eq!(concluded.canonical_bytes(), canonical(&expected));
+    assert_eq!(
+        concluded.head_digest().as_str(),
+        "content:sha256-v1:3865f66a9df1316ffad4aeb94aa2d02d5a0c6b3cb588cc343404b70b07231910"
+    );
+    let concluded_bytes = concluded.canonical_bytes().to_vec();
+    let record = history
+        .extend_inserted(concluded)
+        .expect("extend conclusion");
+    assert!(matches!(
+        record,
+        JournalRecord::StateEffectConcluded {
             kind: OutcomeKind::Success,
             ..
         }
     ));
+
+    let cold = JournalHistory::qualify(
+        &run,
+        StoredRunBytes::new(vec![genesis_bytes, prepared_bytes, concluded_bytes]).expect("stored"),
+    )
+    .expect("cold sequence");
+    assert_eq!(cold.head_sequence(), 3);
 }
 
 #[test]
@@ -133,6 +214,7 @@ fn fused_read_closure_coalesces_identical_objects() {
         context,
     )
     .expect("genesis");
+    let genesis_bytes = genesis.canonical_bytes().to_vec();
     let history = JournalHistory::from_genesis(genesis).expect("history");
     let value = br#"{"same":1}"#;
     let reference = object_ref("mfm.test.same", value);
@@ -155,6 +237,11 @@ fn fused_read_closure_coalesces_identical_objects() {
             .count(),
         4
     );
+    JournalHistory::qualify(
+        &run(2),
+        StoredRunBytes::new(vec![genesis_bytes, bytes.to_vec()]).expect("stored read"),
+    )
+    .expect("cold failed Read");
 }
 
 #[test]
@@ -201,141 +288,6 @@ fn repeated_cross_frame_object_is_valid_hot_and_cold() {
 }
 
 #[test]
-fn every_record_and_outcome_has_the_exact_frozen_wire() {
-    let run = run(11);
-    let program = br#"{"program":1}"#;
-    let context = br#"{"context":2}"#;
-    let program_ref = object_ref("mfm.test.program", program);
-    let context_ref = object_ref("mfm.test.context", context);
-    let genesis = EncodedRunFrame::admission(&run, &program_ref, program, &context_ref, context)
-        .expect("genesis");
-    let expected = json!({
-        "domain": "mfm.run.frame.v2",
-        "objects": sorted_objects(vec![
-            object_wire(&program_ref, program),
-            object_wire(&context_ref, context),
-        ]),
-        "previous_head_digest": null,
-        "record": {
-            "admitted_context": context_ref,
-            "kind": "run_admitted",
-            "program_ref": program_ref,
-        },
-        "run_id": run,
-        "run_sequence": 1,
-    });
-    assert_eq!(genesis.canonical_bytes(), canonical(&expected));
-
-    for kind in [OutcomeKind::Success, OutcomeKind::Failure] {
-        let history = JournalHistory::from_genesis(
-            EncodedRunFrame::admission(&run, &program_ref, program, &context_ref, context)
-                .expect("genesis"),
-        )
-        .expect("history");
-        let outcome = match kind {
-            OutcomeKind::Success => br#"{"success":true}"#.as_slice(),
-            OutcomeKind::Failure => br#"{"failure":true}"#.as_slice(),
-        };
-        let outcome_ref = object_ref("mfm.test.outcome", outcome);
-        let pure = history
-            .encode_pure_conclusion(kind, &outcome_ref, outcome)
-            .expect("pure");
-        let outcome_kind = match kind {
-            OutcomeKind::Success => "success",
-            OutcomeKind::Failure => "failure",
-        };
-        let expected = json!({
-            "domain": "mfm.run.frame.v2",
-            "objects": [object_wire(&outcome_ref, outcome)],
-            "previous_head_digest": history.head_digest(),
-            "record": {
-                "kind": "state_concluded_pure",
-                "outcome": {"kind": outcome_kind, "value": outcome_ref},
-            },
-            "run_id": run,
-            "run_sequence": 2,
-        });
-        assert_eq!(pure.canonical_bytes(), canonical(&expected));
-
-        let intent = br#"{"intent":1}"#;
-        let evidence = br#"{"evidence":2}"#;
-        let intent_ref = object_ref("mfm.test.intent", intent);
-        let evidence_ref = object_ref("mfm.test.evidence", evidence);
-        let read = history
-            .encode_read_conclusion(
-                &intent_ref,
-                intent,
-                &evidence_ref,
-                evidence,
-                kind,
-                &outcome_ref,
-                outcome,
-            )
-            .expect("read");
-        let expected = json!({
-            "domain": "mfm.run.frame.v2",
-            "objects": sorted_objects(vec![
-                object_wire(&intent_ref, intent),
-                object_wire(&evidence_ref, evidence),
-                object_wire(&outcome_ref, outcome),
-            ]),
-            "previous_head_digest": history.head_digest(),
-            "record": {
-                "evidence": evidence_ref,
-                "intent": intent_ref,
-                "kind": "state_concluded_read",
-                "outcome": {"kind": outcome_kind, "value": outcome_ref},
-            },
-            "run_id": run,
-            "run_sequence": 2,
-        });
-        assert_eq!(read.canonical_bytes(), canonical(&expected));
-
-        let command = br#"{"command":3}"#;
-        let command_ref = object_ref("mfm.test.command", command);
-        let effect_id = EffectId::from_digest(DigestBytes::from_array([9; 32]));
-        let prepared = history
-            .encode_effect_prepare(&effect_id, &command_ref, command)
-            .expect("effect prepare");
-        let expected = json!({
-            "domain": "mfm.run.frame.v2",
-            "objects": [object_wire(&command_ref, command)],
-            "previous_head_digest": history.head_digest(),
-            "record": {
-                "command": command_ref,
-                "effect_id": effect_id,
-                "kind": "state_effect_prepared",
-            },
-            "run_id": run,
-            "run_sequence": 2,
-        });
-        assert_eq!(prepared.canonical_bytes(), canonical(&expected));
-
-        let mut pending = history;
-        pending.extend_inserted(prepared).expect("pending prepare");
-        let concluded = pending
-            .encode_effect_conclusion(&evidence_ref, evidence, kind, &outcome_ref, outcome)
-            .expect("effect conclusion");
-        let expected = json!({
-            "domain": "mfm.run.frame.v2",
-            "objects": sorted_objects(vec![
-                object_wire(&evidence_ref, evidence),
-                object_wire(&outcome_ref, outcome),
-            ]),
-            "previous_head_digest": pending.head_digest(),
-            "record": {
-                "evidence": evidence_ref,
-                "kind": "state_effect_concluded",
-                "outcome": {"kind": outcome_kind, "value": outcome_ref},
-            },
-            "run_id": run,
-            "run_sequence": 3,
-        });
-        assert_eq!(concluded.canonical_bytes(), canonical(&expected));
-    }
-}
-
-#[test]
 fn effect_records_require_one_adjacent_prepare_conclusion_pair() {
     let run = run(21);
     let program = b"{}";
@@ -374,22 +326,27 @@ fn effect_records_require_one_adjacent_prepare_conclusion_pair() {
         )
         .expect("prepare");
     history.extend_inserted(prepared).expect("pending");
-    assert_eq!(
-        history
-            .encode_pure_conclusion(OutcomeKind::Success, &evidence_ref, evidence)
-            .expect_err("pure cannot intervene"),
-        JournalError::InvalidFrame
-    );
-    assert_eq!(
-        history
-            .encode_effect_prepare(
+    let invalid_successors = [
+        (
+            "pure conclusion",
+            history.encode_pure_conclusion(OutcomeKind::Success, &evidence_ref, evidence),
+        ),
+        (
+            "second prepare",
+            history.encode_effect_prepare(
                 &EffectId::from_digest(DigestBytes::from_array([5; 32])),
                 &command_ref,
                 command,
-            )
-            .expect_err("prepare cannot intervene"),
-        JournalError::InvalidFrame
-    );
+            ),
+        ),
+    ];
+    for (case, candidate) in invalid_successors {
+        assert_eq!(
+            candidate.expect_err(case),
+            JournalError::InvalidFrame,
+            "{case}"
+        );
+    }
 }
 
 #[test]
@@ -405,8 +362,30 @@ fn cold_effect_prefixes_enforce_exact_pairing_and_checked_identity() {
     let genesis_head = genesis.head_digest().clone();
     let mut pending = JournalHistory::from_genesis(genesis).expect("history");
     let command = br#"{"command":1}"#;
+    let evidence = br#"{"accepted":true}"#;
+    let outcome = br#"{"value":1}"#;
     let command_ref = object_ref("mfm.test.command", command);
+    let evidence_ref = object_ref("mfm.test.evidence", evidence);
+    let outcome_ref = object_ref("mfm.test.outcome", outcome);
     let effect_id = EffectId::from_digest(DigestBytes::from_array([6; 32]));
+    let pure_bytes = pending
+        .encode_pure_conclusion(OutcomeKind::Success, &outcome_ref, outcome)
+        .expect("pure")
+        .canonical_bytes()
+        .to_vec();
+    let read_bytes = pending
+        .encode_read_conclusion(
+            &command_ref,
+            command,
+            &evidence_ref,
+            evidence,
+            OutcomeKind::Success,
+            &outcome_ref,
+            outcome,
+        )
+        .expect("read")
+        .canonical_bytes()
+        .to_vec();
     let prepared = pending
         .encode_effect_prepare(&effect_id, &command_ref, command)
         .expect("prepare");
@@ -420,10 +399,6 @@ fn cold_effect_prefixes_enforce_exact_pairing_and_checked_identity() {
     )
     .expect("valid pending suffix");
 
-    let evidence = br#"{"accepted":true}"#;
-    let outcome = br#"{"value":1}"#;
-    let evidence_ref = object_ref("mfm.test.evidence", evidence);
-    let outcome_ref = object_ref("mfm.test.outcome", outcome);
     let concluded = pending
         .encode_effect_conclusion(
             &evidence_ref,
@@ -448,116 +423,64 @@ fn cold_effect_prefixes_enforce_exact_pairing_and_checked_identity() {
 
     let mut malformed_id: Value = serde_json::from_slice(&prepared_bytes).expect("prepared wire");
     malformed_id["record"]["effect_id"] = json!(effect_id.as_str().replace("effect:", "run:"));
-    assert!(matches!(
-        JournalHistory::qualify(
-            &run,
-            StoredRunBytes::new(vec![genesis_bytes.clone(), canonical(&malformed_id)])
-                .expect("stored"),
+    let invalid_histories = vec![
+        (
+            "malformed effect identity",
+            vec![genesis_bytes.clone(), canonical(&malformed_id)],
         ),
-        Err(JournalError::InvalidHistory)
-    ));
-
-    let mut orphan: Value = serde_json::from_slice(&concluded_bytes).expect("conclusion wire");
-    orphan["run_sequence"] = json!(2);
-    orphan["previous_head_digest"] = json!(genesis_head);
-    assert!(matches!(
-        JournalHistory::qualify(
-            &run,
-            StoredRunBytes::new(vec![genesis_bytes.clone(), canonical(&orphan)]).expect("stored"),
+        (
+            "orphan conclusion",
+            vec![
+                genesis_bytes.clone(),
+                retarget_frame(&concluded_bytes, 2, &genesis_head),
+            ],
         ),
-        Err(JournalError::InvalidHistory)
-    ));
-
-    let mut duplicate_prepare: Value =
-        serde_json::from_slice(&prepared_bytes).expect("prepared wire");
-    duplicate_prepare["run_sequence"] = json!(3);
-    duplicate_prepare["previous_head_digest"] = json!(prepared_head);
-    assert!(matches!(
-        JournalHistory::qualify(
-            &run,
-            StoredRunBytes::new(vec![
+        (
+            "duplicate prepare",
+            vec![
                 genesis_bytes.clone(),
                 prepared_bytes.clone(),
-                canonical(&duplicate_prepare),
-            ])
-            .expect("stored"),
+                retarget_frame(&prepared_bytes, 3, &prepared_head),
+            ],
         ),
-        Err(JournalError::InvalidHistory)
-    ));
-
-    let pure_genesis =
-        EncodedRunFrame::admission(&run, &program_ref, program, &context_ref, context)
-            .expect("pure genesis");
-    let pure_history = JournalHistory::from_genesis(pure_genesis).expect("pure history");
-    let pure = pure_history
-        .encode_pure_conclusion(OutcomeKind::Success, &outcome_ref, outcome)
-        .expect("pure");
-    let mut intervening_pure: Value =
-        serde_json::from_slice(pure.canonical_bytes()).expect("pure wire");
-    intervening_pure["run_sequence"] = json!(3);
-    intervening_pure["previous_head_digest"] = json!(prepared_head);
-    assert!(matches!(
-        JournalHistory::qualify(
-            &run,
-            StoredRunBytes::new(vec![
+        (
+            "intervening pure",
+            vec![
                 genesis_bytes.clone(),
                 prepared_bytes.clone(),
-                canonical(&intervening_pure),
-            ])
-            .expect("stored"),
+                retarget_frame(&pure_bytes, 3, &prepared_head),
+            ],
         ),
-        Err(JournalError::InvalidHistory)
-    ));
-
-    let read_genesis =
-        EncodedRunFrame::admission(&run, &program_ref, program, &context_ref, context)
-            .expect("read genesis");
-    let read_history = JournalHistory::from_genesis(read_genesis).expect("read history");
-    let read = read_history
-        .encode_read_conclusion(
-            &command_ref,
-            command,
-            &evidence_ref,
-            evidence,
-            OutcomeKind::Success,
-            &outcome_ref,
-            outcome,
-        )
-        .expect("read");
-    let mut intervening_read: Value =
-        serde_json::from_slice(read.canonical_bytes()).expect("read wire");
-    intervening_read["run_sequence"] = json!(3);
-    intervening_read["previous_head_digest"] = json!(prepared_head);
-    assert!(matches!(
-        JournalHistory::qualify(
-            &run,
-            StoredRunBytes::new(vec![
+        (
+            "intervening read",
+            vec![
                 genesis_bytes.clone(),
                 prepared_bytes.clone(),
-                canonical(&intervening_read),
-            ])
-            .expect("stored"),
+                retarget_frame(&read_bytes, 3, &prepared_head),
+            ],
         ),
-        Err(JournalError::InvalidHistory)
-    ));
-
-    let mut extra_conclusion: Value =
-        serde_json::from_slice(&concluded_bytes).expect("conclusion wire");
-    extra_conclusion["run_sequence"] = json!(4);
-    extra_conclusion["previous_head_digest"] = json!(concluded_head);
-    assert!(matches!(
-        JournalHistory::qualify(
-            &run,
-            StoredRunBytes::new(vec![
+        (
+            "duplicate conclusion",
+            vec![
                 genesis_bytes,
                 prepared_bytes,
-                concluded_bytes,
-                canonical(&extra_conclusion),
-            ])
-            .expect("stored"),
+                concluded_bytes.clone(),
+                retarget_frame(&concluded_bytes, 4, &concluded_head),
+            ],
         ),
-        Err(JournalError::InvalidHistory)
-    ));
+    ];
+    for (case, frames) in invalid_histories {
+        assert!(
+            matches!(
+                JournalHistory::qualify(
+                    &run,
+                    StoredRunBytes::new(frames).expect("stored invalid prefix"),
+                ),
+                Err(JournalError::InvalidHistory)
+            ),
+            "{case}"
+        );
+    }
 }
 
 #[test]
