@@ -70,6 +70,8 @@ transaction Effect and anchored transaction-route Read. It compiles a first-part
 checks fixed fixture selectors against the emitted ABI, admits the deployment transaction directly,
 and uses a generated ephemeral signer plus real PostgreSQL authority and Reth. A bounded caller loop
 reconstructs Runtime and every IO handle across forced recovery boundaries; the final report decodes
-its value from anchored Read evidence. Its lifecycle Operation, values, registrations, and fixed
-development settlement policy are test-only: they add no production component inventory,
-deployment configuration, CLI, REST, or `Application` entry point.
+its value from anchored Read evidence. Creation, call, and anchored transition values are public EVM
+contracts; the fixture ABI, transaction/observation policy, exact lifecycle Operation, nine State
+registrations, report, failure adaptation, and fixed development settlement policy remain test-only.
+They add no production component inventory, deployment configuration, CLI, REST, or `Application`
+entry point.

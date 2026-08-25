@@ -11,6 +11,7 @@ use serde::de;
 use serde::{Deserialize, Serialize};
 
 use crate::transaction::decode_bounded_bytes;
+use crate::transaction::EvmContractCallCompletion;
 use crate::{
     EvmAddress, EvmBlockAnchor, EvmDomainError, EvmReadEvidence, EvmReadIntent, EvmReadSubject,
     EvmReadValue, EvmTransactionRoute, MAX_EVM_CALLDATA_BYTES,
@@ -225,6 +226,19 @@ impl<K: MfmValueTrait> AnchoredContractCallContext<K> {
     /// Returns the exact anchored call intent.
     pub const fn intent(&self) -> &EvmReadIntent {
         &self.intent
+    }
+}
+
+impl<K: MfmValueTrait> AnchoredContractCallContext<EvmContractCallCompletion<K>> {
+    /// Constructs an observation fixed to the preceding call's route, target, and receipt anchor.
+    pub fn for_confirmed_call(
+        call: EvmContractCallCompletion<K>,
+        calldata: Vec<u8>,
+    ) -> Result<Self, EvmDomainError> {
+        let route = call.binding().route().clone();
+        let target = call.target().clone();
+        let anchor = call.block_anchor().clone();
+        Self::for_route(call, &route, target, calldata, anchor)
     }
 }
 

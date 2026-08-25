@@ -5,12 +5,18 @@ domain-owned route identities. `EvmAddress`, `EvmHash`, and `EvmU256` are the on
 address, hash, and EVM-word concepts. Their strict transparent wires preserve lowercase hexadecimal
 and canonical decimal forms across balance, transaction, receipt, and anchored-call values.
 
-`EvmTransactionEffect` executes one nonce-free, fixed type-2, empty-access-list command through
-`ExecuteEvmTransaction<K>`. The command contains a complete chain/route/epoch/sender binding,
-create-or-call action, value, nonzero gas limit, and ordered fee pair. Its settlement evidence binds
-the exact `EffectId`, reserved nonce, and one structured confirmation or revert containing the
-transaction hash and receipt anchor. Caller context is retained outside the command and projected
-unchanged with that exact confirmation or revert.
+`EvmTransactionEffect` executes one nonce-free, fixed type-2, empty-access-list command shared by
+the independent `CreateEvmContract<K>` and `CallEvmContract<K>` States. Their checked contexts admit
+only the matching Create or Call action. Creation completion exposes the command binding, receipt
+anchor, created address, and transaction hash; call completion exposes the binding, receipt anchor,
+target, and hash. Their action-specific failures retain caller context and the minimal revert, while
+settlement evidence keeps its exact `EffectId`, nonce, confirmation, and revert contract unchanged.
+
+`EvmContractCallContext::for_created_contract` consumes a confirmed creation and fixes the next
+call's binding and target from that evidence. `AnchoredContractCallContext::for_confirmed_call`
+consumes a confirmed call and fixes the observation route, target, and receipt anchor. The general
+checked constructors remain available for explicit alternate policy. EVM supplies no lifecycle
+Operation: consumers keep deployment, call, and observation as explicit Program nodes.
 
 `EvmAnchoredContractCallRead` and `ReadAnchoredContractCall<K>` carry one exact transaction-route
 reference, target, bounded calldata, and block anchor. Returned evidence retains only that anchor

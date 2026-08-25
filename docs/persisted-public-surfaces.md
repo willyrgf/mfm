@@ -72,11 +72,15 @@ Call action, value, nonzero gas limit, and ordered fee pair. It contains no nonc
 settlement policy, access list, timeout, or arbitrary metadata.
 
 `EvmTransactionSettlement` retains EffectId, nonce, and a structured confirmation or revert that
-contains the transaction hash and receipt block anchor. Workflow projections omit EffectId, nonce, command, raw
+contains the transaction hash and receipt block anchor. Its wire is unchanged. The creation
+completion retains caller context, command binding, receipt anchor, created address, and transaction
+hash; the call completion instead retains caller context, binding, receipt anchor, called target,
+and hash. Their failures retain caller context plus only the minimal revert or the redaction-safe
+inconsistent-settlement shape. These specialized projections omit EffectId, nonce, command, raw
 receipt, logs, and provider response. Anchored contract-call intents retain target, bounded calldata,
 exact anchor, chain ID, operation ID, and transaction-route ref; returned evidence retains only the
-anchor and bounded return bytes. Transient signing digests/signatures and raw-transaction
-custody never enter these values.
+anchor and bounded return bytes. Transient signing digests/signatures and raw-transaction custody
+never enter these values.
 
 Ambiguous start/progress acknowledgement is the only shared use-case error carrying data. Both
 client transports use the same Application-owned error serializer and the exact recovery envelopes

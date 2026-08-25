@@ -61,16 +61,21 @@ EVM Program values use one checked lowercase `EvmAddress`, lowercase `EvmHash`, 
 `EvmU256`, and exact 32-byte authority epoch. A transaction binding fixes chain ID plus expected
 genesis hash, endpoint reference, authority epoch, and sender account. The sole
 transaction command is nonce-free EIP-1559 type 2 with an empty access list and a distinct bounded
-Create or Call action. `EvmTransactionEffect` prepares that command unchanged. Settlement evidence
-binds the pending EffectId and contains only the reserved nonce, transaction hash, receipt anchor,
-and matching success-create, success-call, or reverted result; interpretation preserves caller
-context without echoing the command.
+Create or Call action. Independent creation and call Effect States admit only their matching action
+and prepare the shared `EvmTransactionEffect` command unchanged. Their specialized success values
+retain caller context while projecting only binding, receipt anchor, hash, and the created address or
+called target. Action-specific failures retain caller context and the minimal revert. Settlement
+evidence still binds the pending EffectId and contains only the reserved nonce, transaction hash,
+receipt anchor, and matching success-create, success-call, or reverted result.
 
 The context-preserving anchored contract-call Read fixes a transaction-route content ref, target,
 bounded calldata, and exact block anchor. Returned evidence contains only the same anchor and
 bounded return bytes. Rejected, safe-failure, and integrity-blocked evidence project to a closed
-failure reason. These domain contracts perform no provider, signing, nonce, or persistence IO; the
-authority and live adapter remain separate downstream responsibilities.
+failure reason. Checked domain transitions consume a creation completion to fix a subsequent call's
+binding and created target, then consume a call completion to fix an observation's route, target, and
+receipt anchor. General constructors keep deliberate alternate policy explicit. EVM owns no product
+lifecycle Operation. These domain contracts perform no provider, signing, nonce, or persistence IO;
+the authority and live adapter remain separate downstream responsibilities.
 
 The live EVM transaction adapter captures one exact binding, key- and purpose-bound signer,
 append-only transaction authority, and transaction-only provider facet. Before authority or
