@@ -10,8 +10,8 @@ use mfm_capabilities::{EffectCapabilityContract, ReadCapabilityContract};
 use mfm_ids::{ContentRef, EffectId, SchemaId, SemanticTypeId};
 use mfm_program::{
     capability_contract_ref, effect_capability_contract_ref, nominal_contract_ref,
-    state_implementation_ref, Declaration, EffectState, Never, Program, PureState, ReadState,
-    StateDeclaration,
+    state_implementation_ref, Declaration, EffectState, Execution, Never, Program, PureState,
+    ReadState, StateDeclaration,
 };
 use mfm_values::{canonicalize_mfm_value, EnumTagging, MfmValue, SchemaDescriptor, SchemaShape};
 use serde_json::value::RawValue;
@@ -776,41 +776,45 @@ impl RuntimeAssembly {
                     let failure_codec = self
                         .codec(state.failure_contract_ref())
                         .ok_or(RuntimeError::IncompatibleAssembly)?;
-                    let mode = match &registered.mode {
-                        RegisteredMode::Pure { start } => {
-                            if !state.execution().is_pure() {
+                    let mode = match state.execution() {
+                        Execution::Pure => {
+                            let RegisteredMode::Pure { start } = &registered.mode else {
                                 return Err(RuntimeError::IncompatibleAssembly);
-                            }
+                            };
                             ExecutableMode::Pure { start: *start }
                         }
-                        RegisteredMode::Read {
+                        Execution::Read {
                             capability_contract_ref,
-                            start,
-                            validate_retained,
+                            intent_contract_ref,
+                            evidence_contract_ref,
+                            binding_ref,
                         } => {
+                            let RegisteredMode::Read {
+                                capability_contract_ref: registered_capability_contract_ref,
+                                start,
+                                validate_retained,
+                            } = &registered.mode
+                            else {
+                                return Err(RuntimeError::IncompatibleAssembly);
+                            };
                             let Some(CapabilityRegistration::Read {
                                 intent_codec,
                                 evidence_codec,
                                 bindings,
                                 ..
-                            }) = self.inner.capabilities.get(capability_contract_ref)
+                            }) = self
+                                .inner
+                                .capabilities
+                                .get(registered_capability_contract_ref)
                             else {
                                 return Err(RuntimeError::IncompatibleAssembly);
                             };
-                            if !state.execution().is_read()
-                                || state.execution().capability_contract_ref()
-                                    != Some(capability_contract_ref)
-                                || state.execution().intent_contract_ref()
-                                    != Some(&intent_codec.contract_ref)
-                                || state.execution().evidence_contract_ref()
-                                    != Some(&evidence_codec.contract_ref)
+                            if capability_contract_ref != registered_capability_contract_ref
+                                || intent_contract_ref != &intent_codec.contract_ref
+                                || evidence_contract_ref != &evidence_codec.contract_ref
                             {
                                 return Err(RuntimeError::IncompatibleAssembly);
                             }
-                            let binding_ref = state
-                                .execution()
-                                .binding_ref()
-                                .ok_or(RuntimeError::IncompatibleAssembly)?;
                             let adapter = bindings
                                 .get(binding_ref)
                                 .ok_or(RuntimeError::IncompatibleAssembly)?;
@@ -822,36 +826,40 @@ impl RuntimeAssembly {
                                 evidence_codec: Arc::clone(evidence_codec),
                             }
                         }
-                        RegisteredMode::Effect {
+                        Execution::Effect {
                             capability_contract_ref,
-                            prepare,
-                            start_pending,
-                            validate_prepare,
-                            validate_evidence,
+                            command_contract_ref,
+                            evidence_contract_ref,
+                            binding_ref,
                         } => {
+                            let RegisteredMode::Effect {
+                                capability_contract_ref: registered_capability_contract_ref,
+                                prepare,
+                                start_pending,
+                                validate_prepare,
+                                validate_evidence,
+                            } = &registered.mode
+                            else {
+                                return Err(RuntimeError::IncompatibleAssembly);
+                            };
                             let Some(CapabilityRegistration::Effect {
                                 command_codec,
                                 evidence_codec,
                                 bindings,
                                 ..
-                            }) = self.inner.capabilities.get(capability_contract_ref)
+                            }) = self
+                                .inner
+                                .capabilities
+                                .get(registered_capability_contract_ref)
                             else {
                                 return Err(RuntimeError::IncompatibleAssembly);
                             };
-                            if !state.execution().is_effect()
-                                || state.execution().capability_contract_ref()
-                                    != Some(capability_contract_ref)
-                                || state.execution().command_contract_ref()
-                                    != Some(&command_codec.contract_ref)
-                                || state.execution().evidence_contract_ref()
-                                    != Some(&evidence_codec.contract_ref)
+                            if capability_contract_ref != registered_capability_contract_ref
+                                || command_contract_ref != &command_codec.contract_ref
+                                || evidence_contract_ref != &evidence_codec.contract_ref
                             {
                                 return Err(RuntimeError::IncompatibleAssembly);
                             }
-                            let binding_ref = state
-                                .execution()
-                                .binding_ref()
-                                .ok_or(RuntimeError::IncompatibleAssembly)?;
                             let adapter = bindings
                                 .get(binding_ref)
                                 .ok_or(RuntimeError::IncompatibleAssembly)?;

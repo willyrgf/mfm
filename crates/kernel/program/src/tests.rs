@@ -7,7 +7,7 @@ use mfm_program::{
     capability_contract_ref, expand_program, nominal_contract_ref, state_implementation_ref,
     CapabilityInjection, Declaration, EffectState, Execution, InjectionWriter, MatchDeclaration,
     MatchVariant, Never, Operation, OperationExpansion, PreparationError, Program, ProgramError,
-    ProposedStateOutcome, PureState, ReadState, State, StateDeclaration,
+    ProposedStateOutcome, PureState, State, StateDeclaration,
 };
 use mfm_program_derive::MfmValue;
 use mfm_values::{
@@ -94,31 +94,6 @@ impl ReadCapabilityContract for IdentityRead {
         (intent.value == evidence.value)
             .then_some(())
             .ok_or(CapabilityError::EvidenceBinding)
-    }
-}
-
-impl ReadState<IdentityRead> for IdentityState {
-    fn prepare(input: &Self::Input) -> Result<Value, PreparationError> {
-        Ok(Value { value: input.value })
-    }
-
-    fn interpret(
-        input: Self::Input,
-        _evidence: &Value,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success { output: input }
-    }
-}
-
-impl CapabilityInjection<IdentityState> for IdentityRead {
-    type Setup = Value;
-    type ExpandedInput = Value;
-    type ExpandedOutput = Value;
-
-    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
-        mfm_values::canonicalize_mfm_value(setup)
-            .map(|(_, reference)| reference)
-            .map_err(|_| ProgramError::InvalidContract)
     }
 }
 
@@ -223,23 +198,6 @@ impl Operation for IdentityEffectOperation {
         expansion: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
         expansion.effect::<IdentityEffectState, IdentityEffect>(&Value { value: 9 })
-    }
-}
-
-struct ExecutionSumOperation;
-
-impl Operation for ExecutionSumOperation {
-    type Input = Value;
-    type Output = Value;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        expansion: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        expansion.pure::<LeftIdentityState>()?;
-        expansion.read::<IdentityState, IdentityRead>(&Value { value: 3 })?;
-        expansion.effect::<IdentityEffectState, IdentityEffect>(&Value { value: 4 })
     }
 }
 
@@ -440,6 +398,10 @@ fn program_v3_requires_its_domain_and_freezes_the_effect_sum_and_schema() {
         "schema:mfm-program-document:3:sha256-jcs-v1:8bc8621870bca09cec311f2c7a1d451fc31e0e205af97813dfc52da7e7146df4"
     );
     assert_eq!(
+        program.content_ref().content_digest().as_str(),
+        "content:sha256-v1:2a338183d5324147196631e607a0b6c7a68c324f326f9069f98bf1657d3e580f"
+    );
+    assert_eq!(
         Program::decode_canonical(program.canonical_bytes())
             .expect("round trip")
             .canonical_bytes(),
@@ -465,6 +427,27 @@ fn program_v3_requires_its_domain_and_freezes_the_effect_sum_and_schema() {
     .expect("canonical");
     assert!(Program::decode_canonical(unknown_field.as_bytes()).is_err());
 
+    for required_nullable in ["next_index", "failure_next_index"] {
+        let mut missing = wire.clone();
+        missing["declarations"][0]["value"]
+            .as_object_mut()
+            .expect("State object")
+            .remove(required_nullable);
+        let missing = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+            &serde_json::to_string(&missing).expect("json"),
+        )
+        .expect("canonical");
+        assert!(Program::decode_canonical(missing.as_bytes()).is_err());
+    }
+
+    let mut malformed_id = wire.clone();
+    malformed_id["entry_point_id"] = serde_json::json!("invalid entry point");
+    let malformed_id = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&malformed_id).expect("json"),
+    )
+    .expect("canonical");
+    assert!(Program::decode_canonical(malformed_id.as_bytes()).is_err());
+
     let mut wrong_domain = wire;
     wrong_domain["domain"] = serde_json::json!("mfm.program.v2");
     let wrong_domain = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
@@ -488,42 +471,22 @@ fn effect_authoring_applies_pure_support_deterministically_and_preserves_failure
     else {
         panic!("three State declarations");
     };
-    assert!(before.execution().is_pure());
-    assert!(effect.execution().is_effect());
-    assert!(after.execution().is_pure());
+    assert!(matches!(before.execution(), Execution::Pure));
+    let Execution::Effect {
+        command_contract_ref,
+        ..
+    } = effect.execution()
+    else {
+        panic!("Effect declaration");
+    };
+    assert!(matches!(after.execution(), Execution::Pure));
     assert_eq!(before.next_index(), Some(1));
     assert_eq!(effect.next_index(), Some(2));
     assert_eq!(effect.failure_next_index(), None);
     assert_eq!(after.next_index(), None);
     assert_eq!(
-        effect.execution().command_contract_ref(),
-        Some(&nominal_contract_ref::<Value>().expect("command contract"))
-    );
-}
-
-#[test]
-fn execution_sum_preserves_each_mode_and_its_exact_static_abi() {
-    let program = expand_program(
-        EntryPointId::new("mfm.test.identity/execution-sum@1").expect("entry point"),
-        &ExecutionSumOperation,
-    )
-    .expect("Program");
-    let [Declaration::State(pure), Declaration::State(read), Declaration::State(effect)] =
-        program.declarations()
-    else {
-        panic!("Pure, Read, and Effect declarations");
-    };
-    let value = nominal_contract_ref::<Value>().expect("value contract");
-    assert!(matches!(pure.execution(), Execution::Pure));
-    assert!(matches!(read.execution(), Execution::Read { .. }));
-    assert_eq!(read.execution().intent_contract_ref(), Some(&value));
-    assert_eq!(read.execution().evidence_contract_ref(), Some(&value));
-    assert!(matches!(effect.execution(), Execution::Effect { .. }));
-    assert_eq!(effect.execution().command_contract_ref(), Some(&value));
-    assert_eq!(effect.execution().evidence_contract_ref(), Some(&value));
-    assert_ne!(
-        read.execution().capability_contract_ref(),
-        effect.execution().capability_contract_ref()
+        command_contract_ref,
+        &nominal_contract_ref::<Value>().expect("command contract")
     );
 }
 

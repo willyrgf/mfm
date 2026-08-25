@@ -187,7 +187,7 @@ where
             &self.admitted_failure_contract_refs,
         )?;
         nested_callback_depth(self.callback_depth)?;
-        let (identities, suffix) = expand_read_suffix::<S, C>(
+        let (identities, suffix) = expand_capability_suffix::<S, C, _>(
             setup,
             std::mem::take(&mut self.identities),
             expanded_input,
@@ -197,6 +197,17 @@ where
             state_failure,
             never,
             self.callback_depth,
+            |identities, binding_ref| {
+                let capability_contract_ref = identities.read_capability_ref::<C>()?;
+                let intent_contract_ref = identities.value_ref::<C::Intent>()?;
+                let evidence_contract_ref = identities.value_ref::<C::Evidence>()?;
+                Ok(Execution::read(
+                    capability_contract_ref,
+                    intent_contract_ref,
+                    evidence_contract_ref,
+                    binding_ref,
+                ))
+            },
         );
         self.identities = identities;
         self.draft.merge_connected(suffix?)
@@ -222,7 +233,7 @@ where
             &self.admitted_failure_contract_refs,
         )?;
         nested_callback_depth(self.callback_depth)?;
-        let (identities, suffix) = expand_effect_suffix::<S, C>(
+        let (identities, suffix) = expand_capability_suffix::<S, C, _>(
             setup,
             std::mem::take(&mut self.identities),
             expanded_input,
@@ -232,6 +243,17 @@ where
             state_failure,
             never,
             self.callback_depth,
+            |identities, binding_ref| {
+                let capability_contract_ref = identities.effect_capability_ref::<C>()?;
+                let command_contract_ref = identities.value_ref::<C::Command>()?;
+                let evidence_contract_ref = identities.value_ref::<C::Evidence>()?;
+                Ok(Execution::effect(
+                    capability_contract_ref,
+                    command_contract_ref,
+                    evidence_contract_ref,
+                    binding_ref,
+                ))
+            },
         );
         self.identities = identities;
         self.draft.merge_connected(suffix?)
@@ -886,7 +908,7 @@ impl ExpansionDraft {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn expand_read_suffix<S, C>(
+fn expand_capability_suffix<S, C, BuildExecution>(
     setup: &C::Setup,
     identities: IdentityMemo,
     expanded_input: ContentRef,
@@ -896,10 +918,12 @@ fn expand_read_suffix<S, C>(
     state_failure: ContentRef,
     never: ContentRef,
     callback_depth: u8,
+    build_execution: BuildExecution,
 ) -> (IdentityMemo, Result<ExpansionDraft>)
 where
-    S: ReadState<C>,
-    C: ReadCapabilityContract + CapabilityInjection<S>,
+    S: State,
+    C: CapabilityInjection<S>,
+    BuildExecution: FnOnce(&mut IdentityMemo, ContentRef) -> Result<Execution>,
 {
     let mut writer = InjectionWriter {
         draft: ExpansionDraft::new(expanded_input),
@@ -912,72 +936,15 @@ where
         nested_callback_depth(callback_depth)?;
         let binding_ref =
             <C as CapabilityInjection<S>>::original_binding_ref(setup).map_err(authoring_error)?;
+        let state_implementation_ref = writer.identities.state_ref::<S>()?;
+        let execution = build_execution(&mut writer.identities, binding_ref)?;
         append_state_core(
             &mut writer.draft,
-            writer.identities.state_ref::<S>()?,
+            state_implementation_ref,
             state_input,
             state_output,
             state_failure.clone(),
-            Execution::read(
-                writer.identities.read_capability_ref::<C>()?,
-                writer.identities.value_ref::<C::Intent>()?,
-                writer.identities.value_ref::<C::Evidence>()?,
-                binding_ref,
-            ),
-            &never,
-            &state_failure,
-            &[],
-        )?;
-        nested_callback_depth(callback_depth)?;
-        <C as CapabilityInjection<S>>::write_after(setup, &mut writer).map_err(authoring_error)?;
-        writer.draft.require_current(&expanded_output)?;
-        Ok(())
-    })();
-    let InjectionWriter {
-        draft, identities, ..
-    } = writer;
-    (identities, result.map(|()| draft))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn expand_effect_suffix<S, C>(
-    setup: &C::Setup,
-    identities: IdentityMemo,
-    expanded_input: ContentRef,
-    expanded_output: ContentRef,
-    state_input: ContentRef,
-    state_output: ContentRef,
-    state_failure: ContentRef,
-    never: ContentRef,
-    callback_depth: u8,
-) -> (IdentityMemo, Result<ExpansionDraft>)
-where
-    S: EffectState<C>,
-    C: EffectCapabilityContract + CapabilityInjection<S>,
-{
-    let mut writer = InjectionWriter {
-        draft: ExpansionDraft::new(expanded_input),
-        required_failure_contract_ref: state_failure.clone(),
-        identities,
-    };
-    let result = (|| {
-        <C as CapabilityInjection<S>>::write_before(setup, &mut writer).map_err(authoring_error)?;
-        writer.draft.require_current(&state_input)?;
-        nested_callback_depth(callback_depth)?;
-        let binding_ref =
-            <C as CapabilityInjection<S>>::original_binding_ref(setup).map_err(authoring_error)?;
-        append_state_core(
-            &mut writer.draft,
-            writer.identities.state_ref::<S>()?,
-            state_input,
-            state_output,
-            state_failure.clone(),
-            Execution::effect(
-                writer.identities.effect_capability_ref::<C>()?,
-                writer.identities.value_ref::<C::Command>()?,
-                writer.identities.value_ref::<C::Evidence>()?,
-                binding_ref,
-            ),
+            execution,
             &never,
             &state_failure,
             &[],
