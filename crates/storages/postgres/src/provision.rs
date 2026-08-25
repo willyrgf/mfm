@@ -1,13 +1,11 @@
 use sqlx::{Connection, PgConnection};
 
 use crate::{
-    evm_tx::{
-        verify_evm_tx_privileges, verify_evm_tx_schema, EVM_TX_SCHEMA_CONTRACT, EVM_TX_SCHEMA_SQL,
-    },
-    mfm_relation_count, runtime_table_privilege_mask, verify_config_schema, verify_durability,
-    verify_run_schema, AdminPostgresLocator, GateError, PostgresBackend,
-    PostgresEvmTransactionAuthority, RuntimePostgresLocator, CONFIG_SCHEMA_SQL, RUN_SCHEMA_SQL,
-    TABLE_DELETE, TABLE_INSERT, TABLE_SELECT, TABLE_UPDATE,
+    catalog::{surface_exists, verify_surface, CONFIG_SURFACE, EVM_TX_SURFACE, RUN_SURFACE},
+    evm_tx::{load_evm_tx_epoch, EVM_TX_SCHEMA_CONTRACT, EVM_TX_SCHEMA_SQL},
+    verify_config_marker, verify_durability, verify_run_marker, AdminPostgresLocator, GateError,
+    PostgresBackend, PostgresEvmTransactionAuthority, RuntimePostgresLocator, CONFIG_SCHEMA_SQL,
+    RUN_SCHEMA_SQL,
 };
 
 /// Redaction-safe split-authority schema provisioning failure.
@@ -98,14 +96,18 @@ pub async fn provision_postgres(
         }
     }
 
-    verify_run_schema(&mut connection)
+    verify_surface(&mut connection, &RUN_SURFACE, Some(&owner))
         .await
         .map_err(classify_gate)?;
-    verify_config_schema(&mut connection)
+    verify_run_marker(&mut connection)
         .await
         .map_err(classify_gate)?;
-    verify_owned_objects(&mut connection, &owner, "public").await?;
-    verify_owned_objects(&mut connection, &owner, "mfm_config").await?;
+    verify_surface(&mut connection, &CONFIG_SURFACE, Some(&owner))
+        .await
+        .map_err(classify_gate)?;
+    verify_config_marker(&mut connection)
+        .await
+        .map_err(classify_gate)?;
     verify_runtime_base_grants(&mut connection).await?;
     drop(connection);
 
@@ -172,10 +174,12 @@ pub async fn provision_evm_transaction_authority(
             Err(_) => return Err(ProvisionError::Indeterminate),
         }
     }
-    verify_evm_tx_schema(&mut connection)
+    verify_surface(&mut connection, &EVM_TX_SURFACE, Some(&owner))
         .await
         .map_err(classify_gate)?;
-    verify_owned_objects(&mut connection, &owner, "mfm_evm_tx").await?;
+    load_evm_tx_epoch(&mut connection)
+        .await
+        .map_err(classify_gate)?;
     verify_runtime_evm_tx_grants(&mut connection).await?;
     drop(connection);
 
@@ -237,15 +241,16 @@ async fn inspect_run_schema(
     owner: &str,
 ) -> Result<SchemaState, ProvisionError> {
     verify_schema_owner(connection, owner, "public").await?;
-    let count = mfm_relation_count(connection)
+    let exists = surface_exists(connection, &RUN_SURFACE)
         .await
         .map_err(classify_gate)?;
-    if count == 0 {
+    if !exists {
         return Ok(SchemaState::Absent);
     }
-    verify_run_schema(connection).await.map_err(classify_gate)?;
-    verify_owned_objects(connection, owner, "public").await?;
-    verify_runtime_table_grants(connection, true).await?;
+    verify_surface(connection, &RUN_SURFACE, Some(owner))
+        .await
+        .map_err(classify_gate)?;
+    verify_run_marker(connection).await.map_err(classify_gate)?;
     Ok(SchemaState::Present)
 }
 
@@ -253,20 +258,19 @@ async fn inspect_config_schema(
     connection: &mut PgConnection,
     owner: &str,
 ) -> Result<SchemaState, ProvisionError> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'mfm_config')",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|_| ProvisionError::Unavailable)?;
+    let exists = surface_exists(connection, &CONFIG_SURFACE)
+        .await
+        .map_err(classify_gate)?;
     if !exists {
         return Ok(SchemaState::Absent);
     }
-    verify_config_schema(connection)
+    verify_schema_owner(connection, owner, CONFIG_SURFACE.schema()).await?;
+    verify_surface(connection, &CONFIG_SURFACE, Some(owner))
         .await
         .map_err(classify_gate)?;
-    verify_owned_objects(connection, owner, "mfm_config").await?;
-    verify_runtime_table_grants(connection, false).await?;
+    verify_config_marker(connection)
+        .await
+        .map_err(classify_gate)?;
     Ok(SchemaState::Present)
 }
 
@@ -274,48 +278,18 @@ async fn inspect_evm_tx_schema(
     connection: &mut PgConnection,
     owner: &str,
 ) -> Result<SchemaState, ProvisionError> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'mfm_evm_tx')",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|_| ProvisionError::Unavailable)?;
+    let exists = surface_exists(connection, &EVM_TX_SURFACE)
+        .await
+        .map_err(classify_gate)?;
     if !exists {
         return Ok(SchemaState::Absent);
     }
-    verify_evm_tx_schema(connection)
+    verify_schema_owner(connection, owner, EVM_TX_SURFACE.schema()).await?;
+    verify_surface(connection, &EVM_TX_SURFACE, Some(owner))
         .await
         .map_err(classify_gate)?;
-    verify_owned_objects(connection, owner, "mfm_evm_tx").await?;
-    verify_runtime_evm_tx_grants(connection).await?;
+    load_evm_tx_epoch(connection).await.map_err(classify_gate)?;
     Ok(SchemaState::Present)
-}
-
-async fn verify_owned_objects(
-    connection: &mut PgConnection,
-    owner: &str,
-    schema: &str,
-) -> Result<(), ProvisionError> {
-    let wrong_owner: bool = sqlx::query_scalar(
-        "SELECT EXISTS( \
-           SELECT 1 FROM pg_catalog.pg_class c \
-           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-           WHERE n.nspname = $1 \
-             AND c.relname IN ('mfm_store_schema','mfm_run_frames','mfm_run_heads', \
-                               'mfm_config_schema','config_revisions','mfm_evm_tx_schema', \
-                               'nonce_domains','nonce_reservations','prepared_transactions', \
-                               'transaction_settlements') \
-             AND pg_get_userbyid(c.relowner) <> $2)",
-    )
-    .bind(schema)
-    .bind(owner)
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|_| ProvisionError::Unavailable)?;
-    if wrong_owner {
-        return Err(ProvisionError::Incompatible);
-    }
-    verify_schema_owner(connection, owner, schema).await
 }
 
 async fn verify_schema_owner(
@@ -337,6 +311,16 @@ async fn verify_schema_owner(
 }
 
 async fn verify_runtime_base_grants(connection: &mut PgConnection) -> Result<(), ProvisionError> {
+    verify_runtime_database_grants(connection).await
+}
+
+async fn verify_runtime_evm_tx_grants(connection: &mut PgConnection) -> Result<(), ProvisionError> {
+    verify_runtime_database_grants(connection).await
+}
+
+async fn verify_runtime_database_grants(
+    connection: &mut PgConnection,
+) -> Result<(), ProvisionError> {
     let database: (bool, bool, bool) = sqlx::query_as(
         "SELECT has_database_privilege('mfm_runtime', current_database(), 'CONNECT'), \
                 has_database_privilege('mfm_runtime', current_database(), 'CREATE'), \
@@ -347,83 +331,6 @@ async fn verify_runtime_base_grants(connection: &mut PgConnection) -> Result<(),
     .map_err(|_| ProvisionError::Unavailable)?;
     if database != (true, false, false) {
         return Err(ProvisionError::Incompatible);
-    }
-    for schema in ["public", "mfm_config"] {
-        let privileges: (bool, bool) = sqlx::query_as(
-            "SELECT has_schema_privilege('mfm_runtime', $1, 'USAGE'), \
-                    has_schema_privilege('mfm_runtime', $1, 'CREATE')",
-        )
-        .bind(schema)
-        .fetch_one(&mut *connection)
-        .await
-        .map_err(|_| ProvisionError::Unavailable)?;
-        if privileges != (true, false) {
-            return Err(ProvisionError::Incompatible);
-        }
-    }
-    verify_runtime_table_grants(connection, true).await?;
-    verify_runtime_table_grants(connection, false).await
-}
-
-async fn verify_runtime_evm_tx_grants(connection: &mut PgConnection) -> Result<(), ProvisionError> {
-    let database: (bool, bool, bool) = sqlx::query_as(
-        "SELECT has_database_privilege('mfm_runtime', current_database(), 'CONNECT'), \
-                has_database_privilege('mfm_runtime', current_database(), 'CREATE'), \
-                has_database_privilege('mfm_runtime', current_database(), 'TEMPORARY')",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|_| ProvisionError::Unavailable)?;
-    let schema: (bool, bool) = sqlx::query_as(
-        "SELECT has_schema_privilege('mfm_runtime', 'mfm_evm_tx', 'USAGE'), \
-                has_schema_privilege('mfm_runtime', 'mfm_evm_tx', 'CREATE')",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|_| ProvisionError::Unavailable)?;
-    if database != (true, false, false) || schema != (true, false) {
-        return Err(ProvisionError::Incompatible);
-    }
-    if !verify_evm_tx_privileges(connection)
-        .await
-        .map_err(classify_gate)?
-    {
-        return Err(ProvisionError::Incompatible);
-    }
-    Ok(())
-}
-
-async fn verify_runtime_table_grants(
-    connection: &mut PgConnection,
-    run: bool,
-) -> Result<(), ProvisionError> {
-    let expected = if run {
-        [
-            ("public.mfm_run_frames", TABLE_SELECT | TABLE_INSERT),
-            (
-                "public.mfm_run_heads",
-                TABLE_SELECT | TABLE_INSERT | TABLE_UPDATE,
-            ),
-            ("public.mfm_store_schema", TABLE_SELECT),
-        ]
-        .as_slice()
-    } else {
-        [
-            (
-                "mfm_config.config_revisions",
-                TABLE_SELECT | TABLE_INSERT | TABLE_DELETE,
-            ),
-            ("mfm_config.mfm_config_schema", TABLE_SELECT),
-        ]
-        .as_slice()
-    };
-    for (table, expected_mask) in expected {
-        let retained = runtime_table_privilege_mask(connection, table)
-            .await
-            .map_err(classify_gate)?;
-        if retained != *expected_mask {
-            return Err(ProvisionError::Incompatible);
-        }
     }
     Ok(())
 }

@@ -14,7 +14,14 @@ clear. Home/passfile and service-file inputs cannot influence the resulting auth
 an unmodified crates.io dependency so its
 compile-time query macros can be enabled when the query surface adopts them.
 Every runtime connection must authenticate as the fixed `mfm_runtime` role and pass the exact role,
-ownership, database/schema, table-privilege, durability, and schema gate.
+ownership, database/schema, durability, and declarative catalog gate. One normalized verifier owns
+all three surfaces and compares expanded schema, relation, and column ACLs (including `MAINTAIN`),
+column storage shape, RLS/policies/rules/triggers, relation storage properties, validated
+constraints, and live/ready/valid indexes. Dedicated schemas are closed to unmodeled relations;
+the public run-history surface admits unrelated application relations but checks every object
+attached to its three named tables.
+The supported server major is PostgreSQL 18, pinned by the managed environment; another major must
+update and requalify the catalog specification before it is admitted.
 
 Loads use one read-only repeatable-read snapshot, prove a nonempty gap-free prefix and byte/digest
 accounting, then copy owned rows in one pure blocking job. Appends copy the candidate before BEGIN,
@@ -43,5 +50,6 @@ ambiguous acknowledgement is `Unavailable` and the next caller-driven `load` res
 Both require distinct typed admin/runtime locators for the same normalized target and an
 already-created fixed runtime role. Production CLI provisioning invokes only the base provisioner. Existing
 installations are verified and never migrated, repaired, re-owned, reset, or downgraded. Managed
-same-crate tests run
-serially through `postgres-test` against a real loopback-only `hostnossl` server and split authority.
+same-crate tests run serially through `postgres-test` against a real loopback-only `hostnossl`
+server and split authority, including hostile catalog and ACL mutations that every independent pool
+must reject.

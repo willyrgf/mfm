@@ -156,6 +156,20 @@ async fn runtime_connection(locator: &RuntimePostgresLocator) -> PgConnection {
         .expect("runtime connection")
 }
 
+async fn assert_base_gate_rejects(runtime: &RuntimePostgresLocator) {
+    assert!(matches!(
+        PostgresBackend::connect(runtime).await,
+        Err(PostgresOpenError::Incompatible)
+    ));
+}
+
+async fn assert_evm_gate_rejects(runtime: &RuntimePostgresLocator) {
+    assert!(matches!(
+        PostgresEvmTransactionAuthority::connect(runtime).await,
+        Err(PostgresOpenError::Incompatible)
+    ));
+}
+
 async fn reset_schemas(connection: &mut PgConnection) {
     connection
         .execute("DROP SCHEMA IF EXISTS mfm_evm_tx CASCADE")
@@ -1533,6 +1547,265 @@ async fn managed_postgres_persistence_authority_contract() {
         .execute("REVOKE DELETE ON mfm_evm_tx.nonce_reservations FROM mfm_runtime")
         .await
         .expect("revoke excess transaction privilege");
+
+    for (grant, revoke) in [
+        (
+            "GRANT UPDATE (frame_bytes) ON public.mfm_run_frames TO mfm_runtime",
+            "REVOKE UPDATE (frame_bytes) ON public.mfm_run_frames FROM mfm_runtime",
+        ),
+        (
+            "GRANT UPDATE (total_bytes) ON public.mfm_run_heads TO mfm_runtime",
+            "REVOKE UPDATE (total_bytes) ON public.mfm_run_heads FROM mfm_runtime",
+        ),
+        (
+            "GRANT UPDATE (canonical) ON mfm_config.config_revisions TO mfm_runtime",
+            "REVOKE UPDATE (canonical) ON mfm_config.config_revisions FROM mfm_runtime",
+        ),
+    ] {
+        connection
+            .execute(grant)
+            .await
+            .expect("grant hostile column privilege");
+        assert_base_gate_rejects(&runtime).await;
+        connection
+            .execute(revoke)
+            .await
+            .expect("revoke hostile column privilege");
+    }
+
+    connection
+        .execute(
+            "GRANT UPDATE (raw_transaction) \
+             ON mfm_evm_tx.prepared_transactions TO mfm_runtime",
+        )
+        .await
+        .expect("grant raw transaction mutation authority");
+    assert_evm_gate_rejects(&runtime).await;
+    connection
+        .execute(
+            "REVOKE UPDATE (raw_transaction) \
+             ON mfm_evm_tx.prepared_transactions FROM mfm_runtime",
+        )
+        .await
+        .expect("revoke raw transaction mutation authority");
+
+    connection
+        .execute("GRANT MAINTAIN ON public.mfm_run_frames TO mfm_runtime")
+        .await
+        .expect("grant maintain");
+    assert_base_gate_rejects(&runtime).await;
+    connection
+        .execute("REVOKE MAINTAIN ON public.mfm_run_frames FROM mfm_runtime")
+        .await
+        .expect("revoke maintain");
+
+    connection
+        .execute("CREATE ROLE mfm_unexpected_runtime_grant NOLOGIN")
+        .await
+        .expect("create inherited privilege role");
+    connection
+        .execute("GRANT SELECT ON public.mfm_store_schema TO mfm_unexpected_runtime_grant")
+        .await
+        .expect("grant inherited privilege");
+    connection
+        .execute("GRANT mfm_unexpected_runtime_grant TO mfm_runtime")
+        .await
+        .expect("grant unexpected membership");
+    assert_base_gate_rejects(&runtime).await;
+    connection
+        .execute("REVOKE mfm_unexpected_runtime_grant FROM mfm_runtime")
+        .await
+        .expect("revoke unexpected membership");
+    connection
+        .execute("REVOKE SELECT ON public.mfm_store_schema FROM mfm_unexpected_runtime_grant")
+        .await
+        .expect("revoke inherited privilege");
+    connection
+        .execute("DROP ROLE mfm_unexpected_runtime_grant")
+        .await
+        .expect("drop inherited privilege role");
+
+    connection
+        .execute("CREATE ROLE mfm_unexpected_surface_owner NOLOGIN")
+        .await
+        .expect("create hostile owner");
+    connection
+        .execute("ALTER TABLE mfm_config.config_revisions OWNER TO mfm_unexpected_surface_owner")
+        .await
+        .expect("change surface owner");
+    assert_base_gate_rejects(&runtime).await;
+    connection
+        .execute("ALTER TABLE mfm_config.config_revisions OWNER TO CURRENT_USER")
+        .await
+        .expect("restore surface owner");
+    connection
+        .execute("DROP ROLE mfm_unexpected_surface_owner")
+        .await
+        .expect("drop hostile owner");
+
+    connection
+        .execute("ALTER TABLE mfm_config.config_revisions ENABLE ROW LEVEL SECURITY")
+        .await
+        .expect("enable row security");
+    assert_base_gate_rejects(&runtime).await;
+    connection
+        .execute("ALTER TABLE mfm_config.config_revisions DISABLE ROW LEVEL SECURITY")
+        .await
+        .expect("disable row security");
+    connection
+        .execute("CREATE POLICY mfm_hostile_policy ON mfm_config.config_revisions USING (true)")
+        .await
+        .expect("create row security policy");
+    connection
+        .execute("ALTER TABLE mfm_config.config_revisions ENABLE ROW LEVEL SECURITY")
+        .await
+        .expect("enable policy");
+    assert_base_gate_rejects(&runtime).await;
+    connection
+        .execute("DROP POLICY mfm_hostile_policy ON mfm_config.config_revisions")
+        .await
+        .expect("drop row security policy");
+    connection
+        .execute("ALTER TABLE mfm_config.config_revisions DISABLE ROW LEVEL SECURITY")
+        .await
+        .expect("disable policy");
+
+    connection
+        .execute(
+            "CREATE RULE mfm_hostile_rule AS ON DELETE TO mfm_config.config_revisions \
+             DO ALSO NOTHING",
+        )
+        .await
+        .expect("create hostile rule");
+    assert_base_gate_rejects(&runtime).await;
+    connection
+        .execute("DROP RULE mfm_hostile_rule ON mfm_config.config_revisions")
+        .await
+        .expect("drop hostile rule");
+
+    connection
+        .execute("ALTER TABLE mfm_config.config_revisions SET (fillfactor = 90)")
+        .await
+        .expect("set hostile relation option");
+    assert_base_gate_rejects(&runtime).await;
+    connection
+        .execute("ALTER TABLE mfm_config.config_revisions RESET (fillfactor)")
+        .await
+        .expect("reset hostile relation option");
+
+    let tablespace_path = std::env::temp_dir().join(format!(
+        "mfm-postgres-hostile-tablespace-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&tablespace_path).expect("create hostile tablespace directory");
+    let create_tablespace: String = sqlx::query_scalar(
+        "SELECT format('CREATE TABLESPACE mfm_hostile_tablespace LOCATION %L', $1)",
+    )
+    .bind(tablespace_path.to_string_lossy().as_ref())
+    .fetch_one(&mut connection)
+    .await
+    .expect("render tablespace statement");
+    sqlx::query(sqlx::AssertSqlSafe(create_tablespace.as_str()))
+        .execute(&mut connection)
+        .await
+        .expect("create hostile tablespace");
+    connection
+        .execute("ALTER TABLE mfm_config.config_revisions SET TABLESPACE mfm_hostile_tablespace")
+        .await
+        .expect("move relation to hostile tablespace");
+    assert_base_gate_rejects(&runtime).await;
+    connection
+        .execute("ALTER TABLE mfm_config.config_revisions SET TABLESPACE pg_default")
+        .await
+        .expect("restore relation tablespace");
+    connection
+        .execute("DROP TABLESPACE mfm_hostile_tablespace")
+        .await
+        .expect("drop hostile tablespace");
+    std::fs::remove_dir(&tablespace_path).expect("remove hostile tablespace directory");
+
+    for (break_index, restore_index) in [
+        (
+            "UPDATE pg_catalog.pg_index SET indisvalid = false \
+             WHERE indexrelid = 'mfm_config.mfm_config_revisions_pkey'::regclass",
+            "UPDATE pg_catalog.pg_index SET indisvalid = true \
+             WHERE indexrelid = 'mfm_config.mfm_config_revisions_pkey'::regclass",
+        ),
+        (
+            "UPDATE pg_catalog.pg_index SET indisready = false \
+             WHERE indexrelid = 'mfm_config.mfm_config_revisions_pkey'::regclass",
+            "UPDATE pg_catalog.pg_index SET indisready = true \
+             WHERE indexrelid = 'mfm_config.mfm_config_revisions_pkey'::regclass",
+        ),
+        (
+            "UPDATE pg_catalog.pg_index SET indislive = false \
+             WHERE indexrelid = 'mfm_config.mfm_config_revisions_pkey'::regclass",
+            "UPDATE pg_catalog.pg_index SET indislive = true \
+             WHERE indexrelid = 'mfm_config.mfm_config_revisions_pkey'::regclass",
+        ),
+    ] {
+        connection
+            .execute(break_index)
+            .await
+            .expect("break expected index state");
+        assert_base_gate_rejects(&runtime).await;
+        connection
+            .execute(restore_index)
+            .await
+            .expect("restore expected index state");
+    }
+
+    connection
+        .execute(
+            "CREATE INDEX mfm_hostile_expression_index \
+             ON mfm_config.config_revisions ((octet_length(canonical))) \
+             WHERE octet_length(canonical) > 0",
+        )
+        .await
+        .expect("create hostile expression and partial index");
+    assert_base_gate_rejects(&runtime).await;
+    connection
+        .execute("DROP INDEX mfm_config.mfm_hostile_expression_index")
+        .await
+        .expect("drop hostile expression index");
+
+    connection
+        .execute(
+            "UPDATE pg_catalog.pg_constraint SET convalidated = false \
+             WHERE conname = 'mfm_config_revisions_bytes_check' \
+               AND conrelid = 'mfm_config.config_revisions'::regclass",
+        )
+        .await
+        .expect("invalidate expected constraint");
+    assert_base_gate_rejects(&runtime).await;
+    connection
+        .execute(
+            "UPDATE pg_catalog.pg_constraint SET convalidated = true \
+             WHERE conname = 'mfm_config_revisions_bytes_check' \
+               AND conrelid = 'mfm_config.config_revisions'::regclass",
+        )
+        .await
+        .expect("restore expected constraint");
+
+    connection
+        .execute("CREATE TABLE mfm_config.unexpected_relation (value bigint)")
+        .await
+        .expect("create unexpected relation");
+    assert_base_gate_rejects(&runtime).await;
+    connection
+        .execute("DROP TABLE mfm_config.unexpected_relation")
+        .await
+        .expect("drop unexpected relation");
+    connection
+        .execute("ALTER TABLE mfm_config.config_revisions ADD COLUMN unexpected bytea")
+        .await
+        .expect("add unexpected column");
+    assert_base_gate_rejects(&runtime).await;
+    connection
+        .execute("ALTER TABLE mfm_config.config_revisions DROP COLUMN unexpected")
+        .await
+        .expect("drop unexpected column");
+    assert_base_gate_rejects(&runtime).await;
 
     connection
         .execute(
