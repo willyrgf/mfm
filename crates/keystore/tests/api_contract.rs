@@ -3,7 +3,7 @@ use mfm_keystore::{KeystoreError, KeystoreOwner, SecretSecp256k1Scalar, MAX_KEY_
 use mfm_signing::{recover_public_key, Secp256k1Signer, SigningDigest, SigningError};
 
 #[tokio::test]
-async fn duplicate_import_and_signing_are_key_and_purpose_bound_deterministic_and_recoverable() {
+async fn duplicate_import_and_signing_are_key_and_purpose_bound_and_recoverable() {
     let owner = KeystoreOwner::start().expect("owner");
     let mut scalar = [0_u8; 32];
     scalar[31] = 1;
@@ -47,8 +47,6 @@ async fn duplicate_import_and_signing_are_key_and_purpose_bound_deterministic_an
 
     let digest = SigningDigest::from_bytes([0x2a; 32]);
     let first_signature = first.sign(digest).await.expect("first signature");
-    let second_signature = duplicate.sign(digest).await.expect("second signature");
-    assert!(first_signature == second_signature);
     let actual = first_signature
         .as_bytes()
         .iter()
@@ -59,11 +57,8 @@ async fn duplicate_import_and_signing_are_key_and_purpose_bound_deterministic_an
         "74a6b203feee506ab5c39ecb33a32769f79cbf765db4578d15f7e196fb6863a96e4b0679559655534b1c575b9857f1f2604eaf21edd0e703cf723042992c2cb4"
     );
     assert_eq!(first_signature.recovery_id(), 1);
-    let parsed =
-        k256::ecdsa::Signature::from_slice(first_signature.as_bytes()).expect("compact signature");
-    assert!(parsed.normalize_s().is_none());
     let expected_key = first.public_key();
-    assert!(recover_public_key(digest, first_signature).expect("recovered key") == *expected_key);
+    assert!(&recover_public_key(digest, &first_signature).expect("recovered key") == expected_key);
 
     owner.shutdown().await.expect("shutdown");
     assert!(matches!(

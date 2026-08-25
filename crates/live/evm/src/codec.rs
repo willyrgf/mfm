@@ -88,7 +88,7 @@ pub(crate) fn validate_signed_transaction(
 
     let digest = SigningDigest::from_bytes(signed.signature_hash().into());
     let signature = compact_signature(signed.signature())?;
-    let recovered = recover_public_key(digest, signature).map_err(|_| EvmCodecError::Invalid)?;
+    let recovered = recover_public_key(digest, &signature).map_err(|_| EvmCodecError::Invalid)?;
     if &recovered != expected_key
         || &ethereum_address(&recovered) != expected_sender
         || &ethereum_address(expected_key) != expected_sender

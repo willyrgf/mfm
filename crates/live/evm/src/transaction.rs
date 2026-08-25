@@ -276,7 +276,7 @@ async fn prepare(
         .sign(digest)
         .await
         .map_err(|_| AdapterError::Unavailable)?;
-    let recovered = recover_public_key(digest, signature).map_err(|_| AdapterError::Internal)?;
+    let recovered = recover_public_key(digest, &signature).map_err(|_| AdapterError::Internal)?;
     if recovered != executor.public_key || ethereum_address(&recovered) != executor.sender {
         return Err(AdapterError::Internal);
     }

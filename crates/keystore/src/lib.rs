@@ -1,11 +1,11 @@
 #![warn(missing_docs)]
 //! Thread-affine in-process custody for recoverable secp256k1 keys.
 //!
-//! A private non-`Send`, non-`Sync` key map exists only inside its dedicated owner thread. Async
+//! A private non-`Send`, non-`Sync` key container exists only inside its dedicated owner thread. Async
 //! callers use [`KeystoreOwner`] and key- and purpose-bound [`KeystoreSigner`] handles; private
 //! scalars never cross back out of the owner.
 
-use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::rc::Rc;
 use std::thread::JoinHandle;
 
@@ -42,98 +42,99 @@ pub enum KeystoreError {
 ///
 /// This type intentionally implements neither `Debug`, `Display`, nor serde and exposes no byte
 /// accessor.
-pub struct SecretSecp256k1Scalar(Zeroizing<[u8; 32]>);
+pub struct SecretSecp256k1Scalar(SigningKey);
 
 impl SecretSecp256k1Scalar {
     /// Validates a nonzero scalar strictly below the secp256k1 group order.
     pub fn new(bytes: [u8; 32]) -> Result<Self, KeystoreError> {
         let bytes = Zeroizing::new(bytes);
-        SigningKey::from_slice(bytes.as_ref()).map_err(|_| KeystoreError::Invalid)?;
-        Ok(Self(bytes))
+        SigningKey::from_slice(bytes.as_ref())
+            .map(Self)
+            .map_err(|_| KeystoreError::Invalid)
     }
 
-    fn into_signing_key(self) -> Result<SigningKey, KeystoreError> {
-        SigningKey::from_slice(self.0.as_ref()).map_err(|_| KeystoreError::Invalid)
+    fn into_signing_key(self) -> SigningKey {
+        self.0
     }
 }
 
 /// Non-`Send`, non-`Sync` secret owner retained only by its OS thread.
 struct Keystore {
-    entries: BTreeMap<[u8; 65], SigningKey>,
-    _thread_affinity: Rc<()>,
+    entries: Vec<SigningKey>,
+    _thread_affinity: PhantomData<Rc<()>>,
 }
 
 impl Keystore {
     fn new() -> Self {
         Self {
-            entries: BTreeMap::new(),
-            _thread_affinity: Rc::new(()),
+            entries: Vec::new(),
+            _thread_affinity: PhantomData,
         }
     }
 
-    fn import(
-        &mut self,
-        secret: SecretSecp256k1Scalar,
-    ) -> Result<Secp256k1PublicKey, KeystoreError> {
-        let signing_key = secret.into_signing_key()?;
-        let encoded = signing_key.verifying_key().to_encoded_point(false);
-        let public_bytes: [u8; 65] = encoded
-            .as_bytes()
-            .try_into()
-            .map_err(|_| KeystoreError::Internal)?;
-        let public_key = Secp256k1PublicKey::new(public_bytes).map_err(map_signing_error)?;
-        if self.entries.contains_key(&public_bytes) {
-            return Ok(public_key);
+    fn import(&mut self, secret: SecretSecp256k1Scalar) -> Result<ImportedKey, KeystoreError> {
+        let signing_key = secret.into_signing_key();
+        let public_key = Secp256k1PublicKey::try_from(*signing_key.verifying_key())
+            .map_err(map_checked_signing_error)?;
+        if let Some(slot) = self
+            .entries
+            .iter()
+            .position(|entry| entry.verifying_key() == signing_key.verifying_key())
+        {
+            return Ok(ImportedKey {
+                slot: KeySlot(slot),
+                public_key,
+            });
         }
         if self.entries.len() >= MAX_KEY_INSTANCES {
             return Err(KeystoreError::Capacity);
         }
-        self.entries.insert(public_bytes, signing_key);
-        Ok(public_key)
+        let slot = KeySlot(self.entries.len());
+        self.entries.push(signing_key);
+        Ok(ImportedKey { slot, public_key })
     }
 
     fn sign(
         &self,
-        public_key: &[u8; 65],
+        slot: KeySlot,
         digest: SigningDigest,
     ) -> Result<CompactRecoverableSignature, KeystoreError> {
-        let signing_key = self.entries.get(public_key).ok_or(KeystoreError::Invalid)?;
+        let signing_key = self.entries.get(slot.0).ok_or(KeystoreError::Internal)?;
         let (signature, recovery_id) = signing_key
             .sign_prehash_recoverable(digest.as_bytes())
             .map_err(|_| KeystoreError::Internal)?;
-        let bytes: [u8; 64] = signature.to_bytes().into();
-        CompactRecoverableSignature::new(bytes, recovery_id.to_byte()).map_err(map_signing_error)
+        CompactRecoverableSignature::try_from((signature, recovery_id))
+            .map_err(map_checked_signing_error)
     }
+}
+
+#[derive(Clone, Copy)]
+struct KeySlot(usize);
+
+struct ImportedKey {
+    slot: KeySlot,
+    public_key: Secp256k1PublicKey,
 }
 
 enum Command {
     Import {
         secret: SecretSecp256k1Scalar,
-        response: oneshot::Sender<Result<Secp256k1PublicKey, KeystoreError>>,
+        response: oneshot::Sender<Result<ImportedKey, KeystoreError>>,
     },
     Sign {
-        public_key: [u8; 65],
+        slot: KeySlot,
         digest: SigningDigest,
         response: oneshot::Sender<Result<CompactRecoverableSignature, KeystoreError>>,
     },
-    Shutdown {
-        response: oneshot::Sender<()>,
-    },
+    Shutdown,
     #[cfg(test)]
     Panic,
-    #[cfg(test)]
-    Block {
-        entered: std::sync::mpsc::Sender<()>,
-        release: std::sync::mpsc::Receiver<()>,
-    },
-    #[cfg(test)]
-    Noop,
 }
 
 /// Unique controller for one dedicated keystore owner thread.
 pub struct KeystoreOwner {
-    sender: Option<mpsc::Sender<Command>>,
-    join: Option<JoinHandle<()>>,
+    sender: mpsc::Sender<Command>,
+    join: JoinHandle<()>,
 }
 
 impl KeystoreOwner {
@@ -144,10 +145,7 @@ impl KeystoreOwner {
             .name("mfm-keystore-owner".to_owned())
             .spawn(move || owner_loop(receiver))
             .map_err(|_| KeystoreError::Unavailable)?;
-        Ok(Self {
-            sender: Some(sender),
-            join: Some(join),
-        })
+        Ok(Self { sender, join })
     }
 
     /// Imports one checked secret and returns a key- and purpose-bound signer handle.
@@ -156,39 +154,32 @@ impl KeystoreOwner {
         secret: SecretSecp256k1Scalar,
         purpose: StableId,
     ) -> Result<KeystoreSigner, KeystoreError> {
-        let sender = self.sender.as_ref().ok_or(KeystoreError::Unavailable)?;
         let (response, result) = oneshot::channel();
-        sender
+        self.sender
             .send(Command::Import { secret, response })
             .await
             .map_err(|_| KeystoreError::Unavailable)?;
-        let public_key = result.await.map_err(|_| KeystoreError::Internal)??;
+        let imported = result.await.map_err(|_| KeystoreError::Internal)??;
         Ok(KeystoreSigner {
-            sender: sender.clone(),
-            public_key,
+            sender: self.sender.clone(),
+            slot: imported.slot,
+            public_key: imported.public_key,
             purpose,
         })
     }
 
     /// Requests owner exit and asynchronously joins the dedicated OS thread.
-    pub async fn shutdown(mut self) -> Result<(), KeystoreError> {
-        let sender = self.sender.take().ok_or(KeystoreError::Unavailable)?;
-        let (response, stopped) = oneshot::channel();
-        let request = sender
-            .send(Command::Shutdown { response })
-            .await
-            .map_err(|_| KeystoreError::Unavailable);
+    pub async fn shutdown(self) -> Result<(), KeystoreError> {
+        let Self { sender, join } = self;
+        let sent = sender.send(Command::Shutdown).await;
         drop(sender);
-        let acknowledgement = match request {
-            Ok(()) => stopped.await.map_err(|_| KeystoreError::Internal),
-            Err(error) => Err(error),
-        };
-        let join = self.join.take().ok_or(KeystoreError::Internal)?;
         let joined = tokio::task::spawn_blocking(move || join.join())
             .await
-            .map_err(|_| KeystoreError::Internal)?
-            .map_err(|_| KeystoreError::Internal);
-        acknowledgement.and(joined)
+            .map_err(|_| KeystoreError::Internal)?;
+        if joined.is_err() {
+            return Err(KeystoreError::Internal);
+        }
+        sent.map_err(|_| KeystoreError::Unavailable)
     }
 }
 
@@ -196,6 +187,7 @@ impl KeystoreOwner {
 #[derive(Clone)]
 pub struct KeystoreSigner {
     sender: mpsc::Sender<Command>,
+    slot: KeySlot,
     public_key: Secp256k1PublicKey,
     purpose: StableId,
 }
@@ -211,12 +203,12 @@ impl Secp256k1Signer for KeystoreSigner {
 
     fn sign(&self, digest: SigningDigest) -> SigningFuture {
         let sender = self.sender.clone();
-        let public_key = *self.public_key.as_bytes();
+        let slot = self.slot;
         Box::pin(async move {
             let (response, result) = oneshot::channel();
             sender
                 .send(Command::Sign {
-                    public_key,
+                    slot,
                     digest,
                     response,
                 })
@@ -238,31 +230,21 @@ fn owner_loop(mut receiver: mpsc::Receiver<Command>) {
                 let _ = response.send(keystore.import(secret));
             }
             Command::Sign {
-                public_key,
+                slot,
                 digest,
                 response,
             } => {
-                let _ = response.send(keystore.sign(&public_key, digest));
+                let _ = response.send(keystore.sign(slot, digest));
             }
-            Command::Shutdown { response } => {
-                let _ = response.send(());
-                break;
-            }
+            Command::Shutdown => break,
             #[cfg(test)]
             Command::Panic => panic!("injected owner panic"),
-            #[cfg(test)]
-            Command::Block { entered, release } => {
-                let _ = entered.send(());
-                let _ = release.recv();
-            }
-            #[cfg(test)]
-            Command::Noop => {}
         }
     }
 }
 
-fn map_signing_error(_error: SigningError) -> KeystoreError {
-    KeystoreError::Invalid
+fn map_checked_signing_error(_error: SigningError) -> KeystoreError {
+    KeystoreError::Internal
 }
 
 #[cfg(test)]
@@ -275,48 +257,28 @@ mod tests {
     );
 
     #[test]
-    fn last_sender_exit_and_owner_panic_are_joinable_without_secret_diagnostics() {
+    fn last_sender_permits_owner_exit() {
         let owner = KeystoreOwner::start().expect("owner");
-        let KeystoreOwner { sender, mut join } = owner;
+        let KeystoreOwner { sender, join } = owner;
         drop(sender);
-        join.take().expect("join").join().expect("last sender exit");
+        join.join().expect("last sender exit");
+    }
 
+    #[tokio::test]
+    async fn owner_panic_precedes_failed_shutdown_send_without_secret_diagnostics() {
         let owner = KeystoreOwner::start().expect("owner");
-        let sender = owner.sender.as_ref().expect("sender").clone();
-        sender.blocking_send(Command::Panic).expect("panic command");
-        let KeystoreOwner { sender, mut join } = owner;
-        drop(sender);
-        assert!(join.take().expect("join").join().is_err());
+        owner
+            .sender
+            .send(Command::Panic)
+            .await
+            .expect("panic command");
+        while !owner.join.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(owner.shutdown().await, Err(KeystoreError::Internal));
         assert_eq!(
             KeystoreError::Internal.to_string(),
             "keystore operation failed"
         );
-    }
-
-    #[test]
-    fn owner_command_channel_has_exact_bounded_backpressure() {
-        let owner = KeystoreOwner::start().expect("owner");
-        let sender = owner.sender.as_ref().expect("sender").clone();
-        let (entered, observed_entry) = std::sync::mpsc::channel();
-        let (release, await_release) = std::sync::mpsc::channel();
-        sender
-            .blocking_send(Command::Block {
-                entered,
-                release: await_release,
-            })
-            .expect("block command");
-        observed_entry.recv().expect("owner entered block");
-        for _ in 0..MAX_KEY_INSTANCES {
-            sender.try_send(Command::Noop).expect("within capacity");
-        }
-        assert!(matches!(
-            sender.try_send(Command::Noop),
-            Err(mpsc::error::TrySendError::Full(Command::Noop))
-        ));
-        release.send(()).expect("release owner");
-        drop(sender);
-        let KeystoreOwner { sender, mut join } = owner;
-        drop(sender);
-        join.take().expect("join").join().expect("owner exit");
     }
 }

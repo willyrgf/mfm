@@ -46,14 +46,15 @@ fn public_recovery_matches_the_frozen_key_and_digest() {
     let signature = frozen_signature();
     let expected = Secp256k1PublicKey::new(GENERATOR_PUBLIC_KEY).expect("generator key");
     assert!(
-        recover_public_key(SigningDigest::from_bytes([0x2a; 32]), signature).expect("matching key")
+        recover_public_key(SigningDigest::from_bytes([0x2a; 32]), &signature)
+            .expect("matching key")
             == expected
     );
 
     let mut other_digest = [0x2a; 32];
     other_digest[31] ^= 1;
     assert!(
-        recover_public_key(SigningDigest::from_bytes(other_digest), signature)
+        recover_public_key(SigningDigest::from_bytes(other_digest), &signature)
             .expect("another recoverable key")
             != expected
     );
