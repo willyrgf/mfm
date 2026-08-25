@@ -89,9 +89,10 @@ Operation. These domain contracts perform no provider, signing, nonce, or persis
 authority and live adapter remain separate downstream responsibilities.
 
 The live EVM transaction adapter captures one exact binding, key- and purpose-bound signer,
-append-only transaction authority, and transaction-only provider facet. Before authority or
-provider IO it compares the complete command binding and authority epoch, validates immutable
-purpose `mfm.evm.sign-eip1559@1`, and requires the public-key-derived sender to match. It reserves one provider-observed
+append-only transaction authority, and transaction-only provider facet. Registration validates the
+immutable authority epoch, purpose `mfm.evm.sign-eip1559@1`, and public-key-derived sender once.
+Before per-invocation authority or provider IO it compares the complete command binding and exact
+command value ref. It reserves one provider-observed
 pending nonce, signs the fixed type-2 payload through that handle, retains exact signed bytes, and
 reconciles receipts before retaining typed settlement. Retained bytes are fully decoded and
 compared before provider entry. A null receipt causes at most one submission of those bytes in an
@@ -114,7 +115,8 @@ broad token-call data alone retains the missing-interface SafeFailure policy.
 PostgreSQL has three fresh baselines behind two independently gated handles. Run history owns
 `mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads` in `public`; opaque versioned
 configuration custody owns `mfm_config_schema` and `config_revisions` in `mfm_config`; and EVM
-transaction authority owns its marker plus four append-only fact tables in `mfm_evm_tx`. Run heads
+transaction authority owns exactly its marker plus three append-only stage tables in `mfm_evm_tx`.
+Run heads
 also provide the mechanical RunIndex projection without parsing frames. `PostgresBackend` gates
 only run history and configuration; `PostgresEvmTransactionAuthority` owns a separate pool and
 gates only its optional schema. Every admission checks its owned exact catalog, privileges, primary
@@ -134,11 +136,15 @@ Runtime connections have no ownership or DDL authority. Existing installations a
 never migrated, repaired, re-owned, or reset.
 
 The transaction authority epoch is generated with OS cryptographic entropy in the fresh schema
-transaction and captured at backend admission. A nonce domain is exactly epoch, chain instance,
-and sender; custody-provider and endpoint identities are not nonce dimensions. Reservation
-serializes one domain with a frozen JCS advisory-lock digest and
-accepts provider pending nonce only at initial creation or exact authority-next. Reservations,
-prepared raw transactions, and terminal settlements are immutable insert-or-compare facts.
+transaction and captured by the direct admission gate. Every pooled connection repeats the full
+gate and must observe that epoch. A nonce domain is exactly epoch, chain instance, and sender;
+custody-provider and endpoint identities are not nonce dimensions. Reservation serializes one
+domain with a mechanical advisory lock and accepts provider pending nonce only at initial creation
+or exact authority-next. Reservations, prepared raw transactions, and terminal settlements are
+immutable insert-or-compare facts. One marker-driven load statement reconstructs the complete
+optional fact and rejects a wrong epoch without hiding the reservation. Different concurrently
+qualified Prepared or Settled candidates return `Unavailable` so the retained first winner is
+qualified on reload.
 Settlement bytes are current-type canonical JSON and must exactly match EffectId, command-selected
 reservation, nonce, and prepared transaction hash. Ambiguous authority COMMIT acknowledgement is
 `Unavailable`; a later `load` qualifies the committed-or-absent outcome. Writable rollback of an

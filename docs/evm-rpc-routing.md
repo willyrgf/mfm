@@ -45,17 +45,18 @@ therefore a compile error at the provider boundary rather than silent wire drift
 Transaction identity is stricter than observational routing. `EvmChainInstance` binds a nonzero
 chain ID to the expected genesis hash, and `EvmTransactionRoute` adds the endpoint ref. A complete
 Effect binding additionally fixes the transaction-authority epoch and sender account. The provider
-locator and purpose-bound signer handle remain process-local. Before authority
-or provider IO, the adapter compares the complete binding, requires the signer public key to derive
-the bound sender, and asks the separate `EvmTransactionProvider` facet to recheck chain ID and
-genesis at the selected endpoint.
+locator and purpose-bound signer handle remain process-local. Registration validates the immutable
+epoch, signing purpose, and public-key-derived sender. Each invocation compares the command binding
+and exact command value ref before IO, then asks the separate `EvmTransactionProvider` facet to
+recheck chain ID and genesis at the selected endpoint.
 
 The transaction provider exposes only checked chain-instance, pending-nonce, receipt,
 canonical-block, and exact-raw-submission operations. Execution has one loop-free sequence per
 caller invocation:
 
 1. Load the append-only authority and return settled evidence immediately when it already exists.
-2. Observe the pending nonce only when a reservation is absent, then reserve or compare the exact
+2. For any non-settled state, verify chain identity once. Observe the pending nonce only when a
+   reservation is absent, then reserve or compare the exact
    Effect ID and command reference.
 3. Sign the fixed type-2, empty-access-list transaction only when prepared bytes are absent, and
    retain its exact raw bytes and hash before provider submission.
@@ -65,7 +66,9 @@ caller invocation:
 5. On a later invocation, validate one present receipt, require its block identity to equal the
    provider's current canonical block at that number, and retain the resulting settlement.
 
-Every retry therefore reuses the same Effect ID, command, nonce, signature, hash, and raw bytes.
+Every retry therefore reuses the retained first winner's Effect ID, command, nonce, signature, hash,
+and raw bytes. A different concurrent Prepared or Settled candidate returns `Unavailable` and is
+resolved by reloading before any signer or provider retry.
 Transport duplication is allowed; authorizing a replacement or another semantic transaction is
 not. Provider errors and malformed transaction ingress are redacted `Unavailable`; a local binding,
 signer, route, or retained-authority mismatch is `Internal` before the affected provider phase.
