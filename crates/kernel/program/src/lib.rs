@@ -298,81 +298,6 @@ impl Execution {
             binding_ref,
         }
     }
-
-    /// Returns whether this declaration is Pure.
-    pub const fn is_pure(&self) -> bool {
-        matches!(self, Self::Pure)
-    }
-
-    /// Returns whether this declaration is Read.
-    pub const fn is_read(&self) -> bool {
-        matches!(self, Self::Read { .. })
-    }
-
-    /// Returns whether this declaration is Effect.
-    pub const fn is_effect(&self) -> bool {
-        matches!(self, Self::Effect { .. })
-    }
-
-    /// Returns the capability contract for a Read or Effect, if present.
-    pub fn capability_contract_ref(&self) -> Option<&ContentRef> {
-        match self {
-            Self::Pure => None,
-            Self::Read {
-                capability_contract_ref,
-                ..
-            }
-            | Self::Effect {
-                capability_contract_ref,
-                ..
-            } => Some(capability_contract_ref),
-        }
-    }
-
-    /// Returns the Read intent contract, if present.
-    pub fn intent_contract_ref(&self) -> Option<&ContentRef> {
-        match self {
-            Self::Read {
-                intent_contract_ref,
-                ..
-            } => Some(intent_contract_ref),
-            Self::Pure | Self::Effect { .. } => None,
-        }
-    }
-
-    /// Returns the Effect command contract, if present.
-    pub fn command_contract_ref(&self) -> Option<&ContentRef> {
-        match self {
-            Self::Effect {
-                command_contract_ref,
-                ..
-            } => Some(command_contract_ref),
-            Self::Pure | Self::Read { .. } => None,
-        }
-    }
-
-    /// Returns the evidence contract for a Read or Effect, if present.
-    pub fn evidence_contract_ref(&self) -> Option<&ContentRef> {
-        match self {
-            Self::Pure => None,
-            Self::Read {
-                evidence_contract_ref,
-                ..
-            }
-            | Self::Effect {
-                evidence_contract_ref,
-                ..
-            } => Some(evidence_contract_ref),
-        }
-    }
-
-    /// Returns the adapter binding reference, if present.
-    pub fn binding_ref(&self) -> Option<&ContentRef> {
-        match self {
-            Self::Pure => None,
-            Self::Read { binding_ref, .. } | Self::Effect { binding_ref, .. } => Some(binding_ref),
-        }
-    }
 }
 
 /// One checked State occurrence.
@@ -553,7 +478,7 @@ impl Program {
             &root_failure_contract_ref,
             &declarations,
         )?;
-        let wire = ProgramDocumentWire::from_parts(
+        let wire = ProgramWire::from_parts(
             &entry_point_id,
             &admitted_context_contract_ref,
             &root_success_contract_ref,
@@ -578,11 +503,11 @@ impl Program {
         }
         let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
             .map_err(|_| ProgramError::Canonical)?;
-        let raw: RawProgramDocument =
+        let wire: ProgramWire =
             serde_json::from_slice(canonical.as_bytes()).map_err(|_| ProgramError::Canonical)?;
-        let (entry_point_id, admitted, success, failure, declarations) = raw.try_checked()?;
+        let (entry_point_id, admitted, success, failure, declarations) = wire.try_checked()?;
         validate_program(&admitted, &success, &failure, &declarations)?;
-        let wire = ProgramDocumentWire::from_parts(
+        let wire = ProgramWire::from_parts(
             &entry_point_id,
             &admitted,
             &success,
@@ -702,8 +627,10 @@ fn validate_program(
     }
     let frame_weight = declarations.iter().try_fold(1_u64, |weight, declaration| {
         let declaration_weight = match declaration {
-            Declaration::State(state) if state.execution().is_effect() => 2,
-            Declaration::State(_) => 1,
+            Declaration::State(state) => match state.execution() {
+                Execution::Pure | Execution::Read { .. } => 1,
+                Execution::Effect { .. } => 2,
+            },
             Declaration::Match(_) => 0,
         };
         weight
@@ -835,7 +762,7 @@ fn checked_target(
         .ok_or(ProgramError::InvalidContract)
 }
 
-fn encode_wire(wire: &ProgramDocumentWire<'_>) -> Result<PlainCanonicalJsonBytes> {
+fn encode_wire(wire: &ProgramWire) -> Result<PlainCanonicalJsonBytes> {
     let json = serde_json::to_string(wire).map_err(|_| ProgramError::Canonical)?;
     let bytes =
         PlainCanonicalJsonBytes::from_json_str(&json).map_err(|_| ProgramError::Canonical)?;
@@ -845,153 +772,35 @@ fn encode_wire(wire: &ProgramDocumentWire<'_>) -> Result<PlainCanonicalJsonBytes
     Ok(bytes)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProgramDocumentWire<'a> {
-    domain: &'static str,
-    entry_point_id: &'a str,
-    admitted_context_contract_ref: &'a ContentRef,
-    root_success_contract_ref: &'a ContentRef,
-    root_failure_contract_ref: &'a ContentRef,
-    declarations: Vec<DeclarationWire<'a>>,
+struct ProgramWire {
+    domain: String,
+    entry_point_id: EntryPointId,
+    admitted_context_contract_ref: ContentRef,
+    root_success_contract_ref: ContentRef,
+    root_failure_contract_ref: ContentRef,
+    declarations: Vec<DeclarationWire>,
 }
 
-impl<'a> ProgramDocumentWire<'a> {
+impl ProgramWire {
     fn from_parts(
-        entry_point_id: &'a EntryPointId,
-        admitted: &'a ContentRef,
-        success: &'a ContentRef,
-        failure: &'a ContentRef,
-        declarations: &'a [Declaration],
+        entry_point_id: &EntryPointId,
+        admitted: &ContentRef,
+        success: &ContentRef,
+        failure: &ContentRef,
+        declarations: &[Declaration],
     ) -> Self {
         Self {
-            domain: "mfm.program.v3",
-            entry_point_id: entry_point_id.as_str(),
-            admitted_context_contract_ref: admitted,
-            root_success_contract_ref: success,
-            root_failure_contract_ref: failure,
+            domain: "mfm.program.v3".to_owned(),
+            entry_point_id: entry_point_id.clone(),
+            admitted_context_contract_ref: admitted.clone(),
+            root_success_contract_ref: success.clone(),
+            root_failure_contract_ref: failure.clone(),
             declarations: declarations.iter().map(DeclarationWire::from).collect(),
         }
     }
-}
 
-#[derive(Serialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-enum DeclarationWire<'a> {
-    State(StateWire<'a>),
-    Match(MatchWire<'a>),
-}
-
-impl<'a> From<&'a Declaration> for DeclarationWire<'a> {
-    fn from(value: &'a Declaration) -> Self {
-        match value {
-            Declaration::State(state) => Self::State(StateWire::from(state)),
-            Declaration::Match(selector) => Self::Match(MatchWire {
-                selector_contract_ref: selector.selector_contract_ref(),
-                variants: selector
-                    .variants()
-                    .iter()
-                    .map(|variant| MatchVariantWire {
-                        tag: variant.tag().as_str(),
-                        entry_index: variant.entry_index(),
-                    })
-                    .collect(),
-            }),
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct StateWire<'a> {
-    state_implementation_ref: &'a ContentRef,
-    input_contract_ref: &'a ContentRef,
-    output_contract_ref: &'a ContentRef,
-    failure_contract_ref: &'a ContentRef,
-    execution: ExecutionWire<'a>,
-    next_index: Option<u16>,
-    failure_next_index: Option<u16>,
-}
-
-impl<'a> From<&'a StateDeclaration> for StateWire<'a> {
-    fn from(state: &'a StateDeclaration) -> Self {
-        Self {
-            state_implementation_ref: state.state_implementation_ref(),
-            input_contract_ref: state.input_contract_ref(),
-            output_contract_ref: state.output_contract_ref(),
-            failure_contract_ref: state.failure_contract_ref(),
-            execution: match &state.execution {
-                Execution::Pure => ExecutionWire::Pure,
-                Execution::Read {
-                    capability_contract_ref,
-                    intent_contract_ref,
-                    evidence_contract_ref,
-                    binding_ref,
-                } => ExecutionWire::Read {
-                    capability_contract_ref,
-                    intent_contract_ref,
-                    evidence_contract_ref,
-                    binding_ref,
-                },
-                Execution::Effect {
-                    capability_contract_ref,
-                    command_contract_ref,
-                    evidence_contract_ref,
-                    binding_ref,
-                } => ExecutionWire::Effect {
-                    capability_contract_ref,
-                    command_contract_ref,
-                    evidence_contract_ref,
-                    binding_ref,
-                },
-            },
-            next_index: state.next_index(),
-            failure_next_index: state.failure_next_index(),
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum ExecutionWire<'a> {
-    Pure,
-    Read {
-        capability_contract_ref: &'a ContentRef,
-        intent_contract_ref: &'a ContentRef,
-        evidence_contract_ref: &'a ContentRef,
-        binding_ref: &'a ContentRef,
-    },
-    Effect {
-        capability_contract_ref: &'a ContentRef,
-        command_contract_ref: &'a ContentRef,
-        evidence_contract_ref: &'a ContentRef,
-        binding_ref: &'a ContentRef,
-    },
-}
-
-#[derive(Serialize)]
-struct MatchWire<'a> {
-    selector_contract_ref: &'a ContentRef,
-    variants: Vec<MatchVariantWire<'a>>,
-}
-
-#[derive(Serialize)]
-struct MatchVariantWire<'a> {
-    tag: &'a str,
-    entry_index: u16,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawProgramDocument {
-    domain: String,
-    entry_point_id: String,
-    admitted_context_contract_ref: RawContentRef,
-    root_success_contract_ref: RawContentRef,
-    root_failure_contract_ref: RawContentRef,
-    declarations: Vec<RawDeclaration>,
-}
-
-impl RawProgramDocument {
     fn try_checked(
         self,
     ) -> Result<(
@@ -1004,91 +813,143 @@ impl RawProgramDocument {
         if self.domain != "mfm.program.v3" {
             return Err(ProgramError::InvalidContract);
         }
-        let entry =
-            EntryPointId::new(self.entry_point_id).map_err(|_| ProgramError::InvalidContract)?;
-        let admitted = self.admitted_context_contract_ref.try_checked()?;
-        let success = self.root_success_contract_ref.try_checked()?;
-        let failure = self.root_failure_contract_ref.try_checked()?;
         let declarations = self
             .declarations
             .into_iter()
-            .map(RawDeclaration::try_checked)
+            .map(DeclarationWire::try_checked)
             .collect::<Result<Vec<_>>>()?;
-        Ok((entry, admitted, success, failure, declarations))
+        Ok((
+            self.entry_point_id,
+            self.admitted_context_contract_ref,
+            self.root_success_contract_ref,
+            self.root_failure_contract_ref,
+            declarations,
+        ))
     }
 }
 
-#[derive(Deserialize)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-enum RawDeclaration {
-    State(Box<RawState>),
-    Match(RawMatch),
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+enum DeclarationWire {
+    State(Box<StateWire>),
+    Match(MatchWire),
 }
 
-impl RawDeclaration {
+impl From<&Declaration> for DeclarationWire {
+    fn from(value: &Declaration) -> Self {
+        match value {
+            Declaration::State(state) => Self::State(Box::new(StateWire::from(state))),
+            Declaration::Match(selector) => Self::Match(MatchWire {
+                selector_contract_ref: selector.selector_contract_ref().clone(),
+                variants: selector
+                    .variants()
+                    .iter()
+                    .map(|variant| MatchVariantWire {
+                        tag: variant.tag().clone(),
+                        entry_index: variant.entry_index(),
+                    })
+                    .collect(),
+            }),
+        }
+    }
+}
+
+impl DeclarationWire {
     fn try_checked(self) -> Result<Declaration> {
         match self {
-            Self::State(state) => state.try_checked().map(Declaration::State),
+            Self::State(state) => Ok(Declaration::State(state.into_checked())),
             Self::Match(selector) => selector.try_checked().map(Declaration::Match),
         }
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawState {
-    state_implementation_ref: RawContentRef,
-    input_contract_ref: RawContentRef,
-    output_contract_ref: RawContentRef,
-    failure_contract_ref: RawContentRef,
-    execution: RawExecution,
+struct StateWire {
+    state_implementation_ref: ContentRef,
+    input_contract_ref: ContentRef,
+    output_contract_ref: ContentRef,
+    failure_contract_ref: ContentRef,
+    execution: ExecutionWire,
     next_index: RequiredOption<u16>,
     failure_next_index: RequiredOption<u16>,
 }
 
-impl RawState {
-    fn try_checked(self) -> Result<StateDeclaration> {
-        Ok(StateDeclaration::new(
-            self.state_implementation_ref.try_checked()?,
-            self.input_contract_ref.try_checked()?,
-            self.output_contract_ref.try_checked()?,
-            self.failure_contract_ref.try_checked()?,
-            self.execution.try_checked()?,
-            self.next_index.0,
-            self.failure_next_index.0,
-        ))
+impl From<&StateDeclaration> for StateWire {
+    fn from(state: &StateDeclaration) -> Self {
+        Self {
+            state_implementation_ref: state.state_implementation_ref().clone(),
+            input_contract_ref: state.input_contract_ref().clone(),
+            output_contract_ref: state.output_contract_ref().clone(),
+            failure_contract_ref: state.failure_contract_ref().clone(),
+            execution: match &state.execution {
+                Execution::Pure => ExecutionWire::Pure,
+                Execution::Read {
+                    capability_contract_ref,
+                    intent_contract_ref,
+                    evidence_contract_ref,
+                    binding_ref,
+                } => ExecutionWire::Read {
+                    capability_contract_ref: capability_contract_ref.clone(),
+                    intent_contract_ref: intent_contract_ref.clone(),
+                    evidence_contract_ref: evidence_contract_ref.clone(),
+                    binding_ref: binding_ref.clone(),
+                },
+                Execution::Effect {
+                    capability_contract_ref,
+                    command_contract_ref,
+                    evidence_contract_ref,
+                    binding_ref,
+                } => ExecutionWire::Effect {
+                    capability_contract_ref: capability_contract_ref.clone(),
+                    command_contract_ref: command_contract_ref.clone(),
+                    evidence_contract_ref: evidence_contract_ref.clone(),
+                    binding_ref: binding_ref.clone(),
+                },
+            },
+            next_index: RequiredOption(state.next_index()),
+            failure_next_index: RequiredOption(state.failure_next_index()),
+        }
     }
 }
 
-#[derive(Deserialize)]
-struct RequiredOption<T>(Option<T>);
+impl StateWire {
+    fn into_checked(self) -> StateDeclaration {
+        StateDeclaration::new(
+            self.state_implementation_ref,
+            self.input_contract_ref,
+            self.output_contract_ref,
+            self.failure_contract_ref,
+            self.execution.into_execution(),
+            self.next_index.0,
+            self.failure_next_index.0,
+        )
+    }
+}
 
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum RawExecution {
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+enum ExecutionWire {
     Pure,
     Read {
-        capability_contract_ref: RawContentRef,
-        intent_contract_ref: RawContentRef,
-        evidence_contract_ref: RawContentRef,
-        binding_ref: RawContentRef,
+        capability_contract_ref: ContentRef,
+        intent_contract_ref: ContentRef,
+        evidence_contract_ref: ContentRef,
+        binding_ref: ContentRef,
     },
     Effect {
-        capability_contract_ref: RawContentRef,
-        command_contract_ref: RawContentRef,
-        evidence_contract_ref: RawContentRef,
-        binding_ref: RawContentRef,
+        capability_contract_ref: ContentRef,
+        command_contract_ref: ContentRef,
+        evidence_contract_ref: ContentRef,
+        binding_ref: ContentRef,
     },
 }
 
-impl RawExecution {
-    fn try_checked(self) -> Result<Execution> {
-        Ok(match self {
+impl ExecutionWire {
+    fn into_execution(self) -> Execution {
+        match self {
             Self::Pure => Execution::pure(),
             Self::Read {
                 capability_contract_ref,
@@ -1096,10 +957,10 @@ impl RawExecution {
                 evidence_contract_ref,
                 binding_ref,
             } => Execution::read(
-                capability_contract_ref.try_checked()?,
-                intent_contract_ref.try_checked()?,
-                evidence_contract_ref.try_checked()?,
-                binding_ref.try_checked()?,
+                capability_contract_ref,
+                intent_contract_ref,
+                evidence_contract_ref,
+                binding_ref,
             ),
             Self::Effect {
                 capability_contract_ref,
@@ -1107,31 +968,30 @@ impl RawExecution {
                 evidence_contract_ref,
                 binding_ref,
             } => Execution::effect(
-                capability_contract_ref.try_checked()?,
-                command_contract_ref.try_checked()?,
-                evidence_contract_ref.try_checked()?,
-                binding_ref.try_checked()?,
+                capability_contract_ref,
+                command_contract_ref,
+                evidence_contract_ref,
+                binding_ref,
             ),
-        })
+        }
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawMatch {
-    selector_contract_ref: RawContentRef,
-    variants: Vec<RawMatchVariant>,
+struct MatchWire {
+    selector_contract_ref: ContentRef,
+    variants: Vec<MatchVariantWire>,
 }
 
-impl RawMatch {
+impl MatchWire {
     fn try_checked(self) -> Result<MatchDeclaration> {
-        let selector = self.selector_contract_ref.try_checked()?;
         let variants = self
             .variants
             .into_iter()
-            .map(RawMatchVariant::try_checked)
-            .collect::<Result<Vec<_>>>()?;
-        let checked = MatchDeclaration::new(selector, variants.clone())?;
+            .map(|variant| MatchVariant::new(variant.tag, variant.entry_index))
+            .collect::<Vec<_>>();
+        let checked = MatchDeclaration::new(self.selector_contract_ref, variants.clone())?;
         if checked.variants != variants {
             return Err(ProgramError::InvalidContract);
         }
@@ -1139,34 +999,13 @@ impl RawMatch {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawMatchVariant {
-    tag: String,
+struct MatchVariantWire {
+    tag: StableId,
     entry_index: u16,
 }
 
-impl RawMatchVariant {
-    fn try_checked(self) -> Result<MatchVariant> {
-        Ok(MatchVariant::new(
-            StableId::new(self.tag).map_err(|_| ProgramError::InvalidContract)?,
-            self.entry_index,
-        ))
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawContentRef {
-    schema_id: String,
-    content_digest: String,
-}
-
-impl RawContentRef {
-    fn try_checked(self) -> Result<ContentRef> {
-        let schema = SchemaId::parse(self.schema_id).map_err(|_| ProgramError::InvalidContract)?;
-        let digest = mfm_ids::ContentDigest::parse(self.content_digest)
-            .map_err(|_| ProgramError::InvalidContract)?;
-        ContentRef::new(schema, digest).map_err(|_| ProgramError::InvalidContract)
-    }
-}
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+struct RequiredOption<T>(Option<T>);
