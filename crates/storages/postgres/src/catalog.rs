@@ -57,7 +57,7 @@ pub(crate) const RUN_SURFACE: PgSurfaceSpec = PgSurfaceSpec {
             name: "mfm_store_schema",
             columns: &[column(1, "schema_contract", "text", -1, true, Some("C"))],
             constraints: &[
-                constraint("mfm_store_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.run-history-postgres.v2'::text))"),
+                constraint("mfm_store_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.run-history-postgres.v1'::text))"),
                 constraint("mfm_store_schema_pkey", "p", "PRIMARY KEY (schema_contract)"),
             ],
             indexes: &[index("mfm_store_schema_pkey", "CREATE UNIQUE INDEX mfm_store_schema_pkey ON public.mfm_store_schema USING btree (schema_contract)")],

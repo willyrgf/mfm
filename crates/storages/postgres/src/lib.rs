@@ -21,7 +21,7 @@ use mfm_store::{AppendResult, RunIndex, RunIndexError, RunPage, RunPageLimit, St
 use sqlx::postgres::{PgArguments, PgPoolOptions, PgRow};
 use sqlx::{Arguments, Connection, PgConnection, PgPool, Row};
 
-const SCHEMA_CONTRACT: &str = "mfm.run-history-postgres.v2";
+const SCHEMA_CONTRACT: &str = "mfm.run-history-postgres.v1";
 
 mod catalog;
 mod config;
@@ -985,7 +985,7 @@ fn classify_precommit_sql(error: sqlx::Error) -> StoreError {
 
 fn assert_send_static<T: Send + 'static>() {}
 
-const RUN_SCHEMA_SQL: &str = include_str!("../migrations/run_history_postgres_v2.sql");
+const RUN_SCHEMA_SQL: &str = include_str!("../migrations/run_history_postgres_v1.sql");
 const CONFIG_SCHEMA_SQL: &str = include_str!("../migrations/config_postgres_v2.sql");
 
 #[cfg(test)]
