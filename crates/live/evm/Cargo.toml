@@ -19,8 +19,9 @@ mfm-ids = { path = "../../kernel/ids" }
 mfm-runtime = { path = "../../kernel/runtime" }
 mfm-signing = { path = "../../signing" }
 mfm-values = { path = "../../kernel/values" }
+alloy-consensus = { workspace = true }
+alloy-eips = { workspace = true }
 alloy-primitives = { workspace = true }
-alloy-rlp = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

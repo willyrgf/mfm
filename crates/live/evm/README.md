@@ -28,10 +28,12 @@ Anchored block absence is SafeFailure, codeless target is Rejected, and replacem
 block is authenticated IntegrityBlocked evidence. Local operation, route, binding, signer purpose,
 public-key-derived sender, or retained-authority mismatch is Internal before authority/provider IO.
 
-The pure codec pins `alloy-rlp` 0.3.16 and directly encodes/decodes the fixed empty-access-list
-EIP-1559 form. It rejects noncanonical/trailing RLP and verifies every retained field, transaction
-hash, recovery parity, recovered public key, and sender. Keccak helpers expose only checked public
-hash/address results; private key custody remains in `mfm-keystore`.
+The pure codec maps the checked domain command into pinned `alloy-consensus` 1.6.1 `TxEip1559`
+values. Alloy owns signed EIP-2718 encoding, exact decoding, transaction hashing, and CREATE-address
+derivation. The adapter still rejects the wrong transaction type, non-exact or command-mismatched
+retained bytes, invalid or high-S signatures, wrong hashes, recovered-key mismatches, and sender
+mismatches. Keccak helpers expose only checked public hash/address results; private key custody
+remains in `mfm-keystore`.
 
 Transaction execution is caller-driven and loop-free. It loads authority first, reserves one
 pending nonce, signs once through the captured immutable-purpose handle, retains exact raw bytes,
@@ -42,10 +44,14 @@ transport failure, a dropped acknowledgement, malformed ingress, or a mismatched
 canonical block observation. Settled evidence is an authority fast path with no signer/provider
 call. Dropped futures resume from the append-only reservation/preparation/settlement facts.
 
-This is the ONLY crate allowed to depend on `alloy-*`. Custody is option-invariant and the frozen
-wire codecs (U256/hex, ABI, RLP, keccak) live in alloy's stable pure-Rust core; the provider half of
-alloy churns and would drag a TLS/cmake build into the pinned Nix sandbox. `alloy-provider`,
-`alloy-network`, `alloy-rpc-types`, and `alloy-signer` are excluded. Verify with
+This is the ONLY crate allowed to depend on `alloy-*`. The direct `alloy-consensus` and
+`alloy-eips` dependencies are pinned to 1.6.1; the latter exposes the public EIP-2718 traits already
+present in the consensus dependency graph. The confirmed normal tree adds Alloy's EIP, trie, RLP,
+and transaction-macro support, while the selected feature tree activates no Alloy `k256`,
+`secp256k1`, `c-kzg`, or `blst` backend. That bounded cost replaces the consensus-critical custom
+unsigned/signed type-2 RLP implementation and its duplicate parser tests. The provider half of Alloy
+would add unrelated transport and RPC surface, so `alloy-provider`, `alloy-network`,
+`alloy-rpc-types`, and `alloy-signer` remain excluded. Verify with
 `cargo tree -e features -p mfm-evm-live`.
 
 The crate registers callbacks but owns no State registration, planner, binding wrapper, response
