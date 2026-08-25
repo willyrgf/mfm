@@ -153,19 +153,13 @@ impl From<&StateDeclaration> for StateAbiKey {
     }
 }
 
-pub(crate) type PureStart =
-    for<'a> fn(QualifiedValue, DriverContext<'a>) -> BoxFuture<'a, Result<DriverDisposition>>;
+pub(crate) type StateStart =
+    for<'a> fn(DriverContext<'a>) -> BoxFuture<'a, Result<DriverDisposition>>;
 pub(crate) type ReadStart = for<'a> fn(
-    QualifiedValue,
     DriverContext<'a>,
     Arc<ErasedReadAdapterCallback>,
 ) -> BoxFuture<'a, Result<DriverDisposition>>;
-pub(crate) type EffectPrepareStart =
-    for<'a> fn(QualifiedValue, DriverContext<'a>) -> BoxFuture<'a, Result<DriverDisposition>>;
 pub(crate) type EffectPendingStart = for<'a> fn(
-    QualifiedValue,
-    EffectId,
-    QualifiedValue,
     DriverContext<'a>,
     Arc<ErasedEffectAdapterCallback>,
 ) -> BoxFuture<'a, Result<DriverDisposition>>;
@@ -180,7 +174,7 @@ struct RegisteredState {
 
 enum RegisteredMode {
     Pure {
-        start: PureStart,
+        start: StateStart,
     },
     Read {
         capability_contract_ref: ContentRef,
@@ -189,7 +183,7 @@ enum RegisteredMode {
     },
     Effect {
         capability_contract_ref: ContentRef,
-        prepare: EffectPrepareStart,
+        prepare: StateStart,
         start_pending: EffectPendingStart,
         validate_prepare: EffectPrepareValidator,
         validate_evidence: EffectEvidenceValidator,
@@ -229,14 +223,12 @@ impl RegisteredState {
 }
 
 fn start_pure<'a, S: PureState>(
-    input: QualifiedValue,
     context: DriverContext<'a>,
 ) -> BoxFuture<'a, Result<DriverDisposition>> {
-    Box::pin(engine::start_pure::<S>(input, context))
+    Box::pin(engine::start_pure::<S>(context))
 }
 
 fn start_read<'a, S, C>(
-    input: QualifiedValue,
     context: DriverContext<'a>,
     adapter: Arc<ErasedReadAdapterCallback>,
 ) -> BoxFuture<'a, Result<DriverDisposition>>
@@ -244,7 +236,7 @@ where
     S: ReadState<C>,
     C: ReadCapabilityContract,
 {
-    Box::pin(engine::start_read::<S, C>(input, context, adapter))
+    Box::pin(engine::start_read::<S, C>(context, adapter))
 }
 
 fn validate_read<C: ReadCapabilityContract>(
@@ -263,21 +255,15 @@ fn validate_read<C: ReadCapabilityContract>(
         .map_err(|_| RuntimeError::InvalidHistory)
 }
 
-fn prepare_effect<'a, S, C>(
-    input: QualifiedValue,
-    context: DriverContext<'a>,
-) -> BoxFuture<'a, Result<DriverDisposition>>
+fn prepare_effect<'a, S, C>(context: DriverContext<'a>) -> BoxFuture<'a, Result<DriverDisposition>>
 where
     S: EffectState<C>,
     C: EffectCapabilityContract,
 {
-    Box::pin(engine::start_effect::<S, C>(input, context))
+    Box::pin(engine::start_effect::<S, C>(context))
 }
 
 fn start_pending_effect<'a, S, C>(
-    input: QualifiedValue,
-    effect_id: EffectId,
-    command: QualifiedValue,
     context: DriverContext<'a>,
     adapter: Arc<ErasedEffectAdapterCallback>,
 ) -> BoxFuture<'a, Result<DriverDisposition>>
@@ -285,9 +271,7 @@ where
     S: EffectState<C>,
     C: EffectCapabilityContract,
 {
-    Box::pin(engine::start_pending_effect::<S, C>(
-        input, effect_id, command, context, adapter,
-    ))
+    Box::pin(engine::start_pending_effect::<S, C>(context, adapter))
 }
 
 fn validate_effect_prepare<S, C>(input: &QualifiedValue, command: &QualifiedValue) -> Result<()>
@@ -930,7 +914,7 @@ pub(crate) struct ExecutableState {
 
 pub(crate) enum ExecutableMode {
     Pure {
-        start: PureStart,
+        start: StateStart,
     },
     Read {
         start: ReadStart,
@@ -940,7 +924,7 @@ pub(crate) enum ExecutableMode {
         evidence_codec: Arc<ValueCodec>,
     },
     Effect {
-        prepare: EffectPrepareStart,
+        prepare: StateStart,
         start_pending: EffectPendingStart,
         validate_prepare: EffectPrepareValidator,
         validate_evidence: EffectEvidenceValidator,
