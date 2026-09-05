@@ -5,8 +5,8 @@ use mfm_ids::{
 };
 use mfm_program::{
     capability_contract_ref, expand_program, nominal_contract_ref, state_implementation_ref,
-    CapabilityInjection, Declaration, EffectState, Execution, InjectionWriter, MatchDeclaration,
-    MatchVariant, Never, Operation, OperationExpansion, PreparationError, Program, ProgramError,
+    CapabilityInjection, Declaration, EffectState, Execution, MatchDeclaration, MatchVariant,
+    Never, Operation, OperationExpansion, PreparationError, Program, ProgramError,
     ProposedStateOutcome, PureState, State, StateDeclaration,
 };
 use mfm_program_derive::MfmValue;
@@ -178,6 +178,7 @@ impl CapabilityInjection<IdentityEffectState> for IdentityEffect {
     type Setup = Value;
     type ExpandedInput = Value;
     type ExpandedOutput = Value;
+    type ExpandedFailure = <IdentityEffectState as crate::State>::Failure;
 
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         mfm_values::canonicalize_mfm_value(setup)
@@ -235,6 +236,7 @@ impl CapabilityInjection<SupportedEffectState> for IdentityEffect {
     type Setup = Value;
     type ExpandedInput = Value;
     type ExpandedOutput = Value;
+    type ExpandedFailure = <SupportedEffectState as crate::State>::Failure;
 
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         mfm_values::canonicalize_mfm_value(setup)
@@ -242,11 +244,17 @@ impl CapabilityInjection<SupportedEffectState> for IdentityEffect {
             .map_err(|_| ProgramError::InvalidContract)
     }
 
-    fn write_before(_setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
+    fn write_before(
+        _setup: &Self::Setup,
+        writer: &mut OperationExpansion<Value, Value, Value>,
+    ) -> mfm_program::Result<()> {
         writer.pure::<LeftIdentityState>()
     }
 
-    fn write_after(_setup: &Self::Setup, writer: &mut InjectionWriter) -> mfm_program::Result<()> {
+    fn write_after(
+        _setup: &Self::Setup,
+        writer: &mut OperationExpansion<Value, Value, Value>,
+    ) -> mfm_program::Result<()> {
         writer.pure::<RightIdentityState>()
     }
 }

@@ -1033,6 +1033,7 @@ impl<K: MfmValueTrait> CapabilityInjection<ExecuteEvmTransaction<K>> for EvmTran
     type Setup = EvmTransactionBinding;
     type ExpandedInput = EvmTransactionContext<K>;
     type ExpandedOutput = EvmTransactionCompletion<K>;
+    type ExpandedFailure = <ExecuteEvmTransaction<K> as mfm_program::State>::Failure;
 
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         setup

@@ -277,6 +277,7 @@ impl CapabilityInjection<Observe> for Observation {
     type Setup = Binding;
     type ExpandedInput = Number;
     type ExpandedOutput = Number;
+    type ExpandedFailure = <Observe as mfm_program::State>::Failure;
 
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<mfm_ids::ContentRef> {
         canonicalize_mfm_value(setup)
@@ -394,6 +395,7 @@ impl CapabilityInjection<Mutate> for Mutation {
     type Setup = Binding;
     type ExpandedInput = Number;
     type ExpandedOutput = Number;
+    type ExpandedFailure = <Mutate as mfm_program::State>::Failure;
 
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<mfm_ids::ContentRef> {
         canonicalize_mfm_value(setup)
@@ -1866,3 +1868,6 @@ async fn store_failures_map_by_load_or_append_authority() {
         ));
     }
 }
+
+#[path = "support/injection.rs"]
+mod injection;

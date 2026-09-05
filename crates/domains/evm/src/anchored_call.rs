@@ -569,6 +569,7 @@ impl<K: MfmValueTrait> CapabilityInjection<ReadAnchoredContractCall<K>>
     type Setup = EvmTransactionRoute;
     type ExpandedInput = AnchoredContractCallContext<K>;
     type ExpandedOutput = AnchoredContractCallCompletion<K>;
+    type ExpandedFailure = <ReadAnchoredContractCall<K> as mfm_program::State>::Failure;
 
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         setup

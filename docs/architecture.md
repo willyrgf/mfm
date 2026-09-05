@@ -95,7 +95,7 @@ compiler, Runtime, adapter, Store, cancellation, or panic failures. Runtime, Jou
 never receive Operations, authoring setup, callbacks, or scope metadata.
 
 Operation implementations compose children only through `OperationExpansion`, and capability
-policies emit support States only through `InjectionWriter`. Direct trait callback calls bypass
+policies use typed `OperationExpansion` scopes for their before and after graphs. Direct trait callback calls bypass
 kernel callback accounting and are forbidden in reviewed production code. This trusted-code rule
 is not a security or authorization boundary; checked Program construction remains the persisted
 graph boundary.
