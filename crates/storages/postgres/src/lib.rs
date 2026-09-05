@@ -305,7 +305,7 @@ async fn verify_evm_connection(
 
 async fn verify_run_marker(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
     let markers: Vec<String> =
-        sqlx::query_scalar("SELECT schema_contract FROM public.mfm_store_schema ORDER BY 1")
+        sqlx::query_scalar("SELECT schema_contract FROM ONLY public.mfm_store_schema ORDER BY 1")
             .fetch_all(&mut *connection)
             .await
             .map_err(classify_catalog_query)?;
@@ -315,11 +315,12 @@ async fn verify_run_marker(connection: &mut PgConnection) -> std::result::Result
 }
 
 async fn verify_config_marker(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
-    let markers: Vec<String> =
-        sqlx::query_scalar("SELECT schema_contract FROM mfm_config.mfm_config_schema ORDER BY 1")
-            .fetch_all(&mut *connection)
-            .await
-            .map_err(classify_catalog_query)?;
+    let markers: Vec<String> = sqlx::query_scalar(
+        "SELECT schema_contract FROM ONLY mfm_config.mfm_config_schema ORDER BY 1",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(classify_catalog_query)?;
     (markers == ["mfm.config-postgres.v2"])
         .then_some(())
         .ok_or(GateError::Incompatible)
@@ -431,8 +432,8 @@ async fn load_run(
     let head = sqlx::query(
         "SELECT h.run_id, h.head_sequence, h.total_bytes, \
                 f.frame_bytes, f.head_digest \
-         FROM public.mfm_run_heads h \
-         LEFT JOIN public.mfm_run_frames f \
+         FROM ONLY public.mfm_run_heads h \
+         LEFT JOIN ONLY public.mfm_run_frames f \
            ON f.run_id = h.run_id AND f.run_sequence = h.head_sequence \
          WHERE h.run_id = $1",
     )
@@ -443,7 +444,7 @@ async fn load_run(
 
     let Some(head) = head else {
         let orphan: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM public.mfm_run_frames WHERE run_id = $1)",
+            "SELECT EXISTS(SELECT 1 FROM ONLY public.mfm_run_frames WHERE run_id = $1)",
         )
         .bind(run_id.as_str())
         .fetch_one(&mut *transaction)
@@ -483,7 +484,7 @@ async fn load_run(
     let aggregate: (i64, Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
         "SELECT count(*)::bigint, min(run_sequence), max(run_sequence), \
                 sum(octet_length(frame_bytes))::bigint \
-         FROM public.mfm_run_frames WHERE run_id = $1",
+         FROM ONLY public.mfm_run_frames WHERE run_id = $1",
     )
     .bind(run_id.as_str())
     .fetch_one(&mut *transaction)
@@ -499,7 +500,7 @@ async fn load_run(
     }
     let rows = sqlx::query(
         "SELECT run_id, run_sequence, frame_bytes, head_digest \
-         FROM public.mfm_run_frames WHERE run_id = $1 ORDER BY run_sequence",
+         FROM ONLY public.mfm_run_frames WHERE run_id = $1 ORDER BY run_sequence",
     )
     .bind(run_id.as_str())
     .fetch_all(&mut *transaction)
@@ -610,8 +611,8 @@ async fn append_run(
     let head = sqlx::query(
         "SELECT h.run_id, h.head_sequence, h.total_bytes, \
                 f.frame_bytes, f.head_digest \
-         FROM public.mfm_run_heads h \
-         LEFT JOIN public.mfm_run_frames f \
+         FROM ONLY public.mfm_run_heads h \
+         LEFT JOIN ONLY public.mfm_run_frames f \
            ON f.run_id = h.run_id AND f.run_sequence = h.head_sequence \
          WHERE h.run_id = $1",
     )
@@ -621,7 +622,7 @@ async fn append_run(
     .map_err(|_| StoreError::Unavailable)?;
     let target = sqlx::query(
         "SELECT run_id, run_sequence, frame_bytes, head_digest \
-         FROM public.mfm_run_frames WHERE run_id = $1 AND run_sequence = $2",
+         FROM ONLY public.mfm_run_frames WHERE run_id = $1 AND run_sequence = $2",
     )
     .bind(&run_id)
     .bind(sequence)
@@ -629,11 +630,13 @@ async fn append_run(
     .await
     .map_err(|_| StoreError::Unavailable)?;
     let any_frame = if head.is_none() {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.mfm_run_frames WHERE run_id = $1)")
-            .bind(&run_id)
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(|_| StoreError::Unavailable)?
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM ONLY public.mfm_run_frames WHERE run_id = $1)",
+        )
+        .bind(&run_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| StoreError::Unavailable)?
     } else {
         false
     };
@@ -695,7 +698,7 @@ async fn append_run(
         }
         CommitFault::Rejected => {
             sqlx::query(
-                "DELETE FROM public.mfm_run_frames \
+                "DELETE FROM ONLY public.mfm_run_frames \
                  WHERE run_id = $1 AND run_sequence = $2",
             )
             .bind(&run_id)

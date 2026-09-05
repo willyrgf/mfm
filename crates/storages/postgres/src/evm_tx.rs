@@ -319,12 +319,12 @@ async fn load_state(
                 reservation.chain_id::text, reservation.genesis_hash, reservation.sender, \
                 reservation.reserved_nonce::text, \
                 prepared.transaction_hash, prepared.raw_transaction, settled.settlement_bytes \
-         FROM mfm_evm_tx.mfm_evm_tx_schema AS marker \
-         LEFT JOIN mfm_evm_tx.nonce_reservations AS reservation \
+         FROM ONLY mfm_evm_tx.mfm_evm_tx_schema AS marker \
+         LEFT JOIN ONLY mfm_evm_tx.nonce_reservations AS reservation \
            ON reservation.effect_id = $1 \
-         LEFT JOIN mfm_evm_tx.prepared_transactions AS prepared \
+         LEFT JOIN ONLY mfm_evm_tx.prepared_transactions AS prepared \
            ON prepared.effect_id = reservation.effect_id \
-         LEFT JOIN mfm_evm_tx.transaction_settlements AS settled \
+         LEFT JOIN ONLY mfm_evm_tx.transaction_settlements AS settled \
            ON settled.effect_id = prepared.effect_id",
     )
     .bind(effect_id.as_str())
@@ -442,7 +442,7 @@ async fn latest_reservation_effect(
     let genesis = key.chain_instance().expected_genesis_hash().as_bytes();
     let sender = key.sender().as_bytes();
     let retained: Option<String> = sqlx::query_scalar(
-        "SELECT effect_id FROM mfm_evm_tx.nonce_reservations \
+        "SELECT effect_id FROM ONLY mfm_evm_tx.nonce_reservations \
          WHERE authority_epoch = $1 AND chain_id = $2::numeric \
            AND genesis_hash = $3 AND sender = $4 \
          ORDER BY reserved_nonce DESC LIMIT 1",
@@ -553,7 +553,7 @@ pub(crate) async fn load_evm_tx_epoch(
     connection: &mut PgConnection,
 ) -> Result<EvmAuthorityEpoch, GateError> {
     let markers: Vec<(String, Vec<u8>)> = sqlx::query_as(
-        "SELECT schema_contract, authority_epoch FROM mfm_evm_tx.mfm_evm_tx_schema ORDER BY 1",
+        "SELECT schema_contract, authority_epoch FROM ONLY mfm_evm_tx.mfm_evm_tx_schema ORDER BY 1",
     )
     .fetch_all(&mut *connection)
     .await

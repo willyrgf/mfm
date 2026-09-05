@@ -12,8 +12,8 @@ pub(super) async fn list_runs(
     let query_limit = i64::try_from(limit.get() + 1).map_err(|_| RunIndexError::Corrupt)?;
     let rows = sqlx::query(
         "SELECT h.run_id, h.head_sequence, f.head_digest, h.total_bytes \
-         FROM public.mfm_run_heads h \
-         JOIN public.mfm_run_frames f \
+         FROM ONLY public.mfm_run_heads h \
+         JOIN ONLY public.mfm_run_frames f \
            ON f.run_id = h.run_id AND f.run_sequence = h.head_sequence \
          WHERE h.run_id > $1 ORDER BY h.run_id COLLATE \"C\" LIMIT $2",
     )

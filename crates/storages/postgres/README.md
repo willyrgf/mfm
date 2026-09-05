@@ -56,3 +56,9 @@ installations are verified and never migrated, repaired, re-owned, reset, or dow
 same-crate tests run serially through `postgres-test` against a real loopback-only `hostnossl`
 server and split authority, including hostile catalog and ACL mutations that every independent pool
 must reject.
+
+PostgreSQL data reads and deletes target schema-qualified `ONLY` relations. Inserts and conflict
+updates target the named physical table. Inherited descendants outside the owned schemas are
+outside MFM custody: their rows cannot affect markers, history, configuration, or transaction
+authority, and exact configuration deletion cannot remove their rows. Admission continues to
+qualify the owned objects; it does not police unrelated inheritance descendants.

@@ -11,7 +11,7 @@ pub(super) async fn load_config(
 ) -> Result<Option<ConfigRevision>, ConfigRepositoryError> {
     sqlx::query(
         "SELECT config_name, config_digest, canonical \
-         FROM mfm_config.config_revisions \
+         FROM ONLY mfm_config.config_revisions \
          WHERE config_name = $1 AND config_digest = $2",
     )
     .bind(name.as_str())
@@ -28,7 +28,7 @@ pub(super) async fn list_configs(
 ) -> Result<Vec<ConfigRevision>, ConfigRepositoryError> {
     sqlx::query(
         "SELECT config_name, config_digest, canonical \
-         FROM mfm_config.config_revisions \
+         FROM ONLY mfm_config.config_revisions \
          ORDER BY config_name COLLATE \"C\", config_digest COLLATE \"C\"",
     )
     .fetch_all(pool)
@@ -67,7 +67,7 @@ pub(super) async fn import_config(
     }
     let retained = sqlx::query(
         "SELECT config_name, config_digest, canonical \
-         FROM mfm_config.config_revisions \
+         FROM ONLY mfm_config.config_revisions \
          WHERE config_name = $1 AND config_digest = $2",
     )
     .bind(revision.name().as_str())
@@ -98,7 +98,7 @@ pub(super) async fn delete_config(
         .map_err(|_| ConfigRepositoryError::Unavailable)?;
     configure_mutation(&mut transaction).await?;
     let affected = sqlx::query(
-        "DELETE FROM mfm_config.config_revisions \
+        "DELETE FROM ONLY mfm_config.config_revisions \
          WHERE config_name = $1 AND config_digest = $2",
     )
     .bind(name.as_str())
