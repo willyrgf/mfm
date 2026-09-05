@@ -1,14 +1,9 @@
 use std::cmp::Ordering;
 use std::fmt;
-use std::marker::PhantomData;
 use std::num::NonZeroU64;
 
 use mfm_canonical::CanonicalBytes;
-use mfm_capabilities::{CapabilityError, EffectCapabilityContract};
 use mfm_ids::{ContentRef, EffectId, StableId};
-use mfm_program::{
-    CapabilityInjection, EffectState, PreparationError, ProgramError, ProposedStateOutcome, State,
-};
 use mfm_program_derive::MfmValue;
 use mfm_values::{canonicalize_mfm_value, MfmValue as MfmValueTrait};
 use serde::de;
@@ -17,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::EvmDomainError;
 
 /// Exact Effect capability identity for EIP-1559 transaction execution.
-pub const EVM_TRANSACTION_EFFECT_CAPABILITY_ID: &str = "mfm.evm.capability.execute-transaction@1";
+pub const EVM_TRANSACTION_EFFECT_CAPABILITY_ID: &str = "mfm.evm.capability.execute-transaction@2";
 /// Exact State identity for EVM transaction execution.
-pub const EXECUTE_EVM_TRANSACTION_STATE_ID: &str = "mfm.evm.state.execute-transaction@1";
+pub const EXECUTE_EVM_TRANSACTION_STATE_ID: &str = "mfm.evm.state.execute-transaction@2";
 
 const MAX_U256_DECIMAL: &str =
     "115792089237316195423570985008687907853269984665640564039457584007913129639935";
@@ -587,65 +582,37 @@ checked_deserialize!(Eip1559TransactionCommand {
     value: EvmU256,
 });
 
-#[derive(Deserialize)]
+/// Caller context paired with a checked payload at one transaction stage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(
     deny_unknown_fields,
-    bound(deserialize = "K: serde::de::DeserializeOwned")
+    bound(deserialize = "K: serde::de::DeserializeOwned, T: serde::de::DeserializeOwned")
 )]
-struct TransactionContextWire<K> {
-    caller_context: K,
-    command: Eip1559TransactionCommand,
-}
-
-/// Caller-owned context paired with one complete checked transaction command.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
-#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
     name = "transaction-context",
     version = "1",
     schema = "mfm.evm-transaction-context"
 )]
-pub struct EvmTransactionContext<K: MfmValueTrait> {
+pub struct EvmTransactionContext<K: MfmValueTrait, T: MfmValueTrait = Eip1559TransactionCommand> {
     caller_context: K,
-    command: Eip1559TransactionCommand,
+    command: T,
 }
-
-impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmTransactionContext<K> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = TransactionContextWire::<K>::deserialize(deserializer)?;
-        Self::new(wire.caller_context, wire.command).map_err(de::Error::custom)
-    }
-}
-
-impl<K: MfmValueTrait> EvmTransactionContext<K> {
-    /// Constructs one context-preserving transaction input.
-    pub fn new(
-        caller_context: K,
-        command: Eip1559TransactionCommand,
-    ) -> Result<Self, EvmDomainError> {
-        let context = Self {
+impl<K: MfmValueTrait, T: MfmValueTrait> EvmTransactionContext<K, T> {
+    /// Combines independently checked caller context and stage payload.
+    pub const fn new(caller_context: K, command: T) -> Self {
+        Self {
             caller_context,
             command,
-        };
-        context.validate().map(|_| context)
+        }
     }
-
     /// Returns the caller-owned context.
     pub const fn caller_context(&self) -> &K {
         &self.caller_context
     }
-
-    /// Returns the complete checked command.
-    pub const fn command(&self) -> &Eip1559TransactionCommand {
+    /// Returns the checked stage payload.
+    pub const fn command(&self) -> &T {
         &self.command
-    }
-
-    fn validate(&self) -> Result<(), EvmDomainError> {
-        self.command.validate()
     }
 }
 
@@ -927,120 +894,8 @@ impl<K: MfmValueTrait> EvmTransactionReversion<K> {
     }
 }
 
-/// Mutating EVM transaction Effect capability.
-pub struct EvmTransactionEffect;
-
-impl EffectCapabilityContract for EvmTransactionEffect {
-    type Command = Eip1559TransactionCommand;
-    type Evidence = EvmTransactionSettlement;
-
-    fn contract_id() -> mfm_capabilities::Result<StableId> {
-        StableId::new(EVM_TRANSACTION_EFFECT_CAPABILITY_ID)
-            .map_err(|_| CapabilityError::InvalidContract)
-    }
-
-    fn bind_evidence(
-        effect_id: &EffectId,
-        command: &Self::Command,
-        evidence: &Self::Evidence,
-    ) -> mfm_capabilities::Result<()> {
-        let action_matches = matches!(
-            (command.to(), evidence.outcome()),
-            (
-                None,
-                EvmTransactionOutcome::Created { .. } | EvmTransactionOutcome::Reverted
-            ) | (
-                Some(_),
-                EvmTransactionOutcome::Called | EvmTransactionOutcome::Reverted
-            )
-        );
-        (evidence.effect_id() == effect_id && action_matches)
-            .then_some(())
-            .ok_or(CapabilityError::EvidenceBinding)
-    }
-}
-
-/// Context-preserving EVM transaction State.
-pub struct ExecuteEvmTransaction<K: MfmValueTrait>(PhantomData<fn() -> K>);
-
-impl<K: MfmValueTrait> State for ExecuteEvmTransaction<K> {
-    type Input = EvmTransactionContext<K>;
-    type Output = EvmTransactionCompletion<K>;
-    type Failure = EvmTransactionReversion<K>;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new(EXECUTE_EVM_TRANSACTION_STATE_ID).map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl<K: MfmValueTrait> EffectState<EvmTransactionEffect> for ExecuteEvmTransaction<K> {
-    fn prepare(input: &Self::Input) -> Result<Eip1559TransactionCommand, PreparationError> {
-        input
-            .validate()
-            .map(|_| input.command.clone())
-            .map_err(|_| PreparationError)
-    }
-
-    fn interpret(
-        input: Self::Input,
-        evidence: &EvmTransactionSettlement,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        let EvmTransactionContext {
-            caller_context,
-            command,
-        } = input;
-        let receipt = evidence.receipt().clone();
-        let binding = command.binding().clone();
-        match (command.to(), evidence.outcome()) {
-            (None, EvmTransactionOutcome::Created { created_address }) => {
-                ProposedStateOutcome::Success {
-                    output: EvmTransactionCompletion {
-                        caller_context,
-                        binding,
-                        receipt,
-                        outcome: EvmTransactionSuccess::Created {
-                            created_address: created_address.clone(),
-                        },
-                    },
-                }
-            }
-            (Some(target), EvmTransactionOutcome::Called) => ProposedStateOutcome::Success {
-                output: EvmTransactionCompletion {
-                    caller_context,
-                    binding,
-                    receipt,
-                    outcome: EvmTransactionSuccess::Called {
-                        target: target.clone(),
-                    },
-                },
-            },
-            // Runtime binds evidence before interpretation. The same closed failure shape handles
-            // an authenticated reversion and keeps direct trait misuse non-panicking without
-            // retaining an inconsistent-settlement value.
-            (_, EvmTransactionOutcome::Reverted)
-            | (Some(_), EvmTransactionOutcome::Created { .. })
-            | (None, EvmTransactionOutcome::Called) => ProposedStateOutcome::Failure {
-                failure: EvmTransactionReversion {
-                    caller_context,
-                    receipt,
-                },
-            },
-        }
-    }
-}
-
-impl<K: MfmValueTrait> CapabilityInjection<ExecuteEvmTransaction<K>> for EvmTransactionEffect {
-    type Setup = EvmTransactionBinding;
-    type ExpandedInput = EvmTransactionContext<K>;
-    type ExpandedOutput = EvmTransactionCompletion<K>;
-    type ExpandedFailure = <ExecuteEvmTransaction<K> as mfm_program::State>::Failure;
-
-    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
-        setup
-            .binding_ref()
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
+mod stages;
+pub use stages::*;
 
 fn decode_fixed_hex<const N: usize>(encoded: &str) -> Result<[u8; N], EvmDomainError> {
     if encoded.len() != 2 + N * 2 || !encoded.starts_with("0x") {

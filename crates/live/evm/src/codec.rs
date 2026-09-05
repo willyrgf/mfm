@@ -5,8 +5,8 @@ use std::str::FromStr;
 use alloy_consensus::{SignableTransaction, Signed, TxEip1559};
 use alloy_eips::{Decodable2718, Encodable2718};
 use alloy_primitives::{keccak256, Address, Bytes, Signature, TxKind, B256, U256};
+use mfm_evm::custody::{ExactRawTransaction, MAX_EXACT_RAW_TRANSACTION_BYTES};
 use mfm_evm::{Eip1559TransactionCommand, EvmAddress, EvmHash, EvmU256};
-use mfm_evm_transaction_authority::{ExactRawTransaction, MAX_EXACT_RAW_TRANSACTION_BYTES};
 use mfm_signing::{
     recover_public_key, CompactRecoverableSignature, Secp256k1PublicKey, SigningDigest,
 };
@@ -69,7 +69,6 @@ pub(crate) fn validate_signed_transaction(
     nonce: u64,
     expected_hash: &EvmHash,
     raw: &ExactRawTransaction,
-    expected_key: &Secp256k1PublicKey,
     expected_sender: &EvmAddress,
 ) -> Result<(), EvmCodecError> {
     if &hash(raw.as_bytes()) != expected_hash {
@@ -89,10 +88,7 @@ pub(crate) fn validate_signed_transaction(
     let digest = SigningDigest::from_bytes(signed.signature_hash().into());
     let signature = compact_signature(signed.signature())?;
     let recovered = recover_public_key(digest, &signature).map_err(|_| EvmCodecError::Invalid)?;
-    if &recovered != expected_key
-        || &ethereum_address(&recovered) != expected_sender
-        || &ethereum_address(expected_key) != expected_sender
-    {
+    if &ethereum_address(&recovered) != expected_sender {
         return Err(EvmCodecError::Invalid);
     }
     Ok(())
@@ -107,6 +103,9 @@ fn unsigned_transaction(
     command: &Eip1559TransactionCommand,
     nonce: u64,
 ) -> Result<TxEip1559, EvmCodecError> {
+    if nonce == u64::MAX {
+        return Err(EvmCodecError::Invalid);
+    }
     Ok(TxEip1559 {
         chain_id: command.binding().route().chain_instance().chain_id().get(),
         nonce,

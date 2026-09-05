@@ -35,22 +35,20 @@ retained bytes, invalid or high-S signatures, wrong hashes, recovered-key mismat
 mismatches. Keccak helpers expose only checked public hash/address results; private key custody
 remains in `mfm-keystore`.
 
-Transaction execution is caller-driven and loop-free. Registration validates the immutable
-binding/epoch/purpose/public-key/sender composition once. Each invocation compares only the command
-binding and exact Runtime-supplied command value ref, loads authority first, verifies the chain at
-most once when not already settled, reserves one pending nonce, signs once through the captured
-immutable-purpose handle, retains exact raw bytes, checks receipt before submission, and submits at
-most once per invocation. Fresh Alloy transactions are not decoded again; retained wire is decoded
-and fully compared before provider IO. A matching submission
-response returns normal Runtime `Pending` progress;
-transport failure, a dropped acknowledgement, malformed ingress, or a mismatched returned hash is
-`Unavailable`. Receipt settlement is inserted after one validated receipt and one matching
-canonical block observation. Settled evidence is an authority fast path with no signer/provider
-call. A different concurrent Prepared or Settled candidate returns `Unavailable`; reload qualifies
-the retained first winner before any retry. Dropped futures resume from the append-only
-reservation/preparation/settlement facts.
-Runtime supplies the exact qualified command value ref to the Effect callback; the adapter passes
-that identity to authority qualification and does not recanonicalize the command.
+`register_evm_transaction_adapters` registers reservation, preparation, and execution callbacks.
+State registration remains explicit in application composition. Reservation captures binding,
+custody, and provider; preparation captures binding, custody, and signer; execution captures no
+signer. Reservation loads first, then observes pending nonce if absent. Preparation loads first,
+signs only when necessary, and validates the immutable first winner returned by custody.
+Execution decodes exact retained wire, recovers sender, checks receipt before submission, and
+submits at most once per invocation. CPU work runs in immediately awaited blocking closures;
+provider, signer, and custody IO stay outside them.
+
+A matching submission returns Pending. Transport failures, missing acknowledgements, malformed
+ingress, or mismatched returned hashes are Unavailable. A validated receipt and matching canonical
+block produce settlement evidence for Journal; custody stores no settlement. Cold terminal reads
+need no signer or provider. External nonce advances are accepted for fresh reservations; displaced
+old transactions remain unresolved without automatic renonce or conflict detection.
 
 This is the ONLY crate allowed to depend on `alloy-*`. The direct `alloy-consensus` and
 `alloy-eips` dependencies are pinned to 1.6.1; the latter exposes the public EIP-2718 traits already
@@ -65,7 +63,7 @@ would add unrelated transport and RPC surface, so `alloy-provider`, `alloy-netwo
 The crate registers callbacks but owns no State registration, planner, binding wrapper, response
 echo, secret custody, provider retry loop, or production finality configuration. Production
 `ComposedRuntime`, CLI, REST, and configuration do not register these transaction or anchored-route
-callbacks. Version 1 settlement is only the canonical-receipt policy of the pinned non-reorging Reth
+callbacks. Settlement is only the canonical-receipt policy of the pinned non-reorging Reth
 development fixture.
 
 Capability injection is not live registration: it is deterministic domain-owned Program topology

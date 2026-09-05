@@ -6,17 +6,19 @@ infallible exact byte access; their strict string wires remain lowercase `0x` he
 `EvmU256` owns canonical decimal EVM words, while canonical base64 values retain
 `CanonicalBytes` directly and chain IDs and gas limits retain `NonZeroU64`.
 
-`EvmTransactionEffect` executes one nonce-free, fixed type-2, empty-access-list command through the
-single generic `ExecuteEvmTransaction<K>` State. The action is a private command detail: complete
-`create` and `call` factories check byte bounds, nonzero gas, the `u128` fee ceiling, and
-priority-fee ordering, and checked deserialization enforces the same contract. One checked
-`EvmTransactionContext<K>` admits either complete command.
+`EvmTransactionEffect` expands the designated `ExecuteEvmTransaction<K>` into reservation,
+preparation, execution, and Pure outcome projection States using ordinary capability hooks.
+`create` and `call` factories check payload bounds, nonzero gas, fee ceilings, and ordering.
+`EvmTransactionContext<K, T>` carries caller context through checked reserved, prepared, and
+executed descriptors. Reservation binds the original command reference and nonce domain;
+preparation exposes only the retained wire hash. Execution evidence binds its own EffectId,
+nonce, hash, and action. Projection preserves caller context and returns typed success or reversion.
 
-Settlement evidence is one `EvmTransactionReceipt` plus a closed Created, Called, or Reverted
-outcome, together with the exact `EffectId` and nonce. The Effect binder rejects an opposite
-successful action before interpretation. A successful State completion preserves caller context
-and binding, retains the shared receipt, and projects either the created address or checked call
-target. A reversion preserves caller context and that same receipt.
+`custody` owns the reusable asynchronous nonce-reservation and opaque signed-byte retention port.
+The live adapter supplies signer/provider IO and PostgreSQL supplies atomic persistence. Custody
+returns immutable first prepared winners; Journal alone retains transaction settlement. The reserve
+State EffectId identifies custody throughout the graph. Raw signed bytes have no serde or debug
+surface. No State performs IO, and Runtime has no EVM-specific logic.
 
 When a product needs action-specific chaining, its own Pure State projects the transaction
 completion into the next checked command or anchored-call context. EVM supplies no lifecycle

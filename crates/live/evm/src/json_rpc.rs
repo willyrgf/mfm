@@ -7,13 +7,13 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use alloy_primitives::{hex, Address, U256};
+use mfm_evm::custody::ExactRawTransaction;
 use mfm_evm::{
     AnchoredContractCallEvidence, AnchoredContractCallIntent, AnchoredContractCallResult,
     EvmAddress, EvmBalanceSource, EvmBlockAnchor, EvmChainInstance, EvmHash, EvmReadEvidence,
     EvmReadIntent, EvmReadSubject, EvmReadValue, EvmTokenDecimals, EvmU256,
     MAX_EVM_CALL_RETURN_BYTES,
 };
-use mfm_evm_transaction_authority::ExactRawTransaction;
 use mfm_ids::ContentRef;
 use mfm_runtime::AdapterError;
 use serde::de::{self, DeserializeOwned};

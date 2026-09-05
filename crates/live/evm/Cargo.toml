@@ -14,7 +14,6 @@ domain-role = "live"
 [dependencies]
 mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-evm = { path = "../../domains/evm" }
-mfm-evm-transaction-authority = { path = "../../domains/evm-transaction-authority" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-runtime = { path = "../../kernel/runtime" }
 mfm-signing = { path = "../../signing" }
@@ -25,16 +24,17 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
 getrandom = { workspace = true }
 k256 = { workspace = true }
+mfm-journal = { path = "../../kernel/journal" }
 mfm-keystore = { path = "../../keystore" }
 mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }
-mfm-storage-postgres = { path = "../../storages/postgres" }
 mfm-store = { path = "../../kernel/store" }
+mfm-storage-postgres = { path = "../../storages/postgres" }
 mfm-values = { path = "../../kernel/values" }
-tokio = { workspace = true }
 zeroize = { workspace = true }

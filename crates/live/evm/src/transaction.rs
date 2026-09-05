@@ -1,22 +1,21 @@
-//! Durable signer/authority/provider orchestration for EVM transaction Effects.
+//! Explicit reservation, preparation, and execution adapters for EVM transaction States.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use mfm_capabilities::EffectCapabilityContract;
+use mfm_evm::custody::{
+    AuthorityError, EvmTransactionAuthority, ExactRawTransaction, NonceDomain, PreparedRecord,
+    Reservation,
+};
 use mfm_evm::{
     Eip1559TransactionCommand, EvmAddress, EvmBlockAnchor, EvmChainInstance, EvmHash,
-    EvmTransactionBinding, EvmTransactionEffect, EvmTransactionOutcome, EvmTransactionReceipt,
-    EvmTransactionSettlement,
-};
-use mfm_evm_transaction_authority::{
-    AuthorityError, AuthorityState, EvmTransactionAuthority, ExactRawTransaction, NonceDomain,
-    PreparedRecord, Reservation, SettledRecord,
+    EvmTransactionBinding, EvmTransactionEffect, EvmTransactionReceipt, EvmTransactionSettlement,
 };
 use mfm_ids::{ContentRef, EffectId, StableId};
 use mfm_runtime::{AdapterError, EffectAdapterOutcome, RuntimeAssemblyBuilder, RuntimeError};
-use mfm_signing::{recover_public_key, Secp256k1PublicKey, Secp256k1Signer};
+use mfm_signing::{recover_public_key, Secp256k1Signer};
 
 use crate::codec::{
     create_address, signed_transaction, transaction_signing_digest, validate_signed_transaction,
@@ -126,230 +125,274 @@ pub trait EvmTransactionProvider: Send + Sync + 'static {
     ) -> EvmTransactionProviderFuture<'a, EvmHash>;
 }
 
-/// Registers one durable EVM transaction Effect callback under its complete binding.
-pub fn register_evm_transaction_effect(
+use mfm_evm::{
+    EvmNonceReservationEffect, EvmTransactionPreparationEffect, PreparedEvmTransaction,
+    PreparedEvmTransactionEvidence, ReservedEvmTransaction,
+};
+
+/// Registers the three transaction adapters under one public binding.
+/// State implementations are registered separately by application composition.
+pub fn register_evm_transaction_adapters(
     builder: &mut RuntimeAssemblyBuilder,
     binding: EvmTransactionBinding,
     signer: Arc<dyn Secp256k1Signer>,
     authority: Arc<dyn EvmTransactionAuthority>,
     provider: Arc<dyn EvmTransactionProvider>,
 ) -> mfm_runtime::Result<()> {
-    let executor = Arc::new(CheckedExecutor::new(
+    let purpose = StableId::new(EVM_EIP1559_SIGNING_PURPOSE_ID)
+        .map_err(|_| RuntimeError::IncompatibleAssembly)?;
+    if binding.authority_epoch() != authority.authority_epoch()
+        || signer.purpose() != &purpose
+        || &ethereum_address(signer.public_key()) != binding.sender()
+    {
+        return Err(RuntimeError::IncompatibleAssembly);
+    }
+    let reserve_binding = binding.clone();
+    let reserve_authority = authority.clone();
+    let reserve_provider = provider.clone();
+    builder.register_effect_adapter::<EvmNonceReservationEffect, EvmTransactionBinding, _>(
         binding.clone(),
-        signer,
-        authority,
-        provider,
-    )?);
-    builder.register_effect_adapter::<EvmTransactionEffect, EvmTransactionBinding, _>(
-        binding,
-        move |effect_id, command_value_ref, command| {
-            let effect_id = effect_id.clone();
-            let command_value_ref = command_value_ref.clone();
-            let command = command.clone();
-            let executor = Arc::clone(&executor);
+        move |id, reference, command| {
+            let (id, reference, command) = (id.clone(), reference.clone(), command.clone());
+            let (binding, authority, provider) = (
+                reserve_binding.clone(),
+                reserve_authority.clone(),
+                reserve_provider.clone(),
+            );
             Box::pin(async move {
-                execute_transaction(&executor, &effect_id, &command_value_ref, &command).await
+                reserve_nonce(
+                    &binding,
+                    authority.as_ref(),
+                    provider.as_ref(),
+                    &id,
+                    &reference,
+                    &command,
+                )
+                .await
+            })
+        },
+    )?;
+    let prepare_binding = binding.clone();
+    let prepare_authority = authority.clone();
+    builder.register_effect_adapter::<EvmTransactionPreparationEffect, EvmTransactionBinding, _>(
+        binding.clone(),
+        move |id, _, command| {
+            let (id, command) = (id.clone(), command.clone());
+            let (binding, authority, signer) = (
+                prepare_binding.clone(),
+                prepare_authority.clone(),
+                signer.clone(),
+            );
+            Box::pin(async move {
+                prepare_transaction(&binding, authority.as_ref(), signer.as_ref(), &id, &command)
+                    .await
+            })
+        },
+    )?;
+    builder.register_effect_adapter::<EvmTransactionEffect, EvmTransactionBinding, _>(
+        binding.clone(),
+        move |id, _, command| {
+            let (id, command) = (id.clone(), command.clone());
+            let (binding, authority, provider) =
+                (binding.clone(), authority.clone(), provider.clone());
+            Box::pin(async move {
+                execute_transaction(
+                    &binding,
+                    authority.as_ref(),
+                    provider.as_ref(),
+                    &id,
+                    &command,
+                )
+                .await
             })
         },
     )
 }
 
-struct CheckedExecutor {
-    binding: EvmTransactionBinding,
-    signer: Arc<dyn Secp256k1Signer>,
-    authority: Arc<dyn EvmTransactionAuthority>,
-    provider: Arc<dyn EvmTransactionProvider>,
-    domain: NonceDomain,
-    public_key: Secp256k1PublicKey,
-    sender: EvmAddress,
-}
-
-impl CheckedExecutor {
-    fn new(
-        binding: EvmTransactionBinding,
-        signer: Arc<dyn Secp256k1Signer>,
-        authority: Arc<dyn EvmTransactionAuthority>,
-        provider: Arc<dyn EvmTransactionProvider>,
-    ) -> mfm_runtime::Result<Self> {
-        if binding.authority_epoch() != authority.authority_epoch() {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
-        let purpose = StableId::new(EVM_EIP1559_SIGNING_PURPOSE_ID)
-            .map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        if signer.purpose() != &purpose {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
-        let public_key = *signer.public_key();
-        let sender = ethereum_address(&public_key);
-        if &sender != binding.sender() {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
-        let domain = NonceDomain::new(
-            binding.authority_epoch().clone(),
-            binding.route().chain_instance().clone(),
-            sender.clone(),
-        );
-        Ok(Self {
-            binding,
-            signer,
-            authority,
-            provider,
-            domain,
-            public_key,
-            sender,
-        })
-    }
-}
-
-enum ResumeState {
-    Absent,
-    Reserved(Reservation),
-    Prepared(PreparedRecord),
-}
-
-async fn execute_transaction(
-    executor: &CheckedExecutor,
-    effect_id: &EffectId,
-    command_value_ref: &ContentRef,
+fn check_binding(
+    binding: &EvmTransactionBinding,
+    authority: &dyn EvmTransactionAuthority,
     command: &Eip1559TransactionCommand,
-) -> Result<EffectAdapterOutcome<EvmTransactionSettlement>, AdapterError> {
-    if command.binding() != &executor.binding {
+) -> Result<(), AdapterError> {
+    if command.binding() != binding || binding.authority_epoch() != authority.authority_epoch() {
         return Err(AdapterError::Internal);
     }
-    let state = executor
-        .authority
-        .load(effect_id)
-        .await
-        .map_err(map_authority_error)?;
-
-    let resume = match state {
-        Some(AuthorityState::Settled(settled)) => {
-            validate_settled(executor, effect_id, command_value_ref, command, &settled)?;
-            return Ok(EffectAdapterOutcome::Settled(settled.evidence().clone()));
+    Ok(())
+}
+async fn reserve_nonce(
+    binding: &EvmTransactionBinding,
+    authority: &dyn EvmTransactionAuthority,
+    provider: &dyn EvmTransactionProvider,
+    id: &EffectId,
+    reference: &ContentRef,
+    command: &Eip1559TransactionCommand,
+) -> Result<EffectAdapterOutcome<Reservation>, AdapterError> {
+    check_binding(binding, authority, command)?;
+    let reservation = match authority.load(id).await.map_err(map_authority_error)? {
+        Some(loaded) => loaded.reservation,
+        None => {
+            verify_chain(command, provider).await?;
+            let observed = provider.pending_nonce(binding.sender()).await?;
+            authority
+                .reserve_or_compare(id, reference, &NonceDomain::from_binding(binding), observed)
+                .await
+                .map_err(map_authority_error)?
         }
-        Some(AuthorityState::Prepared(prepared)) => {
-            validate_reservation(
-                prepared.reservation(),
-                effect_id,
-                command_value_ref,
-                &executor.domain,
-            )?;
-            validate_prepared(&prepared, command, executor)?;
-            ResumeState::Prepared(prepared)
-        }
-        Some(AuthorityState::Reserved(reservation)) => {
-            validate_reservation(&reservation, effect_id, command_value_ref, &executor.domain)?;
-            ResumeState::Reserved(reservation)
-        }
-        None => ResumeState::Absent,
     };
-
-    verify_chain(command, executor.provider.as_ref()).await?;
-
-    let prepared = match resume {
-        ResumeState::Prepared(prepared) => prepared,
-        ResumeState::Reserved(reservation) => prepare(command, executor, reservation).await?,
-        ResumeState::Absent => {
-            let pending = executor.provider.pending_nonce(&executor.sender).await?;
-            let reservation = executor
-                .authority
-                .reserve_or_compare(effect_id, command_value_ref, &executor.domain, pending)
+    validate_reservation(
+        &reservation,
+        id,
+        reference,
+        &NonceDomain::from_binding(binding),
+    )?;
+    EvmNonceReservationEffect::bind_evidence(id, command, &reservation)
+        .map_err(|_| AdapterError::Internal)?;
+    Ok(EffectAdapterOutcome::Settled(reservation))
+}
+async fn load_reserved(
+    authority: &dyn EvmTransactionAuthority,
+    command: &ReservedEvmTransaction,
+) -> Result<Option<PreparedRecord>, AdapterError> {
+    let loaded = authority
+        .load(command.reservation().effect_id())
+        .await
+        .map_err(map_authority_error)?
+        .ok_or(AdapterError::Internal)?;
+    if &loaded.reservation != command.reservation() {
+        return Err(AdapterError::Internal);
+    }
+    Ok(loaded.prepared)
+}
+async fn qualify_prepared(
+    command: &ReservedEvmTransaction,
+    prepared: PreparedRecord,
+) -> Result<PreparedRecord, AdapterError> {
+    let command = command.clone();
+    tokio::task::spawn_blocking(move || {
+        validate_signed_transaction(
+            command.command(),
+            command.reservation().nonce(),
+            prepared.transaction_hash(),
+            prepared.raw_transaction(),
+            command.command().binding().sender(),
+        )
+        .map_err(|_| AdapterError::Internal)?;
+        Ok(prepared)
+    })
+    .await
+    .map_err(|_| AdapterError::Internal)?
+}
+async fn prepare_transaction(
+    binding: &EvmTransactionBinding,
+    authority: &dyn EvmTransactionAuthority,
+    signer: &dyn Secp256k1Signer,
+    id: &EffectId,
+    command: &ReservedEvmTransaction,
+) -> Result<EffectAdapterOutcome<PreparedEvmTransactionEvidence>, AdapterError> {
+    check_binding(binding, authority, command.command())?;
+    let prepared = match load_reserved(authority, command).await? {
+        Some(prepared) => qualify_prepared(command, prepared).await?,
+        None => {
+            let owned = command.clone();
+            let digest = tokio::task::spawn_blocking(move || {
+                transaction_signing_digest(owned.command(), owned.reservation().nonce())
+            })
+            .await
+            .map_err(|_| AdapterError::Internal)?
+            .map_err(|_| AdapterError::Internal)?;
+            let signature = signer
+                .sign(digest)
+                .await
+                .map_err(|_| AdapterError::Unavailable)?;
+            let owned = command.clone();
+            let candidate = tokio::task::spawn_blocking(move || {
+                let recovered =
+                    recover_public_key(digest, &signature).map_err(|_| AdapterError::Internal)?;
+                if &ethereum_address(&recovered) != owned.command().binding().sender() {
+                    return Err(AdapterError::Internal);
+                }
+                let (raw, hash) =
+                    signed_transaction(owned.command(), owned.reservation().nonce(), signature)
+                        .map_err(|_| AdapterError::Internal)?;
+                Ok(PreparedRecord::new(hash, raw))
+            })
+            .await
+            .map_err(|_| AdapterError::Internal)??;
+            let winner = authority
+                .retain_prepared(command.reservation(), &candidate)
                 .await
                 .map_err(map_authority_error)?;
-            validate_reservation(&reservation, effect_id, command_value_ref, &executor.domain)?;
-            prepare(command, executor, reservation).await?
+            if winner == candidate {
+                winner
+            } else {
+                qualify_prepared(command, winner).await?
+            }
         }
     };
-
-    reconcile(effect_id, command, executor, &prepared).await
+    Ok(EffectAdapterOutcome::Settled(
+        PreparedEvmTransactionEvidence::new(id.clone(), prepared.transaction_hash().clone()),
+    ))
 }
-
-async fn prepare(
-    command: &Eip1559TransactionCommand,
-    executor: &CheckedExecutor,
-    reservation: Reservation,
-) -> Result<PreparedRecord, AdapterError> {
-    let digest = transaction_signing_digest(command, reservation.nonce())
-        .map_err(|_| AdapterError::Internal)?;
-    let signature = executor
-        .signer
-        .sign(digest)
-        .await
-        .map_err(|_| AdapterError::Unavailable)?;
-    let recovered = recover_public_key(digest, &signature).map_err(|_| AdapterError::Internal)?;
-    if recovered != executor.public_key || ethereum_address(&recovered) != executor.sender {
+async fn execute_transaction(
+    binding: &EvmTransactionBinding,
+    authority: &dyn EvmTransactionAuthority,
+    provider: &dyn EvmTransactionProvider,
+    id: &EffectId,
+    command: &PreparedEvmTransaction,
+) -> Result<EffectAdapterOutcome<EvmTransactionSettlement>, AdapterError> {
+    check_binding(binding, authority, command.reserved().command())?;
+    let prepared = load_reserved(authority, command.reserved())
+        .await?
+        .ok_or(AdapterError::Internal)?;
+    if prepared.transaction_hash() != command.transaction_hash() {
         return Err(AdapterError::Internal);
     }
-    let (raw, transaction_hash) = signed_transaction(command, reservation.nonce(), signature)
-        .map_err(|_| AdapterError::Internal)?;
-    let candidate = PreparedRecord::new(reservation, transaction_hash, raw);
-    executor
-        .authority
-        .retain_prepared(&candidate)
-        .await
-        .map_err(map_authority_error)?;
-    Ok(candidate)
-}
-
-async fn reconcile(
-    effect_id: &EffectId,
-    command: &Eip1559TransactionCommand,
-    executor: &CheckedExecutor,
-    prepared: &PreparedRecord,
-) -> Result<EffectAdapterOutcome<EvmTransactionSettlement>, AdapterError> {
-    let Some(receipt) = executor
-        .provider
-        .receipt(prepared.transaction_hash())
-        .await?
-    else {
-        let submitted = executor
-            .provider
-            .submit_raw(prepared.raw_transaction())
-            .await?;
-        if &submitted != prepared.transaction_hash() {
+    let prepared = qualify_prepared(command.reserved(), prepared).await?;
+    verify_chain(command.reserved().command(), provider).await?;
+    let Some(receipt) = provider.receipt(command.transaction_hash()).await? else {
+        let submitted = provider.submit_raw(prepared.raw_transaction()).await?;
+        if &submitted != command.transaction_hash() {
             return Err(AdapterError::Unavailable);
         }
         return Ok(EffectAdapterOutcome::Pending);
     };
-    let evidence = validate_receipt(effect_id, &receipt, prepared, command, executor)?;
-    let canonical = executor
-        .provider
+    let evidence = validate_receipt(
+        id,
+        &receipt,
+        &prepared,
+        command.reserved().command(),
+        command.reserved().reservation().nonce(),
+    )?;
+    let canonical = provider
         .canonical_block(receipt.block_anchor().number())
         .await?;
     if &canonical != receipt.block_anchor() {
         return Err(AdapterError::Unavailable);
     }
-    let candidate = SettledRecord::new(prepared.clone(), evidence).map_err(map_authority_error)?;
-    validate_settlement(candidate.evidence(), effect_id, prepared, command, executor)?;
-    executor
-        .authority
-        .retain_settlement(&candidate)
-        .await
-        .map_err(map_authority_error)?;
-    Ok(EffectAdapterOutcome::Settled(candidate.evidence().clone()))
+    EvmTransactionEffect::bind_evidence(id, command, &evidence)
+        .map_err(|_| AdapterError::Internal)?;
+    Ok(EffectAdapterOutcome::Settled(evidence))
 }
-
 fn validate_receipt(
     effect_id: &EffectId,
     receipt: &ProviderReceipt,
     prepared: &PreparedRecord,
     command: &Eip1559TransactionCommand,
-    executor: &CheckedExecutor,
+    nonce: u64,
 ) -> Result<EvmTransactionSettlement, AdapterError> {
     if receipt.transaction_hash() != prepared.transaction_hash()
-        || receipt.sender() != &executor.sender
+        || receipt.sender() != command.binding().sender()
     {
         return Err(AdapterError::Internal);
     }
     match (command.to(), receipt.result()) {
         (None, ProviderReceiptResult::SuccessCreate { contract_address }) => {
-            if contract_address != &create_address(&executor.sender, prepared.reservation().nonce())
-            {
+            if contract_address != &create_address(command.binding().sender(), nonce) {
                 return Err(AdapterError::Internal);
             }
             Ok(EvmTransactionSettlement::created(
                 effect_id.clone(),
-                prepared.reservation().nonce(),
+                nonce,
                 EvmTransactionReceipt::new(
                     receipt.block_anchor().clone(),
                     prepared.transaction_hash().clone(),
@@ -359,7 +402,7 @@ fn validate_receipt(
         }
         (None, ProviderReceiptResult::RevertedCreate) => Ok(EvmTransactionSettlement::reverted(
             effect_id.clone(),
-            prepared.reservation().nonce(),
+            nonce,
             EvmTransactionReceipt::new(
                 receipt.block_anchor().clone(),
                 prepared.transaction_hash().clone(),
@@ -368,7 +411,7 @@ fn validate_receipt(
         (Some(to), ProviderReceiptResult::SuccessCall { target }) if target == to => {
             Ok(EvmTransactionSettlement::called(
                 effect_id.clone(),
-                prepared.reservation().nonce(),
+                nonce,
                 EvmTransactionReceipt::new(
                     receipt.block_anchor().clone(),
                     prepared.transaction_hash().clone(),
@@ -378,7 +421,7 @@ fn validate_receipt(
         (Some(to), ProviderReceiptResult::RevertedCall { target }) if target == to => {
             Ok(EvmTransactionSettlement::reverted(
                 effect_id.clone(),
-                prepared.reservation().nonce(),
+                nonce,
                 EvmTransactionReceipt::new(
                     receipt.block_anchor().clone(),
                     prepared.transaction_hash().clone(),
@@ -414,68 +457,6 @@ fn validate_reservation(
         return Err(AdapterError::Internal);
     }
     Ok(())
-}
-
-fn validate_prepared(
-    prepared: &PreparedRecord,
-    command: &Eip1559TransactionCommand,
-    executor: &CheckedExecutor,
-) -> Result<(), AdapterError> {
-    validate_signed_transaction(
-        command,
-        prepared.reservation().nonce(),
-        prepared.transaction_hash(),
-        prepared.raw_transaction(),
-        &executor.public_key,
-        &executor.sender,
-    )
-    .map_err(|_| AdapterError::Internal)
-}
-
-fn validate_settlement(
-    evidence: &EvmTransactionSettlement,
-    effect_id: &EffectId,
-    prepared: &PreparedRecord,
-    command: &Eip1559TransactionCommand,
-    executor: &CheckedExecutor,
-) -> Result<(), AdapterError> {
-    EvmTransactionEffect::bind_evidence(effect_id, command, evidence)
-        .map_err(|_| AdapterError::Internal)?;
-    if evidence.nonce() != prepared.reservation().nonce()
-        || evidence.transaction_hash() != prepared.transaction_hash()
-    {
-        return Err(AdapterError::Internal);
-    }
-    if let EvmTransactionOutcome::Created { created_address } = evidence.outcome() {
-        let expected = create_address(&executor.sender, prepared.reservation().nonce());
-        if created_address != &expected {
-            return Err(AdapterError::Internal);
-        }
-    }
-    Ok(())
-}
-
-fn validate_settled(
-    executor: &CheckedExecutor,
-    effect_id: &EffectId,
-    command_value_ref: &ContentRef,
-    command: &Eip1559TransactionCommand,
-    settled: &SettledRecord,
-) -> Result<(), AdapterError> {
-    validate_reservation(
-        settled.prepared().reservation(),
-        effect_id,
-        command_value_ref,
-        &executor.domain,
-    )?;
-    validate_prepared(settled.prepared(), command, executor)?;
-    validate_settlement(
-        settled.evidence(),
-        effect_id,
-        settled.prepared(),
-        command,
-        executor,
-    )
 }
 
 const fn map_authority_error(error: AuthorityError) -> AdapterError {
