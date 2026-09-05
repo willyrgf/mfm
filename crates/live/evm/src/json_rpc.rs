@@ -4,8 +4,6 @@
 //! domain contracts require. It holds no key, nonce authority, or automatic retry.
 
 use std::num::NonZeroU64;
-#[cfg(test)]
-use std::str::FromStr;
 use std::time::Duration;
 
 use alloy_primitives::{hex, Address, U256};
@@ -636,14 +634,6 @@ async fn bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, Adapte
     Ok(body)
 }
 
-/// Parses a 20-byte address and re-renders it; addresses are never spliced as text.
-#[cfg(test)]
-fn checked_address(value: &str) -> Result<String, AdapterError> {
-    Address::from_str(value)
-        .map(|address| format!("0x{}", hex::encode(address)))
-        .map_err(|_| AdapterError::Internal)
-}
-
 fn decimals_calldata() -> String {
     format!("0x{DECIMALS_SELECTOR}")
 }
@@ -665,16 +655,6 @@ fn is_lower_hex(digits: &str) -> bool {
     digits
         .bytes()
         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-#[cfg(test)]
-fn quantity_to_u64(value: &str) -> Option<u64> {
-    RpcQuantity::parse(value).ok()?.to_u64()
-}
-
-#[cfg(test)]
-fn quantity_to_decimal(value: &str) -> Option<String> {
-    RpcQuantity::parse(value).ok().map(|value| value.decimal())
 }
 
 fn decode_abi_u256(word: AbiWord) -> U256 {

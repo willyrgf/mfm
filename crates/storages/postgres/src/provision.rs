@@ -109,7 +109,7 @@ pub async fn provision_postgres(
     verify_config_marker(&mut connection)
         .await
         .map_err(classify_gate)?;
-    verify_runtime_base_grants(&mut connection).await?;
+    verify_runtime_database_grants(&mut connection).await?;
     drop(connection);
 
     let backend = PostgresBackend::connect(runtime)
@@ -181,7 +181,7 @@ pub async fn provision_evm_transaction_authority(
     load_evm_tx_epoch(&mut connection)
         .await
         .map_err(classify_gate)?;
-    verify_runtime_evm_tx_grants(&mut connection).await?;
+    verify_runtime_database_grants(&mut connection).await?;
     drop(connection);
 
     let authority = PostgresEvmTransactionAuthority::connect(runtime)
@@ -320,14 +320,6 @@ async fn verify_schema_owner(
         return Err(ProvisionError::Incompatible);
     }
     Ok(())
-}
-
-async fn verify_runtime_base_grants(connection: &mut PgConnection) -> Result<(), ProvisionError> {
-    verify_runtime_database_grants(connection).await
-}
-
-async fn verify_runtime_evm_tx_grants(connection: &mut PgConnection) -> Result<(), ProvisionError> {
-    verify_runtime_database_grants(connection).await
 }
 
 async fn verify_runtime_database_grants(
