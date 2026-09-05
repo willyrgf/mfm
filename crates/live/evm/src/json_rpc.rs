@@ -407,9 +407,11 @@ struct JsonRpcRequest<'a, P: Serialize + ?Sized> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[serde(bound(deserialize = "T: Deserialize<'de>"))]
 struct RpcSuccess<T> {
     jsonrpc: RpcVersion,
     id: RpcId,
+    #[serde(deserialize_with = "required_field")]
     result: T,
 }
 
@@ -519,21 +521,21 @@ struct RpcReceipt {
     transaction_hash: EvmHash,
     #[serde(rename = "from")]
     sender: EvmAddress,
-    #[serde(deserialize_with = "required_nullable")]
+    #[serde(deserialize_with = "required_field")]
     to: Option<EvmAddress>,
-    #[serde(deserialize_with = "required_nullable")]
+    #[serde(deserialize_with = "required_field")]
     contract_address: Option<EvmAddress>,
     status: RpcQuantity,
     block_number: RpcQuantity,
     block_hash: EvmHash,
 }
 
-fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+fn required_field<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
 {
-    Option::<T>::deserialize(deserializer)
+    T::deserialize(deserializer)
 }
 
 /// Checked JSON-RPC QUANTITY ingress.
@@ -708,4 +710,4 @@ fn parse_receipt(value: RpcReceipt) -> Result<ProviderReceipt, AdapterError> {
 
 #[cfg(test)]
 #[path = "json_rpc_tests.rs"]
-mod tests;
+pub(crate) mod tests;

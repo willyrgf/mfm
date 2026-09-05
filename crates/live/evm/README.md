@@ -70,3 +70,7 @@ development fixture.
 
 Capability injection is not live registration: it is deterministic domain-owned Program topology
 applied before Runtime sees the Program. This crate never invokes Operation or injection hooks.
+
+Success envelopes require an explicit `result` field even for nullable receipt and block results.
+An omitted field is Unavailable; explicit null alone represents absence. Malformed receipt ingress
+retains Prepared without submission, and a later caller resumes the same exact bytes.
