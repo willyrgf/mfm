@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO public.mfm_run_frames (run_id, run_sequence, frame_bytes, head_digest) VALUES ($1,$2,$3,$4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Bytea",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "46136f259cd4768941c32cfad5037388937fe0a58bfef83e301eff8f1bbc4c86"
+}

@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT format('REVOKE ALL PRIVILEGES ON DATABASE %I FROM PUBLIC, mfm_runtime', current_database()) AS \"value!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "value!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a4d1ecbb9fcddbbb79b2dce83c7c588823e3b0512dd6242331a47070f8effaf9"
+}

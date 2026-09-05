@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT has_database_privilege(current_user, current_database(), 'CONNECT') AS \"connect!\", has_database_privilege(current_user, current_database(), 'CREATE') AS \"create!\", has_database_privilege(current_user, current_database(), 'TEMPORARY') AS \"temporary!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "connect!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "create!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "temporary!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "f6445c4a8f0f67c6c490b055a1cb6be29a492cf757b7352948b6eb2f22a64851"
+}

@@ -41,16 +41,20 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
                 return Err(AuthorityError::Internal);
             }
             let mut transaction = self.pool.begin().await.map_err(unavailable)?;
-            sqlx::query("SET LOCAL synchronous_commit = on")
+            sqlx::query!("SET LOCAL synchronous_commit = on")
                 .execute(&mut *transaction)
                 .await
                 .map_err(unavailable)?;
             let lock_key = nonce_domain_lock_key(domain)?;
-            sqlx::query("SELECT pg_advisory_xact_lock($1)")
-                .bind(lock_key)
-                .execute(&mut *transaction)
-                .await
-                .map_err(unavailable)?;
+            sqlx::Executor::execute(
+                &mut *transaction,
+                sqlx::query!(
+                    "SELECT pg_advisory_xact_lock($1) IS NULL AS locked",
+                    lock_key,
+                ),
+            )
+            .await
+            .map_err(unavailable)?;
 
             if let Some(state) =
                 load_state(&mut transaction, effect_id, &self.authority_epoch).await?
@@ -117,7 +121,7 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
         Box::pin(async move {
             let effect_id = candidate.reservation().effect_id();
             let mut transaction = self.pool.begin().await.map_err(unavailable)?;
-            sqlx::query("SET LOCAL synchronous_commit = on")
+            sqlx::query!("SET LOCAL synchronous_commit = on")
                 .execute(&mut *transaction)
                 .await
                 .map_err(unavailable)?;
@@ -137,14 +141,14 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
             }
 
             let transaction_hash_bytes = candidate.transaction_hash().as_bytes();
-            let inserted = sqlx::query(
-                "INSERT INTO mfm_evm_tx.prepared_transactions \
-                 (effect_id, transaction_hash, raw_transaction) VALUES ($1, $2, $3) \
-                 ON CONFLICT DO NOTHING",
+            let inserted = sqlx::query!(
+                "INSERT INTO mfm_evm_tx.prepared_transactions (effect_id, \
+                 transaction_hash, raw_transaction) VALUES ($1, $2, $3) ON \
+                 CONFLICT DO NOTHING",
+                effect_id.as_str(),
+                transaction_hash_bytes.as_slice(),
+                candidate.raw_transaction().as_bytes(),
             )
-            .bind(effect_id.as_str())
-            .bind(transaction_hash_bytes.as_slice())
-            .bind(candidate.raw_transaction().as_bytes())
             .execute(&mut *transaction)
             .await
             .map_err(unavailable)?
@@ -177,7 +181,7 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
                 return Err(AuthorityError::Internal);
             }
             let mut transaction = self.pool.begin().await.map_err(unavailable)?;
-            sqlx::query("SET LOCAL synchronous_commit = on")
+            sqlx::query!("SET LOCAL synchronous_commit = on")
                 .execute(&mut *transaction)
                 .await
                 .map_err(unavailable)?;
@@ -196,12 +200,12 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
                 return Ok(());
             }
 
-            let inserted = sqlx::query(
-                "INSERT INTO mfm_evm_tx.transaction_settlements (effect_id, settlement_bytes) \
-                 VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            let inserted = sqlx::query!(
+                "INSERT INTO mfm_evm_tx.transaction_settlements (effect_id, \
+                 settlement_bytes) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                effect_id.as_str(),
+                canonical.as_bytes(),
             )
-            .bind(effect_id.as_str())
-            .bind(canonical.as_bytes())
             .execute(&mut *transaction)
             .await
             .map_err(unavailable)?
@@ -311,24 +315,24 @@ async fn load_state(
     effect_id: &EffectId,
     captured_epoch: &EvmAuthorityEpoch,
 ) -> Result<Option<AuthorityState>, AuthorityError> {
-    let mut rows = sqlx::query(
-        "SELECT marker.schema_contract, marker.authority_epoch AS admitted_epoch, \
-                reservation.effect_id, reservation.command_schema_id, \
-                reservation.command_content_digest, \
-                reservation.authority_epoch AS reservation_epoch, \
-                reservation.chain_id::text, reservation.genesis_hash, reservation.sender, \
-                reservation.reserved_nonce::text, \
-                prepared.transaction_hash, prepared.raw_transaction, settled.settlement_bytes \
-         FROM ONLY mfm_evm_tx.mfm_evm_tx_schema AS marker \
-         LEFT JOIN ONLY mfm_evm_tx.nonce_reservations AS reservation \
-           ON reservation.effect_id = $1 \
-         LEFT JOIN ONLY mfm_evm_tx.prepared_transactions AS prepared \
-           ON prepared.effect_id = reservation.effect_id \
-         LEFT JOIN ONLY mfm_evm_tx.transaction_settlements AS settled \
-           ON settled.effect_id = prepared.effect_id",
+    let mut rows = sqlx::Executor::fetch_all(
+        connection,
+        sqlx::query!(
+            "SELECT marker.schema_contract, marker.authority_epoch AS \
+         admitted_epoch, reservation.effect_id, reservation.command_schema_id, \
+         reservation.command_content_digest, reservation.authority_epoch AS \
+         reservation_epoch, reservation.chain_id::text, reservation.genesis_hash, \
+         reservation.sender, reservation.reserved_nonce::text, \
+         prepared.transaction_hash, prepared.raw_transaction, \
+         settled.settlement_bytes FROM ONLY mfm_evm_tx.mfm_evm_tx_schema AS \
+         marker LEFT JOIN ONLY mfm_evm_tx.nonce_reservations AS reservation ON \
+         reservation.effect_id = $1 LEFT JOIN ONLY \
+         mfm_evm_tx.prepared_transactions AS prepared ON prepared.effect_id = \
+         reservation.effect_id LEFT JOIN ONLY mfm_evm_tx.transaction_settlements \
+         AS settled ON settled.effect_id = prepared.effect_id",
+            effect_id.as_str(),
+        ),
     )
-    .bind(effect_id.as_str())
-    .fetch_all(connection)
     .await
     .map_err(unavailable)?;
     if rows.len() != 1 {
@@ -441,16 +445,15 @@ async fn latest_reservation_effect(
     let epoch = key.authority_epoch().as_bytes();
     let genesis = key.chain_instance().expected_genesis_hash().as_bytes();
     let sender = key.sender().as_bytes();
-    let retained: Option<String> = sqlx::query_scalar(
-        "SELECT effect_id FROM ONLY mfm_evm_tx.nonce_reservations \
-         WHERE authority_epoch = $1 AND chain_id = $2::numeric \
-           AND genesis_hash = $3 AND sender = $4 \
-         ORDER BY reserved_nonce DESC LIMIT 1",
+    let retained: Option<String> = sqlx::query_scalar!(
+        "SELECT effect_id AS \"value!\" FROM ONLY mfm_evm_tx.nonce_reservations \
+         WHERE authority_epoch = $1 AND chain_id = $2::text::numeric AND \
+         genesis_hash = $3 AND sender = $4 ORDER BY reserved_nonce DESC LIMIT 1",
+        epoch,
+        key.chain_instance().chain_id().to_string(),
+        genesis.as_slice(),
+        sender.as_slice(),
     )
-    .bind(epoch)
-    .bind(key.chain_instance().chain_id().to_string())
-    .bind(genesis.as_slice())
-    .bind(sender.as_slice())
     .fetch_optional(connection)
     .await
     .map_err(unavailable)?;
@@ -469,21 +472,20 @@ async fn insert_reservation(
     let epoch = key.authority_epoch().as_bytes();
     let genesis = key.chain_instance().expected_genesis_hash().as_bytes();
     let sender = key.sender().as_bytes();
-    let result = sqlx::query(
-        "INSERT INTO mfm_evm_tx.nonce_reservations \
-         (effect_id, command_schema_id, command_content_digest, authority_epoch, chain_id, \
-          genesis_hash, sender, reserved_nonce) \
-         VALUES ($1, $2, $3, $4, $5::numeric, $6, $7, $8::numeric) \
-         ON CONFLICT DO NOTHING",
+    let result = sqlx::query!(
+        "INSERT INTO mfm_evm_tx.nonce_reservations (effect_id, \
+         command_schema_id, command_content_digest, authority_epoch, chain_id, \
+         genesis_hash, sender, reserved_nonce) VALUES ($1, $2, $3, $4, \
+         $5::text::numeric, $6, $7, $8::text::numeric) ON CONFLICT DO NOTHING",
+        effect_id.as_str(),
+        command_value_ref.schema_id().as_str(),
+        command_value_ref.content_digest().as_str(),
+        epoch,
+        key.chain_instance().chain_id().to_string(),
+        genesis.as_slice(),
+        sender.as_slice(),
+        nonce.to_string(),
     )
-    .bind(effect_id.as_str())
-    .bind(command_value_ref.schema_id().as_str())
-    .bind(command_value_ref.content_digest().as_str())
-    .bind(epoch)
-    .bind(key.chain_instance().chain_id().to_string())
-    .bind(genesis.as_slice())
-    .bind(sender.as_slice())
-    .bind(nonce.to_string())
     .execute(connection)
     .await
     .map_err(unavailable)?;
@@ -552,11 +554,17 @@ fn internal(_: impl Sized) -> AuthorityError {
 pub(crate) async fn load_evm_tx_epoch(
     connection: &mut PgConnection,
 ) -> Result<EvmAuthorityEpoch, GateError> {
-    let markers: Vec<(String, Vec<u8>)> = sqlx::query_as(
-        "SELECT schema_contract, authority_epoch FROM ONLY mfm_evm_tx.mfm_evm_tx_schema ORDER BY 1",
+    let markers: Vec<(String, Vec<u8>)> = sqlx::query!(
+        "SELECT schema_contract AS \"schema_contract!\", authority_epoch AS \
+         \"authority_epoch!\" FROM ONLY mfm_evm_tx.mfm_evm_tx_schema ORDER BY 1",
     )
     .fetch_all(&mut *connection)
     .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|row| (row.schema_contract, row.authority_epoch))
+            .collect()
+    })
     .map_err(|error| {
         if crate::is_undefined_schema_object(&error) {
             GateError::Incompatible

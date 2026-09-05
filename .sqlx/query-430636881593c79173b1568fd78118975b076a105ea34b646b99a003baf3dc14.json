@@ -1,0 +1,91 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.relname::text AS \"name!\", c.relkind::text AS \"kind!\", c.relpersistence::text AS \"persistence!\", pg_get_userbyid(c.relowner) AS \"owner!\", am.amname::text AS \"access_method?\", COALESCE((SELECT string_agg(option, ',' ORDER BY option) FROM unnest(c.reloptions) option), '') AS \"options!\", COALESCE(ts.spcname, dbts.spcname) AS \"tablespace!\", c.relrowsecurity AS \"row_security!\", c.relforcerowsecurity AS \"force_row_security!\" FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid = c.reltablespace JOIN pg_catalog.pg_database d ON d.datname = current_database() JOIN pg_catalog.pg_tablespace dbts ON dbts.oid = d.dattablespace WHERE n.nspname = $1 AND c.relkind <> 'i' AND ($2 OR c.relname = ANY($3::text[]))",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "persistence!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "owner!",
+        "type_info": "Name",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "access_method?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "options!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "tablespace!",
+        "type_info": "Name",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "row_security!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_class",
+            "name": "relrowsecurity"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "force_row_security!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_class",
+            "name": "relforcerowsecurity"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Name",
+        "Bool",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      false,
+      false
+    ]
+  },
+  "hash": "430636881593c79173b1568fd78118975b076a105ea34b646b99a003baf3dc14"
+}

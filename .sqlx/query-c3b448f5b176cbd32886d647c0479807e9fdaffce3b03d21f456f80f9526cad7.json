@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO mfm_evm_tx.mfm_evm_tx_schema (schema_contract, authority_epoch) VALUES ($1, $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c3b448f5b176cbd32886d647c0479807e9fdaffce3b03d21f456f80f9526cad7"
+}

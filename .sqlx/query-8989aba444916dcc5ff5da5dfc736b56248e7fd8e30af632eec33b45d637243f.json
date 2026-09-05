@@ -1,0 +1,98 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT rolsuper AS \"superuser!\", rolinherit AS \"inherit!\", rolcreaterole AS \"create_role!\", rolcreatedb AS \"create_db!\", rolcanlogin AS \"login!\", rolreplication AS \"replication!\", rolbypassrls AS \"bypass_rls!\" FROM pg_catalog.pg_roles WHERE rolname = 'mfm_runtime'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "superuser!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolsuper"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "inherit!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolinherit"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "create_role!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolcreaterole"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "create_db!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolcreatedb"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "login!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolcanlogin"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "replication!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolreplication"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "bypass_rls!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolbypassrls"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "8989aba444916dcc5ff5da5dfc736b56248e7fd8e30af632eec33b45d637243f"
+}

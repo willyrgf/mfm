@@ -11,8 +11,7 @@ intentionally plaintext inside the trusted shared network namespace and no remot
 is supported. The parser uses stock SQLx, overwrites every ambient-derived connection value that
 can affect this plaintext connection, and rejects `PGOPTIONS`, whose startup effects SQLx cannot
 clear. Home/passfile and service-file inputs cannot influence the resulting authority. SQLx remains
-an unmodified crates.io dependency so its
-compile-time query macros can be enabled when the query surface adopts them.
+an unmodified crates.io dependency. All static production SQL uses its checked query macros.
 Every runtime connection must authenticate as the fixed `mfm_runtime` role and pass the exact role,
 ownership, database/schema, durability, and declarative catalog gate. One normalized verifier owns
 all three surfaces and compares expanded schema, relation, and column ACLs (including `MAINTAIN`),
@@ -62,3 +61,19 @@ updates target the named physical table. Inherited descendants outside the owned
 outside MFM custody: their rows cannot affect markers, history, configuration, or transaction
 authority, and exact configuration deletion cannot remove their rows. Admission continues to
 qualify the owned objects; it does not police unrelated inheritance descendants.
+
+Static queries compile against the committed workspace `.sqlx` metadata. Ordinary development,
+verification, and packaging default to offline compilation. `sqlx-prepare` rebuilds metadata in a
+fresh disposable PostgreSQL 18 database from the three SQL baselines; `sqlx-check` independently
+rebuilds it and rejects missing, changed, or extra cache entries. No production credentials or
+provisioning code participate in metadata generation. See `docs/build-and-verification.md` for
+commands. Compile-time checks cover SQL names and types; runtime admission still qualifies the
+actual deployment, and domain/canonical validation still qualifies stored values.
+
+The only unchecked production SQL is the three existing multi-statement installation baselines
+and database ACL statements whose identifier is quoted by PostgreSQL `format('%I', ...)`. Hostile
+and fault-injection test SQL remains dynamic. Store frame-bearing queries use checked macros
+through `Executor` to retain raw rows: their byte copies and physical validation remain inside the
+pure blocking job. The append job constructs checked, owned query arguments; only the async caller
+executes the query. Catalog nullability overrides follow the selected expression: outer joins and
+optional expressions remain nullable; required catalog facts and total expressions are non-null.

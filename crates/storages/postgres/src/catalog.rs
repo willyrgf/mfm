@@ -1,4 +1,4 @@
-use sqlx::{PgConnection, Row};
+use sqlx::PgConnection;
 
 use crate::GateError;
 
@@ -374,23 +374,23 @@ pub(crate) async fn surface_exists(
     spec: &PgSurfaceSpec,
 ) -> Result<bool, GateError> {
     let exists: bool = if spec.closed {
-        sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1)",
+        sqlx::query_scalar!(
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = \
+             $1) AS \"value!\"",
+            spec.schema,
         )
-        .bind(spec.schema)
         .fetch_one(&mut *connection)
         .await
         .map_err(|_| GateError::Unavailable)?
     } else {
         let names = spec.relation_names();
-        sqlx::query_scalar(
-            "SELECT EXISTS( \
-               SELECT 1 FROM pg_catalog.pg_class c \
-               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-               WHERE n.nspname = $1 AND c.relname = ANY($2::text[]))",
+        sqlx::query_scalar!(
+            "SELECT EXISTS( SELECT 1 FROM pg_catalog.pg_class c JOIN \
+             pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname \
+             = $1 AND c.relname = ANY($2::text[])) AS \"value!\"",
+            spec.schema,
+            &names,
         )
-        .bind(spec.schema)
-        .bind(names)
         .fetch_one(&mut *connection)
         .await
         .map_err(|_| GateError::Unavailable)?
@@ -555,192 +555,146 @@ async fn load_catalog_snapshot(
     connection: &mut PgConnection,
     spec: &PgSurfaceSpec,
 ) -> Result<CatalogSnapshot, GateError> {
-    let owners: Option<(String, String)> = sqlx::query_as(
-        "SELECT pg_get_userbyid(d.datdba), pg_get_userbyid(n.nspowner) \
-         FROM pg_catalog.pg_namespace n \
-         JOIN pg_catalog.pg_database d ON d.datname = current_database() \
-         WHERE n.nspname = $1",
+    let owners: Option<(String, String)> = sqlx::query!(
+        "SELECT pg_get_userbyid(d.datdba) AS \"database_owner!\", \
+         pg_get_userbyid(n.nspowner) AS \"schema_owner!\" FROM \
+         pg_catalog.pg_namespace n JOIN pg_catalog.pg_database d ON d.datname = \
+         current_database() WHERE n.nspname = $1",
+        spec.schema,
     )
-    .bind(spec.schema)
     .fetch_optional(&mut *connection)
     .await
+    .map(|rows| rows.map(|row| (row.database_owner, row.schema_owner)))
     .map_err(|_| GateError::Unavailable)?;
     let (database_owner, schema_owner) = owners.ok_or(GateError::Incompatible)?;
     let relation_names = spec.relation_names();
 
-    let relation_rows = sqlx::query(
-        "SELECT c.relname, c.relkind::text, c.relpersistence::text, \
-                pg_get_userbyid(c.relowner) AS owner, am.amname, \
-                COALESCE((SELECT string_agg(option, ',' ORDER BY option) \
-                          FROM unnest(c.reloptions) option), '') AS options, \
-                COALESCE(ts.spcname, dbts.spcname) AS tablespace, \
-                c.relrowsecurity, c.relforcerowsecurity \
-         FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam \
-         LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid = c.reltablespace \
-         JOIN pg_catalog.pg_database d ON d.datname = current_database() \
-         JOIN pg_catalog.pg_tablespace dbts ON dbts.oid = d.dattablespace \
-         WHERE n.nspname = $1 AND c.relkind <> 'i' \
-           AND ($2 OR c.relname = ANY($3::text[]))",
+    let relations = sqlx::query_as!(
+        RelationFact,
+        "SELECT c.relname::text AS \"name!\", c.relkind::text AS \"kind!\", \
+         c.relpersistence::text AS \"persistence!\", pg_get_userbyid(c.relowner) \
+         AS \"owner!\", am.amname::text AS \"access_method?\", COALESCE((SELECT \
+         string_agg(option, ',' ORDER BY option) FROM unnest(c.reloptions) \
+         option), '') AS \"options!\", COALESCE(ts.spcname, dbts.spcname) AS \
+         \"tablespace!\", c.relrowsecurity AS \"row_security!\", \
+         c.relforcerowsecurity AS \"force_row_security!\" FROM \
+         pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = \
+         c.relnamespace LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam LEFT \
+         JOIN pg_catalog.pg_tablespace ts ON ts.oid = c.reltablespace JOIN \
+         pg_catalog.pg_database d ON d.datname = current_database() JOIN \
+         pg_catalog.pg_tablespace dbts ON dbts.oid = d.dattablespace WHERE \
+         n.nspname = $1 AND c.relkind <> 'i' AND ($2 OR c.relname = \
+         ANY($3::text[]))",
+        spec.schema,
+        spec.closed,
+        &relation_names,
     )
-    .bind(spec.schema)
-    .bind(spec.closed)
-    .bind(&relation_names)
     .fetch_all(&mut *connection)
     .await
     .map_err(|_| GateError::Unavailable)?;
-    let mut relations = Vec::with_capacity(relation_rows.len());
-    for row in relation_rows {
-        relations.push(RelationFact {
-            name: row.try_get(0).map_err(|_| GateError::Unavailable)?,
-            kind: row.try_get(1).map_err(|_| GateError::Unavailable)?,
-            persistence: row.try_get(2).map_err(|_| GateError::Unavailable)?,
-            owner: row.try_get(3).map_err(|_| GateError::Unavailable)?,
-            access_method: row.try_get(4).map_err(|_| GateError::Unavailable)?,
-            options: row.try_get(5).map_err(|_| GateError::Unavailable)?,
-            tablespace: row.try_get(6).map_err(|_| GateError::Unavailable)?,
-            row_security: row.try_get(7).map_err(|_| GateError::Unavailable)?,
-            force_row_security: row.try_get(8).map_err(|_| GateError::Unavailable)?,
-        });
-    }
 
-    let column_rows = sqlx::query(
-        "SELECT c.relname, a.attnum, a.attname, t.typname, a.atttypmod, a.attnotnull, \
-                coll.collname, pg_get_expr(d.adbin, d.adrelid, false), \
-                a.attgenerated::text, a.attidentity::text, a.attisdropped \
-         FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid \
-         LEFT JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
-         LEFT JOIN pg_catalog.pg_collation coll ON coll.oid = a.attcollation \
-         LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum \
+    let columns = sqlx::query_as!(
+        ColumnFact,
+        "SELECT c.relname::text AS \"relation!\", a.attnum AS \"ordinal!\", \
+         a.attname::text AS \"name!\", t.typname::text AS \"type_name?\", \
+         a.atttypmod AS \"type_modifier!\", a.attnotnull AS \"not_null!\", \
+         coll.collname::text AS \"collation?\", pg_get_expr(d.adbin, d.adrelid, \
+         false) AS \"default_expression?\", a.attgenerated::text AS \
+         \"generated!\", a.attidentity::text AS \"identity!\", a.attisdropped AS \
+         \"dropped!\" FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n \
+         ON n.oid = c.relnamespace JOIN pg_catalog.pg_attribute a ON a.attrelid = \
+         c.oid LEFT JOIN pg_catalog.pg_type t ON t.oid = a.atttypid LEFT JOIN \
+         pg_catalog.pg_collation coll ON coll.oid = a.attcollation LEFT JOIN \
+         pg_catalog.pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum \
          WHERE n.nspname = $1 AND c.relname = ANY($2::text[]) AND a.attnum > 0",
+        spec.schema,
+        &relation_names,
     )
-    .bind(spec.schema)
-    .bind(&relation_names)
     .fetch_all(&mut *connection)
     .await
     .map_err(|_| GateError::Unavailable)?;
-    let mut columns = Vec::with_capacity(column_rows.len());
-    for row in column_rows {
-        columns.push(ColumnFact {
-            relation: row.try_get(0).map_err(|_| GateError::Unavailable)?,
-            ordinal: row.try_get(1).map_err(|_| GateError::Unavailable)?,
-            name: row.try_get(2).map_err(|_| GateError::Unavailable)?,
-            type_name: row.try_get(3).map_err(|_| GateError::Unavailable)?,
-            type_modifier: row.try_get(4).map_err(|_| GateError::Unavailable)?,
-            not_null: row.try_get(5).map_err(|_| GateError::Unavailable)?,
-            collation: row.try_get(6).map_err(|_| GateError::Unavailable)?,
-            default_expression: row.try_get(7).map_err(|_| GateError::Unavailable)?,
-            generated: row.try_get(8).map_err(|_| GateError::Unavailable)?,
-            identity: row.try_get(9).map_err(|_| GateError::Unavailable)?,
-            dropped: row.try_get(10).map_err(|_| GateError::Unavailable)?,
-        });
-    }
 
-    let constraint_rows = sqlx::query(
-        "SELECT c.relname, con.conname, con.contype::text, \
-                pg_get_constraintdef(con.oid, false), con.convalidated \
-         FROM pg_catalog.pg_constraint con \
-         JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+    let constraints = sqlx::query_as!(
+        ConstraintFact,
+        "SELECT c.relname::text AS \"relation!\", con.conname AS \"name!\", \
+         con.contype::text AS \"kind!\", pg_get_constraintdef(con.oid, false) AS \
+         \"definition!\", con.convalidated AS \"validated!\" FROM \
+         pg_catalog.pg_constraint con JOIN pg_catalog.pg_class c ON c.oid = \
+         con.conrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = $1 AND c.relname = ANY($2::text[])",
+        spec.schema,
+        &relation_names,
     )
-    .bind(spec.schema)
-    .bind(&relation_names)
     .fetch_all(&mut *connection)
     .await
     .map_err(|_| GateError::Unavailable)?;
-    let mut constraints = Vec::with_capacity(constraint_rows.len());
-    for row in constraint_rows {
-        constraints.push(ConstraintFact {
-            relation: row.try_get(0).map_err(|_| GateError::Unavailable)?,
-            name: row.try_get(1).map_err(|_| GateError::Unavailable)?,
-            kind: row.try_get(2).map_err(|_| GateError::Unavailable)?,
-            definition: row.try_get(3).map_err(|_| GateError::Unavailable)?,
-            validated: row.try_get(4).map_err(|_| GateError::Unavailable)?,
-        });
-    }
 
-    let index_rows = sqlx::query(
-        "SELECT table_class.relname, index_class.relname, \
-                pg_get_userbyid(index_class.relowner), pg_get_indexdef(index_class.oid), \
-                idx.indisunique, idx.indnullsnotdistinct, \
-                pg_get_expr(idx.indpred, idx.indrelid, false), \
-                pg_get_expr(idx.indexprs, idx.indrelid, false), am.amname, \
-                COALESCE((SELECT string_agg(option, ',' ORDER BY option) \
-                          FROM unnest(index_class.reloptions) option), '') AS options, \
-                COALESCE(ts.spcname, dbts.spcname) AS tablespace, \
-                idx.indisvalid, idx.indisready, idx.indislive \
-         FROM pg_catalog.pg_index idx \
-         JOIN pg_catalog.pg_class table_class ON table_class.oid = idx.indrelid \
-         JOIN pg_catalog.pg_class index_class ON index_class.oid = idx.indexrelid \
-         JOIN pg_catalog.pg_namespace n ON n.oid = table_class.relnamespace \
-         JOIN pg_catalog.pg_am am ON am.oid = index_class.relam \
-         LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid = index_class.reltablespace \
-         JOIN pg_catalog.pg_database d ON d.datname = current_database() \
-         JOIN pg_catalog.pg_tablespace dbts ON dbts.oid = d.dattablespace \
-         WHERE n.nspname = $1 AND table_class.relname = ANY($2::text[])",
+    let indexes = sqlx::query_as!(
+        IndexFact,
+        "SELECT table_class.relname::text AS \"relation!\", \
+         index_class.relname::text AS \"name!\", \
+         pg_get_userbyid(index_class.relowner) AS \"owner!\", \
+         pg_get_indexdef(index_class.oid) AS \"definition!\", idx.indisunique AS \
+         \"unique!\", idx.indnullsnotdistinct AS \"nulls_not_distinct!\", \
+         pg_get_expr(idx.indpred, idx.indrelid, false) AS \"predicate?\", \
+         pg_get_expr(idx.indexprs, idx.indrelid, false) AS \"expressions?\", \
+         am.amname::text AS \"access_method!\", COALESCE((SELECT \
+         string_agg(option, ',' ORDER BY option) FROM \
+         unnest(index_class.reloptions) option), '') AS \"options!\", \
+         COALESCE(ts.spcname, dbts.spcname) AS \"tablespace!\", idx.indisvalid AS \
+         \"valid!\", idx.indisready AS \"ready!\", idx.indislive AS \"live!\" \
+         FROM pg_catalog.pg_index idx JOIN pg_catalog.pg_class table_class ON \
+         table_class.oid = idx.indrelid JOIN pg_catalog.pg_class index_class ON \
+         index_class.oid = idx.indexrelid JOIN pg_catalog.pg_namespace n ON n.oid \
+         = table_class.relnamespace JOIN pg_catalog.pg_am am ON am.oid = \
+         index_class.relam LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid = \
+         index_class.reltablespace JOIN pg_catalog.pg_database d ON d.datname = \
+         current_database() JOIN pg_catalog.pg_tablespace dbts ON dbts.oid = \
+         d.dattablespace WHERE n.nspname = $1 AND table_class.relname = \
+         ANY($2::text[])",
+        spec.schema,
+        &relation_names,
     )
-    .bind(spec.schema)
-    .bind(&relation_names)
     .fetch_all(&mut *connection)
     .await
     .map_err(|_| GateError::Unavailable)?;
-    let mut indexes = Vec::with_capacity(index_rows.len());
-    for row in index_rows {
-        indexes.push(IndexFact {
-            relation: row.try_get(0).map_err(|_| GateError::Unavailable)?,
-            name: row.try_get(1).map_err(|_| GateError::Unavailable)?,
-            owner: row.try_get(2).map_err(|_| GateError::Unavailable)?,
-            definition: row.try_get(3).map_err(|_| GateError::Unavailable)?,
-            unique: row.try_get(4).map_err(|_| GateError::Unavailable)?,
-            nulls_not_distinct: row.try_get(5).map_err(|_| GateError::Unavailable)?,
-            predicate: row.try_get(6).map_err(|_| GateError::Unavailable)?,
-            expressions: row.try_get(7).map_err(|_| GateError::Unavailable)?,
-            access_method: row.try_get(8).map_err(|_| GateError::Unavailable)?,
-            options: row.try_get(9).map_err(|_| GateError::Unavailable)?,
-            tablespace: row.try_get(10).map_err(|_| GateError::Unavailable)?,
-            valid: row.try_get(11).map_err(|_| GateError::Unavailable)?,
-            ready: row.try_get(12).map_err(|_| GateError::Unavailable)?,
-            live: row.try_get(13).map_err(|_| GateError::Unavailable)?,
-        });
-    }
 
     let schema_acl = load_schema_acl(connection, spec.schema).await?;
     let relation_acl = load_relation_acl(connection, spec.schema, &relation_names).await?;
     let column_acl = load_column_acl(connection, spec.schema, &relation_names).await?;
-    let policies = load_attached_names(
-        connection,
-        "SELECT c.relname || '.' || p.polname FROM pg_catalog.pg_policy p \
-         JOIN pg_catalog.pg_class c ON c.oid = p.polrelid \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relname = ANY($2::text[])",
+    let policies = sqlx::query_scalar!(
+        "SELECT c.relname || '.' || p.polname AS \"value!\" FROM \
+         pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid = p.polrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname \
+         = $1 AND c.relname = ANY($2::text[])",
         spec.schema,
         &relation_names,
     )
-    .await?;
-    let rules = load_attached_names(
-        connection,
-        "SELECT c.relname || '.' || r.rulename FROM pg_catalog.pg_rewrite r \
-         JOIN pg_catalog.pg_class c ON c.oid = r.ev_class \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relname = ANY($2::text[])",
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)?;
+    let rules = sqlx::query_scalar!(
+        "SELECT c.relname || '.' || r.rulename AS \"value!\" FROM \
+         pg_catalog.pg_rewrite r JOIN pg_catalog.pg_class c ON c.oid = r.ev_class \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname \
+         = $1 AND c.relname = ANY($2::text[])",
         spec.schema,
         &relation_names,
     )
-    .await?;
-    let triggers = load_attached_names(
-        connection,
-        "SELECT c.relname || '.' || t.tgname FROM pg_catalog.pg_trigger t \
-         JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relname = ANY($2::text[]) AND NOT t.tgisinternal",
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)?;
+    let triggers = sqlx::query_scalar!(
+        "SELECT c.relname || '.' || t.tgname AS \"value!\" FROM \
+         pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname \
+         = $1 AND c.relname = ANY($2::text[]) AND NOT t.tgisinternal",
         spec.schema,
         &relation_names,
     )
-    .await?;
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| GateError::Unavailable)?;
 
     Ok(CatalogSnapshot {
         database_owner,
@@ -762,20 +716,20 @@ async fn load_schema_acl(
     connection: &mut PgConnection,
     schema: &str,
 ) -> Result<Vec<AclGrant>, GateError> {
-    let rows = sqlx::query(
-        "SELECT pg_get_userbyid(acl.grantor), \
-                CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END, \
-                acl.privilege_type, acl.is_grantable \
-         FROM pg_catalog.pg_namespace n \
-         CROSS JOIN LATERAL aclexplode( \
-             COALESCE(n.nspacl, acldefault('n'::\"char\", n.nspowner))) acl \
-         WHERE n.nspname = $1",
+    sqlx::query_as!(
+        AclGrant,
+        "SELECT NULL::text AS \"relation?\", NULL::text AS \"column?\", \
+         pg_get_userbyid(acl.grantor) AS \"grantor!\", CASE WHEN acl.grantee = 0 \
+         THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END AS \"grantee!\", \
+         acl.privilege_type AS \"privilege!\", acl.is_grantable AS \
+         \"grant_option!\" FROM pg_catalog.pg_namespace n CROSS JOIN LATERAL \
+         aclexplode( COALESCE(n.nspacl, acldefault('n'::\"char\", n.nspowner))) \
+         acl WHERE n.nspname = $1",
+        schema,
     )
-    .bind(schema)
     .fetch_all(&mut *connection)
     .await
-    .map_err(|_| GateError::Unavailable)?;
-    acl_rows(rows, false)
+    .map_err(|_| GateError::Unavailable)
 }
 
 async fn load_relation_acl(
@@ -783,22 +737,23 @@ async fn load_relation_acl(
     schema: &str,
     relation_names: &[String],
 ) -> Result<Vec<AclGrant>, GateError> {
-    let rows = sqlx::query(
-        "SELECT c.relname, pg_get_userbyid(acl.grantor), \
-                CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END, \
-                acl.privilege_type, acl.is_grantable \
-         FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         CROSS JOIN LATERAL aclexplode( \
-             COALESCE(c.relacl, acldefault('r'::\"char\", c.relowner))) acl \
-         WHERE n.nspname = $1 AND c.relname = ANY($2::text[]) AND c.relkind = 'r'",
+    sqlx::query_as!(
+        AclGrant,
+        "SELECT c.relname::text AS \"relation?\", NULL::text AS \"column?\", \
+         pg_get_userbyid(acl.grantor) AS \"grantor!\", CASE WHEN acl.grantee = 0 \
+         THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END AS \"grantee!\", \
+         acl.privilege_type AS \"privilege!\", acl.is_grantable AS \
+         \"grant_option!\" FROM pg_catalog.pg_class c JOIN \
+         pg_catalog.pg_namespace n ON n.oid = c.relnamespace CROSS JOIN LATERAL \
+         aclexplode( COALESCE(c.relacl, acldefault('r'::\"char\", c.relowner))) \
+         acl WHERE n.nspname = $1 AND c.relname = ANY($2::text[]) AND c.relkind = \
+         'r'",
+        schema,
+        relation_names,
     )
-    .bind(schema)
-    .bind(relation_names)
     .fetch_all(&mut *connection)
     .await
-    .map_err(|_| GateError::Unavailable)?;
-    acl_rows(rows, true)
+    .map_err(|_| GateError::Unavailable)
 }
 
 async fn load_column_acl(
@@ -806,70 +761,21 @@ async fn load_column_acl(
     schema: &str,
     relation_names: &[String],
 ) -> Result<Vec<AclGrant>, GateError> {
-    let rows = sqlx::query(
-        "SELECT c.relname, a.attname, pg_get_userbyid(acl.grantor), \
-                CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END, \
-                acl.privilege_type, acl.is_grantable \
-         FROM pg_catalog.pg_attribute a \
-         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         CROSS JOIN LATERAL aclexplode( \
-             COALESCE(a.attacl, acldefault('c'::\"char\", c.relowner))) acl \
-         WHERE n.nspname = $1 AND c.relname = ANY($2::text[]) AND a.attnum > 0",
+    sqlx::query_as!(
+        AclGrant,
+        "SELECT c.relname::text AS \"relation?\", a.attname::text AS \
+         \"column?\", pg_get_userbyid(acl.grantor) AS \"grantor!\", CASE WHEN \
+         acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END AS \
+         \"grantee!\", acl.privilege_type AS \"privilege!\", acl.is_grantable AS \
+         \"grant_option!\" FROM pg_catalog.pg_attribute a JOIN \
+         pg_catalog.pg_class c ON c.oid = a.attrelid JOIN pg_catalog.pg_namespace \
+         n ON n.oid = c.relnamespace CROSS JOIN LATERAL aclexplode( \
+         COALESCE(a.attacl, acldefault('c'::\"char\", c.relowner))) acl WHERE \
+         n.nspname = $1 AND c.relname = ANY($2::text[]) AND a.attnum > 0",
+        schema,
+        relation_names,
     )
-    .bind(schema)
-    .bind(relation_names)
     .fetch_all(&mut *connection)
     .await
-    .map_err(|_| GateError::Unavailable)?;
-    let mut grants = Vec::with_capacity(rows.len());
-    for row in rows {
-        grants.push(AclGrant {
-            relation: Some(row.try_get(0).map_err(|_| GateError::Unavailable)?),
-            column: Some(row.try_get(1).map_err(|_| GateError::Unavailable)?),
-            grantor: row.try_get(2).map_err(|_| GateError::Unavailable)?,
-            grantee: row.try_get(3).map_err(|_| GateError::Unavailable)?,
-            privilege: row.try_get(4).map_err(|_| GateError::Unavailable)?,
-            grant_option: row.try_get(5).map_err(|_| GateError::Unavailable)?,
-        });
-    }
-    Ok(grants)
-}
-
-fn acl_rows(rows: Vec<sqlx::postgres::PgRow>, relation: bool) -> Result<Vec<AclGrant>, GateError> {
-    let mut grants = Vec::with_capacity(rows.len());
-    for row in rows {
-        let offset = usize::from(relation);
-        grants.push(AclGrant {
-            relation: relation
-                .then(|| row.try_get(0).map_err(|_| GateError::Unavailable))
-                .transpose()?,
-            column: None,
-            grantor: row.try_get(offset).map_err(|_| GateError::Unavailable)?,
-            grantee: row
-                .try_get(offset + 1)
-                .map_err(|_| GateError::Unavailable)?,
-            privilege: row
-                .try_get(offset + 2)
-                .map_err(|_| GateError::Unavailable)?,
-            grant_option: row
-                .try_get(offset + 3)
-                .map_err(|_| GateError::Unavailable)?,
-        });
-    }
-    Ok(grants)
-}
-
-async fn load_attached_names(
-    connection: &mut PgConnection,
-    query: &'static str,
-    schema: &str,
-    relation_names: &[String],
-) -> Result<Vec<String>, GateError> {
-    sqlx::query_scalar(query)
-        .bind(schema)
-        .bind(relation_names)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(|_| GateError::Unavailable)
+    .map_err(|_| GateError::Unavailable)
 }

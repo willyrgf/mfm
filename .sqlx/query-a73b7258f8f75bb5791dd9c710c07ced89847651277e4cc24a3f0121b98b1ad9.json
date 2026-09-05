@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO mfm_evm_tx.nonce_reservations (effect_id, command_schema_id, command_content_digest, authority_epoch, chain_id, genesis_hash, sender, reserved_nonce) VALUES ($1, $2, $3, $4, $5::text::numeric, $6, $7, $8::text::numeric) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Bytea",
+        "Text",
+        "Bytea",
+        "Bytea",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a73b7258f8f75bb5791dd9c710c07ced89847651277e4cc24a3f0121b98b1ad9"
+}

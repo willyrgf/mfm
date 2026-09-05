@@ -54,10 +54,33 @@ run/configuration surfaces and the separate optional transaction-authority surfa
 and exact `solc 0.8.33`. The task compiles the first-party fixture to a temporary initcode file and
 drives the ignored `mfm-evm-live` test serially; compiler output is never committed.
 
+## Checked PostgreSQL SQL
+
+All static production SQL in `mfm-storage-postgres` uses SQLx 0.9 macros and the root `.sqlx`
+metadata. `.cargo/config.toml`, verification tasks, and release packaging default to
+`SQLX_OFFLINE=true`; ordinary compilation needs no database. After changing a query or a baseline:
+
+```bash
+nix run .#run -- --task sqlx-prepare
+nix run .#run -- --task sqlx-check
+```
+
+Both tasks use the pinned PostgreSQL 18 service and SQLx CLI. They create a uniquely named disposable
+database, replay the three existing baseline SQL files in order, and drop only that database on
+exit. They create the baseline grantee role if absent without changing an existing role. The
+passwordless managed admin endpoint is used only during Describe; no production locator, secret,
+or runtime provisioner is needed. `--no-dotenv` prevents dotenv discovery. Prepare can bootstrap
+an absent cache and updates `.sqlx`; review and commit its JSON with the query changes. Check is
+read-only with respect to tracked content and rejects extra entries as well as stale/missing ones.
+CI runs check before Rust compilation. A Nix build includes newly added cache/config files only
+after they are staged in Git.
+
 ## Nixfied tasks
 
 | Command | Contract |
 | --- | --- |
+| `nix run .#run -- --task sqlx-prepare` | Regenerate checked-query metadata from a disposable baseline database. |
+| `nix run .#run -- --task sqlx-check` | Verify metadata content and the exact query filename set without updating tracked files. |
 | `nix run .#model-check` | Admit the compiled model without project tasks. |
 | `nix run .#run -- --task postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
 | `nix run .#run -- --task client-e2e` | Generate and interrupt an exact historical REST run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it against Reth, validate and reload its exact snapshot through the CLI, then reimport the same revision and require an independent CLI-generated run to produce the same semantic result. |

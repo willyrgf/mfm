@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO mfm_evm_tx.prepared_transactions (effect_id, transaction_hash, raw_transaction) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4bcd3ef600a63fa941b9e89cb70abf6448dc342df5f75ab11e984809ccc38449"
+}

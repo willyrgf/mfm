@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO mfm_config.config_revisions (config_name, config_digest, canonical) VALUES ($1,$2,$3) ON CONFLICT (config_name, config_digest) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6cc372814ed7f22b40ab13ebbc495fdad01e3785f65bffd4ad32f153596f19cf"
+}

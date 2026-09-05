@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT schema_contract AS \"value!\" FROM ONLY public.mfm_store_schema ORDER BY 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "value!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "mfm_store_schema",
+            "name": "schema_contract"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bd9d5748da5ddca7aad7b1cd5d3b7efa7cd473c4b7d6314e626cb7f901bc880b"
+}

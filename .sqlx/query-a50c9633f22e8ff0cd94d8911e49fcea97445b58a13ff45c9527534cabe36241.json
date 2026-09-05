@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "REVOKE ALL ON SCHEMA public FROM PUBLIC, mfm_runtime",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "a50c9633f22e8ff0cd94d8911e49fcea97445b58a13ff45c9527534cabe36241"
+}

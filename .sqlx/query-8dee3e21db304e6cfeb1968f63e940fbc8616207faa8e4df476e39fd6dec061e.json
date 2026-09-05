@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT h.run_id, h.head_sequence, f.head_digest, h.total_bytes FROM ONLY public.mfm_run_heads h JOIN ONLY public.mfm_run_frames f ON f.run_id = h.run_id AND f.run_sequence = h.head_sequence WHERE h.run_id > $1 ORDER BY h.run_id COLLATE \"C\" LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "run_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "mfm_run_heads",
+            "name": "run_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "head_sequence",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "mfm_run_heads",
+            "name": "head_sequence"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "head_digest",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "mfm_run_frames",
+            "name": "head_digest"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "total_bytes",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "mfm_run_heads",
+            "name": "total_bytes"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8dee3e21db304e6cfeb1968f63e940fbc8616207faa8e4df476e39fd6dec061e"
+}
