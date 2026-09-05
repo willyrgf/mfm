@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pg_get_userbyid(d.datdba) AS \"database_owner!\", pg_get_userbyid(n.nspowner) AS \"schema_owner!\" FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_database d ON d.datname = current_database() WHERE n.nspname = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "database_owner!",
+        "type_info": "Name",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "schema_owner!",
+        "type_info": "Name",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Name"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "00c81e9044b400ee3572e8a683d372e9dd2ac6b88e8be36324d84cc87b8671c5"
+}

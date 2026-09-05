@@ -50,7 +50,7 @@ pub async fn provision_postgres(
         .await
         .map_err(classify_gate)?;
     verify_target_role(&mut connection).await?;
-    let owner: String = sqlx::query_scalar("SELECT current_user")
+    let owner: String = sqlx::query_scalar!("SELECT current_user AS \"value!\"")
         .fetch_one(&mut connection)
         .await
         .map_err(|_| ProvisionError::Unavailable)?;
@@ -67,18 +67,19 @@ pub async fn provision_postgres(
             .begin()
             .await
             .map_err(|_| ProvisionError::Unavailable)?;
-        sqlx::query("SET LOCAL synchronous_commit = on")
+        sqlx::query!("SET LOCAL synchronous_commit = on")
             .execute(&mut *transaction)
             .await
             .map_err(|_| ProvisionError::Unavailable)?;
         apply_database_acl(&mut transaction).await?;
-        sqlx::raw_sql(
-            "REVOKE ALL ON SCHEMA public FROM PUBLIC, mfm_runtime; \
-             GRANT USAGE ON SCHEMA public TO mfm_runtime",
-        )
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| ProvisionError::Unavailable)?;
+        sqlx::query!("REVOKE ALL ON SCHEMA public FROM PUBLIC, mfm_runtime")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ProvisionError::Unavailable)?;
+        sqlx::query!("GRANT USAGE ON SCHEMA public TO mfm_runtime")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ProvisionError::Unavailable)?;
         sqlx::raw_sql(RUN_SCHEMA_SQL)
             .execute(&mut *transaction)
             .await
@@ -136,7 +137,7 @@ pub async fn provision_evm_transaction_authority(
         .await
         .map_err(classify_gate)?;
     verify_target_role(&mut connection).await?;
-    let owner: String = sqlx::query_scalar("SELECT current_user")
+    let owner: String = sqlx::query_scalar!("SELECT current_user AS \"value!\"")
         .fetch_one(&mut connection)
         .await
         .map_err(|_| ProvisionError::Unavailable)?;
@@ -148,7 +149,7 @@ pub async fn provision_evm_transaction_authority(
             .begin()
             .await
             .map_err(|_| ProvisionError::Unavailable)?;
-        sqlx::query("SET LOCAL synchronous_commit = on")
+        sqlx::query!("SET LOCAL synchronous_commit = on")
             .execute(&mut *transaction)
             .await
             .map_err(|_| ProvisionError::Unavailable)?;
@@ -157,12 +158,12 @@ pub async fn provision_evm_transaction_authority(
             .execute(&mut *transaction)
             .await
             .map_err(|_| ProvisionError::Unavailable)?;
-        sqlx::query(
-            "INSERT INTO mfm_evm_tx.mfm_evm_tx_schema (schema_contract, authority_epoch) \
-             VALUES ($1, $2)",
+        sqlx::query!(
+            "INSERT INTO mfm_evm_tx.mfm_evm_tx_schema (schema_contract, \
+             authority_epoch) VALUES ($1, $2)",
+            EVM_TX_SCHEMA_CONTRACT,
+            epoch.as_slice(),
         )
-        .bind(EVM_TX_SCHEMA_CONTRACT)
-        .bind(epoch.as_slice())
         .execute(&mut *transaction)
         .await
         .map_err(|_| ProvisionError::Unavailable)?;
@@ -191,21 +192,36 @@ pub async fn provision_evm_transaction_authority(
 }
 
 async fn verify_target_role(connection: &mut PgConnection) -> Result<(), ProvisionError> {
-    let role: Option<(bool, bool, bool, bool, bool, bool, bool)> = sqlx::query_as(
-        "SELECT rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, \
-                rolreplication, rolbypassrls \
-         FROM pg_catalog.pg_roles WHERE rolname = 'mfm_runtime'",
+    let role: Option<(bool, bool, bool, bool, bool, bool, bool)> = sqlx::query!(
+        "SELECT rolsuper AS \"superuser!\", rolinherit AS \"inherit!\", \
+         rolcreaterole AS \"create_role!\", rolcreatedb AS \"create_db!\", \
+         rolcanlogin AS \"login!\", rolreplication AS \"replication!\", \
+         rolbypassrls AS \"bypass_rls!\" FROM pg_catalog.pg_roles WHERE rolname = \
+         'mfm_runtime'",
     )
     .fetch_optional(&mut *connection)
     .await
+    .map(|rows| {
+        rows.map(|row| {
+            (
+                row.superuser,
+                row.inherit,
+                row.create_role,
+                row.create_db,
+                row.login,
+                row.replication,
+                row.bypass_rls,
+            )
+        })
+    })
     .map_err(|_| ProvisionError::Unavailable)?;
     if role != Some((false, false, false, false, true, false, false)) {
         return Err(ProvisionError::Incompatible);
     }
-    let memberships: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pg_catalog.pg_auth_members m \
-         JOIN pg_catalog.pg_roles r ON r.oid = m.member OR r.oid = m.roleid \
-         WHERE r.rolname = 'mfm_runtime'",
+    let memberships: i64 = sqlx::query_scalar!(
+        "SELECT count(*) AS \"value!\" FROM pg_catalog.pg_auth_members m JOIN \
+         pg_catalog.pg_roles r ON r.oid = m.member OR r.oid = m.roleid WHERE \
+         r.rolname = 'mfm_runtime'",
     )
     .fetch_one(&mut *connection)
     .await
@@ -213,19 +229,14 @@ async fn verify_target_role(connection: &mut PgConnection) -> Result<(), Provisi
     if memberships != 0 {
         return Err(ProvisionError::Incompatible);
     }
-    let owns: bool = sqlx::query_scalar(
-        "SELECT EXISTS ( \
-           SELECT 1 FROM pg_catalog.pg_database d \
-            WHERE d.datname = current_database() AND pg_get_userbyid(d.datdba) = 'mfm_runtime' \
-           UNION ALL \
-           SELECT 1 FROM pg_catalog.pg_namespace n \
-            WHERE pg_get_userbyid(n.nspowner) = 'mfm_runtime' \
-           UNION ALL \
-           SELECT 1 FROM pg_catalog.pg_class c \
-            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-            WHERE pg_get_userbyid(c.relowner) = 'mfm_runtime' \
-              AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
-         )",
+    let owns: bool = sqlx::query_scalar!(
+        "SELECT EXISTS ( SELECT 1 FROM pg_catalog.pg_database d WHERE d.datname \
+         = current_database() AND pg_get_userbyid(d.datdba) = 'mfm_runtime' UNION \
+         ALL SELECT 1 FROM pg_catalog.pg_namespace n WHERE \
+         pg_get_userbyid(n.nspowner) = 'mfm_runtime' UNION ALL SELECT 1 FROM \
+         pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = \
+         c.relnamespace WHERE pg_get_userbyid(c.relowner) = 'mfm_runtime' AND \
+         n.nspname NOT IN ('pg_catalog', 'information_schema') ) AS \"value!\"",
     )
     .fetch_one(&mut *connection)
     .await
@@ -297,10 +308,11 @@ async fn verify_schema_owner(
     owner: &str,
     schema: &str,
 ) -> Result<(), ProvisionError> {
-    let retained: Option<String> = sqlx::query_scalar(
-        "SELECT pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace WHERE nspname = $1",
+    let retained: Option<String> = sqlx::query_scalar!(
+        "SELECT pg_get_userbyid(nspowner) AS \"value!\" FROM \
+         pg_catalog.pg_namespace WHERE nspname = $1",
+        schema,
     )
-    .bind(schema)
     .fetch_optional(&mut *connection)
     .await
     .map_err(|_| ProvisionError::Unavailable)?;
@@ -321,13 +333,16 @@ async fn verify_runtime_evm_tx_grants(connection: &mut PgConnection) -> Result<(
 async fn verify_runtime_database_grants(
     connection: &mut PgConnection,
 ) -> Result<(), ProvisionError> {
-    let database: (bool, bool, bool) = sqlx::query_as(
-        "SELECT has_database_privilege('mfm_runtime', current_database(), 'CONNECT'), \
-                has_database_privilege('mfm_runtime', current_database(), 'CREATE'), \
-                has_database_privilege('mfm_runtime', current_database(), 'TEMPORARY')",
+    let database: (bool, bool, bool) = sqlx::query!(
+        "SELECT has_database_privilege('mfm_runtime', current_database(), \
+         'CONNECT') AS \"connect!\", has_database_privilege('mfm_runtime', \
+         current_database(), 'CREATE') AS \"create!\", \
+         has_database_privilege('mfm_runtime', current_database(), 'TEMPORARY') \
+         AS \"temporary!\"",
     )
     .fetch_one(&mut *connection)
     .await
+    .map(|rows| (rows.connect, rows.create, rows.temporary))
     .map_err(|_| ProvisionError::Unavailable)?;
     if database != (true, false, false) {
         return Err(ProvisionError::Incompatible);
@@ -338,8 +353,9 @@ async fn verify_runtime_database_grants(
 async fn apply_database_acl(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), ProvisionError> {
-    let revoke: String = sqlx::query_scalar(
-        "SELECT format('REVOKE ALL PRIVILEGES ON DATABASE %I FROM PUBLIC, mfm_runtime', current_database())",
+    let revoke: String = sqlx::query_scalar!(
+        "SELECT format('REVOKE ALL PRIVILEGES ON DATABASE %I FROM PUBLIC, \
+         mfm_runtime', current_database()) AS \"value!\"",
     )
     .fetch_one(&mut **transaction)
     .await
@@ -350,8 +366,9 @@ async fn apply_database_acl(
         .execute(&mut **transaction)
         .await
         .map_err(|_| ProvisionError::Unavailable)?;
-    let grant: String = sqlx::query_scalar(
-        "SELECT format('GRANT CONNECT ON DATABASE %I TO mfm_runtime', current_database())",
+    let grant: String = sqlx::query_scalar!(
+        "SELECT format('GRANT CONNECT ON DATABASE %I TO mfm_runtime', \
+         current_database()) AS \"value!\"",
     )
     .fetch_one(&mut **transaction)
     .await

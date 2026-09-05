@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.relname::text AS \"relation!\", con.conname AS \"name!\", con.contype::text AS \"kind!\", pg_get_constraintdef(con.oid, false) AS \"definition!\", con.convalidated AS \"validated!\" FROM pg_catalog.pg_constraint con JOIN pg_catalog.pg_class c ON c.oid = con.conrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = ANY($2::text[])",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "relation!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_constraint",
+            "name": "conname"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "definition!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "validated!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_constraint",
+            "name": "convalidated"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Name",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null,
+      false,
+      null,
+      null,
+      false
+    ]
+  },
+  "hash": "51a9b7997f56af2b5df6172c694b7cebb06ffc2b4839263c6762368d8b8d77d2"
+}

@@ -22,6 +22,7 @@ let
   ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
   ccEnvSuffix = lib.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.config;
   cargoEnv = {
+    SQLX_OFFLINE = "true";
     CARGO_TARGET_DIR = "target/verification";
     CARGO_INCREMENTAL = "0";
     CARGO_PROFILE_DEV_DEBUG = "1";
@@ -132,6 +133,33 @@ let
     export PGSERVICE=ambient PGSSLMODE=verify-full
     ${cargoArgs}
   '';
+  sqlxTask = check:
+    (cargoLeaf {
+      tools = [ "pg-psql" pkgs.coreutils "find" "diff" (assert pkgs.sqlx-cli.version == "0.9.0"; pkgs.sqlx-cli) ];
+      run = [ "bash" "-c" ''
+        set -euo pipefail
+        unset PGOPTIONS PGSERVICE PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGPASSFILE DATABASE_URL
+        admin_dsn="host=''${host:postgres} port=''${port:postgres} user=postgres dbname=postgres sslmode=disable"
+        metadata_db="mfm_sqlx_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+        psql -X "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<SQL
+        SELECT 'CREATE ROLE mfm_runtime' WHERE NOT EXISTS (
+          SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'mfm_runtime'
+        ) \gexec
+        CREATE DATABASE $metadata_db TEMPLATE template0;
+        SQL
+        trap 'psql -X "$admin_dsn" -v ON_ERROR_STOP=1 -c "DROP DATABASE $metadata_db WITH (FORCE)" >/dev/null' EXIT
+        export DATABASE_URL="postgresql://postgres@''${host:postgres}:''${port:postgres}/$metadata_db?sslmode=disable"
+        for baseline in run_history_postgres_v1 config_postgres_v2 evm_transaction_postgres_v1; do
+          psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "crates/storages/postgres/migrations/$baseline.sql" >/dev/null
+        done
+        SQLX_OFFLINE=false cargo sqlx prepare --no-dotenv ${lib.optionalString check "--check"} --workspace -- --locked -p mfm-storage-postgres --lib
+        ${lib.optionalString check ''
+          # SQLx warns about extra cache files; CI requires the exact live query set.
+          cache_names() { find "$1" -maxdepth 1 -name 'query-*.json' -printf '%f\n' | sort; }
+          diff -u <(cache_names .sqlx) <(cache_names "$CARGO_TARGET_DIR/sqlx-prepare-check")
+        ''}
+      '' ];
+    }) // { requires = [ "postgres" ]; };
   localEvmRun = cargoArgs: ''
     set -euo pipefail
     rpc_url="http://''${host:reth}:''${port:reth}"
@@ -180,6 +208,8 @@ in
       "file-write"
     ];
   };
+  nixfied.closures.find = { package = pkgs.findutils; executable = "bin/find"; effects = [ "source-read" ]; };
+  nixfied.closures.diff = { package = pkgs.diffutils; executable = "bin/diff"; effects = [ "source-read" ]; };
   nixfied.closures.cc = {
     package = pkgs.stdenv.cc;
     executable = "bin/cc";
@@ -248,6 +278,8 @@ in
         "--all-targets"
       ];
     };
+    sqlx-prepare = sqlxTask false;
+    sqlx-check = sqlxTask true;
     postgres-test =
       (cargoLeaf {
         # Every ignored test owns the whole managed database, so they must not overlap.
@@ -390,6 +422,7 @@ in
       kind = "composite";
       steps = nixfiedLib.seq [
         "fmt"
+        "sqlx-check"
         "clippy"
         "cargo-check"
         "cargo-test"

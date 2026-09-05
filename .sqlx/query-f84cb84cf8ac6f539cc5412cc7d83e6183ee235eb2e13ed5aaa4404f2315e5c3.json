@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS ( SELECT 1 FROM pg_catalog.pg_database d WHERE d.datname = current_database() AND pg_get_userbyid(d.datdba) = 'mfm_runtime' UNION ALL SELECT 1 FROM pg_catalog.pg_namespace n WHERE pg_get_userbyid(n.nspowner) = 'mfm_runtime' UNION ALL SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE pg_get_userbyid(c.relowner) = 'mfm_runtime' AND n.nspname NOT IN ('pg_catalog', 'information_schema') ) AS \"value!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "value!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f84cb84cf8ac6f539cc5412cc7d83e6183ee235eb2e13ed5aaa4404f2315e5c3"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT schema_contract AS \"value!\" FROM ONLY mfm_config.mfm_config_schema ORDER BY 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "value!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "mfm_config.mfm_config_schema",
+            "name": "schema_contract"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "057989fec6b772a6c3f628810fb04627133f23e18cef9460927098a5021cc1a0"
+}

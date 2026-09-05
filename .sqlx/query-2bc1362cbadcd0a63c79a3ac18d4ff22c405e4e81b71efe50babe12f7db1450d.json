@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "GRANT USAGE ON SCHEMA public TO mfm_runtime",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "2bc1362cbadcd0a63c79a3ac18d4ff22c405e4e81b71efe50babe12f7db1450d"
+}

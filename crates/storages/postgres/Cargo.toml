@@ -27,7 +27,7 @@ mfm-values = { path = "../../kernel/values" }
 getrandom = { workspace = true }
 percent-encoding = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { workspace = true }
+sqlx = { workspace = true, features = ["macros"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 url = { workspace = true }

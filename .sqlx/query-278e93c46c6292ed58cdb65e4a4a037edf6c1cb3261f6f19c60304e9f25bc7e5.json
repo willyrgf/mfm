@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO public.mfm_run_heads (run_id, head_sequence, total_bytes) VALUES ($1,$2,$3) ON CONFLICT (run_id) DO UPDATE SET head_sequence = EXCLUDED.head_sequence, total_bytes = EXCLUDED.total_bytes",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "278e93c46c6292ed58cdb65e4a4a037edf6c1cb3261f6f19c60304e9f25bc7e5"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pg_get_userbyid(nspowner) AS \"value!\" FROM pg_catalog.pg_namespace WHERE nspname = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "value!",
+        "type_info": "Name",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Name"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8404716f7012f3101d2cb0673ce7d06a7e4e3d78f46e7739bf2f1852dadf3487"
+}

@@ -1,0 +1,140 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT table_class.relname::text AS \"relation!\", index_class.relname::text AS \"name!\", pg_get_userbyid(index_class.relowner) AS \"owner!\", pg_get_indexdef(index_class.oid) AS \"definition!\", idx.indisunique AS \"unique!\", idx.indnullsnotdistinct AS \"nulls_not_distinct!\", pg_get_expr(idx.indpred, idx.indrelid, false) AS \"predicate?\", pg_get_expr(idx.indexprs, idx.indrelid, false) AS \"expressions?\", am.amname::text AS \"access_method!\", COALESCE((SELECT string_agg(option, ',' ORDER BY option) FROM unnest(index_class.reloptions) option), '') AS \"options!\", COALESCE(ts.spcname, dbts.spcname) AS \"tablespace!\", idx.indisvalid AS \"valid!\", idx.indisready AS \"ready!\", idx.indislive AS \"live!\" FROM pg_catalog.pg_index idx JOIN pg_catalog.pg_class table_class ON table_class.oid = idx.indrelid JOIN pg_catalog.pg_class index_class ON index_class.oid = idx.indexrelid JOIN pg_catalog.pg_namespace n ON n.oid = table_class.relnamespace JOIN pg_catalog.pg_am am ON am.oid = index_class.relam LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid = index_class.reltablespace JOIN pg_catalog.pg_database d ON d.datname = current_database() JOIN pg_catalog.pg_tablespace dbts ON dbts.oid = d.dattablespace WHERE n.nspname = $1 AND table_class.relname = ANY($2::text[])",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "relation!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "owner!",
+        "type_info": "Name",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "definition!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "unique!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_index",
+            "name": "indisunique"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "nulls_not_distinct!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_index",
+            "name": "indnullsnotdistinct"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "predicate?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "expressions?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "access_method!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "options!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "tablespace!",
+        "type_info": "Name",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 11,
+        "name": "valid!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_index",
+            "name": "indisvalid"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "ready!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_index",
+            "name": "indisready"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "live!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_index",
+            "name": "indislive"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Name",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "081cc62f85331c573449c760f20289fc5ffb0c0b5dbcfa1385cc3bc28435120c"
+}

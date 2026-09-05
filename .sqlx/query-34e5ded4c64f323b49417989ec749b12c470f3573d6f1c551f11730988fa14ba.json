@@ -1,0 +1,110 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT rolname AS \"role_name!\", rolsuper AS \"superuser!\", rolinherit AS \"inherit!\", rolcreaterole AS \"create_role!\", rolcreatedb AS \"create_db!\", rolcanlogin AS \"login!\", rolreplication AS \"replication!\", rolbypassrls AS \"bypass_rls!\" FROM pg_catalog.pg_roles WHERE rolname = current_user",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role_name!",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolname"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "superuser!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolsuper"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "inherit!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolinherit"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "create_role!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolcreaterole"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "create_db!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolcreatedb"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "login!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolcanlogin"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "replication!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolreplication"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "bypass_rls!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolbypassrls"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "34e5ded4c64f323b49417989ec749b12c470f3573d6f1c551f11730988fa14ba"
+}

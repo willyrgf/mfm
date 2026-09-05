@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT format('GRANT CONNECT ON DATABASE %I TO mfm_runtime', current_database()) AS \"value!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "value!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2a5384b07d5bfc48a5d2de3792f54ce433f1b83be4e6478f9fe708a1f08bca0b"
+}

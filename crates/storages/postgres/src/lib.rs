@@ -19,7 +19,7 @@ use mfm_journal::{
 };
 use mfm_store::{AppendResult, RunIndex, RunIndexError, RunPage, RunPageLimit, Store, StoreError};
 use sqlx::postgres::{PgArguments, PgPoolOptions, PgRow};
-use sqlx::{Arguments, Connection, PgConnection, PgPool, Row};
+use sqlx::{Connection, PgConnection, PgPool, Row};
 
 const SCHEMA_CONTRACT: &str = "mfm.run-history-postgres.v1";
 
@@ -272,12 +272,14 @@ fn classify_open_error(error: sqlx::Error) -> PostgresOpenError {
 }
 
 async fn verify_durability(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
-    let durable: (bool, String, String) = sqlx::query_as(
-        "SELECT NOT pg_is_in_recovery(), current_setting('fsync'), \
-         current_setting('full_page_writes')",
+    let durable: (bool, String, String) = sqlx::query!(
+        "SELECT NOT pg_is_in_recovery() AS \"primary!\", \
+         current_setting('fsync') AS \"fsync!\", \
+         current_setting('full_page_writes') AS \"full_page_writes!\"",
     )
     .fetch_one(&mut *connection)
     .await
+    .map(|rows| (rows.primary, rows.fsync, rows.full_page_writes))
     .map_err(|_| GateError::Unavailable)?;
     if !durability_matches(durable.0, &durable.1, &durable.2) {
         return Err(GateError::Incompatible);
@@ -304,19 +306,22 @@ async fn verify_evm_connection(
 }
 
 async fn verify_run_marker(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
-    let markers: Vec<String> =
-        sqlx::query_scalar("SELECT schema_contract FROM ONLY public.mfm_store_schema ORDER BY 1")
-            .fetch_all(&mut *connection)
-            .await
-            .map_err(classify_catalog_query)?;
+    let markers: Vec<String> = sqlx::query_scalar!(
+        "SELECT schema_contract AS \"value!\" FROM ONLY public.mfm_store_schema \
+         ORDER BY 1",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(classify_catalog_query)?;
     (markers == [SCHEMA_CONTRACT])
         .then_some(())
         .ok_or(GateError::Incompatible)
 }
 
 async fn verify_config_marker(connection: &mut PgConnection) -> std::result::Result<(), GateError> {
-    let markers: Vec<String> = sqlx::query_scalar(
-        "SELECT schema_contract FROM ONLY mfm_config.mfm_config_schema ORDER BY 1",
+    let markers: Vec<String> = sqlx::query_scalar!(
+        "SELECT schema_contract AS \"value!\" FROM ONLY \
+         mfm_config.mfm_config_schema ORDER BY 1",
     )
     .fetch_all(&mut *connection)
     .await
@@ -339,13 +344,29 @@ type RuntimeRoleRow = (String, bool, bool, bool, bool, bool, bool, bool);
 async fn verify_runtime_authority(
     connection: &mut PgConnection,
 ) -> std::result::Result<(), GateError> {
-    let role: Option<RuntimeRoleRow> = sqlx::query_as(
-        "SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, \
-                rolcanlogin, rolreplication, rolbypassrls \
-         FROM pg_catalog.pg_roles WHERE rolname = current_user",
+    let role: Option<RuntimeRoleRow> = sqlx::query!(
+        "SELECT rolname AS \"role_name!\", rolsuper AS \"superuser!\", \
+         rolinherit AS \"inherit!\", rolcreaterole AS \"create_role!\", \
+         rolcreatedb AS \"create_db!\", rolcanlogin AS \"login!\", rolreplication \
+         AS \"replication!\", rolbypassrls AS \"bypass_rls!\" FROM \
+         pg_catalog.pg_roles WHERE rolname = current_user",
     )
     .fetch_optional(&mut *connection)
     .await
+    .map(|rows| {
+        rows.map(|row| {
+            (
+                row.role_name,
+                row.superuser,
+                row.inherit,
+                row.create_role,
+                row.create_db,
+                row.login,
+                row.replication,
+                row.bypass_rls,
+            )
+        })
+    })
     .map_err(|_| GateError::Unavailable)?;
     let Some(role) = role else {
         return Err(GateError::Incompatible);
@@ -361,10 +382,10 @@ async fn verify_runtime_authority(
     {
         return Err(GateError::Incompatible);
     }
-    let memberships: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pg_catalog.pg_auth_members m \
-         JOIN pg_catalog.pg_roles r ON r.oid = m.member OR r.oid = m.roleid \
-         WHERE r.rolname = 'mfm_runtime'",
+    let memberships: i64 = sqlx::query_scalar!(
+        "SELECT count(*) AS \"value!\" FROM pg_catalog.pg_auth_members m JOIN \
+         pg_catalog.pg_roles r ON r.oid = m.member OR r.oid = m.roleid WHERE \
+         r.rolname = 'mfm_runtime'",
     )
     .fetch_one(&mut *connection)
     .await
@@ -372,29 +393,28 @@ async fn verify_runtime_authority(
     if memberships != 0 {
         return Err(GateError::Incompatible);
     }
-    let database: (bool, bool, bool) = sqlx::query_as(
-        "SELECT has_database_privilege(current_user, current_database(), 'CONNECT'), \
-                has_database_privilege(current_user, current_database(), 'CREATE'), \
-                has_database_privilege(current_user, current_database(), 'TEMPORARY')",
+    let database: (bool, bool, bool) = sqlx::query!(
+        "SELECT has_database_privilege(current_user, current_database(), \
+         'CONNECT') AS \"connect!\", has_database_privilege(current_user, \
+         current_database(), 'CREATE') AS \"create!\", \
+         has_database_privilege(current_user, current_database(), 'TEMPORARY') AS \
+         \"temporary!\"",
     )
     .fetch_one(&mut *connection)
     .await
+    .map(|rows| (rows.connect, rows.create, rows.temporary))
     .map_err(|_| GateError::Unavailable)?;
     if database != (true, false, false) {
         return Err(GateError::Incompatible);
     }
-    let owns_objects: bool = sqlx::query_scalar(
-        "SELECT EXISTS ( \
-           SELECT 1 FROM pg_catalog.pg_database d \
-            WHERE d.datname = current_database() AND pg_get_userbyid(d.datdba) = current_user \
-           UNION ALL \
-           SELECT 1 FROM pg_catalog.pg_namespace n WHERE pg_get_userbyid(n.nspowner) = current_user \
-           UNION ALL \
-           SELECT 1 FROM pg_catalog.pg_class c \
-            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-            WHERE pg_get_userbyid(c.relowner) = current_user \
-              AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
-         )",
+    let owns_objects: bool = sqlx::query_scalar!(
+        "SELECT EXISTS ( SELECT 1 FROM pg_catalog.pg_database d WHERE d.datname \
+         = current_database() AND pg_get_userbyid(d.datdba) = current_user UNION \
+         ALL SELECT 1 FROM pg_catalog.pg_namespace n WHERE \
+         pg_get_userbyid(n.nspowner) = current_user UNION ALL SELECT 1 FROM \
+         pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = \
+         c.relnamespace WHERE pg_get_userbyid(c.relowner) = current_user AND \
+         n.nspname NOT IN ('pg_catalog', 'information_schema') ) AS \"value!\"",
     )
     .fetch_one(&mut *connection)
     .await
@@ -424,29 +444,31 @@ async fn load_run(
     #[cfg(not(test))]
     let _ = probe;
     let mut transaction = pool.begin().await.map_err(|_| StoreError::Unavailable)?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+    sqlx::query!("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *transaction)
         .await
         .map_err(|_| StoreError::Unavailable)?;
 
-    let head = sqlx::query(
-        "SELECT h.run_id, h.head_sequence, h.total_bytes, \
-                f.frame_bytes, f.head_digest \
-         FROM ONLY public.mfm_run_heads h \
-         LEFT JOIN ONLY public.mfm_run_frames f \
-           ON f.run_id = h.run_id AND f.run_sequence = h.head_sequence \
-         WHERE h.run_id = $1",
+    // Keep frame bytes in raw rows until the pure blocking validation/copy job.
+    let head = sqlx::Executor::fetch_optional(
+        &mut *transaction,
+        sqlx::query!(
+            "SELECT h.run_id, h.head_sequence, h.total_bytes, f.frame_bytes, \
+             f.head_digest FROM ONLY public.mfm_run_heads h LEFT JOIN ONLY \
+             public.mfm_run_frames f ON f.run_id = h.run_id AND f.run_sequence = \
+             h.head_sequence WHERE h.run_id = $1",
+            run_id.as_str(),
+        ),
     )
-    .bind(run_id.as_str())
-    .fetch_optional(&mut *transaction)
     .await
     .map_err(|_| StoreError::Unavailable)?;
 
     let Some(head) = head else {
-        let orphan: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM ONLY public.mfm_run_frames WHERE run_id = $1)",
+        let orphan: bool = sqlx::query_scalar!(
+            "SELECT EXISTS(SELECT 1 FROM ONLY public.mfm_run_frames WHERE run_id \
+             = $1) AS \"value!\"",
+            run_id.as_str(),
         )
-        .bind(run_id.as_str())
         .fetch_one(&mut *transaction)
         .await
         .map_err(|_| StoreError::Unavailable)?;
@@ -481,14 +503,23 @@ async fn load_run(
         let _ = transaction.rollback().await;
         return Err(StoreError::CorruptPhysicalState);
     }
-    let aggregate: (i64, Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
-        "SELECT count(*)::bigint, min(run_sequence), max(run_sequence), \
-                sum(octet_length(frame_bytes))::bigint \
-         FROM ONLY public.mfm_run_frames WHERE run_id = $1",
+    let aggregate: (i64, Option<i64>, Option<i64>, Option<i64>) = sqlx::query!(
+        "SELECT count(*)::bigint AS \"count!\", min(run_sequence) AS \
+         \"first_sequence?\", max(run_sequence) AS \"last_sequence?\", \
+         sum(octet_length(frame_bytes))::bigint AS \"total_bytes?\" FROM ONLY \
+         public.mfm_run_frames WHERE run_id = $1",
+        run_id.as_str(),
     )
-    .bind(run_id.as_str())
     .fetch_one(&mut *transaction)
     .await
+    .map(|rows| {
+        (
+            rows.count,
+            rows.first_sequence,
+            rows.last_sequence,
+            rows.total_bytes,
+        )
+    })
     .map_err(|_| StoreError::Unavailable)?;
     if aggregate.0 != head_sequence
         || aggregate.1 != Some(1)
@@ -498,12 +529,14 @@ async fn load_run(
         let _ = transaction.rollback().await;
         return Err(StoreError::CorruptPhysicalState);
     }
-    let rows = sqlx::query(
-        "SELECT run_id, run_sequence, frame_bytes, head_digest \
-         FROM ONLY public.mfm_run_frames WHERE run_id = $1 ORDER BY run_sequence",
+    let rows = sqlx::Executor::fetch_all(
+        &mut *transaction,
+        sqlx::query!(
+            "SELECT run_id, run_sequence, frame_bytes, head_digest FROM ONLY \
+         public.mfm_run_frames WHERE run_id = $1 ORDER BY run_sequence",
+            run_id.as_str(),
+        ),
     )
-    .bind(run_id.as_str())
-    .fetch_all(&mut *transaction)
     .await
     .map_err(|_| StoreError::Unavailable)?;
     let expected_run_id = run_id.as_str().to_owned();
@@ -602,38 +635,45 @@ async fn append_run(
     let mut transaction = pool.begin().await.map_err(|_| StoreError::Unavailable)?;
     configure_append_transaction(&mut transaction).await?;
     let lock_key = advisory_lock_key(&run_id);
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(lock_key)
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| StoreError::Unavailable)?;
-
-    let head = sqlx::query(
-        "SELECT h.run_id, h.head_sequence, h.total_bytes, \
-                f.frame_bytes, f.head_digest \
-         FROM ONLY public.mfm_run_heads h \
-         LEFT JOIN ONLY public.mfm_run_frames f \
-           ON f.run_id = h.run_id AND f.run_sequence = h.head_sequence \
-         WHERE h.run_id = $1",
+    sqlx::Executor::execute(
+        &mut *transaction,
+        sqlx::query!(
+            "SELECT pg_advisory_xact_lock($1) IS NULL AS locked",
+            lock_key,
+        ),
     )
-    .bind(&run_id)
-    .fetch_optional(&mut *transaction)
     .await
     .map_err(|_| StoreError::Unavailable)?;
-    let target = sqlx::query(
-        "SELECT run_id, run_sequence, frame_bytes, head_digest \
-         FROM ONLY public.mfm_run_frames WHERE run_id = $1 AND run_sequence = $2",
+
+    let head = sqlx::Executor::fetch_optional(
+        &mut *transaction,
+        sqlx::query!(
+            "SELECT h.run_id, h.head_sequence, h.total_bytes, f.frame_bytes, \
+             f.head_digest FROM ONLY public.mfm_run_heads h LEFT JOIN ONLY \
+             public.mfm_run_frames f ON f.run_id = h.run_id AND f.run_sequence = \
+             h.head_sequence WHERE h.run_id = $1",
+            &run_id,
+        ),
     )
-    .bind(&run_id)
-    .bind(sequence)
-    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|_| StoreError::Unavailable)?;
+    let target = sqlx::Executor::fetch_optional(
+        &mut *transaction,
+        sqlx::query!(
+            "SELECT run_id, run_sequence, frame_bytes, head_digest FROM ONLY \
+         public.mfm_run_frames WHERE run_id = $1 AND run_sequence = $2",
+            &run_id,
+            sequence,
+        ),
+    )
     .await
     .map_err(|_| StoreError::Unavailable)?;
     let any_frame = if head.is_none() {
-        sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM ONLY public.mfm_run_frames WHERE run_id = $1)",
+        sqlx::query_scalar!(
+            "SELECT EXISTS(SELECT 1 FROM ONLY public.mfm_run_frames WHERE run_id \
+             = $1) AS \"value!\"",
+            &run_id,
         )
-        .bind(&run_id)
         .fetch_one(&mut *transaction)
         .await
         .map_err(|_| StoreError::Unavailable)?
@@ -651,7 +691,7 @@ async fn append_run(
     let plan =
         run_pure_blocking(move || plan_pg_append(head, target, any_frame, candidate)).await?;
     let PgAppendPlan::Insert {
-        arguments,
+        query,
         run_id,
         sequence,
         total_bytes,
@@ -661,26 +701,18 @@ async fn append_run(
         return Ok(AppendResult::NotInserted);
     };
 
-    if let Err(error) = sqlx::query_with(
-        "INSERT INTO public.mfm_run_frames \
-         (run_id, run_sequence, frame_bytes, head_digest) VALUES ($1,$2,$3,$4)",
-        arguments,
-    )
-    .execute(&mut *transaction)
-    .await
-    {
+    if let Err(error) = query.execute(&mut *transaction).await {
         let _ = transaction.rollback().await;
         return Err(classify_precommit_sql(error));
     }
-    if let Err(error) = sqlx::query(
+    if let Err(error) = sqlx::query!(
         "INSERT INTO public.mfm_run_heads (run_id, head_sequence, total_bytes) \
-         VALUES ($1,$2,$3) \
-         ON CONFLICT (run_id) DO UPDATE SET \
-           head_sequence = EXCLUDED.head_sequence, total_bytes = EXCLUDED.total_bytes",
+         VALUES ($1,$2,$3) ON CONFLICT (run_id) DO UPDATE SET head_sequence = \
+         EXCLUDED.head_sequence, total_bytes = EXCLUDED.total_bytes",
+        &run_id,
+        sequence,
+        total_bytes,
     )
-    .bind(&run_id)
-    .bind(sequence)
-    .bind(total_bytes)
     .execute(&mut *transaction)
     .await
     {
@@ -698,8 +730,8 @@ async fn append_run(
         }
         CommitFault::Rejected => {
             sqlx::query(
-                "DELETE FROM ONLY public.mfm_run_frames \
-                 WHERE run_id = $1 AND run_sequence = $2",
+                "DELETE FROM ONLY public.mfm_run_frames WHERE run_id = $1 AND \
+                 run_sequence = $2",
             )
             .bind(&run_id)
             .bind(sequence)
@@ -732,11 +764,11 @@ async fn append_run(
 async fn configure_append_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> std::result::Result<(), StoreError> {
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE")
+    sqlx::query!("SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE")
         .execute(&mut **transaction)
         .await
         .map_err(|_| StoreError::Unavailable)?;
-    sqlx::query("SET LOCAL synchronous_commit = on")
+    sqlx::query!("SET LOCAL synchronous_commit = on")
         .execute(&mut **transaction)
         .await
         .map_err(|_| StoreError::Unavailable)?;
@@ -754,7 +786,7 @@ struct PgCandidate {
 enum PgAppendPlan {
     NotInserted,
     Insert {
-        arguments: PgArguments,
+        query: sqlx::query::Query<'static, sqlx::Postgres, PgArguments>,
         run_id: String,
         sequence: i64,
         total_bytes: i64,
@@ -815,21 +847,16 @@ fn plan_pg_append(
         .checked_add(frame_len_u64)
         .and_then(|total| i64::try_from(total).ok())
         .ok_or(StoreError::Capacity)?;
-    let mut arguments = PgArguments::default();
-    arguments
-        .add(candidate.run_id.clone())
-        .map_err(|_| StoreError::Unavailable)?;
-    arguments
-        .add(candidate.sequence)
-        .map_err(|_| StoreError::Unavailable)?;
-    arguments
-        .add(candidate.bytes)
-        .map_err(|_| StoreError::Unavailable)?;
-    arguments
-        .add(candidate.head_digest.as_str().to_owned())
-        .map_err(|_| StoreError::Unavailable)?;
+    let query = sqlx::query!(
+        "INSERT INTO public.mfm_run_frames (run_id, run_sequence, frame_bytes, \
+         head_digest) VALUES ($1,$2,$3,$4)",
+        candidate.run_id,
+        candidate.sequence,
+        candidate.bytes,
+        candidate.head_digest.as_str(),
+    );
     Ok(PgAppendPlan::Insert {
-        arguments,
+        query,
         run_id: candidate.run_id,
         sequence: candidate.sequence,
         total_bytes,

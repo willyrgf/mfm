@@ -1,24 +1,24 @@
 use mfm_config::{
     ConfigDigest, ConfigImportResult, ConfigName, ConfigRepositoryError, ConfigRevision,
 };
-use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 pub(super) async fn load_config(
     pool: &PgPool,
     name: &ConfigName,
     digest: &ConfigDigest,
 ) -> Result<Option<ConfigRevision>, ConfigRepositoryError> {
-    sqlx::query(
-        "SELECT config_name, config_digest, canonical \
-         FROM ONLY mfm_config.config_revisions \
-         WHERE config_name = $1 AND config_digest = $2",
+    sqlx::query_as!(
+        ConfigRow,
+        "SELECT config_name, config_digest, canonical FROM ONLY \
+         mfm_config.config_revisions WHERE config_name = $1 AND config_digest = \
+         $2",
+        name.as_str(),
+        digest.as_str(),
     )
-    .bind(name.as_str())
-    .bind(digest.as_str())
     .fetch_optional(pool)
     .await
-    .map_err(|_| ConfigRepositoryError::Unavailable)?
+    .map_err(classify_revision_query)?
     .map(decode_revision)
     .transpose()
 }
@@ -26,14 +26,15 @@ pub(super) async fn load_config(
 pub(super) async fn list_configs(
     pool: &PgPool,
 ) -> Result<Vec<ConfigRevision>, ConfigRepositoryError> {
-    sqlx::query(
-        "SELECT config_name, config_digest, canonical \
-         FROM ONLY mfm_config.config_revisions \
-         ORDER BY config_name COLLATE \"C\", config_digest COLLATE \"C\"",
+    sqlx::query_as!(
+        ConfigRow,
+        "SELECT config_name, config_digest, canonical FROM ONLY \
+         mfm_config.config_revisions ORDER BY config_name COLLATE \"C\", \
+         config_digest COLLATE \"C\"",
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| ConfigRepositoryError::Unavailable)?
+    .map_err(classify_revision_query)?
     .into_iter()
     .map(decode_revision)
     .collect()
@@ -49,14 +50,14 @@ pub(super) async fn import_config(
         .await
         .map_err(|_| ConfigRepositoryError::Unavailable)?;
     configure_mutation(&mut transaction).await?;
-    let affected = sqlx::query(
-        "INSERT INTO mfm_config.config_revisions \
-         (config_name, config_digest, canonical) VALUES ($1,$2,$3) \
-         ON CONFLICT (config_name, config_digest) DO NOTHING",
+    let affected = sqlx::query!(
+        "INSERT INTO mfm_config.config_revisions (config_name, config_digest, \
+         canonical) VALUES ($1,$2,$3) ON CONFLICT (config_name, config_digest) DO \
+         NOTHING",
+        revision.name().as_str(),
+        revision.digest().as_str(),
+        revision.canonical_bytes(),
     )
-    .bind(revision.name().as_str())
-    .bind(revision.digest().as_str())
-    .bind(revision.canonical_bytes())
     .execute(&mut *transaction)
     .await
     .map_err(|_| ConfigRepositoryError::Unavailable)?
@@ -65,16 +66,17 @@ pub(super) async fn import_config(
         commit_mutation(transaction, fault).await?;
         return Ok(ConfigImportResult::Created);
     }
-    let retained = sqlx::query(
-        "SELECT config_name, config_digest, canonical \
-         FROM ONLY mfm_config.config_revisions \
-         WHERE config_name = $1 AND config_digest = $2",
+    let retained = sqlx::query_as!(
+        ConfigRow,
+        "SELECT config_name, config_digest, canonical FROM ONLY \
+         mfm_config.config_revisions WHERE config_name = $1 AND config_digest = \
+         $2",
+        revision.name().as_str(),
+        revision.digest().as_str(),
     )
-    .bind(revision.name().as_str())
-    .bind(revision.digest().as_str())
     .fetch_optional(&mut *transaction)
     .await
-    .map_err(|_| ConfigRepositoryError::Unavailable)?
+    .map_err(classify_revision_query)?
     .map(decode_revision)
     .transpose()?
     .ok_or(ConfigRepositoryError::Corrupt)?;
@@ -97,12 +99,12 @@ pub(super) async fn delete_config(
         .await
         .map_err(|_| ConfigRepositoryError::Unavailable)?;
     configure_mutation(&mut transaction).await?;
-    let affected = sqlx::query(
-        "DELETE FROM ONLY mfm_config.config_revisions \
-         WHERE config_name = $1 AND config_digest = $2",
+    let affected = sqlx::query!(
+        "DELETE FROM ONLY mfm_config.config_revisions WHERE config_name = $1 AND \
+         config_digest = $2",
+        name.as_str(),
+        digest.as_str(),
     )
-    .bind(name.as_str())
-    .bind(digest.as_str())
     .execute(&mut *transaction)
     .await
     .map_err(|_| ConfigRepositoryError::Unavailable)?
@@ -114,20 +116,17 @@ pub(super) async fn delete_config(
     commit_mutation(transaction, fault).await
 }
 
-fn decode_revision(row: PgRow) -> Result<ConfigRevision, ConfigRepositoryError> {
-    let name: &str = row
-        .try_get("config_name")
-        .map_err(|_| ConfigRepositoryError::Corrupt)?;
-    let digest: &str = row
-        .try_get("config_digest")
-        .map_err(|_| ConfigRepositoryError::Corrupt)?;
-    let canonical: &[u8] = row
-        .try_get("canonical")
-        .map_err(|_| ConfigRepositoryError::Corrupt)?;
+struct ConfigRow {
+    config_name: String,
+    config_digest: String,
+    canonical: Vec<u8>,
+}
+
+fn decode_revision(row: ConfigRow) -> Result<ConfigRevision, ConfigRepositoryError> {
     ConfigRevision::new(
-        ConfigName::new(name).map_err(|_| ConfigRepositoryError::Corrupt)?,
-        ConfigDigest::parse(digest).map_err(|_| ConfigRepositoryError::Corrupt)?,
-        canonical.to_vec(),
+        ConfigName::new(row.config_name).map_err(|_| ConfigRepositoryError::Corrupt)?,
+        ConfigDigest::parse(row.config_digest).map_err(|_| ConfigRepositoryError::Corrupt)?,
+        row.canonical,
     )
     .map_err(|_| ConfigRepositoryError::Corrupt)
 }
@@ -135,7 +134,7 @@ fn decode_revision(row: PgRow) -> Result<ConfigRevision, ConfigRepositoryError> 
 async fn configure_mutation(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), ConfigRepositoryError> {
-    sqlx::query("SET LOCAL synchronous_commit = on")
+    sqlx::query!("SET LOCAL synchronous_commit = on")
         .execute(&mut **transaction)
         .await
         .map_err(|_| ConfigRepositoryError::Unavailable)?;
@@ -205,5 +204,15 @@ async fn commit_mutation(
             Err(ConfigRepositoryError::Unavailable)
         }
         Err(_) => Err(ConfigRepositoryError::Indeterminate),
+    }
+}
+
+fn classify_revision_query(error: sqlx::Error) -> ConfigRepositoryError {
+    match error {
+        sqlx::Error::ColumnDecode { .. }
+        | sqlx::Error::Decode(_)
+        | sqlx::Error::ColumnNotFound(_)
+        | sqlx::Error::ColumnIndexOutOfBounds { .. } => ConfigRepositoryError::Corrupt,
+        _ => ConfigRepositoryError::Unavailable,
     }
 }

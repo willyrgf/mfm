@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.relname::text AS \"relation?\", NULL::text AS \"column?\", pg_get_userbyid(acl.grantor) AS \"grantor!\", CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END AS \"grantee!\", acl.privilege_type AS \"privilege!\", acl.is_grantable AS \"grant_option!\" FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace CROSS JOIN LATERAL aclexplode( COALESCE(c.relacl, acldefault('r'::\"char\", c.relowner))) acl WHERE n.nspname = $1 AND c.relname = ANY($2::text[]) AND c.relkind = 'r'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "relation?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "column?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "grantor!",
+        "type_info": "Name",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "grantee!",
+        "type_info": "Name",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "privilege!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "grant_option!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Name",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "923796763e8c5266b9024b92626e045693bbef2c7e7e5033bc7f15da17b72979"
+}
