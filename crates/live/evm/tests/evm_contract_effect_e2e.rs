@@ -1,3 +1,8 @@
+//! Managed PostgreSQL/Reth coverage of lost reservation acknowledgement, reconstructed Runtime
+//! recovery, external nonce advancement, and unchanged terminal history. Keystore custody stays
+//! alive across Runtime reconstruction. Preparation recovery without signing and Journal append
+//! faults are exercised in `src/transaction_tests.rs`; this test does not count provider calls.
+
 use mfm_evm::{
     EvmNonceReservationEffect, EvmTransactionPreparationEffect, PrepareEvmTransaction,
     ProjectEvmTransactionOutcome, ReserveEvmNonce,
@@ -32,6 +37,7 @@ use mfm_program::{
     expand_program, Operation, OperationExpansion, ProgramError, ProposedStateOutcome, PureState,
     State,
 };
+use mfm_program_derive::MfmValue;
 use mfm_runtime::{RunView, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError};
 use mfm_signing::Secp256k1Signer;
 use mfm_storage_postgres::{
@@ -40,11 +46,13 @@ use mfm_storage_postgres::{
 };
 use mfm_store::Store;
 use mfm_values::MfmValue;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 const MAX_INITCODE_BYTES: usize = 49_152;
 const MAX_FUNDING_RESPONSE_BYTES: usize = 16 * 1024;
+const PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 const CONFIGURED_VALUE: u64 = 42;
 const DEPLOYMENT_GAS: u64 = 2_000_000;
@@ -58,6 +66,35 @@ const VALUE_SELECTOR: [u8; 4] = [0x3f, 0xa4, 0xf2, 0x45];
 type Deployment = EvmTransactionCompletion<EvmU256>;
 type Configuration = EvmTransactionCompletion<Deployment>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum FixtureFailure {
+    MissingCreatedAddress,
+    InvalidConfigurationCommand,
+    MissingCallTarget,
+    InvalidObservationContext,
+    InvalidReturnData,
+    DeploymentReverted,
+    ConfigurationReverted,
+    ObservationFailed,
+}
+
+impl From<EvmTransactionReversion<EvmU256>> for FixtureFailure {
+    fn from(_: EvmTransactionReversion<EvmU256>) -> Self {
+        Self::DeploymentReverted
+    }
+}
+impl From<EvmTransactionReversion<Deployment>> for FixtureFailure {
+    fn from(_: EvmTransactionReversion<Deployment>) -> Self {
+        Self::ConfigurationReverted
+    }
+}
+impl From<AnchoredContractCallFailure<Configuration>> for FixtureFailure {
+    fn from(_: AnchoredContractCallFailure<Configuration>) -> Self {
+        Self::ObservationFailed
+    }
+}
+
 fn nonzero(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).expect("nonzero fixture")
 }
@@ -67,7 +104,7 @@ struct PrepareConfiguration;
 impl State for PrepareConfiguration {
     type Input = Deployment;
     type Output = EvmTransactionContext<Deployment>;
-    type Failure = EvmU256;
+    type Failure = FixtureFailure;
 
     fn state_id() -> mfm_program::Result<StableId> {
         StableId::new("mfm.test.evm-effect/prepare-configuration@1")
@@ -78,7 +115,7 @@ impl State for PrepareConfiguration {
 impl PureState for PrepareConfiguration {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
         let Some(target) = input.outcome().created_address().cloned() else {
-            return fixture_failure();
+            return fixture_failure(FixtureFailure::MissingCreatedAddress);
         };
         let Ok(command) = Eip1559TransactionCommand::call(
             input.binding().clone(),
@@ -89,7 +126,7 @@ impl PureState for PrepareConfiguration {
             EvmU256::from_u64(PRIORITY_FEE),
             EvmU256::from_u64(MAX_FEE),
         ) else {
-            return fixture_failure();
+            return fixture_failure(FixtureFailure::InvalidConfigurationCommand);
         };
         ProposedStateOutcome::Success {
             output: EvmTransactionContext::new(input, command),
@@ -102,7 +139,7 @@ struct PrepareObservation;
 impl State for PrepareObservation {
     type Input = Configuration;
     type Output = AnchoredContractCallContext<Configuration>;
-    type Failure = EvmU256;
+    type Failure = FixtureFailure;
 
     fn state_id() -> mfm_program::Result<StableId> {
         StableId::new("mfm.test.evm-effect/prepare-observation@1")
@@ -113,7 +150,7 @@ impl State for PrepareObservation {
 impl PureState for PrepareObservation {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
         let Some(target) = input.outcome().target().cloned() else {
-            return fixture_failure();
+            return fixture_failure(FixtureFailure::MissingCallTarget);
         };
         let route = input.binding().route().clone();
         let anchor = input.receipt().block_anchor().clone();
@@ -125,7 +162,7 @@ impl PureState for PrepareObservation {
             anchor,
         ) {
             Ok(output) => ProposedStateOutcome::Success { output },
-            Err(_) => fixture_failure(),
+            Err(_) => fixture_failure(FixtureFailure::InvalidObservationContext),
         }
     }
 }
@@ -135,7 +172,7 @@ struct DecodeValue;
 impl State for DecodeValue {
     type Input = AnchoredContractCallCompletion<Configuration>;
     type Output = EvmU256;
-    type Failure = EvmU256;
+    type Failure = FixtureFailure;
 
     fn state_id() -> mfm_program::Result<StableId> {
         StableId::new("mfm.test.evm-effect/decode-value@1")
@@ -147,33 +184,37 @@ impl PureState for DecodeValue {
     fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
         match decode_fixture_value(input.result().return_bytes()) {
             Some(output) => ProposedStateOutcome::Success { output },
-            None => fixture_failure(),
+            None => fixture_failure(FixtureFailure::InvalidReturnData),
         }
     }
 }
 
 struct Abort<I, O>(PhantomData<fn(I) -> O>);
 
-impl<I: MfmValue, O: MfmValue> State for Abort<I, O> {
+impl<I: MfmValue, O: MfmValue> State for Abort<I, O>
+where
+    FixtureFailure: From<I>,
+{
     type Input = I;
     type Output = O;
-    type Failure = EvmU256;
+    type Failure = FixtureFailure;
 
     fn state_id() -> mfm_program::Result<StableId> {
         StableId::new("mfm.test.evm-effect/abort@1").map_err(|_| ProgramError::InvalidContract)
     }
 }
 
-impl<I: MfmValue, O: MfmValue> PureState for Abort<I, O> {
-    fn evaluate(_input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        fixture_failure()
+impl<I: MfmValue, O: MfmValue> PureState for Abort<I, O>
+where
+    FixtureFailure: From<I>,
+{
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        fixture_failure(input.into())
     }
 }
 
-fn fixture_failure<O>() -> ProposedStateOutcome<O, EvmU256> {
-    ProposedStateOutcome::Failure {
-        failure: EvmU256::from_u64(0),
-    }
+fn fixture_failure<O>(failure: FixtureFailure) -> ProposedStateOutcome<O, FixtureFailure> {
+    ProposedStateOutcome::Failure { failure }
 }
 
 struct EffectFixtureOperation {
@@ -183,7 +224,7 @@ struct EffectFixtureOperation {
 impl Operation for EffectFixtureOperation {
     type Input = EvmTransactionContext<EvmU256>;
     type Output = EvmU256;
-    type Failure = EvmU256;
+    type Failure = FixtureFailure;
 
     fn expand(
         &self,
@@ -580,6 +621,41 @@ async fn generated_signer(owner: &KeystoreOwner) -> Arc<dyn Secp256k1Signer> {
     panic!("four entropy candidates did not contain a valid secp256k1 scalar")
 }
 
+async fn drive_to_success<F: serde::de::DeserializeOwned + std::fmt::Debug>(
+    mut step: impl AsyncFnMut() -> mfm_runtime::Result<RunView>,
+) -> RunView {
+    let mut last_progress = String::from("no completed invocation");
+    tokio::time::timeout(PROGRESS_TIMEOUT, async {
+        loop {
+            match step().await {
+                Ok(view) => match view.state() {
+                    RunViewState::Succeeded(_) => return view,
+                    RunViewState::Failed(value) => {
+                        let failure: F = serde_json::from_slice(value.canonical_bytes())
+                            .expect("typed fixture failure");
+                        panic!(
+                            "fixture failed at frame {}: {failure:?}",
+                            view.head_sequence()
+                        );
+                    }
+                    RunViewState::Runnable => {
+                        last_progress = format!("runnable at frame {}", view.head_sequence())
+                    }
+                },
+                Err(RuntimeError::Unavailable) => {
+                    last_progress = String::from("dependency unavailable")
+                }
+                Err(error) => panic!("unexpected fixture progress error: {error:?}"),
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("fixture exceeded {PROGRESS_TIMEOUT:?}; last progress: {last_progress}")
+    })
+}
+
 fn terminal_value(view: &RunView) -> EvmU256 {
     let RunViewState::Succeeded(value) = view.state() else {
         panic!("effect fixture must succeed")
@@ -659,50 +735,43 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     .expect("fixture Program");
     let run_id = RunId::from_digest(DigestBytes::from_array([0x5a; 32]));
     let consumed = Arc::new(AtomicBool::new(false));
-    let mut initial = Some((program, input));
-    let mut terminal = None;
+    let initial_runtime = runtime(
+        &runtime_locator,
+        &rpc_locator,
+        &binding,
+        signer.clone(),
+        consumed.clone(),
+    )
+    .await;
+    let initial = tokio::time::timeout(
+        PROGRESS_TIMEOUT,
+        initial_runtime.start(run_id.clone(), program, input),
+    )
+    .await
+    .expect("initial reservation deadline");
+    assert!(matches!(initial, Err(RuntimeError::Unavailable)));
+    assert!(consumed.load(Ordering::SeqCst));
+    assert_eq!(
+        setup_provider
+            .pending_nonce(&sender)
+            .await
+            .expect("nonce before broadcast"),
+        0
+    );
+    drop(initial_runtime);
 
-    for attempt in 0..8 {
+    let terminal = drive_to_success::<FixtureFailure>(async || {
         let runtime = runtime(
             &runtime_locator,
             &rpc_locator,
             &binding,
-            Arc::clone(&signer),
-            Arc::clone(&consumed),
+            signer.clone(),
+            consumed.clone(),
         )
         .await;
-        let progress = if attempt == 0 {
-            let (program, input) = initial.take().expect("one initial admission");
-            runtime.start(run_id.clone(), program, input).await
-        } else {
-            runtime.resume(&run_id).await
-        };
-
-        if attempt == 0 {
-            assert!(matches!(progress, Err(RuntimeError::Unavailable)));
-            assert!(consumed.load(Ordering::SeqCst));
-            assert_eq!(
-                setup_provider
-                    .pending_nonce(&sender)
-                    .await
-                    .expect("nonce before broadcast"),
-                0
-            );
-            continue;
-        }
-
-        match progress {
-            Ok(view) if matches!(view.state(), RunViewState::Runnable) => {}
-            Ok(view) => {
-                terminal = Some(view);
-                break;
-            }
-            Err(RuntimeError::Unavailable) => {}
-            Err(error) => panic!("unexpected recovery failure: {error:?}"),
-        }
-    }
-
-    let terminal = terminal.expect("fixture must terminate within eight caller invocations");
+        runtime.resume(&run_id).await
+    })
+    .await;
     assert_eq!(
         terminal_value(&terminal),
         EvmU256::from_u64(CONFIGURED_VALUE)
@@ -743,26 +812,22 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         &WalletCall(binding.clone()),
     )
     .unwrap();
-    let mut fresh_view = cold_runtime
-        .start(
-            fresh_run.clone(),
-            fresh_program,
-            EvmTransactionContext::new(EvmU256::from_u64(0), fresh_command),
-        )
-        .await
-        .unwrap();
-    for _ in 0..8 {
-        if matches!(fresh_view.state(), RunViewState::Succeeded(_)) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    // Resume first so Unavailable from admission is retried without assuming genesis committed.
+    drive_to_success::<EvmTransactionReversion<EvmU256>>(async || {
         match cold_runtime.resume(&fresh_run).await {
-            Ok(view) => fresh_view = view,
-            Err(RuntimeError::Unavailable) => {}
-            Err(error) => panic!("unexpected external-advance recovery: {error:?}"),
+            Err(RuntimeError::Absent) => {
+                cold_runtime
+                    .start(
+                        fresh_run.clone(),
+                        fresh_program.clone(),
+                        EvmTransactionContext::new(EvmU256::from_u64(0), fresh_command.clone()),
+                    )
+                    .await
+            }
+            progress => progress,
         }
-    }
-    assert!(matches!(fresh_view.state(), RunViewState::Succeeded(_)));
+    })
+    .await;
     let final_nonce = final_nonce + 2;
     assert_eq!(
         setup_provider.pending_nonce(&sender).await.unwrap(),
@@ -791,4 +856,48 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     );
 
     owner.shutdown().await.expect("keystore shutdown");
+}
+
+#[tokio::test]
+#[should_panic(expected = "ConfigurationReverted")]
+async fn progress_retries_unavailable_then_reports_typed_failure_immediately() {
+    struct FailingOperation;
+    impl Operation for FailingOperation {
+        type Input = FixtureFailure;
+        type Output = EvmU256;
+        type Failure = FixtureFailure;
+        fn expand(
+            &self,
+            body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+        ) -> mfm_program::Result<()> {
+            body.pure::<Abort<FixtureFailure, EvmU256>>()
+        }
+    }
+    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
+    builder
+        .register_pure::<Abort<FixtureFailure, EvmU256>>()
+        .unwrap();
+    let runtime = Runtime::new(builder.finish(), Arc::new(mfm_store::MemoryStore::new()));
+    let mut unavailable = true;
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        drive_to_success::<FixtureFailure>(async || {
+            if std::mem::take(&mut unavailable) {
+                return Err(RuntimeError::Unavailable);
+            }
+            runtime
+                .start(
+                    RunId::from_digest(DigestBytes::from_array([0x5c; 32])),
+                    expand_program(
+                        EntryPointId::new("mfm.test.evm-effect/failure@1").unwrap(),
+                        &FailingOperation,
+                    )
+                    .unwrap(),
+                    FixtureFailure::ConfigurationReverted,
+                )
+                .await
+        }),
+    )
+    .await
+    .expect("a terminal failure must not be polled until the progress deadline");
 }
