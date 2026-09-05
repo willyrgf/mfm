@@ -1463,3 +1463,84 @@ async fn local_binding_and_corrupt_prepared_bytes_are_internal_before_provider_e
     );
     assert!(provider.operations().is_empty());
 }
+
+#[tokio::test]
+async fn malformed_receipt_preserves_prepared_and_recovery_uses_the_retained_bytes() {
+    let (owner, signer, binding, command, effect_id) = fixture().await;
+    let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch().clone()));
+    let provider = Arc::new(ScriptedProvider::new(1337));
+    let executor = CheckedExecutor::new(
+        binding.clone(),
+        signer.clone(),
+        authority.clone(),
+        provider.clone(),
+    )
+    .expect("executor");
+    let reservation = authority
+        .reserve_or_compare(
+            &effect_id,
+            &command_value_ref(&command),
+            &executor.domain,
+            7,
+        )
+        .await
+        .expect("reservation");
+    let prepared = prepare(&command, &executor, reservation)
+        .await
+        .expect("prepared");
+    let malformed = crate::json_rpc::tests::Stub::new(r#"{"jsonrpc":"2.0","id":1}"#)
+        .provider()
+        .receipt(prepared.transaction_hash())
+        .await;
+    provider.push_receipt(malformed);
+    let rejecting = Arc::new(RejectingSigner::matching(signer.as_ref()));
+    assert_eq!(
+        execute(
+            &binding,
+            &effect_id,
+            &command,
+            rejecting.clone(),
+            authority.clone(),
+            provider.clone()
+        )
+        .await,
+        Err(AdapterError::Unavailable)
+    );
+    assert!(!provider
+        .operations()
+        .iter()
+        .any(|op| matches!(op, ProviderOperation::SubmitRaw(_))));
+    assert!(
+        matches!(authority.state(), Some(AuthorityState::Prepared(ref retained)) if retained == &prepared)
+    );
+    let absent = crate::json_rpc::tests::Stub::new(r#"{"jsonrpc":"2.0","id":1,"result":null}"#)
+        .provider()
+        .receipt(prepared.transaction_hash())
+        .await;
+    provider.push_receipt(absent);
+    assert_eq!(
+        execute(
+            &binding,
+            &effect_id,
+            &command,
+            rejecting,
+            authority.clone(),
+            provider.clone()
+        )
+        .await,
+        Ok(EffectAdapterOutcome::Pending)
+    );
+    let submitted = provider
+        .operations()
+        .into_iter()
+        .filter_map(|op| match op {
+            ProviderOperation::SubmitRaw(bytes) => Some(bytes),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(submitted, [prepared.raw_transaction().as_bytes()]);
+    assert!(
+        matches!(authority.state(), Some(AuthorityState::Prepared(ref retained)) if retained == &prepared)
+    );
+    owner.shutdown().await.expect("shutdown");
+}

@@ -13,7 +13,7 @@ const TOKEN: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const BLOCK_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 
 /// Serves exactly one canned JSON body over plain HTTP and then closes.
-struct Stub {
+pub(crate) struct Stub {
     url: String,
     worker: Option<JoinHandle<Vec<u8>>>,
 }
@@ -68,7 +68,7 @@ impl SequenceStub {
 }
 
 impl Stub {
-    fn new(body: impl Into<String>) -> Self {
+    pub(crate) fn new(body: impl Into<String>) -> Self {
         let body = body.into();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
         let url = format!("http://{}", listener.local_addr().expect("stub address"));
@@ -90,7 +90,7 @@ impl Stub {
         }
     }
 
-    fn provider(&self) -> JsonRpcEvmProvider {
+    pub(crate) fn provider(&self) -> JsonRpcEvmProvider {
         JsonRpcEvmProvider::new_http_for_test(self.url.clone()).expect("provider")
     }
 
@@ -904,4 +904,48 @@ fn locator_accepts_raw_http_urls_and_rejects_other_forms() {
     ] {
         assert!(EvmAdapterLocator::parse(rejected).is_err(), "{rejected}");
     }
+}
+
+#[tokio::test]
+async fn nullable_rpc_results_require_the_result_field() {
+    let hash = EvmHash::from_bytes([1; 32]);
+    for body in [
+        r#"{"jsonrpc":"2.0","id":1}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":null,"error":{"code":-1,"message":"opaque"}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":null,"result":null}"#,
+    ] {
+        assert_eq!(
+            Stub::new(body).provider().receipt(&hash).await,
+            Err(AdapterError::Unavailable)
+        );
+        let intent = anchored_intent(serde_json::json!({
+            "kind": "anchored_contract_call",
+            "value": { "anchor": anchor(), "calldata": "", "target": TOKEN }
+        }));
+        assert_eq!(
+            observe_anchored(Stub::new(body).provider(), intent.clone()).await,
+            Err(AdapterError::Unavailable)
+        );
+        let block = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"result":{{"number":"0x11","hash":"{BLOCK_HASH}"}}}}"#
+        );
+        let mut stub = SequenceStub::new(vec![
+            block,
+            r#"{"jsonrpc":"2.0","id":1,"result":"0x6000"}"#.to_owned(),
+            r#"{"jsonrpc":"2.0","id":1,"result":"0x"}"#.to_owned(),
+            body.to_owned(),
+        ]);
+        assert_eq!(
+            observe_anchored(stub.provider(), intent).await,
+            Err(AdapterError::Unavailable)
+        );
+        assert_eq!(stub.observed_requests().len(), 4);
+    }
+    assert_eq!(
+        Stub::new(r#"{"jsonrpc":"2.0","id":1,"result":null}"#)
+            .provider()
+            .receipt(&hash)
+            .await,
+        Ok(None)
+    );
 }
