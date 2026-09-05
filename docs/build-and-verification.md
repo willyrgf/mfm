@@ -53,6 +53,13 @@ run/configuration surfaces and the separate optional transaction-authority surfa
 and exact `solc 0.8.33`. The task compiles the first-party fixture to a temporary initcode file and
 drives the ignored `mfm-evm-live` test serially; compiler output is never committed.
 
+The Effect e2e reconstructs Runtime and database handles while retaining the same keystore owner;
+its cold-recovery claim is not a process-restart test. It uses a 60-second progress deadline,
+retries Runnable/Unavailable with a 100 ms interval, and reports typed domain failures immediately.
+Its terminal checks prove unchanged history, output, and nonce, not absence of provider calls.
+`crates/live/evm/src/transaction_tests.rs` separately verifies prepared-wire recovery with a rejecting
+signer, cancellation, and ambiguous appends at every transaction Journal boundary.
+
 ## Checked PostgreSQL SQL
 
 All static production SQL in `mfm-storage-postgres` uses SQLx 0.9 macros and the root `.sqlx`
