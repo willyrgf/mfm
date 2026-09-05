@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::num::NonZeroU64;
+use std::str::FromStr;
 use std::thread::JoinHandle;
 
 use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
@@ -219,24 +220,29 @@ fn abi_word(value: &str) -> Result<AbiWord, AdapterError> {
 
 #[test]
 fn conversions_and_calldata_are_exact() {
-    assert_eq!(quantity_to_u64("0x539"), Some(1337));
-    assert_eq!(quantity_to_u64("0x0"), Some(0));
-    assert_eq!(quantity_to_u64("0x1"), Some(1));
-    assert_eq!(quantity_to_u64("0x00"), None);
-    assert_eq!(quantity_to_u64("0xA"), None);
-    assert_eq!(quantity_to_u64(&format!("0x{}", "f".repeat(17))), None);
-    assert_eq!(quantity_to_u64("539"), None);
-    assert_eq!(quantity_to_u64("0x"), None);
-    assert_eq!(quantity_to_u64("0xzz"), None);
-
+    for (encoded, value) in [("0x539", 1337), ("0x0", 0), ("0x1", 1)] {
+        assert_eq!(
+            RpcQuantity::parse(encoded).expect("quantity").to_u64(),
+            Some(value)
+        );
+    }
+    for encoded in ["0x00", "0x01", "0xA", "539", "0x", "0xzz"] {
+        assert!(RpcQuantity::parse(encoded).is_err());
+    }
     assert_eq!(
-        quantity_to_decimal("0xd3c21bcecceda1000000").as_deref(),
-        Some("1000000000000000000000000")
+        RpcQuantity::parse(&format!("0x{}", "f".repeat(17)))
+            .expect("u256 quantity")
+            .to_u64(),
+        None
     );
-    assert_eq!(quantity_to_decimal("0x0").as_deref(), Some("0"));
-    assert_eq!(quantity_to_decimal("0x00"), None);
-    assert_eq!(quantity_to_decimal("0x01"), None);
-    assert_eq!(quantity_to_decimal(&format!("0x{}", "f".repeat(65))), None);
+    assert!(RpcQuantity::parse(&format!("0x{}", "f".repeat(65))).is_err());
+    assert_eq!(
+        RpcQuantity::parse("0xd3c21bcecceda1000000")
+            .expect("quantity")
+            .decimal(),
+        "1000000000000000000000000"
+    );
+    assert_eq!(RpcQuantity::parse("0x0").expect("zero").decimal(), "0");
 
     assert!(RpcData::parse("0x", 1).expect("empty data").0.is_empty());
     assert_eq!(RpcData::parse("0x00", 1).expect("zero byte").0, [0_u8]);
@@ -283,18 +289,6 @@ fn conversions_and_calldata_are_exact() {
     assert!(EvmHash::new(BLOCK_HASH).is_ok());
     assert!(EvmHash::new("0xAAAA").is_err());
     assert!(EvmHash::new("0x11").is_err());
-
-    assert_eq!(checked_address(HOLDER), Ok(HOLDER.to_owned()));
-    // Checksummed input renders back to the exact lowercase 20-byte address.
-    assert_eq!(
-        checked_address("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"),
-        Ok(HOLDER.to_owned())
-    );
-    assert_eq!(checked_address("0xnothex"), Err(AdapterError::Internal));
-    assert_eq!(
-        checked_address("wallet.native"),
-        Err(AdapterError::Internal)
-    );
 
     assert_eq!(decimals_calldata(), "0x313ce567");
     let calldata = balance_of_calldata(&Address::from_str(HOLDER).expect("holder"));
