@@ -14,7 +14,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Signing | checked transient secp256k1 key/digest/signature contracts, public recovery, key- and purpose-bound signer port | persisted identity, secret custody, EVM encoding, provider IO |
 | Keystore | bounded thread-affine secp256k1 custody and key- and purpose-bound signer handles | Program, Runtime, EVM, persistence, free-form signing |
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
-| Live adapters | bounded provider ingress, EVM wire codecs, signer/authority/provider orchestration, and direct typed callback registration | domain planning, State registration, or finality policy configuration |
+| Live adapters | bounded provider ingress, EVM wire codecs, stage-specific signer/custody/provider IO, and direct typed callback registration | domain planning, State registration, or finality policy configuration |
 | Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning and compiled component inventory; shared client RunId generation and JSON models | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
 | Binaries | bounded transport parsing, one Application call, transport policy, and redacted rendering | composition, domain planning, environment resolution, execution lifecycle, or run semantics |
 
@@ -55,8 +55,8 @@ PostgreSQL owns its raw private locator grammar, target equivalence, SQLx wiring
 provisioner, loopback-only plaintext policy, and ambient-input exclusion. `PostgresBackend` owns one
 pool gated only for Store, RunIndex, and config custody. Optional
 `PostgresEvmTransactionAuthority` owns a separate pool gated only for its port. The authority schema
-owns only its epoch marker and append-only reservation, exact prepared-wire, and canonical
-settlement facts; the reservation contains the complete nonce domain. It does not own commands,
+owns only its epoch marker and append-only reservation and exact prepared-wire
+facts; the reservation contains the complete nonce domain. It does not own commands,
 transaction action semantics, provider
 truth, signing, broadcast, Runtime folding, or Program association. PostgreSQL uses stock SQLx
 directly.
@@ -107,19 +107,21 @@ jobs. Dropping an operation is safe: no candidate exists yet, or the one in-flig
 atomically and the next complete reload resolves it.
 
 EVM owns one shared checked address, hash, and U256 vocabulary across existing balance Reads and
-transaction contracts. One generic `ExecuteEvmTransaction<K>` State projects a complete command
-through the deterministic `EvmTransactionEffect` into shared receipt plus closed success or
-reversion facts; it owns no nonce reservation, signing, provider, or settlement loop. Products own
-any creation-to-call or call-to-observation projection as ordinary Pure States.
+transaction contracts. Capability injection expands the generic
+`ExecuteEvmTransaction<K>` into reservation and preparation Effects, the designated execution
+Effect, and a Pure outcome projection. Domain-owned `mfm_evm::custody` defines atomic reservation
+and exact-byte retention; PostgreSQL implements that port mechanically. Journal alone retains
+settlement. Runtime schedules the expanded graph with no EVM or signer knowledge. Products own
+creation-to-call or call-to-observation projection as ordinary Pure States.
 `EvmAnchoredContractCallRead` owns only the exact Program-visible
 intent/evidence and context-preserving State. Its route reference is the content ref of
 `EvmTransactionRoute`, while the transaction Effect binds the complete
 route/authority-epoch/sender value. Live registration and IO remain downstream adapters. Live EVM
 receives checked Read intents with Runtime's exact intent value ref and returns evidence bound to
 that same ref; it owns no duplicate serialized-intent transport. Live EVM alone owns the checked command-to-consensus mapping, retained-wire and signer validation, the
-separate transaction provider facet, append-only authority orchestration, and the anchored-call RPC
+separate transaction provider facet, stage-specific custody access, and the anchored-call RPC
 sequence. Its narrow pinned Alloy dependency owns EIP-1559/EIP-2718 consensus encoding, decoding,
-hashing, and CREATE-address derivation. Version 1 transaction settlement is intentionally limited
+hashing, and CREATE-address derivation. Transaction settlement is intentionally limited
 to the pinned non-reorging development fixture; `ComposedRuntime` registers neither transaction
 Effects nor anchored transaction-route Reads.
 

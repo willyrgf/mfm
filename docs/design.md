@@ -72,13 +72,18 @@ EVM Program values use byte-backed checked lowercase `EvmAddress` and `EvmHash`,
 fixes chain ID plus expected genesis hash, endpoint reference, authority epoch, and sender account.
 The sole transaction command is nonce-free EIP-1559 type 2 with an empty access list and a private
 bounded Create or Call action. Its complete factories and checked deserializer enforce input bounds,
-the `u128` fee ceiling, priority-fee ordering, and nonzero gas. One generic
-`ExecuteEvmTransaction<K>` Effect State prepares the shared `EvmTransactionEffect` command
-unchanged. Its completion retains caller context, binding, a shared receipt, and only the created
-address or checked call target; its reversion retains caller context and the same receipt.
-Settlement evidence binds the pending EffectId and contains the reserved nonce, shared receipt, and
-one Created, Called, or Reverted outcome. The Effect binder rejects an opposite successful action
-before State interpretation.
+the `u128` fee ceiling, priority-fee ordering, and nonzero gas. Capability injection expands `ExecuteEvmTransaction<K>` into four ordinary States:
+`ReserveEvmNonce<K>` Effect, `PrepareEvmTransaction<K>` Effect, the designated execution Effect,
+and `ProjectEvmTransactionOutcome<K>` Pure State. Only projection has a typed reversion failure;
+the Effects have `Never` failure. `EvmTransactionContext<K, T>` carries caller context through
+each stage. The reserve EffectId identifies custody; preparation and execution have their own
+EffectIds. The checked reserved descriptor binds the original command content reference and exact
+nonce domain. Preparation evidence binds its EffectId and public retained-wire hash; execution
+evidence binds its EffectId, nonce, hash, and action. Signed wire never enters Program or Journal.
+The final completion retains caller context, binding, receipt, and created address or call target;
+reversion retains caller context and receipt. A completed transaction adds seven frames after
+admission (two per Effect and one projection); Program v3, Journal wire, and the Runtime fold are
+unchanged. Authored graph capacity includes all four States.
 
 The broad EVM Read intent fixes only a nonzero chain ID, physical-route content ref, and one of six
 balance subjects; that subject is the operation discriminator. Its returned sum contains checked
@@ -93,19 +98,23 @@ commands and observations; EVM does not own action-specific bridges or a product
 Operation. These domain contracts perform no provider, signing, nonce, or persistence IO; the
 authority and live adapter remain separate downstream responsibilities.
 
-The live EVM transaction adapter captures one exact binding, key- and purpose-bound signer,
-append-only transaction authority, and transaction-only provider facet. Registration validates the
-immutable authority epoch, purpose `mfm.evm.sign-eip1559@1`, and public-key-derived sender once.
-Before per-invocation authority or provider IO it compares the complete command binding and exact
-command value ref. It reserves one provider-observed
-pending nonce, signs the fixed type-2 payload through that handle, retains exact signed bytes, and
-reconciles receipts before retaining typed settlement. Retained bytes are fully decoded and
-compared before provider entry. A null receipt causes at most one submission of those bytes in an
-invocation; a matching submission response returns normal Pending progress, while a transport
-failure, dropped acknowledgement, malformed response, or hash mismatch remains Unavailable.
-Settlement requires one validated receipt and equality with the provider's current canonical
-identity for its block number. Version 1 is the canonical-receipt policy for
-the pinned non-reorging development fixture and is not registered by production composition.
+`register_evm_transaction_adapters` registers three callbacks under the same binding; application
+composition separately registers the four typed State implementations. Reservation captures only
+binding, custody, and provider; preparation captures binding, custody, and signer; execution
+captures binding, custody, and provider. Registration checks epoch, signing purpose, and sender.
+Each adapter checks its command binding before IO. Reservation loads existing custody before
+observing chain and pending nonce. Preparation reuses retained wire before signing and validates
+the actual immutable winner returned by custody. Execution decodes and qualifies exact retained
+wire and recovers its sender without a signer handle. Pure hashing, encoding, decoding, and recovery
+run in immediately awaited blocking work; IO and custody handles stay outside those closures.
+
+Execution checks receipt before submitting at most once per invocation. A matching submission
+returns Pending; transport failure, dropped acknowledgement, malformed response, or hash mismatch
+is Unavailable. Settlement requires a validated receipt and matching canonical block identity.
+Journal alone retains settlement; cold completed histories need no provider or signer call. This
+canonical-receipt policy is limited to the pinned non-reorging development fixture and is not
+registered by production composition. Displaced old transactions stay unresolved; there is no
+automatic renonce, replacement, or terminal conflict policy.
 
 The same JSON-RPC client implements a separate transaction provider facet and the generic anchored
 contract-call observation. Anchored calls re-observe the authored block by number, require deployed
@@ -151,16 +160,17 @@ The transaction authority epoch is generated with OS cryptographic entropy in th
 transaction and captured by the direct admission gate. Every pooled connection repeats the full
 gate and must observe that epoch. A nonce domain is exactly epoch, chain instance, and sender;
 custody-provider and endpoint identities are not nonce dimensions. Reservation serializes one
-domain with a mechanical advisory lock and accepts provider pending nonce only at initial creation
-or exact authority-next. Reservations, prepared raw transactions, and terminal settlements are
-immutable insert-or-compare facts. One marker-driven load statement reconstructs the complete
-optional fact and rejects a wrong epoch without hiding the reservation. Different concurrently
-qualified Prepared or Settled candidates return `Unavailable` so the retained first winner is
-qualified on reload.
-Settlement bytes are current-type canonical JSON and must exactly match EffectId, command-selected
-reservation, nonce, and prepared transaction hash. Ambiguous authority COMMIT acknowledgement is
-`Unavailable`; a later `load` qualifies the committed-or-absent outcome. Writable rollback of an
-epoch is unsupported.
+domain with an advisory lock in an explicitly READ COMMITTED, READ WRITE transaction, then uses a
+separate statement snapshot to allocate `max(provider_pending, highest_local_reserved + 1)`.
+An existing Effect reservation remains unchanged. External account activity can advance fresh
+reservations without requiring predecessor settlement. `u64::MAX` means exhaustion and returns
+Unavailable without insertion; the largest reservable transaction nonce is `u64::MAX - 1`.
+Reservations and prepared raw transactions are immutable facts in the v2 baseline. One
+marker-driven physical-table load returns a reservation and optional prepared bytes. Prepared
+custody returns the first retained winner even when a concurrent valid signature differs; the live
+adapter qualifies that winner. Every write forces synchronous COMMIT. Ambiguous acknowledgement
+is Unavailable and a later load resolves the committed-or-absent outcome. Old schemas are rejected,
+not migrated. Writable rollback of an epoch is unsupported.
 
 PostgreSQL network authority is one strict URI with an explicit password, numeric `127.0.0.1` or
 `::1` host, and `sslmode=disable`. PostgreSQL traffic is intentionally plaintext inside the trusted

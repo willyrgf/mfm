@@ -25,7 +25,7 @@ pub use json_rpc::{
     EvmAdapterLocator, EvmProviderBuildError, JsonRpcEvmProvider, MAX_EVM_ADAPTER_LOCATOR_BYTES,
 };
 pub use transaction::{
-    register_evm_transaction_effect, EvmTransactionProvider, EvmTransactionProviderFuture,
+    register_evm_transaction_adapters, EvmTransactionProvider, EvmTransactionProviderFuture,
     ProviderReceipt, ProviderReceiptResult, EVM_EIP1559_SIGNING_PURPOSE_ID,
 };
 

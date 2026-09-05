@@ -1,3 +1,7 @@
+use mfm_evm::{
+    EvmNonceReservationEffect, EvmTransactionPreparationEffect, PrepareEvmTransaction,
+    ProjectEvmTransactionOutcome, ReserveEvmNonce,
+};
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -115,14 +119,33 @@ fn runtime(binding: &EvmTransactionBinding, store: Arc<MemoryStore>) -> Runtime 
         .register_effect::<ExecuteEvmTransaction<FirstContext>, EvmTransactionEffect>()
         .expect("first exact State ABI");
     builder
+        .register_effect::<ReserveEvmNonce<FirstContext>, EvmNonceReservationEffect>()
+        .unwrap();
+    builder
+        .register_effect::<PrepareEvmTransaction<FirstContext>, EvmTransactionPreparationEffect>()
+        .unwrap();
+    builder
+        .register_pure::<ProjectEvmTransactionOutcome<FirstContext>>()
+        .unwrap();
+    builder
         .register_effect::<ExecuteEvmTransaction<SecondContext>, EvmTransactionEffect>()
         .expect("second exact State ABI");
+    builder
+        .register_effect::<ReserveEvmNonce<SecondContext>, EvmNonceReservationEffect>()
+        .unwrap();
+    builder
+        .register_effect::<PrepareEvmTransaction<SecondContext>, EvmTransactionPreparationEffect>()
+        .unwrap();
+    builder
+        .register_pure::<ProjectEvmTransactionOutcome<SecondContext>>()
+        .unwrap();
     builder
         .register_effect_adapter::<EvmTransactionEffect, EvmTransactionBinding, _>(
             binding.clone(),
             |effect_id, _command_value_ref, command| {
                 let effect_id = effect_id.clone();
-                let created = command.to().is_none();
+                let created = command.reserved().command().to().is_none();
+                let nonce = command.reserved().reservation().nonce();
                 Box::pin(async move {
                     let receipt = EvmTransactionReceipt::new(
                         EvmBlockAnchor::new(EvmU256::from_u64(7), EvmHash::from_bytes([8; 32])),
@@ -131,18 +154,45 @@ fn runtime(binding: &EvmTransactionBinding, store: Arc<MemoryStore>) -> Runtime 
                     let evidence = if created {
                         EvmTransactionSettlement::created(
                             effect_id,
-                            0,
+                            nonce,
                             receipt,
                             EvmAddress::from_bytes([10; 20]),
                         )
                     } else {
-                        EvmTransactionSettlement::called(effect_id, 1, receipt)
+                        EvmTransactionSettlement::called(effect_id, nonce, receipt)
                     };
                     Ok(EffectAdapterOutcome::Settled(evidence))
                 })
             },
         )
         .expect("shared transaction adapter");
+    builder
+        .register_effect_adapter::<EvmNonceReservationEffect, EvmTransactionBinding, _>(
+            binding.clone(),
+            |id, reference, command| {
+                let reservation = mfm_evm::Reservation::new(
+                    id.clone(),
+                    reference.clone(),
+                    mfm_evm::NonceDomain::from_binding(command.binding()),
+                    0,
+                )
+                .unwrap();
+                Box::pin(async move { Ok(EffectAdapterOutcome::Settled(reservation)) })
+            },
+        )
+        .unwrap();
+    builder
+        .register_effect_adapter::<EvmTransactionPreparationEffect, EvmTransactionBinding, _>(
+            binding.clone(),
+            |id, _, _| {
+                let evidence = mfm_evm::PreparedEvmTransactionEvidence::new(
+                    id.clone(),
+                    EvmHash::from_bytes([9; 32]),
+                );
+                Box::pin(async move { Ok(EffectAdapterOutcome::Settled(evidence)) })
+            },
+        )
+        .unwrap();
     Runtime::new(builder.finish(), store)
 }
 
@@ -178,8 +228,7 @@ async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_col
                 &TransactionProgram::<FirstContext>::new(binding.clone()),
             )
             .expect("first Program"),
-            EvmTransactionContext::new(FirstContext { first: 12 }, command(binding.clone(), None))
-                .expect("first qualified input"),
+            EvmTransactionContext::new(FirstContext { first: 12 }, command(binding.clone(), None)),
         )
         .await
         .expect("first hot execution");
@@ -207,8 +256,7 @@ async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_col
                     second: "two".to_owned(),
                 },
                 command(binding.clone(), Some(EvmAddress::from_bytes([14; 20]))),
-            )
-            .expect("second qualified input"),
+            ),
         )
         .await
         .expect("second hot execution");

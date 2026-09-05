@@ -19,7 +19,6 @@ members = [
 	"crates/kernel/store",
 	"crates/kernel/values",
 	"crates/domains/evm",
-	"crates/domains/evm-transaction-authority",
 	"crates/domains/portfolio",
 	"crates/signing",
 	"crates/storages/postgres",

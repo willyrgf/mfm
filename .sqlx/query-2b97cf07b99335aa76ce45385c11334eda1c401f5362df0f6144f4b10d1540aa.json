@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT reserved_nonce::text AS \"value!\" FROM ONLY mfm_evm_tx.nonce_reservations WHERE authority_epoch = $1 AND chain_id = $2::text::numeric AND genesis_hash = $3 AND sender = $4 ORDER BY reserved_nonce DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "value!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Text",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2b97cf07b99335aa76ce45385c11334eda1c401f5362df0f6144f4b10d1540aa"
+}

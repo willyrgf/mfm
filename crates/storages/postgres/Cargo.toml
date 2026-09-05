@@ -19,7 +19,6 @@ path = "src/lib.rs"
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-config = { path = "../../config" }
 mfm-evm = { path = "../../domains/evm" }
-mfm-evm-transaction-authority = { path = "../../domains/evm-transaction-authority" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-journal = { path = "../../kernel/journal" }
 mfm-store = { path = "../../kernel/store" }

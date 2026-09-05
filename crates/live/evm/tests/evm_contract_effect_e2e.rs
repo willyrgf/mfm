@@ -1,3 +1,7 @@
+use mfm_evm::{
+    EvmNonceReservationEffect, EvmTransactionPreparationEffect, PrepareEvmTransaction,
+    ProjectEvmTransactionOutcome, ReserveEvmNonce,
+};
 use std::io::Read;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
@@ -6,6 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy_primitives::U256;
+use mfm_evm::custody::{
+    AuthorityError, AuthorityFuture, EvmTransactionAuthority, LoadedTransaction, PreparedRecord,
+    Reservation,
+};
 use mfm_evm::{
     AnchoredContractCallCompletion, AnchoredContractCallContext, AnchoredContractCallFailure,
     Eip1559TransactionCommand, EvmAddress, EvmAnchoredContractCallRead, EvmAuthorityEpoch,
@@ -14,13 +22,9 @@ use mfm_evm::{
     ExecuteEvmTransaction, ReadAnchoredContractCall,
 };
 use mfm_evm_live::{
-    ethereum_address, register_evm_anchored_contract_calls, register_evm_transaction_effect,
+    ethereum_address, register_evm_anchored_contract_calls, register_evm_transaction_adapters,
     EvmAdapterLocator, EvmReadProvider, EvmTransactionProvider, JsonRpcEvmProvider,
     EVM_EIP1559_SIGNING_PURPOSE_ID,
-};
-use mfm_evm_transaction_authority::{
-    AuthorityError, AuthorityFuture, AuthorityState, EvmTransactionAuthority, PreparedRecord,
-    Reservation, SettledRecord,
 };
 use mfm_ids::{ContentRef, DigestBytes, EffectId, EntryPointId, RunId, StableId};
 use mfm_keystore::{KeystoreOwner, SecretSecp256k1Scalar};
@@ -87,9 +91,8 @@ impl PureState for PrepareConfiguration {
         ) else {
             return fixture_failure();
         };
-        match EvmTransactionContext::new(input, command) {
-            Ok(output) => ProposedStateOutcome::Success { output },
-            Err(_) => fixture_failure(),
+        ProposedStateOutcome::Success {
+            output: EvmTransactionContext::new(input, command),
         }
     }
 }
@@ -246,7 +249,10 @@ impl EvmTransactionAuthority for ReservationAcknowledgementFault {
         self.inner.authority_epoch()
     }
 
-    fn load<'a>(&'a self, effect_id: &'a EffectId) -> AuthorityFuture<'a, Option<AuthorityState>> {
+    fn load<'a>(
+        &'a self,
+        effect_id: &'a EffectId,
+    ) -> AuthorityFuture<'a, Option<LoadedTransaction>> {
         self.inner.load(effect_id)
     }
 
@@ -254,7 +260,7 @@ impl EvmTransactionAuthority for ReservationAcknowledgementFault {
         &'a self,
         effect_id: &'a EffectId,
         command_value_ref: &'a ContentRef,
-        domain: &'a mfm_evm_transaction_authority::NonceDomain,
+        domain: &'a mfm_evm::custody::NonceDomain,
         observed_pending_nonce: u64,
     ) -> AuthorityFuture<'a, Reservation> {
         Box::pin(async move {
@@ -269,12 +275,12 @@ impl EvmTransactionAuthority for ReservationAcknowledgementFault {
         })
     }
 
-    fn retain_prepared<'a>(&'a self, candidate: &'a PreparedRecord) -> AuthorityFuture<'a, ()> {
-        self.inner.retain_prepared(candidate)
-    }
-
-    fn retain_settlement<'a>(&'a self, candidate: &'a SettledRecord) -> AuthorityFuture<'a, ()> {
-        self.inner.retain_settlement(candidate)
+    fn retain_prepared<'a>(
+        &'a self,
+        reservation: &'a Reservation,
+        candidate: &'a PreparedRecord,
+    ) -> AuthorityFuture<'a, PreparedRecord> {
+        self.inner.retain_prepared(reservation, candidate)
     }
 }
 
@@ -337,12 +343,30 @@ async fn runtime(
         .register_effect::<ExecuteEvmTransaction<EvmU256>, EvmTransactionEffect>()
         .expect("creation state");
     builder
+        .register_effect::<ReserveEvmNonce<EvmU256>, EvmNonceReservationEffect>()
+        .unwrap();
+    builder
+        .register_effect::<PrepareEvmTransaction<EvmU256>, EvmTransactionPreparationEffect>()
+        .unwrap();
+    builder
+        .register_pure::<ProjectEvmTransactionOutcome<EvmU256>>()
+        .unwrap();
+    builder
         .register_effect::<ExecuteEvmTransaction<Deployment>, EvmTransactionEffect>()
         .expect("call state");
     builder
+        .register_effect::<ReserveEvmNonce<Deployment>, EvmNonceReservationEffect>()
+        .unwrap();
+    builder
+        .register_effect::<PrepareEvmTransaction<Deployment>, EvmTransactionPreparationEffect>()
+        .unwrap();
+    builder
+        .register_pure::<ProjectEvmTransactionOutcome<Deployment>>()
+        .unwrap();
+    builder
         .register_read::<ReadAnchoredContractCall<Configuration>, EvmAnchoredContractCallRead>()
         .expect("anchored state");
-    register_evm_transaction_effect(
+    register_evm_transaction_adapters(
         &mut builder,
         binding.clone(),
         signer,
@@ -494,6 +518,50 @@ async fn funding_response_body(mut response: reqwest::Response) -> Result<Vec<u8
     Ok(body)
 }
 
+// This transfer deliberately bypasses Program and custody, like another wallet application.
+async fn external_wallet_transfer(
+    provider: &JsonRpcEvmProvider,
+    signer: &dyn Secp256k1Signer,
+    binding: &EvmTransactionBinding,
+    nonce: u64,
+) {
+    use alloy_consensus::{SignableTransaction, TxEip1559};
+    use alloy_eips::Encodable2718;
+    use alloy_primitives::{Address, Signature, TxKind};
+    let transaction = TxEip1559 {
+        chain_id: binding.route().chain_instance().chain_id().get(),
+        nonce,
+        gas_limit: 21_000,
+        max_fee_per_gas: u128::from(MAX_FEE),
+        max_priority_fee_per_gas: u128::from(PRIORITY_FEE),
+        to: TxKind::Call(Address::from(*binding.sender().as_bytes())),
+        ..Default::default()
+    };
+    let digest = mfm_signing::SigningDigest::from_bytes(transaction.signature_hash().into());
+    let signature = signer
+        .sign(digest)
+        .await
+        .expect("external wallet signature");
+    let bytes = signature.as_bytes();
+    let signature = Signature::from_scalars_and_parity(
+        alloy_primitives::B256::from_slice(&bytes[..32]),
+        alloy_primitives::B256::from_slice(&bytes[32..]),
+        signature.recovery_id() == 1,
+    );
+    let signed = transaction.into_signed(signature);
+    let raw = mfm_evm::custody::ExactRawTransaction::new(signed.encoded_2718())
+        .expect("bounded external transaction");
+    let submitted = provider
+        .submit_raw(&raw)
+        .await
+        .expect("external wallet transfer");
+    assert_eq!(submitted, EvmHash::from_bytes((*signed.hash()).into()));
+    assert_eq!(
+        provider.pending_nonce(binding.sender()).await.unwrap(),
+        nonce + 1
+    );
+}
+
 async fn generated_signer(owner: &KeystoreOwner) -> Arc<dyn Secp256k1Signer> {
     for _ in 0..4 {
         let mut candidate = Zeroizing::new([0_u8; 32]);
@@ -521,7 +589,7 @@ fn terminal_value(view: &RunView) -> EvmU256 {
 
 #[tokio::test]
 #[ignore = "requires the managed PostgreSQL, Reth, and pinned solc fixture"]
-async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
+async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() {
     let initcode = fixture_initcode();
     let admin_raw =
         std::env::var("MFM_TEST_ADMIN_POSTGRES_LOCATOR").expect("managed admin locator");
@@ -581,8 +649,7 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
         EvmU256::from_u64(MAX_FEE),
     )
     .expect("deployment command");
-    let input = EvmTransactionContext::new(EvmU256::from_u64(0), deployment_command)
-        .expect("deployment input");
+    let input = EvmTransactionContext::new(EvmU256::from_u64(0), deployment_command);
     let program = expand_program(
         EntryPointId::new("mfm.test.evm-effect/run@1").expect("entry point"),
         &EffectFixtureOperation {
@@ -646,7 +713,61 @@ async fn evm_contract_effect_recovers_cold_and_mutates_exactly_twice() {
         .expect("final pending nonce");
     assert_eq!(final_nonce, 2);
 
+    external_wallet_transfer(&setup_provider, signer.as_ref(), &binding, final_nonce).await;
+    let fresh_command = Eip1559TransactionCommand::call(
+        binding.clone(),
+        sender.clone(),
+        Vec::new(),
+        EvmU256::from_u64(0),
+        nonzero(21_000),
+        EvmU256::from_u64(PRIORITY_FEE),
+        EvmU256::from_u64(MAX_FEE),
+    )
+    .unwrap();
     let cold_runtime = runtime(&runtime_locator, &rpc_locator, &binding, signer, consumed).await;
+    let fresh_run = RunId::from_digest(DigestBytes::from_array([0x5b; 32]));
+    struct WalletCall(EvmTransactionBinding);
+    impl Operation for WalletCall {
+        type Input = EvmTransactionContext<EvmU256>;
+        type Output = EvmTransactionCompletion<EvmU256>;
+        type Failure = EvmTransactionReversion<EvmU256>;
+        fn expand(
+            &self,
+            body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+        ) -> mfm_program::Result<()> {
+            body.effect::<ExecuteEvmTransaction<EvmU256>, EvmTransactionEffect>(&self.0)
+        }
+    }
+    let fresh_program = expand_program(
+        EntryPointId::new("mfm.test.evm-effect/wallet-call@1").unwrap(),
+        &WalletCall(binding.clone()),
+    )
+    .unwrap();
+    let mut fresh_view = cold_runtime
+        .start(
+            fresh_run.clone(),
+            fresh_program,
+            EvmTransactionContext::new(EvmU256::from_u64(0), fresh_command),
+        )
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        if matches!(fresh_view.state(), RunViewState::Succeeded(_)) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        match cold_runtime.resume(&fresh_run).await {
+            Ok(view) => fresh_view = view,
+            Err(RuntimeError::Unavailable) => {}
+            Err(error) => panic!("unexpected external-advance recovery: {error:?}"),
+        }
+    }
+    assert!(matches!(fresh_view.state(), RunViewState::Succeeded(_)));
+    let final_nonce = final_nonce + 2;
+    assert_eq!(
+        setup_provider.pending_nonce(&sender).await.unwrap(),
+        final_nonce
+    );
     let cold_read = cold_runtime.read(&run_id).await.expect("cold read");
     assert_eq!(cold_read.head_sequence(), terminal.head_sequence());
     assert_eq!(cold_read.head_digest(), terminal.head_digest());

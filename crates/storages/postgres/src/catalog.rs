@@ -111,7 +111,7 @@ pub(crate) const EVM_TX_SURFACE: PgSurfaceSpec = PgSurfaceSpec {
                 column(2, "authority_epoch", "bytea", -1, true, None),
             ],
             constraints: &[
-                constraint("mfm_evm_tx_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.evm-transaction-postgres.v1'::text))"),
+                constraint("mfm_evm_tx_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.evm-transaction-postgres.v2'::text))"),
                 constraint("mfm_evm_tx_schema_epoch_check", "c", "CHECK ((octet_length(authority_epoch) = 32))"),
                 constraint("mfm_evm_tx_schema_epoch_key", "u", "UNIQUE (authority_epoch)"),
                 constraint("mfm_evm_tx_schema_pkey", "p", "PRIMARY KEY (schema_contract)"),
@@ -143,7 +143,7 @@ pub(crate) const EVM_TX_SURFACE: PgSurfaceSpec = PgSurfaceSpec {
                 constraint("nonce_reservations_epoch_check", "c", "CHECK ((octet_length(authority_epoch) = 32))"),
                 constraint("nonce_reservations_epoch_fkey", "f", "FOREIGN KEY (authority_epoch) REFERENCES mfm_evm_tx.mfm_evm_tx_schema(authority_epoch)"),
                 constraint("nonce_reservations_genesis_hash_check", "c", "CHECK ((octet_length(genesis_hash) = 32))"),
-                constraint("nonce_reservations_nonce_check", "c", "CHECK (((reserved_nonce >= (0)::numeric) AND (reserved_nonce <= '18446744073709551615'::numeric)))"),
+                constraint("nonce_reservations_nonce_check", "c", "CHECK (((reserved_nonce >= (0)::numeric) AND (reserved_nonce <= '18446744073709551614'::numeric)))"),
                 constraint("nonce_reservations_pkey", "p", "PRIMARY KEY (effect_id)"),
                 constraint("nonce_reservations_sender_check", "c", "CHECK ((octet_length(sender) = 20))"),
             ],
@@ -170,21 +170,7 @@ pub(crate) const EVM_TX_SURFACE: PgSurfaceSpec = PgSurfaceSpec {
             indexes: &[index("prepared_transactions_pkey", "CREATE UNIQUE INDEX prepared_transactions_pkey ON mfm_evm_tx.prepared_transactions USING btree (effect_id)")],
             runtime_privileges: &["INSERT", "SELECT"],
         },
-        RelationSpec {
-            name: "transaction_settlements",
-            columns: &[
-                column(1, "effect_id", "text", -1, true, Some("C")),
-                column(2, "settlement_bytes", "bytea", -1, true, None),
-            ],
-            constraints: &[
-                constraint("transaction_settlements_bytes_check", "c", "CHECK (((octet_length(settlement_bytes) >= 1) AND (octet_length(settlement_bytes) <= 65536)))"),
-                constraint("transaction_settlements_effect_id_check", "c", "CHECK ((effect_id ~ '^effect:sha256-jcs-v1:[0-9a-f]{64}$'::text))"),
-                constraint("transaction_settlements_pkey", "p", "PRIMARY KEY (effect_id)"),
-                constraint("transaction_settlements_prepared_fkey", "f", "FOREIGN KEY (effect_id) REFERENCES mfm_evm_tx.prepared_transactions(effect_id)"),
-            ],
-            indexes: &[index("transaction_settlements_pkey", "CREATE UNIQUE INDEX transaction_settlements_pkey ON mfm_evm_tx.transaction_settlements USING btree (effect_id)")],
-            runtime_privileges: &["INSERT", "SELECT"],
-        },
+
     ],
 };
 

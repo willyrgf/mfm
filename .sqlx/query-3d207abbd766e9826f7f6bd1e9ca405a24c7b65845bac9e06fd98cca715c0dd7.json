@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT marker.schema_contract, marker.authority_epoch AS admitted_epoch, reservation.effect_id, reservation.command_schema_id, reservation.command_content_digest, reservation.authority_epoch AS reservation_epoch, reservation.chain_id::text, reservation.genesis_hash, reservation.sender, reservation.reserved_nonce::text, prepared.transaction_hash, prepared.raw_transaction, settled.settlement_bytes FROM ONLY mfm_evm_tx.mfm_evm_tx_schema AS marker LEFT JOIN ONLY mfm_evm_tx.nonce_reservations AS reservation ON reservation.effect_id = $1 LEFT JOIN ONLY mfm_evm_tx.prepared_transactions AS prepared ON prepared.effect_id = reservation.effect_id LEFT JOIN ONLY mfm_evm_tx.transaction_settlements AS settled ON settled.effect_id = prepared.effect_id",
+  "query": "SELECT marker.schema_contract, marker.authority_epoch AS admitted_epoch, reservation.effect_id, reservation.command_schema_id, reservation.command_content_digest, reservation.authority_epoch AS reservation_epoch, reservation.chain_id::text, reservation.genesis_hash, reservation.sender, reservation.reserved_nonce::text, prepared.transaction_hash, prepared.raw_transaction FROM ONLY mfm_evm_tx.mfm_evm_tx_schema AS marker LEFT JOIN ONLY mfm_evm_tx.nonce_reservations AS reservation ON reservation.effect_id = $1 LEFT JOIN ONLY mfm_evm_tx.prepared_transactions AS prepared ON prepared.effect_id = reservation.effect_id",
   "describe": {
     "columns": [
       {
@@ -124,17 +124,6 @@
             "name": "raw_transaction"
           }
         }
-      },
-      {
-        "ordinal": 12,
-        "name": "settlement_bytes",
-        "type_info": "Bytea",
-        "origin": {
-          "Table": {
-            "table": "mfm_evm_tx.transaction_settlements",
-            "name": "settlement_bytes"
-          }
-        }
       }
     ],
     "parameters": {
@@ -154,9 +143,8 @@
       true,
       null,
       true,
-      true,
       true
     ]
   },
-  "hash": "d2ec567ade5e7229decd8cf879a92aed1911de5850387b54828647a77085d604"
+  "hash": "3d207abbd766e9826f7f6bd1e9ca405a24c7b65845bac9e06fd98cca715c0dd7"
 }

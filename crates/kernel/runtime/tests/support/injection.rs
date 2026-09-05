@@ -73,7 +73,7 @@ impl State for Choose {
 impl PureState for Choose {
     fn evaluate(input: Number) -> ProposedStateOutcome<Choice, Never> {
         ProposedStateOutcome::Success {
-            output: if input.value % 2 == 0 {
+            output: if input.value.is_multiple_of(2) {
                 Choice::Left(input)
             } else {
                 Choice::Right(input)

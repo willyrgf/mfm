@@ -2258,8 +2258,8 @@ dependencies = [
  "k256",
  "mfm-capabilities",
  "mfm-evm",
- "mfm-evm-transaction-authority",
  "mfm-ids",
+ "mfm-journal",
  "mfm-keystore",
  "mfm-program",
  "mfm-program-derive",
@@ -2275,16 +2275,6 @@ dependencies = [
  "tokio",
  "url",
  "zeroize",
-]
-
-[[package]]
-name = "mfm-evm-transaction-authority"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-evm",
- "mfm-ids",
- "thiserror",
 ]
 
 [[package]]
@@ -2425,7 +2415,6 @@ dependencies = [
  "mfm-canonical",
  "mfm-config",
  "mfm-evm",
- "mfm-evm-transaction-authority",
  "mfm-ids",
  "mfm-journal",
  "mfm-store",
