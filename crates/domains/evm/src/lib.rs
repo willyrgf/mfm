@@ -2203,6 +2203,7 @@ macro_rules! impl_identity_injection {
             type Setup = ContentRef;
             type ExpandedInput = EvmBalanceContext<K>;
             type ExpandedOutput = EvmBalanceContext<K>;
+            type ExpandedFailure = <$state<K> as mfm_program::State>::Failure;
 
             fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
                 Ok(setup.clone())

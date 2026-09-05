@@ -1,6 +1,6 @@
 use mfm_ids::{ContentRef, StableId};
 use mfm_program::{
-    CapabilityInjection, InjectionWriter, MatchJoin, Never, Operation, OperationExpansion,
+    CapabilityInjection, MatchJoin, Never, Operation, OperationExpansion,
     ProgramError, State,
 };
 
@@ -58,7 +58,7 @@ impl State for HookState {
     }
 }
 
-fn require_static_writer(_writer: &'static mut InjectionWriter) {}
+fn require_static_hook(_writer: &'static mut OperationExpansion<Never, Never, Never>) {}
 
 struct EscapingCapability;
 
@@ -66,6 +66,7 @@ impl CapabilityInjection<HookState> for EscapingCapability {
     type Setup = ();
     type ExpandedInput = Never;
     type ExpandedOutput = Never;
+    type ExpandedFailure = <HookState as mfm_program::State>::Failure;
 
     fn original_binding_ref(_setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         Err(ProgramError::InvalidContract)
@@ -73,9 +74,9 @@ impl CapabilityInjection<HookState> for EscapingCapability {
 
     fn write_before(
         _setup: &Self::Setup,
-        writer: &mut InjectionWriter,
+        writer: &mut OperationExpansion<Never, Never, Never>,
     ) -> mfm_program::Result<()> {
-        require_static_writer(writer);
+        require_static_hook(writer);
         Ok(())
     }
 }

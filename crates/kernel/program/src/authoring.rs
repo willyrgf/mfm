@@ -175,13 +175,14 @@ where
     {
         let expanded_input = self.identities.value_ref::<C::ExpandedInput>()?;
         let expanded_output = self.identities.value_ref::<C::ExpandedOutput>()?;
+        let expanded_failure = self.identities.value_ref::<C::ExpandedFailure>()?;
         let state_input = self.identities.value_ref::<S::Input>()?;
         let state_output = self.identities.value_ref::<S::Output>()?;
         let state_failure = self.identities.value_ref::<S::Failure>()?;
         let never = self.identities.value_ref::<Never>()?;
         self.draft.require_current(&expanded_input)?;
         require_legal_failure(
-            &state_failure,
+            &expanded_failure,
             &never,
             &self.failure_contract_ref,
             &self.admitted_failure_contract_refs,
@@ -192,6 +193,7 @@ where
             std::mem::take(&mut self.identities),
             expanded_input,
             expanded_output,
+            expanded_failure,
             state_input,
             state_output,
             state_failure,
@@ -221,13 +223,14 @@ where
     {
         let expanded_input = self.identities.value_ref::<C::ExpandedInput>()?;
         let expanded_output = self.identities.value_ref::<C::ExpandedOutput>()?;
+        let expanded_failure = self.identities.value_ref::<C::ExpandedFailure>()?;
         let state_input = self.identities.value_ref::<S::Input>()?;
         let state_output = self.identities.value_ref::<S::Output>()?;
         let state_failure = self.identities.value_ref::<S::Failure>()?;
         let never = self.identities.value_ref::<Never>()?;
         self.draft.require_current(&expanded_input)?;
         require_legal_failure(
-            &state_failure,
+            &expanded_failure,
             &never,
             &self.failure_contract_ref,
             &self.admitted_failure_contract_refs,
@@ -238,6 +241,7 @@ where
             std::mem::take(&mut self.identities),
             expanded_input,
             expanded_output,
+            expanded_failure,
             state_input,
             state_output,
             state_failure,
@@ -508,37 +512,26 @@ where
     type ExpandedInput: MfmValue;
     /// Complete success contract exposed by the expanded occurrence.
     type ExpandedOutput: MfmValue;
+    /// Complete failure contract exposed by the expanded occurrence.
+    type ExpandedFailure: MfmValue;
 
     /// Derives the original occurrence's immutable persisted binding.
     fn original_binding_ref(setup: &Self::Setup) -> Result<ContentRef>;
 
-    /// Writes ordinary Pure States before the designated capability occurrence.
-    fn write_before(_setup: &Self::Setup, _writer: &mut InjectionWriter) -> Result<()> {
+    /// Authors the ordinary graph preceding the designated capability occurrence.
+    fn write_before(
+        _setup: &Self::Setup,
+        _expansion: &mut OperationExpansion<Self::ExpandedInput, S::Input, Self::ExpandedFailure>,
+    ) -> Result<()> {
         Ok(())
     }
 
-    /// Writes ordinary Pure States after the designated capability occurrence.
-    fn write_after(_setup: &Self::Setup, _writer: &mut InjectionWriter) -> Result<()> {
+    /// Authors the success continuation after the designated capability occurrence.
+    fn write_after(
+        _setup: &Self::Setup,
+        _expansion: &mut OperationExpansion<S::Output, Self::ExpandedOutput, Self::ExpandedFailure>,
+    ) -> Result<()> {
         Ok(())
-    }
-}
-
-/// Restricted writer for one atomic capability-injection suffix.
-pub struct InjectionWriter {
-    draft: ExpansionDraft,
-    required_failure_contract_ref: ContentRef,
-    identities: IdentityMemo,
-}
-
-impl InjectionWriter {
-    /// Appends one deterministic Pure support State.
-    pub fn pure<S: PureState>(&mut self) -> Result<()> {
-        append_pure::<S>(
-            &mut self.draft,
-            &mut self.identities,
-            &self.required_failure_contract_ref,
-            &[],
-        )
     }
 }
 
@@ -913,6 +906,7 @@ fn expand_capability_suffix<S, C, BuildExecution>(
     identities: IdentityMemo,
     expanded_input: ContentRef,
     expanded_output: ContentRef,
+    expanded_failure: ContentRef,
     state_input: ContentRef,
     state_output: ContentRef,
     state_failure: ContentRef,
@@ -925,39 +919,62 @@ where
     C: CapabilityInjection<S>,
     BuildExecution: FnOnce(&mut IdentityMemo, ContentRef) -> Result<Execution>,
 {
-    let mut writer = InjectionWriter {
-        draft: ExpansionDraft::new(expanded_input),
-        required_failure_contract_ref: state_failure.clone(),
-        identities,
+    let depth = match nested_callback_depth(callback_depth) {
+        Ok(depth) => depth,
+        Err(error) => return (identities, Err(error)),
     };
+    let mut before = OperationExpansion::<C::ExpandedInput, S::Input, C::ExpandedFailure>::new(
+        expanded_input,
+        state_input.clone(),
+        expanded_failure.clone(),
+        Vec::new(),
+        depth,
+        identities,
+    );
     let result = (|| {
-        <C as CapabilityInjection<S>>::write_before(setup, &mut writer).map_err(authoring_error)?;
-        writer.draft.require_current(&state_input)?;
-        nested_callback_depth(callback_depth)?;
-        let binding_ref =
-            <C as CapabilityInjection<S>>::original_binding_ref(setup).map_err(authoring_error)?;
-        let state_implementation_ref = writer.identities.state_ref::<S>()?;
-        let execution = build_execution(&mut writer.identities, binding_ref)?;
+        require_legal_failure(&state_failure, &never, &expanded_failure, &[])?;
+        C::write_before(setup, &mut before).map_err(authoring_error)?;
+        finish_hook_scope(&mut before.draft, &state_input)?;
+        let binding_ref = C::original_binding_ref(setup).map_err(authoring_error)?;
+        let state_implementation_ref = before.identities.state_ref::<S>()?;
+        let execution = build_execution(&mut before.identities, binding_ref)?;
         append_state_core(
-            &mut writer.draft,
+            &mut before.draft,
             state_implementation_ref,
             state_input,
-            state_output,
-            state_failure.clone(),
+            state_output.clone(),
+            state_failure,
             execution,
             &never,
-            &state_failure,
+            &expanded_failure,
             &[],
         )?;
-        nested_callback_depth(callback_depth)?;
-        <C as CapabilityInjection<S>>::write_after(setup, &mut writer).map_err(authoring_error)?;
-        writer.draft.require_current(&expanded_output)?;
+        let mut after = OperationExpansion::<S::Output, C::ExpandedOutput, C::ExpandedFailure>::new(
+            state_output,
+            expanded_output.clone(),
+            expanded_failure,
+            Vec::new(),
+            depth,
+            std::mem::take(&mut before.identities),
+        );
+        let callback_result = C::write_after(setup, &mut after).map_err(authoring_error);
+        before.identities = std::mem::take(&mut after.identities);
+        callback_result?;
+        finish_hook_scope(&mut after.draft, &expanded_output)?;
+        if !after.draft.declarations.is_empty() {
+            before.draft.merge_connected(after.draft)?;
+        }
         Ok(())
     })();
-    let InjectionWriter {
-        draft, identities, ..
-    } = writer;
-    (identities, result.map(|()| draft))
+    (before.identities, result.map(|()| before.draft))
+}
+
+fn finish_hook_scope(draft: &mut ExpansionDraft, output: &ContentRef) -> Result<()> {
+    if draft.declarations.is_empty() {
+        draft.require_current(output)
+    } else {
+        draft.reopen_scope_success(output)
+    }
 }
 
 fn append_pure<S: PureState>(

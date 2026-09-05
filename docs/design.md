@@ -26,9 +26,14 @@ ref; Effect callbacks receive the exact command value ref used for `EffectId` de
 instance refs, never shared codec contract refs. State code has no ambient IO.
 
 Each Read or Effect occurrence applies the exact capability/State pair's authoring-time injection
-policy. Injection may add deterministic Pure topology before or after the one kernel-owned
-occurrence, but it cannot emit a Read, Effect, child Operation, Match, or failure handler; perform
-IO; access or replace the occurrence; register an adapter; or grant execution authority.
+policy. Before and after hooks use typed `OperationExpansion` scopes and the same Pure, Read,
+Effect, child Operation, Match, and failure-handler authoring as Operations. The kernel inserts the
+designated occurrence once between them. Hooks perform no IO or adapter registration and have no
+handle for modifying the designated occurrence. Nested hooks share the existing callback-depth and
+graph bounds. Empty hooks require identical input/output contracts; local successful scope exits
+rejoin the designated occurrence or caller continuation. The complete expansion owns its input,
+output, and failure contracts. Original failures skip the after hook: it is a success continuation,
+not a finally handler. Every suffix is checked completely before merging into its caller.
 
 Runtime admits `(RunId, Program, C0)`, appends genesis, folds the qualified history, and executes only
 the selected declaration. Pure and Read append one fused conclusion; a Read frame contains intent,

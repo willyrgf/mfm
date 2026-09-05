@@ -5,7 +5,7 @@
 //! immutable declarations with typed implementations. Authoring callbacks and
 //! capability injection are erased before construction; this crate performs no IO.
 //! Operation implementations compose children only through `OperationExpansion`, and capability
-//! policies emit support States only through `InjectionWriter`. Direct trait callback calls bypass
+//! policies use typed `OperationExpansion` scopes for their before and after graphs. Direct trait callback calls bypass
 //! kernel callback accounting and are forbidden in reviewed production code; checked Program
 //! construction, not this trusted-code rule, remains the persisted graph boundary.
 
@@ -32,7 +32,7 @@ mod authoring;
 mod tests;
 
 pub use authoring::{
-    expand_program, CapabilityInjection, InjectionWriter, MatchJoin, Operation, OperationExpansion,
+    expand_program, CapabilityInjection, MatchJoin, Operation, OperationExpansion,
 };
 
 const MAX_DECLARATIONS: usize = 65_536;
