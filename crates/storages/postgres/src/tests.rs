@@ -2036,3 +2036,172 @@ fn managed_postgres_rejects_pgoptions() {
         Err(PostgresLocatorError)
     ));
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires the managed local PostgreSQL service provided by postgres-test"]
+async fn inherited_rows_are_outside_physical_table_custody() {
+    let (admin, runtime) = managed_locators();
+    let mut connection = admin_connection(&admin).await;
+    reset_schemas(&mut connection).await;
+    connection
+        .execute("DROP SCHEMA IF EXISTS mfm_test_children CASCADE")
+        .await
+        .unwrap();
+    provision_postgres(&admin, &runtime).await.unwrap();
+    provision_evm_transaction_authority(&admin, &runtime)
+        .await
+        .unwrap();
+    let backend = PostgresBackend::connect(&runtime).await.unwrap();
+    let authority = PostgresEvmTransactionAuthority::connect(&runtime)
+        .await
+        .unwrap();
+    let run = run_id(201);
+    backend.append_run(&genesis(&run)).await.unwrap();
+    let config = config_revision("inherited", 1);
+    backend.import_config(&config).await.unwrap();
+    let domain = nonce_domain(authority.authority_epoch(), 201, 202, 203);
+    let command = reference("mfm.test.evm-command", &[201]);
+    let effect = effect_id(201);
+    let reservation = authority
+        .reserve_or_compare(&effect, &command, &domain, 7)
+        .await
+        .unwrap();
+    let prepared = PreparedRecord::new(
+        reservation,
+        evm_hash(201),
+        ExactRawTransaction::new(vec![2, 0xc1]).unwrap(),
+    );
+    authority.retain_prepared(&prepared).await.unwrap();
+    let settled = SettledRecord::new(
+        prepared,
+        transaction_settlement(effect.clone(), 7, evm_hash(201)),
+    )
+    .unwrap();
+    authority.retain_settlement(&settled).await.unwrap();
+    connection
+        .execute("CREATE SCHEMA mfm_test_children")
+        .await
+        .unwrap();
+    for (schema, table) in [
+        ("public", "mfm_store_schema"),
+        ("public", "mfm_run_heads"),
+        ("public", "mfm_run_frames"),
+        ("mfm_config", "mfm_config_schema"),
+        ("mfm_config", "config_revisions"),
+        ("mfm_evm_tx", "mfm_evm_tx_schema"),
+        ("mfm_evm_tx", "nonce_reservations"),
+        ("mfm_evm_tx", "prepared_transactions"),
+        ("mfm_evm_tx", "transaction_settlements"),
+    ] {
+        // Fixture identifiers are closed literals; children deliberately have no runtime grants.
+        connection
+            .execute(sqlx::AssertSqlSafe(format!(
+                "CREATE TABLE mfm_test_children.{table} () INHERITS ({schema}.{table})"
+            )))
+            .await
+            .unwrap();
+        connection
+            .execute(sqlx::AssertSqlSafe(format!(
+                "INSERT INTO mfm_test_children.{table} SELECT * FROM ONLY {schema}.{table}"
+            )))
+            .await
+            .unwrap();
+    }
+    // Duplicate marker and stage facts must neither poison admission nor multiply joined rows.
+    let reopened = PostgresBackend::connect(&runtime).await.unwrap();
+    let reopened_authority = PostgresEvmTransactionAuthority::connect(&runtime)
+        .await
+        .unwrap();
+    for handle in [&backend, &reopened] {
+        assert!(handle.load_run(&run).await.unwrap().is_some());
+        assert_eq!(
+            handle.append_run(&genesis(&run)).await.unwrap(),
+            AppendResult::NotInserted
+        );
+        assert_eq!(
+            handle
+                .list_runs(None, RunPageLimit::new(10).unwrap())
+                .await
+                .unwrap()
+                .items()
+                .len(),
+            1
+        );
+        assert_eq!(handle.list_configs().await.unwrap().len(), 1);
+        assert_eq!(
+            handle.import_config(&config).await.unwrap(),
+            ConfigImportResult::Unchanged
+        );
+    }
+    for handle in [&authority, &reopened_authority] {
+        assert!(matches!(
+            handle.load(&effect).await.unwrap(),
+            Some(AuthorityState::Settled(_))
+        ));
+    }
+    backend
+        .delete_config(config.name(), config.digest())
+        .await
+        .unwrap();
+    assert!(backend
+        .load_config(config.name(), config.digest())
+        .await
+        .unwrap()
+        .is_none());
+    let child_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM mfm_test_children.config_revisions")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(child_count, 1);
+    // A child-only run must stay absent and cannot prevent insertion of its physical parent.
+    sqlx::query("UPDATE mfm_test_children.mfm_run_heads SET run_id = $1")
+        .bind(run_id(202).as_str())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE mfm_test_children.mfm_run_frames SET run_id = $1")
+        .bind(run_id(202).as_str())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert!(backend.load_run(&run_id(202)).await.unwrap().is_none());
+    assert_eq!(
+        backend.append_run(&genesis(&run_id(202))).await.unwrap(),
+        AppendResult::Inserted
+    );
+    // Child-only high nonces and stages cannot select authority-next or invent retained state.
+    sqlx::query(
+        "UPDATE mfm_test_children.nonce_reservations SET effect_id = $1, reserved_nonce = 999",
+    )
+    .bind(effect_id(202).as_str())
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    for table in ["prepared_transactions", "transaction_settlements"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE mfm_test_children.{table} SET effect_id = $1"
+        )))
+        .bind(effect_id(202).as_str())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    }
+    assert!(authority.load(&effect_id(202)).await.unwrap().is_none());
+    assert_eq!(
+        authority
+            .reserve_or_compare(&effect_id(202), &command, &domain, 8)
+            .await
+            .unwrap()
+            .nonce(),
+        8
+    );
+    assert!(matches!(
+        authority.load(&effect_id(202)).await.unwrap(),
+        Some(AuthorityState::Reserved(_))
+    ));
+    connection
+        .execute("DROP SCHEMA mfm_test_children CASCADE")
+        .await
+        .unwrap();
+}
