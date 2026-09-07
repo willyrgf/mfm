@@ -55,14 +55,24 @@ impl State for RightIdentityState {
 }
 
 impl PureState for LeftIdentityState {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success { output: input }
+    fn evaluate(
+        input: Self::Input,
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
+        Ok(ProposedStateOutcome::Success { output: input })
     }
 }
 
 impl PureState for RightIdentityState {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success { output: input }
+    fn evaluate(
+        input: Self::Input,
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
+        Ok(ProposedStateOutcome::Success { output: input })
     }
 }
 
@@ -169,8 +179,11 @@ impl EffectState<IdentityEffect> for IdentityEffectState {
     fn interpret(
         input: Self::Input,
         _evidence: &Value,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success { output: input }
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
+        Ok(ProposedStateOutcome::Success { output: input })
     }
 }
 
@@ -223,11 +236,14 @@ impl EffectState<IdentityEffect> for SupportedEffectState {
     fn interpret(
         input: Self::Input,
         evidence: &Value,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
         if evidence.value == input.value {
-            ProposedStateOutcome::Success { output: input }
+            Ok(ProposedStateOutcome::Success { output: input })
         } else {
-            ProposedStateOutcome::Failure { failure: input }
+            Ok(ProposedStateOutcome::Failure { failure: input })
         }
     }
 }

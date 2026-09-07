@@ -292,7 +292,8 @@ pub(crate) async fn start_pure<S: PureState>(
         .downcast::<S::Input>()
         .map_err(|_| RuntimeError::Internal)?;
     let prepared = run_blocking(move || {
-        let (kind, outcome) = qualify_outcome(S::evaluate(*typed))?;
+        let (kind, outcome) =
+            qualify_outcome(S::evaluate(*typed).map_err(|_| RuntimeError::Internal)?)?;
         let frame = history
             .encode_pure_conclusion(kind, &outcome.value_ref, outcome.canonical.as_bytes())
             .map_err(map_local_journal_error)?;
@@ -354,7 +355,9 @@ where
             .ok_or(RuntimeError::Internal)?;
         C::bind_evidence(&intent.value_ref, typed_intent, typed_evidence)
             .map_err(|_| RuntimeError::Internal)?;
-        let (kind, outcome) = qualify_outcome(S::interpret(*typed_input, typed_evidence))?;
+        let (kind, outcome) = qualify_outcome(
+            S::interpret(*typed_input, typed_evidence).map_err(|_| RuntimeError::Internal)?,
+        )?;
         let frame = history
             .encode_read_conclusion(
                 &intent.value_ref,
@@ -497,7 +500,9 @@ where
             .ok_or(RuntimeError::Internal)?;
         C::bind_evidence(&effect_id, typed_command, typed_evidence)
             .map_err(|_| RuntimeError::Internal)?;
-        let (kind, outcome) = qualify_outcome(S::interpret(*typed_input, typed_evidence))?;
+        let (kind, outcome) = qualify_outcome(
+            S::interpret(*typed_input, typed_evidence).map_err(|_| RuntimeError::Internal)?,
+        )?;
         let frame = history
             .encode_effect_conclusion(
                 &evidence.value_ref,

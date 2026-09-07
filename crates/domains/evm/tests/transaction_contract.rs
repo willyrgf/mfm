@@ -361,6 +361,19 @@ fn one_transaction_state_preserves_context_and_projects_checked_facts() {
             settlement.transaction_hash().clone(),
         )
     };
+    for (command, evidence) in [(creation.command(), &called), (calling.command(), &created)] {
+        let prepared = prepared(command, evidence);
+        let ProposedStateOutcome::Success { output } =
+            <ExecuteEvmTransaction<ObjectContext> as EffectState<EvmTransactionEffect>>::interpret(
+                EvmTransactionContext::new(ObjectContext { step: 27 }, prepared),
+                evidence,
+            )
+            .unwrap();
+        assert_eq!(
+            <ProjectEvmTransactionOutcome<ObjectContext> as PureState>::evaluate(output),
+            Err(mfm_program::StateExecutionError),
+        );
+    }
     for (command, evidence) in [
         (creation.command(), &created),
         (calling.command(), &called),
@@ -385,6 +398,7 @@ fn one_transaction_state_preserves_context_and_projects_checked_facts() {
                 ExecutedEvmTransaction::new(creation.command().clone(), created.clone()).unwrap(),
             ),
         )
+        .unwrap()
     else {
         panic!("expected creation success")
     };
@@ -408,6 +422,7 @@ fn one_transaction_state_preserves_context_and_projects_checked_facts() {
                 ExecutedEvmTransaction::new(calling.command().clone(), called.clone()).unwrap(),
             ),
         )
+        .unwrap()
     else {
         panic!("expected call success")
     };
@@ -426,6 +441,7 @@ fn one_transaction_state_preserves_context_and_projects_checked_facts() {
                 ExecutedEvmTransaction::new(call_command(), reverted.clone()).unwrap(),
             ),
         )
+        .unwrap()
     else {
         panic!("expected reversion")
     };

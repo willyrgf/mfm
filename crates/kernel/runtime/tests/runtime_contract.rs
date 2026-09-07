@@ -107,8 +107,13 @@ impl<K: MfmValueTrait> State for GenericState<K> {
 }
 
 impl<K: MfmValueTrait> PureState for GenericState<K> {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success { output: input }
+    fn evaluate(
+        input: Self::Input,
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
+        Ok(ProposedStateOutcome::Success { output: input })
     }
 }
 
@@ -125,8 +130,13 @@ impl<K: MfmValueTrait> State for ConflictingGenericState<K> {
 }
 
 impl<K: MfmValueTrait> PureState for ConflictingGenericState<K> {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success { output: input }
+    fn evaluate(
+        input: Self::Input,
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
+        Ok(ProposedStateOutcome::Success { output: input })
     }
 }
 
@@ -158,12 +168,17 @@ impl State for Increment {
 }
 
 impl PureState for Increment {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success {
+    fn evaluate(
+        input: Self::Input,
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
+        Ok(ProposedStateOutcome::Success {
             output: Number {
                 value: input.value + 1,
             },
-        }
+        })
     }
 }
 
@@ -264,11 +279,14 @@ impl ReadState<Observation> for Observe {
     fn interpret(
         input: Self::Input,
         evidence: &Evidence,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
         if evidence.accepted {
-            ProposedStateOutcome::Success { output: input }
+            Ok(ProposedStateOutcome::Success { output: input })
         } else {
-            ProposedStateOutcome::Failure { failure: input }
+            Ok(ProposedStateOutcome::Failure { failure: input })
         }
     }
 }
@@ -382,11 +400,14 @@ impl EffectState<Mutation> for Mutate {
     fn interpret(
         input: Self::Input,
         evidence: &EffectEvidence,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
         if evidence.accepted {
-            ProposedStateOutcome::Success { output: input }
+            Ok(ProposedStateOutcome::Success { output: input })
         } else {
-            ProposedStateOutcome::Failure { failure: input }
+            Ok(ProposedStateOutcome::Failure { failure: input })
         }
     }
 }
@@ -1871,3 +1892,6 @@ async fn store_failures_map_by_load_or_append_authority() {
 
 #[path = "support/injection.rs"]
 mod injection;
+
+#[path = "support/callback_errors.rs"]
+mod callback_errors;

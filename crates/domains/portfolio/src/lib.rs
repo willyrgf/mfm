@@ -755,8 +755,13 @@ fn consolidate_portfolio(
 macro_rules! impl_portfolio_pure {
     ($state:ident, $evaluate:path) => {
         impl PureState for $state {
-            fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-                $evaluate(input)
+            fn evaluate(
+                input: Self::Input,
+            ) -> std::result::Result<
+                ProposedStateOutcome<Self::Output, Self::Failure>,
+                mfm_program::StateExecutionError,
+            > {
+                Ok($evaluate(input))
             }
         }
     };

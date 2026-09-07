@@ -2057,8 +2057,11 @@ macro_rules! impl_balance_access {
             fn interpret(
                 input: Self::Input,
                 evidence: &<$capability as ReadCapabilityContract>::Evidence,
-            ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-                $interpret(input, evidence)
+            ) -> std::result::Result<
+                ProposedStateOutcome<Self::Output, Self::Failure>,
+                mfm_program::StateExecutionError,
+            > {
+                Ok($interpret(input, evidence))
             }
         }
     };
@@ -2101,13 +2104,23 @@ impl_balance_access!(
     interpret_confirm_balance_anchor
 );
 impl<K: MfmValueTrait> PureState for SelectBalanceAsset<K> {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        select_balance_asset(input)
+    fn evaluate(
+        input: Self::Input,
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
+        Ok(select_balance_asset(input))
     }
 }
 impl<K: MfmValueTrait> PureState for ConsolidateBalanceCollection<K> {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        consolidate_balance_collection(input)
+    fn evaluate(
+        input: Self::Input,
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
+        Ok(consolidate_balance_collection(input))
     }
 }
 
@@ -2443,6 +2456,7 @@ mod tests {
                     context(),
                     &evidence,
                 )
+                .unwrap()
             else {
                 panic!("rejection evidence must be a typed failure");
             };
@@ -2461,6 +2475,7 @@ mod tests {
                 context(),
                 &EvmReadEvidence::integrity_blocked(route()),
             )
+            .unwrap()
         else {
             panic!("integrity evidence must be a typed failure");
         };

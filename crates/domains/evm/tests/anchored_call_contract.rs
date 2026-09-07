@@ -222,7 +222,7 @@ fn anchored_capability_binds_only_the_exact_result_anchor() {
     let ProposedStateOutcome::Success { output } =
         <ReadAnchoredContractCall<ObjectContext> as ReadState<
             EvmAnchoredContractCallRead,
-        >>::interpret(input, &returned)
+        >>::interpret(input, &returned).unwrap()
     else {
         panic!("expected anchored call success");
     };
@@ -254,7 +254,7 @@ fn anchored_state_preserves_context_for_each_closed_failure() {
         let ProposedStateOutcome::Failure { failure } =
             <ReadAnchoredContractCall<ObjectContext> as ReadState<
                 EvmAnchoredContractCallRead,
-            >>::interpret(context(), &evidence)
+            >>::interpret(context(), &evidence).unwrap()
         else {
             panic!("expected failure");
         };
@@ -402,7 +402,7 @@ fn anchored_value_contracts_are_exact() {
     let ProposedStateOutcome::Success { output } =
         <ReadAnchoredContractCall<ObjectContext> as ReadState<
             EvmAnchoredContractCallRead,
-        >>::interpret(input.clone(), &evidence)
+        >>::interpret(input.clone(), &evidence).unwrap()
     else {
         panic!("completion");
     };
@@ -412,7 +412,7 @@ fn anchored_value_contracts_are_exact() {
         >>::interpret(
             input.clone(),
             &AnchoredContractCallEvidence::rejected(intent_ref),
-        )
+        ).unwrap()
     else {
         panic!("failure");
     };

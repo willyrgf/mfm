@@ -25,6 +25,16 @@ generic ABIs without ambiguity. Read callbacks and evidence binding receive the 
 ref; Effect callbacks receive the exact command value ref used for `EffectId` derivation. These are
 instance refs, never shared codec contract refs. State code has no ambient IO.
 
+Pure evaluation and Read/Effect interpretation return a proposed domain outcome or the
+Program-owned redaction-safe `StateExecutionError`. Runtime maps this internal implementation
+failure to `RuntimeError::Internal` before qualifying or appending a conclusion. Pure and Read
+errors preserve the current head; an Effect interpretation error preserves its acknowledged
+prepare even if external execution has occurred. Retrying uses that same retained command and
+EffectId. Cold fold never reinterprets completed conclusions. `PreparationError` remains the
+separate internal failure of deterministic intent/command preparation, before adapter entry.
+Only authenticated transaction reversion produces a reversion outcome; local action mismatches
+are internal execution errors.
+
 Each Read or Effect occurrence applies the exact capability/State pair's authoring-time injection
 policy. Before and after hooks use typed `OperationExpansion` scopes and the same Pure, Read,
 Effect, child Operation, Match, and failure-handler authoring as Operations. The kernel inserts the

@@ -401,8 +401,11 @@ impl<K: MfmValueTrait> EffectState<EvmNonceReservationEffect> for ReserveEvmNonc
     fn interpret(
         input: Self::Input,
         evidence: &Reservation,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success {
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
+        Ok(ProposedStateOutcome::Success {
             output: EvmTransactionContext::new(
                 input.caller_context,
                 ReservedEvmTransaction {
@@ -410,7 +413,7 @@ impl<K: MfmValueTrait> EffectState<EvmNonceReservationEffect> for ReserveEvmNonc
                     reservation: evidence.clone(),
                 },
             ),
-        }
+        })
     }
 }
 impl<K: MfmValueTrait> CapabilityInjection<ReserveEvmNonce<K>> for EvmNonceReservationEffect {
@@ -443,8 +446,11 @@ impl<K: MfmValueTrait> EffectState<EvmTransactionPreparationEffect> for PrepareE
     fn interpret(
         input: Self::Input,
         evidence: &PreparedEvmTransactionEvidence,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success {
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
+        Ok(ProposedStateOutcome::Success {
             output: EvmTransactionContext::new(
                 input.caller_context,
                 PreparedEvmTransaction {
@@ -452,7 +458,7 @@ impl<K: MfmValueTrait> EffectState<EvmTransactionPreparationEffect> for PrepareE
                     transaction_hash: evidence.transaction_hash.clone(),
                 },
             ),
-        }
+        })
     }
 }
 impl<K: MfmValueTrait> CapabilityInjection<PrepareEvmTransaction<K>>
@@ -486,8 +492,11 @@ impl<K: MfmValueTrait> EffectState<EvmTransactionEffect> for ExecuteEvmTransacti
     fn interpret(
         input: Self::Input,
         evidence: &EvmTransactionSettlement,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        ProposedStateOutcome::Success {
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
+        Ok(ProposedStateOutcome::Success {
             output: EvmTransactionContext::new(
                 input.caller_context,
                 ExecutedEvmTransaction {
@@ -495,7 +504,7 @@ impl<K: MfmValueTrait> EffectState<EvmTransactionEffect> for ExecuteEvmTransacti
                     settlement: evidence.clone(),
                 },
             ),
-        }
+        })
     }
 }
 
@@ -511,7 +520,12 @@ impl<K: MfmValueTrait> State for ProjectEvmTransactionOutcome<K> {
     }
 }
 impl<K: MfmValueTrait> PureState for ProjectEvmTransactionOutcome<K> {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+    fn evaluate(
+        input: Self::Input,
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
         let EvmTransactionContext {
             caller_context,
             command,
@@ -524,7 +538,7 @@ impl<K: MfmValueTrait> PureState for ProjectEvmTransactionOutcome<K> {
         let binding = command.binding().clone();
         match (command.to(), evidence.outcome()) {
             (None, EvmTransactionOutcome::Created { created_address }) => {
-                ProposedStateOutcome::Success {
+                Ok(ProposedStateOutcome::Success {
                     output: EvmTransactionCompletion {
                         caller_context,
                         binding,
@@ -533,9 +547,9 @@ impl<K: MfmValueTrait> PureState for ProjectEvmTransactionOutcome<K> {
                             created_address: created_address.clone(),
                         },
                     },
-                }
+                })
             }
-            (Some(target), EvmTransactionOutcome::Called) => ProposedStateOutcome::Success {
+            (Some(target), EvmTransactionOutcome::Called) => Ok(ProposedStateOutcome::Success {
                 output: EvmTransactionCompletion {
                     caller_context,
                     binding,
@@ -544,18 +558,15 @@ impl<K: MfmValueTrait> PureState for ProjectEvmTransactionOutcome<K> {
                         target: target.clone(),
                     },
                 },
-            },
-            // Runtime binds evidence before interpretation. The same closed failure shape handles
-            // an authenticated reversion and keeps direct trait misuse non-panicking without
-            // retaining an inconsistent-settlement value.
-            (_, EvmTransactionOutcome::Reverted)
-            | (Some(_), EvmTransactionOutcome::Created { .. })
-            | (None, EvmTransactionOutcome::Called) => ProposedStateOutcome::Failure {
+            }),
+            (Some(_), EvmTransactionOutcome::Created { .. })
+            | (None, EvmTransactionOutcome::Called) => Err(mfm_program::StateExecutionError),
+            (_, EvmTransactionOutcome::Reverted) => Ok(ProposedStateOutcome::Failure {
                 failure: EvmTransactionReversion {
                     caller_context,
                     receipt,
                 },
-            },
+            }),
         }
     }
 }

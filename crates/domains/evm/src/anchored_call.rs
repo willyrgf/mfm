@@ -531,17 +531,20 @@ impl<K: MfmValueTrait> ReadState<EvmAnchoredContractCallRead> for ReadAnchoredCo
     fn interpret(
         input: Self::Input,
         evidence: &AnchoredContractCallEvidence,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
         let reason = match evidence {
             AnchoredContractCallEvidence::Returned { result, .. }
                 if evidence.validate_for(&input.intent).is_ok() =>
             {
-                return ProposedStateOutcome::Success {
+                return Ok(ProposedStateOutcome::Success {
                     output: AnchoredContractCallCompletion {
                         caller_context: input.caller_context,
                         result: result.clone(),
                     },
-                };
+                });
             }
             AnchoredContractCallEvidence::Rejected { .. } => {
                 AnchoredContractCallFailureReason::Rejected
@@ -554,12 +557,12 @@ impl<K: MfmValueTrait> ReadState<EvmAnchoredContractCallRead> for ReadAnchoredCo
                 AnchoredContractCallFailureReason::IntegrityBlocked
             }
         };
-        ProposedStateOutcome::Failure {
+        Ok(ProposedStateOutcome::Failure {
             failure: AnchoredContractCallFailure {
                 caller_context: input.caller_context,
                 reason,
             },
-        }
+        })
     }
 }
 
