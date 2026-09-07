@@ -494,27 +494,23 @@ async fn transaction_registration_uses_the_complete_binding_as_its_only_key() {
     builder.finish();
 }
 
-use mfm_evm::{
-    EvmTransactionCompletion, EvmTransactionContext, EvmTransactionReversion,
-    ExecuteEvmTransaction, PrepareEvmTransaction, ProjectEvmTransactionOutcome, ReserveEvmNonce,
-};
+use mfm_evm::{CheckedCreatePlan, CreateAt, EvmTransaction};
 use mfm_ids::{EntryPointId, RunId};
-use mfm_program::{expand_program, Operation, OperationExpansion};
+use mfm_program::expand_program;
+use mfm_program_derive::{MfmContext, MfmValue};
 use mfm_runtime::{RunViewState, Runtime};
 use mfm_store::MemoryStore;
+use serde::{Deserialize, Serialize};
 
-struct TransactionProgram(EvmTransactionBinding);
-impl Operation for TransactionProgram {
-    type Input = EvmTransactionContext<EvmU256>;
-    type Output = EvmTransactionCompletion<EvmU256>;
-    type Failure = EvmTransactionReversion<EvmU256>;
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.effect::<ExecuteEvmTransaction<EvmU256>, EvmTransactionEffect>(&self.0)
-    }
+#[derive(Serialize, Deserialize, MfmValue, MfmContext)]
+#[context(namespace = "mfm.test.transaction.recovery")]
+struct RecoveryContext<T> {
+    transaction: T,
+    unrelated: EvmU256,
 }
+type InitialContext = RecoveryContext<CheckedCreatePlan>;
+type RecoveryRecipe = CreateAt<RecoveryContextTransactionSlot>;
+
 fn runtime(
     binding: &EvmTransactionBinding,
     signer: Arc<dyn Secp256k1Signer>,
@@ -523,18 +519,7 @@ fn runtime(
     store: Arc<dyn mfm_store::Store>,
 ) -> Runtime {
     let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-    builder
-        .register_effect::<ReserveEvmNonce<EvmU256>, EvmNonceReservationEffect>()
-        .unwrap();
-    builder
-        .register_effect::<PrepareEvmTransaction<EvmU256>, EvmTransactionPreparationEffect>()
-        .unwrap();
-    builder
-        .register_effect::<ExecuteEvmTransaction<EvmU256>, EvmTransactionEffect>()
-        .unwrap();
-    builder
-        .register_pure::<ProjectEvmTransactionOutcome<EvmU256>>()
-        .unwrap();
+    crate::register_evm_transaction_states::<InitialContext, RecoveryRecipe>(&mut builder).unwrap();
     register_evm_transaction_adapters(&mut builder, binding.clone(), signer, authority, provider)
         .unwrap();
     Runtime::new(builder.finish(), store)
@@ -542,7 +527,7 @@ fn runtime(
 fn program(binding: &EvmTransactionBinding) -> mfm_program::Program {
     expand_program(
         EntryPointId::new("mfm.test/transaction@1").unwrap(),
-        &TransactionProgram(binding.clone()),
+        &EvmTransaction::<InitialContext, RecoveryRecipe>::new(binding.clone()),
     )
     .unwrap()
 }
@@ -594,7 +579,18 @@ async fn graph_retries_identical_wire_and_cold_projection_needs_no_signer_call()
             .start(
                 run_id(),
                 program(&binding),
-                EvmTransactionContext::new(EvmU256::from_u64(42), command),
+                RecoveryContext {
+                    unrelated: EvmU256::from_u64(42),
+                    transaction: CheckedCreatePlan::new(
+                        command.binding().clone(),
+                        command.input().to_vec(),
+                        command.value().clone(),
+                        command.gas_limit(),
+                        command.max_priority_fee_per_gas().clone(),
+                        command.max_fee_per_gas().clone(),
+                    )
+                    .unwrap(),
+                },
             )
             .await
             .unwrap();
@@ -685,7 +681,18 @@ async fn custody_acknowledgement_loss_recovers_each_stage() {
             hot.start(
                 run_id(),
                 program(&binding),
-                EvmTransactionContext::new(EvmU256::from_u64(0), command)
+                RecoveryContext {
+                    unrelated: EvmU256::from_u64(0),
+                    transaction: CheckedCreatePlan::new(
+                        command.binding().clone(),
+                        command.input().to_vec(),
+                        command.value().clone(),
+                        command.gas_limit(),
+                        command.max_priority_fee_per_gas().clone(),
+                        command.max_fee_per_gas().clone()
+                    )
+                    .unwrap()
+                }
             )
             .await,
             Err(RuntimeError::Unavailable)
@@ -932,7 +939,18 @@ async fn every_transaction_journal_boundary_recovers_after_ambiguous_append() {
                 .start(
                     run_id(),
                     program(&binding),
-                    EvmTransactionContext::new(EvmU256::from_u64(42), command),
+                    RecoveryContext {
+                        unrelated: EvmU256::from_u64(42),
+                        transaction: CheckedCreatePlan::new(
+                            command.binding().clone(),
+                            command.input().to_vec(),
+                            command.value().clone(),
+                            command.gas_limit(),
+                            command.max_priority_fee_per_gas().clone(),
+                            command.max_fee_per_gas().clone(),
+                        )
+                        .unwrap(),
+                    },
                 )
                 .await;
             let mut completed = None;
@@ -995,7 +1013,18 @@ async fn cancelled_receipt_wait_resumes_exact_prepared_wire() {
         hot.start(
             run_id(),
             entry,
-            EvmTransactionContext::new(EvmU256::from_u64(42), command),
+            RecoveryContext {
+                unrelated: EvmU256::from_u64(42),
+                transaction: CheckedCreatePlan::new(
+                    command.binding().clone(),
+                    command.input().to_vec(),
+                    command.value().clone(),
+                    command.gas_limit(),
+                    command.max_priority_fee_per_gas().clone(),
+                    command.max_fee_per_gas().clone(),
+                )
+                .unwrap(),
+            },
         )
         .await
     });

@@ -6,13 +6,23 @@ infallible exact byte access; their strict string wires remain lowercase `0x` he
 `EvmU256` owns canonical decimal EVM words, while canonical base64 values retain
 `CanonicalBytes` directly and chain IDs and gas limits retain `NonZeroU64`.
 
-`EvmTransactionEffect` expands the designated `ExecuteEvmTransaction<K>` into reservation,
-preparation, execution, and Pure outcome projection States using ordinary capability hooks.
-`create` and `call` factories check payload bounds, nonzero gas, fee ceilings, and ordering.
-`EvmTransactionContext<K, T>` carries caller context through checked reserved, prepared, and
-executed descriptors. Reservation binds the original command reference and nonce domain;
-preparation exposes only the retained wire hash. Execution evidence binds its own EffectId,
-nonce, hash, and action. Projection preserves caller context and returns typed success or reversion.
+`EvmTransaction<C, R>::new(binding)` authors one transaction using a static `TransactionRecipe<C>`.
+Capability injection expands its `ExecuteEvmTransaction<C, R>` into reservation, preparation,
+execution, and Pure outcome projection. `CreateAt<Slot>`, `CallCreatedAt<CallSlot, DeploymentSlot>`,
+and `CallAt<Slot>` construct commands from checked plans and the selected successful creation.
+`CheckedCallPlan` has no target; `CheckedTargetCallPlan` adds a required checked address for an
+ordinary call. Plan and command construction share byte, gas, and fee validation. The reserve
+State constructs the complete command during deterministic prepare, before reservation or IO.
+
+Each State replaces the recipe's field using `ContextSlot`, retaining every sibling. The field
+accumulates the exact command and reservation, full preparation evidence, full settlement, and
+sealed `Created` or `Called` projection. `ReservedEvmTransaction` and `PreparedEvmTransaction`
+remain live capability command descriptors. Cumulative fact constructors and decoding preserve
+command/reference, nonce-domain, settlement-nonce/hash/action, and projection agreement. Runtime
+and Journal establish the provenance of Effect identities. Only authenticated reversion reaches
+the typed failure carrying the executed context; internal mismatches return `StateExecutionError`.
+Executable identity commits to stage, implementation version, explicit recipe identity, ordered
+slot identities, and outcome mode. Changing a selected same-typed source changes identity.
 
 `custody` owns the reusable asynchronous nonce-reservation and opaque signed-byte retention port.
 The live adapter supplies signer/provider IO and PostgreSQL supplies atomic persistence. Custody
@@ -20,17 +30,19 @@ returns immutable first prepared winners; Journal alone retains transaction sett
 State EffectId identifies custody throughout the graph. Raw signed bytes have no serde or debug
 surface. No State performs IO, and Runtime has no EVM-specific logic.
 
-When a product needs action-specific chaining, its own Pure State projects the transaction
-completion into the next checked command or anchored-call context. EVM supplies no lifecycle
-Operation or creation-to-call/call-to-observation bridge: consumers keep deployment, call, and
-observation as explicit Program nodes and own their policy.
+Products own named context records, selected recipe connections, ABI decoding, and terminal
+report policy. They register the transaction State family through live EVM's pure
+`register_evm_transaction_states::<C, R>` helper, separately from explicit IO adapter registration.
+`TransactionReportFacts` losslessly normalizes executed or completed transaction facts into one
+execution record and a checked finite outcome, so product failure reports can store each schema
+once in a bounded named entry sequence.
 
-`EvmAnchoredContractCallRead` and `ReadAnchoredContractCall<K>` carry one exact transaction-route
-reference, target, bounded calldata, and block anchor in their own exact intent type. Every
-evidence variant carries Runtime's exact canonical intent value ref; returned evidence additionally
-retains the anchor and bounded return bytes. The State maps the other variants to the closed
-rejected, safe-failure, or integrity-blocked reasons. The live provider algorithm is deliberately
-outside this crate.
+`CheckedObservationPlan` checks route and calldata before admission. `ObserveAt<ObservationSlot,
+ConfigurationSlot>` supplies the selected completed call's target and receipt anchor, rejecting
+cross-field chain/route mismatches before provider entry. `ReadAnchoredContractCall<C, R>`
+constructs intent during prepare and retains the exact intent and accepted evidence in
+`AnchoredObservationFacts`. Failure contexts also retain rejected, safe-failure, or
+integrity-blocked evidence. The live provider algorithm remains outside this crate.
 
 Six balance Read States and two Pure States continue to implement the cumulative balance contract.
 `CollectEvmBalances<K>` deterministically unrolls the native/token topology per source without

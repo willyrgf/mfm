@@ -1,37 +1,19 @@
-use mfm_evm::{
-    EvmNonceReservationEffect, ExecutedEvmTransaction, NonceDomain, PreparedEvmTransaction,
-    ProjectEvmTransactionOutcome, Reservation, ReserveEvmNonce, ReservedEvmTransaction,
-};
-use mfm_program::PureState;
-use std::num::NonZeroU64;
-
 use mfm_canonical::CanonicalBytes;
 use mfm_capabilities::EffectCapabilityContract;
 use mfm_evm::{
-    Eip1559TransactionCommand, EvmAddress, EvmAuthorityEpoch, EvmBlockAnchor, EvmChainInstance,
-    EvmHash, EvmTransactionBinding, EvmTransactionCompletion, EvmTransactionContext,
-    EvmTransactionEffect, EvmTransactionOutcome, EvmTransactionReceipt, EvmTransactionReversion,
-    EvmTransactionRoute, EvmTransactionSettlement, EvmTransactionSuccess, EvmU256,
-    ExecuteEvmTransaction, EVM_TRANSACTION_EFFECT_CAPABILITY_ID, EXECUTE_EVM_TRANSACTION_STATE_ID,
-    MAX_EVM_CALLDATA_BYTES, MAX_EVM_INITCODE_BYTES,
+    Called, CheckedCallPlan, CheckedCreatePlan, CheckedTargetCallPlan, CompletedTransactionFacts,
+    Created, Eip1559TransactionCommand, EvmAddress, EvmAuthorityEpoch, EvmBlockAnchor,
+    EvmChainInstance, EvmHash, EvmNonceReservationEffect, EvmTransactionBinding,
+    EvmTransactionEffect, EvmTransactionOutcome, EvmTransactionPreparationEffect,
+    EvmTransactionReceipt, EvmTransactionRoute, EvmTransactionSettlement, EvmU256,
+    ExecutedTransactionFacts, NonceDomain, PreparedEvmTransaction, PreparedEvmTransactionEvidence,
+    PreparedTransactionFacts, Reservation, ReservedEvmTransaction, MAX_EVM_CALLDATA_BYTES,
+    MAX_EVM_INITCODE_BYTES,
 };
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, EffectId, SchemaId};
-use mfm_program::{CapabilityInjection, EffectState, ProposedStateOutcome, State};
-use mfm_program_derive::MfmValue;
 use mfm_values::{canonicalize_mfm_value, MfmValue as MfmValueTrait};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.test",
-    name = "object-context",
-    version = "1",
-    schema = "mfm.test-object-context"
-)]
-struct ObjectContext {
-    step: u8,
-}
+use serde::Serialize;
+use std::num::NonZeroU64;
 
 fn content_ref() -> ContentRef {
     ContentRef::new(
@@ -271,209 +253,6 @@ fn fixed_eip1559_command_has_exact_wire_and_checked_factories() {
 }
 
 #[test]
-fn one_transaction_state_preserves_context_and_projects_checked_facts() {
-    assert_eq!(
-        ExecuteEvmTransaction::<ObjectContext>::state_id()
-            .expect("state id")
-            .as_str(),
-        "mfm.evm.state.execute-transaction@2"
-    );
-    assert_eq!(
-        EXECUTE_EVM_TRANSACTION_STATE_ID,
-        "mfm.evm.state.execute-transaction@2"
-    );
-    assert_eq!(
-        EvmTransactionEffect::contract_id()
-            .expect("capability id")
-            .as_str(),
-        "mfm.evm.capability.execute-transaction@2"
-    );
-    assert_eq!(
-        EVM_TRANSACTION_EFFECT_CAPABILITY_ID,
-        "mfm.evm.capability.execute-transaction@2"
-    );
-    assert_eq!(
-        <EvmTransactionEffect as CapabilityInjection<
-            ExecuteEvmTransaction<ObjectContext>,
-        >>::original_binding_ref(&binding())
-        .expect("injection binding"),
-        binding().binding_ref().expect("binding")
-    );
-
-    let creation = EvmTransactionContext::new(ObjectContext { step: 22 }, create_command());
-    let calling = EvmTransactionContext::new(ObjectContext { step: 25 }, call_command());
-    assert_eq!(
-        canonical(&creation),
-        format!(
-            r#"{{"caller_context":{{"step":22}},"command":{}}}"#,
-            canonical(creation.command())
-        )
-    );
-    assert_eq!(
-        canonical(&calling),
-        format!(
-            r#"{{"caller_context":{{"step":25}},"command":{}}}"#,
-            canonical(calling.command())
-        )
-    );
-    assert_eq!(
-        <ReserveEvmNonce<ObjectContext> as EffectState<EvmNonceReservationEffect>>::prepare(
-            &creation
-        )
-        .expect("prepared creation"),
-        create_command()
-    );
-    assert_eq!(
-        <ReserveEvmNonce<ObjectContext> as EffectState<EvmNonceReservationEffect>>::prepare(
-            &calling
-        )
-        .expect("prepared call"),
-        call_command()
-    );
-
-    let created_address = EvmAddress::from_bytes([0x22; 20]);
-    let created = EvmTransactionSettlement::created(
-        effect_id(0x33),
-        9,
-        EvmTransactionReceipt::new(anchor(1), transaction_hash(0xcc)),
-        created_address.clone(),
-    );
-    let called = EvmTransactionSettlement::called(
-        effect_id(0x33),
-        10,
-        EvmTransactionReceipt::new(anchor(2), transaction_hash(0xee)),
-    );
-    let reverted = EvmTransactionSettlement::reverted(
-        effect_id(0x33),
-        11,
-        EvmTransactionReceipt::new(anchor(3), transaction_hash(0xab)),
-    );
-    let prepared = |command: &Eip1559TransactionCommand, settlement: &EvmTransactionSettlement| {
-        let reservation = Reservation::new(
-            effect_id(0x30),
-            canonicalize_mfm_value(command).unwrap().1,
-            NonceDomain::from_binding(command.binding()),
-            settlement.nonce(),
-        )
-        .unwrap();
-        PreparedEvmTransaction::new(
-            ReservedEvmTransaction::new(command.clone(), reservation).unwrap(),
-            settlement.transaction_hash().clone(),
-        )
-    };
-    for (command, evidence) in [(creation.command(), &called), (calling.command(), &created)] {
-        let prepared = prepared(command, evidence);
-        let ProposedStateOutcome::Success { output } =
-            <ExecuteEvmTransaction<ObjectContext> as EffectState<EvmTransactionEffect>>::interpret(
-                EvmTransactionContext::new(ObjectContext { step: 27 }, prepared),
-                evidence,
-            )
-            .unwrap();
-        assert_eq!(
-            <ProjectEvmTransactionOutcome<ObjectContext> as PureState>::evaluate(output),
-            Err(mfm_program::StateExecutionError),
-        );
-    }
-    for (command, evidence) in [
-        (creation.command(), &created),
-        (calling.command(), &called),
-        (creation.command(), &reverted),
-        (calling.command(), &reverted),
-    ] {
-        let prepared = prepared(command, evidence);
-        EvmTransactionEffect::bind_evidence(&effect_id(0x33), &prepared, evidence).unwrap();
-        assert!(
-            EvmTransactionEffect::bind_evidence(&effect_id(0x44), &prepared, evidence).is_err()
-        );
-        let wrong_hash =
-            PreparedEvmTransaction::new(prepared.reserved().clone(), transaction_hash(0xff));
-        assert!(
-            EvmTransactionEffect::bind_evidence(&effect_id(0x33), &wrong_hash, evidence).is_err()
-        );
-    }
-    let ProposedStateOutcome::Success { output: deployment } =
-        <ProjectEvmTransactionOutcome<ObjectContext> as PureState>::evaluate(
-            EvmTransactionContext::new(
-                creation.caller_context().clone(),
-                ExecutedEvmTransaction::new(creation.command().clone(), created.clone()).unwrap(),
-            ),
-        )
-        .unwrap()
-    else {
-        panic!("expected creation success")
-    };
-    assert_eq!(deployment.caller_context(), &ObjectContext { step: 22 });
-    assert_eq!(deployment.binding(), &binding());
-    assert_eq!(deployment.receipt(), created.receipt());
-    assert_eq!(
-        deployment.outcome().created_address(),
-        Some(&created_address)
-    );
-    assert_eq!(
-        canonical(deployment.outcome()),
-        r#"{"kind":"created","value":{"created_address":"0x2222222222222222222222222222222222222222"}}"#
-    );
-
-    let call_target = call_command().to().expect("call target").clone();
-    let ProposedStateOutcome::Success { output: configured } =
-        <ProjectEvmTransactionOutcome<ObjectContext> as PureState>::evaluate(
-            EvmTransactionContext::new(
-                calling.caller_context().clone(),
-                ExecutedEvmTransaction::new(calling.command().clone(), called.clone()).unwrap(),
-            ),
-        )
-        .unwrap()
-    else {
-        panic!("expected call success")
-    };
-    assert_eq!(configured.caller_context(), &ObjectContext { step: 25 });
-    assert_eq!(configured.receipt(), called.receipt());
-    assert_eq!(configured.outcome().target(), Some(&call_target));
-    assert_eq!(
-        canonical(configured.outcome()),
-        r#"{"kind":"called","value":{"target":"0x3333333333333333333333333333333333333333"}}"#
-    );
-
-    let ProposedStateOutcome::Failure { failure } =
-        <ProjectEvmTransactionOutcome<ObjectContext> as PureState>::evaluate(
-            EvmTransactionContext::new(
-                ObjectContext { step: 26 },
-                ExecutedEvmTransaction::new(call_command(), reverted.clone()).unwrap(),
-            ),
-        )
-        .unwrap()
-    else {
-        panic!("expected reversion")
-    };
-    assert_eq!(failure.caller_context(), &ObjectContext { step: 26 });
-    assert_eq!(failure.receipt(), reverted.receipt());
-
-    let wires = [
-        canonical(&deployment),
-        canonical(&configured),
-        canonical(&failure),
-    ];
-    assert_eq!(
-        wires,
-        [
-            r#"{"binding":{"authority_epoch":"ERERERERERERERERERERERERERERERERERERERERERE","route":{"chain_instance":{"chain_id":1,"expected_genesis_hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"endpoint_ref":{"content_digest":"content:sha256-v1:0202020202020202020202020202020202020202020202020202020202020202","schema_id":"schema:mfm.test.endpoint:1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101"}},"sender":"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"},"caller_context":{"step":22},"outcome":{"kind":"created","value":{"created_address":"0x2222222222222222222222222222222222222222"}},"receipt":{"block_anchor":{"hash":"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","number":"1"},"transaction_hash":"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}"#,
-            r#"{"binding":{"authority_epoch":"ERERERERERERERERERERERERERERERERERERERERERE","route":{"chain_instance":{"chain_id":1,"expected_genesis_hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"endpoint_ref":{"content_digest":"content:sha256-v1:0202020202020202020202020202020202020202020202020202020202020202","schema_id":"schema:mfm.test.endpoint:1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101"}},"sender":"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"},"caller_context":{"step":25},"outcome":{"kind":"called","value":{"target":"0x3333333333333333333333333333333333333333"}},"receipt":{"block_anchor":{"hash":"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","number":"2"},"transaction_hash":"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}"#,
-            r#"{"caller_context":{"step":26},"receipt":{"block_anchor":{"hash":"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","number":"3"},"transaction_hash":"0xabababababababababababababababababababababababababababababababab"}}"#,
-        ]
-        .map(str::to_owned)
-    );
-    assert_closed_object(&deployment, "receipt");
-    assert_closed_object(&configured, "outcome");
-    assert_closed_object(&failure, "caller_context");
-    assert_closed_object(&created, "effect_id");
-    assert_closed_object(created.receipt(), "transaction_hash");
-    assert_closed_object(
-        &EvmTransactionContext::new(ObjectContext { step: 27 }, call_command()),
-        "command",
-    );
-}
-
-#[test]
 fn transaction_identity_and_wire_ledger_is_frozen() {
     let receipt = EvmTransactionReceipt::new(anchor(1), transaction_hash(0xcc));
     let settlement = EvmTransactionSettlement::created(
@@ -551,11 +330,6 @@ fn transaction_identity_and_wire_ledger_is_frozen() {
             schema_id::<Eip1559TransactionCommand>(),
         ),
         (
-            "context",
-            semantic_id::<EvmTransactionContext<ObjectContext>>(),
-            schema_id::<EvmTransactionContext<ObjectContext>>(),
-        ),
-        (
             "receipt",
             semantic_id::<EvmTransactionReceipt>(),
             schema_id::<EvmTransactionReceipt>(),
@@ -570,21 +344,6 @@ fn transaction_identity_and_wire_ledger_is_frozen() {
             semantic_id::<EvmTransactionSettlement>(),
             schema_id::<EvmTransactionSettlement>(),
         ),
-        (
-            "success",
-            semantic_id::<EvmTransactionSuccess>(),
-            schema_id::<EvmTransactionSuccess>(),
-        ),
-        (
-            "completion",
-            semantic_id::<EvmTransactionCompletion<ObjectContext>>(),
-            schema_id::<EvmTransactionCompletion<ObjectContext>>(),
-        ),
-        (
-            "reversion",
-            semantic_id::<EvmTransactionReversion<ObjectContext>>(),
-            schema_id::<EvmTransactionReversion<ObjectContext>>(),
-        ),
     ];
     let expected = [
         ("address", "semantic:mfm.evm:address:1:sha256-jcs-v1:b89c6610ee65059f35dc04f539319c6b713e5d3cef2a97c00fe876630c7f08eb", "schema:mfm.evm-address:1:sha256-jcs-v1:62ac7e52b8bd00da7f684795487a1faefc5d3b2536d50984fbcc884e0af88455"),
@@ -595,13 +354,9 @@ fn transaction_identity_and_wire_ledger_is_frozen() {
         ("transaction_route", "semantic:mfm.evm:transaction-route:1:sha256-jcs-v1:d463731df98a305d59ad98150a6f6b4f7ded383ecf51c6a1297c4a88421b978b", "schema:mfm.evm-transaction-route:1:sha256-jcs-v1:ed1444b8cc704f9406fc89bef4d4b43a7e02a0814ee9db5ddf2adc23f8204c5a"),
         ("transaction_binding", "semantic:mfm.evm:transaction-binding:1:sha256-jcs-v1:d79c1b7fabc0bc262e3067bda16dc3912bdac331532fbb59e0ba1def71db2458", "schema:mfm.evm-transaction-binding:1:sha256-jcs-v1:aa28e9a4ee8e3d5dcec3694ccfd9f20da75a781d9aa29fc694a9767d4858fbec"),
         ("command", "semantic:mfm.evm:eip1559-transaction-command:1:sha256-jcs-v1:72ec2fe60bd6430fa1a548442f9090d1f66e028f2e155959ef3bbd3aa141841c", "schema:mfm.evm-eip1559-transaction-command:1:sha256-jcs-v1:55ddb103fada5d9a721b50b725ff2b3a58ac87c8b01c602287eb1b98b9ab6107"),
-        ("context", "semantic:mfm.evm:transaction-context:1:sha256-jcs-v1:c5588203372c522898f0ef8291fe4f4898941f1836d0da3b6f2e29546174b8ec", "schema:mfm.evm-transaction-context:1:sha256-jcs-v1:80278ebd03c56b2c4c827e31135f30c8e462d3876e0eb78e1e4db2ae58301087"),
         ("receipt", "semantic:mfm.evm:transaction-receipt:1:sha256-jcs-v1:b46061e3fdf0513d0649533a002e4b36a517ee050bff923affa315748c59cf71", "schema:mfm.evm-transaction-receipt:1:sha256-jcs-v1:f54298ed576a1705aa12b38528bbde9510603f38432fa9451d2c85b6f5b9e6fd"),
         ("outcome", "semantic:mfm.evm:transaction-outcome:1:sha256-jcs-v1:550b9bc834d9b97d80dc8b2d2f7fd59b2ced5d7fcb2bab7f5748d93ced6df6c9", "schema:mfm.evm-transaction-outcome:1:sha256-jcs-v1:d16d9083d15ada4afca3e14c6e8aac9d3ce8f0c1a455736cb7c645cfa10f8481"),
         ("settlement", "semantic:mfm.evm:transaction-settlement:1:sha256-jcs-v1:4c958b57f53af59186964196610ee7625069a22212f3df585b2d8ff0c58447d8", "schema:mfm.evm-transaction-settlement:1:sha256-jcs-v1:df543db8f3bce96f42c972180a02783e1143e1b46b6c75b11c090c223107e9d9"),
-        ("success", "semantic:mfm.evm:transaction-success:1:sha256-jcs-v1:af476cdd76eb793656c566a966c4ed9c426f1501fed4bfc7a6bf6f82b6f06f71", "schema:mfm.evm-transaction-success:1:sha256-jcs-v1:755fea356c2a006f34f70f1d2eeb432c72e964ed76418469f25923d3971ecde8"),
-        ("completion", "semantic:mfm.evm:transaction-completion:1:sha256-jcs-v1:5bb6e0c0121483b8300420aad81fbab183fb41d0e1870c7a38d08dc3947b585e", "schema:mfm.evm-transaction-completion:1:sha256-jcs-v1:9043fad1f1521c7c907ce3470a612d6d2a6ff1109ae1b7012973f7495ed4c53f"),
-        ("reversion", "semantic:mfm.evm:transaction-reversion:1:sha256-jcs-v1:a7d9225a0700a95caca29d5356c339991e67935b96776e6a11830b39055ebec5", "schema:mfm.evm-transaction-reversion:1:sha256-jcs-v1:5f6c2ae01f3e71a91eb36f796cb46ddbc4c150a07aa8f179a86a523462913f2f"),
     ];
     for (actual, expected) in vectors.into_iter().zip(expected) {
         assert_eq!(
@@ -640,4 +395,309 @@ fn reservation_descriptors_reject_mismatched_commands_domains_and_exhaustion() {
     wire["reservation"] = serde_json::to_value(wrong).unwrap();
     assert!(serde_json::from_value::<ReservedEvmTransaction>(wire).is_err());
     assert_closed_object(&reserved, "reservation");
+}
+
+#[test]
+fn checked_plans_share_command_boundaries_and_construct_totally_after_target_selection() {
+    for size in [0, 49_152] {
+        let plan = CheckedCreatePlan::new(
+            binding(),
+            vec![1; size],
+            EvmU256::from_u64(0),
+            nonzero(1),
+            EvmU256::from_u64(1),
+            EvmU256::from_u64(2),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.command(),
+            Eip1559TransactionCommand::create(
+                binding(),
+                vec![1; size],
+                EvmU256::from_u64(0),
+                nonzero(1),
+                EvmU256::from_u64(1),
+                EvmU256::from_u64(2)
+            )
+            .unwrap()
+        );
+        let decoded: CheckedCreatePlan =
+            serde_json::from_value(serde_json::to_value(&plan).unwrap()).unwrap();
+        assert_eq!(decoded, plan);
+    }
+    for size in [0, 131_072] {
+        let plan = CheckedCallPlan::new(
+            binding(),
+            vec![2; size],
+            EvmU256::from_u64(0),
+            nonzero(1),
+            EvmU256::from_u64(1),
+            EvmU256::from_u64(2),
+        )
+        .unwrap();
+        for target in [
+            EvmAddress::from_bytes([1; 20]),
+            EvmAddress::from_bytes([2; 20]),
+        ] {
+            let expected = Eip1559TransactionCommand::call(
+                binding(),
+                target.clone(),
+                vec![2; size],
+                EvmU256::from_u64(0),
+                nonzero(1),
+                EvmU256::from_u64(1),
+                EvmU256::from_u64(2),
+            )
+            .unwrap();
+            assert_eq!(plan.command_for(target.clone()), expected);
+            assert_eq!(
+                CheckedTargetCallPlan::new(plan.clone(), target).command(),
+                expected
+            );
+        }
+    }
+    assert!(CheckedCreatePlan::new(
+        binding(),
+        vec![0; 49_153],
+        EvmU256::from_u64(0),
+        nonzero(1),
+        EvmU256::from_u64(1),
+        EvmU256::from_u64(2)
+    )
+    .is_err());
+    assert!(CheckedCallPlan::new(
+        binding(),
+        vec![0; 131_073],
+        EvmU256::from_u64(0),
+        nonzero(1),
+        EvmU256::from_u64(1),
+        EvmU256::from_u64(2)
+    )
+    .is_err());
+    let ceiling = EvmU256::new("340282366920938463463374607431768211455").unwrap();
+    let above = EvmU256::new("340282366920938463463374607431768211456").unwrap();
+    assert!(CheckedCallPlan::new(
+        binding(),
+        vec![],
+        EvmU256::from_u64(0),
+        nonzero(1),
+        ceiling.clone(),
+        ceiling.clone()
+    )
+    .is_ok());
+    for (priority, maximum) in [
+        (above.clone(), above.clone()),
+        (EvmU256::from_u64(0), above),
+        (EvmU256::from_u64(2), EvmU256::from_u64(1)),
+    ] {
+        assert!(CheckedCreatePlan::new(
+            binding(),
+            vec![],
+            EvmU256::from_u64(0),
+            nonzero(1),
+            priority.clone(),
+            maximum.clone()
+        )
+        .is_err());
+        assert!(CheckedCallPlan::new(
+            binding(),
+            vec![],
+            EvmU256::from_u64(0),
+            nonzero(1),
+            priority,
+            maximum
+        )
+        .is_err());
+    }
+    let create = CheckedCreatePlan::new(
+        binding(),
+        vec![],
+        EvmU256::from_u64(0),
+        nonzero(1),
+        ceiling.clone(),
+        ceiling.clone(),
+    )
+    .unwrap();
+    let call = CheckedCallPlan::new(
+        binding(),
+        vec![],
+        EvmU256::from_u64(0),
+        nonzero(1),
+        ceiling.clone(),
+        ceiling,
+    )
+    .unwrap();
+    for (field, hostile) in [
+        ("gas_limit", serde_json::json!(0)),
+        ("max_fee_per_gas", serde_json::json!("0")),
+        (
+            "max_priority_fee_per_gas",
+            serde_json::json!("340282366920938463463374607431768211456"),
+        ),
+    ] {
+        let mut wire = serde_json::to_value(&create).unwrap();
+        wire[field] = hostile.clone();
+        assert!(serde_json::from_value::<CheckedCreatePlan>(wire).is_err());
+        let mut wire = serde_json::to_value(&call).unwrap();
+        wire[field] = hostile;
+        assert!(serde_json::from_value::<CheckedCallPlan>(wire).is_err());
+    }
+    let mut wire = serde_json::to_value(&create).unwrap();
+    wire["initcode"] = serde_json::json!(CanonicalBytes::new(vec![0; 49_153]));
+    assert!(serde_json::from_value::<CheckedCreatePlan>(wire).is_err());
+    let mut wire = serde_json::to_value(&call).unwrap();
+    wire["calldata"] = serde_json::json!(CanonicalBytes::new(vec![0; 131_073]));
+    assert!(serde_json::from_value::<CheckedCallPlan>(wire).is_err());
+    assert!(
+        serde_json::from_value::<CheckedCreatePlan>(serde_json::to_value(&call).unwrap()).is_err()
+    );
+    assert_closed_object(&create, "initcode");
+    assert_closed_object(&call, "calldata");
+}
+
+#[test]
+fn cumulative_facts_preserve_every_stage_and_reject_hostile_combinations() {
+    for command in [create_command(), call_command()] {
+        let reservation = Reservation::new(
+            effect_id(1),
+            canonicalize_mfm_value(&command).unwrap().1,
+            NonceDomain::from_binding(command.binding()),
+            7,
+        )
+        .unwrap();
+        EvmNonceReservationEffect::bind_evidence(&effect_id(1), &command, &reservation).unwrap();
+        assert!(
+            EvmNonceReservationEffect::bind_evidence(&effect_id(2), &command, &reservation)
+                .is_err()
+        );
+        let reserved = ReservedEvmTransaction::new(command.clone(), reservation.clone()).unwrap();
+        let preparation = PreparedEvmTransactionEvidence::new(effect_id(2), transaction_hash(9));
+        EvmTransactionPreparationEffect::bind_evidence(&effect_id(2), &reserved, &preparation)
+            .unwrap();
+        assert!(EvmTransactionPreparationEffect::bind_evidence(
+            &effect_id(1),
+            &reserved,
+            &preparation
+        )
+        .is_err());
+        let prepared = PreparedTransactionFacts::new(reserved.clone(), preparation.clone());
+        let receipt = EvmTransactionReceipt::new(anchor(1), transaction_hash(9));
+        let settlement = if command.to().is_none() {
+            EvmTransactionSettlement::created(
+                effect_id(3),
+                7,
+                receipt.clone(),
+                EvmAddress::from_bytes([3; 20]),
+            )
+        } else {
+            EvmTransactionSettlement::called(effect_id(3), 7, receipt.clone())
+        };
+        EvmTransactionEffect::bind_evidence(
+            &effect_id(3),
+            &prepared.execution_command(),
+            &settlement,
+        )
+        .unwrap();
+        assert!(EvmTransactionEffect::bind_evidence(
+            &effect_id(2),
+            &prepared.execution_command(),
+            &settlement
+        )
+        .is_err());
+        let executed = ExecutedTransactionFacts::new(prepared.clone(), settlement.clone()).unwrap();
+        assert_eq!(executed.command(), &command);
+        assert_eq!(executed.reservation(), &reservation);
+        assert_eq!(executed.preparation(), &preparation);
+        assert_eq!(executed.settlement(), &settlement);
+        let report = mfm_evm::TransactionReportFacts::from_executed(executed.clone()).unwrap();
+        assert_eq!(report.executed(), &executed);
+        let mut report_wire = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            serde_json::from_value::<mfm_evm::TransactionReportFacts>(report_wire.clone()).unwrap(),
+            report
+        );
+        report_wire["outcome"] = serde_json::json!({ "kind": "reverted" });
+        assert!(serde_json::from_value::<mfm_evm::TransactionReportFacts>(report_wire).is_err());
+        let wire = serde_json::to_value(&executed).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ExecutedTransactionFacts>(wire.clone()).unwrap(),
+            executed
+        );
+        for hostile in [
+            {
+                let mut v = wire.clone();
+                v["settlement"]["nonce"] = serde_json::json!(8);
+                v
+            },
+            {
+                let mut v = wire.clone();
+                v["settlement"]["receipt"]["transaction_hash"] =
+                    serde_json::json!(transaction_hash(8));
+                v
+            },
+            {
+                let mut v = wire.clone();
+                v["prepared"]["reserved"]["reservation"]["command_value_ref"] =
+                    serde_json::json!(content_ref());
+                v
+            },
+            {
+                let mut v = wire.clone();
+                v["prepared"]["reserved"]["reservation"]["domain"]["sender"] =
+                    serde_json::json!(EvmAddress::from_bytes([99; 20]));
+                v
+            },
+        ] {
+            assert!(serde_json::from_value::<ExecutedTransactionFacts>(hostile).is_err());
+        }
+        let bad_action = if command.to().is_none() {
+            EvmTransactionSettlement::called(effect_id(3), 7, receipt.clone())
+        } else {
+            EvmTransactionSettlement::created(
+                effect_id(3),
+                7,
+                receipt.clone(),
+                EvmAddress::from_bytes([3; 20]),
+            )
+        };
+        assert!(ExecutedTransactionFacts::new(prepared.clone(), bad_action.clone()).is_err());
+        let mut hostile = wire;
+        hostile["settlement"] = serde_json::to_value(bad_action).unwrap();
+        assert!(serde_json::from_value::<ExecutedTransactionFacts>(hostile).is_err());
+        if command.to().is_none() {
+            let completed = CompletedTransactionFacts::<Created>::new(executed.clone()).unwrap();
+            assert_eq!(completed.executed(), &executed);
+            assert_eq!(
+                completed.outcome().created_address(),
+                &EvmAddress::from_bytes([3; 20])
+            );
+            let mut hostile = serde_json::to_value(&completed).unwrap();
+            hostile["outcome"]["created_address"] =
+                serde_json::json!(EvmAddress::from_bytes([4; 20]));
+            assert!(serde_json::from_value::<CompletedTransactionFacts<Created>>(hostile).is_err());
+            assert!(CompletedTransactionFacts::<Called>::new(executed).is_err());
+        } else {
+            let completed = CompletedTransactionFacts::<Called>::new(executed.clone()).unwrap();
+            assert_eq!(completed.executed(), &executed);
+            assert_eq!(Some(completed.outcome().target()), command.to());
+            let mut hostile = serde_json::to_value(&completed).unwrap();
+            hostile["outcome"]["target"] = serde_json::json!(EvmAddress::from_bytes([4; 20]));
+            assert!(serde_json::from_value::<CompletedTransactionFacts<Called>>(hostile).is_err());
+            assert!(CompletedTransactionFacts::<Created>::new(executed).is_err());
+        }
+        let reverted = ExecutedTransactionFacts::new(
+            prepared,
+            EvmTransactionSettlement::reverted(effect_id(3), 7, receipt),
+        )
+        .unwrap();
+        assert_eq!(reverted.command(), &command);
+        assert_eq!(reverted.reservation(), &reservation);
+        assert_eq!(reverted.preparation(), &preparation);
+        assert!(CompletedTransactionFacts::<Created>::new(reverted.clone()).is_err());
+        assert!(CompletedTransactionFacts::<Called>::new(reverted).is_err());
+        assert_eq!(
+            PreparedEvmTransaction::new(reserved, transaction_hash(9)).transaction_hash(),
+            &transaction_hash(9)
+        );
+    }
 }

@@ -2,8 +2,8 @@
 //! Bounded EVM provider registration and durable transaction execution.
 //!
 //! The live adapter owns provider ingress, exact transaction wire encoding, and
-//! signer/authority/provider orchestration. Domain State registration and Runtime
-//! construction remain trusted composition responsibilities.
+//! signer/authority/provider orchestration, plus a pure transaction State registration helper.
+//! Runtime construction remains a trusted composition responsibility.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -16,6 +16,9 @@ use mfm_evm::{
 };
 use mfm_ids::ContentRef;
 use mfm_runtime::{AdapterError, RuntimeAssemblyBuilder};
+
+mod assembly;
+pub use assembly::register_evm_transaction_states;
 
 mod codec;
 mod json_rpc;

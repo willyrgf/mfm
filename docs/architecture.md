@@ -14,7 +14,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | Signing | checked transient secp256k1 key/digest/signature contracts, public recovery, key- and purpose-bound signer port | persisted identity, secret custody, EVM encoding, provider IO |
 | Keystore | bounded thread-affine secp256k1 custody and key- and purpose-bound signer handles | Program, Runtime, EVM, persistence, free-form signing |
 | Domains | reusable deterministic Portfolio/EVM semantics and public value contracts | Runtime, Store, provider handles |
-| Live adapters | bounded provider ingress, EVM wire codecs, stage-specific signer/custody/provider IO, and direct typed callback registration | domain planning, State registration, or finality policy configuration |
+| Live adapters | bounded provider ingress, EVM wire codecs, stage-specific signer/custody/provider IO, direct typed callback registration, and pure transaction State-family registration | domain planning or finality policy configuration |
 | Application | injected and live composition; typed config/run/discovery use cases; exhaustive entry-point planning and compiled component inventory; shared client RunId generation and JSON models | sockets, argv/HTTP, sessions, frame inspection, status derivation, secret administration |
 | Binaries | bounded transport parsing, one Application call, transport policy, and redacted rendering | composition, domain planning, environment resolution, execution lifecycle, or run semantics |
 
@@ -108,11 +108,14 @@ atomically and the next complete reload resolves it.
 
 EVM owns one shared checked address, hash, and U256 vocabulary across existing balance Reads and
 transaction contracts. Capability injection expands the generic
-`ExecuteEvmTransaction<K>` into reservation and preparation Effects, the designated execution
+`ExecuteEvmTransaction<C, R>` into reservation and preparation Effects, the designated execution
 Effect, and a Pure outcome projection. Domain-owned `mfm_evm::custody` defines atomic reservation
 and exact-byte retention; PostgreSQL implements that port mechanically. Journal alone retains
-settlement. Runtime schedules the expanded graph with no EVM or signer knowledge. Products own
-creation-to-call or call-to-observation projection as ordinary Pure States.
+settlement. Runtime schedules the expanded graph with no EVM or signer knowledge. EVM owns checked plans, cumulative transaction/observation facts, and slot-selected creation,
+creation-dependent call, ordinary call, and anchored observation recipes. Products select context
+field names and recipe connections, and own ABI decoding and terminal report/failure policy.
+`EvmTransaction<C, R>` is the reusable domain Operation; live EVM owns its pure four-State
+registration helper, separately from IO adapter registration.
 `EvmAnchoredContractCallRead` owns only the exact Program-visible
 intent/evidence and context-preserving State. Its route reference is the content ref of
 `EvmTransactionRoute`, while the transaction Effect binds the complete
