@@ -1,6 +1,7 @@
 # RFC: accumulating typed contexts
 
-Status: proposed. This RFC records the agreed direction and the concrete implementation scope;
+Status: engineer handoff specification; validation results are recorded in
+[the handoff evidence](docs/rfc-ctx-acc-validation.md). This RFC specifies the implementation scope;
 it does not change the current executable contracts. Implementation must update
 [design](docs/design.md) and [architecture](docs/architecture.md) in the same cutover as the code.
 
@@ -29,8 +30,10 @@ which represent distinct durable responsibilities.
 
 [PROBLEM_COMPOSITION_TYPED_PLUMBING.md](PROBLEM_COMPOSITION_TYPED_PLUMBING.md) inventories the wider
 composition problem. This RFC addresses accumulated information, context forwarding, typed access,
-and the two EVM preparation bridges. It specifies a reusable value mechanism and a complete cutover
-of the transaction/anchored-call consumers that demonstrate the problem.
+and the two EVM preparation bridges. Validation also established the need for a uniform internal
+execution-error channel on State callbacks and a compact terminal failure-report representation.
+It specifies a reusable value mechanism and a complete cutover of the transaction/anchored-call
+consumers that demonstrate the problem.
 
 It does not redesign the scheduler, Program graph, heterogeneous run inspection, retry policy,
 all failure authoring, or generic assembly registration. It does not admit development transaction
@@ -69,11 +72,13 @@ and extend those values; Runtime does not acquire a special mutable context serv
 ## 1. Named typed fields and immutable snapshots
 
 The following Rust sketches define intended responsibilities and signatures. Derives, imports,
-privacy, and detailed bounds are abbreviated; these are proposed APIs, not compiling examples
-of the current repository.
+privacy, and detailed bounds are abbreviated in the overview; the exact API contract and compiled
+consumer pattern appear in the handoff evidence. These APIs have been exercised in an isolated
+prototype, not installed in the production workspace.
 
 ```rust
 #[derive(MfmValue, MfmContext)]
+#[context(namespace = "mfm.example.contract_workflow")]
 struct ContractWorkflow<D, C, O> {
     request: ContractWorkflowRequest,
     deployment: D,
@@ -82,9 +87,11 @@ struct ContractWorkflow<D, C, O> {
 }
 ```
 
-`request` retains the original public request, including the checked plans. Initially the three
-working fields contain checked deployment, configuration, and observation plans. Initial value
-construction copies those plans from the request; it performs no runtime workflow step.
+`request` contains shared public metadata that is not already held in the working fields. Initially
+the working fields contain the checked deployment, configuration, and observation plans. Retained
+commands preserve those plans' transaction parameters after execution; unexecuted fields keep their
+plans. Do not also embed a second full copy of all plans in `request`: schema size is bounded as
+well as value size, and duplicated plan schemas reduce useful composition capacity.
 
 An abbreviated sequence is:
 
@@ -140,12 +147,12 @@ pub trait ContextSlot<C: MfmValue> {
 
     fn get(context: &C) -> &Self::Value;
     fn replace<V: MfmValue>(context: C, value: V) -> Self::With<V>;
-    fn slot_id() -> Result<StableId, ValueError>;
+    fn slot_id() -> mfm_values::Result<StableId>;
 }
 ```
 
 `MfmContext` lives in the existing `mfm-program-derive` crate and generates a marker for each
-replaceable field. For `DeploymentSlot`, replacement is equivalent to:
+replaceable field. For `ContractWorkflowDeploymentSlot`, replacement is equivalent to:
 
 ```rust
 ContractWorkflow {
@@ -164,9 +171,11 @@ Keep the derive deliberately narrow:
 
 - Named structs only; replaceable fields are distinct bare type parameters.
 - Each replaceable parameter occurs in exactly one field. Other fields are preserved unchanged.
-- Slot parameters have no additional trait bounds or coupled `where` clauses: `With<V>` must
-  accept every `MfmValue`. Unsupported bounds receive a compile diagnostic. Moving siblings
-  requires no `Clone` bound on the context or arbitrary slot values.
+- Slot parameters have no explicit bounds, defaults, or `where` clauses. Generated implementations
+  add the `MfmValue` bounds. `With<V>` accepts every `MfmValue`; unsupported bounds receive a
+  compile diagnostic. Moving siblings requires no `Clone` bound on the context or slot values.
+- No lifetime or const parameters. The attribute is `#[context(namespace = "...")]`; generated
+  markers are named `<Struct><FieldInPascalCase>Slot`, avoiding collisions between context types.
 - No runtime strings, reflection, overlapping selectors, nested path language, or recursive
   type-list search.
 - Generated marker visibility follows the containing context's visibility. Generated identities
@@ -187,11 +196,12 @@ A transaction recipe identifies the destination field and constructs a complete 
 checked values in the admitted context. Conceptually:
 
 ```rust
-pub trait TransactionRecipe<C: MfmValue> {
+pub trait TransactionRecipe<C: MfmValue>: Send + Sync + 'static {
     type Slot: ContextSlot<C>;
-    type Success: MfmValue;
+    type Success: TransactionSuccessMode;
 
-    fn recipe_id() -> Result<StableId, EvmDomainError>;
+    fn recipe_id() -> mfm_values::Result<StableId>;
+    fn source_ids() -> mfm_values::Result<Vec<StableId>>;
     fn command(context: &C) -> Eip1559TransactionCommand;
     // Success projection is implemented by the supported create/call mode.
 }
@@ -240,7 +250,7 @@ Use these transaction-local facts:
 | `ExecutedTransactionFacts` | Prepared facts plus the complete `EvmTransactionSettlement`, including execution EffectId, nonce, receipt, and action outcome. |
 | `CompletedTransactionFacts<Created>` | Executed facts plus the checked created-address result. |
 | `CompletedTransactionFacts<Called>` | Executed facts plus the checked call-target result. |
-| `RevertedTransactionFacts` | Executed facts and the typed reversion outcome. |
+| `EvmTransactionFailure<ExecutedContext<C, R>>` | The accumulated executed context; its retained settlement already records authenticated reversion. No second reverted record duplicates those facts. |
 
 Reuse existing checked evidence and primitive types. Do not create parallel copies of reservation,
 receipt, address, or hash contracts merely to label them as context data. Add convenient borrowing
@@ -289,7 +299,7 @@ ExecuteEvmTransaction<C, R>
 ProjectEvmTransactionOutcome<C, R>
     Input: ExecutedContext<C, R>
     Output: CompletedContext<C, R>
-    Failure: EvmTransactionFailure<RevertedContext<C, R>>
+    Failure: EvmTransactionFailure<ExecutedContext<C, R>>
 ```
 
 Each alias is an ordinary exact `MfmValue` type produced through `ContextSlot::With`; it is not a
@@ -300,7 +310,7 @@ compile time.
 The first three transaction States retain `Never` as their domain failure contract. Authenticated
 reversion becomes a typed failure only in the existing final outcome projection.
 
-The failure envelope contains the accumulated context with the reverted transaction facts. It
+The failure envelope contains the accumulated context whose execution evidence records reversion. It
 replaces the old receipt-plus-opaque-caller-context failure contract. Anchored Read failures use
 the corresponding accumulated evidence context and existing reviewed failure reason.
 
@@ -344,8 +354,8 @@ read checked call plan and completed creation from context
 
 The current `interpret(input, evidence)` signature does not receive the command separately.
 Reservation interpretation may reconstruct it with the same total recipe from the unchanged
-typed input when building the reserved descriptor. Do not change Runtime's callback interface
-solely to avoid this small deterministic reconstruction. Never reconstruct using fresh external
+typed input when building the reserved descriptor. Keep the existing callback arguments; the
+new error channel below does not add a command argument. Never reconstruct using fresh external
 configuration or a different selection policy.
 
 Checked plan factories validate all constraints independent of the future target:
@@ -376,6 +386,45 @@ before the Effect. It is outside the promised removal of mechanical bridges.
 For this fixture, the checked call plan and required successful creation address must be sufficient
 to remove `PrepareConfiguration` entirely. The checked observation plan and completed call facts
 must likewise remove `PrepareObservation` entirely.
+
+### Internal execution errors are distinct from domain failures
+
+The spike exposed a missing channel in the original RFC: interpreting checked evidence or
+projecting a create/call outcome can detect an invalid local combination. The existing callback
+contracts can only return domain success/failure. A different context record alone does not make
+all combinations of independently decoded command and evidence valid.
+
+Adopt one Program-owned, redaction-safe unit error and a uniform callback result:
+
+```rust
+pub struct StateExecutionError;
+
+fn evaluate(input: Self::Input) -> Result<
+    ProposedStateOutcome<Self::Output, Self::Failure>, StateExecutionError>;
+
+fn interpret(input: Self::Input, evidence: &C::Evidence) -> Result<
+    ProposedStateOutcome<Self::Output, Self::Failure>, StateExecutionError>;
+```
+
+The second signature applies to both Read and Effect States. `PreparationError` and `prepare`
+remain unchanged. Existing genuine outcomes become `Ok(outcome)`; internal contract/validation
+failures become `Err(StateExecutionError)`. Program owns the error type; Runtime maps it to
+`RuntimeError::Internal` before qualifying or appending a conclusion.
+
+Pure errors append no conclusion. Read interpretation errors append no fused Read conclusion,
+although the Read adapter may already have run. Effect interpretation errors leave the acknowledged
+prepare intact; an external action may already have occurred. Subsequent progression uses the same
+retained command and EffectId. Completed conclusions are not re-interpreted on cold fold.
+
+Only actual authenticated `Reverted` evidence produces the transaction domain failure. An action
+or projection-mode mismatch returns `StateExecutionError`, including direct State invocation.
+Delete the current fallback that reports an inconsistent create/call combination as reversion.
+Keep one unparameterized executed-facts record and a sealed success-mode contract; do not add
+extra mode-specific capability families or phantom evidence to avoid this error channel.
+
+This is a deliberate scope expansion validated at the real Runtime boundary. It requires a
+complete trait/call-site cutover across kernel tests, EVM, Portfolio, and all consuming fixtures,
+but no new Journal record, Store behavior, or alternative semantic fold.
 
 ## 7. Identity, recovery, and persistence
 
@@ -432,9 +481,19 @@ through Runtime's public terminal value surface. This test-local ABI/report beha
 allowed; transaction/observation forwarding and stage bookkeeping must be production behavior.
 
 Reversion retains all facts through authenticated settlement, and anchored domain failure retains
-its accepted evidence. Update fixture failure variants/conversions to preserve these accumulated
-contexts rather than discarding them into a unit enum variant. Existing `Abort` handlers may still
-perform that explicit root failure mapping. They do not reconstruct the successful data path.
+its accepted evidence. Keep those exact accumulated failure envelopes between States. At the
+terminal failure-report boundary, convert them losslessly to a compact bounded sequence of named
+plan/transaction/observation entries plus a reviewed failure reason. Unexecuted entries retain
+plans, completed entries retain full execution facts and outcomes, and the failed entry retains
+its available evidence. A finite product step enum identifies entries; checked construction and
+deserialization enforce the exact order, completeness, and agreement with the failure reason.
+
+This reporting representation is required by the measured schema limit: an enum embedding a full
+context separately for each failure point exceeds the existing 65,536-byte schema identity bound
+in the two-deployment example. The report stores each entry schema once. It introduces no dynamic
+execution context or Journal query, and drops no public facts. EVM owns reusable lossless fact
+conversions; the product owns ordering and failure policy. Existing `Abort` handlers perform this
+terminal conversion, not successful-path forwarding.
 
 A business Report that must itself execute after failure can use an existing typed failure handler
 and a sum of the available context shapes. Reporting must not fabricate facts from unexecuted
@@ -448,10 +507,12 @@ There is one supported transaction/anchored-call context API afterward.
 
 | Current code | Required action |
 | --- | --- |
+| Infallible `PureState::evaluate` and Read/Effect `interpret` signatures | Replace all trait declarations, implementations, direct test calls, and Runtime call sites with the uniform `StateExecutionError` result; no compatibility methods. |
+| Action mismatch treated as transaction reversion | Delete the fallback; invalid local combinations return an internal execution error with no conclusion. |
 | `EvmTransactionContext<K, T>` | Delete the opaque caller-context/current-payload wrapper and its exported API/schema. Replace State inputs/outputs with slot-selected accumulated records. |
 | `EvmTransactionCompletion<K>` | Delete the caller-context completion wrapper; replace with cumulative typed completed facts in the workflow field. |
 | `EvmTransactionSuccess` | Replace the combined create/call success value with the outcome-specific `Created` and `Called` facts selected by the recipe. Keep the capability settlement outcome contract. |
-| `EvmTransactionReversion<K>` | Delete the old caller-context/receipt failure shape; replace with failure carrying the context whose transaction field contains full reverted facts. |
+| `EvmTransactionReversion<K>` | Delete the old caller-context/receipt failure shape; replace with failure carrying the accumulated executed context and its authenticated reversion settlement. |
 | `ExecutedEvmTransaction` | Delete the lossy State payload after replacing its uses with executed cumulative facts; preserve its relevant action-consistency validation in the new owner. |
 | `AnchoredContractCallContext<K>` | Delete the caller-context/intent wrapper and its constructors; recipes construct intent from accumulated context. |
 | `AnchoredContractCallCompletion<K>` and `AnchoredContractCallFailure<K>` | Delete old caller-context wrappers; replace with accumulated observation/evidence success and failure contexts. |
@@ -474,6 +535,9 @@ The concrete consumer set includes:
   [generic transaction Runtime tests](crates/live/evm/tests/generic_transaction_runtime.rs), and
   [contract Effect e2e](crates/live/evm/tests/evm_contract_effect_e2e.rs).
 - The Values/derive public APIs and consuming-crate tests for the new mechanical slot contract.
+- Program State traits, Runtime Pure/Read/Effect drivers, and all existing State implementations
+  and direct callback tests, including Portfolio and kernel injection/authoring fixtures. Their
+  domain behavior stays the same inside `Ok`; this is the complete internal-error API cutover.
 - Relevant domain/live READMEs, public-surface documentation, and the build guide's Effect e2e
   description when its terminal report changes. Repeat a repository reference search at cutover.
 
@@ -500,7 +564,7 @@ executing superseded EVM histories through retained old State implementations.
 | EVM domain | Checked plans, cumulative transaction/observation facts, recipes, four-stage injection, reusable transaction Operation, and deterministic State implementations. |
 | Product code | Context field names, which prior result feeds which action, ABI/report semantics, and root domain failure policy. |
 | Live EVM | Existing IO adapters plus a pure helper that registers the reusable transaction's exact State family. No product graph planning. |
-| Program / Runtime | Existing graph authoring/association and sole semantic fold. No field lookup service. |
+| Program / Runtime | State execution error contract and its pre-conclusion mapping, existing graph authoring/association, and sole semantic fold. No field lookup service. |
 | Journal / Store | Existing frame/history qualification and mechanical persistence. No context semantics. |
 
 ## 11. Verification and acceptance
@@ -529,11 +593,15 @@ The feature is complete only when all of these hold:
 8. Reversion and anchored failure preserve the exact available facts. Branches with missing results
    do not obtain successful completion types. A terminal cold read/resume preserves report, head,
    and nonce under the existing tests' actual claims.
-9. Size checks cover complete snapshots and repeated frame closure, including failure paths. The
+9. Size checks cover schema identities, complete snapshots, and repeated frame closure, including
+   failure paths. The 65,536-byte schema identity limit is a separate admission constraint. The
    8 MiB object, frame limits, and 512 MiB run limit remain enforced. Copying growing snapshots can
    make total retained bytes grow quadratically with a long chain of equal-sized added results;
    bound supported inputs instead of introducing an implicit reference/delta fallback.
-10. A reference search finds no superseded EVM context exports, fixture bridge IDs, or duplicate
+10. Pure/Read internal errors preserve the current head; Effect interpretation errors preserve the
+    prepare head and recover with the same command/EffectId. Completed cold histories do not rerun
+    interpretation. A mode mismatch returns Internal, never a false reversion.
+11. A reference search finds no superseded EVM context exports, fixture bridge IDs, or duplicate
     transaction registration/wrapper recipes among current consumers.
 
 Use focused verification under the pinned shell while implementing:
@@ -553,13 +621,17 @@ an actual SQL query/baseline, which this target does not require.
 
 ## 12. Logical commit sequence
 
-1. **Add the mechanical typed slot contract and derive.** Include consuming-crate positive and
+1. **Cut over the internal execution-error contract.** Update Program traits, all existing State
+   implementations/direct callers, Runtime driver mapping, focused boundary tests, and authoritative
+   documentation together. Preserve current context APIs for this coherent prerequisite commit;
+   no old/new callback compatibility layer.
+2. **Add the mechanical typed slot contract and derive.** Include consuming-crate positive and
    compile-fail tests. This is an independent value capability, not a second runtime context model.
-2. **Cut over EVM contexts completely.** Include checked plans, recipes, cumulative facts, all four
+3. **Cut over EVM contexts completely.** Include checked plans, recipes, cumulative facts, all four
    States and injection, anchored Reads, production Operation/registration helpers, every consumer,
-   the updated report/failure tests, deletions, and authoritative documentation. These changes are
-   inseparable: do not split them into commits that leave two supported EVM context APIs or broken
-   associations. Run affected focused tests and final CI.
+   normalized terminal reporting/failure tests, deletions, and authoritative documentation. Keep
+   inseparable changes together: no commit may leave dual EVM context APIs or broken associations.
+   Run affected focused tests and final CI on the exact candidate.
 
 RFC publication itself is one documentation commit. It requires local link/symbol review and
 `git diff --check`; it does not require Rust tests or CI.
@@ -585,9 +657,10 @@ RFC publication itself is one documentation commit. It requires local link/symbo
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
-| The checked plan plus typed prior outcome makes command/intent domain construction total. | Existing factories combine value checks and canonical identity construction; the proposed decomposition is not implemented. | Removing a bridge could change a legitimate domain failure into `Internal`. | Audit each constructor and implement boundary/totality tests before deletion; retain genuine domain validation where required. |
-| The narrow slot derive stays smaller than the forwarding code it replaces. | Associated replacement types, Serde bounds, and exact generic schemas have not been compiled in this form. | The mechanism could become a larger type framework than the problem warrants. | Implement the restricted consuming-crate example first; simplify supported record shapes rather than add recursive generic machinery. |
-| Accepted copying fits representative maximum workflows. | Internal evidence and repeated full snapshots increase retained sizes; this RFC contains no measurements. | The example could work while intended larger workflows exceed fixed format limits. | Measure canonical object/frame/run bytes for maximum intended transaction/report sequences and bound admission accordingly. |
+| The production cutover preserves all existing recovery and trust-boundary guarantees. | The isolated spike exercises the real kernel with deterministic adapters, but does not migrate every production consumer or implement all cumulative-fact checked decoders. | A domain inconsistency, custody regression, or stale consumer could survive the API migration. | Complete the private fact constructors/decoders, hostile-input and recovery tests, managed Effect e2e, reference/deletion audit, and final CI required above. |
+| Intended future workflows fit the existing limits. | Measurements cover two creations, one call, one observation, and reporting; longer graphs and larger schemas have different costs. | A valid-looking composition can fail schema or run admission. | Keep the measured scenario as a capacity regression and measure each new supported product boundary; do not infer unlimited accumulation from this RFC. |
 
-Retention of internal public transaction stages is a confirmed requirement. No uncertainty about
-that scope should be used to omit reservation or preparation evidence from the final context.
+The consuming prototype resolves the GAT/Serde feasibility question, checked transaction-plan
+construction, internal callback-error behavior, and representative successful snapshot sizes.
+The validation note distinguishes those results from production acceptance work. Internal public
+transaction-stage retention remains mandatory.
