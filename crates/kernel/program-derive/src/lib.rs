@@ -21,6 +21,19 @@ use self::attributes::{ContainerAttrs, FieldAttrs, VariantAttrs};
 mod shape;
 use self::shape::{schema_shape_tokens, DeriveKind};
 
+mod context;
+
+/// Derives typed field borrowing and replacement markers for a named context.
+///
+/// Requires `#[context(namespace = "...")]`. Each type parameter must occur as
+/// exactly one bare field type, without bounds, defaults, or a where clause.
+#[proc_macro_derive(MfmContext, attributes(context))]
+pub fn derive_mfm_context(input: TokenStream) -> TokenStream {
+    context::expand(parse_macro_input!(input as DeriveInput))
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
 #[proc_macro_derive(MfmValue, attributes(mfm, serde))]
 /// Derives `mfm_values::MfmValue` for a named struct.
 pub fn derive_mfm_value(input: TokenStream) -> TokenStream {

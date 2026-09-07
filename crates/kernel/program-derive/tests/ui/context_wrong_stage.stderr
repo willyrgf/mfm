@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/context_wrong_stage.rs:17:54
+   |
+17 |     requires_completed::<_, WorkflowTransactionSlot>(&initial);
+   |     ------------------------------------------------ ^^^^^^^^ expected `&Workflow<Completed>`, found `&Workflow<Plan>`
+   |     |
+   |     arguments to this function are incorrect
+   |
+   = note: expected reference `&Workflow<Completed>`
+              found reference `&Workflow<Plan>`
+note: function defined here
+  --> tests/ui/context_wrong_stage.rs:13:4
+   |
+13 | fn requires_completed<C: Value, S: ContextSlot<C, Value = Completed>>(_: &C) {}
+   |    ^^^^^^^^^^^^^^^^^^                                                 -----

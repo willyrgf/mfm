@@ -4,7 +4,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 
 | Owner | Responsibility | Must not own |
 | --- | --- | --- |
-| IDs / Values | checked identities including `EffectId`, schema descriptors, canonical typed values, 8 MiB object bound | execution or IO |
+| IDs / Values | checked identities including `EffectId`, schema descriptors, canonical typed values, mechanical typed context slots, 8 MiB object bound | execution or IO |
 | Capabilities | Read intent/evidence and Effect command/evidence contracts | State outcomes or retries |
 | Program | typed Operation authoring, sole private lowering draft, checked v3 State/Match graph, Pure/Read/Effect State contracts, redaction-safe internal callback errors, `Never` | registries, IO, scheduling |
 | Runtime | immutable assembly, Program association, sole fold, typed execution/progression | persisted wire or physical storage |
