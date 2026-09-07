@@ -113,9 +113,14 @@ impl State for PrepareConfiguration {
 }
 
 impl PureState for PrepareConfiguration {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+    fn evaluate(
+        input: Self::Input,
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
         let Some(target) = input.outcome().created_address().cloned() else {
-            return fixture_failure(FixtureFailure::MissingCreatedAddress);
+            return Ok(fixture_failure(FixtureFailure::MissingCreatedAddress));
         };
         let Ok(command) = Eip1559TransactionCommand::call(
             input.binding().clone(),
@@ -126,11 +131,11 @@ impl PureState for PrepareConfiguration {
             EvmU256::from_u64(PRIORITY_FEE),
             EvmU256::from_u64(MAX_FEE),
         ) else {
-            return fixture_failure(FixtureFailure::InvalidConfigurationCommand);
+            return Ok(fixture_failure(FixtureFailure::InvalidConfigurationCommand));
         };
-        ProposedStateOutcome::Success {
+        Ok(ProposedStateOutcome::Success {
             output: EvmTransactionContext::new(input, command),
-        }
+        })
     }
 }
 
@@ -148,9 +153,14 @@ impl State for PrepareObservation {
 }
 
 impl PureState for PrepareObservation {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+    fn evaluate(
+        input: Self::Input,
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
         let Some(target) = input.outcome().target().cloned() else {
-            return fixture_failure(FixtureFailure::MissingCallTarget);
+            return Ok(fixture_failure(FixtureFailure::MissingCallTarget));
         };
         let route = input.binding().route().clone();
         let anchor = input.receipt().block_anchor().clone();
@@ -161,8 +171,8 @@ impl PureState for PrepareObservation {
             VALUE_SELECTOR.to_vec(),
             anchor,
         ) {
-            Ok(output) => ProposedStateOutcome::Success { output },
-            Err(_) => fixture_failure(FixtureFailure::InvalidObservationContext),
+            Ok(output) => Ok(ProposedStateOutcome::Success { output }),
+            Err(_) => Ok(fixture_failure(FixtureFailure::InvalidObservationContext)),
         }
     }
 }
@@ -181,10 +191,15 @@ impl State for DecodeValue {
 }
 
 impl PureState for DecodeValue {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+    fn evaluate(
+        input: Self::Input,
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
         match decode_fixture_value(input.result().return_bytes()) {
-            Some(output) => ProposedStateOutcome::Success { output },
-            None => fixture_failure(FixtureFailure::InvalidReturnData),
+            Some(output) => Ok(ProposedStateOutcome::Success { output }),
+            None => Ok(fixture_failure(FixtureFailure::InvalidReturnData)),
         }
     }
 }
@@ -208,8 +223,13 @@ impl<I: MfmValue, O: MfmValue> PureState for Abort<I, O>
 where
     FixtureFailure: From<I>,
 {
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
-        fixture_failure(input.into())
+    fn evaluate(
+        input: Self::Input,
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_program::StateExecutionError,
+    > {
+        Ok(fixture_failure(input.into()))
     }
 }
 

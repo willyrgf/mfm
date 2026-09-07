@@ -88,7 +88,9 @@ pub enum ProposedStateOutcome<O, F> {
 /// Deterministic State behavior without IO.
 pub trait PureState: State {
     /// Evaluates one complete input.
-    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure>;
+    fn evaluate(
+        input: Self::Input,
+    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, StateExecutionError>;
 }
 
 /// Deterministic State behavior driven by typed Read evidence.
@@ -103,7 +105,7 @@ where
     fn interpret(
         input: Self::Input,
         evidence: &C::Evidence,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure>;
+    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, StateExecutionError>;
 }
 
 /// Deterministic State behavior driven by typed Effect evidence.
@@ -118,13 +120,20 @@ where
     fn interpret(
         input: Self::Input,
         evidence: &C::Evidence,
-    ) -> ProposedStateOutcome<Self::Output, Self::Failure>;
+    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, StateExecutionError>;
 }
 
 /// Redaction-safe failure of trusted deterministic capability preparation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("capability preparation failed")]
 pub struct PreparationError;
+
+/// Redaction-safe failure of trusted deterministic State execution.
+///
+/// This is an internal implementation error, not a durable domain outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("state execution failed")]
+pub struct StateExecutionError;
 
 /// Uninhabited failure value owned by the framework.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

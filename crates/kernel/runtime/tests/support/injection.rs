@@ -13,8 +13,12 @@ impl EffectState<Mutation> for Injected {
     fn prepare(input: &Number) -> Result<Command, PreparationError> {
         Ok(Command { value: input.value })
     }
-    fn interpret(input: Number, _: &EffectEvidence) -> ProposedStateOutcome<Number, Never> {
-        ProposedStateOutcome::Success { output: input }
+    fn interpret(
+        input: Number,
+        _: &EffectEvidence,
+    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, mfm_program::StateExecutionError>
+    {
+        Ok(ProposedStateOutcome::Success { output: input })
     }
 }
 impl CapabilityInjection<Injected> for Mutation {
@@ -71,14 +75,17 @@ impl State for Choose {
     }
 }
 impl PureState for Choose {
-    fn evaluate(input: Number) -> ProposedStateOutcome<Choice, Never> {
-        ProposedStateOutcome::Success {
+    fn evaluate(
+        input: Number,
+    ) -> std::result::Result<ProposedStateOutcome<Choice, Never>, mfm_program::StateExecutionError>
+    {
+        Ok(ProposedStateOutcome::Success {
             output: if input.value.is_multiple_of(2) {
                 Choice::Left(input)
             } else {
                 Choice::Right(input)
             },
-        }
+        })
     }
 }
 struct Project;
@@ -91,11 +98,14 @@ impl State for Project {
     }
 }
 impl PureState for Project {
-    fn evaluate(input: Number) -> ProposedStateOutcome<Number, Number> {
+    fn evaluate(
+        input: Number,
+    ) -> std::result::Result<ProposedStateOutcome<Number, Number>, mfm_program::StateExecutionError>
+    {
         if input.value == 2 {
-            ProposedStateOutcome::Failure { failure: input }
+            Ok(ProposedStateOutcome::Failure { failure: input })
         } else {
-            ProposedStateOutcome::Success { output: input }
+            Ok(ProposedStateOutcome::Success { output: input })
         }
     }
 }
@@ -227,7 +237,11 @@ impl EffectState<Recursive> for Injected {
     fn prepare(input: &Number) -> Result<Command, PreparationError> {
         <Self as EffectState<Mutation>>::prepare(input)
     }
-    fn interpret(input: Number, evidence: &EffectEvidence) -> ProposedStateOutcome<Number, Never> {
+    fn interpret(
+        input: Number,
+        evidence: &EffectEvidence,
+    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, mfm_program::StateExecutionError>
+    {
         <Self as EffectState<Mutation>>::interpret(input, evidence)
     }
 }
