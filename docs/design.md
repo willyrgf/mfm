@@ -25,6 +25,13 @@ generic ABIs without ambiguity. Read callbacks and evidence binding receive the 
 ref; Effect callbacks receive the exact command value ref used for `EffectId` derivation. These are
 instance refs, never shared codec contract refs. State code has no ambient IO.
 
+Contexts remain ordinary immutable `MfmValue` snapshots. `ContextSlot<C>` borrows one typed
+field or moves its replacement and every unchanged sibling into a new exact value type.
+`MfmContext` derives this reconstruction for distinct bare generic fields of a named record;
+it introduces no Runtime context service, codec, or scheduler. Slot identity uses an explicit
+context namespace and stable field name. Domain stage types and checked fact constructors, not
+the mechanical slot primitive, own preservation of preceding facts.
+
 Pure evaluation and Read/Effect interpretation return a proposed domain outcome or the
 Program-owned redaction-safe `StateExecutionError`. Runtime maps this internal implementation
 failure to `RuntimeError::Internal` before qualifying or appending a conclusion. Pure and Read

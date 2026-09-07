@@ -35,6 +35,9 @@ pub use mfm_canonical::limits::{
     MAX_ARRAY_ITEMS, MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES, MAX_OBJECT_ENTRIES, MAX_STRING_UTF8_BYTES,
 };
 
+mod context;
+pub use self::context::ContextSlot;
+
 mod persisted;
 pub use self::persisted::{
     validate_derived_persisted_owner, CanonicalJsonLinesPersistedSchema,

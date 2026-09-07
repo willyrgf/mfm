@@ -1,0 +1,65 @@
+error: MfmContext requires #[context(namespace = "...")]
+ --> tests/ui/context_layouts.rs:4:8
+  |
+4 | struct MissingNamespace<T> { value: T }
+  |        ^^^^^^^^^^^^^^^^
+
+error: MfmContext supports named structs only
+ --> tests/ui/context_layouts.rs:8:8
+  |
+8 | struct Tuple<T>(T);
+  |        ^^^^^
+
+error: MfmContext supports named structs only
+  --> tests/ui/context_layouts.rs:12:6
+   |
+12 | enum Sum<T> { Value(T) }
+   |      ^^^
+
+error: each context slot parameter must occur exactly once as a bare field type; nested, repeated, and opaque uses are unsupported
+  --> tests/ui/context_layouts.rs:16:15
+   |
+16 | struct Nested<T> { value: Vec<T> }
+   |               ^
+
+error: each context slot parameter must occur exactly once as a bare field type; nested, repeated, and opaque uses are unsupported
+  --> tests/ui/context_layouts.rs:20:17
+   |
+20 | struct Repeated<T> { first: T, second: T }
+   |                 ^
+
+error: each context slot parameter must occur exactly once as a bare field type; nested, repeated, and opaque uses are unsupported
+  --> tests/ui/context_layouts.rs:24:15
+   |
+24 | struct Hidden<T> { first: T, second: Vec<Option<T>> }
+   |               ^
+
+error: context slots require unbounded type parameters without defaults; lifetimes and const parameters are unsupported
+  --> tests/ui/context_layouts.rs:28:14
+   |
+28 | struct Bound<T: Clone> { value: T }
+   |              ^^^^^^^^
+
+error: context slots require unbounded type parameters without defaults; lifetimes and const parameters are unsupported
+  --> tests/ui/context_layouts.rs:32:18
+   |
+32 | struct Defaulted<T = u64> { value: T }
+   |                  ^^^^^^^
+
+error: context slot parameters cannot have a where clause
+  --> tests/ui/context_layouts.rs:36:23
+   |
+36 | struct Constrained<T> where T: Clone { value: T }
+   |                       ^^^^^^^^^^^^^^
+
+error: context slots require unbounded type parameters without defaults; lifetimes and const parameters are unsupported
+  --> tests/ui/context_layouts.rs:40:17
+   |
+40 | struct Borrowed<'a, T> { value: T, sibling: &'a str }
+   |                 ^^
+
+error: context slots require unbounded type parameters without defaults; lifetimes and const parameters are unsupported
+  --> tests/ui/context_layouts.rs:44:17
+   |
+44 | struct Sized<T, const N: usize> { value: T, sibling: [u8; N] }
+   |                 ^^^^^^^^^^^^^^
