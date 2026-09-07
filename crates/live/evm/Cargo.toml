@@ -12,6 +12,7 @@ domain = "evm"
 domain-role = "live"
 
 [dependencies]
+mfm-values = { path = "../../kernel/values" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-evm = { path = "../../domains/evm" }
 mfm-ids = { path = "../../kernel/ids" }
@@ -36,5 +37,4 @@ mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-store = { path = "../../kernel/store" }
 mfm-storage-postgres = { path = "../../storages/postgres" }
-mfm-values = { path = "../../kernel/values" }
 zeroize = { workspace = true }

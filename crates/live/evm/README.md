@@ -36,7 +36,8 @@ mismatches. Keccak helpers expose only checked public hash/address results; priv
 remains in `mfm-keystore`.
 
 `register_evm_transaction_adapters` registers reservation, preparation, and execution callbacks.
-State registration remains explicit in application composition. Reservation captures binding,
+`register_evm_transaction_states::<C, R>` separately installs the four exact executable State
+ABIs for an accumulated context and recipe; it binds no IO and performs no graph planning. Reservation captures binding,
 custody, and provider; preparation captures binding, custody, and signer; execution captures no
 signer. Reservation loads first, then observes pending nonce if absent. Preparation loads first,
 signs only when necessary, and validates the immutable first winner returned by custody.
@@ -60,8 +61,8 @@ would add unrelated transport and RPC surface, so `alloy-provider`, `alloy-netwo
 `alloy-rpc-types`, and `alloy-signer` remain excluded. Verify with
 `cargo tree -e features -p mfm-evm-live`.
 
-The crate registers callbacks but owns no State registration, planner, binding wrapper, response
-echo, secret custody, provider retry loop, or production finality configuration. Production
+The crate registers callbacks and the reusable transaction State family, and owns no planner,
+binding wrapper, response echo, secret custody, provider retry loop, or production finality configuration. Production
 `ComposedRuntime`, CLI, REST, and configuration do not register these transaction or anchored-route
 callbacks. Settlement is only the canonical-receipt policy of the pinned non-reorging Reth
 development fixture.

@@ -1,9 +1,9 @@
 # RFC: accumulating typed contexts
 
-Status: engineer handoff specification; validation results are recorded in
-[the handoff evidence](docs/rfc-ctx-acc-validation.md). This RFC specifies the implementation scope;
-it does not change the current executable contracts. Implementation must update
-[design](docs/design.md) and [architecture](docs/architecture.md) in the same cutover as the code.
+Status: implementation acceptance specification. [Production evidence](docs/rfc-ctx-acc-implementation.md)
+maps requirements to the implemented contracts and tests; [the handoff evidence](docs/rfc-ctx-acc-validation.md)
+records the preceding prototype. [Design](docs/design.md) and [architecture](docs/architecture.md)
+own the current executable contracts.
 
 ## Decision
 
@@ -44,9 +44,9 @@ and anchored-call context contracts.
 This scope avoids introducing a general query language, runtime field registry, dynamic value bag,
 automatic dependency scheduler, or a second interpretation of run history.
 
-## Current implementation
+## Implementation before this RFC
 
-The current [transaction context](crates/domains/evm/src/transaction.rs) contains:
+The pre-cutover [transaction context](crates/domains/evm/src/transaction.rs) contains:
 
 ```rust
 EvmTransactionContext<K, T> {
@@ -56,7 +56,7 @@ EvmTransactionContext<K, T> {
 ```
 
 `K` is opaque to transaction execution. `T` changes from complete command to reserved, prepared,
-and executed transaction. This describes the current payload, rather than a complete accumulated
+and executed transaction. This described the stage payload, rather than a complete accumulated
 record. In [the stages](crates/domains/evm/src/transaction/stages.rs), execution extracts the
 original command from the prepared descriptor, dropping the reservation and preparation details
 from its output. Final projection retains only caller context, binding, receipt, and outcome.
@@ -73,8 +73,7 @@ and extend those values; Runtime does not acquire a special mutable context serv
 
 The following Rust sketches define intended responsibilities and signatures. Derives, imports,
 privacy, and detailed bounds are abbreviated in the overview; the exact API contract and compiled
-consumer pattern appear in the handoff evidence. These APIs have been exercised in an isolated
-prototype, not installed in the production workspace.
+consumer pattern appear in the handoff evidence. The handoff prototype exercised these APIs before their production cutover.
 
 ```rust
 #[derive(MfmValue, MfmContext)]

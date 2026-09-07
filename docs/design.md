@@ -89,18 +89,40 @@ EVM Program values use byte-backed checked lowercase `EvmAddress` and `EvmHash`,
 fixes chain ID plus expected genesis hash, endpoint reference, authority epoch, and sender account.
 The sole transaction command is nonce-free EIP-1559 type 2 with an empty access list and a private
 bounded Create or Call action. Its complete factories and checked deserializer enforce input bounds,
-the `u128` fee ceiling, priority-fee ordering, and nonzero gas. Capability injection expands `ExecuteEvmTransaction<K>` into four ordinary States:
-`ReserveEvmNonce<K>` Effect, `PrepareEvmTransaction<K>` Effect, the designated execution Effect,
-and `ProjectEvmTransactionOutcome<K>` Pure State. Only projection has a typed reversion failure;
-the Effects have `Never` failure. `EvmTransactionContext<K, T>` carries caller context through
-each stage. The reserve EffectId identifies custody; preparation and execution have their own
-EffectIds. The checked reserved descriptor binds the original command content reference and exact
-nonce domain. Preparation evidence binds its EffectId and public retained-wire hash; execution
-evidence binds its EffectId, nonce, hash, and action. Signed wire never enters Program or Journal.
-The final completion retains caller context, binding, receipt, and created address or call target;
-reversion retains caller context and receipt. A completed transaction adds seven frames after
-admission (two per Effect and one projection); Program v3, Journal wire, and the Runtime fold are
-unchanged. Authored graph capacity includes all four States.
+the `u128` fee ceiling, priority-fee ordering, and nonzero gas. `CheckedCreatePlan` and
+`CheckedCallPlan` share these validation owners; the latter has no target. `CheckedTargetCallPlan`
+adds a required target for an ordinary call. Deserialization preserves all plan checks.
+
+`EvmTransaction<C, R>` authors a transaction with one selected `TransactionRecipe<C>`.
+`CreateAt`, `CallCreatedAt`, and `CallAt` select checked plans and, for creation-dependent calls,
+a required successful creation address. The reservation State's deterministic prepare callback
+constructs the complete command before nonce reservation or IO. Capability injection expands
+`ExecuteEvmTransaction<C, R>` into `ReserveEvmNonce`, `PrepareEvmTransaction`, the designated
+execution Effect, and `ProjectEvmTransactionOutcome`, all with the same initial context and recipe.
+The first three have `Never` domain failure; only authenticated reversion reaches projection's
+typed `EvmTransactionFailure<ExecutedContext<C, R>>`. The recipe's sealed `Created` or `Called`
+mode controls both command checking and projection. A local mode mismatch is Internal.
+
+Each stage replaces one named field while preserving siblings. `ReservedEvmTransaction` retains
+the complete command and reservation; `PreparedTransactionFacts` retains those plus full
+preparation evidence; `ExecutedTransactionFacts` retains those plus full settlement;
+`CompletedTransactionFacts<Created/Called>` adds the checked address or target. No fact nests a
+preceding workflow context. Fact constructors and decoders check command reference, nonce domain,
+settlement nonce/hash/action, and projection agreement. Runtime and Journal establish EffectId
+provenance; decoding arbitrary JSON does not establish that a transaction ran. The reserved and
+prepared capability command descriptors remain separate from these report records. Pending
+execution manufactures no completed facts. Signed wire never enters Program or Journal.
+
+Executable identity hashes a canonical domain-separated descriptor containing implementation
+version, stage, explicit recipe identity, ordered selected slots, and outcome mode. Exact value
+schemas remain additional ABI association keys. Cold fold re-prepares retained commands from
+exact snapshots and does not rerun completed interpretation. A completed transaction adds seven
+frames after admission; Program v3, Journal wire, and the Runtime fold remain unchanged.
+
+`TransactionReportFacts` losslessly converts completed or executed transaction-local facts into
+one execution record plus a finite created/called/reverted projection. Checked decoding enforces
+agreement. Products own terminal entry ordering, completeness, and root failure policy; this
+reporting representation does not introduce an execution context or a Journal query.
 
 The broad EVM Read intent fixes only a nonzero chain ID, physical-route content ref, and one of six
 balance subjects; that subject is the operation discriminator. Its returned sum contains checked
@@ -110,13 +132,15 @@ content ref, target, bounded calldata, and exact block anchor. Every broad and a
 outcome carries Runtime's exact qualified intent value ref, which the capability binder checks
 before its typed subject/result relationship. Returned anchored evidence additionally contains the
 same anchor and bounded return bytes. Rejected, safe-failure, and integrity-blocked evidence project
-to a closed failure reason. Caller-owned Pure States project transaction completions into subsequent checked
-commands and observations; EVM does not own action-specific bridges or a product lifecycle
-Operation. These domain contracts perform no provider, signing, nonce, or persistence IO; the
+to a closed failure reason. `ObserveAt` combines a checked observation plan with a selected
+completed call's target and receipt anchor. It rejects cross-field chain/route mismatches before
+provider entry. `ReadAnchoredContractCall<C, R>` constructs the intent during prepare, and retains
+the exact intent and all accepted evidence in `AnchoredObservationFacts`, including domain failure
+evidence. ABI decoding and product reporting remain explicit product semantics. These domain contracts perform no provider, signing, nonce, or persistence IO; the
 authority and live adapter remain separate downstream responsibilities.
 
 `register_evm_transaction_adapters` registers three callbacks under the same binding; application
-composition separately registers the four typed State implementations. Reservation captures only
+composition separately calls `register_evm_transaction_states::<C, R>` for the four exact State ABIs. Reservation captures only
 binding, custody, and provider; preparation captures binding, custody, and signer; execution
 captures binding, custody, and provider. Registration checks epoch, signing purpose, and sender.
 Each adapter checks its command binding before IO. Reservation loads existing custody before

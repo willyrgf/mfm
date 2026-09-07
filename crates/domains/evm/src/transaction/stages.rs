@@ -1,9 +1,10 @@
 use super::*;
 use mfm_capabilities::{CapabilityError, EffectCapabilityContract};
 use mfm_program::{
-    CapabilityInjection, EffectState, Never, OperationExpansion, PreparationError, ProgramError,
-    ProposedStateOutcome, PureState, State,
+    CapabilityInjection, EffectState, Never, Operation, OperationExpansion, PreparationError,
+    ProgramError, ProposedStateOutcome, PureState, State, StateExecutionError,
 };
+use mfm_values::ContextSlot;
 use std::marker::PhantomData;
 
 /// Exact nonce domain, excluding endpoint and custody-provider dimensions.
@@ -215,52 +216,6 @@ impl PreparedEvmTransaction {
     }
 }
 
-/// Public descriptor for the executed-transaction stage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "executed-transaction",
-    version = "1",
-    schema = "mfm.evm-executed-transaction"
-)]
-pub struct ExecutedEvmTransaction {
-    command: Eip1559TransactionCommand,
-    settlement: EvmTransactionSettlement,
-}
-impl ExecutedEvmTransaction {
-    /// Constructs and checks the public stage descriptor.
-    pub fn new(
-        command: Eip1559TransactionCommand,
-        settlement: EvmTransactionSettlement,
-    ) -> Result<Self, EvmDomainError> {
-        let value = Self {
-            command,
-            settlement,
-        };
-        value.validate()?;
-        Ok(value)
-    }
-    /// Returns the command.
-    pub const fn command(&self) -> &Eip1559TransactionCommand {
-        &self.command
-    }
-    /// Returns the settlement.
-    pub const fn settlement(&self) -> &EvmTransactionSettlement {
-        &self.settlement
-    }
-    fn validate(&self) -> Result<(), EvmDomainError> {
-        if !action_matches(&self.command, &self.settlement) {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(())
-    }
-}
-checked_deserialize!(ExecutedEvmTransaction {
-    command: Eip1559TransactionCommand,
-    settlement: EvmTransactionSettlement
-});
-
 /// Evidence identifying the immutable prepared wire for one preparation Effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -291,7 +246,7 @@ impl PreparedEvmTransactionEvidence {
         &self.transaction_hash
     }
 }
-fn action_matches(
+pub(super) fn action_matches(
     command: &Eip1559TransactionCommand,
     evidence: &EvmTransactionSettlement,
 ) -> bool {
@@ -384,89 +339,182 @@ impl EffectCapabilityContract for EvmTransactionEffect {
     }
 }
 
-/// Context-preserving reserve-nonce State.
-pub struct ReserveEvmNonce<K: MfmValueTrait>(PhantomData<fn() -> K>);
-impl<K: MfmValueTrait> State for ReserveEvmNonce<K> {
-    type Input = EvmTransactionContext<K, Eip1559TransactionCommand>;
-    type Output = EvmTransactionContext<K, ReservedEvmTransaction>;
+/// Context after replacing the recipe's selected field with an exact fact type.
+pub type Replaced<C, R, V> = <<R as TransactionRecipe<C>>::Slot as ContextSlot<C>>::With<V>;
+/// Complete context after nonce reservation.
+pub type ReservedContext<C, R> = Replaced<C, R, ReservedEvmTransaction>;
+/// Complete context after transaction preparation.
+pub type PreparedContext<C, R> = Replaced<C, R, PreparedTransactionFacts>;
+/// Complete context after authenticated settlement.
+pub type ExecutedContext<C, R> = Replaced<C, R, ExecutedTransactionFacts>;
+/// Complete context after successful outcome projection.
+pub type CompletedContext<C, R> =
+    Replaced<C, R, CompletedTransactionFacts<<R as TransactionRecipe<C>>::Success>>;
+
+fn state_id<C: MfmValueTrait, R: TransactionRecipe<C>>(
+    stage: &str,
+) -> mfm_program::Result<StableId> {
+    super::recipes::executable_id(
+        stage,
+        R::recipe_id().map_err(|_| ProgramError::InvalidContract)?,
+        R::source_ids().map_err(|_| ProgramError::InvalidContract)?,
+        R::Success::mode_id(),
+    )
+}
+
+/// The reserve-nonce State, retaining all sibling context fields.
+pub struct ReserveEvmNonce<C, R>(PhantomData<fn() -> (C, R)>);
+impl<C: MfmValueTrait, R: TransactionRecipe<C>> State for ReserveEvmNonce<C, R> {
+    type Input = C;
+    type Output = ReservedContext<C, R>;
     type Failure = Never;
     fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.evm.state.reserve-nonce@1").map_err(|_| ProgramError::InvalidContract)
+        state_id::<C, R>("reserve-nonce")
     }
 }
-impl<K: MfmValueTrait> EffectState<EvmNonceReservationEffect> for ReserveEvmNonce<K> {
-    fn prepare(input: &Self::Input) -> Result<Eip1559TransactionCommand, PreparationError> {
-        Ok(input.command.clone())
-    }
-    fn interpret(
-        input: Self::Input,
-        evidence: &Reservation,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        Ok(ProposedStateOutcome::Success {
-            output: EvmTransactionContext::new(
-                input.caller_context,
-                ReservedEvmTransaction {
-                    command: input.command,
-                    reservation: evidence.clone(),
-                },
-            ),
-        })
+/// The prepare-transaction State, retaining all sibling context fields.
+pub struct PrepareEvmTransaction<C, R>(PhantomData<fn() -> (C, R)>);
+impl<C: MfmValueTrait, R: TransactionRecipe<C>> State for PrepareEvmTransaction<C, R> {
+    type Input = ReservedContext<C, R>;
+    type Output = PreparedContext<C, R>;
+    type Failure = Never;
+    fn state_id() -> mfm_program::Result<StableId> {
+        state_id::<C, R>("prepare-transaction")
     }
 }
-impl<K: MfmValueTrait> CapabilityInjection<ReserveEvmNonce<K>> for EvmNonceReservationEffect {
-    type Setup = EvmTransactionBinding;
-    type ExpandedInput = <ReserveEvmNonce<K> as State>::Input;
-    type ExpandedOutput = <ReserveEvmNonce<K> as State>::Output;
-    type ExpandedFailure = Never;
-    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
-        setup
-            .binding_ref()
-            .map_err(|_| ProgramError::InvalidContract)
+/// The execute-transaction State, retaining all sibling context fields.
+pub struct ExecuteEvmTransaction<C, R>(PhantomData<fn() -> (C, R)>);
+impl<C: MfmValueTrait, R: TransactionRecipe<C>> State for ExecuteEvmTransaction<C, R> {
+    type Input = PreparedContext<C, R>;
+    type Output = ExecutedContext<C, R>;
+    type Failure = Never;
+    fn state_id() -> mfm_program::Result<StableId> {
+        state_id::<C, R>("execute-transaction")
+    }
+}
+/// The project-transaction-outcome State, retaining all sibling context fields.
+pub struct ProjectEvmTransactionOutcome<C, R>(PhantomData<fn() -> (C, R)>);
+impl<C: MfmValueTrait, R: TransactionRecipe<C>> State for ProjectEvmTransactionOutcome<C, R> {
+    type Input = ExecutedContext<C, R>;
+    type Output = CompletedContext<C, R>;
+    type Failure = EvmTransactionFailure<ExecutedContext<C, R>>;
+    fn state_id() -> mfm_program::Result<StableId> {
+        state_id::<C, R>("project-transaction-outcome")
     }
 }
 
-/// Context-preserving prepare-transaction State.
-pub struct PrepareEvmTransaction<K: MfmValueTrait>(PhantomData<fn() -> K>);
-impl<K: MfmValueTrait> State for PrepareEvmTransaction<K> {
-    type Input = EvmTransactionContext<K, ReservedEvmTransaction>;
-    type Output = EvmTransactionContext<K, PreparedEvmTransaction>;
-    type Failure = Never;
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.evm.state.prepare-transaction@1")
-            .map_err(|_| ProgramError::InvalidContract)
+impl<C: MfmValueTrait, R: TransactionRecipe<C>> EffectState<EvmNonceReservationEffect>
+    for ReserveEvmNonce<C, R>
+{
+    fn prepare(input: &C) -> Result<Eip1559TransactionCommand, PreparationError> {
+        let command = R::command(input);
+        if !R::Success::accepts(&command) {
+            return Err(PreparationError);
+        }
+        Ok(command)
+    }
+    fn interpret(
+        input: C,
+        evidence: &Reservation,
+    ) -> Result<ProposedStateOutcome<Self::Output, Never>, StateExecutionError> {
+        let command = R::command(&input);
+        if !R::Success::accepts(&command) {
+            return Err(StateExecutionError);
+        }
+        let facts = ReservedEvmTransaction::new(command, evidence.clone())
+            .map_err(|_| StateExecutionError)?;
+        Ok(ProposedStateOutcome::Success {
+            output: <R::Slot as ContextSlot<C>>::replace(input, facts),
+        })
     }
 }
-impl<K: MfmValueTrait> EffectState<EvmTransactionPreparationEffect> for PrepareEvmTransaction<K> {
+impl<C: MfmValueTrait, R: TransactionRecipe<C>> EffectState<EvmTransactionPreparationEffect>
+    for PrepareEvmTransaction<C, R>
+where
+    R::Slot: ContextSlot<
+        ReservedContext<C, R>,
+        Value = ReservedEvmTransaction,
+        With<PreparedTransactionFacts> = PreparedContext<C, R>,
+    >,
+{
     fn prepare(input: &Self::Input) -> Result<ReservedEvmTransaction, PreparationError> {
-        Ok(input.command.clone())
+        Ok(<R::Slot as ContextSlot<Self::Input>>::get(input).clone())
     }
     fn interpret(
         input: Self::Input,
         evidence: &PreparedEvmTransactionEvidence,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
+    ) -> Result<ProposedStateOutcome<Self::Output, Never>, StateExecutionError> {
+        let facts = PreparedTransactionFacts::new(
+            <R::Slot as ContextSlot<Self::Input>>::get(&input).clone(),
+            evidence.clone(),
+        );
         Ok(ProposedStateOutcome::Success {
-            output: EvmTransactionContext::new(
-                input.caller_context,
-                PreparedEvmTransaction {
-                    reserved: input.command,
-                    transaction_hash: evidence.transaction_hash.clone(),
-                },
-            ),
+            output: <R::Slot as ContextSlot<Self::Input>>::replace(input, facts),
         })
     }
 }
-impl<K: MfmValueTrait> CapabilityInjection<PrepareEvmTransaction<K>>
-    for EvmTransactionPreparationEffect
+impl<C: MfmValueTrait, R: TransactionRecipe<C>> EffectState<EvmTransactionEffect>
+    for ExecuteEvmTransaction<C, R>
+where
+    R::Slot: ContextSlot<
+        PreparedContext<C, R>,
+        Value = PreparedTransactionFacts,
+        With<ExecutedTransactionFacts> = ExecutedContext<C, R>,
+    >,
+{
+    fn prepare(input: &Self::Input) -> Result<PreparedEvmTransaction, PreparationError> {
+        Ok(<R::Slot as ContextSlot<Self::Input>>::get(input).execution_command())
+    }
+    fn interpret(
+        input: Self::Input,
+        evidence: &EvmTransactionSettlement,
+    ) -> Result<ProposedStateOutcome<Self::Output, Never>, StateExecutionError> {
+        let facts = ExecutedTransactionFacts::new(
+            <R::Slot as ContextSlot<Self::Input>>::get(&input).clone(),
+            evidence.clone(),
+        )
+        .map_err(|_| StateExecutionError)?;
+        Ok(ProposedStateOutcome::Success {
+            output: <R::Slot as ContextSlot<Self::Input>>::replace(input, facts),
+        })
+    }
+}
+impl<C: MfmValueTrait, R: TransactionRecipe<C>> PureState for ProjectEvmTransactionOutcome<C, R>
+where
+    R::Slot: ContextSlot<
+        ExecutedContext<C, R>,
+        Value = ExecutedTransactionFacts,
+        With<CompletedTransactionFacts<R::Success>> = CompletedContext<C, R>,
+    >,
+{
+    fn evaluate(
+        input: Self::Input,
+    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, StateExecutionError> {
+        let facts = <R::Slot as ContextSlot<Self::Input>>::get(&input);
+        if !R::Success::accepts(facts.command()) {
+            return Err(StateExecutionError);
+        }
+        if matches!(
+            facts.settlement().outcome(),
+            EvmTransactionOutcome::Reverted
+        ) {
+            return Ok(ProposedStateOutcome::Failure {
+                failure: EvmTransactionFailure::new(input),
+            });
+        }
+        let completed = CompletedTransactionFacts::<R::Success>::new(facts.clone())?;
+        Ok(ProposedStateOutcome::Success {
+            output: <R::Slot as ContextSlot<Self::Input>>::replace(input, completed),
+        })
+    }
+}
+
+impl<C: MfmValueTrait, R: TransactionRecipe<C>> CapabilityInjection<ReserveEvmNonce<C, R>>
+    for EvmNonceReservationEffect
 {
     type Setup = EvmTransactionBinding;
-    type ExpandedInput = <PrepareEvmTransaction<K> as State>::Input;
-    type ExpandedOutput = <PrepareEvmTransaction<K> as State>::Output;
+    type ExpandedInput = <ReserveEvmNonce<C, R> as State>::Input;
+    type ExpandedOutput = <ReserveEvmNonce<C, R> as State>::Output;
     type ExpandedFailure = Never;
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         setup
@@ -475,107 +523,41 @@ impl<K: MfmValueTrait> CapabilityInjection<PrepareEvmTransaction<K>>
     }
 }
 
-/// Context-preserving execute-transaction State.
-pub struct ExecuteEvmTransaction<K: MfmValueTrait>(PhantomData<fn() -> K>);
-impl<K: MfmValueTrait> State for ExecuteEvmTransaction<K> {
-    type Input = EvmTransactionContext<K, PreparedEvmTransaction>;
-    type Output = EvmTransactionContext<K, ExecutedEvmTransaction>;
-    type Failure = Never;
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new(EXECUTE_EVM_TRANSACTION_STATE_ID).map_err(|_| ProgramError::InvalidContract)
-    }
-}
-impl<K: MfmValueTrait> EffectState<EvmTransactionEffect> for ExecuteEvmTransaction<K> {
-    fn prepare(input: &Self::Input) -> Result<PreparedEvmTransaction, PreparationError> {
-        Ok(input.command.clone())
-    }
-    fn interpret(
-        input: Self::Input,
-        evidence: &EvmTransactionSettlement,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        Ok(ProposedStateOutcome::Success {
-            output: EvmTransactionContext::new(
-                input.caller_context,
-                ExecutedEvmTransaction {
-                    command: input.command.reserved.command,
-                    settlement: evidence.clone(),
-                },
-            ),
-        })
-    }
-}
-
-/// Projects authenticated settlement into typed success or reversion.
-pub struct ProjectEvmTransactionOutcome<K: MfmValueTrait>(PhantomData<fn() -> K>);
-impl<K: MfmValueTrait> State for ProjectEvmTransactionOutcome<K> {
-    type Input = EvmTransactionContext<K, ExecutedEvmTransaction>;
-    type Output = EvmTransactionCompletion<K>;
-    type Failure = EvmTransactionReversion<K>;
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.evm.state.project-transaction-outcome@1")
+impl<C: MfmValueTrait, R: TransactionRecipe<C>> CapabilityInjection<PrepareEvmTransaction<C, R>>
+    for EvmTransactionPreparationEffect
+{
+    type Setup = EvmTransactionBinding;
+    type ExpandedInput = <PrepareEvmTransaction<C, R> as State>::Input;
+    type ExpandedOutput = <PrepareEvmTransaction<C, R> as State>::Output;
+    type ExpandedFailure = Never;
+    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
+        setup
+            .binding_ref()
             .map_err(|_| ProgramError::InvalidContract)
     }
 }
-impl<K: MfmValueTrait> PureState for ProjectEvmTransactionOutcome<K> {
-    fn evaluate(
-        input: Self::Input,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        let EvmTransactionContext {
-            caller_context,
-            command,
-        } = input;
-        let ExecutedEvmTransaction {
-            command,
-            settlement: evidence,
-        } = command;
-        let receipt = evidence.receipt().clone();
-        let binding = command.binding().clone();
-        match (command.to(), evidence.outcome()) {
-            (None, EvmTransactionOutcome::Created { created_address }) => {
-                Ok(ProposedStateOutcome::Success {
-                    output: EvmTransactionCompletion {
-                        caller_context,
-                        binding,
-                        receipt,
-                        outcome: EvmTransactionSuccess::Created {
-                            created_address: created_address.clone(),
-                        },
-                    },
-                })
-            }
-            (Some(target), EvmTransactionOutcome::Called) => Ok(ProposedStateOutcome::Success {
-                output: EvmTransactionCompletion {
-                    caller_context,
-                    binding,
-                    receipt,
-                    outcome: EvmTransactionSuccess::Called {
-                        target: target.clone(),
-                    },
-                },
-            }),
-            (Some(_), EvmTransactionOutcome::Created { .. })
-            | (None, EvmTransactionOutcome::Called) => Err(mfm_program::StateExecutionError),
-            (_, EvmTransactionOutcome::Reverted) => Ok(ProposedStateOutcome::Failure {
-                failure: EvmTransactionReversion {
-                    caller_context,
-                    receipt,
-                },
-            }),
-        }
-    }
-}
 
-impl<K: MfmValueTrait> CapabilityInjection<ExecuteEvmTransaction<K>> for EvmTransactionEffect {
+impl<C: MfmValueTrait, R: TransactionRecipe<C>> CapabilityInjection<ExecuteEvmTransaction<C, R>>
+    for EvmTransactionEffect
+where
+    R::Slot: ContextSlot<
+            ReservedContext<C, R>,
+            Value = ReservedEvmTransaction,
+            With<PreparedTransactionFacts> = PreparedContext<C, R>,
+        > + ContextSlot<
+            PreparedContext<C, R>,
+            Value = PreparedTransactionFacts,
+            With<ExecutedTransactionFacts> = ExecutedContext<C, R>,
+        > + ContextSlot<
+            ExecutedContext<C, R>,
+            Value = ExecutedTransactionFacts,
+            With<CompletedTransactionFacts<R::Success>> = CompletedContext<C, R>,
+        >,
+{
     type Setup = EvmTransactionBinding;
-    type ExpandedInput = EvmTransactionContext<K>;
-    type ExpandedOutput = EvmTransactionCompletion<K>;
-    type ExpandedFailure = EvmTransactionReversion<K>;
+    type ExpandedInput = C;
+    type ExpandedOutput = CompletedContext<C, R>;
+    type ExpandedFailure = EvmTransactionFailure<ExecutedContext<C, R>>;
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         setup
             .binding_ref()
@@ -585,21 +567,62 @@ impl<K: MfmValueTrait> CapabilityInjection<ExecuteEvmTransaction<K>> for EvmTran
         setup: &Self::Setup,
         expansion: &mut OperationExpansion<
             Self::ExpandedInput,
-            <ExecuteEvmTransaction<K> as State>::Input,
+            <ExecuteEvmTransaction<C, R> as State>::Input,
             Self::ExpandedFailure,
         >,
     ) -> mfm_program::Result<()> {
-        expansion.effect::<ReserveEvmNonce<K>, EvmNonceReservationEffect>(setup)?;
-        expansion.effect::<PrepareEvmTransaction<K>, EvmTransactionPreparationEffect>(setup)
+        expansion.effect::<ReserveEvmNonce<C, R>, EvmNonceReservationEffect>(setup)?;
+        expansion.effect::<PrepareEvmTransaction<C, R>, EvmTransactionPreparationEffect>(setup)
     }
     fn write_after(
-        _setup: &Self::Setup,
+        _: &Self::Setup,
         expansion: &mut OperationExpansion<
-            <ExecuteEvmTransaction<K> as State>::Output,
+            <ExecuteEvmTransaction<C, R> as State>::Output,
             Self::ExpandedOutput,
             Self::ExpandedFailure,
         >,
     ) -> mfm_program::Result<()> {
-        expansion.pure::<ProjectEvmTransactionOutcome<K>>()
+        expansion.pure::<ProjectEvmTransactionOutcome<C, R>>()
+    }
+}
+
+/// Public one-transaction authoring entry point; injection installs all four durable States.
+pub struct EvmTransaction<C, R> {
+    binding: EvmTransactionBinding,
+    context: PhantomData<fn() -> (C, R)>,
+}
+impl<C, R> EvmTransaction<C, R> {
+    /// Selects the explicit adapter binding for this authored transaction.
+    pub const fn new(binding: EvmTransactionBinding) -> Self {
+        Self {
+            binding,
+            context: PhantomData,
+        }
+    }
+}
+impl<C: MfmValueTrait, R: TransactionRecipe<C>> Operation for EvmTransaction<C, R>
+where
+    R::Slot: ContextSlot<
+            ReservedContext<C, R>,
+            Value = ReservedEvmTransaction,
+            With<PreparedTransactionFacts> = PreparedContext<C, R>,
+        > + ContextSlot<
+            PreparedContext<C, R>,
+            Value = PreparedTransactionFacts,
+            With<ExecutedTransactionFacts> = ExecutedContext<C, R>,
+        > + ContextSlot<
+            ExecutedContext<C, R>,
+            Value = ExecutedTransactionFacts,
+            With<CompletedTransactionFacts<R::Success>> = CompletedContext<C, R>,
+        >,
+{
+    type Input = C;
+    type Output = CompletedContext<C, R>;
+    type Failure = EvmTransactionFailure<ExecutedContext<C, R>>;
+    fn expand(
+        &self,
+        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+    ) -> mfm_program::Result<()> {
+        body.effect::<ExecuteEvmTransaction<C, R>, EvmTransactionEffect>(&self.binding)
     }
 }

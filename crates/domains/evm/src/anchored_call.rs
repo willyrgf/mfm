@@ -1,14 +1,9 @@
-use std::marker::PhantomData;
 use std::num::NonZeroU64;
 
 use mfm_canonical::CanonicalBytes;
 use mfm_capabilities::{CapabilityError, ReadCapabilityContract};
 use mfm_ids::{ContentRef, StableId};
-use mfm_program::{
-    CapabilityInjection, PreparationError, ProgramError, ProposedStateOutcome, ReadState, State,
-};
 use mfm_program_derive::MfmValue;
-use mfm_values::MfmValue as MfmValueTrait;
 use serde::de;
 use serde::{Deserialize, Serialize};
 
@@ -19,9 +14,6 @@ use crate::{
 /// Exact anchored contract-call Read capability identity.
 pub const EVM_ANCHORED_CONTRACT_CALL_CAPABILITY_ID: &str =
     "mfm.evm.capability.read-anchored-contract-call@1";
-/// Exact anchored contract-call State identity.
-pub const READ_ANCHORED_CONTRACT_CALL_STATE_ID: &str =
-    "mfm.evm.state.read-anchored-contract-call@1";
 /// Maximum returned bytes retained by an anchored call.
 pub const MAX_EVM_CALL_RETURN_BYTES: usize = 131_072;
 
@@ -89,9 +81,7 @@ impl AnchoredContractCallIntent {
 
     fn validate(&self) -> Result<(), EvmDomainError> {
         self.anchor.validate()?;
-        (self.calldata.as_bytes().len() <= MAX_EVM_CALLDATA_BYTES)
-            .then_some(())
-            .ok_or(EvmDomainError::InvalidValue)
+        crate::transaction::validate_input_bytes(self.calldata.as_bytes(), MAX_EVM_CALLDATA_BYTES)
     }
 }
 
@@ -331,155 +321,6 @@ impl<'de> Deserialize<'de> for AnchoredContractCallFailureReason {
     }
 }
 
-/// Caller context paired with one exact anchored call intent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
-#[serde(
-    deny_unknown_fields,
-    bound(
-        serialize = "K: Serialize",
-        deserialize = "K: serde::de::DeserializeOwned"
-    )
-)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "anchored-contract-call-context",
-    version = "1",
-    schema = "mfm.evm-anchored-contract-call-context"
-)]
-pub struct AnchoredContractCallContext<K: MfmValueTrait> {
-    caller_context: K,
-    intent: AnchoredContractCallIntent,
-}
-
-impl<'de, K: MfmValueTrait> Deserialize<'de> for AnchoredContractCallContext<K> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(
-            deny_unknown_fields,
-            bound(deserialize = "K: serde::de::DeserializeOwned")
-        )]
-        struct Wire<K> {
-            caller_context: K,
-            intent: AnchoredContractCallIntent,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.caller_context, wire.intent).map_err(de::Error::custom)
-    }
-}
-
-impl<K: MfmValueTrait> AnchoredContractCallContext<K> {
-    /// Constructs one context after checking the exact anchored-call intent contract.
-    pub fn new(
-        caller_context: K,
-        intent: AnchoredContractCallIntent,
-    ) -> Result<Self, EvmDomainError> {
-        intent.validate()?;
-        Ok(Self {
-            caller_context,
-            intent,
-        })
-    }
-
-    /// Constructs the exact intent for a transaction route and authored anchor.
-    pub fn for_route(
-        caller_context: K,
-        route: &EvmTransactionRoute,
-        target: EvmAddress,
-        calldata: Vec<u8>,
-        anchor: EvmBlockAnchor,
-    ) -> Result<Self, EvmDomainError> {
-        if calldata.len() > MAX_EVM_CALLDATA_BYTES {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        let intent = AnchoredContractCallIntent::new(
-            route.chain_instance().chain_id(),
-            route.binding_ref()?,
-            anchor,
-            target,
-            calldata,
-        )?;
-        Self::new(caller_context, intent)
-    }
-
-    /// Returns the unchanged caller context.
-    pub const fn caller_context(&self) -> &K {
-        &self.caller_context
-    }
-
-    /// Returns the exact anchored call intent.
-    pub const fn intent(&self) -> &AnchoredContractCallIntent {
-        &self.intent
-    }
-}
-
-/// Caller context and successful anchored call result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(
-    deny_unknown_fields,
-    bound(
-        serialize = "K: Serialize",
-        deserialize = "K: serde::de::DeserializeOwned"
-    )
-)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "anchored-contract-call-completion",
-    version = "1",
-    schema = "mfm.evm-anchored-contract-call-completion"
-)]
-pub struct AnchoredContractCallCompletion<K: MfmValueTrait> {
-    caller_context: K,
-    result: AnchoredContractCallResult,
-}
-
-impl<K: MfmValueTrait> AnchoredContractCallCompletion<K> {
-    /// Returns the unchanged caller context.
-    pub const fn caller_context(&self) -> &K {
-        &self.caller_context
-    }
-
-    /// Returns the exact anchored result.
-    pub const fn result(&self) -> &AnchoredContractCallResult {
-        &self.result
-    }
-}
-
-/// Caller context and closed anchored call failure.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(
-    deny_unknown_fields,
-    bound(
-        serialize = "K: Serialize",
-        deserialize = "K: serde::de::DeserializeOwned"
-    )
-)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "anchored-contract-call-failure",
-    version = "1",
-    schema = "mfm.evm-anchored-contract-call-failure"
-)]
-pub struct AnchoredContractCallFailure<K: MfmValueTrait> {
-    caller_context: K,
-    reason: AnchoredContractCallFailureReason,
-}
-
-impl<K: MfmValueTrait> AnchoredContractCallFailure<K> {
-    /// Returns the unchanged caller context.
-    pub const fn caller_context(&self) -> &K {
-        &self.caller_context
-    }
-
-    /// Returns the closed redaction-safe reason.
-    pub const fn reason(&self) -> AnchoredContractCallFailureReason {
-        self.reason
-    }
-}
-
 /// Duplicate-safe anchored contract-call Read capability.
 pub struct EvmAnchoredContractCallRead;
 
@@ -505,78 +346,5 @@ impl ReadCapabilityContract for EvmAnchoredContractCallRead {
     }
 }
 
-/// Context-preserving anchored contract-call Read State.
-pub struct ReadAnchoredContractCall<K: MfmValueTrait>(PhantomData<fn() -> K>);
-
-impl<K: MfmValueTrait> State for ReadAnchoredContractCall<K> {
-    type Input = AnchoredContractCallContext<K>;
-    type Output = AnchoredContractCallCompletion<K>;
-    type Failure = AnchoredContractCallFailure<K>;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new(READ_ANCHORED_CONTRACT_CALL_STATE_ID)
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl<K: MfmValueTrait> ReadState<EvmAnchoredContractCallRead> for ReadAnchoredContractCall<K> {
-    fn prepare(input: &Self::Input) -> Result<AnchoredContractCallIntent, PreparationError> {
-        input
-            .intent
-            .validate()
-            .map(|_| input.intent.clone())
-            .map_err(|_| PreparationError)
-    }
-
-    fn interpret(
-        input: Self::Input,
-        evidence: &AnchoredContractCallEvidence,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        let reason = match evidence {
-            AnchoredContractCallEvidence::Returned { result, .. }
-                if evidence.validate_for(&input.intent).is_ok() =>
-            {
-                return Ok(ProposedStateOutcome::Success {
-                    output: AnchoredContractCallCompletion {
-                        caller_context: input.caller_context,
-                        result: result.clone(),
-                    },
-                });
-            }
-            AnchoredContractCallEvidence::Rejected { .. } => {
-                AnchoredContractCallFailureReason::Rejected
-            }
-            AnchoredContractCallEvidence::SafeFailure { .. } => {
-                AnchoredContractCallFailureReason::SafeFailure
-            }
-            AnchoredContractCallEvidence::IntegrityBlocked { .. }
-            | AnchoredContractCallEvidence::Returned { .. } => {
-                AnchoredContractCallFailureReason::IntegrityBlocked
-            }
-        };
-        Ok(ProposedStateOutcome::Failure {
-            failure: AnchoredContractCallFailure {
-                caller_context: input.caller_context,
-                reason,
-            },
-        })
-    }
-}
-
-impl<K: MfmValueTrait> CapabilityInjection<ReadAnchoredContractCall<K>>
-    for EvmAnchoredContractCallRead
-{
-    type Setup = EvmTransactionRoute;
-    type ExpandedInput = AnchoredContractCallContext<K>;
-    type ExpandedOutput = AnchoredContractCallCompletion<K>;
-    type ExpandedFailure = <ReadAnchoredContractCall<K> as mfm_program::State>::Failure;
-
-    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
-        setup
-            .binding_ref()
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
+mod context;
+pub use context::*;

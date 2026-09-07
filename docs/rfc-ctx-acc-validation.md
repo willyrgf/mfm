@@ -1,6 +1,7 @@
 # Accumulating context: engineer handoff evidence
 
-This document supplements [RFC_CTX_ACC.md](../RFC_CTX_ACC.md). The RFC is the target; the isolated
+This document records pre-cutover prototype evidence for [RFC_CTX_ACC.md](../RFC_CTX_ACC.md).
+The production test mapping and measurements are in [implementation evidence](rfc-ctx-acc-implementation.md). The RFC is the target; the isolated
 prototype is feasibility evidence, not an alternate supported implementation. Implement the three
 ordered commits in RFC section 12 and meet all acceptance checks in section 11.
 
@@ -274,8 +275,8 @@ snapshots checked without overwrite. The six consuming tests completed in 203.57
 is not a performance benchmark. The missing-producer diagnostic correctly reports that the
 selected slot contains `CheckedCreatePlan` where `CompletedFacts<Created>` is required.
 
-The repository change is documentation only. Review local links and commands and run
-`git diff --check`. No production CI result is claimed. Production implementation must use the
+The original prototype handoff commit was documentation only. Its verification was local link and command review plus
+`git diff --check`. This historical note claims no production CI result. Production acceptance uses the
 RFC's scope-driven gates and final CI, not treat this spike as a substitute.
 
 ## Material uncertainties

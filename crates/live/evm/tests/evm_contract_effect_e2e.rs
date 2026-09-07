@@ -3,10 +3,6 @@
 //! alive across Runtime reconstruction. Preparation recovery without signing and Journal append
 //! faults are exercised in `src/transaction_tests.rs`; this test does not count provider calls.
 
-use mfm_evm::{
-    EvmNonceReservationEffect, EvmTransactionPreparationEffect, PrepareEvmTransaction,
-    ProjectEvmTransactionOutcome, ReserveEvmNonce,
-};
 use std::io::Read;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
@@ -20,16 +16,14 @@ use mfm_evm::custody::{
     Reservation,
 };
 use mfm_evm::{
-    AnchoredContractCallCompletion, AnchoredContractCallContext, AnchoredContractCallFailure,
-    Eip1559TransactionCommand, EvmAddress, EvmAnchoredContractCallRead, EvmAuthorityEpoch,
-    EvmEndpoint, EvmHash, EvmTransactionBinding, EvmTransactionCompletion, EvmTransactionContext,
-    EvmTransactionEffect, EvmTransactionReversion, EvmTransactionRoute, EvmU256,
-    ExecuteEvmTransaction, ReadAnchoredContractCall,
+    CheckedCallPlan, CheckedCreatePlan, CheckedObservationPlan, CheckedTargetCallPlan, EvmAddress,
+    EvmAnchoredContractCallRead, EvmAuthorityEpoch, EvmEndpoint, EvmHash, EvmTransactionBinding,
+    EvmTransactionRoute, EvmU256, ReadAnchoredContractCall,
 };
 use mfm_evm_live::{
     ethereum_address, register_evm_anchored_contract_calls, register_evm_transaction_adapters,
-    EvmAdapterLocator, EvmReadProvider, EvmTransactionProvider, JsonRpcEvmProvider,
-    EVM_EIP1559_SIGNING_PURPOSE_ID,
+    register_evm_transaction_states, EvmAdapterLocator, EvmReadProvider, EvmTransactionProvider,
+    JsonRpcEvmProvider, EVM_EIP1559_SIGNING_PURPOSE_ID,
 };
 use mfm_ids::{ContentRef, DigestBytes, EffectId, EntryPointId, RunId, StableId};
 use mfm_keystore::{KeystoreOwner, SecretSecp256k1Scalar};
@@ -63,241 +57,12 @@ const FUNDING_WEI_HEX: &str = "0xde0b6b3a7640000";
 const CONFIGURE_SELECTOR: [u8; 4] = [0x1e, 0xb2, 0x5e, 0x0a];
 const VALUE_SELECTOR: [u8; 4] = [0x3f, 0xa4, 0xf2, 0x45];
 
-type Deployment = EvmTransactionCompletion<EvmU256>;
-type Configuration = EvmTransactionCompletion<Deployment>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum FixtureFailure {
-    MissingCreatedAddress,
-    InvalidConfigurationCommand,
-    MissingCallTarget,
-    InvalidObservationContext,
-    InvalidReturnData,
-    DeploymentReverted,
-    ConfigurationReverted,
-    ObservationFailed,
-}
-
-impl From<EvmTransactionReversion<EvmU256>> for FixtureFailure {
-    fn from(_: EvmTransactionReversion<EvmU256>) -> Self {
-        Self::DeploymentReverted
-    }
-}
-impl From<EvmTransactionReversion<Deployment>> for FixtureFailure {
-    fn from(_: EvmTransactionReversion<Deployment>) -> Self {
-        Self::ConfigurationReverted
-    }
-}
-impl From<AnchoredContractCallFailure<Configuration>> for FixtureFailure {
-    fn from(_: AnchoredContractCallFailure<Configuration>) -> Self {
-        Self::ObservationFailed
-    }
-}
+#[path = "support/contract_workflow.rs"]
+mod workflow;
+use workflow::*;
 
 fn nonzero(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).expect("nonzero fixture")
-}
-
-struct PrepareConfiguration;
-
-impl State for PrepareConfiguration {
-    type Input = Deployment;
-    type Output = EvmTransactionContext<Deployment>;
-    type Failure = FixtureFailure;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.evm-effect/prepare-configuration@1")
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl PureState for PrepareConfiguration {
-    fn evaluate(
-        input: Self::Input,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        let Some(target) = input.outcome().created_address().cloned() else {
-            return Ok(fixture_failure(FixtureFailure::MissingCreatedAddress));
-        };
-        let Ok(command) = Eip1559TransactionCommand::call(
-            input.binding().clone(),
-            target,
-            fixture_configure_calldata(),
-            EvmU256::from_u64(0),
-            nonzero(CONFIGURATION_GAS),
-            EvmU256::from_u64(PRIORITY_FEE),
-            EvmU256::from_u64(MAX_FEE),
-        ) else {
-            return Ok(fixture_failure(FixtureFailure::InvalidConfigurationCommand));
-        };
-        Ok(ProposedStateOutcome::Success {
-            output: EvmTransactionContext::new(input, command),
-        })
-    }
-}
-
-struct PrepareObservation;
-
-impl State for PrepareObservation {
-    type Input = Configuration;
-    type Output = AnchoredContractCallContext<Configuration>;
-    type Failure = FixtureFailure;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.evm-effect/prepare-observation@1")
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl PureState for PrepareObservation {
-    fn evaluate(
-        input: Self::Input,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        let Some(target) = input.outcome().target().cloned() else {
-            return Ok(fixture_failure(FixtureFailure::MissingCallTarget));
-        };
-        let route = input.binding().route().clone();
-        let anchor = input.receipt().block_anchor().clone();
-        match AnchoredContractCallContext::for_route(
-            input,
-            &route,
-            target,
-            VALUE_SELECTOR.to_vec(),
-            anchor,
-        ) {
-            Ok(output) => Ok(ProposedStateOutcome::Success { output }),
-            Err(_) => Ok(fixture_failure(FixtureFailure::InvalidObservationContext)),
-        }
-    }
-}
-
-struct DecodeValue;
-
-impl State for DecodeValue {
-    type Input = AnchoredContractCallCompletion<Configuration>;
-    type Output = EvmU256;
-    type Failure = FixtureFailure;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.evm-effect/decode-value@1")
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl PureState for DecodeValue {
-    fn evaluate(
-        input: Self::Input,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        match decode_fixture_value(input.result().return_bytes()) {
-            Some(output) => Ok(ProposedStateOutcome::Success { output }),
-            None => Ok(fixture_failure(FixtureFailure::InvalidReturnData)),
-        }
-    }
-}
-
-struct Abort<I, O>(PhantomData<fn(I) -> O>);
-
-impl<I: MfmValue, O: MfmValue> State for Abort<I, O>
-where
-    FixtureFailure: From<I>,
-{
-    type Input = I;
-    type Output = O;
-    type Failure = FixtureFailure;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.evm-effect/abort@1").map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl<I: MfmValue, O: MfmValue> PureState for Abort<I, O>
-where
-    FixtureFailure: From<I>,
-{
-    fn evaluate(
-        input: Self::Input,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        Ok(fixture_failure(input.into()))
-    }
-}
-
-fn fixture_failure<O>(failure: FixtureFailure) -> ProposedStateOutcome<O, FixtureFailure> {
-    ProposedStateOutcome::Failure { failure }
-}
-
-struct EffectFixtureOperation {
-    binding: EvmTransactionBinding,
-}
-
-impl Operation for EffectFixtureOperation {
-    type Input = EvmTransactionContext<EvmU256>;
-    type Output = EvmU256;
-    type Failure = FixtureFailure;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.with_failure_handler::<
-            EvmTransactionReversion<EvmU256>,
-            EvmTransactionContext<Deployment>,
-        >(
-            |protected| {
-                protected
-                    .effect::<ExecuteEvmTransaction<EvmU256>, EvmTransactionEffect>(&self.binding)?;
-                protected.pure::<PrepareConfiguration>()
-            },
-            |handler| {
-                handler.pure::<
-                    Abort<
-                        EvmTransactionReversion<EvmU256>,
-                        EvmTransactionContext<Deployment>,
-                    >,
-                >()
-            },
-        )?;
-        body.with_failure_handler::<
-            EvmTransactionReversion<Deployment>,
-            AnchoredContractCallContext<Configuration>,
-        >(
-            |protected| {
-                protected.effect::<ExecuteEvmTransaction<Deployment>, EvmTransactionEffect>(
-                    &self.binding,
-                )?;
-                protected.pure::<PrepareObservation>()
-            },
-            |handler| {
-                handler.pure::<
-                    Abort<
-                        EvmTransactionReversion<Deployment>,
-                        AnchoredContractCallContext<Configuration>,
-                    >,
-                >()
-            },
-        )?;
-        body.with_failure_handler::<AnchoredContractCallFailure<Configuration>, EvmU256>(
-            |protected| {
-                protected
-                    .read::<ReadAnchoredContractCall<Configuration>, EvmAnchoredContractCallRead>(
-                        self.binding.route(),
-                    )?;
-                protected.pure::<DecodeValue>()
-            },
-            |handler| handler.pure::<Abort<AnchoredContractCallFailure<Configuration>, EvmU256>>(),
-        )
-    }
 }
 
 struct ReservationAcknowledgementFault {
@@ -375,58 +140,9 @@ async fn runtime(
     let read_provider: Arc<dyn EvmReadProvider> = provider;
 
     let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    builder
-        .register_pure::<PrepareConfiguration>()
-        .expect("prepare configuration");
-    builder
-        .register_pure::<PrepareObservation>()
-        .expect("prepare observation");
-    builder
-        .register_pure::<DecodeValue>()
-        .expect("decode value");
-    builder
-        .register_pure::<
-            Abort<EvmTransactionReversion<EvmU256>, EvmTransactionContext<Deployment>>,
-        >()
-        .expect("deployment failure");
-    builder
-        .register_pure::<
-            Abort<
-                EvmTransactionReversion<Deployment>,
-                AnchoredContractCallContext<Configuration>,
-            >,
-        >()
-        .expect("configuration failure");
-    builder
-        .register_pure::<Abort<AnchoredContractCallFailure<Configuration>, EvmU256>>()
-        .expect("anchored failure");
-    builder
-        .register_effect::<ExecuteEvmTransaction<EvmU256>, EvmTransactionEffect>()
-        .expect("creation state");
-    builder
-        .register_effect::<ReserveEvmNonce<EvmU256>, EvmNonceReservationEffect>()
-        .unwrap();
-    builder
-        .register_effect::<PrepareEvmTransaction<EvmU256>, EvmTransactionPreparationEffect>()
-        .unwrap();
-    builder
-        .register_pure::<ProjectEvmTransactionOutcome<EvmU256>>()
-        .unwrap();
-    builder
-        .register_effect::<ExecuteEvmTransaction<Deployment>, EvmTransactionEffect>()
-        .expect("call state");
-    builder
-        .register_effect::<ReserveEvmNonce<Deployment>, EvmNonceReservationEffect>()
-        .unwrap();
-    builder
-        .register_effect::<PrepareEvmTransaction<Deployment>, EvmTransactionPreparationEffect>()
-        .unwrap();
-    builder
-        .register_pure::<ProjectEvmTransactionOutcome<Deployment>>()
-        .unwrap();
-    builder
-        .register_read::<ReadAnchoredContractCall<Configuration>, EvmAnchoredContractCallRead>()
-        .expect("anchored state");
+    register_fixture_states(&mut builder).expect("fixture State ABIs");
+    register_evm_transaction_states::<WalletInitial, WalletRecipe>(&mut builder)
+        .expect("wallet State ABIs");
     register_evm_transaction_adapters(
         &mut builder,
         binding.clone(),
@@ -676,7 +392,7 @@ async fn drive_to_success<F: serde::de::DeserializeOwned + std::fmt::Debug>(
     })
 }
 
-fn terminal_value(view: &RunView) -> EvmU256 {
+fn terminal_value(view: &RunView) -> FixtureReport {
     let RunViewState::Succeeded(value) = view.state() else {
         panic!("effect fixture must succeed")
     };
@@ -736,7 +452,7 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         0
     );
 
-    let deployment_command = Eip1559TransactionCommand::create(
+    let deployment = CheckedCreatePlan::new(
         binding.clone(),
         initcode,
         EvmU256::from_u64(0),
@@ -744,8 +460,25 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         EvmU256::from_u64(PRIORITY_FEE),
         EvmU256::from_u64(MAX_FEE),
     )
-    .expect("deployment command");
-    let input = EvmTransactionContext::new(EvmU256::from_u64(0), deployment_command);
+    .expect("checked deployment");
+    let configuration = CheckedCallPlan::new(
+        binding.clone(),
+        fixture_configure_calldata(),
+        EvmU256::from_u64(0),
+        nonzero(CONFIGURATION_GAS),
+        EvmU256::from_u64(PRIORITY_FEE),
+        EvmU256::from_u64(MAX_FEE),
+    )
+    .expect("checked configuration");
+    let observation = CheckedObservationPlan::new(binding.route().clone(), VALUE_SELECTOR.to_vec())
+        .expect("checked observation");
+    let input = ContractWorkflow {
+        request: FixtureRequest { label: 17 },
+        deployment,
+        configuration,
+        observation,
+    };
+    let expected_input = input.clone();
     let program = expand_program(
         EntryPointId::new("mfm.test.evm-effect/run@1").expect("entry point"),
         &EffectFixtureOperation {
@@ -793,8 +526,64 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     })
     .await;
     assert_eq!(
-        terminal_value(&terminal),
-        EvmU256::from_u64(CONFIGURED_VALUE)
+        terminal_value(&terminal).decoded(),
+        &EvmU256::from_u64(CONFIGURED_VALUE)
+    );
+    let report = terminal_value(&terminal);
+    assert_eq!(report.context().request, expected_input.request);
+    assert_eq!(
+        report.context().deployment.command(),
+        &expected_input.deployment.command()
+    );
+    assert_eq!(
+        report.context().configuration.command(),
+        &expected_input.configuration.command_for(
+            report
+                .context()
+                .deployment
+                .outcome()
+                .created_address()
+                .clone()
+        )
+    );
+    assert_eq!(report.context().deployment.reservation().nonce(), 0);
+    assert_eq!(report.context().configuration.reservation().nonce(), 1);
+    assert_eq!(
+        report.context().deployment.preparation().transaction_hash(),
+        report.context().deployment.settlement().transaction_hash()
+    );
+    assert_eq!(
+        report
+            .context()
+            .configuration
+            .preparation()
+            .transaction_hash(),
+        report
+            .context()
+            .configuration
+            .settlement()
+            .transaction_hash()
+    );
+    assert_eq!(
+        report.context().observation.intent(),
+        &expected_input.observation.intent_for(
+            report.context().configuration.outcome().target().clone(),
+            report
+                .context()
+                .configuration
+                .settlement()
+                .block_anchor()
+                .clone()
+        )
+    );
+    assert_eq!(
+        report
+            .context()
+            .observation
+            .result()
+            .unwrap()
+            .return_bytes(),
+        &abi_word(CONFIGURED_VALUE)
     );
     let final_nonce = setup_provider
         .pending_nonce(&sender)
@@ -803,51 +592,51 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     assert_eq!(final_nonce, 2);
 
     external_wallet_transfer(&setup_provider, signer.as_ref(), &binding, final_nonce).await;
-    let fresh_command = Eip1559TransactionCommand::call(
-        binding.clone(),
+    let fresh_plan = CheckedTargetCallPlan::new(
+        CheckedCallPlan::new(
+            binding.clone(),
+            Vec::new(),
+            EvmU256::from_u64(0),
+            nonzero(21_000),
+            EvmU256::from_u64(PRIORITY_FEE),
+            EvmU256::from_u64(MAX_FEE),
+        )
+        .unwrap(),
         sender.clone(),
-        Vec::new(),
-        EvmU256::from_u64(0),
-        nonzero(21_000),
-        EvmU256::from_u64(PRIORITY_FEE),
-        EvmU256::from_u64(MAX_FEE),
-    )
-    .unwrap();
+    );
     let cold_runtime = runtime(&runtime_locator, &rpc_locator, &binding, signer, consumed).await;
     let fresh_run = RunId::from_digest(DigestBytes::from_array([0x5b; 32]));
-    struct WalletCall(EvmTransactionBinding);
-    impl Operation for WalletCall {
-        type Input = EvmTransactionContext<EvmU256>;
-        type Output = EvmTransactionCompletion<EvmU256>;
-        type Failure = EvmTransactionReversion<EvmU256>;
-        fn expand(
-            &self,
-            body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-        ) -> mfm_program::Result<()> {
-            body.effect::<ExecuteEvmTransaction<EvmU256>, EvmTransactionEffect>(&self.0)
-        }
-    }
     let fresh_program = expand_program(
         EntryPointId::new("mfm.test.evm-effect/wallet-call@1").unwrap(),
-        &WalletCall(binding.clone()),
+        &WalletTransaction::new(binding.clone()),
     )
     .unwrap();
     // Resume first so Unavailable from admission is retried without assuming genesis committed.
-    drive_to_success::<EvmTransactionReversion<EvmU256>>(async || {
-        match cold_runtime.resume(&fresh_run).await {
+    let wallet_terminal =
+        drive_to_success::<WalletFailure>(async || match cold_runtime.resume(&fresh_run).await {
             Err(RuntimeError::Absent) => {
                 cold_runtime
                     .start(
                         fresh_run.clone(),
                         fresh_program.clone(),
-                        EvmTransactionContext::new(EvmU256::from_u64(0), fresh_command.clone()),
+                        WalletContext {
+                            transaction: fresh_plan.clone(),
+                            label: 18,
+                        },
                     )
                     .await
             }
             progress => progress,
-        }
-    })
-    .await;
+        })
+        .await;
+    let RunViewState::Succeeded(wallet_value) = wallet_terminal.state() else {
+        panic!("wallet follow-up success")
+    };
+    let wallet_report: WalletReport =
+        serde_json::from_slice(wallet_value.canonical_bytes()).unwrap();
+    assert_eq!(wallet_report.label, 18);
+    assert_eq!(wallet_report.transaction.command(), &fresh_plan.command());
+    assert_eq!(wallet_report.transaction.reservation().nonce(), 3);
     let final_nonce = final_nonce + 2;
     assert_eq!(
         setup_provider.pending_nonce(&sender).await.unwrap(),
@@ -856,17 +645,11 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     let cold_read = cold_runtime.read(&run_id).await.expect("cold read");
     assert_eq!(cold_read.head_sequence(), terminal.head_sequence());
     assert_eq!(cold_read.head_digest(), terminal.head_digest());
-    assert_eq!(
-        terminal_value(&cold_read),
-        EvmU256::from_u64(CONFIGURED_VALUE)
-    );
+    assert_eq!(terminal_value(&cold_read), report);
     let cold_resume = cold_runtime.resume(&run_id).await.expect("terminal resume");
     assert_eq!(cold_resume.head_sequence(), terminal.head_sequence());
     assert_eq!(cold_resume.head_digest(), terminal.head_digest());
-    assert_eq!(
-        terminal_value(&cold_resume),
-        EvmU256::from_u64(CONFIGURED_VALUE)
-    );
+    assert_eq!(terminal_value(&cold_resume), report);
     assert_eq!(
         setup_provider
             .pending_nonce(&sender)
@@ -878,46 +661,7 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     owner.shutdown().await.expect("keystore shutdown");
 }
 
-#[tokio::test]
-#[should_panic(expected = "ConfigurationReverted")]
-async fn progress_retries_unavailable_then_reports_typed_failure_immediately() {
-    struct FailingOperation;
-    impl Operation for FailingOperation {
-        type Input = FixtureFailure;
-        type Output = EvmU256;
-        type Failure = FixtureFailure;
-        fn expand(
-            &self,
-            body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-        ) -> mfm_program::Result<()> {
-            body.pure::<Abort<FixtureFailure, EvmU256>>()
-        }
-    }
-    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-    builder
-        .register_pure::<Abort<FixtureFailure, EvmU256>>()
-        .unwrap();
-    let runtime = Runtime::new(builder.finish(), Arc::new(mfm_store::MemoryStore::new()));
-    let mut unavailable = true;
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        drive_to_success::<FixtureFailure>(async || {
-            if std::mem::take(&mut unavailable) {
-                return Err(RuntimeError::Unavailable);
-            }
-            runtime
-                .start(
-                    RunId::from_digest(DigestBytes::from_array([0x5c; 32])),
-                    expand_program(
-                        EntryPointId::new("mfm.test.evm-effect/failure@1").unwrap(),
-                        &FailingOperation,
-                    )
-                    .unwrap(),
-                    FixtureFailure::ConfigurationReverted,
-                )
-                .await
-        }),
-    )
-    .await
-    .expect("a terminal failure must not be polled until the progress deadline");
-}
+#[path = "support/accumulating_contract.rs"]
+mod accumulating_contract;
+#[path = "support/context_capacity.rs"]
+mod context_capacity;

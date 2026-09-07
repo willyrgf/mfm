@@ -13,8 +13,6 @@ use crate::EvmDomainError;
 
 /// Exact Effect capability identity for EIP-1559 transaction execution.
 pub const EVM_TRANSACTION_EFFECT_CAPABILITY_ID: &str = "mfm.evm.capability.execute-transaction@2";
-/// Exact State identity for EVM transaction execution.
-pub const EXECUTE_EVM_TRANSACTION_STATE_ID: &str = "mfm.evm.state.execute-transaction@2";
 
 const MAX_U256_DECIMAL: &str =
     "115792089237316195423570985008687907853269984665640564039457584007913129639935";
@@ -420,18 +418,6 @@ impl TransactionAction {
             Self::Call { to, .. } => Some(to),
         }
     }
-
-    fn validate(&self) -> Result<(), EvmDomainError> {
-        match self {
-            Self::Create { initcode } if initcode.as_bytes().len() <= MAX_EVM_INITCODE_BYTES => {
-                Ok(())
-            }
-            Self::Call { calldata, .. } if calldata.as_bytes().len() <= MAX_EVM_CALLDATA_BYTES => {
-                Ok(())
-            }
-            _ => Err(EvmDomainError::InvalidValue),
-        }
-    }
 }
 
 /// Complete nonce-free fixed-form EIP-1559 transaction command.
@@ -462,9 +448,6 @@ impl Eip1559TransactionCommand {
         max_priority_fee_per_gas: EvmU256,
         max_fee_per_gas: EvmU256,
     ) -> Result<Self, EvmDomainError> {
-        if initcode.len() > MAX_EVM_INITCODE_BYTES {
-            return Err(EvmDomainError::InvalidValue);
-        }
         Self::new(
             binding,
             TransactionAction::Create {
@@ -487,9 +470,6 @@ impl Eip1559TransactionCommand {
         max_priority_fee_per_gas: EvmU256,
         max_fee_per_gas: EvmU256,
     ) -> Result<Self, EvmDomainError> {
-        if calldata.len() > MAX_EVM_CALLDATA_BYTES {
-            return Err(EvmDomainError::InvalidValue);
-        }
         Self::new(
             binding,
             TransactionAction::Call {
@@ -559,17 +539,16 @@ impl Eip1559TransactionCommand {
     }
 
     fn validate(&self) -> Result<(), EvmDomainError> {
-        if self.action.validate().is_err()
-            || self.max_fee_per_gas.to_u128().is_none()
-            || self.max_priority_fee_per_gas.to_u128().is_none()
-            || self
-                .max_fee_per_gas
-                .numeric_cmp(&self.max_priority_fee_per_gas)
-                == Ordering::Less
-        {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(())
+        let maximum = match &self.action {
+            TransactionAction::Create { .. } => MAX_EVM_INITCODE_BYTES,
+            TransactionAction::Call { .. } => MAX_EVM_CALLDATA_BYTES,
+        };
+        validate_transaction_parameters(
+            self.input(),
+            maximum,
+            &self.max_priority_fee_per_gas,
+            &self.max_fee_per_gas,
+        )
     }
 }
 
@@ -581,40 +560,6 @@ checked_deserialize!(Eip1559TransactionCommand {
     max_priority_fee_per_gas: EvmU256,
     value: EvmU256,
 });
-
-/// Caller context paired with a checked payload at one transaction stage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(
-    deny_unknown_fields,
-    bound(deserialize = "K: serde::de::DeserializeOwned, T: serde::de::DeserializeOwned")
-)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "transaction-context",
-    version = "1",
-    schema = "mfm.evm-transaction-context"
-)]
-pub struct EvmTransactionContext<K: MfmValueTrait, T: MfmValueTrait = Eip1559TransactionCommand> {
-    caller_context: K,
-    command: T,
-}
-impl<K: MfmValueTrait, T: MfmValueTrait> EvmTransactionContext<K, T> {
-    /// Combines independently checked caller context and stage payload.
-    pub const fn new(caller_context: K, command: T) -> Self {
-        Self {
-            caller_context,
-            command,
-        }
-    }
-    /// Returns the caller-owned context.
-    pub const fn caller_context(&self) -> &K {
-        &self.caller_context
-    }
-    /// Returns the checked stage payload.
-    pub const fn command(&self) -> &T {
-        &self.command
-    }
-}
 
 /// Shared receipt facts authenticated for one settled transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -769,130 +714,39 @@ impl EvmTransactionSettlement {
     }
 }
 
-/// Action-specific success facts projected by the transaction State.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "transaction-success",
-    version = "1",
-    schema = "mfm.evm-transaction-success"
-)]
-pub enum EvmTransactionSuccess {
-    /// A contract creation succeeded.
-    Created {
-        /// Receipt-derived created contract address.
-        created_address: EvmAddress,
-    },
-    /// A contract call succeeded.
-    Called {
-        /// Target fixed by the checked command.
-        target: EvmAddress,
-    },
+fn validate_transaction_parameters(
+    input: &[u8],
+    maximum: usize,
+    priority_fee: &EvmU256,
+    max_fee: &EvmU256,
+) -> Result<(), EvmDomainError> {
+    validate_input_bytes(input, maximum)?;
+    if max_fee.to_u128().is_none()
+        || priority_fee.to_u128().is_none()
+        || max_fee.numeric_cmp(priority_fee) == Ordering::Less
+    {
+        return Err(EvmDomainError::InvalidValue);
+    }
+    Ok(())
 }
 
-impl EvmTransactionSuccess {
-    /// Returns the created address for a successful creation.
-    pub const fn created_address(&self) -> Option<&EvmAddress> {
-        match self {
-            Self::Created { created_address } => Some(created_address),
-            Self::Called { .. } => None,
-        }
-    }
-
-    /// Returns the target for a successful call.
-    pub const fn target(&self) -> Option<&EvmAddress> {
-        match self {
-            Self::Created { .. } => None,
-            Self::Called { target } => Some(target),
-        }
-    }
+pub(crate) fn validate_input_bytes(input: &[u8], maximum: usize) -> Result<(), EvmDomainError> {
+    (input.len() <= maximum)
+        .then_some(())
+        .ok_or(EvmDomainError::InvalidValue)
 }
 
-/// Caller context and authenticated facts from one successful transaction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(
-    deny_unknown_fields,
-    bound(deserialize = "K: serde::de::DeserializeOwned")
-)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "transaction-completion",
-    version = "1",
-    schema = "mfm.evm-transaction-completion"
-)]
-pub struct EvmTransactionCompletion<K: MfmValueTrait> {
-    caller_context: K,
-    binding: EvmTransactionBinding,
-    receipt: EvmTransactionReceipt,
-    outcome: EvmTransactionSuccess,
-}
+pub(crate) mod recipes;
+pub use recipes::*;
 
-impl<K: MfmValueTrait> EvmTransactionCompletion<K> {
-    /// Returns the unchanged caller context.
-    pub const fn caller_context(&self) -> &K {
-        &self.caller_context
-    }
+mod report;
+pub use report::*;
 
-    /// Returns the execution binding selected by the command.
-    pub const fn binding(&self) -> &EvmTransactionBinding {
-        &self.binding
-    }
+mod facts;
+pub use facts::*;
 
-    /// Returns the shared checked receipt facts.
-    pub const fn receipt(&self) -> &EvmTransactionReceipt {
-        &self.receipt
-    }
-
-    /// Returns the action-specific successful outcome.
-    pub const fn outcome(&self) -> &EvmTransactionSuccess {
-        &self.outcome
-    }
-
-    /// Returns the canonical receipt block anchor.
-    pub const fn block_anchor(&self) -> &crate::EvmBlockAnchor {
-        self.receipt.block_anchor()
-    }
-
-    /// Returns the exact signed transaction hash.
-    pub const fn transaction_hash(&self) -> &EvmHash {
-        self.receipt.transaction_hash()
-    }
-}
-
-/// Caller context and receipt facts from one reverted transaction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(
-    deny_unknown_fields,
-    bound(deserialize = "K: serde::de::DeserializeOwned")
-)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "transaction-reversion",
-    version = "1",
-    schema = "mfm.evm-transaction-reversion"
-)]
-pub struct EvmTransactionReversion<K: MfmValueTrait> {
-    caller_context: K,
-    receipt: EvmTransactionReceipt,
-}
-
-impl<K: MfmValueTrait> EvmTransactionReversion<K> {
-    /// Returns the unchanged caller context.
-    pub const fn caller_context(&self) -> &K {
-        &self.caller_context
-    }
-
-    /// Returns the shared checked receipt facts.
-    pub const fn receipt(&self) -> &EvmTransactionReceipt {
-        &self.receipt
-    }
-}
+mod plans;
+pub use plans::*;
 
 mod stages;
 pub use stages::*;
