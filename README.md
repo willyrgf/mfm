@@ -1,7 +1,7 @@
 # MFM
 
-MFM is a typed, append-only execution core for deterministic State/Match Programs with explicit
-observational Reads. Runtime is the sole reducer, Journal seals exact canonical frames, and Store
+MFM is a typed, append-only execution core for deterministic State sequences with explicit
+observational Reads, retained Effects, and bounded recovery. Runtime is the sole reducer, Journal seals exact canonical frames, and Store
 provides only complete-prefix load and atomic exact-head append.
 
 The current product composition is Portfolio snapshot execution over secret-free EVM balance Reads.

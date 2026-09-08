@@ -365,6 +365,21 @@ error; a service reports the failed request without terminating unrelated runs. 
 claims that an unrecorded stop is a durably terminal run. Recovering uncertain storage progress
 requires an explicit load/read with the original identity before another resume.
 
+## Checked planning and exact input specialization
+
+The concrete sequence is specialized to its checked root input. `Operation::validate_input` is a
+required deterministic authoring check of the Operation's planning assumptions against that input.
+`expand_program` performs it before expansion and commits the qualified initial-value content ref
+into Program identity. This check establishes plan/input agreement; the content ref separately
+prevents later substitution. Runtime compares supplied input before genesis or provider entry and
+checks retained genesis against it during reconstruction. Multiple RunIds can reuse the same exact
+Program/input pair. Parent planning and deterministic States establish future child input contracts;
+Runtime receives no domain validation callback.
+
+For balance collection, the checked ordered request determines native/token State sequences during
+authoring. Remove selector-only States and Match payloads. The initial-anchor State updates the
+ordinary context stage using the checked current source; it does not select execution topology.
+
 ## Checkpoints and restart semantics
 
 A checkpoint names the input boundary before a State. Its active snapshot is the exact immutable

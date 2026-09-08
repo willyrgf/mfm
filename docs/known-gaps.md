@@ -32,14 +32,14 @@ The following are missing capabilities, not current API guarantees:
   implements assembly and progression around production primitives; it does not contain a second
   Runtime engine. The current Portfolio composition does not provide this EVM product surface.
 - Bounded configuration of supported operation order, ABI/function selection, and static typed
-  arguments, with production-owned validation, encoding/decoding, graph construction, and
+  arguments, with production-owned validation, encoding/decoding, sequence construction, and
   executable registration. ABI choices and values should be configuration rather than custom
   test State implementations. The initial supported ABI/type catalogue remains to be specified.
 - RPC fee-discovery Read States and production fee-selection logic. Observation evidence must be
   retained before deterministic transaction construction, with configured bounds/rules. A resumed
   acknowledged prepare must reuse its original command and fees rather than refresh them.
 - Simple configuration of supported terminal failure classes and production-owned classification,
-  propagation, and report construction. Consumers should not write failure adapter States merely
+  propagation, and report construction. Consumers should not write typed maps merely
   to select terminal behavior. Configuring a class does not make an infrastructure error into an
   authenticated durable domain failure.
 - Production typed success/failure reports containing configured names/order, declared public
@@ -65,18 +65,22 @@ The following are missing capabilities, not current API guarantees:
 
 ## General execution and recovery policy
 
+Runtime now supplies typed classifier/handler selection, bounded retry/checkpoint restart, Effect
+barriers, canonical failure reports, and stopped-invocation observations. The remaining gaps below
+concern configurable product orchestration around that caller-driven contract.
+
 - There is no complete reusable production driver for configured deadlines, polling, retries,
   exact-admission recovery, dependency reconnection, and structured result delivery. Consumers
   should configure this policy rather than implement `drive_to_success` or resume-before-start
   loops. Operational policy must not rewrite admitted Program/input or retained pending commands.
-- Supported actions for domain failure classes, Absent, admission conflict, Unavailable,
-  Indeterminate acknowledgement, cancellation, and deadline expiry need a coherent public policy
-  contract. Stopping an execution attempt must remain distinguishable from a durable terminal
-  workflow failure, including when an external Effect may already have occurred.
+- Product configuration for Absent, admission conflict, dependency reconnection, ambiguous
+  acknowledgement, cancellation, and caller deadlines remains undefined. Any orchestration must
+  preserve the existing distinction between invocation failure and durable terminal failure,
+  including retained pending Effect authority.
 - Recovery after client/process loss, pending transaction reconciliation, key/authority availability,
   and interactions with the existing nonce/replacement/finality limitations are not a complete
   configurable product. Existing cancellation, acknowledgement-loss, prepared-wire, and cold-fold
-  tests establish specific boundaries; they do not establish general recovery support. Ephemeral
+  tests establish specific boundaries; they do not establish a complete configurable orchestration product. Ephemeral
   keystore survival during Runtime reconstruction is not host-process restart recovery.
 - Consumer E2E coverage should configure production execution and assert final report results.
   Deliberate fault schedules can be selected in separate explicit dev/test scenario configuration,

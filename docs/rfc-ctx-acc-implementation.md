@@ -8,10 +8,10 @@ bounded workflow capacity measurements. Git history retains the completed RFC an
 
 | Requirement | Production boundary and regression evidence |
 | --- | --- |
-| 1. Production recipes, no preparation bridges | `contract_workflow.rs` composes `EvmTransaction<C, R>` with `CreateAt`, `CallCreatedAt`, and `ObserveAt`; the wallet follow-up uses `CallAt`. The managed Effect e2e executes this graph. |
+| 1. Production recipes, no preparation bridges | `contract_workflow.rs` composes `EvmTransaction<C, R>` with `CreateAt`, `CallCreatedAt`, and `ObserveAt`; the wallet follow-up uses `CallAt`. The managed Effect e2e executes this sequence. |
 | 2. Complete successful report | `FixtureReport` retains both transactions' command, reservation, complete preparation evidence, settlement, typed outcome, exact anchored intent/evidence, request metadata, and decoded value. The live test asserts 42 and the retained commands; deterministic tests compare each stage's EffectId with accepted adapter evidence. |
 | 3. Sibling preservation and multiple context shapes | `context_contract.rs` moves non-Clone fields through generated slots. `generic_transaction_runtime.rs` executes and cold-reloads distinct context shapes. The fixture and two-creation scenario retain unrelated request metadata through all stages. |
-| 4. Typed requirements and semantic identity | Derive UI tests and the `TransactionRecipe` compile-fail rustdoc reject wrong layouts/stages. Generic Runtime tests distinguish same-typed source choices and custom recipe identities, and reject incompatible assembly before Store or adapter IO. Existing Program/Runtime tests retain exact-edge and ABI checks. |
+| 4. Typed requirements and semantic identity | Derive UI tests and the `TransactionRecipe` compile-fail rustdoc reject wrong layouts/stages. Generic Runtime tests distinguish same-typed source choices and custom recipe identities, and reject incompatible assembly before Store or adapter IO. Existing Program/Runtime tests retain exact typed-boundary and ABI checks. |
 | 5. Checked plans | `transaction_contract.rs` and `anchored_call_contract.rs` test byte maxima, fee ceiling/order, zero-gas decoding, strict deserialization, and total late-target/anchor construction. Plan and complete-command factories share validation owners. |
 | 6. Complete facts and hostile inputs | Private cumulative records preserve checked reservation, preparation, settlement, and projection relationships. Domain tests reject mismatched command references, nonce domains, settlement nonce/hash/action, projected addresses/targets, and anchored intent references/anchors. |
 | 7. Recovery boundaries | Live unit tests retain cancellation, rejecting-signer prepared-wire reuse, custody acknowledgement loss, and ambiguous appends at every transaction Journal boundary. The managed Effect e2e retains the original external nonce advancement and reconstructed Runtime claims. |
@@ -28,7 +28,7 @@ The test paths above are:
 - [generic Runtime tests](../crates/live/evm/tests/generic_transaction_runtime.rs)
 - [live recovery tests](../crates/live/evm/src/transaction_tests.rs)
 - [managed Effect e2e](../crates/live/evm/tests/evm_contract_effect_e2e.rs)
-- [fixture graph and checked reports](../crates/live/evm/tests/support/contract_workflow.rs)
+- [fixture sequence and checked reports](../crates/live/evm/tests/support/contract_workflow.rs)
 - [deterministic fixture tests](../crates/live/evm/tests/support/accumulating_contract.rs)
 - [capacity tests](../crates/live/evm/tests/support/context_capacity.rs)
 - [Runtime callback error tests](../crates/kernel/runtime/tests/support/callback_errors.rs)
@@ -54,23 +54,23 @@ measurements below are bytes; returned success evidence contains the 32-byte ABI
 
 | Creation input | Call/observation input | Terminal value | Total frame bytes | Largest frame |
 | ---: | ---: | ---: | ---: | ---: |
-| 3 | 3 | 7,201 | 147,153 | 34,834 |
-| 1,024 | 1,024 | 12,649 | 242,493 | 40,282 |
-| 16,384 | 16,384 | 94,569 | 1,676,093 | 122,202 |
-| 49,152 | 49,152 | 269,329 | 4,734,393 | 337,630 |
-| 49,152 | 131,072 | 487,783 | 8,448,111 | 665,311 |
+| 3 | 3 | 7,201 | 315,578 | 202,883 |
+| 1,024 | 1,024 | 12,649 | 410,918 | 208,331 |
+| 16,384 | 16,384 | 94,569 | 1,844,541 | 290,274 |
+| 49,152 | 49,152 | 269,329 | 4,902,841 | 465,034 |
+| 49,152 | 131,072 | 487,783 | 8,616,559 | 683,488 |
 
 Failure paths use 49,152-byte creation inputs and 131,072-byte call/observation inputs.
 
 | Failure | Terminal value | Total frame bytes | Largest frame |
 | --- | ---: | ---: | ---: |
-| First creation reverted | 484,085 | 3,144,589 | 515,416 |
-| Second creation reverted | 485,388 | 5,296,222 | 515,416 |
-| Configuration reverted | 486,752 | 7,781,706 | 515,416 |
-| Observation rejected | 662,252 | 8,622,293 | 665,022 |
-| Observation safe failure | 662,256 | 8,622,309 | 665,034 |
-| Observation integrity blocked | 662,261 | 8,622,329 | 665,049 |
-| Invalid ABI with 131,072 returned bytes | 837,146 | 9,146,916 | 1,014,751 |
+| First creation reverted | 969,419 | 3,312,479 | 969,619 |
+| Second creation reverted | 972,166 | 5,464,205 | 972,367 |
+| Configuration reverted | 975,024 | 7,949,787 | 975,225 |
+| Observation rejected | 1,151,123 | 8,790,434 | 1,327,895 |
+| Observation safe failure | 1,151,135 | 8,790,450 | 1,327,911 |
+| Observation integrity blocked | 1,151,150 | 8,790,470 | 1,327,931 |
+| Invalid ABI with 131,072 returned bytes | 1,675,520 | 9,315,661 | 1,014,811 |
 
 The prefix representation retains original plans, including the observation plan alongside its
 accepted intent. This increases observation-failure payloads while removing independently supplied
@@ -78,8 +78,8 @@ reason and outcome fields. All measured schemas, values, frames, and runs remain
 limits.
 
 These are bounded product scenarios, not a promise of arbitrary workflow length. Full snapshots
-are copied into subsequent frames; long chains can grow retained bytes quadratically. Neither
-schema/object/frame/run limits nor the Journal wire or SQL baselines changed. No implicit
+are copied into subsequent frames; long chains can grow retained bytes quadratically. Schema/object/frame/run ceilings and SQL baselines remain unchanged. These measurements use
+Program v4 and Journal frame v3; terminal failures include the canonical Runtime FailureReport. No implicit
 reference/delta representation or old-context reader exists.
 
 ## Verification workflow

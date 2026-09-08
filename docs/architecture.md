@@ -6,7 +6,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | --- | --- | --- |
 | IDs / Values | checked identities including `EffectId`, schema descriptors, canonical typed values, mechanical typed context slots, 8 MiB object bound | execution or IO |
 | Capabilities | Read intent/evidence and Effect command/evidence contracts | State outcomes or retries |
-| Program | typed Operation authoring, sole private lowering draft, checked v3 State/Match graph, Pure/Read/Effect State contracts, redaction-safe internal callback errors, `Never` | registries, IO, scheduling |
+| Program | typed Operation authoring and root input validation, sole private lowering draft, checked v4 ordered State sequence and exact initial-value commitment, Pure/Read/Effect State contracts, redaction-safe internal callback errors, `Never` | registries, IO, scheduling |
 | Runtime | immutable assembly, Program association, sole fold, typed execution/progression | persisted wire or physical storage |
 | Journal | exact frame encoding and complete-history qualification | domain interpretation or persistence IO |
 | Store / run index ports | object-safe complete load and atomic append; separate mechanical current-head enumeration | Program, State, capability, reducer, config semantics, or run-status derivation |
@@ -79,32 +79,33 @@ Application state, and the deployment-free compiled-component inspection renderi
 liveness, bounded HTTP admission, and an unauthenticated Unix socket; it exposes neither schema,
 developer inspection, nor secret administration. Both accept an optional identity and use the same
 Application client primitive to generate one before their one use-case call. REST returns HTTP 200
-for a durably failed run, while the CLI uses exit 1 for Runnable or Failed. These are named transport
+for a durably failed run, while the CLI uses exit 1 for Runnable, EffectPending, or Failed. These are named transport
 asymmetries, not second use-case implementations.
 
-Values owns interpretation of exact inline/generic enum payload descriptors; Program validates
-graph edges and Runtime validates associated codecs using that same shape operation.
+Values owns qualification against exact inline/generic value descriptors. Program checks adjacent
+State contracts and selected policy/mapping ABIs; Runtime associates the exact typed implementations.
 
 The source-authoring sequence is separate from progression:
 
 ```text
-domain Operation -> OperationExpansion -> one private flat draft -> immutable Program v3
-                         |-> exact capability/State injection policy
+domain Operation -> OperationExpansion -> one private symbolic draft -> immutable Program v4
+                         |-> typed before/designated/after capability injection
 ```
 
-`match_join` owns both ordinary value-selected topology and recovery selected by a Pure failure
-classifier. `with_failure_handler` routes only the named typed State failures; it does not catch
-compiler, Runtime, adapter, Store, cancellation, or panic failures. Runtime, Journal, and Store
-never receive Operations, authoring setup, callbacks, or scope metadata.
+Operation implementations compose children through `OperationExpansion`. Classifier and handler
+families inherit independently; occurrence overrides select exact typed bindings. Root failure maps
+replace failure-routing States. Scoped checkpoints lower to permitted declaration boundaries.
+Runtime receives only the completed Program and associated implementations; Journal and Store
+receive neither authoring scopes nor policies to execute. Runtime owns the sole semantic fold,
+including recovery counters, checkpoint retention and irreversible Effect barriers.
 
-Operation implementations compose children only through `OperationExpansion`, and capability
-policies use typed `OperationExpansion` scopes for their before and after graphs. Direct trait callback calls bypass
-kernel callback accounting and are forbidden in reviewed production code. This trusted-code rule
-is not a security or authorization boundary; checked Program construction remains the persisted
-graph boundary.
+EVM owns its original incident components and selectable balance classifier. Portfolio owns its
+original public failure and explicit EVM failure map. The shipping Portfolio operation uses the
+framework's stop defaults and zero recovery allowances. A caller selects any different policy;
+collection authoring does not override it implicitly.
 
 Pure work and byte-heavy validation run in immediately awaited pure blocking jobs. Effect identity
-derivation belongs to Runtime and binds RunId, Program ref, declaration index, and exact command
+derivation belongs to Runtime and binds RunId, Program ref, execution position (State and visit), and exact command
 ref. Connections, transactions, Store mutation, and provider IO remain async and outside those
 jobs. Dropping an operation is safe: no candidate exists yet, or the one in-flight append commits
 atomically and the next complete reload resolves it.
@@ -114,7 +115,7 @@ transaction contracts. Capability injection expands the generic
 `ExecuteEvmTransaction<C, R>` into reservation and preparation Effects, the designated execution
 Effect, and a Pure outcome projection. Domain-owned `mfm_evm::custody` defines atomic reservation
 and exact-byte retention; PostgreSQL implements that port mechanically. Journal alone retains
-settlement. Runtime schedules the expanded graph with no EVM or signer knowledge. EVM owns checked plans, cumulative transaction/observation facts, and slot-selected creation,
+settlement. Runtime schedules the expanded sequence with no EVM or signer knowledge. EVM owns checked plans, cumulative transaction/observation facts, and slot-selected creation,
 creation-dependent call, ordinary call, and anchored observation recipes. Products select context
 field names and recipe connections, and own ABI decoding and terminal report/failure policy.
 `EvmTransaction<C, R>` is the reusable domain Operation; live EVM owns its pure four-State

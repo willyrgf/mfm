@@ -39,6 +39,14 @@ impl PureState for FailingPure {
     }
 }
 impl ReadState<Observation> for FailingRead {
+    type AdapterContext = NoContext;
+    fn adapter_context(
+        _: &Self::Input,
+        _: &Intent,
+        _: &NoContext,
+    ) -> Result<NoContext, mfm_program::StateExecutionError> {
+        Ok(NoContext)
+    }
     fn prepare(input: &Number) -> Result<Intent, PreparationError> {
         Ok(Intent { value: input.value })
     }
@@ -50,6 +58,14 @@ impl ReadState<Observation> for FailingRead {
     }
 }
 impl EffectState<Mutation> for FailingEffect {
+    type AdapterContext = NoContext;
+    fn adapter_context(
+        _: &Self::Input,
+        _: &Command,
+        _: &NoContext,
+    ) -> Result<NoContext, mfm_program::StateExecutionError> {
+        Ok(NoContext)
+    }
     fn prepare(input: &Number) -> Result<Command, PreparationError> {
         Ok(Command { value: input.value })
     }
@@ -61,6 +77,10 @@ impl EffectState<Mutation> for FailingEffect {
     }
 }
 impl CapabilityInjection<FailingRead> for Observation {
+    type FailureMap = Identity<Number>;
+    fn failure_map_params(_: &Self::Setup) -> mfm_program::Result<NoParams> {
+        Ok(NoParams)
+    }
     type Setup = Binding;
     type ExpandedInput = Number;
     type ExpandedOutput = Number;
@@ -72,6 +92,10 @@ impl CapabilityInjection<FailingRead> for Observation {
     }
 }
 impl CapabilityInjection<FailingEffect> for Mutation {
+    type FailureMap = Identity<Number>;
+    fn failure_map_params(_: &Self::Setup) -> mfm_program::Result<NoParams> {
+        Ok(NoParams)
+    }
     type Setup = Binding;
     type ExpandedInput = Number;
     type ExpandedOutput = Number;
@@ -92,14 +116,32 @@ impl Operation for ErrorProgram {
     type Input = Number;
     type Output = Number;
     type Failure = Number;
+    fn validate_input(&self, _: &Self::Input) -> mfm_program::Result<()> {
+        Ok(())
+    }
+
     fn expand(
         &self,
         body: &mut OperationExpansion<Number, Number, Number>,
     ) -> mfm_program::Result<()> {
         match self {
-            Self::Pure => body.pure::<FailingPure>(),
-            Self::Read => body.read::<FailingRead, Observation>(&Binding { route: 7 }),
-            Self::Effect => body.effect::<FailingEffect, Mutation>(&Binding { route: 8 }),
+            Self::Pure => body.pure::<FailingPure, Identity<Number>>(
+                NoParams,
+                Occurrence::new(),
+                ConclusionBound::new(65536)?,
+            ),
+            Self::Read => body.read::<FailingRead, Observation, Identity<Number>>(
+                &Binding { route: 7 },
+                NoParams,
+                Occurrence::new(),
+                ConclusionBound::new(65536)?,
+            ),
+            Self::Effect => body.effect::<FailingEffect, Mutation, Identity<Number>>(
+                &Binding { route: 8 },
+                NoParams,
+                Occurrence::new(),
+                EffectBounds::new(65536, 65536)?,
+            ),
         }
     }
 }
@@ -161,21 +203,36 @@ async fn internal_callback_errors_preserve_heads_and_effect_retry_identity() {
         let program = expand_program(
             EntryPointId::new("mfm.test.runtime/callback-error@1").unwrap(),
             &operation,
+            &Number { value: 12 },
+            ProgramLimits::new(0),
         )
         .unwrap();
         assert!(matches!(
             runtime
                 .start(id.clone(), program, Number { value: 12 })
                 .await,
-            Err(RuntimeError::Internal)
+            Err(InvocationFailure::Execution {
+                error: RuntimeError::Internal,
+                ..
+            })
         ));
         let pending = runtime.read(&id).await.unwrap();
         assert_eq!(pending.head_sequence(), expected_head);
-        assert!(matches!(pending.state(), RunViewState::Runnable));
+        if expected_head == 2 {
+            assert!(matches!(
+                pending.state(),
+                RunViewState::EffectPending { .. }
+            ));
+        } else {
+            assert!(matches!(pending.state(), RunViewState::Runnable { .. }));
+        }
         let cold = build_runtime();
         assert!(matches!(
             cold.resume(&id).await,
-            Err(RuntimeError::Internal)
+            Err(InvocationFailure::Execution {
+                error: RuntimeError::Internal,
+                ..
+            })
         ));
         assert_eq!(
             cold.read(&id).await.unwrap().head_digest(),

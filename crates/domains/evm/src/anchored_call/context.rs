@@ -239,6 +239,17 @@ impl<C: MfmValueTrait, R: ObservationRecipe<C>> State for ReadAnchoredContractCa
 impl<C: MfmValueTrait, R: ObservationRecipe<C>> ReadState<EvmAnchoredContractCallRead>
     for ReadAnchoredContractCall<C, R>
 {
+    type AdapterContext = crate::AnchoredCallAdapterContext;
+    fn adapter_context(
+        input: &C,
+        intent: &AnchoredContractCallIntent,
+        _: &crate::EvmOperationalError,
+    ) -> Result<Self::AdapterContext, StateExecutionError> {
+        if &R::intent(input).map_err(|_| StateExecutionError)? != intent {
+            return Err(StateExecutionError);
+        }
+        Ok(crate::AnchoredCallAdapterContext::from_intent(intent))
+    }
     fn prepare(input: &C) -> Result<AnchoredContractCallIntent, PreparationError> {
         R::intent(input)
     }
@@ -266,6 +277,10 @@ impl<C: MfmValueTrait, R: ObservationRecipe<C>> CapabilityInjection<ReadAnchored
     type ExpandedInput = C;
     type ExpandedOutput = ObservedContext<C, R>;
     type ExpandedFailure = AnchoredContractCallFailure<ObservedContext<C, R>>;
+    type FailureMap = mfm_program::Identity<Self::ExpandedFailure>;
+    fn failure_map_params(_: &Self::Setup) -> mfm_program::Result<mfm_program::NoParams> {
+        Ok(mfm_program::NoParams)
+    }
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         setup
             .binding_ref()

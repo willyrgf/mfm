@@ -1,49 +1,49 @@
 # Run execution
 
-One run is identified by an explicit caller-supplied RunId and one checked Program.
+One run is identified by an explicit caller-supplied RunId and one checked Program whose initial
+value ref commits to the exact C0 supplied at admission.
 
 ```text
 start(RunId, Program, C0)
   -> append RunAdmitted(Program, C0)
   -> fold exact qualified prefix
-  -> Pure: evaluate input -> append outcome
-  -> Read: prepare intent/value ref -> await typed adapter evidence -> interpret -> append fused conclusion
+  -> Pure: evaluate input -> append domain conclusion and recovery decision
+  -> Read: prepare intent -> await typed evidence/error -> append fused conclusion and decision
   -> Effect: append exact command/value ref/EffectId -> await Pending or Settled evidence
-       -> Pending: append nothing -> return Runnable
-       -> Settled: bind evidence -> interpret -> append adjacent conclusion
-  -> Match: project closed-sum tag/payload without an append
-  -> exact root success or exact root failure
+       -> Pending: append nothing -> return EffectPending
+       -> Settled: bind evidence -> interpret -> append adjacent conclusion and decision
+  -> advance, yield committed Retry/Restart, or return terminal success/FailureReport
 ```
 
-Program index zero is the root. Only forward successor indices are valid. Each conclusion determines
-the next declaration from its branch. A missing successor terminates at that branch's declared root
-contract; `Never` cannot terminate or have a failure successor. A zero-State Program succeeds at
-genesis with C0.
+Program contains a linear State sequence. Every selected occurrence has a checked State position
+and monotonic visit identity. Success advances; a zero-State Program succeeds at genesis with C0.
+A classifier assesses an original domain failure or typed adapter error/context. Its independently
+selected handler requests Stop, RetryState, or a typed checkpoint restart. Runtime checks finite
+State/run allowances, active checkpoints, and retained Effect barriers before committing a decision.
+Only Stop applies the declared root failure maps. Accepted recovery yields to the caller.
 
 Runtime associates the entire Program with one immutable RuntimeAssembly before admission or fold.
-Association checks exact codecs, State implementations, Read capability/binding callbacks, and
-closed Match projection contracts. Runtime then owns the only semantic fold. Neither Application nor
-Store inspects frames to derive state.
+Association checks exact codecs, State implementations, mode-specific capability contracts, policy
+parameters, and maps. Runtime owns the only semantic fold; Application and Store do not inspect
+frames to derive state.
 
-The typed Read callback and hot/cold evidence binder receive the exact qualified intent value ref.
-The typed Effect callback receives the exact qualified command value ref used in `EffectId`
-derivation. A value ref identifies one canonical instance; a codec contract ref identifies only its
-shared schema and is never substituted at these boundaries.
+Read callbacks and hot/cold evidence binders receive the exact qualified intent value ref. Effect
+callbacks receive the exact qualified command value ref used in EffectId derivation. A value ref
+identifies one canonical instance; a codec contract ref identifies its schema.
 
-After an inserted frame, Runtime extends its private hot accumulator without loading. A
-`NotInserted` result triggers one complete reload because another writer may have advanced the run.
-Cold resume/read always load once, ask Journal to qualify the complete prefix, and use the same fold.
-`read` performs no adapter IO and appends nothing. Cold qualification of a retained Effect prepare
-deterministically invokes its `EffectState::prepare` implementation to compare the exact command and
-derived identity.
+After an inserted frame, Runtime extends its private hot accumulator without loading. NotInserted
+triggers one complete reload and returns the winning view without executing another visit. Cold
+resume/read load once, ask Journal to qualify the complete prefix, and use the same fold. Read
+performs no adapter IO and appends nothing. Cold qualification of retained Effect prepare repeats
+its deterministic State preparation to compare the exact command and derived identity.
 
-Pure evaluation and typed encoding are pure blocking jobs that are immediately awaited. A Read is
-entered at most once in each start/resume call. An Effect adapter is also entered at most once per
-invocation: `Pending` returns a Runnable view at the existing prepare, while `Unavailable` or
-`Internal` returns the corresponding error. All three append no Effect conclusion.
-Dropping at any await is safe: either no candidate was submitted, or the one in-flight Store append
-may commit atomically and a later complete reload determines the result.
+Pure evaluation, qualification, and encoding use immediately awaited blocking jobs. Store and adapter
+IO stay on the async driver. Pending Effect settlement never appends a second prepare. An operational
+pending error can stop the invocation while preserving the acknowledged authority and observed view;
+an invariant violation is Internal. These errors do not fabricate a durable conclusion.
+Dropping at any await is safe: either no candidate was submitted or one in-flight Store append may
+commit atomically, and a later complete reload determines the result.
 
-Store `Unavailable` is definitely noncommitted; append `Indeterminate` means COMMIT acknowledgement
-was ambiguous. Runtime exposes that ambiguity and retains no pending owner, background finalizer,
-semaphore, timeout policy, or cancellation token.
+Store Unavailable is definitely noncommitted; append Indeterminate means COMMIT acknowledgement was
+ambiguous. InvocationFailure preserves the mechanical source and last observed view when available.
+Runtime retains no background finalizer, semaphore, timeout policy, or cancellation token.

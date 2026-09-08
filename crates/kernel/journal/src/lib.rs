@@ -1,14 +1,14 @@
 #![warn(missing_docs)]
 //! Exact canonical run frames and qualified append-only history.
 //!
-//! Journal owns the one RunFrameV2 encoder and qualifier. Store moves opaque
+//! Journal owns the one RunFrameV3 encoder and qualifier. Store moves opaque
 //! bytes; Runtime receives only borrowed qualified record and object views.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use mfm_canonical::{raw_content_digest, sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, EffectId, RunId};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, EffectId, ExecutionPosition, RunId};
 use mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -39,14 +39,10 @@ pub enum JournalError {
     InvalidHistory,
 }
 
-/// Outcome branch recorded by a State conclusion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutcomeKind {
-    /// Successful State outcome.
-    Success,
-    /// Failed State outcome.
-    Failure,
-}
+mod conclusion;
+pub use conclusion::{
+    DomainConclusion, DomainDecision, EffectConclusion, ReadConclusion, RecoveryDecision, StopCode,
+};
 
 /// Derives the exact-byte recursive frame head without qualifying the input.
 pub fn frame_head_digest(frame_bytes: &[u8]) -> ContentDigest {
@@ -54,12 +50,28 @@ pub fn frame_head_digest(frame_bytes: &[u8]) -> ContentDigest {
 }
 
 /// Borrowed view of one frame-local canonical object.
+#[derive(Clone, Copy)]
 pub struct JournalObject<'a> {
     content_ref: &'a ContentRef,
     canonical: &'a [u8],
 }
 
 impl<'a> JournalObject<'a> {
+    /// Checks a canonical object and its exact instance reference for local frame construction.
+    pub fn new(content_ref: &'a ContentRef, canonical: &'a [u8]) -> Result<Self> {
+        if canonical.len() > MAX_RUN_OBJECT_CANONICAL_BYTES {
+            return Err(JournalError::Capacity);
+        }
+        PlainCanonicalJsonBytes::from_canonical_json_slice(canonical)
+            .map_err(|_| JournalError::InvalidFrame)?;
+        if content_ref.content_digest() != &raw_content_digest(canonical) {
+            return Err(JournalError::InvalidFrame);
+        }
+        Ok(Self {
+            content_ref,
+            canonical,
+        })
+    }
     /// Returns the complete object content reference.
     pub const fn content_ref(&self) -> &ContentRef {
         self.content_ref
@@ -81,49 +93,47 @@ impl fmt::Debug for JournalObject<'_> {
     }
 }
 
-/// Borrowed qualified semantic record.
+/// Borrowed qualified structural record. Runtime owns transition semantics.
 #[derive(Debug)]
 pub enum JournalRecord<'a> {
-    /// Genesis admission with the exact Program and C0.
+    /// Exact immutable admission.
     RunAdmitted {
         /// Retained Program object.
         program: JournalObject<'a>,
-        /// Retained admitted-context object.
+        /// Retained initial context.
         admitted_context: JournalObject<'a>,
     },
-    /// One fused Pure conclusion.
-    StateConcludedPure {
-        /// Success or failure branch.
-        kind: OutcomeKind,
-        /// Complete typed outcome.
-        outcome: JournalObject<'a>,
+    /// Fused Pure conclusion and decision.
+    PureConcluded {
+        /// Concluded execution occurrence.
+        position: ExecutionPosition,
+        /// Domain result and any recovery decision.
+        outcome: DomainConclusion<JournalObject<'a>>,
     },
-    /// One fused Read observation and conclusion.
-    StateConcludedRead {
+    /// Fused Read conclusion and decision.
+    ReadConcluded {
+        /// Concluded execution occurrence.
+        position: ExecutionPosition,
         /// Exact prepared intent.
         intent: JournalObject<'a>,
-        /// Exact accepted evidence.
-        evidence: JournalObject<'a>,
-        /// Success or failure branch.
-        kind: OutcomeKind,
-        /// Complete typed outcome.
-        outcome: JournalObject<'a>,
+        /// Evidence/domain outcome or contextualized operational error.
+        outcome: ReadConclusion<JournalObject<'a>>,
     },
-    /// One durable Effect command prepared before adapter entry.
-    StateEffectPrepared {
-        /// Durable identity derived from the exact occurrence and command.
+    /// A complete acknowledged command establishes pending Effect authority.
+    EffectPrepared {
+        /// Prepared execution occurrence, shared with its adjacent conclusion.
+        position: ExecutionPosition,
+        /// Exact Effect identity.
         effect_id: &'a EffectId,
-        /// Exact prepared command.
+        /// Complete retained command.
         command: JournalObject<'a>,
     },
-    /// One Effect conclusion adjacent to its prepare.
-    StateEffectConcluded {
-        /// Exact accepted evidence.
+    /// Adjacent settlement of the prepared Effect, with no recoverable decision.
+    EffectConcluded {
+        /// Accepted settlement evidence.
         evidence: JournalObject<'a>,
-        /// Success or failure branch.
-        kind: OutcomeKind,
-        /// Complete typed outcome.
-        outcome: JournalObject<'a>,
+        /// Settled State outcome.
+        outcome: EffectConclusion<JournalObject<'a>>,
     },
 }
 
@@ -188,9 +198,14 @@ impl EncodedRunFrame {
         &self.frame.head_digest
     }
 
-    /// Returns exact canonical RunFrameV2 bytes.
+    /// Returns exact canonical RunFrameV3 bytes.
     pub fn canonical_bytes(&self) -> &[u8] {
         self.frame.canonical.as_bytes()
+    }
+
+    /// Returns the structurally qualified record for local semantic validation before append.
+    pub fn record(&self) -> JournalRecord<'_> {
+        self.frame.record_view()
     }
 }
 
@@ -321,79 +336,82 @@ impl JournalHistory {
         })
     }
 
-    /// Encodes a fused Pure conclusion against this exact head.
+    /// Encodes a complete Pure conclusion at the exact current head.
     pub fn encode_pure_conclusion(
         &self,
-        kind: OutcomeKind,
-        value_ref: &ContentRef,
-        value: &[u8],
-    ) -> std::result::Result<EncodedRunFrame, JournalError> {
-        self.construct_successor(
-            Record::StateConcludedPure {
-                outcome: Outcome::new(kind, value_ref.clone()),
-            },
-            vec![(value_ref.clone(), value)],
-        )
+        position: ExecutionPosition,
+        outcome: DomainConclusion<JournalObject<'_>>,
+    ) -> Result<EncodedRunFrame> {
+        let mut objects = Vec::new();
+        let outcome = outcome.map_ref(&mut |object| {
+            objects.push((object.content_ref.clone(), object.canonical));
+            object.content_ref.clone()
+        });
+        self.construct_successor(Record::PureConcluded { position, outcome }, objects)
     }
 
-    /// Encodes a fused Read conclusion against this exact head.
-    #[allow(clippy::too_many_arguments)]
+    /// Encodes one fused Read observation or operational failure.
     pub fn encode_read_conclusion(
         &self,
-        intent_ref: &ContentRef,
-        intent: &[u8],
-        evidence_ref: &ContentRef,
-        evidence: &[u8],
-        kind: OutcomeKind,
-        value_ref: &ContentRef,
-        value: &[u8],
-    ) -> std::result::Result<EncodedRunFrame, JournalError> {
+        position: ExecutionPosition,
+        intent: JournalObject<'_>,
+        outcome: ReadConclusion<JournalObject<'_>>,
+    ) -> Result<EncodedRunFrame> {
+        let mut objects = vec![(intent.content_ref.clone(), intent.canonical)];
+        let outcome = outcome.map_ref(&mut |object| {
+            objects.push((object.content_ref.clone(), object.canonical));
+            object.content_ref.clone()
+        });
         self.construct_successor(
-            Record::StateConcludedRead {
-                intent: intent_ref.clone(),
-                evidence: evidence_ref.clone(),
-                outcome: Outcome::new(kind, value_ref.clone()),
+            Record::ReadConcluded {
+                position,
+                intent: intent.content_ref.clone(),
+                outcome,
             },
-            vec![
-                (intent_ref.clone(), intent),
-                (evidence_ref.clone(), evidence),
-                (value_ref.clone(), value),
-            ],
+            objects,
         )
     }
 
-    /// Encodes one Effect prepare against this exact head.
+    /// Encodes the complete Effect command before adapter entry.
     pub fn encode_effect_prepare(
         &self,
+        position: ExecutionPosition,
         effect_id: &EffectId,
-        command_ref: &ContentRef,
-        command: &[u8],
-    ) -> std::result::Result<EncodedRunFrame, JournalError> {
+        command: JournalObject<'_>,
+    ) -> Result<EncodedRunFrame> {
         self.construct_successor(
-            Record::StateEffectPrepared {
+            Record::EffectPrepared {
+                position,
                 effect_id: effect_id.clone(),
-                command: command_ref.clone(),
+                command: command.content_ref.clone(),
             },
-            vec![(command_ref.clone(), command)],
+            vec![(command.content_ref.clone(), command.canonical)],
         )
     }
 
-    /// Encodes one Effect conclusion adjacent to this history's pending prepare.
+    /// Encodes settlement adjacent to the current retained prepare.
     pub fn encode_effect_conclusion(
         &self,
-        evidence_ref: &ContentRef,
-        evidence: &[u8],
-        kind: OutcomeKind,
-        value_ref: &ContentRef,
-        value: &[u8],
-    ) -> std::result::Result<EncodedRunFrame, JournalError> {
+        evidence: JournalObject<'_>,
+        outcome: EffectConclusion<JournalObject<'_>>,
+    ) -> Result<EncodedRunFrame> {
+        let mut objects = vec![(evidence.content_ref.clone(), evidence.canonical)];
+        let outcome = outcome.map_ref(&mut |object| {
+            objects.push((object.content_ref.clone(), object.canonical));
+            object.content_ref.clone()
+        });
         self.construct_successor(
-            Record::StateEffectConcluded {
-                evidence: evidence_ref.clone(),
-                outcome: Outcome::new(kind, value_ref.clone()),
+            Record::EffectConcluded {
+                evidence: evidence.content_ref.clone(),
+                outcome,
             },
-            vec![(evidence_ref.clone(), evidence), (value_ref.clone(), value)],
+            objects,
         )
+    }
+
+    /// Complete retained canonical frame bytes, including repeated closure objects.
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
     }
 
     fn construct_successor(
@@ -470,6 +488,13 @@ impl JournalHistory {
         self.frames.iter().map(QualifiedFrame::record_view)
     }
 
+    /// Returns canonical frame lengths in record order for semantic admission-bound checks.
+    pub fn frame_lengths(&self) -> impl ExactSizeIterator<Item = usize> + '_ {
+        self.frames
+            .iter()
+            .map(|frame| frame.canonical.as_bytes().len())
+    }
+
     /// Returns the run identity.
     pub fn run_id(&self) -> &RunId {
         &self.frames[0].run_id
@@ -509,33 +534,32 @@ impl QualifiedFrame {
                 program: self.object(program_ref),
                 admitted_context: self.object(admitted_context),
             },
-            Record::StateConcludedPure { outcome } => JournalRecord::StateConcludedPure {
-                kind: outcome.kind(),
-                outcome: self.object(outcome.value()),
+            Record::PureConcluded { position, outcome } => JournalRecord::PureConcluded {
+                position: *position,
+                outcome: outcome.map_ref(&mut |reference| self.object(reference)),
             },
-            Record::StateConcludedRead {
+            Record::ReadConcluded {
+                position,
                 intent,
-                evidence,
                 outcome,
-            } => JournalRecord::StateConcludedRead {
+            } => JournalRecord::ReadConcluded {
+                position: *position,
                 intent: self.object(intent),
-                evidence: self.object(evidence),
-                kind: outcome.kind(),
-                outcome: self.object(outcome.value()),
+                outcome: outcome.map_ref(&mut |reference| self.object(reference)),
             },
-            Record::StateEffectPrepared { effect_id, command } => {
-                JournalRecord::StateEffectPrepared {
-                    effect_id,
-                    command: self.object(command),
-                }
-            }
-            Record::StateEffectConcluded { evidence, outcome } => {
-                JournalRecord::StateEffectConcluded {
-                    evidence: self.object(evidence),
-                    kind: outcome.kind(),
-                    outcome: self.object(outcome.value()),
-                }
-            }
+            Record::EffectPrepared {
+                position,
+                effect_id,
+                command,
+            } => JournalRecord::EffectPrepared {
+                position: *position,
+                effect_id,
+                command: self.object(command),
+            },
+            Record::EffectConcluded { evidence, outcome } => JournalRecord::EffectConcluded {
+                evidence: self.object(evidence),
+                outcome: outcome.map_ref(&mut |reference| self.object(reference)),
+            },
         }
     }
 
@@ -564,51 +588,24 @@ enum Record {
         program_ref: ContentRef,
         admitted_context: ContentRef,
     },
-    StateConcludedPure {
-        outcome: Outcome,
+    PureConcluded {
+        position: ExecutionPosition,
+        outcome: DomainConclusion<ContentRef>,
     },
-    StateConcludedRead {
+    ReadConcluded {
+        position: ExecutionPosition,
         intent: ContentRef,
-        evidence: ContentRef,
-        outcome: Outcome,
+        outcome: ReadConclusion<ContentRef>,
     },
-    StateEffectPrepared {
+    EffectPrepared {
+        position: ExecutionPosition,
         effect_id: EffectId,
         command: ContentRef,
     },
-    StateEffectConcluded {
+    EffectConcluded {
         evidence: ContentRef,
-        outcome: Outcome,
+        outcome: EffectConclusion<ContentRef>,
     },
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum Outcome {
-    Success { value: ContentRef },
-    Failure { value: ContentRef },
-}
-
-impl Outcome {
-    fn new(kind: OutcomeKind, value: ContentRef) -> Self {
-        match kind {
-            OutcomeKind::Success => Self::Success { value },
-            OutcomeKind::Failure => Self::Failure { value },
-        }
-    }
-
-    fn kind(&self) -> OutcomeKind {
-        match self {
-            Self::Success { .. } => OutcomeKind::Success,
-            Self::Failure { .. } => OutcomeKind::Failure,
-        }
-    }
-
-    fn value(&self) -> &ContentRef {
-        match self {
-            Self::Success { value } | Self::Failure { value } => value,
-        }
-    }
 }
 
 fn construct_frame(
@@ -697,22 +694,39 @@ fn validate_closure(record: &Record, objects: &[ObjectOwned]) -> Result<()> {
 }
 
 fn record_refs(record: &Record) -> BTreeSet<&ContentRef> {
+    let mut refs = BTreeSet::new();
     match record {
         Record::RunAdmitted {
             program_ref,
             admitted_context,
-        } => BTreeSet::from([program_ref, admitted_context]),
-        Record::StateConcludedPure { outcome } => BTreeSet::from([outcome.value()]),
-        Record::StateConcludedRead {
-            intent,
-            evidence,
-            outcome,
-        } => BTreeSet::from([intent, evidence, outcome.value()]),
-        Record::StateEffectPrepared { command, .. } => BTreeSet::from([command]),
-        Record::StateEffectConcluded { evidence, outcome } => {
-            BTreeSet::from([evidence, outcome.value()])
+        } => {
+            refs.insert(program_ref);
+            refs.insert(admitted_context);
+        }
+        Record::PureConcluded { outcome, .. } => {
+            outcome.map_ref(&mut |reference| {
+                refs.insert(reference);
+            });
+        }
+        Record::ReadConcluded {
+            intent, outcome, ..
+        } => {
+            refs.insert(intent);
+            outcome.map_ref(&mut |reference| {
+                refs.insert(reference);
+            });
+        }
+        Record::EffectPrepared { command, .. } => {
+            refs.insert(command);
+        }
+        Record::EffectConcluded { evidence, outcome } => {
+            refs.insert(evidence);
+            outcome.map_ref(&mut |reference| {
+                refs.insert(reference);
+            });
         }
     }
+    refs
 }
 
 fn encode_frame(
@@ -735,7 +749,7 @@ fn encode_frame(
         })
         .collect::<Result<Vec<_>>>()?;
     let wire = FrameWire {
-        domain: "mfm.run.frame.v2".to_owned(),
+        domain: "mfm.run.frame.v3".to_owned(),
         run_id: run_id.clone(),
         run_sequence,
         previous_head_digest: previous_head_digest.cloned(),
@@ -798,7 +812,7 @@ fn qualify_frame(bytes: &[u8]) -> std::result::Result<QualifiedFrame, JournalErr
         record,
         objects: wire_objects,
     } = wire;
-    if domain != "mfm.run.frame.v2"
+    if domain != "mfm.run.frame.v3"
         || run_sequence == 0
         || run_sequence > MAX_RUN_FRAMES
         || (run_sequence == 1) != previous_head_digest.is_none()
@@ -860,10 +874,10 @@ fn qualify_frame(bytes: &[u8]) -> std::result::Result<QualifiedFrame, JournalErr
 
 fn records_are_adjacent(previous: &Record, next: &Record) -> bool {
     match previous {
-        Record::StateEffectPrepared { .. } => {
-            matches!(next, Record::StateEffectConcluded { .. })
+        Record::EffectPrepared { .. } => {
+            matches!(next, Record::EffectConcluded { .. })
         }
-        _ => !matches!(next, Record::StateEffectConcluded { .. }),
+        _ => !matches!(next, Record::EffectConcluded { .. }),
     }
 }
 
@@ -920,10 +934,18 @@ mod tests {
                 DigestAlgorithm::Sha256V1,
                 DigestBytes::from_array([7; 32]),
             )),
-            Record::StateConcludedRead {
+            Record::ReadConcluded {
+                position: ExecutionPosition {
+                    state: mfm_ids::StatePosition::new(0).unwrap(),
+                    visit: mfm_ids::VisitId::new(0),
+                },
                 intent: intent_ref.clone(),
-                evidence: evidence_ref.clone(),
-                outcome: Outcome::new(OutcomeKind::Success, outcome_ref.clone()),
+                outcome: ReadConclusion::Observed {
+                    evidence: evidence_ref.clone(),
+                    outcome: DomainConclusion::Success {
+                        output: outcome_ref.clone(),
+                    },
+                },
             },
             vec![
                 (outcome_ref, outcome.as_bytes()),
@@ -950,9 +972,13 @@ mod tests {
         let next = b"null";
         assert!(matches!(
             history.encode_pure_conclusion(
-                OutcomeKind::Success,
-                &object_ref("mfm.test.next", next),
-                next,
+                ExecutionPosition {
+                    state: mfm_ids::StatePosition::new(0).unwrap(),
+                    visit: mfm_ids::VisitId::new(1)
+                },
+                DomainConclusion::Success {
+                    output: JournalObject::new(&object_ref("mfm.test.next", next), next).unwrap()
+                },
             ),
             Err(JournalError::Capacity)
         ));

@@ -1,31 +1,34 @@
+mod fold;
+use fold::{Cursor, FoldState};
 use std::sync::Arc;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::{EffectCapabilityContract, ReadCapabilityContract};
-use mfm_ids::{ContentRef, EffectId, RunId};
+use mfm_capabilities::{AdapterError, EffectCapabilityContract, ReadCapabilityContract};
+use mfm_ids::{ContentRef, EffectId, ExecutionPosition, RunId};
 use mfm_journal::{
-    EncodedRunFrame, JournalError, JournalHistory, JournalObject, JournalRecord, OutcomeKind,
-    StoredRunBytes,
+    EncodedRunFrame, JournalError, JournalHistory, JournalObject, JournalRecord, StoredRunBytes,
 };
-use mfm_program::{Declaration, EffectState, Program, ProposedStateOutcome, PureState, ReadState};
+use mfm_program::{EffectState, Program, ProposedStateOutcome, PureState, ReadState};
 use mfm_store::{AppendResult, Store, StoreError};
 use mfm_values::{MfmValue, ValueError};
 use serde::Serialize;
 
 use crate::assembly::{
     qualify_hot, AssemblyInner, EffectPendingStart, ErasedEffectAdapterCallback,
-    ErasedReadAdapterCallback, ExecutableDeclaration, ExecutableMode, ExecutableProgram,
-    QualifiedValue, ReadStart, RuntimeAssembly, StateStart, ValueCodec,
+    ErasedReadAdapterCallback, ExecutableMode, ExecutableProgram, QualifiedValue, ReadStart,
+    RuntimeAssembly, StateStart, ValueCodec,
 };
-use crate::{
-    AdapterError, EffectAdapterOutcome, Result, RetainedValueView, RunView, RunViewState,
-    RuntimeError,
-};
+use crate::{EffectAdapterOutcome, Result, RunView, RunViewState, RuntimeError, ValueView};
 
 pub(crate) enum DriverDisposition {
     Continue(Accumulator),
     Reload,
     Yield(Accumulator),
+    Stopped {
+        accumulator: Accumulator,
+        incident: Box<crate::AdapterIncidentView>,
+        reason: mfm_journal::StopCode,
+    },
 }
 
 pub(crate) struct DriverContext<'a> {
@@ -39,19 +42,16 @@ pub(crate) struct Accumulator {
     state: FoldState,
 }
 
-enum FoldState {
-    Runnable {
-        declaration_index: u16,
-        input: QualifiedValue,
-    },
-    EffectPending {
-        declaration_index: u16,
-        input: QualifiedValue,
-        effect_id: EffectId,
-        command: Box<QualifiedValue>,
-    },
-    Succeeded(QualifiedValue),
-    Failed(QualifiedValue),
+fn invocation_error(
+    run_id: RunId,
+    error: RuntimeError,
+    last_observed: Option<RunView>,
+) -> crate::InvocationFailure {
+    crate::InvocationFailure::Execution {
+        run_id,
+        error,
+        last_observed,
+    }
 }
 
 pub(crate) async fn start<T: MfmValue>(
@@ -60,36 +60,45 @@ pub(crate) async fn start<T: MfmValue>(
     run_id: RunId,
     program: Program,
     c0: T,
-) -> Result<RunView> {
-    let proposed = run_blocking(move || prepare_admission(assembly, run_id, program, c0)).await?;
-    match store
+) -> std::result::Result<RunView, crate::InvocationFailure> {
+    let identity = run_id.clone();
+    let proposed = run_blocking(move || prepare_admission(assembly, run_id, program, c0))
+        .await
+        .map_err(|error| invocation_error(identity.clone(), error, None))?;
+    let result = store
         .append_run(&proposed.genesis)
         .await
-        .map_err(map_append_error)?
-    {
+        .map_err(|error| invocation_error(identity.clone(), map_append_error(error), None))?;
+    match result {
         AppendResult::Inserted => {
-            let PreparedAdmission {
-                executable,
-                c0,
-                genesis,
-            } = proposed;
-            let accumulator =
-                run_blocking(move || accumulator_from_inserted_genesis(executable, c0, genesis))
-                    .await?;
+            let accumulator = run_blocking(move || {
+                accumulator_from_inserted_genesis(
+                    proposed.executable,
+                    proposed.c0,
+                    proposed.genesis,
+                )
+            })
+            .await
+            .map_err(|error| invocation_error(identity.clone(), error, None))?;
             advance_until_stable(store, accumulator).await
         }
         AppendResult::NotInserted => {
             let stored = store
-                .load_run(proposed.genesis.run_id())
+                .load_run(&identity)
                 .await
-                .map_err(map_load_error)?
-                .ok_or(RuntimeError::Internal)?;
-            let expected_run_id = proposed.genesis.run_id().clone();
-            let accumulator = run_blocking(move || {
-                fold_collision(expected_run_id, stored, proposed.executable, proposed.c0)
+                .map_err(|error| invocation_error(identity.clone(), map_load_error(error), None))?
+                .ok_or_else(|| invocation_error(identity.clone(), RuntimeError::Internal, None))?;
+            let run_id = identity.clone();
+            run_blocking(move || {
+                view(&fold_collision(
+                    run_id,
+                    stored,
+                    proposed.executable,
+                    proposed.c0,
+                )?)
             })
-            .await?;
-            advance_until_stable(store, accumulator).await
+            .await
+            .map_err(|error| invocation_error(identity, error, None))
         }
     }
 }
@@ -98,8 +107,10 @@ pub(crate) async fn resume(
     assembly: Arc<AssemblyInner>,
     store: Arc<dyn Store>,
     run_id: RunId,
-) -> Result<RunView> {
-    let accumulator = load_and_fold(assembly, &store, &run_id, false).await?;
+) -> std::result::Result<RunView, crate::InvocationFailure> {
+    let accumulator = load_and_fold(assembly, &store, &run_id, false)
+        .await
+        .map_err(|error| invocation_error(run_id, error, None))?;
     advance_until_stable(store, accumulator).await
 }
 
@@ -107,13 +118,13 @@ pub(crate) async fn read(
     assembly: Arc<AssemblyInner>,
     store: Arc<dyn Store>,
     run_id: RunId,
-) -> Result<RunView> {
-    let stored = store
-        .load_run(&run_id)
+) -> std::result::Result<RunView, crate::InvocationFailure> {
+    let accumulator = load_and_fold(assembly, &store, &run_id, false)
         .await
-        .map_err(map_load_error)?
-        .ok_or(RuntimeError::Absent)?;
-    run_blocking(move || view(fold_retained(assembly, run_id, stored)?)).await
+        .map_err(|error| invocation_error(run_id.clone(), error, None))?;
+    run_blocking(move || view(&accumulator))
+        .await
+        .map_err(|error| invocation_error(run_id, error, None))
 }
 
 struct PreparedAdmission {
@@ -129,7 +140,9 @@ fn prepare_admission<T: MfmValue>(
     c0: T,
 ) -> Result<PreparedAdmission> {
     let c0 = qualify_hot(c0).map_err(map_hot_value_error)?;
-    if program.admitted_context_contract_ref() != &c0.contract_ref {
+    if program.admitted_context_contract_ref() != &c0.contract_ref
+        || program.initial_value_ref() != &c0.value_ref
+    {
         return Err(RuntimeError::Internal);
     }
     let executable = RuntimeAssembly { inner: assembly }.associate(program)?;
@@ -141,11 +154,36 @@ fn prepare_admission<T: MfmValue>(
         c0.canonical.as_bytes(),
     )
     .map_err(map_local_journal_error)?;
+    validate_admission_bound(&executable.program, genesis.canonical_bytes().len())?;
     Ok(PreparedAdmission {
         executable,
         c0,
         genesis,
     })
+}
+
+fn validate_admission_bound(program: &Program, genesis_bytes: usize) -> Result<()> {
+    use mfm_program::{ConclusionBound, Execution};
+    for declaration in program.declarations() {
+        let maximum = match declaration.execution() {
+            Execution::Pure { bound } | Execution::Read { bound, .. } => bound.max_frame_bytes(),
+            Execution::Effect { bounds, .. } => {
+                bounds.prepare_bytes().max(bounds.conclusion_bytes())
+            }
+        };
+        if maximum > mfm_journal::MAX_FRAME_BYTES as u64 {
+            return Err(RuntimeError::Capacity);
+        }
+    }
+    let bound = program
+        .history_bound(
+            ConclusionBound::new(genesis_bytes as u64).map_err(|_| RuntimeError::Capacity)?,
+        )
+        .map_err(|_| RuntimeError::Capacity)?;
+    if bound.frames() > mfm_journal::MAX_RUN_FRAMES || bound.bytes() > mfm_journal::MAX_RUN_BYTES {
+        return Err(RuntimeError::Capacity);
+    }
+    Ok(())
 }
 
 fn accumulator_from_inserted_genesis(
@@ -167,7 +205,7 @@ fn accumulator_from_inserted_genesis(
     if !admission_matches {
         return Err(RuntimeError::Internal);
     }
-    let state = initial_state(&executable, c0)?;
+    let state = FoldState::initial(&executable, c0)?;
     Ok(Accumulator {
         executable,
         history,
@@ -197,15 +235,22 @@ async fn load_and_fold(
 async fn advance_until_stable(
     store: Arc<dyn Store>,
     mut accumulator: Accumulator,
-) -> Result<RunView> {
+) -> std::result::Result<RunView, crate::InvocationFailure> {
     loop {
-        let invocation = match &accumulator.state {
-            FoldState::Runnable {
-                declaration_index, ..
-            } => {
-                let selected = executable_state(&accumulator.executable, *declaration_index)
-                    .map_err(|_| RuntimeError::Internal)?;
-                match &selected.mode {
+        let run_id = accumulator.history.run_id().clone();
+        if matches!(
+            accumulator.state.cursor,
+            Cursor::Succeeded(_) | Cursor::Failed(_)
+        ) {
+            return run_blocking(move || view(&accumulator))
+                .await
+                .map_err(|error| invocation_error(run_id, error, None));
+        }
+        let observed =
+            view(&accumulator).map_err(|error| invocation_error(run_id.clone(), error, None))?;
+        let invocation = match &accumulator.state.cursor {
+            Cursor::Runnable { position, .. } => {
+                match &accumulator.executable.declarations[position.state.index()].mode {
                     ExecutableMode::Pure { start } => DriverInvocation::State { start: *start },
                     ExecutableMode::Read { start, adapter, .. } => DriverInvocation::Read {
                         start: *start,
@@ -216,43 +261,67 @@ async fn advance_until_stable(
                     }
                 }
             }
-            FoldState::EffectPending {
-                declaration_index, ..
-            } => {
-                let selected = executable_state(&accumulator.executable, *declaration_index)
-                    .map_err(|_| RuntimeError::Internal)?;
+            Cursor::EffectPending { position, .. } => {
                 let ExecutableMode::Effect {
                     start_pending,
                     adapter,
                     ..
-                } = &selected.mode
+                } = &accumulator.executable.declarations[position.state.index()].mode
                 else {
-                    return Err(RuntimeError::Internal);
+                    return Err(invocation_error(
+                        run_id,
+                        RuntimeError::Internal,
+                        Some(observed),
+                    ));
                 };
                 DriverInvocation::EffectPending {
                     start: *start_pending,
                     adapter: Arc::clone(adapter),
                 }
             }
-            FoldState::Succeeded(_) | FoldState::Failed(_) => return view(accumulator),
+            Cursor::Succeeded(_) | Cursor::Failed(_) => return Ok(observed),
         };
-        let reload_run_id = accumulator.history.run_id().clone();
-        let reload_assembly = Arc::clone(&accumulator.executable._assembly);
+        let assembly = Arc::clone(&accumulator.executable._assembly);
         let context = DriverContext {
             store: &store,
             accumulator,
         };
         let disposition = match invocation {
-            DriverInvocation::State { start } => start(context).await?,
-            DriverInvocation::Read { start, adapter } => start(context, adapter).await?,
-            DriverInvocation::EffectPending { start, adapter } => start(context, adapter).await?,
+            DriverInvocation::State { start } => start(context).await,
+            DriverInvocation::Read { start, adapter } => start(context, adapter).await,
+            DriverInvocation::EffectPending { start, adapter } => start(context, adapter).await,
         };
         match disposition {
-            DriverDisposition::Continue(next) => accumulator = next,
-            DriverDisposition::Reload => {
-                accumulator = load_and_fold(reload_assembly, &store, &reload_run_id, true).await?;
+            Err(error) => return Err(invocation_error(run_id, error, Some(observed))),
+            Ok(DriverDisposition::Continue(next)) => accumulator = next,
+            Ok(DriverDisposition::Reload) => {
+                let loaded = load_and_fold(assembly, &store, &run_id, true).await;
+                return match loaded {
+                    Ok(loaded) => run_blocking(move || view(&loaded))
+                        .await
+                        .map_err(|error| invocation_error(run_id, error, Some(observed))),
+                    Err(error) => Err(invocation_error(run_id, error, Some(observed))),
+                };
             }
-            DriverDisposition::Yield(pending) => return view(pending),
+            Ok(DriverDisposition::Yield(pending)) => {
+                return run_blocking(move || view(&pending))
+                    .await
+                    .map_err(|error| invocation_error(run_id, error, Some(observed)))
+            }
+            Ok(DriverDisposition::Stopped {
+                accumulator,
+                incident,
+                reason,
+            }) => {
+                let pending = run_blocking(move || view(&accumulator))
+                    .await
+                    .map_err(|error| invocation_error(run_id, error, Some(observed)))?;
+                return Err(crate::InvocationFailure::RecoveryStopped {
+                    observed: pending,
+                    incident,
+                    reason: crate::report::stop_reason(reason),
+                });
+            }
         }
     }
 }
@@ -271,264 +340,476 @@ enum DriverInvocation {
     },
 }
 
+fn current(accumulator: &Accumulator) -> Result<(ExecutionPosition, Arc<QualifiedValue>)> {
+    match &accumulator.state.cursor {
+        Cursor::Runnable {
+            position, input, ..
+        } => Ok((*position, Arc::clone(input))),
+        _ => Err(RuntimeError::Internal),
+    }
+}
+
+fn typed_input<T: MfmValue>(input: &QualifiedValue) -> Result<T> {
+    if input.contract_ref
+        != mfm_program::nominal_contract_ref::<T>().map_err(|_| RuntimeError::Internal)?
+    {
+        return Err(RuntimeError::Internal);
+    }
+    serde_json::from_slice(input.canonical.as_bytes()).map_err(|_| RuntimeError::Internal)
+}
+
+fn object(value: &QualifiedValue) -> Result<JournalObject<'_>> {
+    JournalObject::new(&value.value_ref, value.canonical.as_bytes())
+        .map_err(map_local_journal_error)
+}
+
+fn copy_value(value: &QualifiedValue, codec: &ValueCodec) -> Result<QualifiedValue> {
+    codec
+        .qualify(&value.value_ref, value.canonical.as_bytes())
+        .map_err(|_| RuntimeError::Internal)
+}
+
+fn decide(
+    accumulator: &Accumulator,
+    position: ExecutionPosition,
+    phase: mfm_program::ExecutionPhase,
+    incident: crate::assembly::recovery::QualifiedIncident,
+) -> Result<mfm_journal::RecoveryDecision> {
+    use mfm_journal::{RecoveryDecision, StopCode};
+    use mfm_program::{Assessment, RecoveryAllowances, RecoveryContext, RecoveryRequest};
+    let declaration = &accumulator.executable.program.declarations()[position.state.index()];
+    let usage = accumulator.state.usage(position.state)?;
+    let eligible: Vec<_> = declaration
+        .recovery_targets()
+        .iter()
+        .copied()
+        .filter(|target| {
+            accumulator
+                .state
+                .eligible(&accumulator.executable, position.state, target.position())
+        })
+        .collect();
+    let context = RecoveryContext::new(
+        phase,
+        RecoveryAllowances::new(
+            declaration
+                .allowances()
+                .retries()
+                .checked_sub(usage.state_retries)
+                .ok_or(RuntimeError::Internal)?,
+            declaration
+                .allowances()
+                .restarts()
+                .checked_sub(usage.state_restarts)
+                .ok_or(RuntimeError::Internal)?,
+        ),
+        accumulator
+            .executable
+            .program
+            .limits()
+            .max_recovery_decisions()
+            .checked_sub(usage.run_decisions)
+            .ok_or(RuntimeError::Internal)?,
+        &eligible,
+    );
+    let (assessment, request) = accumulator.executable.declarations[position.state.index()]
+        .recovery
+        .request(incident, &context)?;
+    if assessment == Assessment::Nonrecoverable {
+        return Ok(RecoveryDecision::Stop {
+            reason: StopCode::Nonrecoverable,
+        });
+    }
+    let decision = match request {
+        RecoveryRequest::Stop => RecoveryDecision::Stop {
+            reason: StopCode::Requested,
+        },
+        RecoveryRequest::RetryState => RecoveryDecision::Retry,
+        RecoveryRequest::Restart(target) => RecoveryDecision::Restart {
+            checkpoint: target.position(),
+        },
+    };
+    if phase == mfm_program::ExecutionPhase::EffectPending {
+        return Ok(match decision {
+            RecoveryDecision::Restart { .. } => RecoveryDecision::Stop {
+                reason: StopCode::EffectBarrier,
+            },
+            decision => decision,
+        });
+    }
+    Ok(
+        match accumulator.state.recovery_denial(
+            &accumulator.executable,
+            position.state,
+            decision,
+        )? {
+            Some(reason) => RecoveryDecision::Stop { reason },
+            None => decision,
+        },
+    )
+}
+
+fn conclude<O: MfmValue, F: MfmValue>(
+    accumulator: &Accumulator,
+    position: ExecutionPosition,
+    phase: mfm_program::ExecutionPhase,
+    proposed: ProposedStateOutcome<O, F>,
+) -> Result<mfm_journal::DomainConclusion<QualifiedValue>> {
+    use mfm_journal::{DomainConclusion, DomainDecision, RecoveryDecision, StopCode};
+    match proposed {
+        ProposedStateOutcome::Success { output } => Ok(DomainConclusion::Success {
+            output: qualify_hot(output).map_err(map_hot_value_error)?,
+        }),
+        ProposedStateOutcome::Failure { failure } => {
+            let original = qualify_hot(failure).map_err(map_hot_value_error)?;
+            let selected = &accumulator.executable.declarations[position.state.index()];
+            let incident = crate::assembly::recovery::QualifiedIncident::Domain(copy_value(
+                &original,
+                &selected.failure_codec,
+            )?);
+            let mut decision = decide(accumulator, position, phase, incident)?;
+            if phase == mfm_program::ExecutionPhase::EffectSettled
+                && !matches!(decision, RecoveryDecision::Stop { .. })
+            {
+                decision = RecoveryDecision::Stop {
+                    reason: StopCode::EffectSettled,
+                };
+            }
+            let decision = match decision {
+                RecoveryDecision::Retry => DomainDecision::Retry,
+                RecoveryDecision::Restart { checkpoint } => DomainDecision::Restart { checkpoint },
+                RecoveryDecision::Stop { reason } => DomainDecision::Stop {
+                    reason,
+                    root: selected
+                        .root_map
+                        .apply(copy_value(&original, &selected.failure_codec)?)?,
+                },
+            };
+            Ok(DomainConclusion::Failure { original, decision })
+        }
+    }
+}
+
+fn domain_objects(
+    outcome: &mfm_journal::DomainConclusion<QualifiedValue>,
+) -> Result<mfm_journal::DomainConclusion<JournalObject<'_>>> {
+    use mfm_journal::{DomainConclusion, DomainDecision};
+    Ok(match outcome {
+        DomainConclusion::Success { output } => DomainConclusion::Success {
+            output: object(output)?,
+        },
+        DomainConclusion::Failure { original, decision } => DomainConclusion::Failure {
+            original: object(original)?,
+            decision: match decision {
+                DomainDecision::Retry => DomainDecision::Retry,
+                DomainDecision::Restart { checkpoint } => DomainDecision::Restart {
+                    checkpoint: *checkpoint,
+                },
+                DomainDecision::Stop { reason, root } => DomainDecision::Stop {
+                    reason: *reason,
+                    root: object(root)?,
+                },
+            },
+        },
+    })
+}
+
 pub(crate) async fn start_pure<S: PureState>(
     context: DriverContext<'_>,
 ) -> Result<DriverDisposition> {
     let DriverContext { store, accumulator } = context;
-    let Accumulator {
-        executable,
-        history,
-        state,
-    } = accumulator;
-    let FoldState::Runnable {
-        declaration_index,
-        input,
-    } = state
-    else {
-        return Err(RuntimeError::Internal);
-    };
-    let typed = input
-        .typed
-        .downcast::<S::Input>()
-        .map_err(|_| RuntimeError::Internal)?;
     let prepared = run_blocking(move || {
-        let (kind, outcome) =
-            qualify_outcome(S::evaluate(*typed).map_err(|_| RuntimeError::Internal)?)?;
-        let frame = history
-            .encode_pure_conclusion(kind, &outcome.value_ref, outcome.canonical.as_bytes())
+        let (position, input) = current(&accumulator)?;
+        let proposed =
+            S::evaluate(typed_input::<S::Input>(&input)?).map_err(|_| RuntimeError::Internal)?;
+        let outcome = conclude(
+            &accumulator,
+            position,
+            mfm_program::ExecutionPhase::Pure,
+            proposed,
+        )?;
+        let frame = accumulator
+            .history
+            .encode_pure_conclusion(position, domain_objects(&outcome)?)
             .map_err(map_local_journal_error)?;
-        let next_state = apply_outcome(&executable, declaration_index, kind, outcome)?;
-        Ok(PreparedAppend {
-            executable,
-            history,
-            frame,
-            next_state,
-        })
+        prepare_append(accumulator, frame)
     })
     .await?;
     finish_append(store, prepared).await
 }
 
-pub(crate) async fn start_read<S, C>(
+pub(crate) async fn start_read<S: ReadState<C>, C: ReadCapabilityContract>(
     context: DriverContext<'_>,
     adapter: Arc<ErasedReadAdapterCallback>,
-) -> Result<DriverDisposition>
-where
-    S: ReadState<C>,
-    C: ReadCapabilityContract,
-{
+) -> Result<DriverDisposition> {
     let DriverContext { store, accumulator } = context;
-    let Accumulator {
-        executable,
-        history,
-        state,
-    } = accumulator;
-    let FoldState::Runnable {
-        declaration_index,
-        input,
-    } = state
-    else {
-        return Err(RuntimeError::Internal);
-    };
-    let typed_input = input
-        .typed
-        .downcast::<S::Input>()
-        .map_err(|_| RuntimeError::Internal)?;
-    let (typed_input, intent) = run_blocking(move || {
-        let intent = S::prepare(&typed_input).map_err(|_| RuntimeError::Internal)?;
-        let intent = qualify_hot(intent).map_err(map_hot_value_error)?;
-        Ok((typed_input, intent))
+    let (accumulator, position, input, intent) = run_blocking(move || {
+        let (position, input) = current(&accumulator)?;
+        let typed = input
+            .typed
+            .downcast_ref::<S::Input>()
+            .ok_or(RuntimeError::Internal)?;
+        let intent = qualify_hot(S::prepare(typed).map_err(|_| RuntimeError::Internal)?)
+            .map_err(map_hot_value_error)?;
+        Ok((accumulator, position, input, intent))
     })
     .await?;
-
-    let qualify_evidence = adapter(&intent).await.map_err(map_adapter_error)?;
-
+    let response = adapter(&intent).await;
     let prepared = run_blocking(move || {
-        let evidence = qualify_evidence().map_err(map_hot_value_error)?;
-        let typed_intent = intent
-            .typed
-            .downcast_ref::<C::Intent>()
-            .ok_or(RuntimeError::Internal)?;
-        let typed_evidence = evidence
-            .typed
-            .downcast_ref::<C::Evidence>()
-            .ok_or(RuntimeError::Internal)?;
-        C::bind_evidence(&intent.value_ref, typed_intent, typed_evidence)
-            .map_err(|_| RuntimeError::Internal)?;
-        let (kind, outcome) = qualify_outcome(
-            S::interpret(*typed_input, typed_evidence).map_err(|_| RuntimeError::Internal)?,
-        )?;
-        let frame = history
-            .encode_read_conclusion(
-                &intent.value_ref,
-                intent.canonical.as_bytes(),
-                &evidence.value_ref,
-                evidence.canonical.as_bytes(),
-                kind,
-                &outcome.value_ref,
-                outcome.canonical.as_bytes(),
-            )
-            .map_err(map_local_journal_error)?;
-        let next_state = apply_outcome(&executable, declaration_index, kind, outcome)?;
-        Ok(PreparedAppend {
-            executable,
-            history,
-            frame,
-            next_state,
-        })
+        let frame = match response {
+            Ok(qualify) => {
+                let evidence = qualify().map_err(map_hot_value_error)?;
+                let typed_evidence = evidence
+                    .typed
+                    .downcast_ref::<C::Evidence>()
+                    .ok_or(RuntimeError::Internal)?;
+                C::bind_evidence(
+                    &intent.value_ref,
+                    intent
+                        .typed
+                        .downcast_ref::<C::Intent>()
+                        .ok_or(RuntimeError::Internal)?,
+                    typed_evidence,
+                )
+                .map_err(|_| RuntimeError::Internal)?;
+                let proposed = S::interpret(typed_input::<S::Input>(&input)?, typed_evidence)
+                    .map_err(|_| RuntimeError::Internal)?;
+                let outcome = conclude(
+                    &accumulator,
+                    position,
+                    mfm_program::ExecutionPhase::Read,
+                    proposed,
+                )?;
+                accumulator
+                    .history
+                    .encode_read_conclusion(
+                        position,
+                        object(&intent)?,
+                        mfm_journal::ReadConclusion::Observed {
+                            evidence: object(&evidence)?,
+                            outcome: domain_objects(&outcome)?,
+                        },
+                    )
+                    .map_err(map_local_journal_error)?
+            }
+            Err(AdapterError::Operational(qualify)) => {
+                let error = qualify().map_err(map_hot_value_error)?;
+                let ExecutableMode::Read { incident, .. } =
+                    &accumulator.executable.declarations[position.state.index()].mode
+                else {
+                    return Err(RuntimeError::Internal);
+                };
+                let state_context = (incident.context)(&input, &intent, &error)?;
+                let decision = decide(
+                    &accumulator,
+                    position,
+                    mfm_program::ExecutionPhase::Read,
+                    crate::assembly::recovery::QualifiedIncident::Adapter {
+                        original: copy_value(&error, &incident.error_codec)?,
+                        context: Box::new(copy_value(&state_context, &incident.context_codec)?),
+                    },
+                )?;
+                accumulator
+                    .history
+                    .encode_read_conclusion(
+                        position,
+                        object(&intent)?,
+                        mfm_journal::ReadConclusion::AdapterFailed {
+                            error: object(&error)?,
+                            state_context: object(&state_context)?,
+                            decision,
+                        },
+                    )
+                    .map_err(map_local_journal_error)?
+            }
+            Err(AdapterError::Invariant(_)) => return Err(RuntimeError::Internal),
+        };
+        prepare_append(accumulator, frame)
     })
     .await?;
     finish_append(store, prepared).await
 }
 
-pub(crate) async fn start_effect<S, C>(context: DriverContext<'_>) -> Result<DriverDisposition>
-where
-    S: EffectState<C>,
-    C: EffectCapabilityContract,
-{
+pub(crate) async fn start_effect<S: EffectState<C>, C: EffectCapabilityContract>(
+    context: DriverContext<'_>,
+) -> Result<DriverDisposition> {
     let DriverContext { store, accumulator } = context;
-    let Accumulator {
-        executable,
-        history,
-        state,
-    } = accumulator;
-    let FoldState::Runnable {
-        declaration_index,
-        input,
-    } = state
-    else {
-        return Err(RuntimeError::Internal);
-    };
-    let QualifiedValue {
-        contract_ref,
-        value_ref,
-        canonical,
-        typed,
-    } = input;
-    let typed_input = typed
-        .downcast::<S::Input>()
-        .map_err(|_| RuntimeError::Internal)?;
     let prepared = run_blocking(move || {
-        let command = S::prepare(&typed_input).map_err(|_| RuntimeError::Internal)?;
-        let command = qualify_hot(command).map_err(map_hot_value_error)?;
+        let (position, input) = current(&accumulator)?;
+        let command = qualify_hot(
+            S::prepare(
+                input
+                    .typed
+                    .downcast_ref::<S::Input>()
+                    .ok_or(RuntimeError::Internal)?,
+            )
+            .map_err(|_| RuntimeError::Internal)?,
+        )
+        .map_err(map_hot_value_error)?;
         let effect_id = derive_effect_id(
-            history.run_id(),
-            executable.program.content_ref(),
-            declaration_index,
+            accumulator.history.run_id(),
+            accumulator.executable.program.content_ref(),
+            position,
             &command.value_ref,
         )?;
-        let frame = history
-            .encode_effect_prepare(&effect_id, &command.value_ref, command.canonical.as_bytes())
+        let frame = accumulator
+            .history
+            .encode_effect_prepare(position, &effect_id, object(&command)?)
             .map_err(map_local_journal_error)?;
-        let next_state = FoldState::EffectPending {
-            declaration_index,
-            input: QualifiedValue {
-                contract_ref,
-                value_ref,
-                canonical,
-                typed: typed_input,
-            },
-            effect_id,
-            command: Box::new(command),
-        };
-        Ok(PreparedAppend {
-            executable,
-            history,
-            frame,
-            next_state,
-        })
+        prepare_append(accumulator, frame)
     })
     .await?;
     finish_append(store, prepared).await
 }
 
-pub(crate) async fn start_pending_effect<S, C>(
+pub(crate) async fn start_pending_effect<S: EffectState<C>, C: EffectCapabilityContract>(
     context: DriverContext<'_>,
     adapter: Arc<ErasedEffectAdapterCallback>,
-) -> Result<DriverDisposition>
-where
-    S: EffectState<C>,
-    C: EffectCapabilityContract,
-{
+) -> Result<DriverDisposition> {
     let DriverContext { store, accumulator } = context;
-    let Accumulator {
-        executable,
-        history,
-        state,
-    } = accumulator;
-    let FoldState::EffectPending {
-        declaration_index,
+    let Cursor::EffectPending {
+        position,
         input,
         effect_id,
         command,
-    } = state
+    } = &accumulator.state.cursor
     else {
         return Err(RuntimeError::Internal);
     };
-    let command = *command;
-    let outcome = adapter(&effect_id, &command)
-        .await
-        .map_err(map_adapter_error)?;
-    let qualify_evidence = match outcome {
-        EffectAdapterOutcome::Pending => {
-            return Ok(DriverDisposition::Yield(Accumulator {
-                executable,
-                history,
-                state: FoldState::EffectPending {
-                    declaration_index,
-                    input,
-                    effect_id,
-                    command: Box::new(command),
-                },
-            }));
+    let (position, input, command, effect_id) = (
+        *position,
+        Arc::clone(input),
+        Arc::clone(command),
+        effect_id.clone(),
+    );
+    let response = adapter(&effect_id, &command).await;
+    let qualify = match response {
+        Ok(EffectAdapterOutcome::Pending) => return Ok(DriverDisposition::Yield(accumulator)),
+        Ok(EffectAdapterOutcome::Settled(qualify)) => qualify,
+        Err(AdapterError::Invariant(_)) => return Err(RuntimeError::Internal),
+        Err(AdapterError::Operational(qualify)) => {
+            return run_blocking(move || {
+                let error = qualify().map_err(map_hot_value_error)?;
+                let ExecutableMode::Effect { incident, .. } =
+                    &accumulator.executable.declarations[position.state.index()].mode
+                else {
+                    return Err(RuntimeError::Internal);
+                };
+                let state_context = (incident.context)(&input, &command, &error)?;
+                let decision = decide(
+                    &accumulator,
+                    position,
+                    mfm_program::ExecutionPhase::EffectPending,
+                    crate::assembly::recovery::QualifiedIncident::Adapter {
+                        original: copy_value(&error, &incident.error_codec)?,
+                        context: Box::new(copy_value(&state_context, &incident.context_codec)?),
+                    },
+                )?;
+                match decision {
+                    mfm_journal::RecoveryDecision::Retry => {
+                        Ok(DriverDisposition::Yield(accumulator))
+                    }
+                    mfm_journal::RecoveryDecision::Stop { reason } => {
+                        Ok(DriverDisposition::Stopped {
+                            accumulator,
+                            incident: Box::new(crate::AdapterIncidentView {
+                                error: retained_view(&error),
+                                state_context: retained_view(&state_context),
+                            }),
+                            reason,
+                        })
+                    }
+                    mfm_journal::RecoveryDecision::Restart { .. } => Err(RuntimeError::Internal),
+                }
+            })
+            .await;
         }
-        EffectAdapterOutcome::Settled(qualify_evidence) => qualify_evidence,
     };
-    let typed_input = input
-        .typed
-        .downcast::<S::Input>()
-        .map_err(|_| RuntimeError::Internal)?;
     let prepared = run_blocking(move || {
-        let evidence = qualify_evidence().map_err(map_hot_value_error)?;
-        let typed_command = command
-            .typed
-            .downcast_ref::<C::Command>()
-            .ok_or(RuntimeError::Internal)?;
+        let evidence = qualify().map_err(map_hot_value_error)?;
         let typed_evidence = evidence
             .typed
             .downcast_ref::<C::Evidence>()
             .ok_or(RuntimeError::Internal)?;
-        C::bind_evidence(&effect_id, typed_command, typed_evidence)
+        C::bind_evidence(
+            &effect_id,
+            command
+                .typed
+                .downcast_ref::<C::Command>()
+                .ok_or(RuntimeError::Internal)?,
+            typed_evidence,
+        )
+        .map_err(|_| RuntimeError::Internal)?;
+        let proposed = S::interpret(typed_input::<S::Input>(&input)?, typed_evidence)
             .map_err(|_| RuntimeError::Internal)?;
-        let (kind, outcome) = qualify_outcome(
-            S::interpret(*typed_input, typed_evidence).map_err(|_| RuntimeError::Internal)?,
+        let outcome = conclude(
+            &accumulator,
+            position,
+            mfm_program::ExecutionPhase::EffectSettled,
+            proposed,
         )?;
-        let frame = history
-            .encode_effect_conclusion(
-                &evidence.value_ref,
-                evidence.canonical.as_bytes(),
-                kind,
-                &outcome.value_ref,
-                outcome.canonical.as_bytes(),
-            )
+        let outcome = match domain_objects(&outcome)? {
+            mfm_journal::DomainConclusion::Success { output } => {
+                mfm_journal::EffectConclusion::Success { output }
+            }
+            mfm_journal::DomainConclusion::Failure {
+                original,
+                decision: mfm_journal::DomainDecision::Stop { reason, root },
+            } => mfm_journal::EffectConclusion::Failure {
+                original,
+                root,
+                reason,
+            },
+            _ => return Err(RuntimeError::Internal),
+        };
+        let frame = accumulator
+            .history
+            .encode_effect_conclusion(object(&evidence)?, outcome)
             .map_err(map_local_journal_error)?;
-        let next_state = apply_outcome(&executable, declaration_index, kind, outcome)?;
-        Ok(PreparedAppend {
-            executable,
-            history,
-            frame,
-            next_state,
-        })
+        prepare_append(accumulator, frame)
     })
     .await?;
     finish_append(store, prepared).await
 }
 
 struct PreparedAppend {
-    executable: ExecutableProgram,
-    history: JournalHistory,
+    accumulator: Accumulator,
     frame: EncodedRunFrame,
-    next_state: FoldState,
+}
+
+fn current_frame_bound(executable: &ExecutableProgram, state: &FoldState) -> Result<u64> {
+    use mfm_program::Execution;
+    let (position, pending) = match &state.cursor {
+        Cursor::Runnable { position, .. } => (*position, false),
+        Cursor::EffectPending { position, .. } => (*position, true),
+        _ => return Err(RuntimeError::InvalidHistory),
+    };
+    Ok(
+        match executable.program.declarations()[position.state.index()].execution() {
+            Execution::Pure { bound } | Execution::Read { bound, .. } => bound.max_frame_bytes(),
+            Execution::Effect { bounds, .. } if pending => bounds.conclusion_bytes(),
+            Execution::Effect { bounds, .. } => bounds.prepare_bytes(),
+        },
+    )
+}
+
+fn prepare_append(mut accumulator: Accumulator, frame: EncodedRunFrame) -> Result<PreparedAppend> {
+    if frame.canonical_bytes().len() as u64
+        > current_frame_bound(&accumulator.executable, &accumulator.state)?
+    {
+        return Err(RuntimeError::Capacity);
+    }
+    accumulator
+        .state
+        .apply(
+            &accumulator.executable,
+            accumulator.history.run_id(),
+            frame.record(),
+        )
+        .map_err(|_| RuntimeError::Internal)?;
+    // Check terminal report capacity before the append can acknowledge its retained facts.
+    view(&accumulator)?;
+    Ok(PreparedAppend { accumulator, frame })
 }
 
 async fn finish_append(
@@ -540,39 +821,32 @@ async fn finish_append(
         .await
         .map_err(map_append_error)?
     {
-        AppendResult::NotInserted => {
-            drop(prepared);
-            Ok(DriverDisposition::Reload)
-        }
+        AppendResult::NotInserted => Ok(DriverDisposition::Reload),
         AppendResult::Inserted => {
-            let accumulator = run_blocking(move || apply_inserted(prepared)).await?;
-            Ok(DriverDisposition::Continue(accumulator))
+            run_blocking(move || {
+                let PreparedAppend {
+                    mut accumulator,
+                    frame,
+                } = prepared;
+                accumulator
+                    .history
+                    .extend_inserted(frame)
+                    .map_err(map_local_journal_error)?;
+                if matches!(
+                    accumulator.state.cursor,
+                    Cursor::Runnable {
+                        reason: fold::RunnableReason::Retry | fold::RunnableReason::Restart(_),
+                        ..
+                    }
+                ) {
+                    Ok(DriverDisposition::Yield(accumulator))
+                } else {
+                    Ok(DriverDisposition::Continue(accumulator))
+                }
+            })
+            .await
         }
     }
-}
-
-fn apply_inserted(mut prepared: PreparedAppend) -> Result<Accumulator> {
-    prepared
-        .history
-        .extend_inserted(prepared.frame)
-        .map_err(map_local_journal_error)?;
-    Ok(Accumulator {
-        executable: prepared.executable,
-        history: prepared.history,
-        state: prepared.next_state,
-    })
-}
-
-fn qualify_outcome<O: MfmValue, F: MfmValue>(
-    proposed: ProposedStateOutcome<O, F>,
-) -> Result<(OutcomeKind, QualifiedValue)> {
-    let (kind, outcome) = match proposed {
-        ProposedStateOutcome::Success { output } => (OutcomeKind::Success, qualify_hot(output)),
-        ProposedStateOutcome::Failure { failure } => (OutcomeKind::Failure, qualify_hot(failure)),
-    };
-    outcome
-        .map(|outcome| (kind, outcome))
-        .map_err(map_hot_value_error)
 }
 
 fn fold_retained(
@@ -641,7 +915,9 @@ fn fold(executable: ExecutableProgram, history: JournalHistory) -> Result<Accumu
             program,
             admitted_context,
         }) => {
-            if !journal_object_matches_program(program, &executable.program) {
+            if !journal_object_matches_program(program, &executable.program)
+                || admitted_context.content_ref() != executable.program.initial_value_ref()
+            {
                 return Err(RuntimeError::InvalidHistory);
             }
             executable
@@ -654,11 +930,23 @@ fn fold(executable: ExecutableProgram, history: JournalHistory) -> Result<Accumu
         }
         _ => return Err(RuntimeError::InvalidHistory),
     };
-    let mut state = initial_state(&executable, c0)?;
+    validate_admission_bound(
+        &executable.program,
+        history
+            .frame_lengths()
+            .next()
+            .ok_or(RuntimeError::InvalidHistory)?,
+    )
+    .map_err(|_| RuntimeError::InvalidHistory)?;
+    let mut state = FoldState::initial(&executable, c0)?;
     let run_id = history.run_id().clone();
-    for record in history.records().skip(1) {
-        state = apply_retained_record(&executable, &run_id, state, record)?;
+    for (record, bytes) in history.records().zip(history.frame_lengths()).skip(1) {
+        if bytes as u64 > current_frame_bound(&executable, &state)? {
+            return Err(RuntimeError::InvalidHistory);
+        }
+        state.apply(&executable, &run_id, record)?;
     }
+    state.validate_pending(&executable)?;
     Ok(Accumulator {
         executable,
         history,
@@ -666,211 +954,10 @@ fn fold(executable: ExecutableProgram, history: JournalHistory) -> Result<Accumu
     })
 }
 
-fn initial_state(executable: &ExecutableProgram, c0: QualifiedValue) -> Result<FoldState> {
-    if executable.declarations.is_empty() {
-        return Ok(FoldState::Succeeded(c0));
-    }
-    select_declaration(executable, 0, c0)
-}
-
-fn select_declaration(
-    executable: &ExecutableProgram,
-    mut index: u16,
-    mut input: QualifiedValue,
-) -> Result<FoldState> {
-    loop {
-        match executable
-            .declarations
-            .get(usize::from(index))
-            .ok_or(RuntimeError::InvalidHistory)?
-        {
-            ExecutableDeclaration::State(_) => {
-                return Ok(FoldState::Runnable {
-                    declaration_index: index,
-                    input,
-                });
-            }
-            ExecutableDeclaration::Match(projection) => {
-                let (next, payload) = projection.project(input)?;
-                index = next;
-                input = payload;
-            }
-        }
-    }
-}
-
-fn apply_retained_record(
-    executable: &ExecutableProgram,
-    run_id: &RunId,
-    state: FoldState,
-    record: JournalRecord<'_>,
-) -> Result<FoldState> {
-    match (state, record) {
-        (
-            FoldState::Runnable {
-                declaration_index,
-                input: _,
-            },
-            JournalRecord::StateConcludedPure { kind, outcome },
-        ) => {
-            let selected = executable_state(executable, declaration_index)?;
-            if !matches!(selected.mode, ExecutableMode::Pure { .. }) {
-                return Err(RuntimeError::InvalidHistory);
-            }
-            let outcome = qualify_retained_outcome(selected, kind, outcome)?;
-            apply_outcome(executable, declaration_index, kind, outcome)
-        }
-        (
-            FoldState::Runnable {
-                declaration_index,
-                input: _,
-            },
-            JournalRecord::StateConcludedRead {
-                intent,
-                evidence,
-                kind,
-                outcome,
-            },
-        ) => {
-            let selected = executable_state(executable, declaration_index)?;
-            let ExecutableMode::Read {
-                validate_retained,
-                intent_codec,
-                evidence_codec,
-                ..
-            } = &selected.mode
-            else {
-                return Err(RuntimeError::InvalidHistory);
-            };
-            let intent = qualify_journal_object(intent_codec, intent)?;
-            let evidence = qualify_journal_object(evidence_codec, evidence)?;
-            validate_retained(&intent, &evidence)?;
-            let outcome = qualify_retained_outcome(selected, kind, outcome)?;
-            apply_outcome(executable, declaration_index, kind, outcome)
-        }
-        (
-            FoldState::Runnable {
-                declaration_index,
-                input,
-            },
-            JournalRecord::StateEffectPrepared { effect_id, command },
-        ) => {
-            let selected = executable_state(executable, declaration_index)?;
-            let ExecutableMode::Effect {
-                validate_prepare,
-                command_codec,
-                ..
-            } = &selected.mode
-            else {
-                return Err(RuntimeError::InvalidHistory);
-            };
-            let command = qualify_journal_object(command_codec, command)?;
-            validate_prepare(&input, &command)?;
-            let expected = derive_effect_id(
-                run_id,
-                executable.program.content_ref(),
-                declaration_index,
-                &command.value_ref,
-            )?;
-            if &expected != effect_id {
-                return Err(RuntimeError::InvalidHistory);
-            }
-            Ok(FoldState::EffectPending {
-                declaration_index,
-                input,
-                effect_id: expected,
-                command: Box::new(command),
-            })
-        }
-        (
-            FoldState::EffectPending {
-                declaration_index,
-                input: _,
-                effect_id,
-                command,
-            },
-            JournalRecord::StateEffectConcluded {
-                evidence,
-                kind,
-                outcome,
-            },
-        ) => {
-            let selected = executable_state(executable, declaration_index)?;
-            let ExecutableMode::Effect {
-                validate_evidence,
-                evidence_codec,
-                ..
-            } = &selected.mode
-            else {
-                return Err(RuntimeError::InvalidHistory);
-            };
-            let evidence = qualify_journal_object(evidence_codec, evidence)?;
-            validate_evidence(&effect_id, &command, &evidence)?;
-            let outcome = qualify_retained_outcome(selected, kind, outcome)?;
-            apply_outcome(executable, declaration_index, kind, outcome)
-        }
-        _ => Err(RuntimeError::InvalidHistory),
-    }
-}
-
-fn executable_state(
-    executable: &ExecutableProgram,
-    declaration_index: u16,
-) -> Result<&crate::assembly::ExecutableState> {
-    match executable.declarations.get(usize::from(declaration_index)) {
-        Some(ExecutableDeclaration::State(state)) => Ok(state),
-        _ => Err(RuntimeError::InvalidHistory),
-    }
-}
-
-fn qualify_retained_outcome(
-    state: &crate::assembly::ExecutableState,
-    kind: OutcomeKind,
-    object: JournalObject<'_>,
-) -> Result<QualifiedValue> {
-    let codec = match kind {
-        OutcomeKind::Success => &state.output_codec,
-        OutcomeKind::Failure => &state.failure_codec,
-    };
-    qualify_journal_object(codec, object)
-}
-
 fn qualify_journal_object(codec: &ValueCodec, object: JournalObject<'_>) -> Result<QualifiedValue> {
     codec
         .qualify(object.content_ref(), object.canonical_bytes())
         .map_err(|_| RuntimeError::InvalidHistory)
-}
-
-fn apply_outcome(
-    executable: &ExecutableProgram,
-    declaration_index: u16,
-    kind: OutcomeKind,
-    outcome: QualifiedValue,
-) -> Result<FoldState> {
-    let declaration = match executable
-        .program
-        .declarations()
-        .get(usize::from(declaration_index))
-    {
-        Some(Declaration::State(declaration)) => declaration,
-        _ => return Err(RuntimeError::InvalidHistory),
-    };
-    match kind {
-        OutcomeKind::Success => match declaration.next_index() {
-            Some(next) => select_declaration(executable, next, outcome),
-            None if &outcome.contract_ref == executable.program.root_success_contract_ref() => {
-                Ok(FoldState::Succeeded(outcome))
-            }
-            None => Err(RuntimeError::InvalidHistory),
-        },
-        OutcomeKind::Failure => match declaration.failure_next_index() {
-            Some(next) => select_declaration(executable, next, outcome),
-            None if &outcome.contract_ref == executable.program.root_failure_contract_ref() => {
-                Ok(FoldState::Failed(outcome))
-            }
-            None => Err(RuntimeError::InvalidHistory),
-        },
-    }
 }
 
 fn journal_object_matches_value(object: JournalObject<'_>, value: &QualifiedValue) -> bool {
@@ -883,11 +970,49 @@ fn journal_object_matches_program(object: JournalObject<'_>, program: &Program) 
         && object.canonical_bytes() == program.canonical_bytes()
 }
 
-fn view(accumulator: Accumulator) -> Result<RunView> {
-    let state = match accumulator.state {
-        FoldState::Runnable { .. } | FoldState::EffectPending { .. } => RunViewState::Runnable,
-        FoldState::Succeeded(value) => RunViewState::Succeeded(retained_view(value)),
-        FoldState::Failed(value) => RunViewState::Failed(retained_view(value)),
+fn view(accumulator: &Accumulator) -> Result<RunView> {
+    let state = match &accumulator.state.cursor {
+        Cursor::Runnable {
+            position, reason, ..
+        } => RunViewState::Runnable {
+            position: *position,
+            reason: match reason {
+                fold::RunnableReason::Advance => crate::RunnableReason::Advance,
+                fold::RunnableReason::Retry => crate::RunnableReason::Retry,
+                fold::RunnableReason::Restart(checkpoint) => crate::RunnableReason::Restart {
+                    checkpoint: *checkpoint,
+                },
+            },
+        },
+        Cursor::EffectPending {
+            position,
+            effect_id,
+            ..
+        } => RunViewState::EffectPending {
+            position: *position,
+            effect_id: effect_id.clone(),
+        },
+        Cursor::Succeeded(value) => RunViewState::Succeeded(retained_view(value)),
+        Cursor::Failed(failure) => {
+            let cause = match &failure.cause {
+                fold::FailureCause::Domain { original, root } => crate::FailureCauseView::Domain {
+                    original: retained_view(original),
+                    root: retained_view(root),
+                },
+                fold::FailureCause::Adapter { error, context } => {
+                    crate::FailureCauseView::Adapter(crate::AdapterIncidentView {
+                        error: retained_view(error),
+                        state_context: retained_view(context),
+                    })
+                }
+            };
+            RunViewState::Failed(crate::FailureReport::new(
+                failure.position,
+                failure.reason,
+                failure.usage,
+                cause,
+            )?)
+        }
     };
     Ok(RunView {
         run_id: accumulator.history.run_id().clone(),
@@ -897,18 +1022,18 @@ fn view(accumulator: Accumulator) -> Result<RunView> {
     })
 }
 
-fn retained_view(value: QualifiedValue) -> RetainedValueView {
-    RetainedValueView {
-        contract_ref: value.contract_ref,
-        value_ref: value.value_ref,
-        canonical: value.canonical,
+fn retained_view(value: &QualifiedValue) -> ValueView {
+    ValueView {
+        contract_ref: value.contract_ref.clone(),
+        value_ref: value.value_ref.clone(),
+        canonical: value.canonical.clone(),
     }
 }
 
 #[derive(Serialize)]
 struct EffectIdPreimage<'a> {
     command_ref: &'a ContentRef,
-    declaration_index: u16,
+    position: ExecutionPosition,
     domain: &'static str,
     program_ref: &'a ContentRef,
     run_id: &'a RunId,
@@ -917,13 +1042,13 @@ struct EffectIdPreimage<'a> {
 fn derive_effect_id(
     run_id: &RunId,
     program_ref: &ContentRef,
-    declaration_index: u16,
+    position: ExecutionPosition,
     command_ref: &ContentRef,
 ) -> Result<EffectId> {
     let preimage = EffectIdPreimage {
         command_ref,
-        declaration_index,
-        domain: "mfm.effect-id.v1",
+        position,
+        domain: "mfm.effect-id.v2",
         program_ref,
         run_id,
     };
@@ -951,13 +1076,6 @@ fn map_hot_value_error(error: ValueError) -> RuntimeError {
     }
 }
 
-fn map_adapter_error(error: AdapterError) -> RuntimeError {
-    match error {
-        AdapterError::Unavailable => RuntimeError::Unavailable,
-        AdapterError::Internal => RuntimeError::Internal,
-    }
-}
-
 fn map_local_journal_error(error: JournalError) -> RuntimeError {
     match error {
         JournalError::Capacity => RuntimeError::Capacity,
@@ -966,72 +1084,8 @@ fn map_local_journal_error(error: JournalError) -> RuntimeError {
 }
 
 fn map_load_error(error: StoreError) -> RuntimeError {
-    match error {
-        StoreError::Capacity => RuntimeError::Internal,
-        StoreError::CorruptPhysicalState => RuntimeError::InvalidHistory,
-        StoreError::Unavailable => RuntimeError::Unavailable,
-        StoreError::Indeterminate => RuntimeError::Internal,
-    }
+    RuntimeError::Store(error)
 }
-
 fn map_append_error(error: StoreError) -> RuntimeError {
-    match error {
-        StoreError::Capacity => RuntimeError::Capacity,
-        StoreError::CorruptPhysicalState => RuntimeError::InvalidHistory,
-        StoreError::Unavailable => RuntimeError::Unavailable,
-        StoreError::Indeterminate => RuntimeError::Indeterminate,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, SchemaId};
-
-    use super::*;
-
-    #[test]
-    fn effect_id_preimage_and_derivation_are_exact() {
-        let run_id = RunId::from_digest(DigestBytes::from_array([1; 32]));
-        let program_ref = ContentRef::new(
-            SchemaId::new(
-                "mfm-program-document",
-                "3",
-                DigestAlgorithm::Sha256JcsV1,
-                DigestBytes::from_array([2; 32]),
-            )
-            .expect("program schema"),
-            ContentDigest::from_digest(DigestAlgorithm::Sha256V1, DigestBytes::from_array([3; 32])),
-        )
-        .expect("program ref");
-        let command_ref = ContentRef::new(
-            SchemaId::new(
-                "mfm-test-command",
-                "1",
-                DigestAlgorithm::Sha256JcsV1,
-                DigestBytes::from_array([4; 32]),
-            )
-            .expect("command schema"),
-            ContentDigest::from_digest(DigestAlgorithm::Sha256V1, DigestBytes::from_array([5; 32])),
-        )
-        .expect("command ref");
-        let preimage = EffectIdPreimage {
-            command_ref: &command_ref,
-            declaration_index: 7,
-            domain: "mfm.effect-id.v1",
-            program_ref: &program_ref,
-            run_id: &run_id,
-        };
-        let json = serde_json::to_string(&preimage).expect("json");
-        let canonical = PlainCanonicalJsonBytes::from_json_str(&json).expect("canonical");
-        assert_eq!(
-            canonical.as_str(),
-            "{\"command_ref\":{\"content_digest\":\"content:sha256-v1:0505050505050505050505050505050505050505050505050505050505050505\",\"schema_id\":\"schema:mfm-test-command:1:sha256-jcs-v1:0404040404040404040404040404040404040404040404040404040404040404\"},\"declaration_index\":7,\"domain\":\"mfm.effect-id.v1\",\"program_ref\":{\"content_digest\":\"content:sha256-v1:0303030303030303030303030303030303030303030303030303030303030303\",\"schema_id\":\"schema:mfm-program-document:3:sha256-jcs-v1:0202020202020202020202020202020202020202020202020202020202020202\"},\"run_id\":\"run:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101\"}"
-        );
-        assert_eq!(
-            derive_effect_id(&run_id, &program_ref, 7, &command_ref)
-                .expect("effect id")
-                .as_str(),
-            "effect:sha256-jcs-v1:a79a7bfef85f3e097d2d9ccf193b59da8010ab403c9980c23a3e78771d4f3e38"
-        );
-    }
+    RuntimeError::Store(error)
 }

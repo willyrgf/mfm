@@ -54,8 +54,9 @@ fallback. Explicit RunIds bypass generation and support deterministic retries.
 ## Output
 
 `--output text` is the default human presentation. Listed config revisions include `config_name`,
-`config_digest`, and `entry_point`. Start prints those fields before the run fields. Terminal run
-text includes `contract_ref`, `value_ref`, and exact canonical `value`.
+`config_digest`, and `entry_point`. Start prints those fields before the run fields. Successful run
+text includes `contract_ref`, `value_ref`, and exact canonical `value`. Failed runs include
+`value_ref` and the canonical `report`; runnable/pending views expose position, reason or EffectId.
 
 `--output json` is the stable automation surface shared with REST. It preserves the documented
 Application models: generic item lists, config revision summaries, start results, mechanical run
@@ -67,8 +68,10 @@ Component inspection JSON is an `ItemList` whose items contain `kind`, `id`, and
 Text renders the same three fields for each component.
 
 Ordinary JSON errors are exactly `{"code":"...","message":"..."}`. The Application-owned client
-error serializer adds the shared `recovery` sum for an ambiguous run append. Text mode prints
-`error: <message>` plus the same recovery RunId and selected config summary when present. Locator
+error serializer adds `recovery` plus `last_observed` for an ambiguous append, or the tagged
+`invocation` detail for an execution-stopped call or stopped pending-Effect recovery. A null
+last observation means no qualified head is known. Text prints the same recovery identity and
+invocation details after `error: <message>`. These errors do not claim a durable terminal state. Locator
 values, URLs, credentials, config bodies, and provider details are never rendered.
 
 ## Exit codes
@@ -76,14 +79,14 @@ values, URLs, credentials, config bodies, and provider details are never rendere
 | Code | Meaning |
 | --- | --- |
 | 0 | A non-run command succeeded, or a run view is `succeeded`. |
-| 1 | A run view is `runnable` or durably `failed`. |
-| 2 | No run view: usage, checked input, composition, entropy, request, or output failure. |
+| 1 | A run view is `runnable`, `effect_pending` or durably `failed`. |
+| 2 | A call failed: usage, input, composition, entropy, request, stopped invocation or output failure; any last observed view is historical. |
 
 The old `init`, `snapshot`, and `show --config` grammar and combined configuration file do not
 exist. Keystore administration and transaction submission remain outside this surface.
 
-The managed `client-e2e` task builds both binaries explicitly, admits an exact historical run through
-a deliberately unavailable live Read, deletes its config revision, resumes it through the Unix-socket
+The managed `client-e2e` task builds both binaries explicitly, admits an exact historical run by interrupting
+an in-flight live Read, deletes its config revision, resumes it through the Unix-socket
 REST listener against Reth, validates the complete snapshot, and reloads the same durable RunView
 through this JSON surface. It then reimports the same revision, starts a fresh CLI-generated run, and
 requires an identical semantic result from the independent execution. Both renderers also match the

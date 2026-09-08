@@ -319,6 +319,7 @@ impl<'de> Deserialize<'de> for AnchoredContractCallFailureReason {
 pub struct EvmAnchoredContractCallRead;
 
 impl ReadCapabilityContract for EvmAnchoredContractCallRead {
+    type OperationalError = crate::EvmOperationalError;
     type Intent = AnchoredContractCallIntent;
     type Evidence = AnchoredContractCallEvidence;
 

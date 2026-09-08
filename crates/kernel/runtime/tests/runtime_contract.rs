@@ -5,16 +5,27 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use mfm_capabilities::{CapabilityError, EffectCapabilityContract, ReadCapabilityContract};
-use mfm_ids::{ContentRef, DigestBytes, EffectId, EntryPointId, RunId, SemanticTypeId, StableId};
-use mfm_journal::{EncodedRunFrame, JournalHistory, OutcomeKind, StoredRunBytes};
+use mfm_capabilities::{
+    AdapterError, AdapterInvariantError, CapabilityError, EffectCapabilityContract,
+    ReadCapabilityContract,
+};
+use mfm_ids::{
+    ContentRef, DigestBytes, EffectId, EntryPointId, ExecutionPosition, RunId, SemanticTypeId,
+    StableId, StatePosition, VisitId,
+};
+use mfm_journal::{
+    EffectConclusion, EncodedRunFrame, JournalHistory, JournalObject, StoredRunBytes,
+};
 use mfm_program::{
-    expand_program, CapabilityInjection, EffectState, Never, Operation, OperationExpansion,
-    PreparationError, ProgramError, ProposedStateOutcome, PureState, ReadState, State,
+    expand_program, CapabilityInjection, ConclusionBound, EffectBounds, EffectState, FromNever,
+    Identity, Never, NoContext, NoParams, Occurrence, Operation, OperationExpansion,
+    PreparationError, ProgramError, ProgramLimits, ProposedStateOutcome, PureState, ReadState,
+    State,
 };
 use mfm_program_derive::MfmValue;
 use mfm_runtime::{
-    AdapterError, EffectAdapterOutcome, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError,
+    EffectAdapterOutcome, InvocationFailure, RunViewState, Runtime, RuntimeAssemblyBuilder,
+    RuntimeError,
 };
 use mfm_store::{AppendResult, MemoryStore, Store, StoreError};
 use mfm_values::{
@@ -147,11 +158,19 @@ impl<K: MfmValueTrait> Operation for GenericProgram<K> {
     type Output = GenericStateValue<K>;
     type Failure = Never;
 
+    fn validate_input(&self, _: &Self::Input) -> mfm_program::Result<()> {
+        Ok(())
+    }
+
     fn expand(
         &self,
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
-        body.pure::<GenericState<K>>()
+        body.pure::<GenericState<K>, Identity<Never>>(
+            NoParams,
+            Occurrence::new(),
+            ConclusionBound::new(65536)?,
+        )
     }
 }
 
@@ -189,11 +208,19 @@ impl Operation for PureProgram {
     type Output = Number;
     type Failure = Never;
 
+    fn validate_input(&self, _: &Self::Input) -> mfm_program::Result<()> {
+        Ok(())
+    }
+
     fn expand(
         &self,
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
-        body.pure::<Increment>()
+        body.pure::<Increment, Identity<Never>>(
+            NoParams,
+            Occurrence::new(),
+            ConclusionBound::new(65536)?,
+        )
     }
 }
 
@@ -203,6 +230,10 @@ impl Operation for EmptyProgram {
     type Input = Number;
     type Output = Number;
     type Failure = Never;
+
+    fn validate_input(&self, _: &Self::Input) -> mfm_program::Result<()> {
+        Ok(())
+    }
 
     fn expand(
         &self,
@@ -235,6 +266,7 @@ struct Binding {
 struct Observation;
 
 impl ReadCapabilityContract for Observation {
+    type OperationalError = NoContext;
     type Intent = Intent;
     type Evidence = Evidence;
 
@@ -272,6 +304,14 @@ impl State for Observe {
 }
 
 impl ReadState<Observation> for Observe {
+    type AdapterContext = NoContext;
+    fn adapter_context(
+        _: &Self::Input,
+        _: &Intent,
+        _: &NoContext,
+    ) -> Result<NoContext, mfm_program::StateExecutionError> {
+        Ok(NoContext)
+    }
     fn prepare(input: &Self::Input) -> Result<Intent, PreparationError> {
         Ok(Intent { value: input.value })
     }
@@ -292,6 +332,10 @@ impl ReadState<Observation> for Observe {
 }
 
 impl CapabilityInjection<Observe> for Observation {
+    type FailureMap = Identity<Number>;
+    fn failure_map_params(_: &Self::Setup) -> mfm_program::Result<NoParams> {
+        Ok(NoParams)
+    }
     type Setup = Binding;
     type ExpandedInput = Number;
     type ExpandedOutput = Number;
@@ -311,11 +355,20 @@ impl Operation for ReadProgram {
     type Output = Number;
     type Failure = Number;
 
+    fn validate_input(&self, _: &Self::Input) -> mfm_program::Result<()> {
+        Ok(())
+    }
+
     fn expand(
         &self,
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
-        body.read::<Observe, Observation>(&Binding { route: 7 })
+        body.read::<Observe, Observation, Identity<Number>>(
+            &Binding { route: 7 },
+            NoParams,
+            Occurrence::new(),
+            ConclusionBound::new(65536)?,
+        )
     }
 }
 
@@ -336,6 +389,7 @@ struct EffectEvidence {
 struct Mutation;
 
 impl EffectCapabilityContract for Mutation {
+    type OperationalError = NoContext;
     type Command = Command;
     type Evidence = EffectEvidence;
 
@@ -357,6 +411,7 @@ impl EffectCapabilityContract for Mutation {
 struct ConflictingReadCapability;
 
 impl ReadCapabilityContract for ConflictingReadCapability {
+    type OperationalError = NoContext;
     type Intent = Command;
     type Evidence = EffectEvidence;
 
@@ -390,6 +445,14 @@ impl State for Mutate {
 }
 
 impl EffectState<Mutation> for Mutate {
+    type AdapterContext = NoContext;
+    fn adapter_context(
+        _: &Self::Input,
+        _: &Command,
+        _: &NoContext,
+    ) -> Result<NoContext, mfm_program::StateExecutionError> {
+        Ok(NoContext)
+    }
     fn prepare(input: &Self::Input) -> Result<Command, PreparationError> {
         if input.value == PREPARATION_FAILURE_SENTINEL {
             return Err(PreparationError);
@@ -413,6 +476,10 @@ impl EffectState<Mutation> for Mutate {
 }
 
 impl CapabilityInjection<Mutate> for Mutation {
+    type FailureMap = Identity<Number>;
+    fn failure_map_params(_: &Self::Setup) -> mfm_program::Result<NoParams> {
+        Ok(NoParams)
+    }
     type Setup = Binding;
     type ExpandedInput = Number;
     type ExpandedOutput = Number;
@@ -432,11 +499,20 @@ impl Operation for EffectProgram {
     type Output = Number;
     type Failure = Number;
 
+    fn validate_input(&self, _: &Self::Input) -> mfm_program::Result<()> {
+        Ok(())
+    }
+
     fn expand(
         &self,
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
-        body.effect::<Mutate, Mutation>(&Binding { route: 8 })
+        body.effect::<Mutate, Mutation, Identity<Number>>(
+            &Binding { route: 8 },
+            NoParams,
+            Occurrence::new(),
+            EffectBounds::new(65536, 65536)?,
+        )
     }
 }
 
@@ -507,6 +583,10 @@ async fn one_semantic_family_executes_multiple_exact_schemas_hot_and_cold() {
             expand_program(
                 EntryPointId::new("mfm.test.runtime/generic-first@1").expect("first entry point"),
                 &GenericProgram::<FirstGenericValue>(PhantomData),
+                &GenericStateValue {
+                    value: FirstGenericValue { first: 11 },
+                },
+                ProgramLimits::new(0),
             )
             .expect("first Program"),
             GenericStateValue {
@@ -530,6 +610,12 @@ async fn one_semantic_family_executes_multiple_exact_schemas_hot_and_cold() {
             expand_program(
                 EntryPointId::new("mfm.test.runtime/generic-second@1").expect("second entry point"),
                 &GenericProgram::<SecondGenericValue>(PhantomData),
+                &GenericStateValue {
+                    value: SecondGenericValue {
+                        second: "two".to_owned(),
+                    },
+                },
+                ProgramLimits::new(0),
             )
             .expect("second Program"),
             GenericStateValue {
@@ -585,7 +671,7 @@ async fn one_semantic_family_executes_multiple_exact_schemas_hot_and_cold() {
 }
 
 #[test]
-fn effect_registration_rejects_duplicate_and_wrong_kind_capability_entries() {
+fn effect_registration_rejects_duplicates_and_distinguishes_capability_modes() {
     let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_effect::<Mutate, Mutation>()
@@ -623,13 +709,11 @@ fn effect_registration_rejects_duplicate_and_wrong_kind_capability_entries() {
         ),
         Err(RuntimeError::IncompatibleAssembly)
     );
-    assert_eq!(
-        builder.register_adapter::<ConflictingReadCapability, _, _>(
-            Binding { route: 8 },
-            |_, _intent| { Box::pin(async { Err(AdapterError::Internal) }) },
-        ),
-        Err(RuntimeError::IncompatibleAssembly)
-    );
+    builder
+        .register_adapter::<ConflictingReadCapability, _, _>(Binding { route: 8 }, |_, _| {
+            Box::pin(async { Err(AdapterError::Invariant(AdapterInvariantError)) })
+        })
+        .expect("mode participates in the capability contract identity");
 }
 
 #[tokio::test]
@@ -648,16 +732,24 @@ async fn missing_effect_adapter_is_rejected_before_store_io() {
                     EntryPointId::new("mfm.test.runtime/missing-effect-adapter@1")
                         .expect("entry point"),
                     &EffectProgram,
+                    &Number { value: 1 },
+                    ProgramLimits::new(0),
                 )
                 .expect("Program"),
                 Number { value: 1 },
             )
             .await,
-        Err(RuntimeError::IncompatibleAssembly)
+        Err(InvocationFailure::Execution {
+            error: RuntimeError::IncompatibleAssembly,
+            ..
+        })
     ));
     assert!(matches!(
         runtime.read(&run_id).await,
-        Err(RuntimeError::Absent)
+        Err(InvocationFailure::Execution {
+            error: RuntimeError::Absent,
+            ..
+        })
     ));
 }
 
@@ -671,6 +763,8 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
     let program = expand_program(
         EntryPointId::new("mfm.test.runtime/pure@1").expect("entry point"),
         &PureProgram,
+        &Number { value: 4 },
+        ProgramLimits::new(0),
     )
     .expect("Program");
 
@@ -683,6 +777,11 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
     };
     assert_eq!(hot.head_sequence(), 2);
     assert_eq!(hot_value.canonical_bytes(), br#"{"value":5}"#);
+    assert_eq!(hot_value.decode::<Number>().unwrap().value, 5);
+    assert!(matches!(
+        hot_value.decode::<FirstGenericValue>(),
+        Err(mfm_values::ValueError::SchemaShapeMismatch)
+    ));
 
     let cold = runtime.read(&run_id).await.expect("cold read");
     let RunViewState::Succeeded(cold_value) = cold.state() else {
@@ -691,6 +790,7 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
     assert_eq!(cold.head_sequence(), hot.head_sequence());
     assert_eq!(cold.head_digest(), hot.head_digest());
     assert_eq!(cold_value.canonical_bytes(), hot_value.canonical_bytes());
+    assert_eq!(cold_value.decode::<Number>().unwrap().value, 5);
 
     let mut empty_builder = RuntimeAssemblyBuilder::new().expect("builder");
     empty_builder
@@ -700,6 +800,8 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
     let empty_program = expand_program(
         EntryPointId::new("mfm.test.runtime/empty@1").expect("entry point"),
         &EmptyProgram,
+        &Number { value: 9 },
+        ProgramLimits::new(0),
     )
     .expect("empty Program");
     let empty_view = empty
@@ -718,7 +820,7 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
 }
 
 #[tokio::test]
-async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
+async fn a_fused_read_is_replayable_and_local_invariant_failure_preserves_the_prefix() {
     let calls = Arc::new(AtomicUsize::new(0));
     let store = Arc::new(MemoryStore::new());
     let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
@@ -746,6 +848,8 @@ async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
     let program = expand_program(
         EntryPointId::new("mfm.test.runtime/read@1").expect("entry point"),
         &ReadProgram,
+        &Number { value: 12 },
+        ProgramLimits::new(0),
     )
     .expect("Program");
     let hot = runtime
@@ -765,7 +869,7 @@ async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
         .expect("Read State");
     unavailable_builder
         .register_adapter::<Observation, _, _>(Binding { route: 7 }, |_, _| {
-            Box::pin(async { Err(AdapterError::Unavailable) })
+            Box::pin(async { Err(AdapterError::Invariant(AdapterInvariantError)) })
         })
         .expect("unavailable adapter");
     let unavailable = Runtime::new(unavailable_builder.finish(), unavailable_store.clone());
@@ -773,6 +877,8 @@ async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
     let interrupted_program = expand_program(
         EntryPointId::new("mfm.test.runtime/read@1").expect("entry point"),
         &ReadProgram,
+        &Number { value: 21 },
+        ProgramLimits::new(0),
     )
     .expect("Program");
     assert!(matches!(
@@ -783,14 +889,17 @@ async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
                 Number { value: 21 },
             )
             .await,
-        Err(RuntimeError::Unavailable)
+        Err(InvocationFailure::Execution {
+            error: RuntimeError::Internal,
+            ..
+        })
     ));
     let prefix = unavailable
         .read(&interrupted_run_id)
         .await
         .expect("durable prefix");
     assert_eq!(prefix.head_sequence(), 1);
-    assert!(matches!(prefix.state(), RunViewState::Runnable));
+    assert!(matches!(prefix.state(), RunViewState::Runnable { .. }));
 
     let mut resumed_builder = RuntimeAssemblyBuilder::new().expect("builder");
     resumed_builder
@@ -816,7 +925,11 @@ async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
         panic!("rejected observation did not follow the Program failure path");
     };
     assert_eq!(resumed.head_sequence(), 2);
-    assert_eq!(value.canonical_bytes(), br#"{"value":21}"#);
+    let mfm_runtime::FailureCauseView::Domain { original, root } = value.cause() else {
+        panic!("domain result")
+    };
+    assert_eq!(original.decode::<Number>().unwrap().value, 21);
+    assert_eq!(root.decode::<Number>().unwrap().value, 21);
 }
 
 #[tokio::test]
@@ -860,6 +973,8 @@ async fn cancellation_during_observation_preserves_a_runnable_prefix() {
                     expand_program(
                         EntryPointId::new("mfm.test.runtime/cancel@1").expect("entry point"),
                         &ReadProgram,
+                        &Number { value: 8 },
+                        ProgramLimits::new(0),
                     )
                     .expect("Program"),
                     Number { value: 8 },
@@ -877,7 +992,7 @@ async fn cancellation_during_observation_preserves_a_runnable_prefix() {
 
     let prefix = runtime.read(&run_id).await.expect("durable prefix");
     assert_eq!(prefix.head_sequence(), 1);
-    assert!(matches!(prefix.state(), RunViewState::Runnable));
+    assert!(matches!(prefix.state(), RunViewState::Runnable { .. }));
 }
 
 #[tokio::test]
@@ -930,6 +1045,8 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
                     expand_program(
                         EntryPointId::new("mfm.test.runtime/effect@1").expect("entry point"),
                         &EffectProgram,
+                        &Number { value: 34 },
+                        ProgramLimits::new(0),
                     )
                     .expect("Program"),
                     Number { value: 34 },
@@ -941,7 +1058,10 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
 
     let pending = runtime.read(&run_id).await.expect("pending view");
     assert_eq!(pending.head_sequence(), 2);
-    assert!(matches!(pending.state(), RunViewState::Runnable));
+    assert!(matches!(
+        pending.state(),
+        RunViewState::EffectPending { .. }
+    ));
     task.abort();
     match task.await {
         Err(error) => assert!(error.is_cancelled()),
@@ -1043,6 +1163,8 @@ async fn pending_yields_once_and_a_later_settlement_closes_the_same_prepare() {
             expand_program(
                 EntryPointId::new("mfm.test.runtime/pending-effect@1").expect("entry point"),
                 &EffectProgram,
+                &Number { value: 21 },
+                ProgramLimits::new(0),
             )
             .expect("Program"),
             Number { value: 21 },
@@ -1050,12 +1172,15 @@ async fn pending_yields_once_and_a_later_settlement_closes_the_same_prepare() {
         .await
         .expect("pending is normal progress");
     assert_eq!(pending.head_sequence(), 2);
-    assert!(matches!(pending.state(), RunViewState::Runnable));
+    assert!(matches!(
+        pending.state(),
+        RunViewState::EffectPending { .. }
+    ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let cold = runtime.read(&run_id).await.expect("cold pending view");
     assert_eq!(cold.head_digest(), pending.head_digest());
-    assert!(matches!(cold.state(), RunViewState::Runnable));
+    assert!(matches!(cold.state(), RunViewState::EffectPending { .. }));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let settled = runtime.resume(&run_id).await.expect("later settlement");
@@ -1098,6 +1223,10 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
                 expand_program(
                     EntryPointId::new("mfm.test.runtime/reject-effect@1").expect("entry point"),
                     &EffectProgram,
+                    &Number {
+                        value: PREPARATION_FAILURE_SENTINEL
+                    },
+                    ProgramLimits::new(0),
                 )
                 .expect("Program"),
                 Number {
@@ -1105,7 +1234,10 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
                 },
             )
             .await,
-        Err(RuntimeError::Internal)
+        Err(InvocationFailure::Execution {
+            error: RuntimeError::Internal,
+            ..
+        })
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -1146,12 +1278,17 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
                 expand_program(
                     EntryPointId::new("mfm.test.runtime/invalid-evidence@1").expect("entry point"),
                     &EffectProgram,
+                    &Number { value: 2 },
+                    ProgramLimits::new(0),
                 )
                 .expect("Program"),
                 Number { value: 2 },
             )
             .await,
-        Err(RuntimeError::Internal)
+        Err(InvocationFailure::Execution {
+            error: RuntimeError::Internal,
+            ..
+        })
     ));
     assert_eq!(
         invalid
@@ -1373,6 +1510,10 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
             EntryPointId::new(format!("mfm.test.runtime/ambiguous-{}@1", name))
                 .expect("entry point"),
             &EffectProgram,
+            &Number {
+                value: u64::try_from(offset + 3).expect("input value"),
+            },
+            ProgramLimits::new(0),
         )
         .expect("Program");
 
@@ -1386,7 +1527,10 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
                     },
                 )
                 .await,
-            Err(RuntimeError::Indeterminate)
+            Err(InvocationFailure::Execution {
+                error: RuntimeError::Store(StoreError::Indeterminate),
+                ..
+            })
         ));
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -1401,10 +1545,14 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
             "{} retained head after start",
             name
         );
-        if expected_head_after_start == 3 {
-            assert!(matches!(after_start.state(), RunViewState::Succeeded(_)));
-        } else {
-            assert!(matches!(after_start.state(), RunViewState::Runnable));
+        match expected_head_after_start {
+            1 => assert!(matches!(after_start.state(), RunViewState::Runnable { .. })),
+            2 => assert!(matches!(
+                after_start.state(),
+                RunViewState::EffectPending { .. }
+            )),
+            3 => assert!(matches!(after_start.state(), RunViewState::Succeeded(_))),
+            _ => unreachable!("fixture head"),
         }
 
         let completed = runtime.resume(&run_id).await.expect("ambiguous recovery");
@@ -1426,7 +1574,7 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
 }
 
 #[tokio::test]
-async fn effect_not_inserted_reloads_the_committed_prepare_or_conclusion() {
+async fn effect_not_inserted_returns_the_winner_without_entering_its_new_visit() {
     for (offset, sequence) in [2_u64, 3].into_iter().enumerate() {
         let calls = Arc::new(AtomicUsize::new(0));
         let store = Arc::new(ScriptedStore::new([(
@@ -1443,19 +1591,35 @@ async fn effect_not_inserted_reloads_the_committed_prepare_or_conclusion() {
         ));
         let completed = runtime
             .start(
-                run_id,
+                run_id.clone(),
                 expand_program(
                     EntryPointId::new(format!("mfm.test.runtime/not-inserted-{sequence}@1"))
                         .expect("entry point"),
                     &EffectProgram,
+                    &Number { value: 8 },
+                    ProgramLimits::new(0),
                 )
                 .expect("Program"),
                 Number { value: 8 },
             )
             .await
             .expect("converged Effect");
-        assert_eq!(completed.head_sequence(), 3);
-        assert!(matches!(completed.state(), RunViewState::Succeeded(_)));
+        assert_eq!(completed.head_sequence(), sequence);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            if sequence == 2 { 0 } else { 1 }
+        );
+        if sequence == 2 {
+            assert!(matches!(
+                completed.state(),
+                RunViewState::EffectPending { .. }
+            ));
+        } else {
+            assert!(matches!(completed.state(), RunViewState::Succeeded(_)));
+        }
+        let resumed = runtime.resume(&run_id).await.unwrap();
+        assert_eq!(resumed.head_sequence(), 3);
+        assert!(matches!(resumed.state(), RunViewState::Succeeded(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
@@ -1490,9 +1654,11 @@ async fn every_adapter_failure_leaves_one_pending_prepare() {
                     calls.fetch_add(1, Ordering::SeqCst);
                     match mode {
                         FailureMode::Unavailable => {
-                            Box::pin(async { Err(AdapterError::Unavailable) })
+                            Box::pin(async { Err(AdapterError::Operational(NoContext)) })
                         }
-                        FailureMode::Internal => Box::pin(async { Err(AdapterError::Internal) }),
+                        FailureMode::Internal => {
+                            Box::pin(async { Err(AdapterError::Invariant(AdapterInvariantError)) })
+                        }
                         FailureMode::Panic => panic!("adapter panic"),
                     }
                 }
@@ -1509,20 +1675,33 @@ async fn every_adapter_failure_leaves_one_pending_prepare() {
                     EntryPointId::new(format!("mfm.test.runtime/adapter-failure-{offset}@1"))
                         .expect("entry point"),
                     &EffectProgram,
+                    &Number { value: 9 },
+                    ProgramLimits::new(0),
                 )
                 .expect("Program"),
                 Number { value: 9 },
             )
             .await;
-        let expected = match mode {
-            FailureMode::Unavailable => RuntimeError::Unavailable,
-            FailureMode::Internal | FailureMode::Panic => RuntimeError::Internal,
-        };
-        assert!(matches!(result, Err(error) if error == expected));
+        match mode {
+            FailureMode::Unavailable => assert!(matches!(
+                result,
+                Err(InvocationFailure::RecoveryStopped { .. })
+            )),
+            FailureMode::Internal | FailureMode::Panic => assert!(matches!(
+                result,
+                Err(InvocationFailure::Execution {
+                    error: RuntimeError::Internal,
+                    ..
+                })
+            )),
+        }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let pending = runtime.read(&run_id).await.expect("pending view");
         assert_eq!(pending.head_sequence(), 2);
-        assert!(matches!(pending.state(), RunViewState::Runnable));
+        assert!(matches!(
+            pending.state(),
+            RunViewState::EffectPending { .. }
+        ));
     }
 }
 
@@ -1542,7 +1721,7 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
                     .lock()
                     .expect("pending effect ids")
                     .push(effect_id.clone());
-                Box::pin(async { Err(AdapterError::Unavailable) })
+                Box::pin(async { Err(AdapterError::Operational(NoContext)) })
             }
         })
         .expect("adapter");
@@ -1555,12 +1734,14 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
                 expand_program(
                     EntryPointId::new("mfm.test.runtime/retained-effect@1").expect("entry point"),
                     &EffectProgram,
+                    &Number { value: 7 },
+                    ProgramLimits::new(0),
                 )
                 .expect("Program"),
                 Number { value: 7 },
             )
             .await,
-        Err(RuntimeError::Unavailable)
+        Err(InvocationFailure::RecoveryStopped { .. })
     ));
     let pending_frames = pending_store.snapshot();
     assert_eq!(pending_frames.len(), 2);
@@ -1575,7 +1756,10 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
     let read_runtime = retained_effect_reader(pending_frames.clone(), Arc::clone(&read_calls));
     let pending = read_runtime.read(&run_id).await.expect("pending view");
     assert_eq!(pending.head_sequence(), 2);
-    assert!(matches!(pending.state(), RunViewState::Runnable));
+    assert!(matches!(
+        pending.state(),
+        RunViewState::EffectPending { .. }
+    ));
     assert_eq!(read_calls.load(Ordering::SeqCst), 0);
 
     let genesis = qualify_recorded_prefix(&run_id, &pending_frames[..1]);
@@ -1583,9 +1767,12 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
         canonicalize_mfm_value(&Command { value: 7 }).expect("retained command");
     let wrong_id = genesis
         .encode_effect_prepare(
+            ExecutionPosition {
+                state: StatePosition::new(0).unwrap(),
+                visit: VisitId::new(0),
+            },
             &EffectId::from_digest(DigestBytes::from_array([88; 32])),
-            &command_ref,
-            command.as_bytes(),
+            JournalObject::new(&command_ref, command.as_bytes()).unwrap(),
         )
         .expect("wrong-id prepare")
         .canonical_bytes()
@@ -1596,9 +1783,12 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
         canonicalize_mfm_value(&Command { value: 99 }).expect("replacement command");
     let wrong_command = genesis
         .encode_effect_prepare(
+            ExecutionPosition {
+                state: StatePosition::new(0).unwrap(),
+                visit: VisitId::new(0),
+            },
             &retained_effect_id,
-            &replacement_command_ref,
-            replacement_command.as_bytes(),
+            JournalObject::new(&replacement_command_ref, replacement_command.as_bytes()).unwrap(),
         )
         .expect("wrong-command prepare")
         .canonical_bytes()
@@ -1620,6 +1810,8 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
             expand_program(
                 EntryPointId::new("mfm.test.runtime/retained-settlement@1").expect("entry point"),
                 &EffectProgram,
+                &Number { value: 7 },
+                ProgramLimits::new(0),
             )
             .expect("Program"),
             Number { value: 7 },
@@ -1658,11 +1850,10 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
     .expect("swapped evidence");
     let swapped_evidence = prepared
         .encode_effect_conclusion(
-            &swapped_evidence_ref,
-            swapped_evidence.as_bytes(),
-            OutcomeKind::Success,
-            &outcome_ref,
-            outcome.as_bytes(),
+            JournalObject::new(&swapped_evidence_ref, swapped_evidence.as_bytes()).unwrap(),
+            EffectConclusion::Success {
+                output: JournalObject::new(&outcome_ref, outcome.as_bytes()).unwrap(),
+            },
         )
         .expect("swapped-evidence conclusion")
         .canonical_bytes()
@@ -1683,11 +1874,10 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
         canonicalize_mfm_value(&Command { value: 7 }).expect("wrong outcome type");
     let wrong_outcome = prepared
         .encode_effect_conclusion(
-            &valid_evidence_ref,
-            valid_evidence.as_bytes(),
-            OutcomeKind::Success,
-            &wrong_outcome_ref,
-            wrong_outcome.as_bytes(),
+            JournalObject::new(&valid_evidence_ref, valid_evidence.as_bytes()).unwrap(),
+            EffectConclusion::Success {
+                output: JournalObject::new(&wrong_outcome_ref, wrong_outcome.as_bytes()).unwrap(),
+            },
         )
         .expect("wrong-outcome conclusion")
         .canonical_bytes()
@@ -1717,7 +1907,10 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
         assert!(
             matches!(
                 runtime.read(&corrupt_run_id).await,
-                Err(RuntimeError::InvalidHistory),
+                Err(InvocationFailure::Execution {
+                    error: RuntimeError::InvalidHistory,
+                    ..
+                }),
             ),
             "{name}"
         );
@@ -1738,7 +1931,7 @@ async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
         .expect("Effect State");
     unavailable_builder
         .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, |_, _, _| {
-            Box::pin(async { Err(AdapterError::Unavailable) })
+            Box::pin(async { Err(AdapterError::Operational(NoContext)) })
         })
         .expect("adapter");
     let unavailable = Runtime::new(unavailable_builder.finish(), store.clone());
@@ -1750,12 +1943,14 @@ async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
                 expand_program(
                     EntryPointId::new("mfm.test.runtime/concurrent-effect@1").expect("entry point"),
                     &EffectProgram,
+                    &Number { value: 5 },
+                    ProgramLimits::new(0),
                 )
                 .expect("Program"),
                 Number { value: 5 },
             )
             .await,
-        Err(RuntimeError::Unavailable)
+        Err(InvocationFailure::RecoveryStopped { .. })
     ));
 
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -1831,28 +2026,12 @@ impl Store for FaultStore {
 }
 
 #[tokio::test]
-async fn store_failures_map_by_load_or_append_authority() {
-    for (offset, (failure, load_error, append_error)) in [
-        (
-            StoreError::Capacity,
-            RuntimeError::Internal,
-            RuntimeError::Capacity,
-        ),
-        (
-            StoreError::CorruptPhysicalState,
-            RuntimeError::InvalidHistory,
-            RuntimeError::InvalidHistory,
-        ),
-        (
-            StoreError::Unavailable,
-            RuntimeError::Unavailable,
-            RuntimeError::Unavailable,
-        ),
-        (
-            StoreError::Indeterminate,
-            RuntimeError::Internal,
-            RuntimeError::Indeterminate,
-        ),
+async fn store_failures_preserve_mechanical_source_and_unknown_observation() {
+    for (offset, failure) in [
+        StoreError::Capacity,
+        StoreError::CorruptPhysicalState,
+        StoreError::Unavailable,
+        StoreError::Indeterminate,
     ]
     .into_iter()
     .enumerate()
@@ -1865,16 +2044,18 @@ async fn store_failures_map_by_load_or_append_authority() {
         ));
         assert!(matches!(
             runtime.read(&run_id).await,
-            Err(error) if error == load_error
+            Err(InvocationFailure::Execution { error: RuntimeError::Store(source), last_observed: None, .. }) if source == failure
         ));
         let program = expand_program(
             EntryPointId::new("mfm.test.runtime/fault@1").expect("entry point"),
             &EmptyProgram,
+            &Number { value: 1 },
+            ProgramLimits::new(0),
         )
         .expect("Program");
         assert!(matches!(
             runtime.start(run_id, program, Number { value: 1 }).await,
-            Err(error) if error == append_error
+            Err(InvocationFailure::Execution { error: RuntimeError::Store(source), last_observed: None, .. }) if source == failure
         ));
     }
 }

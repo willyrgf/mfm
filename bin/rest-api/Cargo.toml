@@ -20,6 +20,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+mfm-capabilities = { path = "../../crates/kernel/capabilities" }
 libc = { workspace = true }
 mfm-config = { path = "../../crates/config" }
 mfm-evm = { path = "../../crates/domains/evm" }

@@ -1,23 +1,34 @@
 # Design
 
-MFM durably proves a caller-driven execution of one immutable typed Program. A Program contains an
-ordered array of State or Match declarations. Index zero is the root; every successor is a forward
-`u16` index, and array order is the only control identity. A State has exact input, output, and
-failure contracts. Missing success/failure successors mean the corresponding exact root result;
-`Never` is the reserved uninhabited failure contract and can never be encoded as a value.
+MFM durably proves caller-driven execution of an immutable typed Program. Program contains an
+ordered sequence of State declarations with exact input, output and original failure contracts,
+selected recovery policies and parameters, explicit root failure maps, scoped checkpoint positions,
+finite recovery allowances, and complete frame bounds. Success advances linearly; recovery is a
+Runtime transition. `Never` remains the uninhabited failure contract.
 
-Source code authors the graph through one deterministic typed `Operation`. Product-inspection IDs
-and descriptions on admitted Operations and States are source metadata only: they are not lowered,
-hashed, or persisted. `expand_program` gives
-the root Operation the sole `OperationExpansion` compiler context, which flattens Pure States,
-exact-pair Reads and Effects, child Operations, structured Match joins, and exact failure handlers
-into one private symbolic draft before constructing Program v3. Operations, callbacks, injection
-setup, and scope boundaries are erased; only the immutable State/Match graph is persisted.
+Source code authors the sequence through a deterministic `Operation`. Its required `validate_input`
+check establishes agreement between root planning assumptions and the initial value before expansion.
+`expand_program(entry, operation, input, limits)` qualifies that input and commits its exact value
+reference into Program v4. Runtime rejects input substitution before genesis or provider entry;
+cold reconstruction checks genesis against the same commitment. Parent planning and deterministic
+States establish future child input agreement. No authoring callback enters Runtime. Multiple RunIds
+may reuse the same exact Program/input pair.
+
+OperationExpansion lowers Pure/Read/Effect States and child Operations through one private symbolic
+draft. Scoped checkpoint tokens cannot be captured for direct installation in another scope, while
+inherited installed bindings retain their owning scope for final relocation. Operations, callbacks,
+and injection setup remain authoring-only. Program retains only the selected immutable descriptors.
+
+The framework defaults to `NoRecovery` and `Stop`. The shipping Portfolio planner selects those
+defaults with zero global and local recovery allowances. Library callers may explicitly install
+other policies. EVM owns the selectable `EvmBalanceClassifier` and the checked `AnchorChanged`
+cause for bound observations differing from a retained collection anchor; it does not override
+caller classification or handler defaults inside `CollectEvmBalances`.
 
 Pure States deterministically map typed input to typed success/failure. Read States deterministically
 prepare typed intent, then interpret typed evidence. Effect States deterministically prepare a
 complete command and interpret typed settlement evidence. Runtime associates all values,
-mode-specific State executables, Match projections, and exact `(capability contract, binding ref)`
+mode-specific State executables, recovery callbacks, and exact `(capability contract, binding ref)`
 adapters before execution. A semantic type ID names a value family and may have multiple exact
 generic schemas; only the exact content ref selects a codec. State association likewise uses the
 exact implementation/input/output/failure ABI, so one implementation identity may own multiple
@@ -43,36 +54,48 @@ Only authenticated transaction reversion produces a reversion outcome; local act
 are internal execution errors.
 
 Each Read or Effect occurrence applies the exact capability/State pair's authoring-time injection
-policy. Before and after hooks use typed `OperationExpansion` scopes and the same Pure, Read,
-Effect, child Operation, Match, and failure-handler authoring as Operations. The kernel inserts the
-designated occurrence once between them. Hooks perform no IO or adapter registration and have no
-handle for modifying the designated occurrence. Nested hooks share the existing callback-depth and
-graph bounds. Empty hooks require identical input/output contracts; local successful scope exits
-rejoin the designated occurrence or caller continuation. The complete expansion owns its input,
-output, and failure contracts. Original failures skip the after hook: it is a success continuation,
-not a finally handler. Every suffix is checked completely before merging into its caller.
+policy. Before and after hooks use typed `OperationExpansion` scopes with the same linear State,
+child Operation, classifier, handler and checkpoint authoring as Operations. The kernel inserts the
+designated occurrence once between them. Hooks perform no IO or adapter registration and cannot
+modify the designated occurrence. Nested hooks share a 16-level callback bound, counting the root as one, and the declaration
+bounds. Before/after hooks are sibling levels. Nested entry is checked before descriptor
+construction; suspended occurrence descriptors remain boxed during prefix authoring. Failed
+expansions leave the parent draft unchanged. Trusted callbacks compose through OperationExpansion;
+this is not a sandbox for unrestricted Rust recursion or stack allocation.
+Empty hooks require identical input/output contracts. The complete expansion owns its input,
+output, expanded failure contract and explicit designated-to-expanded failure map. Original failures
+skip the after hook, which is a success continuation. Every suffix is checked before merging.
 
 Runtime admits `(RunId, Program, C0)`, appends genesis, folds the qualified history, and executes only
 the selected declaration. Pure and Read append one fused conclusion; a Read frame contains intent,
-accepted evidence, and outcome together. Effect execution first appends the complete command and
-derived `EffectId`, and enters the adapter only after known insertion. `Settled(evidence)` binds and
-interprets the evidence before appending the adjacent conclusion. `Pending` retains the identical
-prepare, appends nothing, and returns a Runnable view without re-entering the adapter in that
-invocation. An adapter error also leaves the prepare pending and appends no conclusion, but returns
-its distinct Runtime error. Match is a pure projection and adds no frame. Zero-State Programs
-terminate at genesis. Hot advancement and cold reload use the same fold. Cold fold re-prepares only
-a retained Effect command to validate its exact bytes and identity; retained Pure/Read conclusions
-remain authoritative event-log outcomes.
+accepted evidence and domain outcome, or the original operational error and State-owned context.
+The same frame commits any retry, restart or terminal stop. Accepted recovery spends local/global
+allowance, advances the visit identity and yields; cold reconstruction restores that exact decision
+without invoking a classifier, handler or adapter. Checkpoints retain their active typed input and
+restart drops later checkpoint snapshots. An acknowledged Effect prevents restart across its position.
 
-Journal owns the exact `mfm.run.frame.v2` canonical wire, recursive exact-byte SHA-256 heads, strict
-frame-local object closure, Effect prepare/conclusion adjacency, and history qualification. Store
-sees only sealed frames and opaque complete transfers. It atomically inserts at the exact head or
-writes nothing and has no Effect semantics.
+Effect execution first appends the complete command and derived `EffectId`, and enters the adapter
+only after known insertion. `Settled(evidence)` binds and interprets evidence before appending the
+adjacent conclusion. `Pending` retains the identical prepare, appends nothing and returns an
+`EffectPending` view. An operational adapter error also preserves the prepare, returning a stopped
+invocation with the last observed view and typed incident. Explicit resume uses the same command
+and EffectId. A settled Effect cannot retry or restart. Zero-State Programs terminate at genesis.
+Hot advancement, pre-append validation and cold reconstruction use the sole semantic fold. Cold
+fold re-prepares only the final pending Effect command to validate its exact bytes and identity;
+completed conclusions remain authoritative event-log outcomes.
+
+Journal owns the `mfm.run.frame.v3` canonical wire, recursive exact-byte SHA-256 heads,
+strict frame-local object closure, Effect prepare/conclusion adjacency and history qualification.
+Store sees only sealed frames and opaque complete transfers. It atomically inserts at the exact
+head or writes nothing and has no Effect semantics.
 
 The fixed limits are 8 MiB per canonical run object, 65,536 non-payload envelope bytes, 25,231,360
-bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. Program validates the
-conservative bound `1 + Pure + Read + 2*Effect <= 65,536` across every declaration. These are format
-bounds, not tunable runtime policy.
+bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. For global recovery limit `G`,
+Program bounds frames by `1 + (G + 1) * (Pure + Read + 2*Effect)` and bounds cumulative bytes by
+genesis plus `G + 1` copies of the declared complete sequence closure. Each Pure/Read occurrence
+bounds its complete conclusion; each Effect bounds prepare and conclusion separately. Bounds cover
+all retained canonical objects, root failures and envelopes. Runtime rejects excessive concrete
+admission before genesis or provider entry. Format ceilings are not tunable runtime policy.
 
 Signing owns the checked transient recoverable-secp256k1 public key, 32-byte digest, low-S compact
 recoverable signature, public recovery, and key- and purpose-bound `Secp256k1Signer` contract.

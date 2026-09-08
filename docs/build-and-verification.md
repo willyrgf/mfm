@@ -58,8 +58,8 @@ branch and the two-creation capacity scenario, including maximum input and retur
 bytes, schema admission, complete snapshots, and repeated frame object closure.
 
 The Effect e2e reconstructs Runtime and database handles while retaining the same keystore owner;
-its cold-recovery claim is not a process-restart test. It uses a 60-second progress deadline,
-retries Runnable/Unavailable with a 100 ms interval, and reports typed domain failures immediately.
+its cold-recovery claim is not a process-restart test. It uses a 300-second progress deadline,
+retries Runnable, EffectPending, and reviewed dependency failures with a 100 ms interval, and reports typed domain failures immediately.
 Its terminal checks prove unchanged history, output, and nonce, not absence of provider calls.
 `crates/live/evm/src/transaction_tests.rs` separately verifies prepared-wire recovery with a rejecting
 signer, cancellation, and ambiguous appends at every transaction Journal boundary.
@@ -94,7 +94,7 @@ after they are staged in Git.
 | `nix run .#model-check` | Admit the compiled model without project tasks. |
 | `nix run .#run -- --task postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
 | `nix run .#run -- --task client-e2e` | Generate and interrupt an exact historical REST run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it against Reth, validate and reload its exact snapshot through the CLI, then reimport the same revision and require an independent CLI-generated run to produce the same semantic result. |
-| `nix run .#run -- --task effect-e2e` | Generate and fund an ephemeral keystore wallet, lose the first committed reservation acknowledgement before broadcast, cold-recover deployment and configuration through two expanded four-State transaction graphs, retain both complete transaction histories and anchored evidence in a typed report, decode the getter as 42, prove pending nonce `0 -> 2`, send an external wallet transfer and run a fresh transaction to prove `2 -> 4`, and prove a fresh cold read/resume changes neither the terminal head/value nor the nonce. |
+| `nix run .#run -- --task effect-e2e` | Generate and fund an ephemeral keystore wallet, lose the first committed reservation acknowledgement before broadcast, cold-recover deployment and configuration through two expanded four-State transaction sequences, retain both complete transaction histories and anchored evidence in a typed report, decode the getter as 42, prove pending nonce `0 -> 2`, send an external wallet transfer and run a fresh transaction to prove `2 -> 4`, and prove a fresh cold read/resume changes neither the terminal head/value nor the nonce. |
 | `nix run .#run -- --task capacity-app` | Exercise the exact 64/65-source Portfolio Program/C0 bound. |
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |

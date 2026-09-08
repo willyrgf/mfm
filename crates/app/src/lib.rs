@@ -11,9 +11,7 @@ use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
 use mfm_evm_live::{register_evm_reads, EvmAdapterLocator, EvmReadProvider, JsonRpcEvmProvider};
 use mfm_ids::{ContentRef, RunId};
 use mfm_portfolio::PortfolioError;
-use mfm_runtime::{
-    RetainedValueView, RunView, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError,
-};
+use mfm_runtime::{InvocationFailure, RunView, Runtime, RuntimeAssemblyBuilder, RuntimeError};
 use mfm_storage_postgres::{
     provision_postgres as provision_postgres_backend, AdminPostgresLocator, PostgresBackend,
     RuntimePostgresLocator,
@@ -21,11 +19,12 @@ use mfm_storage_postgres::{
 use mfm_store::{RunIndex, RunIndexError, Store};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
-use serde_json::value::RawValue;
 
 mod config;
 mod deployment;
 mod inspection;
+mod run_view;
+pub use run_view::SerializableRunView;
 
 pub use config::{
     ConfigDocument, ConfigDocumentError, ConfigSummary, EntryPointSummary, ImportOutcome,
@@ -312,7 +311,11 @@ pub struct SerializableClientError<'a> {
 enum ClientErrorDetail<'a> {
     None,
     RunId(&'a RunId),
-    Recovery(&'a RunRecovery),
+    Recovery {
+        recovery: &'a RunRecovery,
+        last_observed: Option<&'a RunView>,
+    },
+    Invocation(&'a InvocationFailure),
 }
 
 impl<'a> SerializableClientError<'a> {
@@ -334,12 +337,22 @@ impl<'a> SerializableClientError<'a> {
         }
     }
 
-    /// Constructs an append error carrying its exact recovery instruction.
-    pub const fn recoverable(code: &'a str, message: &'a str, recovery: &'a RunRecovery) -> Self {
+    /// Renders a run-call failure with its last observed head and any recovery identity.
+    pub fn for_run(error: &'a RunRequestError, message: &'a str) -> Self {
         Self {
-            code,
+            code: error.code(),
             message,
-            detail: ClientErrorDetail::Recovery(recovery),
+            detail: match error {
+                RunRequestError::Request(_) => ClientErrorDetail::None,
+                RunRequestError::AppendIndeterminate {
+                    recovery,
+                    last_observed,
+                } => ClientErrorDetail::Recovery {
+                    recovery,
+                    last_observed: last_observed.as_ref(),
+                },
+                RunRequestError::Invocation(failure) => ClientErrorDetail::Invocation(failure),
+            },
         }
     }
 }
@@ -351,21 +364,37 @@ impl Serialize for SerializableClientError<'_> {
     {
         let mut state = serializer.serialize_struct(
             "ClientError",
-            2 + usize::from(!matches!(self.detail, ClientErrorDetail::None)),
+            2 + match self.detail {
+                ClientErrorDetail::None => 0,
+                ClientErrorDetail::Recovery { .. } => 2,
+                _ => 1,
+            },
         )?;
         state.serialize_field("code", self.code)?;
         state.serialize_field("message", self.message)?;
         match self.detail {
             ClientErrorDetail::None => {}
             ClientErrorDetail::RunId(run_id) => state.serialize_field("run_id", run_id)?,
-            ClientErrorDetail::Recovery(recovery) => state.serialize_field("recovery", recovery)?,
+            ClientErrorDetail::Recovery {
+                recovery,
+                last_observed,
+            } => {
+                state.serialize_field("recovery", recovery)?;
+                state.serialize_field(
+                    "last_observed",
+                    &last_observed.map(SerializableRunView::new),
+                )?;
+            }
+            ClientErrorDetail::Invocation(failure) => {
+                state.serialize_field("invocation", &run_view::Invocation(failure))?
+            }
         }
         state.end()
     }
 }
 
 /// Run mutation failure with exact recovery identity for ambiguous append acknowledgement.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(thiserror::Error)]
 // The public recovery sum deliberately retains its checked fields inline; append ambiguity is an
 // exceptional path and changing the variant to an allocation-shaped API would weaken that contract.
 #[allow(clippy::large_enum_variant)]
@@ -378,7 +407,21 @@ pub enum RunRequestError {
     AppendIndeterminate {
         /// Checked public recovery identity.
         recovery: RunRecovery,
+        /// Last completely qualified observation; it is not a claim about the current head.
+        last_observed: Option<RunView>,
     },
+    /// A call stopped without claiming a durable terminal outcome.
+    #[error("{0}")]
+    Invocation(#[source] InvocationFailure),
+}
+
+impl fmt::Debug for RunRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RunRequestError")
+            .field("code", &self.code())
+            .finish_non_exhaustive()
+    }
 }
 
 impl RunRequestError {
@@ -387,14 +430,30 @@ impl RunRequestError {
         match self {
             Self::Request(error) => error.code(),
             Self::AppendIndeterminate { .. } => "run_append_indeterminate",
+            Self::Invocation(InvocationFailure::Execution { error, .. }) => {
+                map_runtime_error(*error).code()
+            }
+            Self::Invocation(InvocationFailure::RecoveryStopped { .. }) => "recovery_stopped",
+        }
+    }
+
+    /// Returns the reviewed request category when the invocation has an execution fault.
+    pub const fn request_error(&self) -> Option<RequestError> {
+        match self {
+            Self::Request(error) => Some(*error),
+            Self::Invocation(InvocationFailure::Execution { error, .. }) => {
+                Some(map_runtime_error(*error))
+            }
+            Self::AppendIndeterminate { .. }
+            | Self::Invocation(InvocationFailure::RecoveryStopped { .. }) => None,
         }
     }
 
     /// Returns recovery identity only for an ambiguously acknowledged append.
     pub const fn recovery(&self) -> Option<&RunRecovery> {
         match self {
-            Self::Request(_) => None,
-            Self::AppendIndeterminate { recovery } => Some(recovery),
+            Self::Request(_) | Self::Invocation(_) => None,
+            Self::AppendIndeterminate { recovery, .. } => Some(recovery),
         }
     }
 }
@@ -431,76 +490,6 @@ impl Serialize for StartRunResult {
         let mut state = serializer.serialize_struct("StartRunResult", 2)?;
         state.serialize_field("config", &self.config)?;
         state.serialize_field("run", &SerializableRunView::new(&self.run))?;
-        state.end()
-    }
-}
-
-/// Borrowed exact JSON serializer for one [`RunView`].
-pub struct SerializableRunView<'a> {
-    view: &'a RunView,
-}
-
-impl<'a> SerializableRunView<'a> {
-    /// Wraps one run view without changing its retained bytes.
-    pub const fn new(view: &'a RunView) -> Self {
-        Self { view }
-    }
-}
-
-impl Serialize for SerializableRunView<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("RunView", 4)?;
-        state.serialize_field("run_id", self.view.run_id())?;
-        state.serialize_field("head_sequence", &self.view.head_sequence())?;
-        state.serialize_field("head_digest", self.view.head_digest())?;
-        match self.view.state() {
-            RunViewState::Runnable => {
-                state.serialize_field("state", &RunnableState { kind: "runnable" })?
-            }
-            RunViewState::Succeeded(value) => {
-                state.serialize_field("state", &TerminalState::new("succeeded", value))?
-            }
-            RunViewState::Failed(value) => {
-                state.serialize_field("state", &TerminalState::new("failed", value))?
-            }
-        }
-        state.end()
-    }
-}
-
-#[derive(Serialize)]
-struct RunnableState {
-    kind: &'static str,
-}
-
-struct TerminalState<'a> {
-    kind: &'static str,
-    value: &'a RetainedValueView,
-}
-
-impl<'a> TerminalState<'a> {
-    const fn new(kind: &'static str, value: &'a RetainedValueView) -> Self {
-        Self { kind, value }
-    }
-}
-
-impl Serialize for TerminalState<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let raw = std::str::from_utf8(self.value.canonical_bytes())
-            .ok()
-            .and_then(|value| RawValue::from_string(value.to_owned()).ok())
-            .ok_or_else(|| serde::ser::Error::custom("retained canonical value is invalid"))?;
-        let mut state = serializer.serialize_struct("RunViewState", 4)?;
-        state.serialize_field("kind", self.kind)?;
-        state.serialize_field("contract_ref", self.value.contract_ref())?;
-        state.serialize_field("value_ref", self.value.value_ref())?;
-        state.serialize_field("value", &raw)?;
         state.end()
     }
 }
@@ -679,10 +668,15 @@ impl Application {
             .await
         {
             Ok(run) => Ok(StartRunResult { config, run }),
-            Err(RuntimeError::Indeterminate) => Err(RunRequestError::AppendIndeterminate {
+            Err(InvocationFailure::Execution {
+                error: RuntimeError::Store(mfm_store::StoreError::Indeterminate),
+                last_observed,
+                ..
+            }) => Err(RunRequestError::AppendIndeterminate {
                 recovery: RunRecovery::Start { run_id, config },
+                last_observed,
             }),
-            Err(error) => Err(map_runtime_error(error).into()),
+            Err(error) => Err(RunRequestError::Invocation(error)),
         }
     }
 
@@ -690,22 +684,27 @@ impl Application {
     pub async fn progress_run(&self, run_id: &RunId) -> Result<RunView, RunRequestError> {
         match self.composed.runtime.resume(run_id).await {
             Ok(view) => Ok(view),
-            Err(RuntimeError::Indeterminate) => Err(RunRequestError::AppendIndeterminate {
+            Err(InvocationFailure::Execution {
+                error: RuntimeError::Store(mfm_store::StoreError::Indeterminate),
+                last_observed,
+                ..
+            }) => Err(RunRequestError::AppendIndeterminate {
                 recovery: RunRecovery::Progress {
                     run_id: run_id.clone(),
                 },
+                last_observed,
             }),
-            Err(error) => Err(map_runtime_error(error).into()),
+            Err(error) => Err(RunRequestError::Invocation(error)),
         }
     }
 
     /// Reads one retained run without progression.
-    pub async fn read_run(&self, run_id: &RunId) -> Result<RunView, RequestError> {
+    pub async fn read_run(&self, run_id: &RunId) -> Result<RunView, RunRequestError> {
         self.composed
             .runtime
             .read(run_id)
             .await
-            .map_err(map_runtime_error)
+            .map_err(RunRequestError::Invocation)
     }
 
     /// Lists one mechanical keyset page of current run heads.
@@ -791,11 +790,15 @@ const fn map_runtime_error(error: RuntimeError) -> RequestError {
     match error {
         RuntimeError::Absent => RequestError::RunAbsent,
         RuntimeError::AdmissionConflict => RequestError::RunAdmissionConflict,
-        RuntimeError::Indeterminate => RequestError::Internal,
+        RuntimeError::Store(error) => match error {
+            mfm_store::StoreError::Unavailable => RequestError::DependencyUnavailable,
+            mfm_store::StoreError::Capacity => RequestError::RunCapacity,
+            mfm_store::StoreError::CorruptPhysicalState => RequestError::InvalidRunHistory,
+            mfm_store::StoreError::Indeterminate => RequestError::Internal,
+        },
         RuntimeError::InvalidHistory => RequestError::InvalidRunHistory,
         RuntimeError::IncompatibleAssembly => RequestError::IncompatibleAssembly,
         RuntimeError::Capacity => RequestError::RunCapacity,
-        RuntimeError::Unavailable => RequestError::DependencyUnavailable,
         RuntimeError::Internal => RequestError::Internal,
     }
 }
@@ -883,10 +886,12 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                serde_json::to_value(SerializableClientError::recoverable(
-                    "run_append_indeterminate",
+                serde_json::to_value(SerializableClientError::for_run(
+                    &RunRequestError::AppendIndeterminate {
+                        recovery: recovery.clone(),
+                        last_observed: None
+                    },
                     "run append outcome is indeterminate",
-                    recovery,
                 ))
                 .expect("recovery error JSON"),
                 serde_json::from_str::<serde_json::Value>(fixture).expect("recovery fixture")
@@ -918,13 +923,12 @@ mod tests {
             (ComponentKind::EntryPoint, "mfm.portfolio/snapshot@1"),
             (
                 ComponentKind::Operation,
-                "mfm.evm.operation.collect-balances@1",
+                "mfm.evm.operation.collect-balances@2",
             ),
             (
                 ComponentKind::PureState,
                 "mfm.evm.state.consolidate-balance-collection@1",
             ),
-            (ComponentKind::PureState, "mfm.evm.state.select-asset@1"),
             (
                 ComponentKind::PureState,
                 "mfm.portfolio.state.consolidate@1",
@@ -936,10 +940,6 @@ mod tests {
             (ComponentKind::PureState, "mfm.portfolio.state.initialize@1"),
             (
                 ComponentKind::PureState,
-                "mfm.portfolio.state.map-evm-failure@1",
-            ),
-            (
-                ComponentKind::PureState,
                 "mfm.portfolio.state.resume-collection@1",
             ),
             (
@@ -948,11 +948,11 @@ mod tests {
             ),
             (
                 ComponentKind::ReadState,
-                "mfm.evm.state.confirm-balance-anchor@1",
+                "mfm.evm.state.confirm-balance-anchor@2",
             ),
             (
                 ComponentKind::ReadState,
-                "mfm.evm.state.read-initial-anchor@1",
+                "mfm.evm.state.read-initial-anchor@2",
             ),
             (
                 ComponentKind::ReadState,

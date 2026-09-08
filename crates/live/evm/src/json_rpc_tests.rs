@@ -142,7 +142,7 @@ fn anchored_intent(subject: serde_json::Value) -> AnchoredContractCallIntent {
 async fn observe_broad(
     provider: JsonRpcEvmProvider,
     intent: EvmReadIntent,
-) -> Result<EvmReadEvidence, AdapterError> {
+) -> Result<EvmReadEvidence, AdapterError<EvmOperationalError>> {
     let (_, intent_value_ref) = canonicalize_mfm_value(&intent).expect("intent ref");
     provider.observe(&intent_value_ref, &intent).await
 }
@@ -150,7 +150,7 @@ async fn observe_broad(
 async fn observe_anchored(
     provider: JsonRpcEvmProvider,
     intent: AnchoredContractCallIntent,
-) -> Result<AnchoredContractCallEvidence, AdapterError> {
+) -> Result<AnchoredContractCallEvidence, AdapterError<EvmOperationalError>> {
     let (_, intent_value_ref) = canonicalize_mfm_value(&intent).expect("intent ref");
     provider
         .observe_anchored_call(&intent_value_ref, &intent)
@@ -170,7 +170,7 @@ fn anchor() -> serde_json::Value {
     serde_json::json!({ "number": "17", "hash": BLOCK_HASH })
 }
 
-fn abi_word(value: &str) -> Result<AbiWord, AdapterError> {
+fn abi_word(value: &str) -> Result<AbiWord, AdapterError<EvmOperationalError>> {
     AbiWord::try_from(RpcData::parse(value, 33)?)
 }
 
@@ -202,8 +202,14 @@ fn conversions_and_calldata_are_exact() {
 
     assert!(RpcData::parse("0x", 1).expect("empty data").0.is_empty());
     assert_eq!(RpcData::parse("0x00", 1).expect("zero byte").0, [0_u8]);
-    assert_eq!(RpcData::parse("0x0", 1), Err(AdapterError::Unavailable));
-    assert_eq!(RpcData::parse("0x0000", 1), Err(AdapterError::Unavailable));
+    assert_eq!(
+        RpcData::parse("0x0", 1),
+        Err(AdapterError::Operational(EvmOperationalError::Unavailable))
+    );
+    assert_eq!(
+        RpcData::parse("0x0000", 1),
+        Err(AdapterError::Operational(EvmOperationalError::Unavailable))
+    );
 
     let zero_word = format!("0x{}", "00".repeat(32));
     let one_word = format!("0x{}01", "00".repeat(31));
@@ -407,7 +413,10 @@ async fn malformed_or_wrong_sized_abi_data_is_unavailable() {
             })),
         )
         .await;
-        assert_eq!(response, Err(AdapterError::Unavailable));
+        assert_eq!(
+            response,
+            Err(AdapterError::Operational(EvmOperationalError::Unavailable))
+        );
     }
 }
 
@@ -428,7 +437,10 @@ async fn rpc_errors_are_unavailable_but_empty_token_data_is_safe_failure() {
         token_intent(),
     )
     .await;
-    assert_eq!(rpc_error, Err(AdapterError::Unavailable));
+    assert_eq!(
+        rpc_error,
+        Err(AdapterError::Operational(EvmOperationalError::Unavailable))
+    );
 
     let empty = observe_broad(
         Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":"0x"}"#.into()]).provider(),
@@ -452,7 +464,11 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
             intent(serde_json::json!({ "kind": "initial_anchor" })),
         )
         .await;
-        assert_eq!(response, Err(AdapterError::Unavailable), "body {body}");
+        assert_eq!(
+            response,
+            Err(AdapterError::Operational(EvmOperationalError::Unavailable)),
+            "body {body}"
+        );
     }
 
     let unbound = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -464,7 +480,10 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
         intent(serde_json::json!({ "kind": "chain_identity" })),
     )
     .await;
-    assert_eq!(response, Err(AdapterError::Unavailable));
+    assert_eq!(
+        response,
+        Err(AdapterError::Operational(EvmOperationalError::Unavailable))
+    );
 }
 
 #[tokio::test]
@@ -483,7 +502,10 @@ async fn incomplete_or_malformed_rpc_errors_are_unavailable() {
             intent(serde_json::json!({ "kind": "chain_identity" })),
         )
         .await;
-        assert_eq!(response, Err(AdapterError::Unavailable));
+        assert_eq!(
+            response,
+            Err(AdapterError::Operational(EvmOperationalError::Unavailable))
+        );
     }
 }
 
@@ -546,7 +568,11 @@ async fn rpc_envelope_version_id_and_fields_are_exact() {
             intent(serde_json::json!({ "kind": "chain_identity" })),
         )
         .await;
-        assert_eq!(response, Err(AdapterError::Unavailable), "body {body}");
+        assert_eq!(
+            response,
+            Err(AdapterError::Operational(EvmOperationalError::Unavailable)),
+            "body {body}"
+        );
     }
 }
 
@@ -592,7 +618,10 @@ async fn redirects_never_leave_the_selected_endpoint() {
         intent(serde_json::json!({ "kind": "chain_identity" })),
     )
     .await;
-    assert_eq!(response, Err(AdapterError::Unavailable));
+    assert_eq!(
+        response,
+        Err(AdapterError::Operational(EvmOperationalError::Unavailable))
+    );
     redirect_worker.join().expect("redirect worker");
 
     let _ = TcpStream::connect(target_address);
@@ -613,7 +642,7 @@ async fn loopback_submission_acknowledgement_drop_after_full_request_is_unavaila
             .expect("provider")
             .submit_raw(&raw)
             .await,
-        Err(AdapterError::Unavailable)
+        Err(AdapterError::Operational(EvmOperationalError::Unavailable))
     );
     let request: serde_json::Value =
         serde_json::from_slice(&worker.join().expect("drop server")).expect("request JSON");
@@ -705,7 +734,7 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
                 .provider()
                 .submit_raw(&raw)
                 .await,
-            Err(AdapterError::Unavailable),
+            Err(AdapterError::Operational(EvmOperationalError::Unavailable)),
             "body {body}"
         );
     }
@@ -721,7 +750,10 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         if body.contains("result") {
             assert_eq!(result, Ok(None));
         } else {
-            assert_eq!(result, Err(AdapterError::Unavailable));
+            assert_eq!(
+                result,
+                Err(AdapterError::Operational(EvmOperationalError::Unavailable))
+            );
         }
     }
 }
@@ -872,7 +904,7 @@ async fn nullable_rpc_results_require_the_result_field() {
     ] {
         assert_eq!(
             Stub::new(vec![body.into()]).provider().receipt(&hash).await,
-            Err(AdapterError::Unavailable)
+            Err(AdapterError::Operational(EvmOperationalError::Unavailable))
         );
         let intent = anchored_intent(serde_json::json!({
             "kind": "anchored_contract_call",
@@ -880,7 +912,7 @@ async fn nullable_rpc_results_require_the_result_field() {
         }));
         assert_eq!(
             observe_anchored(Stub::new(vec![body.into()]).provider(), intent.clone()).await,
-            Err(AdapterError::Unavailable)
+            Err(AdapterError::Operational(EvmOperationalError::Unavailable))
         );
         let block = format!(
             r#"{{"jsonrpc":"2.0","id":1,"result":{{"number":"0x11","hash":"{BLOCK_HASH}"}}}}"#
@@ -893,7 +925,7 @@ async fn nullable_rpc_results_require_the_result_field() {
         ]);
         assert_eq!(
             observe_anchored(stub.provider(), intent).await,
-            Err(AdapterError::Unavailable)
+            Err(AdapterError::Operational(EvmOperationalError::Unavailable))
         );
         assert_eq!(stub.observed_requests().len(), 4);
     }
@@ -904,4 +936,44 @@ async fn nullable_rpc_results_require_the_result_field() {
             .await,
         Ok(None)
     );
+}
+
+#[tokio::test]
+async fn transport_deadline_and_http_rate_limit_preserve_typed_operational_causes() {
+    for timeout in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let locator =
+            EvmAdapterLocator::parse(format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let (release, released) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            if timeout {
+                // Keep the response pending until the real provider deadline returns.
+                released.recv().unwrap();
+            } else {
+                stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            }
+            request
+        });
+        let provider = JsonRpcEvmProvider::connect(&locator).unwrap();
+        let response = observe_broad(
+            provider,
+            intent(serde_json::json!({ "kind": "chain_identity" })),
+        )
+        .await;
+        if timeout {
+            release.send(()).unwrap();
+        }
+        let request: serde_json::Value = serde_json::from_slice(&worker.join().unwrap()).unwrap();
+        assert_eq!(request["method"], "eth_chainId");
+        assert_eq!(
+            response,
+            Err(AdapterError::Operational(if timeout {
+                EvmOperationalError::Timeout
+            } else {
+                EvmOperationalError::RateLimited
+            }))
+        );
+    }
 }

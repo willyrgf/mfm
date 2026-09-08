@@ -60,6 +60,9 @@ pub use self::checked::*;
 mod identity;
 pub use self::identity::*;
 
+mod position;
+pub use position::{ExecutionPosition, StatePosition, VisitId};
+
 /// Category-branded version string with checked grammar.
 pub struct Version<K> {
     value: String,

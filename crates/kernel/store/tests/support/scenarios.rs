@@ -1,6 +1,11 @@
 use mfm_canonical::raw_content_digest;
-use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId};
-use mfm_journal::{EncodedRunFrame, JournalHistory, OutcomeKind};
+use mfm_ids::{
+    ContentRef, DigestAlgorithm, DigestBytes, ExecutionPosition, RunId, SchemaId, StatePosition,
+    VisitId,
+};
+use mfm_journal::{
+    DomainConclusion, DomainDecision, EncodedRunFrame, JournalHistory, JournalObject, StopCode,
+};
 use mfm_store::{AppendResult, Store};
 
 pub fn run(byte: u8) -> RunId {
@@ -55,9 +60,13 @@ pub async fn exercise_store(store: &dyn Store, run: &RunId) {
     let output = br#"{"value":3}"#;
     let second = history
         .encode_pure_conclusion(
-            OutcomeKind::Success,
-            &reference("mfm.test.output", output),
-            output,
+            ExecutionPosition {
+                state: StatePosition::new(0).unwrap(),
+                visit: VisitId::new(0),
+            },
+            DomainConclusion::Success {
+                output: JournalObject::new(&reference("mfm.test.output", output), output).unwrap(),
+            },
         )
         .expect("second");
     assert_eq!(
@@ -74,16 +83,37 @@ pub async fn exercise_store(store: &dyn Store, run: &RunId) {
     let right_bytes = br#"{"value":5}"#;
     let left = history
         .encode_pure_conclusion(
-            OutcomeKind::Success,
-            &reference("mfm.test.output", left_bytes),
-            left_bytes,
+            ExecutionPosition {
+                state: StatePosition::new(1).unwrap(),
+                visit: VisitId::new(1),
+            },
+            DomainConclusion::Success {
+                output: JournalObject::new(&reference("mfm.test.output", left_bytes), left_bytes)
+                    .unwrap(),
+            },
         )
         .expect("left candidate");
     let right = history
         .encode_pure_conclusion(
-            OutcomeKind::Failure,
-            &reference("mfm.test.failure", right_bytes),
-            right_bytes,
+            ExecutionPosition {
+                state: StatePosition::new(1).unwrap(),
+                visit: VisitId::new(1),
+            },
+            DomainConclusion::Failure {
+                original: JournalObject::new(
+                    &reference("mfm.test.failure", right_bytes),
+                    right_bytes,
+                )
+                .unwrap(),
+                decision: DomainDecision::Stop {
+                    reason: StopCode::Nonrecoverable,
+                    root: JournalObject::new(
+                        &reference("mfm.test.failure", right_bytes),
+                        right_bytes,
+                    )
+                    .unwrap(),
+                },
+            },
         )
         .expect("right candidate");
     let (left_result, right_result) =

@@ -45,7 +45,8 @@ use zeroize::Zeroizing;
 
 const MAX_INITCODE_BYTES: usize = 49_152;
 const MAX_FUNDING_RESPONSE_BYTES: usize = 16 * 1024;
-const PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
+// Cold progress requalifies the complete accumulating history on every invocation.
+const PROGRESS_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 const CONFIGURED_VALUE: u64 = 42;
@@ -343,8 +344,8 @@ async fn generated_signer(owner: &KeystoreOwner) -> Arc<dyn Secp256k1Signer> {
     panic!("four entropy candidates did not contain a valid secp256k1 scalar")
 }
 
-async fn drive_to_success<F: serde::de::DeserializeOwned + std::fmt::Debug>(
-    mut step: impl AsyncFnMut() -> mfm_runtime::Result<RunView>,
+async fn drive_to_success<F: mfm_values::MfmValue + std::fmt::Debug>(
+    mut step: impl AsyncFnMut() -> Result<RunView, mfm_runtime::InvocationFailure>,
 ) -> RunView {
     let mut last_progress = String::from("no completed invocation");
     tokio::time::timeout(PROGRESS_TIMEOUT, async {
@@ -353,20 +354,26 @@ async fn drive_to_success<F: serde::de::DeserializeOwned + std::fmt::Debug>(
                 Ok(view) => match view.state() {
                     RunViewState::Succeeded(_) => return view,
                     RunViewState::Failed(value) => {
-                        let failure: F = serde_json::from_slice(value.canonical_bytes())
-                            .expect("typed fixture failure");
+                        let failure: F = root_failure(value);
                         panic!(
                             "fixture failed at frame {}: {failure:?}",
                             view.head_sequence()
                         );
                     }
-                    RunViewState::Runnable => {
-                        last_progress = format!("runnable at frame {}", view.head_sequence())
+                    RunViewState::Runnable { .. } | RunViewState::EffectPending { .. } => {
+                        last_progress = format!("runnable at frame {}", view.head_sequence());
+                        eprintln!("{last_progress}");
                     }
                 },
-                Err(RuntimeError::Unavailable) => {
-                    last_progress = String::from("dependency unavailable")
-                }
+                Err(mfm_runtime::InvocationFailure::RecoveryStopped { .. })
+                | Err(mfm_runtime::InvocationFailure::Execution {
+                    error:
+                        RuntimeError::Store(
+                            mfm_store::StoreError::Unavailable
+                            | mfm_store::StoreError::Indeterminate,
+                        ),
+                    ..
+                }) => last_progress = String::from("dependency unavailable"),
                 Err(error) => panic!("unexpected fixture progress error: {error:?}"),
             }
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -469,7 +476,10 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         EntryPointId::new("mfm.test.evm-effect/run@1").expect("entry point"),
         &EffectFixtureOperation {
             binding: binding.clone(),
+            bound: fixture_bound(&input),
         },
+        &input,
+        mfm_program::ProgramLimits::new(1),
     )
     .expect("fixture Program");
     let run_id = RunId::from_digest(DigestBytes::from_array([0x5a; 32]));
@@ -488,7 +498,10 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     )
     .await
     .expect("initial reservation deadline");
-    assert!(matches!(initial, Err(RuntimeError::Unavailable)));
+    assert!(matches!(
+        initial,
+        Err(mfm_runtime::InvocationFailure::RecoveryStopped { .. })
+    ));
     assert!(consumed.load(Ordering::SeqCst));
     assert_eq!(
         setup_provider
@@ -592,23 +605,32 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     );
     let cold_runtime = runtime(&runtime_locator, &rpc_locator, &binding, signer, consumed).await;
     let fresh_run = RunId::from_digest(DigestBytes::from_array([0x5b; 32]));
+    let fresh_input = WalletContext {
+        transaction: fresh_plan.clone(),
+        label: 18,
+    };
     let fresh_program = expand_program(
         EntryPointId::new("mfm.test.evm-effect/wallet-call@1").unwrap(),
-        &WalletTransaction::new(binding.clone()),
+        &WalletTransaction::new(
+            binding.clone(),
+            transaction_bounds(fixture_bound(&fresh_input)),
+        ),
+        &fresh_input,
+        mfm_program::ProgramLimits::new(1),
     )
     .unwrap();
     // Resume first so Unavailable from admission is retried without assuming genesis committed.
     let wallet_terminal =
         drive_to_success::<WalletFailure>(async || match cold_runtime.resume(&fresh_run).await {
-            Err(RuntimeError::Absent) => {
+            Err(mfm_runtime::InvocationFailure::Execution {
+                error: RuntimeError::Absent,
+                ..
+            }) => {
                 cold_runtime
                     .start(
                         fresh_run.clone(),
                         fresh_program.clone(),
-                        WalletContext {
-                            transaction: fresh_plan.clone(),
-                            label: 18,
-                        },
+                        fresh_input.clone(),
                     )
                     .await
             }

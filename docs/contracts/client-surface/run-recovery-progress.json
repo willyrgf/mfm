@@ -4,5 +4,6 @@
   "recovery": {
     "kind": "progress",
     "run_id": "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111"
-  }
+  },
+  "last_observed": null
 }

@@ -9,5 +9,6 @@
       "digest": "content:sha256-jcs-v1:0723d5ccf638cfcf6bb85d96de269e93adcef0847147ace563d09464c8c12250",
       "entry_point": "mfm.portfolio/snapshot@1"
     }
-  }
+  },
+  "last_observed": null
 }

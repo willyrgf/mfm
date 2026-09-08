@@ -284,7 +284,10 @@ async fn accumulated_fixture_preserves_all_success_failure_and_cold_facts() {
             EntryPointId::new("mfm.test/accumulated-contract@1").unwrap(),
             &EffectFixtureOperation {
                 binding: binding.clone(),
+                bound: fixture_bound(&input),
             },
+            &input,
+            mfm_program::ProgramLimits::new(1),
         )
         .unwrap();
         let terminal = runtime
@@ -338,8 +341,7 @@ async fn accumulated_fixture_preserves_all_success_failure_and_cold_facts() {
                 assert!(serde_json::from_value::<FixtureReport>(hostile).is_err());
             }
             (RunViewState::Failed(value), Some(reason)) => {
-                let failure: FixtureFailure =
-                    serde_json::from_slice(value.canonical_bytes()).unwrap();
+                let failure: FixtureFailure = root_failure(value);
                 assert_eq!(failure.request(), &input.request);
                 assert_eq!(failure.reason(), reason);
                 assert_eq!(failure.plans().creations, input.deployment);
@@ -398,11 +400,13 @@ async fn accumulated_fixture_preserves_all_success_failure_and_cold_facts() {
             assert_eq!(view.head_digest(), terminal.head_digest());
             assert_eq!(view.head_sequence(), terminal.head_sequence());
             let bytes = match view.state() {
-                RunViewState::Succeeded(v) | RunViewState::Failed(v) => v.canonical_bytes(),
+                RunViewState::Succeeded(v) => v.canonical_bytes(),
+                RunViewState::Failed(v) => v.canonical_bytes(),
                 _ => panic!("terminal"),
             };
             let expected = match terminal.state() {
-                RunViewState::Succeeded(v) | RunViewState::Failed(v) => v.canonical_bytes(),
+                RunViewState::Succeeded(v) => v.canonical_bytes(),
+                RunViewState::Failed(v) => v.canonical_bytes(),
                 _ => panic!("terminal"),
             };
             assert_eq!(bytes, expected);
@@ -417,7 +421,11 @@ async fn accumulated_fixture_preserves_all_success_failure_and_cold_facts() {
                         let mut failure_view = Some(terminal);
                         drive_to_success::<FixtureFailure>(async || {
                             if std::mem::take(&mut unavailable) {
-                                return Err(RuntimeError::Unavailable);
+                                return Err(mfm_runtime::InvocationFailure::Execution {
+                                    run_id: id.clone(),
+                                    error: RuntimeError::Store(StoreError::Unavailable),
+                                    last_observed: None,
+                                });
                             }
                             Ok(failure_view
                                 .take()

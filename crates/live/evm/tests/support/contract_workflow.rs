@@ -444,53 +444,89 @@ impl PureState for DecodeValue {
     }
 }
 
-pub struct Abort<I, O, F = FixtureFailure>(PhantomData<fn(I) -> (O, F)>);
-impl<I: MfmValue, O: MfmValue, F: MfmValue> State for Abort<I, O, F>
-where
-    F: TryFrom<I>,
-{
+pub struct MapFailure<I, F = FixtureFailure>(PhantomData<fn(I) -> F>);
+impl<I: MfmValue, F: MfmValue + TryFrom<I>> mfm_program::ValueMap for MapFailure<I, F> {
     type Input = I;
-    type Output = O;
-    type Failure = F;
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.evm-effect/abort@2").map_err(|_| ProgramError::InvalidContract)
+    type Output = F;
+    type Params = mfm_program::NoParams;
+    fn implementation_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.test.evm-effect/map-failure@1")
+            .map_err(|_| ProgramError::InvalidContract)
+    }
+    fn apply(_: &Self::Params, input: I) -> Result<F, StateExecutionError> {
+        F::try_from(input).map_err(|_| StateExecutionError)
     }
 }
-impl<I: MfmValue, O: MfmValue, F: MfmValue> PureState for Abort<I, O, F>
-where
-    F: TryFrom<I>,
-{
-    fn evaluate(input: I) -> Result<ProposedStateOutcome<O, F>, StateExecutionError> {
-        Ok(ProposedStateOutcome::Failure {
-            failure: F::try_from(input).map_err(|_| StateExecutionError)?,
-        })
+
+pub fn fixture_bound<T: MfmValue>(input: &T) -> mfm_program::ConclusionBound {
+    let input_bytes = mfm_values::canonicalize_mfm_value(input)
+        .unwrap()
+        .0
+        .as_bytes()
+        .len() as u64;
+    // The workflows retain at most three transactions and one anchored observation.
+    // Four copies cover original context, mapped failure plans/progress and observation
+    // evidence. Each copy reserves the maximum base64 return and 64 KiB for bounded
+    // transaction facts, references, outcome fields and the complete frame envelope.
+    let returned = 4 * (mfm_evm::MAX_EVM_CALL_RETURN_BYTES as u64).div_ceil(3);
+    mfm_program::ConclusionBound::new(4 * (input_bytes + returned + 65_536)).unwrap()
+}
+
+pub fn transaction_bounds(bound: mfm_program::ConclusionBound) -> mfm_evm::EvmTransactionBounds {
+    let effect =
+        mfm_program::EffectBounds::new(bound.max_frame_bytes(), bound.max_frame_bytes()).unwrap();
+    mfm_evm::EvmTransactionBounds {
+        reservation: effect,
+        preparation: effect,
+        execution: effect,
+        projection: bound,
     }
 }
 
 pub struct EffectFixtureOperation {
     pub binding: EvmTransactionBinding,
+    pub bound: mfm_program::ConclusionBound,
 }
 impl Operation for EffectFixtureOperation {
     type Input = Initial;
     type Output = FixtureReport;
     type Failure = FixtureFailure;
+    fn validate_input(&self, input: &Initial) -> mfm_program::Result<()> {
+        if input.deployment.binding() != &self.binding
+            || input.configuration.binding() != &self.binding
+            || input.observation.route_ref()
+                != &self
+                    .binding
+                    .route
+                    .binding_ref()
+                    .map_err(|_| ProgramError::InvalidContract)?
+            || input.observation.chain_id() != self.binding.route.chain_instance.chain_id
+        {
+            return Err(ProgramError::InvalidContract);
+        }
+        Ok(())
+    }
     fn expand(
         &self,
         body: &mut OperationExpansion<Initial, FixtureReport, FixtureFailure>,
     ) -> mfm_program::Result<()> {
-        body.with_failure_handler::<DeployFailure, Deployment>(
-            |protected| protected.operation(&Deploy::new(self.binding.clone())),
-            |handler| handler.pure::<Abort<DeployFailure, Deployment>>(),
+        use mfm_program::{Identity, NoParams, Occurrence};
+        let bounds = transaction_bounds(self.bound);
+        body.operation::<Deploy, MapFailure<DeployFailure>>(
+            &Deploy::new(self.binding.clone(), bounds),
+            NoParams,
         )?;
-        body.with_failure_handler::<ConfigureFailure, Configuration>(
-            |protected| protected.operation(&Configure::new(self.binding.clone())),
-            |handler| handler.pure::<Abort<ConfigureFailure, Configuration>>(),
+        body.operation::<Configure, MapFailure<ConfigureFailure>>(
+            &Configure::new(self.binding.clone(), bounds),
+            NoParams,
         )?;
-        body.with_failure_handler::<ObserveFailure, Observed>(
-            |protected| protected.read::<Observe, EvmAnchoredContractCallRead>(&self.binding.route),
-            |handler| handler.pure::<Abort<ObserveFailure, Observed>>(),
+        body.read::<Observe, EvmAnchoredContractCallRead, MapFailure<ObserveFailure>>(
+            &self.binding.route,
+            NoParams,
+            Occurrence::new(),
+            self.bound,
         )?;
-        body.pure::<DecodeValue>()
+        body.pure::<DecodeValue, Identity<FixtureFailure>>(NoParams, Occurrence::new(), self.bound)
     }
 }
 
@@ -499,7 +535,14 @@ pub fn register_fixture_states(builder: &mut RuntimeAssemblyBuilder) -> mfm_runt
     register_evm_transaction_states::<Deployment, ConfigureRecipe>(builder)?;
     builder.register_read::<Observe, EvmAnchoredContractCallRead>()?;
     builder.register_pure::<DecodeValue>()?;
-    builder.register_pure::<Abort<DeployFailure, Deployment>>()?;
-    builder.register_pure::<Abort<ConfigureFailure, Configuration>>()?;
-    builder.register_pure::<Abort<ObserveFailure, Observed>>()
+    builder.register_map::<MapFailure<DeployFailure>>()?;
+    builder.register_map::<MapFailure<ConfigureFailure>>()?;
+    builder.register_map::<MapFailure<ObserveFailure>>()
+}
+
+pub fn root_failure<F: MfmValue>(report: &mfm_runtime::FailureReport) -> F {
+    let mfm_runtime::FailureCauseView::Domain { root, .. } = report.cause() else {
+        panic!("expected domain failure")
+    };
+    root.decode::<F>().unwrap()
 }

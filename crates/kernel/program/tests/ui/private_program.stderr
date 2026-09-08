@@ -1,0 +1,22 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/private_program.rs:4:22
+  |
+4 |       let _ = Program::new;
+  |                        ^^^ private associated function
+  |
+ ::: src/program.rs
+  |
+  | /     pub(crate) fn new(
+  | |         entry_point_id: EntryPointId,
+  | |         admitted: ContentRef,
+  | |         initial_value_ref: ContentRef,
+... |
+  | |         limits: ProgramLimits,
+  | |     ) -> Result<Self> {
+  | |_____________________- private associated function defined here
+
+error: cannot construct `StateDeclaration` with struct literal syntax due to private fields
+ --> tests/ui/private_program.rs:5:18
+  |
+5 |     let _state = StateDeclaration {};
+  |                  ^^^^^^^^^^^^^^^^
