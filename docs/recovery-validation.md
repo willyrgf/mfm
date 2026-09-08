@@ -94,7 +94,11 @@ config deletion, publishes through REST, repeats through CLI, executes a depende
 recovers its exact start after published-config deletion. The initial run's 204 JSON fixture error
 was fixed; it was not a product failure.
 
-Final composed CI has not run.
+The first composed CI run passed format, SQLx, Clippy and workspace compilation. It was cancelled
+during workspace tests after the acceptance audit identified missing nested/global-budget coverage.
+The new Runtime regression alternates inner and outer checkpoint restoration, proves preserved
+inputs and cold positions, and exhausts global and local restart allowances independently. It passed
+in 0.32 seconds without implementation changes. The final composed CI result remains pending.
 
 ## Material uncertainties
 
