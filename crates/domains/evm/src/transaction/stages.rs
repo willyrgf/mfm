@@ -498,19 +498,8 @@ impl<C: MfmValueTrait, R: TransactionRecipe<C>> CapabilityInjection<PrepareEvmTr
 impl<C: MfmValueTrait, R: TransactionRecipe<C>> CapabilityInjection<ExecuteEvmTransaction<C, R>>
     for EvmTransactionEffect
 where
-    R::Slot: ContextSlot<
-            ReservedContext<C, R>,
-            Value = ReservedEvmTransaction,
-            With<PreparedTransactionFacts> = PreparedContext<C, R>,
-        > + ContextSlot<
-            PreparedContext<C, R>,
-            Value = PreparedTransactionFacts,
-            With<ExecutedTransactionFacts> = ExecutedContext<C, R>,
-        > + ContextSlot<
-            ExecutedContext<C, R>,
-            Value = ExecutedTransactionFacts,
-            With<CompletedTransactionFacts<R::Success>> = CompletedContext<C, R>,
-        >,
+    PrepareEvmTransaction<C, R>: EffectState<EvmTransactionPreparationEffect>,
+    ProjectEvmTransactionOutcome<C, R>: PureState,
 {
     type Setup = EvmTransactionBinding;
     type ExpandedInput = C;
@@ -560,19 +549,14 @@ impl<C, R> EvmTransaction<C, R> {
 }
 impl<C: MfmValueTrait, R: TransactionRecipe<C>> Operation for EvmTransaction<C, R>
 where
-    R::Slot: ContextSlot<
-            ReservedContext<C, R>,
-            Value = ReservedEvmTransaction,
-            With<PreparedTransactionFacts> = PreparedContext<C, R>,
-        > + ContextSlot<
-            PreparedContext<C, R>,
-            Value = PreparedTransactionFacts,
-            With<ExecutedTransactionFacts> = ExecutedContext<C, R>,
-        > + ContextSlot<
-            ExecutedContext<C, R>,
-            Value = ExecutedTransactionFacts,
-            With<CompletedTransactionFacts<R::Success>> = CompletedContext<C, R>,
-        >,
+    ExecuteEvmTransaction<C, R>: EffectState<EvmTransactionEffect>,
+    EvmTransactionEffect: CapabilityInjection<
+        ExecuteEvmTransaction<C, R>,
+        Setup = EvmTransactionBinding,
+        ExpandedInput = C,
+        ExpandedOutput = CompletedContext<C, R>,
+        ExpandedFailure = EvmTransactionFailure<ExecutedContext<C, R>>,
+    >,
 {
     type Input = C;
     type Output = CompletedContext<C, R>;

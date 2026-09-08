@@ -1,7 +1,5 @@
 //! Explicit reservation, preparation, and execution adapters for EVM transaction States.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use mfm_capabilities::EffectCapabilityContract;
@@ -20,14 +18,10 @@ use mfm_signing::{recover_public_key, Secp256k1Signer};
 use crate::codec::{
     create_address, signed_transaction, transaction_signing_digest, validate_signed_transaction,
 };
-use crate::ethereum_address;
+use crate::{ethereum_address, ProviderFuture};
 
 /// Exact signing-purpose identity for fixed EIP-1559 transactions.
 pub const EVM_EIP1559_SIGNING_PURPOSE_ID: &str = "mfm.evm.sign-eip1559@1";
-
-/// Borrowing boxed transaction-provider operation.
-pub type EvmTransactionProviderFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, AdapterError>> + Send + 'a>>;
 
 /// Closed provider receipt result preserving create-or-call shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,29 +94,28 @@ impl ProviderReceipt {
 /// Minimal transaction-only provider facet.
 pub trait EvmTransactionProvider: Send + Sync + 'static {
     /// Observes the endpoint's chain ID and genesis block hash.
-    fn chain_instance(&self) -> EvmTransactionProviderFuture<'_, EvmChainInstance>;
+    fn chain_instance(&self) -> ProviderFuture<'_, EvmChainInstance>;
 
     /// Observes the sender's pending transaction count.
-    fn pending_nonce<'a>(&'a self, sender: &'a EvmAddress)
-        -> EvmTransactionProviderFuture<'a, u64>;
+    fn pending_nonce<'a>(&'a self, sender: &'a EvmAddress) -> ProviderFuture<'a, u64>;
 
     /// Observes one exact transaction receipt, where absence is expected and retryable.
     fn receipt<'a>(
         &'a self,
         transaction_hash: &'a EvmHash,
-    ) -> EvmTransactionProviderFuture<'a, Option<ProviderReceipt>>;
+    ) -> ProviderFuture<'a, Option<ProviderReceipt>>;
 
     /// Observes the current canonical identity of one exact block number.
     fn canonical_block<'a>(
         &'a self,
         block_number: &'a mfm_evm::EvmU256,
-    ) -> EvmTransactionProviderFuture<'a, EvmBlockAnchor>;
+    ) -> ProviderFuture<'a, EvmBlockAnchor>;
 
     /// Submits exact retained signed bytes and returns the node's transaction hash.
     fn submit_raw<'a>(
         &'a self,
         raw_transaction: &'a ExactRawTransaction,
-    ) -> EvmTransactionProviderFuture<'a, EvmHash>;
+    ) -> ProviderFuture<'a, EvmHash>;
 }
 
 use mfm_evm::{
