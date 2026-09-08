@@ -309,8 +309,8 @@ fn workflow() -> Initial {
         vec![1],
         EvmU256::from_u64(0),
         NonZeroU64::new(1).unwrap(),
-        EvmU256::from_u64(1),
-        EvmU256::from_u64(2),
+        (1) as u128,
+        (2) as u128,
     )
     .unwrap()
     .command_for(EvmAddress::from_bytes([0x33; 20]));

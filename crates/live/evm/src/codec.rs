@@ -110,14 +110,8 @@ fn unsigned_transaction(
         chain_id: command.binding().route.chain_instance.chain_id.get(),
         nonce,
         gas_limit: command.gas_limit().get(),
-        max_fee_per_gas: command
-            .max_fee_per_gas()
-            .to_u128()
-            .ok_or(EvmCodecError::Invalid)?,
-        max_priority_fee_per_gas: command
-            .max_priority_fee_per_gas()
-            .to_u128()
-            .ok_or(EvmCodecError::Invalid)?,
+        max_fee_per_gas: command.max_fee_per_gas(),
+        max_priority_fee_per_gas: command.max_priority_fee_per_gas(),
         to: command.to().map_or(TxKind::Create, |address| {
             TxKind::Call(Address::from(*address.as_bytes()))
         }),

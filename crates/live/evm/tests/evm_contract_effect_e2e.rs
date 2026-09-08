@@ -457,8 +457,8 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         initcode,
         EvmU256::from_u64(0),
         nonzero(DEPLOYMENT_GAS),
-        EvmU256::from_u64(PRIORITY_FEE),
-        EvmU256::from_u64(MAX_FEE),
+        (PRIORITY_FEE) as u128,
+        (MAX_FEE) as u128,
     )
     .expect("checked deployment");
     let configuration = CheckedCallPlan::new(
@@ -466,8 +466,8 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         fixture_configure_calldata(),
         EvmU256::from_u64(0),
         nonzero(CONFIGURATION_GAS),
-        EvmU256::from_u64(PRIORITY_FEE),
-        EvmU256::from_u64(MAX_FEE),
+        (PRIORITY_FEE) as u128,
+        (MAX_FEE) as u128,
     )
     .expect("checked configuration");
     let observation = CheckedObservationPlan::new(binding.route.clone(), VALUE_SELECTOR.to_vec())
@@ -598,8 +598,8 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
             Vec::new(),
             EvmU256::from_u64(0),
             nonzero(21_000),
-            EvmU256::from_u64(PRIORITY_FEE),
-            EvmU256::from_u64(MAX_FEE),
+            (PRIORITY_FEE) as u128,
+            (MAX_FEE) as u128,
         )
         .unwrap(),
         sender.clone(),

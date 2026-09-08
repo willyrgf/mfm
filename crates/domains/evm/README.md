@@ -73,3 +73,6 @@ shape, and closed evidence. Authenticated integrity evidence maps to the distinc
 signer handle, nonce authority, broadcast, or ambient IO dependency.
 
 Checked identity products expose named fields; commands and correlated facts retain checked constructors.
+
+Transaction factories accept `u128` fees. Plans and complete commands share nested `parameters`
+with `binding`, `value`, `gas_limit`, and checked `fees` (`priority` and `maximum` decimal strings).

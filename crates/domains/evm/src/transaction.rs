@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::fmt;
 use std::num::NonZeroU64;
 
@@ -162,13 +161,6 @@ impl EvmU256 {
     /// Returns this value as `u128` when it fits that checked range.
     pub fn to_u128(&self) -> Option<u128> {
         self.value.parse().ok()
-    }
-
-    pub(crate) fn numeric_cmp(&self, other: &Self) -> Ordering {
-        self.value
-            .len()
-            .cmp(&other.value.len())
-            .then_with(|| self.value.cmp(&other.value))
     }
 }
 
@@ -348,12 +340,8 @@ impl TransactionAction {
     schema = "mfm.evm-eip1559-transaction-command"
 )]
 pub struct Eip1559TransactionCommand {
+    parameters: TransactionParameters,
     action: TransactionAction,
-    binding: EvmTransactionBinding,
-    gas_limit: NonZeroU64,
-    max_fee_per_gas: EvmU256,
-    max_priority_fee_per_gas: EvmU256,
-    value: EvmU256,
 }
 
 impl Eip1559TransactionCommand {
@@ -363,8 +351,8 @@ impl Eip1559TransactionCommand {
         initcode: Vec<u8>,
         value: EvmU256,
         gas_limit: NonZeroU64,
-        max_priority_fee_per_gas: EvmU256,
-        max_fee_per_gas: EvmU256,
+        max_priority_fee_per_gas: u128,
+        max_fee_per_gas: u128,
     ) -> Result<Self, EvmDomainError> {
         Self::new(
             binding,
@@ -385,8 +373,8 @@ impl Eip1559TransactionCommand {
         calldata: Vec<u8>,
         value: EvmU256,
         gas_limit: NonZeroU64,
-        max_priority_fee_per_gas: EvmU256,
-        max_fee_per_gas: EvmU256,
+        max_priority_fee_per_gas: u128,
+        max_fee_per_gas: u128,
     ) -> Result<Self, EvmDomainError> {
         Self::new(
             binding,
@@ -406,16 +394,18 @@ impl Eip1559TransactionCommand {
         action: TransactionAction,
         value: EvmU256,
         gas_limit: NonZeroU64,
-        max_priority_fee_per_gas: EvmU256,
-        max_fee_per_gas: EvmU256,
+        max_priority_fee_per_gas: u128,
+        max_fee_per_gas: u128,
     ) -> Result<Self, EvmDomainError> {
         let command = Self {
             action,
-            binding,
-            gas_limit,
-            max_fee_per_gas,
-            max_priority_fee_per_gas,
-            value,
+            parameters: TransactionParameters::new(
+                binding,
+                value,
+                gas_limit,
+                max_priority_fee_per_gas,
+                max_fee_per_gas,
+            )?,
         };
         command.validate()?;
         Ok(command)
@@ -433,27 +423,27 @@ impl Eip1559TransactionCommand {
 
     /// Returns the complete public transaction binding.
     pub const fn binding(&self) -> &EvmTransactionBinding {
-        &self.binding
+        &self.parameters.binding
     }
 
     /// Returns the exact nonzero gas limit.
     pub const fn gas_limit(&self) -> NonZeroU64 {
-        self.gas_limit
+        self.parameters.gas_limit
     }
 
     /// Returns the maximum fee per gas.
-    pub const fn max_fee_per_gas(&self) -> &EvmU256 {
-        &self.max_fee_per_gas
+    pub const fn max_fee_per_gas(&self) -> u128 {
+        self.parameters.fees.maximum.0
     }
 
     /// Returns the maximum priority fee per gas.
-    pub const fn max_priority_fee_per_gas(&self) -> &EvmU256 {
-        &self.max_priority_fee_per_gas
+    pub const fn max_priority_fee_per_gas(&self) -> u128 {
+        self.parameters.fees.priority.0
     }
 
     /// Returns the transferred value.
     pub const fn value(&self) -> &EvmU256 {
-        &self.value
+        &self.parameters.value
     }
 
     fn validate(&self) -> Result<(), EvmDomainError> {
@@ -461,22 +451,13 @@ impl Eip1559TransactionCommand {
             TransactionAction::Create { .. } => MAX_EVM_INITCODE_BYTES,
             TransactionAction::Call { .. } => MAX_EVM_CALLDATA_BYTES,
         };
-        validate_transaction_parameters(
-            self.input(),
-            maximum,
-            &self.max_priority_fee_per_gas,
-            &self.max_fee_per_gas,
-        )
+        validate_input_bytes(self.input(), maximum)
     }
 }
 
 impl_checked_deserialize!(Eip1559TransactionCommand {
     action: TransactionAction,
-    binding: EvmTransactionBinding,
-    gas_limit: NonZeroU64,
-    max_fee_per_gas: EvmU256,
-    max_priority_fee_per_gas: EvmU256,
-    value: EvmU256,
+    parameters: TransactionParameters,
 });
 
 /// Shared receipt facts authenticated for one settled transaction.
@@ -614,22 +595,6 @@ impl EvmTransactionSettlement {
     }
 }
 
-fn validate_transaction_parameters(
-    input: &[u8],
-    maximum: usize,
-    priority_fee: &EvmU256,
-    max_fee: &EvmU256,
-) -> Result<(), EvmDomainError> {
-    validate_input_bytes(input, maximum)?;
-    if max_fee.to_u128().is_none()
-        || priority_fee.to_u128().is_none()
-        || max_fee.numeric_cmp(priority_fee) == Ordering::Less
-    {
-        return Err(EvmDomainError::InvalidValue);
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_input_bytes(input: &[u8], maximum: usize) -> Result<(), EvmDomainError> {
     (input.len() <= maximum)
         .then_some(())
@@ -645,6 +610,8 @@ pub use report::*;
 mod facts;
 pub use facts::*;
 
+mod parameters;
+use parameters::TransactionParameters;
 mod plans;
 pub use plans::*;
 

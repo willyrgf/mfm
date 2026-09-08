@@ -465,8 +465,8 @@ async fn fixture() -> (
         vec![0x60, 0x00],
         EvmU256::from_u64(0),
         nonzero(100_000),
-        EvmU256::from_u64(2),
-        EvmU256::from_u64(10),
+        (2) as u128,
+        (10) as u128,
     )
     .expect("command");
     (
@@ -593,8 +593,8 @@ async fn graph_retries_identical_wire_and_cold_projection_needs_no_signer_call()
                         command.input().to_vec(),
                         command.value().clone(),
                         command.gas_limit(),
-                        command.max_priority_fee_per_gas().clone(),
-                        command.max_fee_per_gas().clone(),
+                        command.max_priority_fee_per_gas(),
+                        command.max_fee_per_gas(),
                     )
                     .unwrap(),
                 },
@@ -695,8 +695,8 @@ async fn custody_acknowledgement_loss_recovers_each_stage() {
                         command.input().to_vec(),
                         command.value().clone(),
                         command.gas_limit(),
-                        command.max_priority_fee_per_gas().clone(),
-                        command.max_fee_per_gas().clone()
+                        command.max_priority_fee_per_gas(),
+                        command.max_fee_per_gas()
                     )
                     .unwrap()
                 }
@@ -956,8 +956,8 @@ async fn every_transaction_journal_boundary_recovers_after_ambiguous_append() {
                             command.input().to_vec(),
                             command.value().clone(),
                             command.gas_limit(),
-                            command.max_priority_fee_per_gas().clone(),
-                            command.max_fee_per_gas().clone(),
+                            command.max_priority_fee_per_gas(),
+                            command.max_fee_per_gas(),
                         )
                         .unwrap(),
                     },
@@ -1030,8 +1030,8 @@ async fn cancelled_receipt_wait_resumes_exact_prepared_wire() {
                     command.input().to_vec(),
                     command.value().clone(),
                     command.gas_limit(),
-                    command.max_priority_fee_per_gas().clone(),
-                    command.max_fee_per_gas().clone(),
+                    command.max_priority_fee_per_gas(),
+                    command.max_fee_per_gas(),
                 )
                 .unwrap(),
             },
