@@ -552,7 +552,7 @@ async fn start_revalidates_hostile_config_rows_before_binding_errors() {
 }
 
 #[tokio::test]
-async fn invalid_or_unbound_config_fails_before_run_store_io() {
+async fn invalid_or_unbound_config_fails_before_run_admission() {
     let app = application(&[(1, "alpha", provider(1))]);
     let invalid_name = config_name("invalid");
     let invalid = ConfigDocument::new(
@@ -733,3 +733,6 @@ async fn client_models_distinguish_durable_provider_failure_from_unknown_invocat
         serde_json::json!({"kind":"execution_stopped", "run_id":run_id(71), "last_observed":null})
     );
 }
+
+#[path = "support/enrichment.rs"]
+mod enrichment;

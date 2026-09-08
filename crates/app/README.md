@@ -32,7 +32,7 @@ is not part of this file and is resolved only by the CLI `postgres init` command
 `ConfigDocument` is an opaque async checked value. It bounds input at 256 KiB, rejects malformed
 UTF-8/JSON, duplicate keys, floats, excess depth, unknown fields, and invalid domain values, then
 owns canonical JSON plus its `sha256-jcs-v1` digest. The required entry-point tag is
-`mfm.portfolio/snapshot@1`; its route array has 1–64 entries, is strictly chain-ordered, and must
+`mfm.portfolio/snapshot@1` or `mfm.portfolio/enrich@1`; the route array has 1–64 entries, is strictly chain-ordered, and must
 exactly cover the Portfolio source chains when Application runs the planner during import.
 
 One `ComposedRuntime` derives Runtime adapter registration, public binding discovery, planning
@@ -89,3 +89,14 @@ contracts; the fixture ABI, transaction/observation policy, exact lifecycle Oper
 registrations, report, failure adaptation, and fixed development settlement policy remain test-only.
 They add no production component inventory, deployment configuration, CLI, REST, or `Application`
 entry point.
+
+Explicit candidate enrichment uses the same selector, Portfolio config, and routes as snapshot
+execution. Each collection requires a native source. The domain retains native sources and tokens
+with nonzero anchored balance, preserving order and quotes. `publish_enrichment(name, run_id)` reads
+the exact successful output, checks the immutable binding inventory, and imports a snapshot config
+with RunId/head/output provenance. It does not rediscover or admit a dependent run.
+
+Imported provenance is verified against the successful enrichment history before new admission.
+C0 retains the selected revision identity and full resolved demand. Start first reads the requested
+RunId and checks that identity; matching recovery survives config deletion, while conflicts reject.
+Read/progress never reload configuration or enrichment history.

@@ -99,6 +99,14 @@ enum BindingCommand {
 
 #[derive(Subcommand)]
 enum ConfigCommand {
+    /// Publishes one completed enrichment run as an immutable configuration revision.
+    PublishEnrichment {
+        /// Destination configuration name.
+        name: String,
+        /// Exact successful enrichment run.
+        #[arg(long)]
+        run_id: String,
+    },
     /// Imports one immutable named config revision.
     Import {
         /// Durable configuration name.
@@ -296,6 +304,13 @@ async fn run_config(
     command: ConfigCommand,
 ) -> Result<ExitCode, CliError> {
     match command {
+        ConfigCommand::PublishEnrichment { name, run_id } => {
+            let name = ConfigName::new(name).map_err(|_| CliError::ConfigName)?;
+            let run_id = RunId::parse(run_id).map_err(|_| CliError::RunId)?;
+            let application = open(deployment).await?;
+            let result = application.publish_enrichment(name, &run_id).await?;
+            emit_serializable(output, &result, || render_config_summary(result.config()))
+        }
         ConfigCommand::Import { name, from } => {
             let name = ConfigName::new(name).map_err(|_| CliError::ConfigName)?;
             let bytes = read_config_input(&from).await?;
@@ -664,7 +679,7 @@ mod tests {
         let items = Application::components();
         let rendered = render_components(&items);
         assert_eq!(rendered.lines().count(), items.len() * 4);
-        assert!(rendered.starts_with("kind=entry_point\nid=mfm.portfolio/snapshot@1\ndescription="));
+        assert!(rendered.starts_with("kind=entry_point\nid=mfm.portfolio/enrich@1\ndescription="));
         assert!(rendered
             .contains("kind=operation\nid=mfm.evm.operation.collect-balances@2\ndescription="));
         assert!(rendered

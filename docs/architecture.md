@@ -74,6 +74,11 @@ shared Application request contains only bounded, secret-free data and stable se
 pre-bound capabilities. It cannot introduce environment resolution, a filesystem or network
 locator, secret custody, schema authority, or an unbounded durable effect.
 
+Portfolio owns candidate selection and its checked enrichment output. Application alone publishes
+that output through configuration custody and verifies RunId/head/output linkage before a new
+dependent admission. Runtime exposes already-qualified genesis input and entry-point identity for
+matching start recovery; it acquires no configuration lookup or write authority.
+
 The CLI owns argv, bounded file/stdin input, exit status, schema provisioning outside listener-held
 Application state, and the deployment-free compiled-component inspection rendering. REST owns
 liveness, bounded HTTP admission, and an unauthenticated Unix socket; it exposes neither schema,

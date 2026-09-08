@@ -533,6 +533,11 @@ impl Runtime {
         -> Result<RunView, InvocationFailure>;
 }
 
+impl RunView {
+    pub fn entry_point(&self) -> &EntryPointId;
+    pub fn admitted_context(&self) -> &ValueView;
+}
+
 pub enum RunViewState {
     Runnable {
         position: ExecutionPosition,

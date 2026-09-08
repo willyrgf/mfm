@@ -29,6 +29,7 @@ deployment environment.
 | GET | `/v1/entry-points` | none | shared `ItemList` |
 | GET | `/v1/bindings` | none | shared `ItemList` |
 | PUT | `/v1/configs/{name}` | raw config JSON | shared `ImportOutcome`; 201 created or 200 unchanged |
+| POST | `/v1/configs/{name}/publish-enrichment` | `{"run_id":"run:..."}` | shared `ImportOutcome`; 201 created or 200 unchanged |
 | GET | `/v1/configs` | none | complete retained-revision `ItemList` |
 | DELETE | `/v1/configs/{name}/revisions/{digest}` | none | empty; 204 whether present or absent |
 | GET | `/v1/runs?after=&limit=` | none | shared mechanical `RunPage` |
@@ -58,7 +59,7 @@ media types with a `+json` suffix.
 
 ## Bounds and failures
 
-Config request bodies are limited to 256 KiB and checked again by `ConfigDocument`. Run action
+Config request bodies are limited to 256 KiB and checked again by `ConfigDocument`. Run and publication action
 bodies are limited to 4 KiB. Config listing accepts no query fields and returns every retained
 revision as one unpaginated aggregate; each document remains independently bounded. Typed run-list
 extraction accepts only one `after` RunId and one `limit`, rejects unknown
@@ -88,3 +89,9 @@ this listener against Reth, validates the complete snapshot, and reloads the ide
 through the CLI. It then reimports the same revision and requires a fresh CLI-generated run to
 produce the same semantic result. The two renderers also match the same frozen start/progress
 indeterminate recovery fixtures under `docs/contracts/client-surface/`.
+
+Enrichment uses the ordinary run routes with an exact `mfm.portfolio/enrich@1` config revision.
+Publication requires its successful exact-schema result and accepts only the destination name and
+RunId. `invalid_enrichment` returns 400 for incomplete, wrong-schema, or inconsistent linkage.
+Repeated publication has no discovery IO. New dependent admission verifies retained provenance;
+matching start recovery and ordinary read/progress survive configuration deletion.

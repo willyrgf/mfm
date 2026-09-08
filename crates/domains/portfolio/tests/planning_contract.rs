@@ -54,8 +54,13 @@ fn planning_uses_the_selected_routes_and_rejects_unusable_route_sets() {
             .expect("beta endpoint"),
     };
 
-    let (program, input) = plan_snapshot(selector.clone(), &config, &[alpha.clone(), beta.clone()])
-        .expect("planned snapshot");
+    let (program, input) = plan_snapshot(
+        selector.clone(),
+        &config,
+        &[alpha.clone(), beta.clone()],
+        None,
+    )
+    .expect("planned snapshot");
     let decoded = mfm_program::Program::decode_canonical(program.canonical_bytes())
         .expect("persisted planned Program");
     assert_eq!(decoded.content_ref(), program.content_ref());
@@ -82,9 +87,13 @@ fn planning_uses_the_selected_routes_and_rejects_unusable_route_sets() {
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("replacement endpoint"),
     };
-    let (replacement_program, replacement_input) =
-        plan_snapshot(selector.clone(), &config, &[alpha.clone(), replacement])
-            .expect("replacement plan");
+    let (replacement_program, replacement_input) = plan_snapshot(
+        selector.clone(),
+        &config,
+        &[alpha.clone(), replacement],
+        None,
+    )
+    .expect("replacement plan");
     assert_ne!(program.content_ref(), replacement_program.content_ref());
     assert_ne!(
         input,
@@ -98,7 +107,7 @@ fn planning_uses_the_selected_routes_and_rejects_unusable_route_sets() {
         vec![alpha.clone(), alpha],
     ] {
         assert!(matches!(
-            plan_snapshot(selector.clone(), &config, &targets),
+            plan_snapshot(selector.clone(), &config, &targets, None),
             Err(PortfolioError::InvalidValue)
         ));
     }
@@ -149,9 +158,13 @@ fn the_supported_source_capacity_plans_and_one_more_is_rejected() {
             });
             let config: PortfolioConfig =
                 serde_json::from_value(config_json.clone()).expect("maximum Portfolio config");
-            let (program, input) =
-                plan_snapshot(selector.clone(), &config, std::slice::from_ref(&target))
-                    .expect("maximum plan");
+            let (program, input) = plan_snapshot(
+                selector.clone(),
+                &config,
+                std::slice::from_ref(&target),
+                None,
+            )
+            .expect("maximum plan");
             // Four native Reads, five token Reads, enter/child consolidation/resume
             // per collection, and root initialization/consolidation.
             let conclusions = 4 * (64 - token_count) + 5 * token_count + 3 * collection_count + 2;

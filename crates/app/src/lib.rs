@@ -10,7 +10,9 @@ use mfm_config::{ConfigImportResult, ConfigRepository, ConfigRepositoryError};
 use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
 use mfm_evm_live::{register_evm_reads, EvmAdapterLocator, EvmReadProvider, JsonRpcEvmProvider};
 use mfm_ids::{ContentRef, RunId};
-use mfm_portfolio::PortfolioError;
+use mfm_portfolio::{
+    EnrichmentProvenance, PortfolioEnrichmentOutput, PortfolioError, PortfolioSnapshotInput,
+};
 use mfm_runtime::{InvocationFailure, RunView, Runtime, RuntimeAssemblyBuilder, RuntimeError};
 use mfm_storage_postgres::{
     provision_postgres as provision_postgres_backend, AdminPostgresLocator, PostgresBackend,
@@ -201,6 +203,9 @@ pub enum RequestError {
     /// The complete config cannot be planned.
     #[error("config document is invalid")]
     InvalidConfigDocument,
+    /// Enrichment is incomplete, has the wrong schema, or disagrees with its dependent configuration.
+    #[error("enrichment result is invalid for publication or admission")]
+    InvalidEnrichment,
     /// A configuration mutation may have committed.
     #[error("config mutation outcome is indeterminate")]
     ConfigMutationIndeterminate,
@@ -242,6 +247,7 @@ impl RequestError {
         match self {
             Self::ConfigAbsent => "config_absent",
             Self::InvalidConfigDocument => "invalid_config_document",
+            Self::InvalidEnrichment => "invalid_enrichment",
             Self::ConfigMutationIndeterminate => "config_mutation_indeterminate",
             Self::InvalidRetainedConfig => "invalid_retained_config",
             Self::RunAbsent => "run_absent",
@@ -471,6 +477,27 @@ pub struct StartRunResult {
 }
 
 impl StartRunResult {
+    // Preserve the public inline recovery sum shared by both async start paths.
+    #[allow(clippy::result_large_err)]
+    fn from_runtime(
+        run_id: RunId,
+        config: ConfigSummary,
+        result: Result<RunView, InvocationFailure>,
+    ) -> Result<Self, RunRequestError> {
+        match result {
+            Ok(run) => Ok(StartRunResult { config, run }),
+            Err(InvocationFailure::Execution {
+                error: RuntimeError::Store(mfm_store::StoreError::Indeterminate),
+                last_observed,
+                ..
+            }) => Err(RunRequestError::AppendIndeterminate {
+                recovery: RunRecovery::Start { run_id, config },
+                last_observed,
+            }),
+            Err(error) => Err(RunRequestError::Invocation(error)),
+        }
+    }
+
     /// Returns the exact selected config revision.
     pub const fn config(&self) -> &ConfigSummary {
         &self.config
@@ -569,7 +596,7 @@ impl Application {
         name: ConfigName,
         document: ConfigDocument,
     ) -> Result<ImportOutcome, RequestError> {
-        let document = tokio::task::spawn_blocking(move || match document.plan() {
+        let document = tokio::task::spawn_blocking(move || match document.plan(None) {
             Ok(_) => Ok(document),
             Err(PortfolioError::InvalidValue) => Err(RequestError::InvalidConfigDocument),
             Err(PortfolioError::InvalidContinuation | PortfolioError::Program) => {
@@ -628,12 +655,96 @@ impl Application {
             .map_err(map_config_repository_error)
     }
 
+    /// Publishes one exact successful enrichment result as an immutable snapshot configuration.
+    pub async fn publish_enrichment(
+        &self,
+        destination: ConfigName,
+        run_id: &RunId,
+    ) -> Result<ImportOutcome, RunRequestError> {
+        let observed = self.read_run(run_id).await?;
+        let bindings = self.composed.bindings.clone();
+        let document = tokio::task::spawn_blocking(move || {
+            let mfm_runtime::RunViewState::Succeeded(value) = observed.state() else {
+                return Err(RequestError::InvalidEnrichment);
+            };
+            let output = value
+                .decode::<PortfolioEnrichmentOutput>()
+                .map_err(|_| RequestError::InvalidEnrichment)?;
+            let provenance = EnrichmentProvenance::new(
+                observed.run_id().clone(),
+                observed.head_digest().clone(),
+                value.value_ref().clone(),
+            )
+            .map_err(|_| RequestError::InvalidEnrichment)?;
+            let mut routes = std::collections::BTreeMap::new();
+            for (chain, reference) in output.bindings() {
+                let endpoint = bindings
+                    .iter()
+                    .find_map(|binding| match binding {
+                        PublicBindingView::Evm {
+                            chain_id,
+                            endpoint_id,
+                            binding_ref,
+                        } if *chain_id == chain.get() && binding_ref == reference => {
+                            Some(endpoint_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .ok_or(RequestError::BindingUnbound)?;
+                if routes
+                    .insert(chain.get(), endpoint.clone())
+                    .is_some_and(|previous| previous != endpoint)
+                {
+                    return Err(RequestError::BindingUnbound);
+                }
+            }
+            ConfigDocument::from_enrichment(&output, &provenance, routes.into_iter().collect())
+                .map_err(|_| RequestError::InvalidEnrichment)
+        })
+        .await
+        .map_err(|_| RequestError::Internal)??;
+        self.import_config(destination, document)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Selects a stored config, plans it, admits the exact RunId, and progresses the run.
     pub async fn start_run(
         &self,
         run_id: RunId,
         selection: &ConfigSelection,
     ) -> Result<StartRunResult, RunRequestError> {
+        match self.composed.runtime.read(&run_id).await {
+            Ok(run) => {
+                let config = tokio::task::spawn_blocking(move || {
+                    let input = run
+                        .admitted_context()
+                        .decode::<PortfolioSnapshotInput>()
+                        .map_err(|_| RequestError::RunAdmissionConflict)?;
+                    let identity = input
+                        .admission()
+                        .ok_or(RequestError::RunAdmissionConflict)?;
+                    if identity.entry_point() != run.entry_point() {
+                        return Err(RequestError::RunAdmissionConflict);
+                    }
+                    let config = ConfigSummary::from_admission(identity)
+                        .map_err(|_| RequestError::RunAdmissionConflict)?;
+                    Ok::<_, RequestError>(config)
+                })
+                .await
+                .map_err(|_| RequestError::Internal)??;
+                if config.name() != selection.name() || config.digest() != selection.digest() {
+                    return Err(RequestError::RunAdmissionConflict.into());
+                }
+                let result = self.composed.runtime.resume(&run_id).await;
+                return StartRunResult::from_runtime(run_id, config, result);
+            }
+            Err(InvocationFailure::Execution {
+                error: RuntimeError::Absent,
+                ..
+            }) => {}
+            Err(error) => return Err(RunRequestError::Invocation(error)),
+        }
         let entry = self
             .configs
             .load_config(selection.name(), selection.digest())
@@ -641,43 +752,55 @@ impl Application {
             .map_err(map_config_repository_error)?
             .ok_or(RequestError::ConfigAbsent)?;
         let (name, digest, canonical) = entry.into_parts();
-        let (document, program, c0) = tokio::task::spawn_blocking(move || {
-            let document = ConfigDocument::parse_retained(canonical, &digest)
-                .map_err(|_| RequestError::InvalidRetainedConfig)?;
-            let (program, c0) = match document.plan() {
-                Ok(planned) => planned,
-                Err(PortfolioError::InvalidValue) => {
-                    return Err(RequestError::InvalidRetainedConfig)
-                }
-                Err(PortfolioError::InvalidContinuation | PortfolioError::Program) => {
-                    return Err(RequestError::Internal);
-                }
-            };
-            Ok((document, program, c0))
+        let document = tokio::task::spawn_blocking(move || {
+            ConfigDocument::parse_retained(canonical, &digest)
+                .map_err(|_| RequestError::InvalidRetainedConfig)
         })
         .await
         .map_err(|_| RequestError::Internal)??;
-        let config = document.summary(name);
+        let observed = if let Some(provenance) = document.enrichment() {
+            Some(self.read_run(provenance.run_id()).await?)
+        } else {
+            None
+        };
+        let (document, config, program, c0) = tokio::task::spawn_blocking(move || {
+            if let (Some(provenance), Some(observed)) = (document.enrichment(), observed) {
+                let mfm_runtime::RunViewState::Succeeded(value) = observed.state() else {
+                    return Err(RequestError::InvalidEnrichment);
+                };
+                let output = value
+                    .decode::<PortfolioEnrichmentOutput>()
+                    .map_err(|_| RequestError::InvalidEnrichment)?;
+                if observed.head_digest() != provenance.head()
+                    || value.value_ref() != provenance.output()
+                    || !document.matches_enrichment(&output)
+                {
+                    return Err(RequestError::InvalidEnrichment);
+                }
+            }
+            let admission = document
+                .admission(&name)
+                .map_err(|_| RequestError::InvalidRetainedConfig)?;
+            let (program, c0) = document
+                .plan(Some(admission))
+                .map_err(|error| match error {
+                    PortfolioError::InvalidValue => RequestError::InvalidRetainedConfig,
+                    _ => RequestError::Internal,
+                })?;
+            let config = document.summary(name);
+            Ok::<_, RequestError>((document, config, program, c0))
+        })
+        .await
+        .map_err(|_| RequestError::Internal)??;
         if !self.composed.has_targets(document.targets()) {
             return Err(RequestError::BindingUnbound.into());
         }
-        match self
+        let result = self
             .composed
             .runtime
             .start(run_id.clone(), program, c0)
-            .await
-        {
-            Ok(run) => Ok(StartRunResult { config, run }),
-            Err(InvocationFailure::Execution {
-                error: RuntimeError::Store(mfm_store::StoreError::Indeterminate),
-                last_observed,
-                ..
-            }) => Err(RunRequestError::AppendIndeterminate {
-                recovery: RunRecovery::Start { run_id, config },
-                last_observed,
-            }),
-            Err(error) => Err(RunRequestError::Invocation(error)),
-        }
+            .await;
+        StartRunResult::from_runtime(run_id, config, result)
     }
 
     /// Progresses one retained run under its exact immutable assembly.
@@ -911,7 +1034,7 @@ mod tests {
             serde_json::to_value(ItemList::new(Application::entry_points()))
                 .expect("entry-point JSON"),
             serde_json::json!({
-                "items": [{"entry_point": "mfm.portfolio/snapshot@1"}]
+                "items": [{"entry_point": "mfm.portfolio/enrich@1"}, {"entry_point": "mfm.portfolio/snapshot@1"}]
             })
         );
     }
@@ -920,6 +1043,7 @@ mod tests {
     fn compiled_components_are_checked_complete_and_ordered() {
         let components = Application::components();
         let expected = [
+            (ComponentKind::EntryPoint, "mfm.portfolio/enrich@1"),
             (ComponentKind::EntryPoint, "mfm.portfolio/snapshot@1"),
             (
                 ComponentKind::Operation,
@@ -938,6 +1062,10 @@ mod tests {
                 "mfm.portfolio.state.enter-collection@1",
             ),
             (ComponentKind::PureState, "mfm.portfolio.state.initialize@1"),
+            (
+                ComponentKind::PureState,
+                "mfm.portfolio.state.resolve-assets@1",
+            ),
             (
                 ComponentKind::PureState,
                 "mfm.portfolio.state.resume-collection@1",
@@ -990,8 +1118,8 @@ mod tests {
 
         let json = serde_json::to_value(ItemList::new(&components)).expect("component JSON");
         assert_eq!(json["items"][0]["kind"], "entry_point");
-        assert_eq!(json["items"][1]["kind"], "operation");
-        assert_eq!(json["items"][2]["kind"], "pure_state");
+        assert_eq!(json["items"][2]["kind"], "operation");
+        assert_eq!(json["items"][3]["kind"], "pure_state");
         assert_eq!(json["items"][9]["kind"], "read_state");
     }
 
@@ -1023,6 +1151,11 @@ mod tests {
                 RequestError::RunAdmissionConflict,
                 "run_admission_conflict",
                 "run admission conflicts with retained history",
+            ),
+            (
+                RequestError::InvalidEnrichment,
+                "invalid_enrichment",
+                "enrichment result is invalid for publication or admission",
             ),
             (
                 RequestError::InvalidRunHistory,

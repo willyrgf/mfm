@@ -267,14 +267,31 @@ automatic retry.
 
 The configuration repository retains complete, individually bounded canonical documents tagged by
 the exact entry point. Import validates and plans the document before atomically creating or
-comparing one immutable revision. Run start requires an exact retained name and `sha256-jcs-v1`
-digest, checks every requested binding before Runtime Store IO, and returns the selected config
-summary with the run view. The management surface exposes import, complete unpaginated listing, and
+comparing one immutable revision. New admission requires an exact retained name and `sha256-jcs-v1`
+digest and checks every requested binding before appending genesis. Start first reads the requested
+RunId: a matching retained source identity resumes without requiring configuration custody; a
+conflicting selection is rejected. Uncertain reads stop admission. The result includes the selected
+config summary and run view. The management surface exposes import, complete unpaginated listing, and
 idempotent exact delete. Deletion does not revoke runs already admitted from that revision. The shared
 surface also owns compiled component, entry-point, and binding discovery, run progress/read, and
 mechanical run-head listing. Compiled component discovery is an unexpanded inventory of the public
 entry points and reusable Operations admitted by Application composition plus the exact States that
 the same composition registers with Runtime.
+
+Candidate enrichment uses ordinary anchored balance Reads and a final Pure selection State. It
+retains every native source and tokens with nonzero raw balance, preserving candidate order,
+configuration quotes, and route identities. Each collection requires a native source. Provider
+failure fails the run; it does not remove candidates. Publication explicitly reads a successful
+exact-schema enrichment output, resolves its bindings against the immutable composition inventory,
+and imports an immutable snapshot config. It never executes discovery or admits another run.
+
+New dependent admission verifies the enrichment RunId, terminal head, output ref, resolved values,
+and bindings against that retained successful run. C0 retains complete resolved demand and the
+bounded linkage, plus the selected source revision name, entry point, and 64 lowercase hex digits
+of its canonical-document SHA-256 digest. This fixed revision field does not change the raw
+ContentDigest grammar. RunView exposes its already-qualified genesis input and Program entry point
+for matching admission recovery. Configuration deletion is not revocation; read/progress never
+reload configuration or enrichment history. Re-enrichment is an explicit new run and revision.
 Every execution receives an explicit transport-selected RunId. Both client surfaces accept one or
 use the same Application client primitive to derive one from OS cryptographic entropy before the
 start use case. Ambiguous append acknowledgement carries the exact start or progress recovery

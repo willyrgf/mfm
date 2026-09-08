@@ -1014,11 +1014,28 @@ fn view(accumulator: &Accumulator) -> Result<RunView> {
             )?)
         }
     };
+    let Some(JournalRecord::RunAdmitted {
+        admitted_context, ..
+    }) = accumulator.history.records().next()
+    else {
+        return Err(RuntimeError::InvalidHistory);
+    };
+    let admitted_context = Box::new(ValueView {
+        contract_ref: accumulator
+            .executable
+            .program
+            .admitted_context_contract_ref()
+            .clone(),
+        value_ref: admitted_context.content_ref().clone(),
+        canonical: admitted_context.canonical_bytes().to_vec(),
+    });
     Ok(RunView {
         run_id: accumulator.history.run_id().clone(),
         head_sequence: accumulator.history.head_sequence(),
         head_digest: accumulator.history.head_digest().clone(),
         state,
+        admitted_context,
+        entry_point: accumulator.executable.program.entry_point_id().clone(),
     })
 }
 
@@ -1026,7 +1043,7 @@ fn retained_view(value: &QualifiedValue) -> ValueView {
     ValueView {
         contract_ref: value.contract_ref.clone(),
         value_ref: value.value_ref.clone(),
-        canonical: value.canonical.clone(),
+        canonical: value.canonical.to_vec(),
     }
 }
 
