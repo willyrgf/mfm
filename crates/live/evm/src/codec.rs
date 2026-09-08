@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use alloy_consensus::{SignableTransaction, Signed, TxEip1559};
 use alloy_eips::{Decodable2718, Encodable2718};
-use alloy_primitives::{keccak256, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{keccak256, Address, Bytes, Signature, TxKind, U256};
 use mfm_evm::custody::{ExactRawTransaction, MAX_EXACT_RAW_TRANSACTION_BYTES};
 use mfm_evm::{Eip1559TransactionCommand, EvmAddress, EvmHash, EvmU256};
 use mfm_signing::{
@@ -21,10 +21,8 @@ pub enum EvmCodecError {
 
 /// Derives the Ethereum address of one checked uncompressed secp256k1 public key.
 pub fn ethereum_address(key: &Secp256k1PublicKey) -> EvmAddress {
-    let digest = keccak256(&key.as_bytes()[1..]);
-    let mut address = [0_u8; 20];
-    address.copy_from_slice(&digest[12..]);
-    EvmAddress::from_bytes(address)
+    // The checked uncompressed key contains exactly 64 bytes after its SEC1 prefix.
+    EvmAddress::from_bytes(Address::from_raw_public_key(&key.as_bytes()[1..]).into_array())
 }
 
 /// Computes bounded public Keccak-256 without copying the input.
@@ -57,9 +55,6 @@ pub(crate) fn signed_transaction(
     let signed = transaction.into_signed(alloy_signature(signature));
     let transaction_hash = EvmHash::from_bytes((*signed.hash()).into());
     let raw = signed.encoded_2718();
-    if raw.len() > MAX_EXACT_RAW_TRANSACTION_BYTES {
-        return Err(EvmCodecError::Invalid);
-    }
     let raw = ExactRawTransaction::new(raw).map_err(|_| EvmCodecError::Invalid)?;
     Ok((raw, transaction_hash))
 }
@@ -130,17 +125,31 @@ fn hash(bytes: &[u8]) -> EvmHash {
 }
 
 fn alloy_signature(signature: CompactRecoverableSignature) -> Signature {
-    let mut r = [0_u8; 32];
-    let mut s = [0_u8; 32];
-    r.copy_from_slice(&signature.as_bytes()[..32]);
-    s.copy_from_slice(&signature.as_bytes()[32..]);
-    Signature::from_scalars_and_parity(B256::from(r), B256::from(s), signature.recovery_id() == 1)
+    Signature::from_bytes_and_parity(signature.as_bytes(), signature.recovery_id() == 1)
 }
 
 fn compact_signature(signature: &Signature) -> Result<CompactRecoverableSignature, EvmCodecError> {
-    let mut bytes = [0_u8; 64];
-    bytes[..32].copy_from_slice(&signature.r().to_be_bytes::<32>());
-    bytes[32..].copy_from_slice(&signature.s().to_be_bytes::<32>());
-    CompactRecoverableSignature::new(bytes, u8::from(signature.v()))
-        .map_err(|_| EvmCodecError::Invalid)
+    let [bytes @ .., parity] = signature.as_rsy();
+    CompactRecoverableSignature::new(bytes, parity).map_err(|_| EvmCodecError::Invalid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consensus_signature_conversion_preserves_raw_parity_and_checks_scalars() {
+        let mut expected = [0; 64];
+        expected[31] = 1;
+        expected[63] = 2;
+        for parity in [0, 1] {
+            let external = Signature::new(U256::from(1), U256::from(2), parity == 1);
+            let checked = compact_signature(&external).unwrap();
+            assert_eq!(checked.as_bytes(), &expected);
+            assert_eq!(checked.recovery_id(), parity);
+            assert_eq!(alloy_signature(checked), external);
+        }
+        assert!(compact_signature(&Signature::new(U256::ZERO, U256::from(2), false)).is_err());
+        assert!(compact_signature(&Signature::new(U256::from(1), U256::MAX, false)).is_err());
+    }
 }

@@ -45,7 +45,6 @@ impl SigningDigest {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Secp256k1PublicKey {
     bytes: [u8; 65],
-    verifying_key: VerifyingKey,
 }
 
 impl Secp256k1PublicKey {
@@ -54,12 +53,8 @@ impl Secp256k1PublicKey {
         if bytes[0] != 0x04 {
             return Err(SigningError::Invalid);
         }
-        let verifying_key =
-            VerifyingKey::from_sec1_bytes(&bytes).map_err(|_| SigningError::Invalid)?;
-        Ok(Self {
-            bytes,
-            verifying_key,
-        })
+        VerifyingKey::from_sec1_bytes(&bytes).map_err(|_| SigningError::Invalid)?;
+        Ok(Self { bytes })
     }
 
     /// Returns the exact SEC1 bytes.
@@ -77,10 +72,7 @@ impl TryFrom<VerifyingKey> for Secp256k1PublicKey {
             .as_bytes()
             .try_into()
             .map_err(|_| SigningError::Failed)?;
-        Ok(Self {
-            bytes,
-            verifying_key,
-        })
+        Ok(Self { bytes })
     }
 }
 
