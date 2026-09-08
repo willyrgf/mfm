@@ -43,14 +43,14 @@ fn nonce_domain(
     genesis_byte: u8,
     sender_byte: u8,
 ) -> NonceDomain {
-    NonceDomain::new(
-        epoch.clone(),
-        EvmChainInstance::new(
-            NonZeroU64::new(chain_id).expect("nonzero chain"),
-            evm_hash(genesis_byte),
-        ),
-        evm_address(sender_byte),
-    )
+    NonceDomain {
+        authority_epoch: epoch.clone(),
+        chain_instance: EvmChainInstance {
+            chain_id: NonZeroU64::new(chain_id).expect("nonzero chain"),
+            expected_genesis_hash: evm_hash(genesis_byte),
+        },
+        sender: evm_address(sender_byte),
+    }
 }
 
 fn reference(name: &str, bytes: &[u8]) -> ContentRef {

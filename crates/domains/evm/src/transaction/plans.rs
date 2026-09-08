@@ -65,7 +65,7 @@ impl CheckedCreatePlan {
         }
     }
 }
-checked_deserialize!(CheckedCreatePlan {
+impl_checked_deserialize!(CheckedCreatePlan {
     binding: EvmTransactionBinding,
     initcode: CanonicalBytes,
     value: EvmU256,
@@ -140,7 +140,7 @@ impl CheckedCallPlan {
         }
     }
 }
-checked_deserialize!(CheckedCallPlan {
+impl_checked_deserialize!(CheckedCallPlan {
     binding: EvmTransactionBinding,
     calldata: CanonicalBytes,
     value: EvmU256,

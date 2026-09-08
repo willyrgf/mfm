@@ -17,39 +17,12 @@ use std::marker::PhantomData;
     schema = "mfm.evm-nonce-domain"
 )]
 pub struct NonceDomain {
-    authority_epoch: EvmAuthorityEpoch,
-    chain_instance: EvmChainInstance,
-    sender: EvmAddress,
-}
-
-impl NonceDomain {
-    /// Constructs a nonce domain from checked public identities.
-    pub fn new(
-        authority_epoch: EvmAuthorityEpoch,
-        chain_instance: EvmChainInstance,
-        sender: EvmAddress,
-    ) -> Self {
-        Self {
-            authority_epoch,
-            chain_instance,
-            sender,
-        }
-    }
-
-    /// Returns the authority epoch that separates fresh installations.
-    pub const fn authority_epoch(&self) -> &EvmAuthorityEpoch {
-        &self.authority_epoch
-    }
-
-    /// Returns the endpoint-independent chain instance.
-    pub const fn chain_instance(&self) -> &EvmChainInstance {
-        &self.chain_instance
-    }
-
-    /// Returns the exact sender address.
-    pub const fn sender(&self) -> &EvmAddress {
-        &self.sender
-    }
+    /// Authority epoch.
+    pub authority_epoch: EvmAuthorityEpoch,
+    /// Chain instance.
+    pub chain_instance: EvmChainInstance,
+    /// Sender.
+    pub sender: EvmAddress,
 }
 
 /// Immutable nonce reservation for one Effect and command.
@@ -76,15 +49,14 @@ impl Reservation {
         domain: NonceDomain,
         nonce: u64,
     ) -> Result<Self, EvmDomainError> {
-        if nonce == u64::MAX {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(Self {
+        let reservation = Self {
             effect_id,
             command_value_ref,
             domain,
             nonce,
-        })
+        };
+        reservation.validate()?;
+        Ok(reservation)
     }
 
     /// Returns the reserved Effect identity.
@@ -111,11 +83,11 @@ impl Reservation {
 impl NonceDomain {
     /// Derives the endpoint-independent reservation domain.
     pub fn from_binding(binding: &EvmTransactionBinding) -> Self {
-        Self::new(
-            binding.authority_epoch().clone(),
-            binding.route().chain_instance().clone(),
-            binding.sender().clone(),
-        )
+        Self {
+            authority_epoch: binding.authority_epoch.clone(),
+            chain_instance: binding.route.chain_instance.clone(),
+            sender: binding.sender.clone(),
+        }
     }
 }
 
@@ -128,7 +100,7 @@ impl Reservation {
         }
     }
 }
-checked_deserialize!(Reservation {
+impl_checked_deserialize!(Reservation {
     effect_id: EffectId,
     command_value_ref: ContentRef,
     domain: NonceDomain,
@@ -180,7 +152,7 @@ impl ReservedEvmTransaction {
         Ok(())
     }
 }
-checked_deserialize!(ReservedEvmTransaction {
+impl_checked_deserialize!(ReservedEvmTransaction {
     command: Eip1559TransactionCommand,
     reservation: Reservation
 });
@@ -226,26 +198,12 @@ impl PreparedEvmTransaction {
     schema = "mfm.evm-transaction-preparation-evidence"
 )]
 pub struct PreparedEvmTransactionEvidence {
-    effect_id: EffectId,
-    transaction_hash: EvmHash,
+    /// Effect id.
+    pub effect_id: EffectId,
+    /// Transaction hash.
+    pub transaction_hash: EvmHash,
 }
-impl PreparedEvmTransactionEvidence {
-    /// Constructs the public preparation evidence.
-    pub const fn new(effect_id: EffectId, transaction_hash: EvmHash) -> Self {
-        Self {
-            effect_id,
-            transaction_hash,
-        }
-    }
-    /// Returns the preparation Effect identity.
-    pub const fn effect_id(&self) -> &EffectId {
-        &self.effect_id
-    }
-    /// Returns the retained wire hash.
-    pub const fn transaction_hash(&self) -> &EvmHash {
-        &self.transaction_hash
-    }
-}
+
 pub(super) fn action_matches(
     command: &Eip1559TransactionCommand,
     evidence: &EvmTransactionSettlement,
@@ -305,7 +263,7 @@ impl EffectCapabilityContract for EvmTransactionPreparationEffect {
     ) -> mfm_capabilities::Result<()> {
         let matches = {
             let _ = command;
-            evidence.effect_id() == effect_id
+            (&evidence.effect_id) == effect_id
         };
         matches
             .then_some(())

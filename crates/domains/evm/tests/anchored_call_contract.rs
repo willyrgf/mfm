@@ -32,20 +32,20 @@ fn endpoint_ref() -> ContentRef {
 }
 
 fn route() -> EvmTransactionRoute {
-    EvmTransactionRoute::new(
-        EvmChainInstance::new(
-            NonZeroU64::new(1).expect("nonzero chain"),
-            EvmHash::new(format!("0x{}", "aa".repeat(32))).expect("genesis"),
-        ),
-        endpoint_ref(),
-    )
+    EvmTransactionRoute {
+        chain_instance: EvmChainInstance {
+            chain_id: NonZeroU64::new(1).expect("nonzero chain"),
+            expected_genesis_hash: EvmHash::new(format!("0x{}", "aa".repeat(32))).expect("genesis"),
+        },
+        endpoint_ref: endpoint_ref(),
+    }
 }
 
 fn anchor(number: u64, byte: &str) -> EvmBlockAnchor {
-    EvmBlockAnchor::new(
-        EvmU256::from_u64(number),
-        EvmHash::new(format!("0x{}", byte.repeat(32))).expect("block hash"),
-    )
+    EvmBlockAnchor {
+        number: EvmU256::from_u64(number),
+        hash: EvmHash::new(format!("0x{}", byte.repeat(32))).expect("block hash"),
+    }
 }
 
 fn intent() -> AnchoredContractCallIntent {
@@ -299,11 +299,11 @@ type Observe =
     ReadAnchoredContractCall<Initial, ObserveAt<WorkflowObservationSlot, WorkflowTransactionSlot>>;
 
 fn workflow() -> Initial {
-    let binding = EvmTransactionBinding::new(
-        route(),
-        EvmAuthorityEpoch::new([1; 32]),
-        EvmAddress::from_bytes([2; 20]),
-    );
+    let binding = EvmTransactionBinding {
+        route: route(),
+        authority_epoch: EvmAuthorityEpoch::new([1; 32]),
+        sender: EvmAddress::from_bytes([2; 20]),
+    };
     let command = CheckedCallPlan::new(
         binding,
         vec![1],
@@ -324,17 +324,20 @@ fn workflow() -> Initial {
     let reserved = ReservedEvmTransaction::new(command, reservation).unwrap();
     let prepared = PreparedTransactionFacts::new(
         reserved,
-        PreparedEvmTransactionEvidence::new(
-            EffectId::from_digest(DigestBytes::from_array([2; 32])),
-            EvmHash::from_bytes([3; 32]),
-        ),
+        PreparedEvmTransactionEvidence {
+            effect_id: EffectId::from_digest(DigestBytes::from_array([2; 32])),
+            transaction_hash: EvmHash::from_bytes([3; 32]),
+        },
     );
     let executed = ExecutedTransactionFacts::new(
         prepared,
         EvmTransactionSettlement::called(
             EffectId::from_digest(DigestBytes::from_array([3; 32])),
             0,
-            EvmTransactionReceipt::new(anchor(7, "bb"), EvmHash::from_bytes([3; 32])),
+            EvmTransactionReceipt {
+                block_anchor: anchor(7, "bb"),
+                transaction_hash: EvmHash::from_bytes([3; 32]),
+            },
         ),
     )
     .unwrap();
@@ -390,14 +393,17 @@ fn observation_recipe_retains_success_and_each_failure_and_rejects_local_mismatc
     );
     assert!(Observe::interpret(input.clone(), &wrong_anchor).is_err());
     for route in [
-        EvmTransactionRoute::new(
-            route().chain_instance().clone(),
-            route().binding_ref().unwrap(),
-        ),
-        EvmTransactionRoute::new(
-            EvmChainInstance::new(NonZeroU64::new(2).unwrap(), EvmHash::from_bytes([0xaa; 32])),
-            endpoint_ref(),
-        ),
+        EvmTransactionRoute {
+            chain_instance: route().chain_instance.clone(),
+            endpoint_ref: route().binding_ref().unwrap(),
+        },
+        EvmTransactionRoute {
+            chain_instance: EvmChainInstance {
+                chain_id: NonZeroU64::new(2).unwrap(),
+                expected_genesis_hash: EvmHash::from_bytes([0xaa; 32]),
+            },
+            endpoint_ref: endpoint_ref(),
+        },
     ] {
         let mut mismatch = input.clone();
         mismatch.observation = CheckedObservationPlan::new(route, vec![]).unwrap();

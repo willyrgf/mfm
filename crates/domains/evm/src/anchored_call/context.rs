@@ -27,7 +27,7 @@ impl CheckedObservationPlan {
     pub fn new(route: EvmTransactionRoute, calldata: Vec<u8>) -> Result<Self, EvmDomainError> {
         crate::transaction::validate_input_bytes(&calldata, MAX_EVM_CALLDATA_BYTES)?;
         Ok(Self {
-            chain_id: route.chain_instance().chain_id(),
+            chain_id: route.chain_instance.chain_id,
             route_ref: route.binding_ref()?,
             calldata: CanonicalBytes::new(calldata),
         })
@@ -174,9 +174,9 @@ where
     fn intent(context: &C) -> Result<AnchoredContractCallIntent, PreparationError> {
         let plan = O::get(context);
         let call = T::get(context);
-        let route = call.command().binding().route();
+        let route = &call.command().binding().route;
         let reference = route.binding_ref().map_err(|_| PreparationError)?;
-        if &reference != plan.route_ref() || route.chain_instance().chain_id() != plan.chain_id() {
+        if &reference != plan.route_ref() || route.chain_instance.chain_id != plan.chain_id() {
             return Err(PreparationError);
         }
         Ok(plan.intent_for(

@@ -129,7 +129,7 @@ async fn runtime(
     );
     assert_eq!(
         transaction_authority.authority_epoch(),
-        binding.authority_epoch()
+        (&binding.authority_epoch)
     );
     let provider = Arc::new(JsonRpcEvmProvider::connect(rpc_locator).expect("provider"));
     let authority: Arc<dyn EvmTransactionAuthority> = Arc::new(ReservationAcknowledgementFault {
@@ -151,7 +151,7 @@ async fn runtime(
         transaction_provider,
     )
     .expect("transaction adapter");
-    register_evm_anchored_contract_calls(&mut builder, binding.route().clone(), read_provider)
+    register_evm_anchored_contract_calls(&mut builder, binding.route.clone(), read_provider)
         .expect("anchored adapter");
     let store: Arc<dyn Store> = backend;
     Runtime::new(builder.finish(), store)
@@ -306,12 +306,12 @@ async fn external_wallet_transfer(
     use alloy_eips::Encodable2718;
     use alloy_primitives::{Address, Signature, TxKind};
     let transaction = TxEip1559 {
-        chain_id: binding.route().chain_instance().chain_id().get(),
+        chain_id: binding.route.chain_instance.chain_id.get(),
         nonce,
         gas_limit: 21_000,
         max_fee_per_gas: u128::from(MAX_FEE),
         max_priority_fee_per_gas: u128::from(PRIORITY_FEE),
-        to: TxKind::Call(Address::from(*binding.sender().as_bytes())),
+        to: TxKind::Call(Address::from(*binding.sender.as_bytes())),
         ..Default::default()
     };
     let digest = mfm_signing::SigningDigest::from_bytes(transaction.signature_hash().into());
@@ -334,7 +334,7 @@ async fn external_wallet_transfer(
         .expect("external wallet transfer");
     assert_eq!(submitted, EvmHash::from_bytes((*signed.hash()).into()));
     assert_eq!(
-        provider.pending_nonce(binding.sender()).await.unwrap(),
+        provider.pending_nonce(&binding.sender).await.unwrap(),
         nonce + 1
     );
 }
@@ -426,21 +426,21 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         .chain_instance()
         .await
         .expect("chain instance");
-    let route = EvmTransactionRoute::new(
-        chain,
-        EvmEndpoint::new("reth-effect-e2e")
+    let route = EvmTransactionRoute {
+        chain_instance: chain,
+        endpoint_ref: EvmEndpoint::new("reth-effect-e2e")
             .expect("endpoint")
             .endpoint_ref()
             .expect("endpoint ref"),
-    );
+    };
     let owner = KeystoreOwner::start().expect("keystore owner");
     let signer = generated_signer(&owner).await;
     let sender = ethereum_address(signer.public_key());
-    let binding = EvmTransactionBinding::new(
+    let binding = EvmTransactionBinding {
         route,
-        setup_authority.authority_epoch().clone(),
-        sender.clone(),
-    );
+        authority_epoch: setup_authority.authority_epoch().clone(),
+        sender: sender.clone(),
+    };
     drop(setup_authority);
 
     fund_sender(&rpc_raw, &sender).await.expect("fund wallet");
@@ -470,7 +470,7 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         EvmU256::from_u64(MAX_FEE),
     )
     .expect("checked configuration");
-    let observation = CheckedObservationPlan::new(binding.route().clone(), VALUE_SELECTOR.to_vec())
+    let observation = CheckedObservationPlan::new(binding.route.clone(), VALUE_SELECTOR.to_vec())
         .expect("checked observation");
     let input = ContractWorkflow {
         request: FixtureRequest { label: 17 },
@@ -549,15 +549,15 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     assert_eq!(report.context().deployment.reservation().nonce(), 0);
     assert_eq!(report.context().configuration.reservation().nonce(), 1);
     assert_eq!(
-        report.context().deployment.preparation().transaction_hash(),
+        (&report.context().deployment.preparation().transaction_hash),
         report.context().deployment.settlement().transaction_hash()
     );
     assert_eq!(
-        report
+        (&report
             .context()
             .configuration
             .preparation()
-            .transaction_hash(),
+            .transaction_hash),
         report
             .context()
             .configuration

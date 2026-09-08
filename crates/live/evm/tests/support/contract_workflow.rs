@@ -219,11 +219,10 @@ impl FixtureFailure {
                         || intent.route_ref()
                             != &command
                                 .binding()
-                                .route()
+                                .route
                                 .binding_ref()
                                 .map_err(|_| StateExecutionError)?
-                        || intent.chain_id()
-                            != command.binding().route().chain_instance().chain_id()
+                        || intent.chain_id() != command.binding().route.chain_instance.chain_id
                     {
                         return Err(StateExecutionError);
                     }
@@ -492,9 +491,7 @@ impl Operation for EffectFixtureOperation {
             |handler| handler.pure::<Abort<ConfigureFailure, Configuration>>(),
         )?;
         body.with_failure_handler::<ObserveFailure, Observed>(
-            |protected| {
-                protected.read::<Observe, EvmAnchoredContractCallRead>(self.binding.route())
-            },
+            |protected| protected.read::<Observe, EvmAnchoredContractCallRead>(&self.binding.route),
             |handler| handler.pure::<Abort<ObserveFailure, Observed>>(),
         )?;
         body.pure::<DecodeValue>()

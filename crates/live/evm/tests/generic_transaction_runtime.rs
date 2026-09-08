@@ -51,14 +51,17 @@ fn binding() -> EvmTransactionBinding {
         ContentDigest::from_digest(DigestAlgorithm::Sha256V1, DigestBytes::from_array([2; 32])),
     )
     .expect("endpoint ref");
-    EvmTransactionBinding::new(
-        EvmTransactionRoute::new(
-            EvmChainInstance::new(nonzero(1), EvmHash::from_bytes([3; 32])),
+    EvmTransactionBinding {
+        route: EvmTransactionRoute {
+            chain_instance: EvmChainInstance {
+                chain_id: nonzero(1),
+                expected_genesis_hash: EvmHash::from_bytes([3; 32]),
+            },
             endpoint_ref,
-        ),
-        EvmAuthorityEpoch::new([4; 32]),
-        EvmAddress::from_bytes([5; 20]),
-    )
+        },
+        authority_epoch: EvmAuthorityEpoch::new([4; 32]),
+        sender: EvmAddress::from_bytes([5; 20]),
+    }
 }
 
 fn plan(binding: EvmTransactionBinding) -> CheckedCreatePlan {
@@ -85,10 +88,13 @@ fn runtime(binding: &EvmTransactionBinding, store: Arc<MemoryStore>) -> Runtime 
                 let created = command.reserved().command().to().is_none();
                 let nonce = command.reserved().reservation().nonce();
                 Box::pin(async move {
-                    let receipt = EvmTransactionReceipt::new(
-                        EvmBlockAnchor::new(EvmU256::from_u64(7), EvmHash::from_bytes([8; 32])),
-                        EvmHash::from_bytes([9; 32]),
-                    );
+                    let receipt = EvmTransactionReceipt {
+                        block_anchor: EvmBlockAnchor {
+                            number: EvmU256::from_u64(7),
+                            hash: EvmHash::from_bytes([8; 32]),
+                        },
+                        transaction_hash: EvmHash::from_bytes([9; 32]),
+                    };
                     let evidence = if created {
                         EvmTransactionSettlement::created(
                             effect_id,
@@ -123,10 +129,10 @@ fn runtime(binding: &EvmTransactionBinding, store: Arc<MemoryStore>) -> Runtime 
         .register_effect_adapter::<EvmTransactionPreparationEffect, EvmTransactionBinding, _>(
             binding.clone(),
             |id, _, _| {
-                let evidence = mfm_evm::PreparedEvmTransactionEvidence::new(
-                    id.clone(),
-                    EvmHash::from_bytes([9; 32]),
-                );
+                let evidence = mfm_evm::PreparedEvmTransactionEvidence {
+                    effect_id: id.clone(),
+                    transaction_hash: EvmHash::from_bytes([9; 32]),
+                };
                 Box::pin(async move { Ok(EffectAdapterOutcome::Settled(evidence)) })
             },
         )
@@ -185,12 +191,12 @@ async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_col
     );
     assert_eq!(first_report.transaction.reservation().nonce(), 0);
     assert_eq!(
-        first_report.transaction.preparation().transaction_hash(),
+        (&first_report.transaction.preparation().transaction_hash),
         &EvmHash::from_bytes([9; 32])
     );
     assert_eq!(
         first_report.transaction.settlement().transaction_hash(),
-        first_report.transaction.preparation().transaction_hash()
+        (&first_report.transaction.preparation().transaction_hash)
     );
     assert_eq!(
         first_report.transaction.outcome().created_address(),
@@ -375,10 +381,10 @@ async fn selecting_another_same_typed_source_requires_its_own_assembly_before_io
     .unwrap();
     let prepared = PreparedTransactionFacts::new(
         ReservedEvmTransaction::new(command, reservation).unwrap(),
-        PreparedEvmTransactionEvidence::new(
-            mfm_ids::EffectId::from_digest(DigestBytes::from_array([2; 32])),
-            EvmHash::from_bytes([9; 32]),
-        ),
+        PreparedEvmTransactionEvidence {
+            effect_id: mfm_ids::EffectId::from_digest(DigestBytes::from_array([2; 32])),
+            transaction_hash: EvmHash::from_bytes([9; 32]),
+        },
     );
     let [a, b] = [3, 4].map(|byte| {
         CompletedTransactionFacts::<Created>::new(
@@ -387,10 +393,13 @@ async fn selecting_another_same_typed_source_requires_its_own_assembly_before_io
                 EvmTransactionSettlement::created(
                     mfm_ids::EffectId::from_digest(DigestBytes::from_array([byte; 32])),
                     0,
-                    EvmTransactionReceipt::new(
-                        EvmBlockAnchor::new(EvmU256::from_u64(7), EvmHash::from_bytes([8; 32])),
-                        EvmHash::from_bytes([9; 32]),
-                    ),
+                    EvmTransactionReceipt {
+                        block_anchor: EvmBlockAnchor {
+                            number: EvmU256::from_u64(7),
+                            hash: EvmHash::from_bytes([8; 32]),
+                        },
+                        transaction_hash: EvmHash::from_bytes([9; 32]),
+                    },
                     EvmAddress::from_bytes([byte; 20]),
                 ),
             )

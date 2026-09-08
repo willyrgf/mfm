@@ -36,10 +36,10 @@ fn source(source_id: &str, address_byte: &str) -> EvmBalanceSource {
 }
 
 fn anchor(number: u64, hash_byte: &str) -> EvmBlockAnchor {
-    EvmBlockAnchor::new(
-        EvmU256::from_u64(number),
-        EvmHash::new(format!("0x{}", hash_byte.repeat(32))).expect("hash"),
-    )
+    EvmBlockAnchor {
+        number: EvmU256::from_u64(number),
+        hash: EvmHash::new(format!("0x{}", hash_byte.repeat(32))).expect("hash"),
+    }
 }
 
 fn intent(source: EvmBalanceSource, anchor: EvmBlockAnchor) -> EvmReadIntent {

@@ -80,7 +80,6 @@ impl AnchoredContractCallIntent {
     }
 
     fn validate(&self) -> Result<(), EvmDomainError> {
-        self.anchor.validate()?;
         crate::transaction::validate_input_bytes(self.calldata.as_bytes(), MAX_EVM_CALLDATA_BYTES)
     }
 }
@@ -257,13 +256,8 @@ impl AnchoredContractCallEvidence {
     }
 
     fn validate_for(&self, intent: &AnchoredContractCallIntent) -> Result<(), EvmDomainError> {
-        intent.validate()?;
         match self {
-            Self::Returned { result, .. }
-                if result.validate().is_ok() && result.anchor() == intent.anchor() =>
-            {
-                Ok(())
-            }
+            Self::Returned { result, .. } if result.anchor() == intent.anchor() => Ok(()),
             Self::Rejected { .. } | Self::SafeFailure { .. } | Self::IntegrityBlocked { .. } => {
                 Ok(())
             }

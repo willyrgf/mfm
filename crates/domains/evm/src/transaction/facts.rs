@@ -47,7 +47,7 @@ impl PreparedTransactionFacts {
     pub fn execution_command(&self) -> PreparedEvmTransaction {
         PreparedEvmTransaction::new(
             self.reserved.clone(),
-            self.preparation.transaction_hash().clone(),
+            self.preparation.transaction_hash.clone(),
         )
     }
 }
@@ -80,7 +80,7 @@ impl ExecutedTransactionFacts {
     }
     fn validate(&self) -> Result<(), EvmDomainError> {
         if self.reservation().nonce() != self.settlement.nonce()
-            || self.preparation().transaction_hash() != self.settlement.transaction_hash()
+            || (&self.preparation().transaction_hash) != self.settlement.transaction_hash()
             || !super::stages::action_matches(self.command(), &self.settlement)
         {
             return Err(EvmDomainError::EvidenceBinding);
@@ -108,7 +108,7 @@ impl ExecutedTransactionFacts {
         &self.settlement
     }
 }
-checked_deserialize!(ExecutedTransactionFacts {
+impl_checked_deserialize!(ExecutedTransactionFacts {
     prepared: PreparedTransactionFacts,
     settlement: EvmTransactionSettlement
 });

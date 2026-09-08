@@ -33,7 +33,7 @@ Endpoint identity changes the target ref and Program. Replacing credentials or a
 under the same public target does not. Credentials are never target material.
 
 `EvmEndpoint { endpoint_id }` is the domain-owned derivation of that endpoint ref: trusted
-composition names the endpoint, `endpoint_ref` canonicalizes the name, and `EvmPhysicalTarget::new`
+composition names the endpoint, `endpoint_ref` canonicalizes the name, and the `EvmPhysicalTarget` fields
 binds it to the chain ID. The same name therefore derives the same route ref and the same Program in
 every process; an RPC URL, credential, or client handle never enters the derivation.
 

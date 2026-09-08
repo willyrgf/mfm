@@ -141,9 +141,9 @@ pub fn register_evm_transaction_adapters(
 ) -> mfm_runtime::Result<()> {
     let purpose = StableId::new(EVM_EIP1559_SIGNING_PURPOSE_ID)
         .map_err(|_| RuntimeError::IncompatibleAssembly)?;
-    if binding.authority_epoch() != authority.authority_epoch()
+    if (&binding.authority_epoch) != authority.authority_epoch()
         || signer.purpose() != &purpose
-        || &ethereum_address(signer.public_key()) != binding.sender()
+        || ethereum_address(signer.public_key()) != binding.sender
     {
         return Err(RuntimeError::IncompatibleAssembly);
     }
@@ -214,7 +214,7 @@ fn check_binding(
     authority: &dyn EvmTransactionAuthority,
     command: &Eip1559TransactionCommand,
 ) -> Result<(), AdapterError> {
-    if command.binding() != binding || binding.authority_epoch() != authority.authority_epoch() {
+    if command.binding() != binding || (&binding.authority_epoch) != authority.authority_epoch() {
         return Err(AdapterError::Internal);
     }
     Ok(())
@@ -232,7 +232,7 @@ async fn reserve_nonce(
         Some(loaded) => loaded.reservation,
         None => {
             verify_chain(command, provider).await?;
-            let observed = provider.pending_nonce(binding.sender()).await?;
+            let observed = provider.pending_nonce(&binding.sender).await?;
             authority
                 .reserve_or_compare(id, reference, &NonceDomain::from_binding(binding), observed)
                 .await
@@ -274,7 +274,7 @@ async fn qualify_prepared(
             command.reservation().nonce(),
             prepared.transaction_hash(),
             prepared.raw_transaction(),
-            command.command().binding().sender(),
+            &command.command().binding().sender,
         )
         .map_err(|_| AdapterError::Internal)?;
         Ok(prepared)
@@ -308,7 +308,7 @@ async fn prepare_transaction(
             let candidate = tokio::task::spawn_blocking(move || {
                 let recovered =
                     recover_public_key(digest, &signature).map_err(|_| AdapterError::Internal)?;
-                if &ethereum_address(&recovered) != owned.command().binding().sender() {
+                if ethereum_address(&recovered) != owned.command().binding().sender {
                     return Err(AdapterError::Internal);
                 }
                 let (raw, hash) =
@@ -330,7 +330,10 @@ async fn prepare_transaction(
         }
     };
     Ok(EffectAdapterOutcome::Settled(
-        PreparedEvmTransactionEvidence::new(id.clone(), prepared.transaction_hash().clone()),
+        PreparedEvmTransactionEvidence {
+            effect_id: id.clone(),
+            transaction_hash: prepared.transaction_hash().clone(),
+        },
     ))
 }
 async fn execute_transaction(
@@ -364,7 +367,7 @@ async fn execute_transaction(
         command.reserved().reservation().nonce(),
     )?;
     let canonical = provider
-        .canonical_block(receipt.block_anchor().number())
+        .canonical_block(&receipt.block_anchor().number)
         .await?;
     if &canonical != receipt.block_anchor() {
         return Err(AdapterError::Unavailable);
@@ -381,51 +384,51 @@ fn validate_receipt(
     nonce: u64,
 ) -> Result<EvmTransactionSettlement, AdapterError> {
     if receipt.transaction_hash() != prepared.transaction_hash()
-        || receipt.sender() != command.binding().sender()
+        || receipt.sender() != (&command.binding().sender)
     {
         return Err(AdapterError::Internal);
     }
     match (command.to(), receipt.result()) {
         (None, ProviderReceiptResult::SuccessCreate { contract_address }) => {
-            if contract_address != &create_address(command.binding().sender(), nonce) {
+            if contract_address != &create_address(&command.binding().sender, nonce) {
                 return Err(AdapterError::Internal);
             }
             Ok(EvmTransactionSettlement::created(
                 effect_id.clone(),
                 nonce,
-                EvmTransactionReceipt::new(
-                    receipt.block_anchor().clone(),
-                    prepared.transaction_hash().clone(),
-                ),
+                EvmTransactionReceipt {
+                    block_anchor: receipt.block_anchor().clone(),
+                    transaction_hash: prepared.transaction_hash().clone(),
+                },
                 contract_address.clone(),
             ))
         }
         (None, ProviderReceiptResult::RevertedCreate) => Ok(EvmTransactionSettlement::reverted(
             effect_id.clone(),
             nonce,
-            EvmTransactionReceipt::new(
-                receipt.block_anchor().clone(),
-                prepared.transaction_hash().clone(),
-            ),
+            EvmTransactionReceipt {
+                block_anchor: receipt.block_anchor().clone(),
+                transaction_hash: prepared.transaction_hash().clone(),
+            },
         )),
         (Some(to), ProviderReceiptResult::SuccessCall { target }) if target == to => {
             Ok(EvmTransactionSettlement::called(
                 effect_id.clone(),
                 nonce,
-                EvmTransactionReceipt::new(
-                    receipt.block_anchor().clone(),
-                    prepared.transaction_hash().clone(),
-                ),
+                EvmTransactionReceipt {
+                    block_anchor: receipt.block_anchor().clone(),
+                    transaction_hash: prepared.transaction_hash().clone(),
+                },
             ))
         }
         (Some(to), ProviderReceiptResult::RevertedCall { target }) if target == to => {
             Ok(EvmTransactionSettlement::reverted(
                 effect_id.clone(),
                 nonce,
-                EvmTransactionReceipt::new(
-                    receipt.block_anchor().clone(),
-                    prepared.transaction_hash().clone(),
-                ),
+                EvmTransactionReceipt {
+                    block_anchor: receipt.block_anchor().clone(),
+                    transaction_hash: prepared.transaction_hash().clone(),
+                },
             ))
         }
         _ => Err(AdapterError::Internal),
@@ -436,7 +439,7 @@ async fn verify_chain(
     command: &Eip1559TransactionCommand,
     provider: &dyn EvmTransactionProvider,
 ) -> Result<(), AdapterError> {
-    let expected = command.binding().route().chain_instance();
+    let expected = &command.binding().route.chain_instance;
     let observed = provider.chain_instance().await?;
     if &observed != expected {
         return Err(AdapterError::Internal);

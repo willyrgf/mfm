@@ -418,10 +418,10 @@ mod tests {
                         EvmReadValue::ChainId(NonZeroU64::new(1).expect("nonzero chain"))
                     }
                     EvmReadSubject::InitialAnchor | EvmReadSubject::ConfirmAnchor { .. } => {
-                        EvmReadValue::Anchor(EvmBlockAnchor::new(
-                            EvmU256::new("100").expect("number"),
-                            EvmHash::new(ANCHOR).expect("hash"),
-                        ))
+                        EvmReadValue::Anchor(EvmBlockAnchor {
+                            number: EvmU256::new("100").expect("number"),
+                            hash: EvmHash::new(ANCHOR).expect("hash"),
+                        })
                     }
                     EvmReadSubject::NativeBalance { .. } => {
                         EvmReadValue::RawUnits(EvmU256::new("1000000000000000000").expect("units"))

@@ -21,29 +21,6 @@ pub const MAX_EVM_INITCODE_BYTES: usize = 49_152;
 /// Maximum EVM call calldata bytes admitted by one command or anchored Read.
 pub const MAX_EVM_CALLDATA_BYTES: usize = 131_072;
 
-macro_rules! checked_deserialize {
-    ($type:ident { $($field:ident: $field_type:ty),+ $(,)? }) => {
-        impl<'de> Deserialize<'de> for $type {
-            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct Wire {
-                    $($field: $field_type,)+
-                }
-
-                let wire = Wire::deserialize(deserializer)?;
-                let value = Self {
-                    $($field: wire.$field,)+
-                };
-                value.validate().map(|_| value).map_err(de::Error::custom)
-            }
-        }
-    };
-}
-
 /// Exact lowercase 20-byte EVM address.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
 #[serde(try_from = "String", into = "String")]
@@ -261,28 +238,10 @@ impl<'de> Deserialize<'de> for EvmAuthorityEpoch {
     schema = "mfm.evm-chain-instance"
 )]
 pub struct EvmChainInstance {
-    chain_id: NonZeroU64,
-    expected_genesis_hash: EvmHash,
-}
-
-impl EvmChainInstance {
-    /// Constructs one exact nonzero chain instance.
-    pub fn new(chain_id: NonZeroU64, expected_genesis_hash: EvmHash) -> Self {
-        Self {
-            chain_id,
-            expected_genesis_hash,
-        }
-    }
-
-    /// Returns the nonzero chain ID.
-    pub const fn chain_id(&self) -> NonZeroU64 {
-        self.chain_id
-    }
-
-    /// Returns the expected genesis block hash.
-    pub const fn expected_genesis_hash(&self) -> &EvmHash {
-        &self.expected_genesis_hash
-    }
+    /// Chain id.
+    pub chain_id: NonZeroU64,
+    /// Expected genesis hash.
+    pub expected_genesis_hash: EvmHash,
 }
 
 /// Public route used to bind transaction execution and anchored observations.
@@ -295,29 +254,13 @@ impl EvmChainInstance {
     schema = "mfm.evm-transaction-route"
 )]
 pub struct EvmTransactionRoute {
-    chain_instance: EvmChainInstance,
-    endpoint_ref: ContentRef,
+    /// Chain instance.
+    pub chain_instance: EvmChainInstance,
+    /// Endpoint ref.
+    pub endpoint_ref: ContentRef,
 }
 
 impl EvmTransactionRoute {
-    /// Constructs one public transaction route.
-    pub fn new(chain_instance: EvmChainInstance, endpoint_ref: ContentRef) -> Self {
-        Self {
-            chain_instance,
-            endpoint_ref,
-        }
-    }
-
-    /// Returns the exact chain instance.
-    pub const fn chain_instance(&self) -> &EvmChainInstance {
-        &self.chain_instance
-    }
-
-    /// Returns the selected public endpoint reference.
-    pub const fn endpoint_ref(&self) -> &ContentRef {
-        &self.endpoint_ref
-    }
-
     /// Derives the exact adapter binding reference.
     pub fn binding_ref(&self) -> Result<ContentRef, EvmDomainError> {
         canonicalize_mfm_value(self)
@@ -336,40 +279,15 @@ impl EvmTransactionRoute {
     schema = "mfm.evm-transaction-binding"
 )]
 pub struct EvmTransactionBinding {
-    authority_epoch: EvmAuthorityEpoch,
-    route: EvmTransactionRoute,
-    sender: EvmAddress,
+    /// Authority epoch.
+    pub authority_epoch: EvmAuthorityEpoch,
+    /// Route.
+    pub route: EvmTransactionRoute,
+    /// Sender.
+    pub sender: EvmAddress,
 }
 
 impl EvmTransactionBinding {
-    /// Constructs one complete public transaction binding.
-    pub fn new(
-        route: EvmTransactionRoute,
-        authority_epoch: EvmAuthorityEpoch,
-        sender: EvmAddress,
-    ) -> Self {
-        Self {
-            authority_epoch,
-            route,
-            sender,
-        }
-    }
-
-    /// Returns the authority epoch.
-    pub const fn authority_epoch(&self) -> &EvmAuthorityEpoch {
-        &self.authority_epoch
-    }
-
-    /// Returns the transaction route.
-    pub const fn route(&self) -> &EvmTransactionRoute {
-        &self.route
-    }
-
-    /// Returns the bound sender account.
-    pub const fn sender(&self) -> &EvmAddress {
-        &self.sender
-    }
-
     /// Derives the exact Effect adapter binding reference.
     pub fn binding_ref(&self) -> Result<ContentRef, EvmDomainError> {
         canonicalize_mfm_value(self)
@@ -552,7 +470,7 @@ impl Eip1559TransactionCommand {
     }
 }
 
-checked_deserialize!(Eip1559TransactionCommand {
+impl_checked_deserialize!(Eip1559TransactionCommand {
     action: TransactionAction,
     binding: EvmTransactionBinding,
     gas_limit: NonZeroU64,
@@ -571,28 +489,10 @@ checked_deserialize!(Eip1559TransactionCommand {
     schema = "mfm.evm-transaction-receipt"
 )]
 pub struct EvmTransactionReceipt {
-    block_anchor: crate::EvmBlockAnchor,
-    transaction_hash: EvmHash,
-}
-
-impl EvmTransactionReceipt {
-    /// Constructs one checked receipt projection.
-    pub fn new(block_anchor: crate::EvmBlockAnchor, transaction_hash: EvmHash) -> Self {
-        Self {
-            block_anchor,
-            transaction_hash,
-        }
-    }
-
-    /// Returns the canonical receipt block anchor.
-    pub const fn block_anchor(&self) -> &crate::EvmBlockAnchor {
-        &self.block_anchor
-    }
-
-    /// Returns the exact signed transaction hash.
-    pub const fn transaction_hash(&self) -> &EvmHash {
-        &self.transaction_hash
-    }
+    /// Block anchor.
+    pub block_anchor: crate::EvmBlockAnchor,
+    /// Transaction hash.
+    pub transaction_hash: EvmHash,
 }
 
 /// Closed outcome authenticated for one settled transaction.
@@ -705,12 +605,12 @@ impl EvmTransactionSettlement {
 
     /// Returns the transaction hash.
     pub const fn transaction_hash(&self) -> &EvmHash {
-        self.receipt.transaction_hash()
+        &self.receipt.transaction_hash
     }
 
     /// Returns the canonical receipt block anchor.
     pub const fn block_anchor(&self) -> &crate::EvmBlockAnchor {
-        self.receipt.block_anchor()
+        &self.receipt.block_anchor
     }
 }
 

@@ -125,7 +125,10 @@ impl BoundCapabilitySet {
             let endpoint_ref = endpoint
                 .endpoint_ref()
                 .map_err(|_| ComposeError::Assembly)?;
-            let target = EvmPhysicalTarget::new(chain_id, endpoint_ref);
+            let target = EvmPhysicalTarget {
+                chain_id,
+                endpoint_ref,
+            };
             evm.push(BoundEvmRoute {
                 target,
                 endpoint_id: endpoint.endpoint_id().to_owned(),
@@ -166,7 +169,7 @@ impl ComposedRuntime {
                 .binding_ref()
                 .map_err(|_| ComposeError::Assembly)?;
             views.push(PublicBindingView::Evm {
-                chain_id: binding.target.chain_id().get(),
+                chain_id: binding.target.chain_id.get(),
                 endpoint_id: binding.endpoint_id,
                 binding_ref,
             });
