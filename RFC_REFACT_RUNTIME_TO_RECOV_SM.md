@@ -12,10 +12,14 @@ Configuration determines which States exist before admission. When that informat
 a separate enrichment run produces a checked immutable value that Application uses to plan the
 dependent run. Once admitted, a Program never grows or changes.
 
-Normal success advances to the next State. A typed deterministic failure policy requests retry of
-the failed State, restart from an explicit checkpoint, or terminal failure. Runtime validates the
-request, applies budgets and Effect barriers, and persists the outcome and recovery decision
-atomically. Recovery does not require authors to duplicate State sequences or construct branches.
+Normal success advances to the next State. Two independently configurable implementations classify
+typed domain failures or structured execution errors and choose recovery. Operations supply
+defaults; individual State occurrences may override them. Expansion resolves one effective binding
+per declaration. Runtime assesses incidents through those bindings, validates requested recovery,
+and applies budgets and Effect barriers. Eligible incidents and their recovery decisions are
+persisted atomically. Errors whose durable outcome is unknown or cannot be recorded stop the
+invocation without inventing a terminal run. Recovery does not require authors to duplicate State
+sequences or construct branches.
 
 This is a complete replacement, not another execution mode. Remove Match, arbitrary success and
 failure edges, graph failure handlers, and the old graph compiler/fold. Preserve the useful
@@ -47,6 +51,12 @@ token:  check chain -> read anchor -> read decimals -> read token balance -> con
 A mixed portfolio concatenates the selected sequences in source order. Repeated expansion of the
 same exact configuration and implementation produces the same Program bytes and reference.
 
+The simplification is smaller business authoring and one reusable recovery mechanism. Visits,
+checkpoint activation, budgets, and recovery qualification add Runtime responsibilities compared
+with today's less capable forward-only engine. Configurable classifiers and handlers remove
+hard-coded policy choices, not the Runtime's execution-safety checks. The cutover must demonstrate
+a compact consuming API; fewer Runtime lines are not an assumed acceptance result.
+
 ## Goals and explicit exclusions
 
 The design must make the normal execution path readable as a list, make recovery reusable rather
@@ -71,10 +81,10 @@ multiple IO actions inside a State.
 | Owner | Target responsibility |
 | --- | --- |
 | Values / IDs | Checked value schemas, context reconstruction, content refs, run and Effect identities. |
-| Program | Immutable ordered State declarations, exact contracts, checkpoint declarations, recovery policy identities and bounded parameters; deterministic linear authoring. |
-| Domain | Pure State semantics, typed failure classification, meaningful checkpoint selection, resolved planning values and enrichment validity rules. |
-| Runtime | Exact assembly association; sole semantic fold; execution position, visits, checkpoints, budgets, Effect barriers, and authorized recovery transitions. |
-| Capabilities / adapters | Typed Read observations and Effect settlement; explicit async IO and duplicate-safe recovery of existing Effects. |
+| Program | Immutable ordered State declarations; public classifier/handler authoring contracts; resolved exact bindings, checkpoints, bounded parameters, and typed failure mapping. |
+| Domain | Pure State semantics, public typed failures and reusable classification/handling implementations, meaningful checkpoint selection, resolved planning values and enrichment validity rules. |
+| Runtime | Public structured execution faults and run reports; exact assembly association; incident assessment; sole semantic fold; visits, checkpoints, budgets, Effect barriers, and authorized recovery transitions. |
+| Capabilities / adapters | Public typed Read observations, Effect settlement, and redaction-safe adapter errors; explicit async IO and duplicate-safe recovery of existing Effects. |
 | Journal | Exact canonical frames, object closure, append-only wire qualification, and Effect prepare/conclusion structure. |
 | Store | Complete-prefix load and atomic exact-head append only. No recovery, checkpoint, or domain semantics. |
 | Application | Validate and bind configuration; coordinate explicitly selected enrichment and dependent admission; expose typed run use cases. |
@@ -151,47 +161,96 @@ composition cannot capture arbitrary parent positions. A parent may establish a 
 around a child; validation checks the complete expanded region and compatible checkpoint input.
 There is one linear authoring implementation, not parallel graph and sequence APIs.
 
-## Recovery policy
+## Classification and recovery handling
+
+### Public reusable contracts
+
+Domain failures, framework/runtime/adapter errors, classification contracts, recovery-handler
+contracts, and default report types are public documented library APIs. Downstream crates can
+inspect and reuse typed causes, implement classifiers and handlers, and compose them without the
+CLI, private Runtime types, or changes to framework source. Public extension does not grant Store,
+adapter, or scheduling authority, and does not permit unchecked construction of qualified values.
+
+Domains own their typed failures. Each framework boundary owns its reviewed error vocabulary;
+Runtime preserves origin and execution phase when forming a structured execution fault. Classifiers
+must be able to distinguish Read unavailability, pending Effect unavailability, and Store append
+uncertainty before transport rendering collapses detail. Raw provider errors, arbitrary diagnostic
+strings, and secrets are not classifier inputs or public error payloads.
+
+Program owns the generic authoring/association contracts; Runtime supplies its concrete execution
+fault contract at association. Domain implementations need not depend on Runtime to classify their
+own failures. These are typed extension points, not a serialized executable or erased error bag.
+
+### Two configurable implementations
 
 The names below describe contracts, not a frozen Rust API:
 
 ```text
-on typed domain failure:
+typed domain failure or structured execution fault
+    -> classifier: typed assessment of cause and recoverability
+    -> recovery handler: requested action using assessment and admitted recovery context
+    -> Runtime: validate, apply budgets/barriers, and commit or stop the invocation
+
+requested actions:
     RetryState
     Restart(checkpoint)
-    Fail(root_failure)
+    Stop
 ```
 
-Each recoverable step associates one deterministic typed policy with a versioned implementation
-identity and immutable bounded parameters in the Program. Runtime assembly associates its exact
-ABI, just as it associates State implementations. Policies consume the typed failed outcome and
-the explicitly admitted context/counter information they require; they perform no ambient IO,
-read no clock, and receive no Store or adapter authority.
+The classifier assesses the incident; the handler selects recovery. A nonrecoverable assessment
+permits only stopping; a recoverable assessment does not guarantee that Runtime can authorize the
+requested action. Both components are independently replaceable deterministic implementations with
+exact versioned identities and compatible typed ABIs. They consume only the typed
+incident/assessment and explicitly admitted bounded parameters,
+context, and counter information. They perform no ambient IO, read no clock, and receive no Store
+or adapter authority. A pending Effect permits only reconciliation of its existing authority;
+`RetryState` cannot create a new visit or command in that phase.
 
-Policy composition must map each State's failure into the Operation's one root failure contract.
-The same contract provides a deterministic root failure when recovery is exhausted or disallowed
-by an Effect barrier. Its exact ABI includes the original typed failure and the bounded reason
-recovery was denied or exhausted. There is no erased error bag or generic catch-all handler Operation.
+Typed domain failures map into the Operation's one root domain-failure contract. Execution faults
+retain their framework identity in the default report and do not require every domain to invent
+business failures for infrastructure incidents. Exhaustion and denial use a bounded stop reason
+alongside the original cause. There is no catch-all recovery Operation or middleware chain.
 
-Runtime owns authorization: a policy cannot bypass mode restrictions, restore arbitrary values,
-reset counters, or authorize another Effect. Structurally invalid policy results are internal
-implementation errors. Expected exhaustion or an unavailable checkpoint produces the declared
-terminal failure through the typed policy contract.
+### Operation defaults and State-occurrence overrides
 
-Defaults are terminal domain failure and zero recovery allowance. Recovery is explicit. Classifier
-and failure-mapping code is associated implementation code, never serialized executable code.
+Operation expansion may supply defaults for classification, recovery handling, and bounded
+allowances. The nearest explicitly supplied Operation default wins for each setting; an explicit
+State-occurrence setting overrides that default. A parent default fills unspecified child settings
+but does not silently replace an explicit child choice. Configuration belongs to the occurrence,
+so one reusable State implementation may have different policies in different Operations.
 
-### Domain failures versus execution errors
+Expansion resolves inheritance, checks the final classifier/handler/failure-mapping compatibility,
+and lowers one complete effective binding per declaration into Program. Injected occurrences use
+the same authoring rules. Runtime associates those exact bindings once; it never receives Operation
+scopes or resolves dynamic inheritance. Configuration and allowances cannot change after admission.
+Framework defaults request no recovery and provide the standard stop report; allowances are zero
+unless explicitly configured. A complete binding must cover both the State's domain-failure
+contract and applicable framework faults, with reusable framework defaults for the latter.
 
-- A typed domain failure may be classified and durably retried, restarted, or terminated.
-- Preparation, interpretation, policy callback, local binding, and invariant failures return a
-  redaction-safe Runtime error without manufacturing a domain conclusion.
-- Adapter unavailability, Store errors, and cancellation do not enter domain classification.
-- Ambiguous append acknowledgement requires reload; it is never evidence that nothing committed.
+### Runtime authorization and error boundaries
+
+Runtime uses the configured classifier and handler wherever a trustworthy associated execution
+position exists, but retains sole authority over legal transitions. A policy cannot bypass mode
+restrictions, restore arbitrary values, reset counters, or authorize another Effect. Structurally
+invalid policy results and classifier/handler failures return an internal error without recursively
+entering the same recovery pipeline. Expected exhaustion or an ineligible checkpoint produces the
+standard stop report; it becomes terminal only where a valid durable conclusion is possible.
+
+| Incident | Authorized behavior |
+| --- | --- |
+| Typed domain failure | Classify and atomically conclude with mode-eligible retry/restart or terminal domain failure. |
+| Read adapter unavailability without accepted evidence | Classify a structured execution fault; atomically record that fault and retry, eligible restart, or terminal execution failure. Never fabricate evidence or a domain outcome. |
+| Pending Effect adapter error | Assess the safe fault, but retain the exact prepare, visit, command, and EffectId. Yield for same-authority reconciliation or stop the invocation; never abandon or terminally settle the Effect from an error. |
+| Store unavailability | Stop with an operational report if progress cannot be recorded. No durable recovery allowance is consumed without a committed decision. |
+| Ambiguous append acknowledgement or a lost exact-head race | Reload the winning complete history before selecting another transition. Uncertainty is never evidence that nothing committed. |
+| Preparation, interpretation, local binding, or invariant error | Stop with a safe execution error; no fabricated domain conclusion, new provider call, or recovery append. Policy cannot authorize bypassing the failed invariant. |
+| Invalid history, incompatible association, or error before a trustworthy execution position exists | Stop through the public framework report; do not invoke an unassociated policy or execute against invalid history. |
+| Cancellation | Preserve committed authority; no guaranteed callback or append during cancellation. A later caller reloads and resumes. |
 
 For an internal Pure/Read callback error, the current durable head remains unchanged. For an Effect
-callback error after preparation, its exact acknowledged prepare remains pending. The next caller
-can resume that retained position. Cold fold never reruns a completed classifier or interpreter.
+callback error after preparation, its exact acknowledged prepare remains pending. Cold fold never
+reruns completed classifiers, handlers, or interpreters. Infrastructure errors that cannot be
+durably recorded remain invocation errors, even when a configured handler requests stopping.
 
 ## Checkpoints and restart semantics
 
@@ -228,9 +287,9 @@ This return is a Runtime recovery transition. It is not a business edge in the P
 | Mode | Retry and restart contract |
 | --- | --- |
 | Pure | Repeating a typed deterministic failure with the same input cannot repair it. Reject `RetryState`; allow restart only through an eligible earlier Read region or terminate. Interrupted pure work may be recomputed. |
-| Read | `RetryState` starts a new visit with the same exact input and may obtain new evidence. Restart can re-observe an eligible earlier region and recompute its suffix. |
+| Read | A domain failure or eligible adapter execution fault may select `RetryState`, starting a new visit with the same exact input and potentially new evidence. Restart can re-observe an eligible earlier region and recompute its suffix. |
 | Effect before acknowledged prepare | No external authority has been entered. Preparation errors retain the current position; no fabricated settlement or domain recovery occurs. |
-| Effect with acknowledged prepare | Hard recovery barrier. Resume only its retained command and EffectId until settlement. No checkpoint jump may abandon it. |
+| Effect with acknowledged prepare | Hard recovery barrier. Resume only its retained command and EffectId until settlement. No checkpoint jump or exhausted invocation recovery may abandon it or manufacture terminal settlement. |
 | Settled Effect | Its external outcome remains real. Success advances; typed domain failure terminates under this initial contract. Never implicitly execute it again. |
 
 After successful Effect settlement, recovery may use checkpoints in the subsequent Pure/Read
@@ -249,28 +308,43 @@ Runtime has one fold over retained history. Its active state distinguishes a run
 an exact pending Effect, and terminal success/failure. It also derives active checkpoint values and
 monotonic recovery counters. Avoid correlated status flags and independent mutable cursors.
 
-A State position identifies a definition within a Program. A visit identifies one execution of
-that position. A committed retry or restart selects a new visit; it does not overwrite a prior
-outcome. Visit numbering is deterministically derived from qualified transitions and checked for
-overflow. An interrupted invocation without a committed transition does not invent another visit.
+A State position identifies a definition within a Program. The tuple
+`(RunId, ProgramRef, StatePosition, VisitId)` identifies an execution occurrence. VisitId is one
+run-wide monotonic counter, deterministically advanced when a committed transition selects the next
+State execution, including retry or restart, and checked for overflow. Retry counters govern
+allowances rather than adding another identity dimension. An interrupted invocation without a
+committed transition does not invent another visit.
+
+Restart selects a retained checkpoint input and appends to the current Journal head. Execution may
+return to an earlier State position, but Journal history remains one linear hash chain; it never
+forks from a prior head. Old occurrences and their evidence remain immutable. Visit identity
+distinguishes repeated executions; exact-head atomic append decides which competing transition
+becomes history. Neither mechanism alone prevents duplicate external IO.
 
 EffectId derivation binds RunId, Program reference, State position, visit identity, and exact
 command reference under the new canonical domain. Resuming a pending Effect always reuses the
 same visit, command, and EffectId. Invocation count is not Effect identity. This provides durable
 authorization and reconciliation, not a generic exactly-once guarantee about external systems.
 
-Each admitted policy has finite retry/restart allowances and the Program has a finite total
-recovery-decision bound. Runtime enforces the global bound as well as local allowances. Exhaustion
-produces the typed terminal failure atomically with the failed attempt that exhausted recovery.
+Each effective recovery binding has finite retry/restart allowances and the Program has a finite
+total recovery-decision bound. Runtime enforces the global bound as well as local allowances.
+For a domain failure or eligible Read execution fault, exhaustion produces the terminal report
+atomically with the incident that exhausted recovery. Local counters belong to declaration
+occurrences, remain run-scoped, and never reset when a checkpoint restores input.
 
 A committed retry or restart yields a Runnable view. A later `resume` executes the selected visit.
 Successful steps may continue in the current invocation; a pending Effect also yields. This keeps
 progress caller-driven without tight retry loops, clocks, sleeps, or background tasks in Runtime.
 Clients may control pacing outside State semantics.
 
-Infrastructure failures and repeated pending observations that append no frame do not consume a
-durable domain-recovery budget. Therefore the bound is on committed recovery decisions, not wall
-time or total provider invocations. Runtime makes no eventual-settlement guarantee.
+Committed recovery for eligible Read execution faults consumes the same admitted allowances as
+domain-failure recovery. Store errors, pending Effect observations, and other incidents that append
+no frame do not consume a durable recovery budget. Therefore maximum recovery tries means
+committed recovery decisions, not wall time or total provider invocations. A Read timeout followed
+by an unsuccessful append does not durably spend an allowance; the next caller reloads first.
+Each pending Effect reconciliation yields rather than retrying internally. Caller-side limits on
+unrecorded invocation attempts are operational limits, not durable counters or terminal run facts.
+Runtime makes no eventual-settlement guarantee.
 Exhausted recovery allowances cannot revoke an acknowledged pending command: its retained visit
 must remain eligible for settlement and its reserved conclusion capacity remains available.
 
@@ -279,21 +353,28 @@ must remain eligible for settlement and its reserved conclusion capacity remains
 Introduce one current linear-recovery Program and Journal wire contract with new identities. Old
 graph bytes are rejected. Do not reinterpret them as sequences or add compatibility readers.
 
-Pure/Read conclusions retain the typed outcome; Read conclusions also retain exact intent and
-accepted evidence. A failed conclusion additionally carries the authorized recovery disposition,
-target checkpoint activation where applicable, and sufficient exact references to qualify it.
+Pure/Read domain conclusions retain the typed outcome; Read domain conclusions also retain exact
+intent and accepted evidence. A distinct Read execution-fault conclusion retains the exact intent,
+reviewed fault origin/phase/code, and recovery disposition, with no accepted evidence or domain
+outcome. These alternatives must be represented explicitly, not through a fabricated evidence
+value or unrelated optional fields. An incident conclusion additionally carries the authorized
+recovery disposition, target checkpoint activation where applicable, and sufficient exact
+references to qualify it, including the resulting terminal report where applicable.
 Effect prepare retains the command, visit, and EffectId; its adjacent conclusion retains bound
 settlement and the terminal-or-advance disposition.
 
-Failure and recovery decision are one atomic conclusion. There is no durable intermediate failed
-State waiting for an unrecorded classifier choice. If classification or validation fails before
-append, no conclusion is committed. An Effect's prepare remains pending in that case.
+An eligible incident and recovery decision are one atomic conclusion. There is no durable
+intermediate failed State waiting for an unrecorded classifier or handler choice. If classification,
+handling, mapping, or validation fails before append, no conclusion is committed. An Effect's
+prepare remains pending in that case. Pending Effect errors add no intermediate frames between
+prepare and settlement conclusion; stop reports for those invocations are not settlement records.
 
 Journal owns structural wire qualification and complete frame-local object closure. Runtime owns
 semantic validation against the associated Program: expected visit and position, allowed mode,
-checkpoint eligibility and input, counters, and Effect barriers. Cold fold validates retained
-decisions without re-executing policy callbacks, State interpretations, or providers. A retained
-pending Effect is re-prepared only to validate its exact command and identity, as today.
+checkpoint eligibility and input, counters, fault eligibility, report contracts, and Effect
+barriers. Cold fold validates retained decisions without re-executing classifiers, handlers,
+failure mappings, State interpretations, or providers. A retained pending Effect is re-prepared
+only to validate its exact command and identity, as today.
 
 Store remains mechanical. Every append is exact-head and all-or-nothing. A losing concurrent
 append reloads the winning complete history. Concurrent recoveries cannot each spend the same
@@ -302,19 +383,21 @@ through the adapter's same-identity protocol; Store locking alone does not preve
 
 ### Capacity
 
-Keep explicit finite canonical-object, frame, frame-count, and total-history byte limits. The
-current once-per-declaration formula is removed because declarations may be revisited. Replace it
-with checked admission arithmetic proving a conservative maximum for the complete sequence and
-all executions permitted by its recovery bounds, in both frames and bytes. Include genesis,
-successful suffixes, failed attempts, checkpoint value closure, and terminal dispositions. Reject
-admission before genesis if the full bound exceeds the format limits. There is no extra durable
-capacity-stop state and no requirement that a `Never` State manufacture a domain failure.
+Keep an independent finite Program declaration/size bound and explicit finite canonical-object,
+frame, frame-count, and total-history byte limits. Declaration count bounds the admitted definition,
+not the number of executions. The current once-per-declaration formula is removed because
+declarations may be revisited. Replace it with checked admission arithmetic proving a conservative
+maximum for the complete sequence and all executions permitted by its recovery bounds, in both
+frames and bytes. Include genesis, successful suffixes, domain and eligible execution-fault
+attempts, checkpoint value closure, and terminal reports/dispositions. Reject admission before
+genesis if the full bound exceeds the format limits. There is no extra durable capacity-stop state
+and no requirement that a `Never` State manufacture a domain failure.
 
 Each step's admitted size bounds must cover its complete frame-local closure, including evidence,
-context, and policy output; Runtime enforces those bounds on returned values. Planning may use
-tighter checked bounds than the global maximum object size, but cannot omit a possible valid
-execution within the admitted contract. Exact runtime accounting before every append checks the
-admission invariant. Never let a retry reset history accounting.
+context, and classifier/handler/report output; Runtime enforces those bounds on returned values.
+Planning may use tighter checked bounds than the global maximum object size, but cannot omit a
+possible valid execution within the admitted contract. Exact runtime accounting before every
+append checks the admission invariant. Never let a retry reset history accounting.
 
 Before preparing an Effect, Runtime must reserve enough remaining frame/count/byte capacity for
 both its prepare and its maximum admitted conclusion, including terminal failure disposition.
@@ -334,9 +417,23 @@ runnable visit or reconciles the exact pending Effect; terminal resume is unchan
 no execution. Runnable recovery exposes a bounded reason and target State position so callers
 can distinguish retry/restart from pending settlement without inspecting frames.
 
-Expose terminal domain failure separately from redacted Runtime errors. Preserve stable recovery
-identities on ambiguous admission/progress acknowledgements. No secrets, raw provider errors,
-configuration locators, or arbitrary classifier diagnostics enter public output.
+Provide one public reusable default Operation stop report for nonrecoverable incidents, exhausted
+allowances, or recovery disallowed by Runtime. It contains the reviewed cause, bounded stop reason,
+State position/visit and recovery usage when known, and the mapped typed root domain failure when
+the cause is a domain failure. Framework faults retain their structured safe identity and never
+require a fabricated root domain failure, including for a State with `Never` domain failure.
+
+Use explicit result variants to distinguish a durably terminal domain or execution failure from an
+invocation stopped with runnable, pending, or unknown durable state. An invocation report is not
+evidence of an appended terminal conclusion. In particular, pending Effect recovery exhaustion
+must report unresolved settlement and retain its exact recovery authority. For failures before a
+position is known, report that scope explicitly rather than inventing a State or counter value.
+Domain authors may build reporting on these public types; Runtime supplies the default without
+requiring a custom reporting Operation.
+
+Preserve stable recovery identities on ambiguous admission/progress acknowledgements. No secrets,
+raw provider errors, configuration locators, or arbitrary classifier diagnostics enter public
+output. Public reuse does not expose private adapter handles or unredacted source errors.
 
 Application owns mapping into shared client models; CLI and REST update together with their
 documented transport asymmetries. They do not implement retry policy or derive run status.
@@ -348,22 +445,27 @@ The implementation must replace all current producers and consumers together:
 1. Program wire, checked construction, and authoring: remove `Declaration::Match`,
    `MatchDeclaration`, `MatchVariant`, `MatchJoin`, `match_join`, `with_failure_handler`, arbitrary
    successor edges, graph joins/frontiers, selector projections, and obsolete graph-only helpers.
-   Replace them with sequence construction, scoped checkpoints, and exact typed recovery policy.
+   Replace them with sequence construction, scoped checkpoints, public typed classifier/handler
+   contracts, and authoring-time resolution of Operation defaults and occurrence overrides.
 2. Runtime assembly and engine: delete graph association, Match selection, edge advancement, and
-   once-per-declaration assumptions. Implement the sole linear recovery fold and associated policy
-   callbacks. Keep one public Runtime API and no old engine behind flags.
+   once-per-declaration assumptions. Implement the sole linear recovery fold, associated classifier
+   and handler callbacks, phase-aware public faults, and default reports. Keep one public Runtime
+   API and no old engine behind flags or runtime policy-inheritance resolver.
 3. Journal and IDs: replace the wire/qualification fixtures and EffectId derivation; update all
-   complete-history, hostile-input, capacity, and exact-byte tests. Store gets no semantic API.
+   complete-history, hostile-input, capacity, and exact-byte tests, including explicit Read
+   execution-fault conclusions and monotonic visits. Store gets no semantic API.
 4. Domains and live composition: specialize balance expansion from ordered sources; remove
    `SelectBalanceAsset` and its selector-only sum/metadata/registrations where obsolete. Replace
-   Portfolio failure-handler topology with typed root-failure mapping and declared recovery policy.
-   Preserve chain/route/input validation and anchored evidence contracts.
+   Portfolio failure-handler topology with public typed root-failure mapping and resolved
+   classification/recovery bindings. Preserve chain/route/input validation and anchored evidence
+   contracts.
 5. Effect injection and custody consumers: update the four-State transaction sequence, identity
    users, fixtures, and pending recovery tests. Retain exact prepared-wire reuse and signer-free
    recovery guarantees. Do not promote the development finality contract into production.
 6. Application, CLI, REST, discovery inventories, examples, and contract snapshots: remove graph
-   assumptions and expose the one current run model. Add explicit enrichment-to-admission use
-   cases without adding a hidden scheduler.
+   assumptions and expose the one current run/report model, distinguishing durable termination
+   from stopped invocations. Add explicit enrichment-to-admission use cases in the subsequent
+   enrichment commit without adding a hidden scheduler.
 7. Documentation: replace the current contract in `docs/design.md` and taxonomy in
    `docs/architecture.md`, update affected binary READMEs and rustdoc, and align verification docs
    and executable task descriptions with the new contracts.
@@ -387,18 +489,38 @@ Tests must use public boundaries and independently specify observable behavior:
 - Native-only, token-only, and mixed configuration produce the selected linear sequences and
   correct balances; mismatched Program/input fails before provider entry.
 - Expansion is deterministic; incomplete adjacent types, invalid checkpoint scopes, incompatible
-  failure policies, and unbounded policies fail construction or association.
+  classifier/handler/failure-mapping contracts, and unbounded allowances fail construction or
+  association. Changes to effective policy identity or parameters change Program identity.
+- A consuming crate reuses public domain failures, framework/adapter faults, classifiers, handlers,
+  and default reports without CLI or private Runtime access. It supplies custom implementations
+  for both domain and applicable execution-fault classification/handling.
+- Operation defaults, nearest explicit child defaults, and State-occurrence overrides resolve
+  deterministically, including injected occurrences. Two occurrences of the same State can choose
+  different recovery without modifying the State implementation or adding runtime scope lookup.
 - A Read domain failure retries with the same input and new evidence; a Pure deterministic failure
   cannot select same-input retry.
+- Read adapter unavailability records a structured execution fault with no fabricated evidence or
+  domain outcome. Its retry/restart consumes admitted allowances and exhaustion produces a durable
+  execution-failure report; cold fold does not repeat its callbacks.
 - Anchor mismatch restarts the declared collection region, discards active suffix values, retains
   prior frames, and yields the same result and head interpretation after cold reload.
 - Repeated/nested restart cannot reset local/global budgets; exhaustion produces terminal failure.
 - Cancellation and ambiguous append at every recovery boundary converge on one qualified history;
   concurrent callers cannot spend one recovery allowance twice.
-- Classifier/internal errors append no conclusion; cold fold never calls completed interpreters,
-  classifiers, providers, or signers.
+- Classifier, handler, mapping, and internal errors append no conclusion or recursively invoke
+  recovery. Local binding mismatch performs no provider call or append and cannot be classified
+  into authenticated external evidence. Cold fold never calls completed interpreters,
+  classifiers, handlers, mappings, providers, or signers.
+- Store unavailability cannot falsely spend a durable allowance or report durable termination.
+  Read timeout followed by append failure retains the committed budget; ambiguous acknowledgement
+  reloads before another decision. Fault assessment preserves origin and phase.
 - Pending Effect recovery keeps the exact command/EffectId, cannot jump to a checkpoint, and does
   not rebroadcast a new action after settled success or failure.
+- Stopping pending Effect invocation recovery retains its prepare and settlement authority, adds
+  no intermediate frame, and reports unresolved execution rather than terminal run failure.
+- Restart to an earlier State selects a fresh run-wide visit while extending the latest Journal
+  head. Ordinary advancement also selects a fresh visit; interruption without a committed
+  transition and repeated pending Effect reconciliation retain the existing visit.
 - A checkpoint after an Effect can restart its Read suffix; a checkpoint before it is ineligible,
   including when the Effect was introduced by injection.
 - Exact wire/hash vectors, malformed decisions, forged checkpoint refs, stale visits, budget
@@ -407,11 +529,17 @@ Tests must use public boundaries and independently specify observable behavior:
   settlement at the bound; all histories remain within fixed limits.
 - Enrichment output linkage is exact; a resumed dependent run does not rediscover assets or depend
   on a deleted config; invalid/stale discovery fails admission under its declared domain policy.
-- CLI/REST agree on recovery state and identities while preserving documented transport behavior.
+- Default reports distinguish exhausted/nonrecoverable domain failures, durable Read execution
+  failures, and stopped invocations with unresolved or unknown history, including unavailable
+  State information before association. A `Never` domain failure contract still permits an
+  execution-failure report without an encodable domain failure.
+- CLI/REST agree on recovery state, reports, and identities while preserving documented transport
+  behavior.
 
 ## Ordered implementation commits and verification
 
-1. **Record the proposal.** This RFC only; review assumptions without changing current contracts.
+1. **Record the agreed proposal.** This RFC only; specify public composable classification and
+   recovery, default reports, and identity without changing current implementation contracts.
 2. **Replace the execution contract completely.** Keep the inseparable Program/Runtime/Journal/
    Effect-identity cutover, all dependent domain/adapter/application/binary changes, deletions,
    fixtures, tests, and current design documentation in one coherent logical commit. Do not split
@@ -439,6 +567,16 @@ candidate; do not redundantly run its broad component gates immediately beforeha
   limits change Program topology. Rejected for maintainability and authoring complexity.
 - **Let States return arbitrary next-State IDs:** moves scheduling into domain implementations,
   weakens typed composition, and recreates an implicit graph. Rejected.
+- **Resolve Operation policy inheritance during execution:** retains authoring scopes in Runtime
+  and multiplies runtime lookup paths. Resolve one effective binding per declaration instead.
+- **Classify only domain failures:** excludes ordinary recoverable Read adapter errors. Accept
+  structured execution faults while preserving Runtime's phase-specific safety restrictions.
+- **Treat all errors as terminal domain failures or generic retries:** fabricates business outcomes,
+  loses append uncertainty, and can abandon pending Effects. Keep public typed causes and distinguish
+  durable run conclusions from invocation stop reports.
+- **Use retry counters as execution identity or fork Journal history on restart:** overlapping
+  counters do not replace visit identity or exact-head append. Keep one monotonic VisitId and one
+  linear append-only history, independently bounded in frames and bytes.
 - **Perform live discovery inside expansion:** makes Program construction depend on ambient IO
   and provides no ordinary durable recovery for that IO. Rejected.
 - **Append States to an admitted Program:** changes immutable Program identity and introduces a
@@ -448,15 +586,14 @@ candidate; do not redundantly run its broad component gates immediately beforeha
 
 ## Material uncertainties
 
-These are explicit proposed assumptions, not unspecified implementation choices. Review them
-before implementing the replacement.
+Separate enrichment/dependent admissions, the absence of runtime business branching, hard Effect
+barriers, caller-driven progression, authoring-time default resolution, public reusable
+error/failure contracts, a shared default report, and budgets counted as committed recovery
+decisions are selected design contracts. Remaining uncertainties concern validating the
+implementation and concrete enrichment contracts.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
-| Enrichment and dependent execution have separate RunIds and an explicit API boundary. | The discussion approved enrichment before expansion but did not settle lifecycle identity. | A single resumable parent request would require a separately designed durable coordinator; it must not be smuggled into Runtime. | Review discovery completion, crash before dependent admission, and ambiguous admission with the intended client flow. |
-| No required product needs runtime business branching within one Program. | Existing native/token selection is static, but future products have not been enumerated. | Some workflows must split at an execution result; unacceptable splits would require revisiting this expressiveness boundary. | Model representative portfolio and transaction workflows using resolved linear sequences. |
-| Effects are hard barriers and settled Effect failure terminates. | The requested rollback behavior did not specify compensation or crossing completed Effects. | Recovery involving undo/replacement requires a new explicit domain contract and cannot use generic checkpoint restart. | Walk through failure after reservation, signing, broadcast, and settlement. |
-| Retry/restart yields for caller-driven progression, without durable timers. | Automatic pacing/backoff was not specified. | Unattended timed recovery would need an external driver contract. | Validate intended CLI/REST usage and service operation. |
 | Discovery freezes a bounded asset list with domain-defined validity. | Exhaustiveness and snapshot freshness requirements are not yet specified. | Stronger portfolio claims require anchored discovery and consistency evidence. | Specify expected results when assets or metadata change between discovery and collection. |
-| Explicit bounded policy inputs and typed failure mappings suffice without recovery Operations. | Exact generic Rust authoring signatures have not been prototyped. | Excessive type machinery could undermine the simplification. | Implement a minimal consuming-crate prototype for nested Portfolio/EVM failure mapping and one checkpoint; accept only one compact final API. |
+| Two public typed implementation contracts with resolved defaults remain compact. | Exact generic Rust signatures for domain failures, execution faults, assessments, and root mappings have not been prototyped. | Excessive type machinery could undermine the authoring simplification or introduce an unwanted domain-to-Runtime dependency. | Implement a minimal consuming-crate prototype with nested Portfolio/EVM defaults, an occurrence override, a custom execution-fault classifier/handler, the default report, and one checkpoint; accept only one compact final API. |
 | Conservative full-history admission bounds can fit useful portfolios and recovery allowances. | Per-step complete-closure bounds have not yet been measured against the existing capacity fixtures. | Overly broad bounds could reject useful runs; tighter checked contracts or an explicit format-capacity decision would be required. | Prove bounds for the existing 64-source and transaction fixtures with representative retry budgets before freezing the wire. |
