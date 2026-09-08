@@ -1,11 +1,12 @@
 # Reusable production responsibilities implemented by the E2E harness
 
-## Problem
+## Problem and intended consumer experience
 
-The EVM contract Effect E2E consumes production transaction execution, observation, keystore,
-and persistence primitives, but still implements much of the software needed to turn those
-primitives into a usable workflow. A consumer must learn and reproduce graph assembly,
-failure adaptation, progress policy, and result decoding in addition to choosing domain behavior.
+The EVM contract Effect E2E consumes production execution primitives, but implements much of the
+software required to assemble and run them. It defines workflow types and failure adapters,
+constructs Runtime assembly, manages dependencies and recovery, drives progress, and decodes
+results. These are missing reusable production capabilities, rather than unavoidable duties of a
+consumer E2E.
 
 The intended consumer experience is:
 
@@ -15,270 +16,271 @@ The intended consumer experience is:
 4. Execute under an explicit progress/deadline policy.
 5. Inspect a typed terminal report.
 
-This includes assembling a new workflow from reusable components. Defining new business behavior
-can require authoring code; connecting existing components should not require reimplementing
-their execution support. The benchmark concerns the complete consumer implementation, including
-support modules, rather than the number of lines in the final test function.
+Workflow choices and execution policy should be configuration consumed by production code. The
+consumer E2E supplies that configuration and checks the resulting report. It should not implement
+States, failure conversions, State registration lists, a Runtime factory, a polling/recovery loop,
+or report codecs for behavior supported by the platform.
 
-The gap is not that tests contain structs or helper functions. It is that reusable responsibilities
-have no supported production entry point, forcing tests to implement them. Moving unchanged code
-into a helper or promoting hardcoded fixture behavior into a library does not resolve that gap.
+The immediate direction is configuration of supported operations, their order, ABI/function
+selection, and static typed inputs. Arbitrary wiring such as “argument X takes output Y from State
+Z” is a future capability recorded in [known gaps](docs/known-gaps.md#configuration-driven-workflows).
+Existing production connections for created addresses and receipt anchors remain useful; static
+input support does not require first inventing a general expression language.
+
+This is a problem statement and agreed direction, not an implemented API or a replacement for the
+current [design](docs/design.md) and [architecture](docs/architecture.md). It records missing support
+rather than asserting that today's contracts already provide it.
 
 ## Scope and evidence
 
-This problem statement follows the source review of commit `b1c26a19`, which completed
-the [accumulating-context cutover](docs/rfc-ctx-acc-implementation.md). At document preparation, HEAD was `836dc2a1` and another session
-was changing implementation details, including failure-report representation. The findings concern
-the responsibilities and consumer obligations below; they do not depend on the earlier report
-type names, exact line counts, or preserving that representation. Concurrent cleanup is outside
-this document's review scope.
+The initial review examined `b1c26a19`, following the
+[accumulating-context cutover](docs/rfc-ctx-acc-implementation.md). This revision incorporates the
+user's configuration-driven consumer requirements against `14b6141c`. Subsequent cleanup has
+changed report representation and reduced duplication, but the consumer obligations below remain.
+The findings do not depend on historical line counts or retaining old report types.
 
-The complete harness includes:
+The whole harness includes:
 
-- [Managed E2E](crates/live/evm/tests/evm_contract_effect_e2e.rs): resource setup, funding,
-  acknowledgement-loss injection, Runtime construction, execution, external nonce advancement,
-  recovery, and assertions.
-- [Workflow support](crates/live/evm/tests/support/contract_workflow.rs): named contexts, recipe
-  selection, graph authoring, ABI/report semantics, failure adaptation, and State registration.
-- [Deterministic coverage](crates/live/evm/tests/support/accumulating_contract.rs): scripted
-  external evidence, recording Store, failure branches, and cold terminal checks.
+- [Managed E2E](crates/live/evm/tests/evm_contract_effect_e2e.rs): resources, funding, acknowledgement
+  loss, Runtime construction, progress, external nonce advancement, recovery, and assertions.
+- [Workflow support](crates/live/evm/tests/support/contract_workflow.rs): contexts, graph, recipe
+  selection, ABI/report semantics, failure adaptation, and State registrations.
+- [Deterministic coverage](crates/live/evm/tests/support/accumulating_contract.rs): scripted external
+  evidence, recording Store, failures, and cold terminal checks.
 - [Capacity coverage](crates/live/evm/tests/support/context_capacity.rs): another context shape,
-  an additional creation, failure reporting, and schema/object/frame/run measurements.
+  additional creation, failure reporting, and schema/object/frame/run measurements.
 - [Managed task](nixfied.nix): PostgreSQL/Reth resources, pinned Solidity compilation, and test
-  selection. [The build guide](docs/build-and-verification.md) describes its guarantees.
+  selection. The [build guide](docs/build-and-verification.md) states the actual guarantees.
 
-Production boundaries examined include [Runtime](crates/kernel/runtime/src/lib.rs),
+The production boundaries include [Runtime](crates/kernel/runtime/src/lib.rs),
 [Program authoring](crates/kernel/program/src/authoring.rs),
-[EVM transaction stages and Operation](crates/domains/evm/src/transaction/stages.rs),
+[EVM transaction States and Operation](crates/domains/evm/src/transaction/stages.rs),
 [State-family registration](crates/live/evm/src/assembly.rs),
-[JSON-RPC provider](crates/live/evm/src/json_rpc.rs),
-[keystore](crates/keystore/src/lib.rs), and
+[JSON-RPC provider](crates/live/evm/src/json_rpc.rs), [keystore](crates/keystore/src/lib.rs), and
 [Application composition](crates/app/src/lib.rs).
 
-This is a problem inventory and a set of improvement criteria, not a replacement architecture.
-[Design](docs/design.md) and [architecture](docs/architecture.md) remain authoritative.
+The accumulating-context work made checked plans, cumulative facts, typed replacement, selected
+creation/call/observation connections, and transaction-family registration reusable. Its bounded
+scope did not solve general composition, execution policy, failure authoring, or typed result
+consumption. Completing that cutover therefore did not complete this consumer experience.
 
-## Relationship to accumulating contexts
+## Responsibility inventory
 
-The RFC moved checked plans, cumulative facts, typed field replacement, creation-dependent command
-selection, the one-transaction Operation, and four-State transaction registration into production.
-The E2E no longer implements the two mechanical preparation bridge States.
-
-However, the RFC explicitly excluded general assembly registration, retry policy, heterogeneous
-result inspection, and general failure authoring. It explicitly retained product ABI decoding,
-checked terminal failure reports, failure handlers, and a bounded progression driver.
-
-Consequently, completion of that cutover does not establish complete reusable workflow support.
-The remaining costs below are not
-automatically stale implementations or failures of that cutover. Several are limitations of its
-deliberately bounded scope.
-
-## Inventory against the five-step consumer flow
-
-| Consumer step | Implementation currently supplied by the harness | Reusable production responsibility missing or insufficiently packaged | What remains consumer/test-owned |
+| Consumer step | Implementation leaking into the harness | Required reusable production behavior | Consumer E2E supplies |
 | --- | --- | --- | --- |
-| Obtain a wallet | `generated_signer`: entropy, checked scalar construction, retries, purpose selection, import | A reusable wallet/key-creation entry point if obtaining a new wallet is a supported platform use case; checked import already exists | Choosing an ephemeral wallet, its purpose, and lifetime |
-| Fund a wallet | `fund_sender`, `funding_rpc`, `funding_response_body`, `FundingResponse<T>`, `FundingError` | Reusable bounded JSON-RPC transport mechanics; a funding capability requires an explicit development/faucet authority contract | Selecting the funding source, amount, development node, and readiness requirement |
-| Supply capabilities | `runtime`: opens Store and authority, constructs provider, installs State and adapter families | A reusable composition boundary accepting explicitly supplied dependencies and the selected workflow's executable requirements | Locators, signer/authority selection, fault wrappers, resource lifetime, and deliberate reconstruction |
-| Select workflow/input | `EffectFixtureOperation`, context/recipe aliases, `register_fixture_states` | Composable executable components whose required State inventory is maintained with their implementation | Step ordering, selected source fields, plans, fees, ABI, and product policy |
-| Connect failures | `Abort`, its trait implementations and registrations, `with_failure_handler`, `TryFrom` conversions | Reusable typed failure adaptation without handwritten executable scaffolding for every mapping | Which failures are terminal, their reviewed reasons, and genuine recovery behavior |
-| Retain terminal facts | `FixtureFailure` construction/decoding and context-to-report conversions; analogous capacity code | Reusable lossless report construction for supported compositions, with bounded representation and checked contracts | Product names/order, chosen report content, and domain-specific consistency rules |
-| Execute | `drive_to_success`, resume-before-start logic for the wallet follow-up, timeout and polling constants | A reusable caller-controlled execution driver with explicit deadline/progress/recovery policy | Policy values, injected failures, expected interruption points, and assertions |
-| Inspect report | `terminal_value`, failure deserialization in the driver, manual `WalletReport` decoding | Exact-contract-checked typed terminal access, with a clear relationship to the selected workflow's success/failure types | Expected values and independent wire/history assertions |
+| Obtain/import wallet | `generated_signer`: entropy, scalar construction, retries, purpose selection, import | Reviewed wallet creation/import and owned key-handle lifecycle | Wallet creation/import request and selected capability reference; no persisted secret in workflow configuration |
+| Fund wallet | `fund_sender`, `funding_rpc`, `funding_response_body`, `FundingResponse<T>`, `FundingError` | A `DevNodeFundWallet` State and dev-node adapter, sharing bounded RPC mechanics and defining completed funding/retry behavior | Development-node selection, recipient, amount, and funding options |
+| Supply capabilities | `runtime`: opens Store/authority/provider, installs executable and adapter families, rebuilds handles | Production application/composition opens or accepts dependencies, owns their lifecycle, installs selected executable requirements, and constructs the existing Runtime | Explicit deployment/capability selections |
+| Select workflow/input | `EffectFixtureOperation`, recipe aliases, ABI helpers, `register_fixture_states`, fixed fee constants | Checked operation configuration, production graph/assembly planning, reusable ABI encoding/decoding, and RPC fee-discovery States | Supported step order, ABI/function selection, static typed arguments, fee policy, and report options |
+| Connect failures | `Abort`, its trait implementations/registrations, failure regions and `TryFrom` conversions | Supported failure classes and simple configured terminal/retry behavior, implemented by production components | Failure-class policy; no custom failure-adapter State |
+| Retain terminal facts | `FixtureFailure` construction/decoding, context-to-report conversion, analogous capacity code | Production success/failure report construction and validation with complete declared facts | Optional names, report selections, and supported expectation rules as configuration |
+| Execute | `drive_to_success`, resume-before-start logic, polling/deadline handling, repeated reconstruction | Production execution entry point and policy driver over the sole Runtime, including supported lifecycle/recovery behavior | Execution configuration; no custom driver or forced interruption in this E2E |
+| Inspect report | `terminal_value`, failure/wallet JSON decoding, intermediate head/nonce assertions | Exact-contract-checked typed result and report APIs | Final report expectations only; internal recovery assertions move to focused tests |
 
-The table separates demonstrated framework gaps from the wallet/funding product-surface questions.
-The latter do not justify adding ambient key generation or unlocked-account RPC methods to domain
-States or broadening production transaction admission merely to shorten a test.
+The consumer can pass one request containing both operation and execution configuration. Their
+meanings differ: operation configuration determines admitted semantics; execution configuration
+controls how production code drives that admitted run. Changing a deadline or reconnecting a
+provider must not silently rewrite Program, C0, a pending command, or a durable domain outcome.
 
-## 1. Transport implementation leaks into funding setup
+## 1. Development-node funding should be a reusable State
 
-`fund_sender` constructs a second HTTP client and implements JSON-RPC requests and responses.
-It repeats no-proxy/no-redirect/no-retry policy, request deadlines, bounded response collection,
-version/ID checks, and redacted error conversion. The production `JsonRpcEvmProvider` already owns
-these mechanisms through its private `rpc`, envelope types, HTTP construction, and body reader.
+The target is a small `DevNodeFundWallet` operation/State, selectable like other supported behavior.
+It accepts checked public funding input and returns retained funding evidence suitable for the
+report. The State prepares a command and interprets evidence; a live adapter performs RPC IO.
+Funding mutates external state, so it belongs on the Effect path rather than being disguised as a
+Read or executed through ambient IO inside a deterministic State.
 
-The test needs `eth_accounts` and `eth_sendTransaction`, which the production transaction-provider
-port does not expose. That explains the duplicate implementation; it does not make all those
-transport mechanisms inherently test-specific.
+A separate general faucet-authority subsystem is not a prerequisite. Selecting and binding an
+explicit development-node adapter can provide the required boundary using existing capability
+mechanisms. “Production implementation” here means reusable maintained platform code with an
+explicit development-node scope, not a promise of general production-chain funding.
 
-The reusable portion is bounded transport and protocol handling. Development-node account discovery
-and unlocked-account funding are separate authority-bearing behavior. A supported funding component
-must make that distinction explicit and define whether it acknowledges submission or actually waits
-for funding readiness. The reviewed `fund_sender` consumes a returned transaction hash and returns;
-it does not itself wait for a successful receipt or sufficient balance.
+The current helper discovers an unlocked account and submits `eth_sendTransaction`, consuming its
+returned hash without itself waiting for funding readiness. Moving that call into a State is not
+sufficient: duplicate Effect entry after a lost acknowledgement must not accidentally fund twice.
+The minimal implementation must define completion evidence, readiness, and recoverable duplicate
+handling. The exact dev-node command/replay mechanism remains an implementation design question;
+this requirement does not prescribe an additional authority service.
 
-`FundingError` is a legitimate redaction boundary. The subsequent LOC reduction shares a generic
-`FundingResponse<T>` and one test-only `funding_rpc` request path. This removes the duplicate
-envelope and checks within the harness; the broader transport responsibility remains as described
-above.
+The funding code also repeats HTTP policy, bounded response collection, JSON-RPC checks, and
+redacted errors already owned privately by `JsonRpcEvmProvider`. Sharing `FundingResponse<T>` and
+`funding_rpc` within tests reduces local duplication but leaves that production responsibility in
+the harness. Reusable funding should consume shared transport behavior.
 
-## 2. Wallet creation is implemented by the caller
+## 2. Wallet creation and dependency lifecycle belong to production
 
-`generated_signer` obtains random bytes, constructs a checked secp256k1 scalar, retries rejected
-candidates, and imports the key with a signing purpose. Production already owns checked secrets,
-import, signing handles, and keystore lifecycle; it does not expose the complete creation operation
-used here.
+`generated_signer` implements fresh key generation around an existing checked import API. A
+consumer should request the supported ephemeral wallet or import a key through production code.
+Secret generation, validation, zeroization, import, signer purpose, and owner shutdown should have
+one reviewed implementation. This does not require mnemonic support or a new persistence format.
 
-If creating a fresh wallet belongs to the supported platform surface, callers should select that
-operation rather than repeat secret-generation and import mechanics. Entropy, secret lifetime,
-and redacted errors need one reviewed implementation. This is a narrower requirement than adding
-a wallet-management framework, mnemonic support, or new key persistence.
+Likewise, the consumer E2E should select dependencies rather than implement their construction and
+lifecycle. The earlier phrase “composition boundary” means a concrete production entry point that:
 
-The choice to create an ephemeral key and keep its keystore owner alive across recovery remains
-test policy. No secret should enter workflow input, Program, Journal, reports, logs, or diagnostics.
+- accepts explicit deployment/capability selections or injected handles;
+- installs the selected workflow's exact executable and adapter requirements;
+- constructs and uses the existing production Runtime;
+- owns normal dependency opening, closing, and supported reconnection behavior.
 
-## 3. Workflow composition does not carry its executable requirements
+The test's `runtime(...)` helper is not a second implementation of the Runtime engine: it calls
+`Runtime::new`. The missing reuse is the assembly/bootstrap/lifecycle implementation around that
+engine. The target removes the test-owned factory and driver, not the use of a real production
+Runtime instance internally. Runtime retains the sole semantic fold.
 
-`EffectFixtureOperation::expand` selects the graph. `register_fixture_states` independently lists
-the implementations needed to execute that graph. The surrounding `runtime` function combines
-those registrations with the wallet follow-up family and explicit IO adapters.
+Deliberate teardown and reconstruction for fault verification belong in dedicated integration
+coverage. Normal lifecycle and recovery supported for users must be production behavior. The
+consumer E2E should not reproduce either policy in a local helper.
 
-The four-State transaction helper is a real improvement: callers no longer list the transaction's
-internal stages. The same ownership problem remains at the composed-workflow boundary. Changing
-the graph can still require a separate registration edit; the consumer must know its transitive
-implementation requirements. Association rejects incompatible assembly, but does not remove the
-maintenance obligation that produced it.
+## 3. Workflow, ABI, input, and fee choices should be configuration
 
-Reusable components should expose sufficient composition support that consuming them does not
-mean reproducing their implementation inventory. The consumer must still supply Store, signer,
-authority, and providers explicitly. Program must remain immutable graph data, with Runtime owning
-association and execution; this problem statement does not prescribe merging those owners.
+For supported EVM behavior, consumers should configure an ordered list of operations, selected
+ABI/function or selector, static typed arguments, public plan options, and reporting/failure policy.
+Production code should validate that configuration, encode/decode ABI values, construct the exact
+graph, and install its executable requirements. It should reject incompatible selectors, argument
+shapes, and unsupported operations through checked admission, without asking the test author to
+write another State or registration list.
 
-The existing `ComposedRuntime` packages Portfolio. It intentionally does not package transaction
-Effects or anchored transaction-route Reads. The E2E therefore cannot obtain this experience by
-calling an existing general application entry point.
+The ABI and the intended values remain choices made by the caller, but their implementation should
+not remain handwritten fixture Rust. For example, choosing a setter with the static value 42 is
+configuration; duplicating calldata construction and a decoder around that choice is not necessary
+consumer work. Truly new semantics can require a reusable production component, after which its
+supported instances should be configurable.
 
-## 4. Failure conversion requires caller-authored executable machinery
+RPC-derived fees are another missing production operation. A fee-discovery Read State should retain
+typed external evidence, and production deterministic code should apply the configured fee rule
+and bounds when constructing the transaction command. The configured choice can distinguish fixed
+fees from discovery. Once an Effect prepare is acknowledged, recovery must reuse its exact command
+and fees rather than query a new price and alter the transaction.
 
-The product's failure conversion is accompanied by `Abort` State declarations, implementation IDs,
-exact input/output/failure types, evaluators, graph occurrences, and registrations. Each protected
-region also supplies a concrete successful join type even though the aborting handler produces
-only failure.
+General configuration-driven references from a named prior State output into a later ABI argument
+are deferred. The initial scope uses static caller-supplied arguments and supported built-in
+connections, including production fee discovery feeding transaction construction. The future
+reference feature needs exact type/field checks, dependency ordering, branch availability, and
+stable identity; it must not become a dynamic untyped context bag. See
+[configuration-driven workflow gaps](docs/known-gaps.md#configuration-driven-workflows).
 
-Choosing a root failure reason is domain policy. Repeatedly expressing an ordinary typed conversion
-as a custom executable State is framework ceremony. The framework should support this reusable
-adaptation while keeping genuine recovery graphs explicit and preserving exact failure contracts,
-deterministic identity, redaction, and durable semantics.
+## 4. Failure classes should be simple configuration
 
-This does not justify replacing every failure handler with an implicit conversion. A handler that
-performs real recovery has different responsibilities from one that only converts and propagates.
+Consumers should select which supported failure classes terminate an operation and which admit
+supported retry/recovery behavior. The implementation must not require consumer-written `Abort`
+States, `TryFrom` report conversions, failure-handler registration, or a new recovery graph merely
+to express ordinary policy.
 
-## 5. Terminal reporting still reconstructs accumulated data manually
+Production components own reviewed failure classes, classification, and typed propagation. The
+configuration selects among their supported behaviors. An unspecified or unsupported policy must
+not silently turn failure into success or allow downstream steps to consume absent results.
 
-The ordinary EVM stages preserve siblings through generated slots, but terminal failure conversion
-selects fields and constructs another representation by hand. The alternate capacity workflow needs
-corresponding reporting machinery. Changing the representation can reduce duplication without
-eliminating this consumer obligation.
+A terminal domain failure and stopping an execution attempt are different results. An authenticated
+reversion can be a durable domain outcome. Unavailable dependencies, cancellation, deadline expiry,
+and Indeterminate acknowledgement do not automatically prove a durable failed workflow. Production
+policy/result APIs must preserve that distinction while presenting a simple consumer interface.
 
-An unrelated field added to the accumulated context survives stage replacement. Its presence in
-the terminal failure report still depends on the converter explicitly retaining it. In particular,
-adding a new sibling outside the existing request object is not automatically covered by converters
-that select only the original fields. This is an extension hazard, not evidence that the existing
-fixture has already dropped a required fact.
+General recovery is unfinished and is explicitly tracked in
+[known gaps](docs/known-gaps.md#general-execution-and-recovery-policy). Existing boundary tests are
+valuable evidence for specific guarantees, not a complete configurable recovery product.
 
-Reusable report support should preserve the declared facts across supported success and failure
-shapes without each consumer rebuilding the same stage bookkeeping. Products still own which
-facts their report promises, step names/order, ABI meaning, and business consistency requirements.
+## 5. Success and failure reports should be production results
 
-Any improvement must remain within schema identity, object, frame, and run limits. Simply embedding
-the full context separately in every failure variant can exceed the schema budget; discarding facts
-or adding an implicit Journal-backed lookup would change the requirement instead of satisfying it.
+Both success and failure reports should include configured step names/order, public input and plan
+information, retained execution/evidence facts, available decoded outputs, failure classes, and the
+results of supported consistency/expectation checks. A failure report must describe which steps
+completed, failed, or did not run without fabricating missing outputs.
 
-## 6. Execution policy and admission recovery are handwritten
+The caller can choose report content and supported expectation rules through configuration.
+Production code should construct and validate the report. Names, ordering, and consistency outcomes
+are report data, rather than reasons to require test-owned report schemas and converters. Intrinsic
+command/evidence checks still belong to their production owners; configured expectations must not
+disable them. New business-specific validation can be added as a production component instead of
+being reimplemented inside the E2E.
 
-`drive_to_success` implements a progress loop, total deadline, polling interval, retries of Runnable
-and Unavailable, typed failure decoding, and panic diagnostics. The wallet follow-up separately
-tries `resume` before `start` so an unavailable admission acknowledgement does not imply that
-genesis was absent.
+The report boundary should preserve all facts declared by its contract across both success and
+failure. Adding an unrelated retained field must not silently lose it in a handwritten failure
+conversion. Representation must fit the schema/object/frame/run limits without duplicating whole
+prefixes per failure variant or introducing an implicit Journal lookup.
 
-These are reusable execution-client responsibilities. Consumers should supply explicit policy and
-receive structured outcomes rather than copy a panic-based test driver. The supported behavior for
-Absent, admission conflict, Indeterminate, Unavailable, cancellation, and deadline expiry needs a
-reviewed contract; the current helper is not a general policy for all Runtime errors.
+Typed report access should check the exact contract and return structured results. Consumers should
+not repeat JSON decoding or reconstruct failure reasons from erased `RunView` bytes. Public result
+metadata must distinguish a durable terminal report from a stopped attempt with resumable history;
+a deadline must not manufacture a persisted failure report that the workflow never produced.
 
-Runtime remains caller-driven. A reusable driver must call the existing authoritative execution
-operations, preserve the caller's RunId and exact admission, and leave acknowledged prepares
-recoverable. It must not introduce a second semantic fold, silently choose infinite retries,
-manufacture terminal domain failures, or assume a timed-out append did not commit.
+## 6. Execution should be entirely production-owned
 
-Repeated Runtime/database reconstruction is deliberate recovery coverage and remains test-owned.
-The production driver need not reconstruct every dependency on each poll just because this
-particular test does.
+The consumer supplies progress, deadline, polling, and supported retry/recovery configuration to a
+production execution entry point. Production code handles admission, resume, dependency lifecycle,
+policy enforcement, and typed result delivery. It preserves one caller-supplied RunId, exact
+admission and pending command identity, append atomicity, and the existing sole Runtime fold.
 
-## 7. Typed workflow execution returns to manual JSON decoding
+The consumer E2E should not contain `drive_to_success`, resume-before-start logic, manually rebuilt
+Runtime handles, forced interruption points, or assertions about internal frame progression. Its
+assertions compare final report results with the configured scenario's expectations.
 
-`terminal_value`, the failure arm in `drive_to_success`, and wallet-report inspection all select a
-`RunViewState` branch and deserialize canonical bytes themselves. The expected output and failure
-types were known during authoring, but the consumer has to supply them again after execution.
+Failures and policy choices should be representable through supported configuration. Deliberately
+injected infrastructure faults, where needed, can be selected through a separate explicit dev/test
+scenario profile backed by reusable test infrastructure. They should not become undocumented
+operation semantics or require handwritten wrappers in the consumer E2E. Detailed interruption,
+head, nonce, cancellation, and append-boundary verification belongs in dedicated unit/integration
+tests. Those tests retain fault implementations and independent assertions; they need not be
+limited to a terminal report when the property being proved is an intermediate durability boundary.
 
-A reusable typed terminal interface should verify the requested exact value contract before
-decoding, distinguish success/failure/nonterminal progress, and return reviewed errors. Successful
-Serde decoding alone does not establish that the caller selected the correct nominal/exact
-contract: different contracts can have compatible JSON shapes.
+Separating these tests must preserve coverage. It is not permission to delete acknowledgement-loss,
+prepared-wire recovery, external nonce advancement, cold history, or capacity guarantees.
 
-Raw retained bytes, contract references, and heterogeneous inspection remain necessary. A typed
-accessor can coexist with them. It is one useful improvement, but is not by itself a complete typed
-execution interface tied to a chosen workflow.
+## What remains outside the consumer E2E implementation
 
-## 8. Business behavior and test boundaries must not be mistaken for missing framework code
-
-| Harness code | Responsibility that should remain outside generic production execution |
+| Existing harness code | Intended destination or treatment |
 | --- | --- |
-| `ReservationAcknowledgementFault` | Commits through the real authority and deliberately loses one acknowledgement. This is the fault being tested. |
-| `RecordingStore`, `ScriptedEvidence`, `Fault` | Substitute or observe explicit external boundaries to test behavior. |
-| `external_wallet_transfer` | Acts outside Program and nonce custody to represent another wallet application. Replacing it with an MFM-managed transaction would weaken that test condition. |
-| `fixture_initcode`, managed Solidity compilation, environment selection | Supply a particular first-party fixture artifact and managed resources. The generic framework does not need knowledge of this file or compiler invocation. |
-| `CONFIGURE_SELECTOR`, `VALUE_SELECTOR`, `fixture_configure_calldata`, `abi_word`, `decode_fixture_value` | Describe this contract's ABI and expected semantics. Reusable encoding machinery may support them, but cannot infer the product meaning. |
-| `ContractWorkflow`, `FixtureRequest`, recipe source choices, `EffectFixtureOperation` step ordering | Define the chosen product. If exposed as a supported reusable product, it needs a real product contract; copying the hardcoded fixture into EVM core is insufficient. |
-| `DecodeValue` and report-specific validation | Perform real ABI/business interpretation. Reduce surrounding authoring ceremony without removing the semantics. |
-| Capacity workflow and hostile report inputs | Exercise alternate composition and rejection boundaries, rather than represent a second production execution engine. |
-| Nonce, retained command/evidence, head, terminal value, and cold replay assertions | Establish observable outcomes. Assertions and expected values belong to the tests. |
-| `nonzero` and ordinary input construction | Express checked fixture constants and inputs; their mere presence does not justify new public APIs. |
+| `ReservationAcknowledgementFault`, `RecordingStore`, `ScriptedEvidence`, `Fault` | Reusable dev/test infrastructure and dedicated fault/recovery integration tests; no local copies in the consumer E2E |
+| `external_wallet_transfer` | Dedicated external-nonce integration scenario, retaining an actor outside MFM custody |
+| Runtime/database teardown and reconstruction | Production lifecycle where supported for users; deliberate boundary manipulation in dedicated recovery tests |
+| Solidity fixture source/compiler task and managed service provisioning | Managed test infrastructure; E2E receives the artifact and deployment configuration |
+| ABI selectors, setter values, fee choices, operation order, report selections | Checked consumer configuration interpreted by production components |
+| Calldata codecs, `DecodeValue`, graph/registration assembly, failure/report conversion | Reusable production implementation for the supported configurable operations |
+| Capacity graphs, hostile report wires, exact head/append assertions | Focused unit/integration/capacity suites |
+| Final expected report values | Consumer E2E assertions |
 
-External transfer code uses signing/encoding primitives to construct an independent actor's input.
-This is not sufficient evidence that MFM needs a second public custody-bypassing transaction API.
-Likewise, development funding does not authorize widening the production Effect provider port.
+Resource provisioning can remain part of the managed test environment. That does not imply the
+consumer test should rebuild production composition or execution behavior. Likewise, independent
+fault infrastructure is legitimate testing code, but is not an obligation imposed on ordinary
+workflow consumers.
 
-## What completion of this problem should demonstrate
+## Completion criteria and sequence
 
-1. A complete consumer example follows the five-step flow using supported reusable APIs. Review
-   every supporting module, not only the final test body.
-2. A second workflow/context can reuse the same components without copying their transitive State
-   inventory, execution driver, or terminal decoding implementation.
-3. Adding an unrelated retained field and adding another transaction have small, identifiable
-   authoring surfaces; success and failure reports retain their declared facts.
-4. Ordinary failure conversion does not require a new handwritten adapter State plus registration
-   for each mapping. Genuine recovery behavior remains explicit.
-5. Deadline, retry, admission recovery, and cancellation behavior are explicit and reusable, and
-   preserve exact RunId/command/history guarantees under ambiguous outcomes.
-6. Typed terminal access rejects a wrong exact contract even when its JSON shape would deserialize.
-   Independent raw wire/history inspection remains available.
-7. Wallet creation and funding use reusable capabilities where admitted as supported product
-   behavior; secret custody, funding authority, and readiness semantics remain explicit.
-8. Funding does not maintain a parallel implementation of shared bounded RPC mechanics. Any
-   extraction reduces total implementations and change sites without exposing an unrestricted
-   authority surface merely for convenience.
-9. Managed acknowledgement loss, rejecting-signer prepared-wire recovery, cancellation, ambiguous
-   appends, external nonce advancement, cold terminal stability, failure facts, and capacity tests
-   retain their actual guarantees. A short success example does not replace adversarial coverage.
-10. Improvement is measured by removed caller obligations, duplicated implementations, public
-    concepts, and future change sites. Test-file movement and renamed wrappers alone do not count.
+1. A consumer E2E follows the five-step flow using production APIs, configuration, and final report
+   assertions only. Review all support modules to ensure no local implementation is hidden there.
+2. A reusable `DevNodeFundWallet` State completes configured funding with checked evidence and a
+   reviewed duplicate-entry/recovery contract, without requiring a general faucet subsystem.
+3. Production composition owns dependency lifecycle and exact executable requirements. A second
+   workflow does not copy State registration lists or a Runtime constructor.
+4. Supported ABI/function selection, static typed inputs, ordered operations, fee selection, failure
+   classes, and report options are configuration. Fee discovery is a retained production Read.
+5. Production execution owns progress/recovery policy and typed result decoding. No consumer panic
+   loop, ad hoc admission retry, or manual JSON report decoding remains.
+6. Success/failure reports retain declared facts, configured names/order, and supported consistency
+   results under unchanged capacity limits. Stopped attempts remain distinguishable from durable
+   workflow failure.
+7. Detailed fault/interruption tests move to named unit/integration scenarios with their assertions
+   intact; managed task selection continues to run them where required.
+8. Future arbitrary prior-output references and general recovery are tracked explicitly in known
+   gaps rather than claimed as already supported by static configuration.
+9. Improvements reduce total caller obligations and independent implementations. Moving a fixture
+   helper or wrapping unchanged test-only machinery behind a new function is insufficient.
 
-These criteria require a subsequent target design before implementation. They do not authorize
-changes to Program wire, Journal/Store ownership, keystore threading, transaction finality, or
-CLI/REST admission. No architecture cutover is selected by this document.
+This documentation revision is one coherent change: update this problem statement and known gaps.
+Subsequent implementation needs a concrete target API and logical cutovers covering production
+components, consumers, authoritative contracts, and tests together. The configuration-driven
+consumer direction is selected; exact schemas and APIs are not implemented by this document.
 
 ## Material uncertainties
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
-| Fresh wallet creation should be a reusable platform capability. | The desired flow includes obtaining a wallet, but supported creation/import sources and persistence policy are not specified. | A convenience API could unnecessarily widen secret-handling responsibilities. | Specify the ephemeral creation use case, entropy boundary, and key lifetime before selecting an API. |
-| Funding needs a reusable capability in addition to shared RPC mechanics. | The demonstrated funder is a managed development node with unlocked accounts, not a general production funding source. | Promoting it indiscriminately could introduce inappropriate authority into production execution. | Define the development/faucet boundary and submission-versus-readiness contract; retain explicit authority. |
-| A common composition/reporting API can reduce the remaining obligations. | Different workflows have different failure policies, schemas, and supported capacity. No replacement API has been implemented or measured here. | A general abstraction could introduce more concepts or exceed limits while only hiding existing bookkeeping. | Compare complete implementations for the current workflow and an extended context/transaction scenario, including failures and capacity. |
-| Responsibility findings outlast concurrent cleanup. | Another session was changing the harness and report representation during documentation. | Specific examples may be removed even though some broader gaps remain, or a gap may be resolved. | Recheck cited symbols and complete consumer change sites against the implementation selected for the next design. |
+| Dev-node funding can fit a small replay-safe Effect contract. | The existing unlocked-account submission does not itself provide duplicate suppression after lost acknowledgement. | A simple RPC wrapper could fund twice or report completion too early. | Select and test the supported dev-node mechanism, retained evidence, readiness, and acknowledgement-loss behavior before implementation. |
+| The first configurable ABI/input surface can remain bounded. | Supported ABI types, overload selection, and expectation rules are not yet enumerated. | A supposedly small change could become a general expression/schema engine or leave common inputs unsupported. | Specify complete static setter/getter examples and rejection cases, then validate an additional ABI/context shape. |
+| General recovery can be presented as simple class-based policy. | Supported actions and interactions with pending Effects, deadlines, and process/key lifetime are unfinished. | Treating every stopped attempt as terminal failure could misstate history or retry external mutation incorrectly. | Define the supported class/action matrix and test ambiguous admission, cancellation, pending prepare, reconnect, and restart boundaries. |
 
 ## Verification
 
-Documentation-only source review: inspect the cited symbols and local links and run a scoped
-`git diff --check`. This document changes no executable behavior and selects no Rust tests,
-managed E2E, or CI run under [build and verification](docs/build-and-verification.md).
+Documentation-only review of cited symbols, local links, requirements consistency, and scoped
+`git diff --check`. No Rust behavior, task selection, or executable contract changes in this revision;
+no Rust tests, managed E2E, or CI run is selected by the
+[build guide](docs/build-and-verification.md).
