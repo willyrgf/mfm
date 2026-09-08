@@ -207,18 +207,33 @@ struct FundingError;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AccountsResponse {
+struct FundingResponse<T> {
     jsonrpc: String,
     id: u64,
-    result: Vec<EvmAddress>,
+    result: T,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FundingResponse {
-    jsonrpc: String,
-    id: u64,
-    result: EvmHash,
+async fn funding_rpc<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<T, FundingError> {
+    let response = client
+        .post(url.clone())
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
+        }))
+        .send()
+        .await
+        .map_err(|_| FundingError)?;
+    let response: FundingResponse<T> =
+        serde_json::from_slice(&funding_response_body(response).await?)
+            .map_err(|_| FundingError)?;
+    if response.jsonrpc != "2.0" || response.id != 1 {
+        return Err(FundingError);
+    }
+    Ok(response.result)
 }
 
 async fn fund_sender(locator: &str, sender: &EvmAddress) -> Result<(), FundingError> {
@@ -231,49 +246,23 @@ async fn fund_sender(locator: &str, sender: &EvmAddress) -> Result<(), FundingEr
         .timeout(RPC_TIMEOUT)
         .build()
         .map_err(|_| FundingError)?;
-    let accounts_response = client
-        .post(url.clone())
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "eth_accounts",
-            "params": [],
-        }))
-        .send()
-        .await
-        .map_err(|_| FundingError)?;
-    let accounts: AccountsResponse =
-        serde_json::from_slice(&funding_response_body(accounts_response).await?)
-            .map_err(|_| FundingError)?;
-    if accounts.jsonrpc != "2.0" || accounts.id != 1 {
-        return Err(FundingError);
-    }
-    let source = accounts.result.first().ok_or(FundingError)?;
-    let funding_response = client
-        .post(url)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "eth_sendTransaction",
-            "params": [{
-                "from": source,
-                "gas": format!("{:#x}", 21_000_u64),
-                "maxFeePerGas": format!("{MAX_FEE:#x}"),
-                "maxPriorityFeePerGas": format!("{PRIORITY_FEE:#x}"),
-                "to": sender,
-                "value": FUNDING_WEI_HEX,
-            }],
-        }))
-        .send()
-        .await
-        .map_err(|_| FundingError)?;
-    let funding: FundingResponse =
-        serde_json::from_slice(&funding_response_body(funding_response).await?)
-            .map_err(|_| FundingError)?;
-    if funding.jsonrpc != "2.0" || funding.id != 1 {
-        return Err(FundingError);
-    }
-    let _transaction_hash = funding.result;
+    let accounts: Vec<EvmAddress> =
+        funding_rpc(&client, &url, "eth_accounts", serde_json::json!([])).await?;
+    let source = accounts.first().ok_or(FundingError)?;
+    let _transaction_hash: EvmHash = funding_rpc(
+        &client,
+        &url,
+        "eth_sendTransaction",
+        serde_json::json!([{
+            "from": source,
+            "gas": format!("{:#x}", 21_000_u64),
+            "maxFeePerGas": format!("{MAX_FEE:#x}"),
+            "maxPriorityFeePerGas": format!("{PRIORITY_FEE:#x}"),
+            "to": sender,
+            "value": FUNDING_WEI_HEX,
+        }]),
+    )
+    .await?;
     Ok(())
 }
 

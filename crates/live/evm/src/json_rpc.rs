@@ -90,15 +90,6 @@ impl JsonRpcEvmProvider {
         })
     }
 
-    #[cfg(test)]
-    fn new_http_for_test(url: String) -> Result<Self, EvmProviderBuildError> {
-        let url = reqwest::Url::parse(&url).map_err(|_| EvmProviderBuildError)?;
-        Ok(Self {
-            url,
-            http: http_client()?,
-        })
-    }
-
     async fn rpc<P: Serialize + ?Sized, T: DeserializeOwned>(
         &self,
         method: &'static str,
