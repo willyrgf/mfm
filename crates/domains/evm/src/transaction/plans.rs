@@ -10,13 +10,9 @@ use super::*;
     schema = "mfm.evm-checked-create-plan"
 )]
 pub struct CheckedCreatePlan {
-    binding: EvmTransactionBinding,
+    parameters: TransactionParameters,
     #[mfm(minimum_bytes = 0, maximum_bytes = 49152)]
     initcode: CanonicalBytes,
-    value: EvmU256,
-    gas_limit: NonZeroU64,
-    max_priority_fee_per_gas: EvmU256,
-    max_fee_per_gas: EvmU256,
 }
 impl CheckedCreatePlan {
     /// Checks all transaction parameters before context admission.
@@ -25,31 +21,28 @@ impl CheckedCreatePlan {
         initcode: Vec<u8>,
         value: EvmU256,
         gas_limit: NonZeroU64,
-        max_priority_fee_per_gas: EvmU256,
-        max_fee_per_gas: EvmU256,
+        max_priority_fee_per_gas: u128,
+        max_fee_per_gas: u128,
     ) -> Result<Self, EvmDomainError> {
         let plan = Self {
-            binding,
+            parameters: TransactionParameters::new(
+                binding,
+                value,
+                gas_limit,
+                max_priority_fee_per_gas,
+                max_fee_per_gas,
+            )?,
             initcode: CanonicalBytes::new(initcode),
-            value,
-            gas_limit,
-            max_priority_fee_per_gas,
-            max_fee_per_gas,
         };
         plan.validate()?;
         Ok(plan)
     }
     fn validate(&self) -> Result<(), EvmDomainError> {
-        validate_transaction_parameters(
-            self.initcode.as_bytes(),
-            49152,
-            &self.max_priority_fee_per_gas,
-            &self.max_fee_per_gas,
-        )
+        validate_input_bytes(self.initcode.as_bytes(), MAX_EVM_INITCODE_BYTES)
     }
     /// Returns the checked public transaction binding.
     pub const fn binding(&self) -> &EvmTransactionBinding {
-        &self.binding
+        &self.parameters.binding
     }
     /// Constructs the complete nonce-free command from checked parameters.
     pub fn command(&self) -> Eip1559TransactionCommand {
@@ -57,21 +50,13 @@ impl CheckedCreatePlan {
             action: TransactionAction::Create {
                 initcode: self.initcode.clone(),
             },
-            binding: self.binding.clone(),
-            value: self.value.clone(),
-            gas_limit: self.gas_limit,
-            max_priority_fee_per_gas: self.max_priority_fee_per_gas.clone(),
-            max_fee_per_gas: self.max_fee_per_gas.clone(),
+            parameters: self.parameters.clone(),
         }
     }
 }
 impl_checked_deserialize!(CheckedCreatePlan {
-    binding: EvmTransactionBinding,
+    parameters: TransactionParameters,
     initcode: CanonicalBytes,
-    value: EvmU256,
-    gas_limit: NonZeroU64,
-    max_priority_fee_per_gas: EvmU256,
-    max_fee_per_gas: EvmU256
 });
 
 /// Checked transaction parameters whose call target is supplied by a later fact.
@@ -84,13 +69,9 @@ impl_checked_deserialize!(CheckedCreatePlan {
     schema = "mfm.evm-checked-call-plan"
 )]
 pub struct CheckedCallPlan {
-    binding: EvmTransactionBinding,
+    parameters: TransactionParameters,
     #[mfm(minimum_bytes = 0, maximum_bytes = 131072)]
     calldata: CanonicalBytes,
-    value: EvmU256,
-    gas_limit: NonZeroU64,
-    max_priority_fee_per_gas: EvmU256,
-    max_fee_per_gas: EvmU256,
 }
 impl CheckedCallPlan {
     /// Checks all transaction parameters before context admission.
@@ -99,31 +80,28 @@ impl CheckedCallPlan {
         calldata: Vec<u8>,
         value: EvmU256,
         gas_limit: NonZeroU64,
-        max_priority_fee_per_gas: EvmU256,
-        max_fee_per_gas: EvmU256,
+        max_priority_fee_per_gas: u128,
+        max_fee_per_gas: u128,
     ) -> Result<Self, EvmDomainError> {
         let plan = Self {
-            binding,
+            parameters: TransactionParameters::new(
+                binding,
+                value,
+                gas_limit,
+                max_priority_fee_per_gas,
+                max_fee_per_gas,
+            )?,
             calldata: CanonicalBytes::new(calldata),
-            value,
-            gas_limit,
-            max_priority_fee_per_gas,
-            max_fee_per_gas,
         };
         plan.validate()?;
         Ok(plan)
     }
     fn validate(&self) -> Result<(), EvmDomainError> {
-        validate_transaction_parameters(
-            self.calldata.as_bytes(),
-            131072,
-            &self.max_priority_fee_per_gas,
-            &self.max_fee_per_gas,
-        )
+        validate_input_bytes(self.calldata.as_bytes(), MAX_EVM_CALLDATA_BYTES)
     }
     /// Returns the checked public transaction binding.
     pub const fn binding(&self) -> &EvmTransactionBinding {
-        &self.binding
+        &self.parameters.binding
     }
     /// Constructs the complete nonce-free command from checked parameters.
     pub fn command_for(&self, target: EvmAddress) -> Eip1559TransactionCommand {
@@ -132,21 +110,13 @@ impl CheckedCallPlan {
                 to: target,
                 calldata: self.calldata.clone(),
             },
-            binding: self.binding.clone(),
-            value: self.value.clone(),
-            gas_limit: self.gas_limit,
-            max_priority_fee_per_gas: self.max_priority_fee_per_gas.clone(),
-            max_fee_per_gas: self.max_fee_per_gas.clone(),
+            parameters: self.parameters.clone(),
         }
     }
 }
 impl_checked_deserialize!(CheckedCallPlan {
-    binding: EvmTransactionBinding,
+    parameters: TransactionParameters,
     calldata: CanonicalBytes,
-    value: EvmU256,
-    gas_limit: NonZeroU64,
-    max_priority_fee_per_gas: EvmU256,
-    max_fee_per_gas: EvmU256
 });
 
 /// Checked ordinary call plan with a required target.

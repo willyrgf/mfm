@@ -402,8 +402,8 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
                 vec![1; create_bytes],
                 EvmU256::from_u64(0),
                 nonzero(DEPLOYMENT_GAS),
-                EvmU256::from_u64(PRIORITY_FEE),
-                EvmU256::from_u64(MAX_FEE),
+                (PRIORITY_FEE) as u128,
+                (MAX_FEE) as u128,
             )
             .unwrap(),
             deployment: CheckedCreatePlan::new(
@@ -411,8 +411,8 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
                 vec![2; create_bytes],
                 EvmU256::from_u64(0),
                 nonzero(DEPLOYMENT_GAS),
-                EvmU256::from_u64(PRIORITY_FEE),
-                EvmU256::from_u64(MAX_FEE),
+                (PRIORITY_FEE) as u128,
+                (MAX_FEE) as u128,
             )
             .unwrap(),
             configuration: CheckedCallPlan::new(
@@ -420,8 +420,8 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
                 vec![3; call_bytes],
                 EvmU256::from_u64(0),
                 nonzero(CONFIGURATION_GAS),
-                EvmU256::from_u64(PRIORITY_FEE),
-                EvmU256::from_u64(MAX_FEE),
+                (PRIORITY_FEE) as u128,
+                (MAX_FEE) as u128,
             )
             .unwrap(),
             observation: CheckedObservationPlan::new(binding.route.clone(), vec![4; call_bytes])

@@ -254,8 +254,8 @@ async fn accumulated_fixture_preserves_all_success_failure_and_cold_facts() {
                 vec![1, 2, 3],
                 EvmU256::from_u64(0),
                 nonzero(DEPLOYMENT_GAS),
-                EvmU256::from_u64(PRIORITY_FEE),
-                EvmU256::from_u64(MAX_FEE),
+                (PRIORITY_FEE) as u128,
+                (MAX_FEE) as u128,
             )
             .unwrap(),
             configuration: CheckedCallPlan::new(
@@ -263,8 +263,8 @@ async fn accumulated_fixture_preserves_all_success_failure_and_cold_facts() {
                 fixture_configure_calldata(),
                 EvmU256::from_u64(0),
                 nonzero(CONFIGURATION_GAS),
-                EvmU256::from_u64(PRIORITY_FEE),
-                EvmU256::from_u64(MAX_FEE),
+                (PRIORITY_FEE) as u128,
+                (MAX_FEE) as u128,
             )
             .unwrap(),
             observation: CheckedObservationPlan::new(

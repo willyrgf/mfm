@@ -89,7 +89,9 @@ EVM Program values use byte-backed checked lowercase `EvmAddress` and `EvmHash`,
 fixes chain ID plus expected genesis hash, endpoint reference, authority epoch, and sender account.
 The sole transaction command is nonce-free EIP-1559 type 2 with an empty access list and a private
 bounded Create or Call action. Its complete factories and checked deserializer enforce input bounds,
-the `u128` fee ceiling, priority-fee ordering, and nonzero gas. `CheckedCreatePlan` and
+priority-fee ordering and nonzero gas. Plans and commands retain one shared nested parameter
+product. Its private fee amounts store `u128` and serialize as canonical decimal strings; factories
+accept `u128` fees and checked decoding rejects noncanonical spelling and overflow. `CheckedCreatePlan` and
 `CheckedCallPlan` share these validation owners; the latter has no target. `CheckedTargetCallPlan`
 adds a required target for an ordinary call. Deserialization preserves all plan checks.
 

@@ -57,8 +57,8 @@ fn create_command() -> Eip1559TransactionCommand {
         vec![1, 2, 3],
         EvmU256::from_u64(0),
         nonzero(2_000_000),
-        EvmU256::from_u64(1_000_000_000),
-        EvmU256::from_u64(10_000_000_000),
+        (1_000_000_000) as u128,
+        (10_000_000_000) as u128,
     )
     .expect("create command")
 }
@@ -70,8 +70,8 @@ fn call_command() -> Eip1559TransactionCommand {
         vec![4, 5, 6],
         EvmU256::from_u64(7),
         nonzero(200_000),
-        EvmU256::from_u64(1),
-        EvmU256::from_u64(2),
+        (1) as u128,
+        (2) as u128,
     )
     .expect("call command")
 }
@@ -203,14 +203,14 @@ fn fixed_eip1559_command_has_exact_wire_and_checked_factories() {
     assert_eq!(command.to(), None);
     assert_eq!(
         canonical(&command),
-        r#"{"action":{"kind":"create","value":{"initcode":"AQID"}},"binding":{"authority_epoch":"ERERERERERERERERERERERERERERERERERERERERERE","route":{"chain_instance":{"chain_id":1,"expected_genesis_hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"endpoint_ref":{"content_digest":"content:sha256-v1:0202020202020202020202020202020202020202020202020202020202020202","schema_id":"schema:mfm.test.endpoint:1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101"}},"sender":"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"},"gas_limit":2000000,"max_fee_per_gas":"10000000000","max_priority_fee_per_gas":"1000000000","value":"0"}"#
+        r#"{"action":{"kind":"create","value":{"initcode":"AQID"}},"parameters":{"binding":{"authority_epoch":"ERERERERERERERERERERERERERERERERERERERERERE","route":{"chain_instance":{"chain_id":1,"expected_genesis_hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"endpoint_ref":{"content_digest":"content:sha256-v1:0202020202020202020202020202020202020202020202020202020202020202","schema_id":"schema:mfm.test.endpoint:1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101"}},"sender":"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"},"fees":{"maximum":"10000000000","priority":"1000000000"},"gas_limit":2000000,"value":"0"}}"#
     );
 
     let mut wire = serde_json::to_value(&command).expect("wire");
-    wire["gas_limit"] = serde_json::json!(0);
+    wire["parameters"]["gas_limit"] = serde_json::json!(0);
     assert!(serde_json::from_value::<Eip1559TransactionCommand>(wire).is_err());
     let mut wire = serde_json::to_value(&command).expect("wire");
-    wire["max_fee_per_gas"] = serde_json::json!("999999999");
+    wire["parameters"]["fees"]["maximum"] = serde_json::json!("999999999");
     assert!(serde_json::from_value::<Eip1559TransactionCommand>(wire).is_err());
     let mut wire = serde_json::to_value(&command).expect("wire");
     wire["action"]["value"]["initcode"] = serde_json::json!("AQID=");
@@ -225,8 +225,8 @@ fn fixed_eip1559_command_has_exact_wire_and_checked_factories() {
         vec![0; MAX_EVM_INITCODE_BYTES],
         EvmU256::from_u64(0),
         nonzero(1),
-        EvmU256::from_u64(1),
-        EvmU256::from_u64(1),
+        (1) as u128,
+        (1) as u128,
     )
     .is_ok());
     assert!(Eip1559TransactionCommand::create(
@@ -234,8 +234,8 @@ fn fixed_eip1559_command_has_exact_wire_and_checked_factories() {
         vec![0; MAX_EVM_INITCODE_BYTES + 1],
         EvmU256::from_u64(0),
         nonzero(1),
-        EvmU256::from_u64(1),
-        EvmU256::from_u64(1),
+        (1) as u128,
+        (1) as u128,
     )
     .is_err());
     assert!(Eip1559TransactionCommand::call(
@@ -244,19 +244,8 @@ fn fixed_eip1559_command_has_exact_wire_and_checked_factories() {
         vec![0; MAX_EVM_CALLDATA_BYTES + 1],
         EvmU256::from_u64(0),
         nonzero(1),
-        EvmU256::from_u64(1),
-        EvmU256::from_u64(1),
-    )
-    .is_err());
-    let above_u128 =
-        EvmU256::new("340282366920938463463374607431768211456").expect("valid u256 above u128");
-    assert!(Eip1559TransactionCommand::create(
-        binding(),
-        Vec::new(),
-        EvmU256::from_u64(0),
-        nonzero(1),
-        EvmU256::from_u64(0),
-        above_u128,
+        (1) as u128,
+        (1) as u128,
     )
     .is_err());
 }
@@ -365,7 +354,7 @@ fn transaction_identity_and_wire_ledger_is_frozen() {
         ("chain_instance", "semantic:mfm.evm:chain-instance:1:sha256-jcs-v1:bd03cc792156c07fc5036a962689cfe59b026faa88af4dbe7b4e7cbc6dd22c67", "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"),
         ("transaction_route", "semantic:mfm.evm:transaction-route:1:sha256-jcs-v1:d463731df98a305d59ad98150a6f6b4f7ded383ecf51c6a1297c4a88421b978b", "schema:mfm.evm-transaction-route:1:sha256-jcs-v1:ed1444b8cc704f9406fc89bef4d4b43a7e02a0814ee9db5ddf2adc23f8204c5a"),
         ("transaction_binding", "semantic:mfm.evm:transaction-binding:1:sha256-jcs-v1:d79c1b7fabc0bc262e3067bda16dc3912bdac331532fbb59e0ba1def71db2458", "schema:mfm.evm-transaction-binding:1:sha256-jcs-v1:aa28e9a4ee8e3d5dcec3694ccfd9f20da75a781d9aa29fc694a9767d4858fbec"),
-        ("command", "semantic:mfm.evm:eip1559-transaction-command:1:sha256-jcs-v1:72ec2fe60bd6430fa1a548442f9090d1f66e028f2e155959ef3bbd3aa141841c", "schema:mfm.evm-eip1559-transaction-command:1:sha256-jcs-v1:55ddb103fada5d9a721b50b725ff2b3a58ac87c8b01c602287eb1b98b9ab6107"),
+        ("command", "semantic:mfm.evm:eip1559-transaction-command:1:sha256-jcs-v1:72ec2fe60bd6430fa1a548442f9090d1f66e028f2e155959ef3bbd3aa141841c", "schema:mfm.evm-eip1559-transaction-command:1:sha256-jcs-v1:238fada95370980eebf597f62ab5b57a5beea218b86199c09096785e01cb2768"),
         ("receipt", "semantic:mfm.evm:transaction-receipt:1:sha256-jcs-v1:b46061e3fdf0513d0649533a002e4b36a517ee050bff923affa315748c59cf71", "schema:mfm.evm-transaction-receipt:1:sha256-jcs-v1:f54298ed576a1705aa12b38528bbde9510603f38432fa9451d2c85b6f5b9e6fd"),
         ("outcome", "semantic:mfm.evm:transaction-outcome:1:sha256-jcs-v1:550b9bc834d9b97d80dc8b2d2f7fd59b2ced5d7fcb2bab7f5748d93ced6df6c9", "schema:mfm.evm-transaction-outcome:1:sha256-jcs-v1:d16d9083d15ada4afca3e14c6e8aac9d3ce8f0c1a455736cb7c645cfa10f8481"),
         ("settlement", "semantic:mfm.evm:transaction-settlement:1:sha256-jcs-v1:4c958b57f53af59186964196610ee7625069a22212f3df585b2d8ff0c58447d8", "schema:mfm.evm-transaction-settlement:1:sha256-jcs-v1:df543db8f3bce96f42c972180a02783e1143e1b46b6c75b11c090c223107e9d9"),
@@ -417,8 +406,8 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
             vec![1; size],
             EvmU256::from_u64(0),
             nonzero(1),
-            EvmU256::from_u64(1),
-            EvmU256::from_u64(2),
+            (1) as u128,
+            (2) as u128,
         )
         .unwrap();
         assert_eq!(
@@ -428,8 +417,8 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
                 vec![1; size],
                 EvmU256::from_u64(0),
                 nonzero(1),
-                EvmU256::from_u64(1),
-                EvmU256::from_u64(2)
+                (1) as u128,
+                (2) as u128
             )
             .unwrap()
         );
@@ -443,8 +432,8 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
             vec![2; size],
             EvmU256::from_u64(0),
             nonzero(1),
-            EvmU256::from_u64(1),
-            EvmU256::from_u64(2),
+            (1) as u128,
+            (2) as u128,
         )
         .unwrap();
         for target in [
@@ -457,8 +446,8 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
                 vec![2; size],
                 EvmU256::from_u64(0),
                 nonzero(1),
-                EvmU256::from_u64(1),
-                EvmU256::from_u64(2),
+                (1) as u128,
+                (2) as u128,
             )
             .unwrap();
             assert_eq!(plan.command_for(target.clone()), expected);
@@ -473,8 +462,8 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
         vec![0; 49_153],
         EvmU256::from_u64(0),
         nonzero(1),
-        EvmU256::from_u64(1),
-        EvmU256::from_u64(2)
+        (1) as u128,
+        (2) as u128
     )
     .is_err());
     assert!(CheckedCallPlan::new(
@@ -482,33 +471,28 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
         vec![0; 131_073],
         EvmU256::from_u64(0),
         nonzero(1),
-        EvmU256::from_u64(1),
-        EvmU256::from_u64(2)
+        (1) as u128,
+        (2) as u128
     )
     .is_err());
-    let ceiling = EvmU256::new("340282366920938463463374607431768211455").unwrap();
-    let above = EvmU256::new("340282366920938463463374607431768211456").unwrap();
+    let ceiling = u128::MAX;
     assert!(CheckedCallPlan::new(
         binding(),
         vec![],
         EvmU256::from_u64(0),
         nonzero(1),
-        ceiling.clone(),
-        ceiling.clone()
+        ceiling,
+        ceiling
     )
     .is_ok());
-    for (priority, maximum) in [
-        (above.clone(), above.clone()),
-        (EvmU256::from_u64(0), above),
-        (EvmU256::from_u64(2), EvmU256::from_u64(1)),
-    ] {
+    for (priority, maximum) in [(2, 1)] {
         assert!(CheckedCreatePlan::new(
             binding(),
             vec![],
             EvmU256::from_u64(0),
             nonzero(1),
-            priority.clone(),
-            maximum.clone()
+            priority,
+            maximum
         )
         .is_err());
         assert!(CheckedCallPlan::new(
@@ -526,8 +510,8 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
         vec![],
         EvmU256::from_u64(0),
         nonzero(1),
-        ceiling.clone(),
-        ceiling.clone(),
+        ceiling,
+        ceiling,
     )
     .unwrap();
     let call = CheckedCallPlan::new(
@@ -535,24 +519,42 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
         vec![],
         EvmU256::from_u64(0),
         nonzero(1),
-        ceiling.clone(),
+        ceiling,
         ceiling,
     )
     .unwrap();
     for (field, hostile) in [
-        ("gas_limit", serde_json::json!(0)),
-        ("max_fee_per_gas", serde_json::json!("0")),
+        ("/parameters/gas_limit", serde_json::json!(0)),
+        ("/parameters/fees/maximum", serde_json::json!("0")),
         (
-            "max_priority_fee_per_gas",
+            "/parameters/fees/priority",
             serde_json::json!("340282366920938463463374607431768211456"),
         ),
     ] {
         let mut wire = serde_json::to_value(&create).unwrap();
-        wire[field] = hostile.clone();
+        *wire.pointer_mut(field).unwrap() = hostile.clone();
         assert!(serde_json::from_value::<CheckedCreatePlan>(wire).is_err());
         let mut wire = serde_json::to_value(&call).unwrap();
-        wire[field] = hostile;
+        *wire.pointer_mut(field).unwrap() = hostile;
         assert!(serde_json::from_value::<CheckedCallPlan>(wire).is_err());
+    }
+    for invalid in [
+        serde_json::json!("340282366920938463463374607431768211456"),
+        serde_json::json!("01"),
+        serde_json::json!("+1"),
+        serde_json::json!("-1"),
+        serde_json::json!(" 1"),
+        serde_json::json!("1.0"),
+        serde_json::json!(1),
+    ] {
+        for field in ["priority", "maximum"] {
+            let mut wire = serde_json::to_value(&create).unwrap();
+            wire["parameters"]["fees"][field] = invalid.clone();
+            assert!(serde_json::from_value::<CheckedCreatePlan>(wire.clone()).is_err());
+            wire.as_object_mut().unwrap().remove("initcode");
+            wire["calldata"] = serde_json::json!("");
+            assert!(serde_json::from_value::<CheckedCallPlan>(wire).is_err());
+        }
     }
     let mut wire = serde_json::to_value(&create).unwrap();
     wire["initcode"] = serde_json::json!(CanonicalBytes::new(vec![0; 49_153]));
