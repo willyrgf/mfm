@@ -869,6 +869,40 @@ pub enum SchemaShape {
 }
 
 impl SchemaShape {
+    /// Returns the exact value identity and serialized shape of a supported enum payload.
+    ///
+    /// Accepts one inline value or generic-value envelope, optionally inside a one-field tuple.
+    /// Program and Runtime use the same interpretation at their separate trust boundaries.
+    pub fn value_payload_descriptor(&self) -> Option<(&SchemaId, &SemanticTypeId, &SchemaShape)> {
+        let payload = match self {
+            SchemaShape::Tuple(elements) if elements.len() == 1 => &elements[0],
+            other => other,
+        };
+
+        match payload {
+            SchemaShape::InlineValue {
+                schema_id,
+                semantic_type_id,
+                serialized_shape,
+            } => Some((schema_id, semantic_type_id, serialized_shape.as_ref())),
+            SchemaShape::Generic {
+                constructor,
+                arguments,
+                serialized_shape,
+            } if constructor == "mfm/generic-value" => {
+                let [argument] = arguments.as_slice() else {
+                    return None;
+                };
+                Some((
+                    &argument.schema_id,
+                    &argument.semantic_type_id,
+                    serialized_shape.as_ref(),
+                ))
+            }
+            _ => None,
+        }
+    }
+
     /// Builds the complete inline shape of one nested [`MfmValue`].
     pub fn inline_value<T: MfmValue>() -> Result<Self> {
         let descriptor = T::schema_descriptor()?;

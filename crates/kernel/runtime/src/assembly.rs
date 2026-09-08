@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_capabilities::{EffectCapabilityContract, ReadCapabilityContract};
-use mfm_ids::{ContentRef, EffectId, SchemaId, SemanticTypeId};
+use mfm_ids::{ContentRef, EffectId, SemanticTypeId};
 use mfm_program::{
     capability_contract_ref, effect_capability_contract_ref, nominal_contract_ref,
     state_implementation_ref, Declaration, EffectState, Execution, Never, Program, PureState,
@@ -117,10 +117,7 @@ pub(crate) fn qualify_hot<T: MfmValue>(
 #[derive(Clone, PartialEq, Eq)]
 struct StateSignature {
     state_type: TypeId,
-    state_implementation_ref: ContentRef,
-    input_contract_ref: ContentRef,
-    output_contract_ref: ContentRef,
-    failure_contract_ref: ContentRef,
+    abi: StateAbiKey,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -129,17 +126,6 @@ struct StateAbiKey {
     input_contract_ref: ContentRef,
     output_contract_ref: ContentRef,
     failure_contract_ref: ContentRef,
-}
-
-impl From<&StateSignature> for StateAbiKey {
-    fn from(signature: &StateSignature) -> Self {
-        Self {
-            state_implementation_ref: signature.state_implementation_ref.clone(),
-            input_contract_ref: signature.input_contract_ref.clone(),
-            output_contract_ref: signature.output_contract_ref.clone(),
-            failure_contract_ref: signature.failure_contract_ref.clone(),
-        }
-    }
 }
 
 impl From<&StateDeclaration> for StateAbiKey {
@@ -596,7 +582,7 @@ impl RuntimeAssemblyBuilder {
     }
 
     fn register_state(&mut self, state: RegisteredState) -> Result<()> {
-        let key = StateAbiKey::from(&state.signature);
+        let key = state.signature.abi.clone();
         if let Some(previous) = self.states.get(&key) {
             return previous
                 .has_same_registration(&state)
@@ -711,11 +697,13 @@ fn state_signature<S: mfm_program::State>(
 ) -> Result<StateSignature> {
     Ok(StateSignature {
         state_type: TypeId::of::<S>(),
-        state_implementation_ref: state_implementation_ref::<S>()
-            .map_err(|_| RuntimeError::IncompatibleAssembly)?,
-        input_contract_ref: input.contract_ref.clone(),
-        output_contract_ref: output.contract_ref.clone(),
-        failure_contract_ref: failure.contract_ref.clone(),
+        abi: StateAbiKey {
+            state_implementation_ref: state_implementation_ref::<S>()
+                .map_err(|_| RuntimeError::IncompatibleAssembly)?,
+            input_contract_ref: input.contract_ref.clone(),
+            output_contract_ref: output.contract_ref.clone(),
+            failure_contract_ref: failure.contract_ref.clone(),
+        },
     })
 }
 
@@ -1027,7 +1015,10 @@ fn associate_match(
             return Err(RuntimeError::IncompatibleAssembly);
         }
         let (schema_id, semantic_id, serialized_shape) =
-            match_payload_descriptor(&variant.shape).ok_or(RuntimeError::IncompatibleAssembly)?;
+            variant
+                .shape
+                .value_payload_descriptor()
+                .ok_or(RuntimeError::IncompatibleAssembly)?;
         let payload_contract =
             ContentRef::new(schema_id.clone(), raw_content_digest(b"mfm.contract.v1"))
                 .map_err(|_| RuntimeError::IncompatibleAssembly)?;
@@ -1064,36 +1055,4 @@ fn associate_match(
         tagging: tagging.clone(),
         variants: projections,
     })
-}
-
-fn match_payload_descriptor(
-    shape: &SchemaShape,
-) -> Option<(&SchemaId, &SemanticTypeId, &SchemaShape)> {
-    let payload = match shape {
-        SchemaShape::Tuple(elements) if elements.len() == 1 => &elements[0],
-        other => other,
-    };
-
-    match payload {
-        SchemaShape::InlineValue {
-            schema_id,
-            semantic_type_id,
-            serialized_shape,
-        } => Some((schema_id, semantic_type_id, serialized_shape.as_ref())),
-        SchemaShape::Generic {
-            constructor,
-            arguments,
-            serialized_shape,
-        } if constructor == "mfm/generic-value" => {
-            let [argument] = arguments.as_slice() else {
-                return None;
-            };
-            Some((
-                &argument.schema_id,
-                &argument.semantic_type_id,
-                serialized_shape.as_ref(),
-            ))
-        }
-        _ => None,
-    }
 }
