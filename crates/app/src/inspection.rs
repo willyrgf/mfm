@@ -110,7 +110,8 @@ const OPERATIONS: [ComponentSummary; 1] = [ComponentSummary::new(
     CollectEvmBalances::<PortfolioContinuation>::DESCRIPTION,
 )];
 
-const STATES: [StateRegistration; 11] = [
+const STATES: [StateRegistration; 12] = [
+    pure_state!(mfm_portfolio::ResolvePortfolioAssets),
     pure_state!(InitializePortfolio),
     pure_state!(EnterPortfolioCollection),
     pure_state!(ResumePortfolioCollection),

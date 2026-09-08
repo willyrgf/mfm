@@ -24,6 +24,10 @@ pub(crate) fn router(application: Arc<Application>) -> Router {
         .route("/v1/bindings", get(bindings))
         .route("/v1/configs", get(list_configs))
         .route(
+            "/v1/configs/{name}/publish-enrichment",
+            post(publish_enrichment).layer(DefaultBodyLimit::max(RUN_BODY_MAX)),
+        )
+        .route(
             "/v1/configs/{name}",
             put(import_config).layer(DefaultBodyLimit::max(MAX_CONFIG_DOCUMENT_BYTES)),
         )
@@ -67,6 +71,27 @@ async fn import_config(
     let Json(raw) = body.map_err(|error| RestError(config_json_rejection(error)))?;
     let document = ConfigDocument::new(raw.get().as_bytes().to_vec()).await?;
     let outcome = application.import_config(name.clone(), document).await?;
+    let status = match outcome {
+        ImportOutcome::Created { .. } => StatusCode::CREATED,
+        ImportOutcome::Unchanged { .. } => StatusCode::OK,
+    };
+    Ok(json_response(status, &outcome))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishEnrichmentBody {
+    run_id: RunId,
+}
+
+async fn publish_enrichment(
+    State(application): State<Arc<Application>>,
+    path: Result<Path<ConfigName>, PathRejection>,
+    body: Result<Json<PublishEnrichmentBody>, JsonRejection>,
+) -> Result<Response, RestError> {
+    let Path(name) = path.map_err(|_| RestError(invalid_config_name()))?;
+    let Json(body) = body.map_err(|error| RestError(json_rejection(error)))?;
+    let outcome = application.publish_enrichment(name, &body.run_id).await?;
     let status = match outcome {
         ImportOutcome::Created { .. } => StatusCode::CREATED,
         ImportOutcome::Unchanged { .. } => StatusCode::OK,
@@ -251,9 +276,9 @@ const fn request_error_status(error: RequestError) -> StatusCode {
     match error {
         RequestError::ConfigAbsent | RequestError::RunAbsent => StatusCode::NOT_FOUND,
         RequestError::RunAdmissionConflict | RequestError::BindingUnbound => StatusCode::CONFLICT,
-        RequestError::InvalidConfigDocument | RequestError::RunCapacity => {
-            StatusCode::UNPROCESSABLE_ENTITY
-        }
+        RequestError::InvalidConfigDocument
+        | RequestError::InvalidEnrichment
+        | RequestError::RunCapacity => StatusCode::UNPROCESSABLE_ENTITY,
         RequestError::ConfigMutationIndeterminate | RequestError::DependencyUnavailable => {
             StatusCode::SERVICE_UNAVAILABLE
         }

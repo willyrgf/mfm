@@ -214,7 +214,110 @@ fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() {
     assert_ne!(repeated["run"]["head_digest"], progressed.1["head_digest"]);
     assert_eq!(repeated["run"]["state"], progressed.1["state"]);
 
+    verify_enrichment_publication(&cli, &rest, &xdg, &socket, &root);
     std::fs::remove_dir_all(&root).expect("remove client e2e tree");
+}
+
+fn verify_enrichment_publication(cli: &Path, rest: &Path, xdg: &Path, socket: &Path, root: &Path) {
+    let mut candidate: serde_json::Value =
+        serde_json::from_str(historical_config()).expect("candidate config");
+    candidate["entry_point"] = serde_json::json!("mfm.portfolio/enrich@1");
+    let path = root.join("candidates.json");
+    std::fs::write(&path, serde_json::to_vec(&candidate).unwrap()).unwrap();
+    let imported = cli_json(
+        cli,
+        xdg,
+        &["config", "import", "candidates", "--from", utf8(&path)],
+    );
+    let digest = imported["config"]["digest"].as_str().unwrap();
+    let mut daemon = Daemon::start(rest, xdg, socket, None, None);
+    daemon.wait_ready();
+    let request =
+        serde_json::json!({"config": {"name": "candidates", "digest": digest}}).to_string();
+    let enriched = rest_json(
+        socket,
+        "POST",
+        "/v1/runs/start",
+        Some((&request, "application/json")),
+    );
+    assert_eq!(enriched.0, 200);
+    assert_eq!(enriched.1["run"]["state"]["kind"], "succeeded");
+    let enrichment_id = enriched.1["run"]["run_id"].as_str().unwrap();
+    let deleted = run_cli(
+        cli,
+        xdg,
+        &["config", "delete", "candidates", "--digest", digest],
+    );
+    assert_success(&deleted, "delete candidate config");
+    let body = serde_json::json!({"run_id": enrichment_id}).to_string();
+    let published = rest_json(
+        socket,
+        "POST",
+        "/v1/configs/resolved/publish-enrichment",
+        Some((&body, "application/json")),
+    );
+    assert_eq!(published.0, 201);
+    assert_eq!(published.1["outcome"], "created");
+    let repeated = cli_json(
+        cli,
+        xdg,
+        &[
+            "config",
+            "publish-enrichment",
+            "resolved",
+            "--run-id",
+            enrichment_id,
+        ],
+    );
+    assert_eq!(repeated["outcome"], "unchanged");
+    assert_eq!(repeated["config"], published.1["config"]);
+    let resolved_digest = published.1["config"]["digest"].as_str().unwrap();
+    let started = cli_json(
+        cli,
+        xdg,
+        &[
+            "run",
+            "start",
+            "--config",
+            "resolved",
+            "--config-digest",
+            resolved_digest,
+        ],
+    );
+    let dependent_id = started["run"]["run_id"].as_str().unwrap();
+    assert_ne!(dependent_id, enrichment_id);
+    assert_exact_live_snapshot(&started["run"], dependent_id);
+    assert_eq!(
+        http(
+            socket,
+            "DELETE",
+            &format!("/v1/configs/resolved/revisions/{resolved_digest}"),
+            None
+        )
+        .expect("delete published revision")
+        .status,
+        204
+    );
+    let recovered = cli_json(
+        cli,
+        xdg,
+        &[
+            "run",
+            "start",
+            "--config",
+            "resolved",
+            "--config-digest",
+            resolved_digest,
+            "--run-id",
+            dependent_id,
+        ],
+    );
+    assert_eq!(recovered, started);
+    assert_eq!(
+        rest_json(socket, "GET", &format!("/v1/runs/{dependent_id}"), None).1,
+        started["run"]
+    );
+    daemon.stop();
 }
 
 fn deployment(adapter_locator_env: &str) -> String {

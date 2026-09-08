@@ -4,7 +4,8 @@
   host-loss failover, quorum, replica, or multi-primary authority.
 - Trusted Rust State implementations, assembly, and adapters are in the process trust base.
 - Runtime has caller-driven progression only; it owns no background scheduler or timeout policy.
-- The current product entry point is `mfm.portfolio/snapshot@1`.
+- Current product entry points are `mfm.portfolio/snapshot@1` and bounded candidate enrichment
+  `mfm.portfolio/enrich@1`. Enrichment does not discover assets outside the supplied candidate list.
 - EVM transaction settlement version 1 is limited to the pinned non-reorging development fixture.
   Production submission remains unsupported until a product defines its finality, confirmation,
   reorg, authorization, and operational policy under a separately reviewed capability identity.

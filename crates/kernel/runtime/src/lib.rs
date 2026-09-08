@@ -12,7 +12,6 @@ pub use report::{AdapterIncidentView, FailureCauseView, FailureReport, Invocatio
 
 use std::sync::Arc;
 
-use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{ContentDigest, ContentRef, EffectId, ExecutionPosition, RunId, StatePosition};
 use mfm_program::Program;
 use mfm_store::Store;
@@ -101,7 +100,7 @@ pub enum RunnableReason {
 pub struct ValueView {
     contract_ref: ContentRef,
     value_ref: ContentRef,
-    canonical: PlainCanonicalJsonBytes,
+    canonical: Vec<u8>,
 }
 
 impl ValueView {
@@ -131,7 +130,7 @@ impl ValueView {
 
     /// Returns exact canonical retained bytes.
     pub fn canonical_bytes(&self) -> &[u8] {
-        self.canonical.as_bytes()
+        &self.canonical
     }
 }
 
@@ -141,9 +140,21 @@ pub struct RunView {
     head_sequence: u64,
     head_digest: ContentDigest,
     state: RunViewState,
+    admitted_context: Box<ValueView>,
+    entry_point: mfm_ids::EntryPointId,
 }
 
 impl RunView {
+    /// Returns the exact entry point retained in the admitted Program.
+    pub fn entry_point(&self) -> &mfm_ids::EntryPointId {
+        &self.entry_point
+    }
+
+    /// Returns the exact genesis input already qualified by this view's Runtime fold.
+    pub fn admitted_context(&self) -> &ValueView {
+        &self.admitted_context
+    }
+
     /// Returns the run identity.
     pub const fn run_id(&self) -> &RunId {
         &self.run_id

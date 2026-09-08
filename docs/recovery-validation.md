@@ -3,7 +3,7 @@
 This records evidence for [the recovery RFC](../RFC_REFACT_RUNTIME_TO_RECOV_SM.md).
 The first milestone is complete. Program v4 and Journal frame v3 are the current contracts;
 there is one linear compiler and one Runtime semantic fold. Old graph bytes are rejected.
-The inseparable replacement is validated by the focused gates below; enrichment follows separately.
+The inseparable replacement and subsequent enrichment are validated by the focused gates below.
 
 ## Architectural decisions
 
@@ -70,8 +70,31 @@ Scoped Clippy passed with warnings denied across all changed runtime/domain/appl
 targets. IDs, values, derive, and capabilities all-targets tests passed, as did the scoped
 Program/Runtime/EVM/Portfolio/Application rustdoc tests. Runtime all-targets passed again after boxing large incident/report payloads.
 
-Final composed CI has not run. Enrichment remains a separate subsequent implementation commit,
-following [the selected design](recovery-enrichment-design.md).
+## Enrichment verification
+
+The separate candidate implementation follows [the selected design](recovery-enrichment-design.md).
+Domain execution passed native retention, ordered nonzero-token selection, provider failure, and cold
+reconstruction in 38.76 seconds. The digest regression checks exact lowercase hex and canonical
+MfmValue qualification; it preserves the existing ContentDigest grammar. Maximum 64-source output,
+configuration and root-closure tests passed for one and 64 collections. Candidate and published
+config documents with maximum public fields remain below 128 KiB, within the unchanged 256 KiB cap.
+
+Application all-targets passed nine unit and eight integration tests before the additional hostile
+publication scenarios. Those scenarios passed loss of a committed publication acknowledgement,
+repeat without provider IO, exact one-digit revision mismatch, wrong output schema, forged head,
+resolved values and route rejection, and a new immutable revision without changing the old one.
+Pending enrichment cannot publish; start can resume its cancelled Read. The complete regression,
+including a resumed-start ambiguous acknowledgement retaining its Start envelope and observed
+three-frame prefix, passed in 49.61 seconds. Runtime all-targets passed after the genesis/entry-point
+view changes.
+
+CLI/REST focused tests and scoped Clippy passed. Managed `client-e2e` passed in 113.58 seconds,
+run `run-3909240-1788904054041268951`: actual Reth enrichment starts through REST, survives candidate
+config deletion, publishes through REST, repeats through CLI, executes a dependent snapshot and
+recovers its exact start after published-config deletion. The initial run's 204 JSON fixture error
+was fixed; it was not a product failure.
+
+Final composed CI has not run.
 
 ## Material uncertainties
 

@@ -18,7 +18,8 @@ fn calculated_root_bound_covers_completed_prefix_and_snapshot_with_maximum_publi
                     format!("{index:02}{}", "\"".repeat(254)),
                     target.chain_id,
                     mfm_evm::EvmAddress::from_bytes([255; 20]),
-                    (index % 2 == 0).then(|| mfm_evm::EvmAddress::from_bytes([254; 20])),
+                    (collection_count == 1 && index % 2 == 0)
+                        .then(|| mfm_evm::EvmAddress::from_bytes([254; 20])),
                 )
                 .unwrap()
             })
@@ -39,6 +40,8 @@ fn calculated_root_bound_covers_completed_prefix_and_snapshot_with_maximum_publi
             serde_json::from_value(serde_json::json!("\"".repeat(256))).unwrap(),
             collections,
             serde_json::from_value(serde_json::json!("usd")).unwrap(),
+            vec![QuoteCode::Usd, QuoteCode::Eur],
+            None,
         )
         .unwrap();
         let (bound, _) = conclusion_bounds(&input).unwrap();
@@ -73,6 +76,14 @@ fn calculated_root_bound_covers_completed_prefix_and_snapshot_with_maximum_publi
             .collect();
         let continuation = PortfolioContinuation::new(input, completed).unwrap();
         assert!(bytes(&continuation).unwrap() <= bound.max_frame_bytes());
+        let encoded = serde_json::to_vec(&continuation).unwrap();
+        let ProposedStateOutcome::Success { output: resolved } =
+            ResolvePortfolioAssets::evaluate(serde_json::from_slice(&encoded).unwrap()).unwrap()
+        else {
+            panic!("bounded native/token candidates must resolve")
+        };
+        assert!(bytes(&resolved).unwrap() <= bound.max_frame_bytes());
+        assert!(serde_json::to_vec(resolved.portfolio()).unwrap().len() < 128 * 1024);
         let ProposedStateOutcome::Success { output } =
             ConsolidatePortfolio::evaluate(continuation).unwrap()
         else {

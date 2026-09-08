@@ -27,3 +27,10 @@ Operation is represented publicly by the entry point rather than admitted as a r
 Focused contract tests cover exact route selection, 64/65-source planning, concrete native/token
 execution, and cold reconstruction of domain and operational failures. The value-bound unit test
 covers completed prefixes and final snapshots with full-width balances and public anchor fields.
+
+`plan_snapshot` and `plan_enrichment` accept optional checked `PortfolioAdmission` metadata.
+Application supplies the exact source revision identity and verified enrichment linkage; direct
+library callers may use `None`. The shared sequence collects anchored observations, then selects
+either snapshot consolidation or candidate resolution. Enrichment requires a native source in each
+collection, retains all natives and nonzero tokens in order, and preserves quotes and route refs.
+`PortfolioEnrichmentOutput` is the checked publication input; no domain code owns config custody.

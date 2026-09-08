@@ -37,7 +37,7 @@ async fn planned_native_and_token_collections_execute_and_reconstruct_typed_fail
             endpoint_ref: EvmEndpoint::new("fixture").unwrap().endpoint_ref().unwrap(),
         };
         let (program, input) =
-            plan_snapshot(selector, &config, std::slice::from_ref(&target)).unwrap();
+            plan_snapshot(selector, &config, std::slice::from_ref(&target), None).unwrap();
         let mut builder = portfolio_states();
         let calls = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&calls);
@@ -232,7 +232,8 @@ async fn maximum_token_portfolio_admits_and_retains_the_first_typed_provider_fai
             .endpoint_ref()
             .unwrap(),
     };
-    let (program, input) = plan_snapshot(selector, &config, std::slice::from_ref(&target)).unwrap();
+    let (program, input) =
+        plan_snapshot(selector, &config, std::slice::from_ref(&target), None).unwrap();
     let mut builder = portfolio_states();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
@@ -299,4 +300,116 @@ async fn maximum_token_portfolio_admits_and_retains_the_first_typed_provider_fai
     assert_eq!(cold_report.value_ref(), report.value_ref());
     assert_eq!(cold_report.canonical_bytes(), report.canonical_bytes());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn enrichment_retains_native_and_nonzero_candidates_and_never_filters_provider_failure() {
+    for fail in [false, true] {
+        let candidates = serde_json::json!({
+            "portfolio_id": "candidates", "quotes": ["eur", "usd"],
+            "collections": [{"correlation": "wallet", "request": {"decimals": 18,
+                "sources": [
+                    {"source_id": "funded", "chain_id": 1, "address": format!("0x{:040x}", 1), "token": format!("0x{:040x}", 2)},
+                    {"source_id": "native", "chain_id": 1, "address": format!("0x{:040x}", 1), "token": null},
+                    {"source_id": "empty", "chain_id": 1, "address": format!("0x{:040x}", 1), "token": format!("0x{:040x}", 3)}
+                ]}}]
+        });
+        let config = serde_json::from_value(candidates.clone()).unwrap();
+        let selector =
+            serde_json::from_value(serde_json::json!({"target": "candidates", "quote": "usd"}))
+                .unwrap();
+        let target = EvmPhysicalTarget {
+            chain_id: NonZeroU64::new(1).unwrap(),
+            endpoint_ref: EvmEndpoint::new("enrichment")
+                .unwrap()
+                .endpoint_ref()
+                .unwrap(),
+        };
+        let (program, input) =
+            plan_enrichment(selector, &config, std::slice::from_ref(&target), None).unwrap();
+        let mut builder = portfolio_states();
+        builder.register_pure::<ResolvePortfolioAssets>().unwrap();
+        builder
+            .register_adapter::<EvmChainIdentityRead, _, _>(target.clone(), |reference, intent| {
+                Box::pin(async move {
+                    Ok(EvmReadEvidence::returned(
+                        reference.clone(),
+                        EvmReadValue::ChainId(intent.chain_id()),
+                    ))
+                })
+            })
+            .unwrap();
+        builder
+            .register_adapter::<EvmAnchorRead, _, _>(target.clone(), |reference, _| {
+                Box::pin(async move {
+                    Ok(EvmReadEvidence::returned(
+                        reference.clone(),
+                        EvmReadValue::Anchor(EvmBlockAnchor {
+                            number: EvmU256::from_u64(7),
+                            hash: EvmHash::from_bytes([7; 32]),
+                        }),
+                    ))
+                })
+            })
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        builder
+            .register_adapter::<EvmBalanceRead, _, _>(target.clone(), move |reference, intent| {
+                count.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    let value = match intent.subject() {
+                        EvmReadSubject::TokenDecimals { .. } => {
+                            EvmReadValue::TokenDecimals(EvmTokenDecimals::new(18).unwrap())
+                        }
+                        EvmReadSubject::TokenBalance { source, .. }
+                            if source.source_id() == "funded" =>
+                        {
+                            EvmReadValue::RawUnits(EvmU256::from_u64(1))
+                        }
+                        EvmReadSubject::TokenBalance { .. } if fail => {
+                            return Err(AdapterError::Operational(EvmOperationalError::Timeout))
+                        }
+                        _ => EvmReadValue::RawUnits(EvmU256::from_u64(0)),
+                    };
+                    Ok(EvmReadEvidence::returned(reference.clone(), value))
+                })
+            })
+            .unwrap();
+        let runtime = Runtime::new(builder.finish(), Arc::new(mfm_store::MemoryStore::new()));
+        let id = RunId::from_digest(DigestBytes::from_array([90 + u8::from(fail); 32]));
+        let hot = runtime.start(id.clone(), program, input).await.unwrap();
+        match hot.state() {
+            RunViewState::Succeeded(value) if !fail => {
+                let output = value.decode::<PortfolioEnrichmentOutput>().unwrap();
+                let mut expected = candidates;
+                expected["collections"][0]["request"]["sources"]
+                    .as_array_mut()
+                    .unwrap()
+                    .pop();
+                assert_eq!(serde_json::to_value(output.portfolio()).unwrap(), expected);
+                assert_eq!(
+                    output.bindings().collect::<Vec<_>>(),
+                    vec![(target.chain_id, &target.binding_ref().unwrap())]
+                );
+                let wire = serde_json::to_value(&output).unwrap();
+                assert_eq!(wire["collections"][0]["anchor"]["number"], "7");
+                assert_eq!(wire["selector"]["quote"], "usd");
+            }
+            RunViewState::Failed(report) if fail => {
+                let FailureCauseView::Adapter(incident) = report.cause() else {
+                    panic!("typed provider cause");
+                };
+                assert!(matches!(
+                    incident.error.decode::<EvmOperationalError>().unwrap(),
+                    EvmOperationalError::Timeout
+                ));
+            }
+            _ => panic!("candidate enrichment outcome"),
+        }
+        let count = calls.load(Ordering::SeqCst);
+        let cold = runtime.read(&id).await.unwrap();
+        assert_eq!(cold.head_digest(), hot.head_digest());
+        assert_eq!(calls.load(Ordering::SeqCst), count);
+    }
 }

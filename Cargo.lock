@@ -2194,6 +2194,7 @@ dependencies = [
  "mfm-runtime",
  "mfm-storage-postgres",
  "mfm-store",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",

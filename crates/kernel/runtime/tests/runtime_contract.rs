@@ -776,6 +776,7 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
         panic!("Pure Program did not succeed");
     };
     assert_eq!(hot.head_sequence(), 2);
+    assert_eq!(hot.admitted_context().decode::<Number>().unwrap().value, 4);
     assert_eq!(hot_value.canonical_bytes(), br#"{"value":5}"#);
     assert_eq!(hot_value.decode::<Number>().unwrap().value, 5);
     assert!(matches!(
@@ -788,6 +789,14 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
         panic!("cold Program did not succeed");
     };
     assert_eq!(cold.head_sequence(), hot.head_sequence());
+    assert_eq!(
+        cold.admitted_context().value_ref(),
+        hot.admitted_context().value_ref()
+    );
+    assert_eq!(
+        cold.admitted_context().canonical_bytes(),
+        hot.admitted_context().canonical_bytes()
+    );
     assert_eq!(cold.head_digest(), hot.head_digest());
     assert_eq!(cold_value.canonical_bytes(), hot_value.canonical_bytes());
     assert_eq!(cold_value.decode::<Number>().unwrap().value, 5);

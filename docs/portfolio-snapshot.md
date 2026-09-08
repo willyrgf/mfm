@@ -1,6 +1,6 @@
 # Portfolio snapshot
 
-`plan_snapshot(selector, config, targets)` returns the checked Program and typed C0. Selector and
+`plan_snapshot(selector, config, targets, admission)` returns the checked Program and typed C0. Selector and
 configuration are checked secret-free authoring inputs. Targets are nonempty, strictly sorted and
 unique by chain ID, and exactly cover the selected chains. Their refs are retained in Program and C0.
 
@@ -24,3 +24,9 @@ A stopped child failure retains both its original cause and mapped Portfolio roo
 canonical FailureReport. Later normal work is suppressed. Final Pure consolidation builds the frozen
 snapshot/report with checked decimal-string arithmetic. Read/progress reconstruct from admission and
 history after configuration deletion, without consulting configuration custody.
+
+`plan_enrichment` takes the same checked inputs and authors the shared collection prefix followed
+by `ResolvePortfolioAssets`. It preserves configured quotes, all native candidates, and nonzero
+tokens. Every collection must contain a native source. Its checked output includes resolved config,
+selector, route bindings, and collection anchors; it contains no self-referential run/head linkage.
+Application adds and verifies that linkage during explicit publication and dependent admission.

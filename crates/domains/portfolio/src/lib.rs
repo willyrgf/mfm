@@ -6,6 +6,10 @@
 //! loop, output map, parallel branch, or multi-result join.
 
 mod bounds;
+pub use enrichment::{
+    plan_enrichment, EnrichmentProvenance, PortfolioAdmission, PortfolioEnrichmentOutput,
+    ResolvePortfolioAssets, PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID,
+};
 
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
@@ -133,12 +137,16 @@ pub struct PortfolioSnapshotInput {
     portfolio_id: PortfolioId,
     collections: Vec<PortfolioCollectionDemand>,
     quote: QuoteCode,
+    quotes: Vec<QuoteCode>,
+    admission: Option<PortfolioAdmission>,
 }
 
 impl_checked_deserialize!(PortfolioSnapshotInput {
     portfolio_id: PortfolioId,
     collections: Vec<PortfolioCollectionDemand>,
     quote: QuoteCode,
+    quotes: Vec<QuoteCode>,
+    admission: Option<PortfolioAdmission>,
 });
 
 impl PortfolioSnapshotInput {
@@ -146,11 +154,15 @@ impl PortfolioSnapshotInput {
         portfolio_id: PortfolioId,
         collections: Vec<PortfolioCollectionDemand>,
         quote: QuoteCode,
+        quotes: Vec<QuoteCode>,
+        admission: Option<PortfolioAdmission>,
     ) -> Result<Self, PortfolioError> {
         let value = Self {
             portfolio_id,
             collections,
             quote,
+            quotes,
+            admission,
         };
         value.validate()?;
         Ok(value)
@@ -158,7 +170,14 @@ impl PortfolioSnapshotInput {
 
     /// Validates a decoded snapshot input and every declaration-ordered child request.
     fn validate(&self) -> Result<(), PortfolioError> {
-        if !valid_public_text(&self.portfolio_id.value, 256)
+        if !self.quotes.contains(&self.quote)
+            || self.quotes.len() > 2
+            || self
+                .quotes
+                .iter()
+                .enumerate()
+                .any(|(i, q)| self.quotes[..i].contains(q))
+            || !valid_public_text(&self.portfolio_id.value, 256)
             || self.collections.is_empty()
             || self.collections.len() > PORTFOLIO_COLLECTION_LIMIT
             || self
@@ -184,6 +203,11 @@ impl PortfolioSnapshotInput {
             return Err(PortfolioError::InvalidValue);
         }
         Ok(())
+    }
+
+    /// Returns the immutable caller admission identity and enrichment linkage, if supplied.
+    pub fn admission(&self) -> Option<&PortfolioAdmission> {
+        self.admission.as_ref()
     }
 
     fn collection(&self, ordinal: usize) -> Option<&PortfolioCollectionDemand> {
@@ -553,6 +577,8 @@ macro_rules! impl_portfolio_state {
     };
 }
 
+mod enrichment;
+
 impl_portfolio_state!(
     InitializePortfolio,
     PortfolioSnapshotInput,
@@ -903,7 +929,7 @@ fn sum_unsigned(values: &[String]) -> Option<String> {
 }
 
 /// Selector for selecting an admitted Portfolio target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioSnapshotSelector {
     target: PortfolioId,
@@ -923,7 +949,7 @@ impl PortfolioSnapshotSelector {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 struct PortfolioCollectionConfig {
     pub correlation: String,
@@ -931,7 +957,7 @@ struct PortfolioCollectionConfig {
 }
 
 /// Checked secret-free Portfolio snapshot authoring input.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioConfig {
     portfolio_id: PortfolioId,
@@ -1007,7 +1033,27 @@ pub fn plan_snapshot(
     selector: PortfolioSnapshotSelector,
     config: &PortfolioConfig,
     targets: &[EvmPhysicalTarget],
+    admission: Option<PortfolioAdmission>,
 ) -> Result<(Program, PortfolioSnapshotInput), PortfolioError> {
+    plan::<ConsolidatePortfolio>(selector, config, targets, admission, entry_point_id()?)
+}
+
+fn plan<S>(
+    selector: PortfolioSnapshotSelector,
+    config: &PortfolioConfig,
+    targets: &[EvmPhysicalTarget],
+    admission: Option<PortfolioAdmission>,
+    entry: EntryPointId,
+) -> Result<(Program, PortfolioSnapshotInput), PortfolioError>
+where
+    S: PureState<Input = PortfolioContinuation, Failure = PortfolioSnapshotFailure>,
+{
+    if admission
+        .as_ref()
+        .is_some_and(|identity| identity.entry_point() != &entry)
+    {
+        return Err(PortfolioError::InvalidValue);
+    }
     validate_portfolio_config(config).map_err(|_| PortfolioError::Program)?;
     selector.validate()?;
     if selector.target != config.portfolio_id || !config.quotes.contains(&selector.quote) {
@@ -1055,8 +1101,13 @@ pub fn plan_snapshot(
             route_ref.clone(),
         )?);
     }
-    let input =
-        PortfolioSnapshotInput::from_demand(config.portfolio_id.clone(), demand, selector.quote)?;
+    let input = PortfolioSnapshotInput::from_demand(
+        config.portfolio_id.clone(),
+        demand,
+        selector.quote,
+        config.quotes.clone(),
+        admission,
+    )?;
     let (conclusion_bound, child_bounds) = bounds::conclusion_bounds(&input)?;
     let checked_collections = input
         .collections
@@ -1071,28 +1122,28 @@ pub fn plan_snapshot(
             .map_err(|_| PortfolioError::Program)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let root = PortfolioSnapshotOperation {
+    let root = PortfolioOperation::<S> {
+        terminal: std::marker::PhantomData,
         checked_collections,
         conclusion_bound,
     };
-    let program = expand_program(
-        entry_point_id()?,
-        &root,
-        &input,
-        mfm_program::ProgramLimits::new(0),
-    )
-    .map_err(|_| PortfolioError::Program)?;
+    let program = expand_program(entry, &root, &input, mfm_program::ProgramLimits::new(0))
+        .map_err(|_| PortfolioError::Program)?;
     Ok((program, input))
 }
 
-struct PortfolioSnapshotOperation {
+struct PortfolioOperation<S> {
+    terminal: std::marker::PhantomData<fn() -> S>,
     checked_collections: Vec<CollectEvmBalances<PortfolioContinuation>>,
     conclusion_bound: mfm_program::ConclusionBound,
 }
 
-impl Operation for PortfolioSnapshotOperation {
+impl<S> Operation for PortfolioOperation<S>
+where
+    S: PureState<Input = PortfolioContinuation, Failure = PortfolioSnapshotFailure>,
+{
     type Input = PortfolioSnapshotInput;
-    type Output = PortfolioSnapshotOutput;
+    type Output = S::Output;
     type Failure = PortfolioSnapshotFailure;
 
     fn validate_input(&self, input: &Self::Input) -> mfm_program::Result<()> {
@@ -1135,11 +1186,7 @@ impl Operation for PortfolioSnapshotOperation {
                 self.conclusion_bound,
             )?;
         }
-        body.pure::<ConsolidatePortfolio, Identity<Self::Failure>>(
-            NoParams,
-            Occurrence::new(),
-            self.conclusion_bound,
-        )
+        body.pure::<S, Identity<Self::Failure>>(NoParams, Occurrence::new(), self.conclusion_bound)
     }
 }
 

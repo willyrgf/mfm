@@ -52,8 +52,10 @@ Application interprets retained bytes as one strict, complete, versioned config 
 JSON contains only the entry-point tag, stable route selectors, and checked secret-free domain
 input. Config revision summaries expose the checked name, canonical-document digest, entry point,
 and no mutable status. Public config management exposes import, complete listing, and exact delete.
-Exact retained run-start selection never adds config provenance to Journal or the mechanical
-RunIndex: the exact Program and C0 remain the durable execution admission.
+C0 retains the selected source revision name, entry point, and exact canonical-document digest as
+64 lowercase hex characters. Enriched snapshot config and C0 additionally retain the enrichment
+RunId, terminal head, and exact output ref. Application verifies that linkage before new admission.
+The exact Program and C0 remain the durable execution admission; RunIndex remains mechanical.
 
 Public `RunView` contains RunId, durable sequence/head, and one of `Runnable`, `EffectPending`,
 `Succeeded`, or `Failed`. Runnable retains position and Advance/Retry/Restart reason; a pending

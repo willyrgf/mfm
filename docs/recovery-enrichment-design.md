@@ -38,7 +38,10 @@ admission, Application verifies enriched provenance against the successful run's
 output reference/schema, resolved configuration and bindings. Imported provenance is not trusted
 merely because JSON contains it. The dependent initial value retains the full resolved demand,
 enrichment provenance and a bounded source-revision identity sufficient to compare ConfigSelection;
-the domain gains no ConfigRepository dependency.
+the domain gains no ConfigRepository dependency. `PortfolioAdmission::config_digest_hex` retains
+exactly 64 lowercase hexadecimal characters: SHA-256 of the canonical configuration document.
+Application strips/restores the fixed `content:sha256-jcs-v1:` prefix through ConfigDigest. The
+persisted raw ContentDigest grammar remains unchanged; the revision is never retagged or rehashed.
 
 Matching start recovery reads the requested dependent RunId before loading configuration. Expose
 the qualified genesis input through the existing RunView as a ValueView accessor. For a retained
@@ -68,8 +71,8 @@ Publish after deleting the candidate configuration to prove retained input is su
 
 ## Material uncertainties
 
-| Assumption | Why uncertain | Consequence if wrong | Validation |
-| --- | --- | --- | --- |
-| The current continuation retains sufficient original demand. | Publication does not exist yet. | Add only missing immutable planning fields. | Publish after deleting the candidate config. |
-| Resolved output and provenance fit the 256 KiB config bound. | The new document shape is not measured. | Tighten checked enrichment bounds explicitly. | Maximum 64-source candidate/output/publication fixtures. |
-| RunView can expose genesis input through its current qualification boundary. | The accessor is absent. | Extend existing view construction without another folding/inspection path. | Matching/conflicting start recovery after deletion and uncertain admission. |
+none for the selected bounded workflow. Publication after candidate deletion proves retained demand
+is sufficient. Maximum 64-source candidate/output/config tests cover one and 64 collections within
+the existing ceilings. Runtime and Application tests prove qualified-genesis matching, conflicting
+selection rejection, interrupted enrichment, and ambiguous resumed-start acknowledgement. Managed
+PostgreSQL/CLI/REST verifies explicit publication and dependent recovery after config deletion.

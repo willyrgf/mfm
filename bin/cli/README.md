@@ -19,6 +19,7 @@ mfm_cli [--deployment <PATH>] [--output text|json] postgres init \
 mfm_cli [--deployment <PATH>] [--output text|json] binding list
 
 mfm_cli [--deployment <PATH>] [--output text|json] config import <NAME> --from <PATH|->
+mfm_cli [--deployment <PATH>] [--output text|json] config publish-enrichment <NAME> --run-id <RUN_ID>
 mfm_cli [--deployment <PATH>] [--output text|json] config list
 mfm_cli [--deployment <PATH>] [--output text|json] config delete <NAME> --digest <DIGEST>
 
@@ -91,3 +92,8 @@ REST listener against Reth, validates the complete snapshot, and reloads the sam
 through this JSON surface. It then reimports the same revision, starts a fresh CLI-generated run, and
 requires an identical semantic result from the independent execution. Both renderers also match the
 frozen start/progress recovery envelopes in `docs/contracts/client-surface/`.
+
+Candidate discovery is selected by a `mfm.portfolio/enrich@1` configuration and uses ordinary
+`run start/show/progress`. `config publish-enrichment` explicitly publishes a successful result as
+a snapshot revision. Repetition returns the same revision without discovery. Start of an admitted
+RunId with the same selection works after config deletion; a different revision conflicts.
