@@ -1,12 +1,12 @@
 # Accumulating contexts: implementation and verification
 
-[RFC_CTX_ACC.md](../RFC_CTX_ACC.md) defines the complete cutover. The
-[prototype handoff](rfc-ctx-acc-validation.md) records earlier feasibility evidence; production
-contracts live in [design](design.md) and [architecture](architecture.md).
+The current contracts live in [design](design.md) and [architecture](architecture.md). This
+document maps their accumulating-context requirements to executable evidence and records the
+bounded workflow capacity measurements. Git history retains the completed RFC and prototype.
 
 ## Requirement owners and evidence
 
-| RFC acceptance | Production boundary and regression evidence |
+| Requirement | Production boundary and regression evidence |
 | --- | --- |
 | 1. Production recipes, no preparation bridges | `contract_workflow.rs` composes `EvmTransaction<C, R>` with `CreateAt`, `CallCreatedAt`, and `ObserveAt`; the wallet follow-up uses `CallAt`. The managed Effect e2e executes this graph. |
 | 2. Complete successful report | `FixtureReport` retains both transactions' command, reservation, complete preparation evidence, settlement, typed outcome, exact anchored intent/evidence, request metadata, and decoded value. The live test asserts 42 and the retained commands; deterministic tests compare each stage's EffectId with accepted adapter evidence. |
@@ -18,7 +18,7 @@ contracts live in [design](design.md) and [architecture](architecture.md).
 | 8. Exact failure facts and cold terminals | Deterministic fixture tests cover both reversions, all three observation failure reasons, and invalid ABI bytes; they compare unchanged cold head/value, retained frames, and adapter counts. Distinct three-step and four-step root reports retain plans once with an executed evidence prefix, check continuation/outcome and target/observation linkage, and derive the failure reason. The managed test compares complete terminal reports and nonce `0 -> 2 -> 4`. |
 | 9. Capacity | `context_capacity.rs` executes two creations, a call selecting the second creation, anchored observation, and ABI reporting. It covers all measured input sizes, every failure point at maximum inputs, and maximum returned evidence. It checks exact schema identity lengths, terminal bytes, each repeated frame object closure, frame maxima, total run bytes, and cold terminal equality under unchanged limits. |
 | 10. Internal execution errors | `runtime/tests/support/callback_errors.rs` proves Pure/Read head preservation, Effect prepare preservation, exact retry command/EffectId, and no completed cold interpretation. The EVM tests reject an incompatible success mode before prepare append or adapter entry. |
-| 11. Complete deletion | Current EVM domain/live source and current contract documentation contain no superseded caller-context wrappers, fixture preparation bridges, old State-ID constants, or local one-transaction wrappers. Original RFC/problem descriptions remain historical specification material. |
+| 11. Complete deletion | Current EVM domain/live source and current contract documentation contain no superseded caller-context wrappers, fixture preparation bridges, old State-ID constants, or local one-transaction wrappers. Superseded RFC, prototype, and pre-cutover composition descriptions are deleted; remaining production-reuse gaps are tracked separately in [the current problem inventory](../PROBLEM_LEAK_PROD_IMPLS.md). |
 
 The test paths above are:
 
@@ -35,8 +35,9 @@ The test paths above are:
 
 ## Production capacity measurements
 
-Schema identities below describe the current shared-parameter and prefix-report types. Payload measurements below are from the pre-reduction cutover and will be refreshed by its capacity acceptance run. Schema identities are
-an independent admission constraint, bounded at 65,536 bytes.
+These measurements come from `two_creations_call_observation_and_reports_fit_the_unchanged_capacity_envelope` with the
+current shared-parameter and prefix-report types. Schema identity size is an independent admission
+constraint, bounded at 65,536 bytes.
 
 | Value | Schema identity bytes |
 | --- | ---: |
@@ -46,30 +47,35 @@ an independent admission constraint, bounded at 65,536 bytes.
 | After configuration | 53,786 |
 | After observation | 59,846 |
 | Successful report | 60,666 |
-| Normalized failure report | 53,665 |
+| Prefix failure report | 53,665 |
 
 Successful runs retain 24 frames. Input sizes are per creation and per call/observation. All
 measurements below are bytes; returned success evidence contains the 32-byte ABI word.
 
 | Creation input | Call/observation input | Terminal value | Total frame bytes | Largest frame |
 | ---: | ---: | ---: | ---: | ---: |
-| 3 | 3 | 7,201 | 147,147 | 34,828 |
-| 1,024 | 1,024 | 12,649 | 242,487 | 40,276 |
-| 16,384 | 16,384 | 94,569 | 1,676,087 | 122,196 |
-| 49,152 | 49,152 | 269,329 | 4,734,387 | 337,630 |
-| 49,152 | 131,072 | 487,783 | 8,448,105 | 665,311 |
+| 3 | 3 | 7,201 | 147,153 | 34,834 |
+| 1,024 | 1,024 | 12,649 | 242,493 | 40,282 |
+| 16,384 | 16,384 | 94,569 | 1,676,093 | 122,202 |
+| 49,152 | 49,152 | 269,329 | 4,734,393 | 337,630 |
+| 49,152 | 131,072 | 487,783 | 8,448,111 | 665,311 |
 
 Failure paths use 49,152-byte creation inputs and 131,072-byte call/observation inputs.
 
 | Failure | Terminal value | Total frame bytes | Largest frame |
 | --- | ---: | ---: | ---: |
-| First creation reverted | 484,437 | 3,144,933 | 515,410 |
-| Second creation reverted | 485,902 | 5,296,728 | 515,410 |
-| Configuration reverted | 487,426 | 7,782,372 | 515,410 |
-| Observation rejected | 487,976 | 8,448,009 | 665,022 |
-| Observation safe failure | 487,984 | 8,448,029 | 665,034 |
-| Observation integrity blocked | 487,994 | 8,448,054 | 665,049 |
-| Invalid ABI with 131,072 returned bytes | 662,843 | 8,972,605 | 1,014,751 |
+| First creation reverted | 484,085 | 3,144,589 | 515,416 |
+| Second creation reverted | 485,388 | 5,296,222 | 515,416 |
+| Configuration reverted | 486,752 | 7,781,706 | 515,416 |
+| Observation rejected | 662,252 | 8,622,293 | 665,022 |
+| Observation safe failure | 662,256 | 8,622,309 | 665,034 |
+| Observation integrity blocked | 662,261 | 8,622,329 | 665,049 |
+| Invalid ABI with 131,072 returned bytes | 837,146 | 9,146,916 | 1,014,751 |
+
+The prefix representation retains original plans, including the observation plan alongside its
+accepted intent. This increases observation-failure payloads while removing independently supplied
+reason and outcome fields. All measured schemas, values, frames, and runs remain within the fixed
+limits.
 
 These are bounded product scenarios, not a promise of arbitrary workflow length. Full snapshots
 are copied into subsequent frames; long chains can grow retained bytes quadratically. Neither
@@ -78,14 +84,14 @@ reference/delta representation or old-context reader exists.
 
 ## Verification workflow
 
-The cutover uses the focused commands in RFC section 11, targeted generic/fixture tests, and the
-managed `effect-e2e` task. The final candidate requires `nix run .#ci`, including managed DB,
+Use the scope-driven commands in [build and verification](build-and-verification.md), targeted
+generic/fixture tests, and the managed `effect-e2e` task. The final candidate requires `nix run .#ci`, including managed DB,
 client/Effect e2e, documentation, and capacity tasks. Nixfied's task result and run summary own
 that final gate's result; focused results and this document do not substitute for it.
 
-The newly normal dependency from live EVM to `mfm-values` supplies `MfmValue`/`ContextSlot` bounds
-for the required pure registration helper. It was already a live-EVM test dependency and adds no
-external package. No signer, custody, provider, SQL, or production CLI/REST transaction policy was
+Live EVM uses existing workspace dependencies `mfm-values` and `mfm-program` for checked values
+and the executable State bounds of its pure registration helper. Both were already live-EVM test
+dependencies; this adds no external package. No signer, custody, provider, SQL, or production CLI/REST transaction policy was
 expanded.
 
 ## Material uncertainties

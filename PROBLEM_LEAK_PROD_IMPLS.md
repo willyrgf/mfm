@@ -27,7 +27,7 @@ into a helper or promoting hardcoded fixture behavior into a library does not re
 ## Scope and evidence
 
 This problem statement follows the source review of commit `b1c26a19`, which completed
-[RFC_CTX_ACC.md](RFC_CTX_ACC.md). At document preparation, HEAD was `836dc2a1` and another session
+the [accumulating-context cutover](docs/rfc-ctx-acc-implementation.md). At document preparation, HEAD was `836dc2a1` and another session
 was changing implementation details, including failure-report representation. The findings concern
 the responsibilities and consumer obligations below; they do not depend on the earlier report
 type names, exact line counts, or preserving that representation. Concurrent cleanup is outside
@@ -68,8 +68,8 @@ However, the RFC explicitly excluded general assembly registration, retry policy
 result inspection, and general failure authoring. It explicitly retained product ABI decoding,
 checked terminal failure reports, failure handlers, and a bounded progression driver.
 
-Consequently, completion of that RFC does not establish completion of the broader
-[composition problem](PROBLEM_COMPOSITION_TYPED_PLUMBING.md). The remaining costs below are not
+Consequently, completion of that cutover does not establish complete reusable workflow support.
+The remaining costs below are not
 automatically stale implementations or failures of that cutover. Several are limitations of its
 deliberately bounded scope.
 
@@ -78,7 +78,7 @@ deliberately bounded scope.
 | Consumer step | Implementation currently supplied by the harness | Reusable production responsibility missing or insufficiently packaged | What remains consumer/test-owned |
 | --- | --- | --- | --- |
 | Obtain a wallet | `generated_signer`: entropy, checked scalar construction, retries, purpose selection, import | A reusable wallet/key-creation entry point if obtaining a new wallet is a supported platform use case; checked import already exists | Choosing an ephemeral wallet, its purpose, and lifetime |
-| Fund a wallet | `fund_sender`, `funding_response_body`, `AccountsResponse`, `FundingResponse`, `FundingError` | Reusable bounded JSON-RPC transport mechanics; a funding capability requires an explicit development/faucet authority contract | Selecting the funding source, amount, development node, and readiness requirement |
+| Fund a wallet | `fund_sender`, `funding_rpc`, `funding_response_body`, `FundingResponse<T>`, `FundingError` | Reusable bounded JSON-RPC transport mechanics; a funding capability requires an explicit development/faucet authority contract | Selecting the funding source, amount, development node, and readiness requirement |
 | Supply capabilities | `runtime`: opens Store and authority, constructs provider, installs State and adapter families | A reusable composition boundary accepting explicitly supplied dependencies and the selected workflow's executable requirements | Locators, signer/authority selection, fault wrappers, resource lifetime, and deliberate reconstruction |
 | Select workflow/input | `EffectFixtureOperation`, context/recipe aliases, `register_fixture_states` | Composable executable components whose required State inventory is maintained with their implementation | Step ordering, selected source fields, plans, fees, ABI, and product policy |
 | Connect failures | `Abort`, its trait implementations and registrations, `with_failure_handler`, `TryFrom` conversions | Reusable typed failure adaptation without handwritten executable scaffolding for every mapping | Which failures are terminal, their reviewed reasons, and genuine recovery behavior |
@@ -107,9 +107,10 @@ must make that distinction explicit and define whether it acknowledges submissio
 for funding readiness. The reviewed `fund_sender` consumes a returned transaction hash and returns;
 it does not itself wait for a successful receipt or sufficient balance.
 
-`FundingError` is a legitimate redaction boundary. The two response structs encode legitimate
-response types, but repeat the same envelope shape. Replacing them with one generic test-only
-struct would reduce syntax while leaving the duplicated transport implementation in place.
+`FundingError` is a legitimate redaction boundary. The subsequent LOC reduction shares a generic
+`FundingResponse<T>` and one test-only `funding_rpc` request path. This removes the duplicate
+envelope and checks within the harness; the broader transport responsibility remains as described
+above.
 
 ## 2. Wallet creation is implemented by the caller
 
