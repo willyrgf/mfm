@@ -481,18 +481,16 @@ allowed; transaction/observation forwarding and stage bookkeeping must be produc
 
 Reversion retains all facts through authenticated settlement, and anchored domain failure retains
 its accepted evidence. Keep those exact accumulated failure envelopes between States. At the
-terminal failure-report boundary, convert them losslessly to a compact bounded sequence of named
-plan/transaction/observation entries plus a reviewed failure reason. Unexecuted entries retain
-plans, completed entries retain full execution facts and outcomes, and the failed entry retains
-its available evidence. A finite product step enum identifies entries; checked construction and
-deserialization enforce the exact order, completeness, and agreement with the failure reason.
+terminal failure-report boundary, retain each checked original plan once and a typed executed
+prefix of reservation, preparation, and settlement evidence. Checked decoding reconstructs commands
+from plans and verifies their exact references and cross-stage target/observation relationships.
+The three-step and four-step fixtures have distinct exact root types. Continuation presence must
+agree with authenticated success/reversion; derive the root failure reason from the prefix.
 
-This reporting representation is required by the measured schema limit: an enum embedding a full
-context separately for each failure point exceeds the existing 65,536-byte schema identity bound
-in the two-deployment example. The report stores each entry schema once. It introduces no dynamic
-execution context or Journal query, and drops no public facts. EVM owns reusable lossless fact
-conversions; the product owns ordering and failure policy. Existing `Abort` handlers perform this
-terminal conversion, not successful-path forwarding.
+Do not embed a complete context in every failure variant: that repeats large schemas and exceeds
+the fixed 65,536-byte schema identity bound. The prefix representation introduces no dynamic
+execution context or Journal query and drops no public facts. Product-owned terminal conversion
+uses existing checked domain constructors rather than a second production reporting schema.
 
 A business Report that must itself execute after failure can use an existing typed failure handler
 and a sum of the available context shapes. Reporting must not fabricate facts from unexecuted

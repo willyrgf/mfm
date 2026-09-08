@@ -218,8 +218,9 @@ impl<S: TransactionSuccessMode> CompletedTransactionFacts<S> {
         let outcome = S::project(&executed)?;
         Ok(Self { executed, outcome })
     }
-    pub(super) fn into_parts(self) -> (ExecutedTransactionFacts, S) {
-        (self.executed, self.outcome)
+    /// Returns the retained execution facts without the successful-mode projection.
+    pub fn into_executed(self) -> ExecutedTransactionFacts {
+        self.executed
     }
     /// Returns all public facts through settlement.
     pub const fn executed(&self) -> &ExecutedTransactionFacts {

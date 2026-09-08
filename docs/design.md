@@ -121,10 +121,12 @@ schemas remain additional ABI association keys. Cold fold re-prepares retained c
 exact snapshots and does not rerun completed interpretation. A completed transaction adds seven
 frames after admission; Program v3, Journal wire, and the Runtime fold remain unchanged.
 
-`TransactionReportFacts` losslessly converts completed or executed transaction-local facts into
-one execution record plus a finite created/called/reverted projection. Checked decoding enforces
-agreement. Products own terminal entry ordering, completeness, and root failure policy; this
-reporting representation does not introduce an execution context or a Journal query.
+Terminal reporting uses existing checked execution facts and settlement outcomes; there is no
+separate persisted outcome projection. Products own root failure policy. The fixture reports retain
+checked original plans once and an executed evidence prefix containing reservation, preparation,
+and settlement. Continuation presence must agree with authenticated success or reversion. Checked
+root decoding reconstructs commands and checks exact evidence references, target and observation
+linkage. The root failure reason is derived from that prefix, never independently supplied.
 
 The broad EVM Read intent fixes only a nonzero chain ID, physical-route content ref, and one of six
 balance subjects; that subject is the operation discriminator. Its returned sum contains checked
