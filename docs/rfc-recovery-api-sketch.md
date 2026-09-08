@@ -266,17 +266,17 @@ impl<I: MfmValue, O: MfmValue, F: MfmValue> OperationExpansion<I, O, F> {
     where S: PureState, M: ValueMap<Input = S::Failure, Output = F>;
 
     pub fn read<S, C, M>(
-        &mut self, binding: &ContentRef, root_map: M::Params,
+        &mut self, setup: &<C as CapabilityInjection<S>>::Setup, root_map: M::Params,
         policy: Occurrence, bound: ConclusionBound,
     ) -> Result<(), ProgramError>
-    where C: ReadCapabilityContract, S: ReadState<C>,
+    where C: ReadCapabilityContract + CapabilityInjection<S>, S: ReadState<C>,
           M: ValueMap<Input = S::Failure, Output = F>;
 
     pub fn effect<S, C, M>(
-        &mut self, binding: &ContentRef, root_map: M::Params,
+        &mut self, setup: &<C as CapabilityInjection<S>>::Setup, root_map: M::Params,
         policy: Occurrence, bounds: EffectBounds,
     ) -> Result<(), ProgramError>
-    where C: EffectCapabilityContract, S: EffectState<C>,
+    where C: EffectCapabilityContract + CapabilityInjection<S>, S: EffectState<C>,
           M: ValueMap<Input = S::Failure, Output = F>;
 
     pub fn operation<C, M>(&mut self, child: &C, root_map: M::Params)
@@ -309,6 +309,11 @@ See the [executable signature proof](examples/recovery-api-signatures.rs) for al
 bounded exact paths of already registered mapper implementations; State registration does not
 need to know every parent Operation. This preserves typed root failures without retaining graph
 failure handlers or mapping States.
+
+Read and Effect emission preserve the existing typed capability-injection setup. The compiler
+resolves the designated binding from that setup once and expands before/designated/after through
+the same scope machinery. A raw binding reference cannot replace the setup contract for injected
+transaction States.
 
 ## Checkpoints, limits, and immutable declarations
 
@@ -378,6 +383,11 @@ Runtime validates it again against the selected occurrence's permissions and act
 Program constructs these copyable target tokens during checked lowering; Runtime filters the
 declaration's tokens to active eligible targets. This avoids requiring private cross-crate
 constructors or letting Program acquire history semantics.
+An Effect inside a declared region does not by itself invalidate the Program. After full injection,
+Program checks scope ownership and exact boundary contracts; Runtime makes earlier checkpoints
+ineligible when an Effect prepare is acknowledged. A checkpoint after the Effect may still recover
+the following Read suffix. Occurrence overrides are subject to the same installation ownership
+checks as Operation handler families.
 The built-in `RestartRegion` handler requires exactly one bound checkpoint. More general custom
 handlers must make their selection explicit; absence of an eligible target yields Stop. Neither
 the authoring token nor its scope ID appears in Journal.
@@ -690,6 +700,19 @@ Before freezing the implementation wire, demonstrate:
   valid conclusions and the pending Effect lifecycle.
 - Public reconstruction tests, including competing recovery appends, uncertain acknowledgement,
   stopped pending Effects, completed preparation callbacks not rerun, and decoded default reports.
+
+Stage the first validation in the production Program authoring and existing Runtime assembly,
+with real codec-backed descriptors, parameter qualification, and associated callbacks. Internal
+association tests may run before the new Journal wire exists; public consuming tests also exercise
+the real generic registration API. Registration alone does not prove selected association. Keep
+this work in the uncommitted replacement candidate until the inseparable cutover is coherent;
+do not ship a graph/recovery intermediate design or create a separate validation Runtime.
+
+Capacity evidence must bound every valid complete closure, not just measure successful examples.
+In particular, a terminal Read domain failure can retain intent, evidence, original failure, and
+mapped root failure. Four independent maximum-size objects exceed the current frame ceiling.
+Use checked domain bounds and maximum alternative conclusions for native, token, mixed 64-source,
+and fully injected transaction fixtures before selecting useful nonzero recovery allowances.
 
 Concrete enrichment remains a subsequent commit: user-requested discovery, exact immutable DB
 configuration publication, and admission from the selected revision. Do not mix a discovery source
