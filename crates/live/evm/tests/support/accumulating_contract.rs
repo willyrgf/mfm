@@ -3,7 +3,7 @@ use mfm_evm::{
     AnchoredContractCallEvidence, AnchoredContractCallFailureReason, AnchoredContractCallResult,
     EvmBlockAnchor, EvmChainInstance, EvmNonceReservationEffect, EvmTransactionEffect,
     EvmTransactionPreparationEffect, EvmTransactionReceipt, EvmTransactionSettlement, NonceDomain,
-    PreparedEvmTransactionEvidence, TransactionReportOutcome,
+    PreparedEvmTransactionEvidence,
 };
 use mfm_journal::{EncodedRunFrame, StoredRunBytes};
 use mfm_runtime::EffectAdapterOutcome;
@@ -342,56 +342,42 @@ async fn accumulated_fixture_preserves_all_success_failure_and_cold_facts() {
                     serde_json::from_slice(value.canonical_bytes()).unwrap();
                 assert_eq!(failure.request(), &input.request);
                 assert_eq!(failure.reason(), reason);
-                let entries = failure.entries();
-                let workflow::FixtureEntryData::Transaction(deployment) = &entries[0].data else {
-                    panic!("deployment evidence")
-                };
-                assert_eq!(deployment.executed().command(), &input.deployment.command());
-                assert_eq!(deployment.executed().reservation().nonce(), 0);
-                if let workflow::FixtureEntryData::CallPlan(plan) = &entries[1].data {
-                    assert_eq!(plan, &input.configuration);
-                }
-                if let workflow::FixtureEntryData::ObservationPlan(plan) = &entries[2].data {
-                    assert_eq!(plan, &input.observation);
-                }
-                if let workflow::FixtureEntryData::Transaction(configuration) = &entries[1].data {
-                    let TransactionReportOutcome::Created(created) = deployment.outcome() else {
-                        panic!("created dependency")
-                    };
-                    assert_eq!(
-                        configuration.executed().command(),
-                        &input
-                            .configuration
-                            .command_for(created.created_address().clone())
-                    );
-                    assert_eq!(configuration.executed().reservation().nonce(), 1);
+                assert_eq!(failure.plans().creations, input.deployment);
+                assert_eq!(failure.plans().configuration, input.configuration);
+                assert_eq!(failure.plans().observation, input.observation);
+                let deployment = failure
+                    .progress()
+                    .evidence
+                    .executed(input.deployment.command())
+                    .unwrap();
+                assert_eq!(deployment.reservation().nonce(), 0);
+                if let Some(call) = &failure.progress().next {
+                    let configuration = call
+                        .evidence
+                        .executed(input.configuration.command_for(call.target.clone()))
+                        .unwrap();
+                    assert_eq!(configuration.reservation().nonce(), 1);
                 }
                 let wire = serde_json::to_value(&failure).unwrap();
-                let mut wrong_reason = wire.clone();
-                wrong_reason["reason"] = serde_json::json!({"kind":"invalid_return_data"});
-                if reason != FixtureFailureReason::InvalidReturnData {
-                    assert!(serde_json::from_value::<FixtureFailure>(wrong_reason).is_err());
-                }
-                for hostile in [
-                    {
-                        let mut v = wire.clone();
-                        v["entries"].as_array_mut().unwrap().swap(0, 1);
-                        v
-                    },
-                    {
-                        let mut v = wire.clone();
-                        v["entries"].as_array_mut().unwrap().pop();
-                        v
-                    },
-                    {
-                        let mut v = wire.clone();
-                        v["entries"]
-                            .as_array_mut()
-                            .unwrap()
-                            .push(wire["entries"][0].clone());
-                        v
-                    },
+                for (path, replacement) in [
+                    ("/plans/creations/initcode", serde_json::json!("BA")),
+                    ("/progress/evidence/settlement/nonce", serde_json::json!(99)),
+                    (
+                        "/progress/evidence/preparation/transaction_hash",
+                        serde_json::json!(EvmHash::from_bytes([99; 32])),
+                    ),
                 ] {
+                    let mut hostile = wire.clone();
+                    *hostile.pointer_mut(path).unwrap() = replacement;
+                    assert!(serde_json::from_value::<FixtureFailure>(hostile).is_err());
+                }
+                if failure.progress().next.is_some() {
+                    let mut hostile = wire.clone();
+                    hostile["progress"]["next"] = serde_json::Value::Null;
+                    assert!(serde_json::from_value::<FixtureFailure>(hostile).is_err());
+                    let mut hostile = wire.clone();
+                    hostile["progress"]["next"]["target"] =
+                        serde_json::json!(EvmAddress::from_bytes([99; 20]));
                     assert!(serde_json::from_value::<FixtureFailure>(hostile).is_err());
                 }
             }

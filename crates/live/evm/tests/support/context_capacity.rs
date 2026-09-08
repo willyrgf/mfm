@@ -4,7 +4,6 @@ use mfm_evm::{
     AnchoredContractCallFailure, AnchoredContractCallFailureReason, AnchoredObservationFacts,
     CallCreatedAt, Called, CompletedTransactionFacts, CreateAt, Created, EvmChainInstance,
     EvmTransaction, EvmTransactionFailure, ExecutedTransactionFacts, ObserveAt,
-    TransactionReportFacts,
 };
 use mfm_program::StateExecutionError;
 use mfm_program_derive::MfmContext;
@@ -40,98 +39,198 @@ type Observation = ReadAnchoredContractCall<
 type AfterObservation = <Observation as State>::Output;
 type ObservationFailure = <Observation as State>::Failure;
 
-trait ReportEntry {
-    fn entry(self) -> Result<FixtureEntryData, StateExecutionError>;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct CreationPlans {
+    prior: CheckedCreatePlan,
+    deployment: CheckedCreatePlan,
 }
-macro_rules! entry {
-    ($ty:ty, $variant:ident) => {
-        impl ReportEntry for $ty {
-            fn entry(self) -> Result<FixtureEntryData, StateExecutionError> {
-                Ok(FixtureEntryData::$variant(self.into()))
+
+#[derive(Debug, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct CapacityFailure {
+    request: FixtureRequest,
+    plans: workflow::FailurePlans<CreationPlans>,
+    progress: workflow::CreateProgress<workflow::CreateProgress<workflow::CallProgress>>,
+}
+impl CapacityFailure {
+    fn new(
+        request: FixtureRequest,
+        plans: workflow::FailurePlans<CreationPlans>,
+        progress: workflow::CreateProgress<workflow::CreateProgress<workflow::CallProgress>>,
+    ) -> Result<Self, StateExecutionError> {
+        progress.validate(&plans.creations.prior)?;
+        if let Some(deployment) = &progress.next {
+            let target = deployment.validate(&plans.creations.deployment)?;
+            if let (Some(call), Some(target)) = (&deployment.next, target) {
+                call.validate(&plans, &target)?;
             }
         }
-    };
-}
-entry!(CheckedCreatePlan, CreatePlan);
-entry!(CheckedCallPlan, CallPlan);
-entry!(CheckedObservationPlan, ObservationPlan);
-entry!(AnchoredObservationFacts, Observation);
-impl ReportEntry for CompletedTransactionFacts<Created> {
-    fn entry(self) -> Result<FixtureEntryData, StateExecutionError> {
-        Ok(FixtureEntryData::Transaction(Box::new(self.into())))
+        Ok(Self {
+            request,
+            plans,
+            progress,
+        })
     }
-}
-impl ReportEntry for CompletedTransactionFacts<Called> {
-    fn entry(self) -> Result<FixtureEntryData, StateExecutionError> {
-        Ok(FixtureEntryData::Transaction(Box::new(self.into())))
-    }
-}
-impl ReportEntry for ExecutedTransactionFacts {
-    fn entry(self) -> Result<FixtureEntryData, StateExecutionError> {
-        Ok(FixtureEntryData::Transaction(Box::new(
-            TransactionReportFacts::from_executed(self)?,
-        )))
-    }
-}
-fn failure<A: ReportEntry, D: ReportEntry, C: ReportEntry, O: ReportEntry>(
-    context: CapacityWorkflow<A, D, C, O>,
-    reason: FixtureFailureReason,
-) -> Result<FixtureFailure, StateExecutionError> {
-    FixtureFailure::new(
-        context.request,
-        vec![
-            FixtureEntry {
-                step: FixtureStep::PriorDeployment,
-                data: context.prior.entry()?,
-            },
-            FixtureEntry {
-                step: FixtureStep::Deployment,
-                data: context.deployment.entry()?,
-            },
-            FixtureEntry {
-                step: FixtureStep::Configuration,
-                data: context.configuration.entry()?,
-            },
-            FixtureEntry {
-                step: FixtureStep::Observation,
-                data: context.observation.entry()?,
-            },
-        ],
-        reason,
-    )
-}
-macro_rules! revert_report {
-    ($a:ty, $d:ty, $c:ty, $reason:ident) => {
-        impl TryFrom<EvmTransactionFailure<CapacityWorkflow<$a, $d, $c, CheckedObservationPlan>>>
-            for FixtureFailure
-        {
-            type Error = StateExecutionError;
-            fn try_from(
-                value: EvmTransactionFailure<CapacityWorkflow<$a, $d, $c, CheckedObservationPlan>>,
-            ) -> Result<Self, Self::Error> {
-                failure(value.into_context(), FixtureFailureReason::$reason)
-            }
+    fn reason(&self) -> FixtureFailureReason {
+        match &self.progress.next {
+            None => FixtureFailureReason::PriorDeploymentReverted,
+            Some(deployment) => deployment.next.as_ref().map_or(
+                FixtureFailureReason::DeploymentReverted,
+                workflow::CallProgress::reason,
+            ),
         }
-    };
+    }
+    fn from_observed(context: AfterObservation) -> Result<Self, StateExecutionError> {
+        let plans = workflow::FailurePlans {
+            creations: CreationPlans {
+                prior: workflow::create_plan(context.prior.command())?,
+                deployment: workflow::create_plan(context.deployment.command())?,
+            },
+            configuration: workflow::call_plan(context.configuration.command())?,
+            observation: workflow::observation_plan(
+                &context.observation,
+                context.configuration.command().binding(),
+            )?,
+        };
+        let call = workflow::CallProgress {
+            target: context.configuration.outcome().target().clone(),
+            evidence: workflow::TransactionEvidence::from_executed(
+                context.configuration.executed(),
+            ),
+            observation: Some(context.observation),
+        };
+        let deployment = workflow::CreateProgress {
+            evidence: workflow::TransactionEvidence::from_executed(context.deployment.executed()),
+            next: Some(call),
+        };
+        let progress = workflow::CreateProgress {
+            evidence: workflow::TransactionEvidence::from_executed(context.prior.executed()),
+            next: Some(deployment),
+        };
+        Self::new(context.request, plans, progress)
+    }
 }
-revert_report!(
-    ExecutedTransactionFacts,
-    CheckedCreatePlan,
-    CheckedCallPlan,
-    PriorDeploymentReverted
-);
-revert_report!(
-    CompletedTransactionFacts<Created>,
-    ExecutedTransactionFacts,
-    CheckedCallPlan,
-    DeploymentReverted
-);
-revert_report!(
-    CompletedTransactionFacts<Created>,
-    CompletedTransactionFacts<Created>,
-    ExecutedTransactionFacts,
-    ConfigurationReverted
-);
+impl<'de> Deserialize<'de> for CapacityFailure {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            request: FixtureRequest,
+            plans: workflow::FailurePlans<CreationPlans>,
+            progress: workflow::CreateProgress<workflow::CreateProgress<workflow::CallProgress>>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(wire.request, wire.plans, wire.progress).map_err(serde::de::Error::custom)
+    }
+}
+impl
+    TryFrom<
+        EvmTransactionFailure<
+            CapacityWorkflow<
+                ExecutedTransactionFacts,
+                CheckedCreatePlan,
+                CheckedCallPlan,
+                CheckedObservationPlan,
+            >,
+        >,
+    > for CapacityFailure
+{
+    type Error = StateExecutionError;
+    fn try_from(value: FirstFailure) -> Result<Self, Self::Error> {
+        let context = value.into_context();
+        let plans = workflow::FailurePlans {
+            creations: CreationPlans {
+                prior: workflow::create_plan(context.prior.command())?,
+                deployment: context.deployment,
+            },
+            configuration: context.configuration,
+            observation: context.observation,
+        };
+        let progress = workflow::CreateProgress {
+            evidence: workflow::TransactionEvidence::from_executed(&context.prior),
+            next: None,
+        };
+        Self::new(context.request, plans, progress)
+    }
+}
+impl
+    TryFrom<
+        EvmTransactionFailure<
+            CapacityWorkflow<
+                CompletedTransactionFacts<Created>,
+                ExecutedTransactionFacts,
+                CheckedCallPlan,
+                CheckedObservationPlan,
+            >,
+        >,
+    > for CapacityFailure
+{
+    type Error = StateExecutionError;
+    fn try_from(value: SecondFailure) -> Result<Self, Self::Error> {
+        let context = value.into_context();
+        let plans = workflow::FailurePlans {
+            creations: CreationPlans {
+                prior: workflow::create_plan(context.prior.command())?,
+                deployment: workflow::create_plan(context.deployment.command())?,
+            },
+            configuration: context.configuration,
+            observation: context.observation,
+        };
+        let progress = workflow::CreateProgress {
+            evidence: workflow::TransactionEvidence::from_executed(context.prior.executed()),
+            next: Some(workflow::CreateProgress {
+                evidence: workflow::TransactionEvidence::from_executed(&context.deployment),
+                next: None,
+            }),
+        };
+        Self::new(context.request, plans, progress)
+    }
+}
+impl
+    TryFrom<
+        EvmTransactionFailure<
+            CapacityWorkflow<
+                CompletedTransactionFacts<Created>,
+                CompletedTransactionFacts<Created>,
+                ExecutedTransactionFacts,
+                CheckedObservationPlan,
+            >,
+        >,
+    > for CapacityFailure
+{
+    type Error = StateExecutionError;
+    fn try_from(value: CallFailure) -> Result<Self, Self::Error> {
+        let context = value.into_context();
+        let plans = workflow::FailurePlans {
+            creations: CreationPlans {
+                prior: workflow::create_plan(context.prior.command())?,
+                deployment: workflow::create_plan(context.deployment.command())?,
+            },
+            configuration: workflow::call_plan(context.configuration.command())?,
+            observation: context.observation,
+        };
+        let call = workflow::CallProgress {
+            target: context
+                .configuration
+                .command()
+                .to()
+                .ok_or(StateExecutionError)?
+                .clone(),
+            evidence: workflow::TransactionEvidence::from_executed(&context.configuration),
+            observation: None,
+        };
+        let deployment = workflow::CreateProgress {
+            evidence: workflow::TransactionEvidence::from_executed(context.deployment.executed()),
+            next: Some(call),
+        };
+        let progress = workflow::CreateProgress {
+            evidence: workflow::TransactionEvidence::from_executed(context.prior.executed()),
+            next: Some(deployment),
+        };
+        Self::new(context.request, plans, progress)
+    }
+}
 impl
     TryFrom<
         AnchoredContractCallFailure<
@@ -142,15 +241,11 @@ impl
                 AnchoredObservationFacts,
             >,
         >,
-    > for FixtureFailure
+    > for CapacityFailure
 {
     type Error = StateExecutionError;
     fn try_from(value: ObservationFailure) -> Result<Self, Self::Error> {
-        let reason = value.reason();
-        failure(
-            value.into_context(),
-            FixtureFailureReason::ObservationFailed(reason),
-        )
+        Self::from_observed(value.into_context())
     }
 }
 
@@ -189,7 +284,7 @@ struct CapacityDecode;
 impl State for CapacityDecode {
     type Input = AfterObservation;
     type Output = CapacityReport;
-    type Failure = FixtureFailure;
+    type Failure = CapacityFailure;
     fn state_id() -> mfm_program::Result<StableId> {
         StableId::new("mfm.test.two-creations/decode@1").map_err(|_| ProgramError::InvalidContract)
     }
@@ -197,7 +292,7 @@ impl State for CapacityDecode {
 impl PureState for CapacityDecode {
     fn evaluate(
         input: AfterObservation,
-    ) -> Result<ProposedStateOutcome<CapacityReport, FixtureFailure>, StateExecutionError> {
+    ) -> Result<ProposedStateOutcome<CapacityReport, CapacityFailure>, StateExecutionError> {
         let result = input.observation.result().ok_or(StateExecutionError)?;
         Ok(match decode_fixture_value(result.return_bytes()) {
             Some(decoded) => ProposedStateOutcome::Success {
@@ -207,7 +302,7 @@ impl PureState for CapacityDecode {
                 },
             },
             None => ProposedStateOutcome::Failure {
-                failure: failure(input, FixtureFailureReason::InvalidReturnData)?,
+                failure: CapacityFailure::from_observed(input)?,
             },
         })
     }
@@ -218,26 +313,26 @@ struct CapacityOperation {
 impl Operation for CapacityOperation {
     type Input = CapacityInitial;
     type Output = CapacityReport;
-    type Failure = FixtureFailure;
+    type Failure = CapacityFailure;
     fn expand(
         &self,
-        body: &mut OperationExpansion<CapacityInitial, CapacityReport, FixtureFailure>,
+        body: &mut OperationExpansion<CapacityInitial, CapacityReport, CapacityFailure>,
     ) -> mfm_program::Result<()> {
         body.with_failure_handler::<FirstFailure, AfterFirst>(
             |body| body.operation(&FirstTransaction::new(self.binding.clone())),
-            |body| body.pure::<Abort<FirstFailure, AfterFirst>>(),
+            |body| body.pure::<Abort<FirstFailure, AfterFirst, CapacityFailure>>(),
         )?;
         body.with_failure_handler::<SecondFailure, AfterSecond>(
             |body| body.operation(&SecondTransaction::new(self.binding.clone())),
-            |body| body.pure::<Abort<SecondFailure, AfterSecond>>(),
+            |body| body.pure::<Abort<SecondFailure, AfterSecond, CapacityFailure>>(),
         )?;
         body.with_failure_handler::<CallFailure, AfterCall>(
             |body| body.operation(&CallTransaction::new(self.binding.clone())),
-            |body| body.pure::<Abort<CallFailure, AfterCall>>(),
+            |body| body.pure::<Abort<CallFailure, AfterCall, CapacityFailure>>(),
         )?;
         body.with_failure_handler::<ObservationFailure, AfterObservation>(
             |body| body.read::<Observation, EvmAnchoredContractCallRead>(&self.binding.route),
-            |body| body.pure::<Abort<ObservationFailure, AfterObservation>>(),
+            |body| body.pure::<Abort<ObservationFailure, AfterObservation, CapacityFailure>>(),
         )?;
         body.pure::<CapacityDecode>()
     }
@@ -369,7 +464,7 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
         ),
         (
             "failure",
-            FixtureFailure::schema_descriptor()
+            CapacityFailure::schema_descriptor()
                 .unwrap()
                 .identity_canonical_json()
                 .unwrap()
@@ -438,16 +533,16 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
             .unwrap();
         builder.register_pure::<CapacityDecode>().unwrap();
         builder
-            .register_pure::<Abort<FirstFailure, AfterFirst>>()
+            .register_pure::<Abort<FirstFailure, AfterFirst, CapacityFailure>>()
             .unwrap();
         builder
-            .register_pure::<Abort<SecondFailure, AfterSecond>>()
+            .register_pure::<Abort<SecondFailure, AfterSecond, CapacityFailure>>()
             .unwrap();
         builder
-            .register_pure::<Abort<CallFailure, AfterCall>>()
+            .register_pure::<Abort<CallFailure, AfterCall, CapacityFailure>>()
             .unwrap();
         builder
-            .register_pure::<Abort<ObservationFailure, AfterObservation>>()
+            .register_pure::<Abort<ObservationFailure, AfterObservation, CapacityFailure>>()
             .unwrap();
         source.register(&mut builder, &binding);
         let runtime = Runtime::new(builder.finish(), store.clone());
@@ -497,14 +592,20 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
                 value
             }
             (RunViewState::Failed(value), Some(reason)) => {
-                let report: FixtureFailure =
+                let report: CapacityFailure =
                     serde_json::from_slice(value.canonical_bytes()).unwrap();
                 assert_eq!(report.reason(), reason);
-                assert_eq!(report.request().label, 99);
-                assert_eq!(report.entries().len(), 4);
+                assert_eq!(report.request.label, 99);
+                assert_eq!(report.plans.creations.prior, input.prior);
+                assert_eq!(report.plans.creations.deployment, input.deployment);
+                assert_eq!(report.plans.configuration, input.configuration);
+                assert_eq!(report.plans.observation, input.observation);
                 let mut wire = serde_json::to_value(&report).unwrap();
-                wire["entries"].as_array_mut().unwrap().swap(0, 1);
-                assert!(serde_json::from_value::<FixtureFailure>(wire).is_err());
+                let prior = wire["plans"]["creations"]["prior"].clone();
+                wire["plans"]["creations"]["prior"] =
+                    wire["plans"]["creations"]["deployment"].clone();
+                wire["plans"]["creations"]["deployment"] = prior;
+                assert!(serde_json::from_value::<CapacityFailure>(wire).is_err());
                 value
             }
             _ => panic!("capacity branch mismatch"),

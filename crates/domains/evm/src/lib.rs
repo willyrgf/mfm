@@ -64,9 +64,8 @@ pub use transaction::{
     ExecutedTransactionFacts, NonceDomain, PrepareEvmTransaction, PreparedContext,
     PreparedEvmTransaction, PreparedEvmTransactionEvidence, PreparedTransactionFacts,
     ProjectEvmTransactionOutcome, Replaced, Reservation, ReserveEvmNonce, ReservedContext,
-    ReservedEvmTransaction, TransactionRecipe, TransactionReportFacts, TransactionReportOutcome,
-    TransactionSuccessMode, EVM_TRANSACTION_EFFECT_CAPABILITY_ID, MAX_EVM_CALLDATA_BYTES,
-    MAX_EVM_INITCODE_BYTES,
+    ReservedEvmTransaction, TransactionRecipe, TransactionSuccessMode,
+    EVM_TRANSACTION_EFFECT_CAPABILITY_ID, MAX_EVM_CALLDATA_BYTES, MAX_EVM_INITCODE_BYTES,
 };
 
 /// Secret-free public identity of one live EVM route.

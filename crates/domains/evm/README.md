@@ -33,9 +33,8 @@ surface. No State performs IO, and Runtime has no EVM-specific logic.
 Products own named context records, selected recipe connections, ABI decoding, and terminal
 report policy. They register the transaction State family through live EVM's pure
 `register_evm_transaction_states::<C, R>` helper, separately from explicit IO adapter registration.
-`TransactionReportFacts` losslessly normalizes executed or completed transaction facts into one
-execution record and a checked finite outcome, so product failure reports can store each schema
-once in a bounded named entry sequence.
+Terminal reports use the existing execution facts and settlement outcome. Product failure reports
+retain plans once with the executed evidence prefix and derive their failure reason.
 
 `CheckedObservationPlan` checks route and calldata before admission. `ObserveAt<ObservationSlot,
 ConfigurationSlot>` supplies the selected completed call's target and receipt anchor, rejecting

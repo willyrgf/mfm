@@ -629,15 +629,6 @@ fn cumulative_facts_preserve_every_stage_and_reject_hostile_combinations() {
         assert_eq!(executed.reservation(), &reservation);
         assert_eq!(executed.preparation(), &preparation);
         assert_eq!(executed.settlement(), &settlement);
-        let report = mfm_evm::TransactionReportFacts::from_executed(executed.clone()).unwrap();
-        assert_eq!(report.executed(), &executed);
-        let mut report_wire = serde_json::to_value(&report).unwrap();
-        assert_eq!(
-            serde_json::from_value::<mfm_evm::TransactionReportFacts>(report_wire.clone()).unwrap(),
-            report
-        );
-        report_wire["outcome"] = serde_json::json!({ "kind": "reverted" });
-        assert!(serde_json::from_value::<mfm_evm::TransactionReportFacts>(report_wire).is_err());
         let wire = serde_json::to_value(&executed).unwrap();
         assert_eq!(
             serde_json::from_value::<ExecutedTransactionFacts>(wire.clone()).unwrap(),

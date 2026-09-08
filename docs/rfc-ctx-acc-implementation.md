@@ -15,7 +15,7 @@ contracts live in [design](design.md) and [architecture](architecture.md).
 | 5. Checked plans | `transaction_contract.rs` and `anchored_call_contract.rs` test byte maxima, fee ceiling/order, zero-gas decoding, strict deserialization, and total late-target/anchor construction. Plan and complete-command factories share validation owners. |
 | 6. Complete facts and hostile inputs | Private cumulative records preserve checked reservation, preparation, settlement, and projection relationships. Domain tests reject mismatched command references, nonce domains, settlement nonce/hash/action, projected addresses/targets, and anchored intent references/anchors. |
 | 7. Recovery boundaries | Live unit tests retain cancellation, rejecting-signer prepared-wire reuse, custody acknowledgement loss, and ambiguous appends at every transaction Journal boundary. The managed Effect e2e retains the original external nonce advancement and reconstructed Runtime claims. |
-| 8. Exact failure facts and cold terminals | Deterministic fixture tests cover both reversions, all three observation failure reasons, and invalid ABI bytes; they compare unchanged cold head/value, retained frames, and adapter counts. Checked terminal reports require either the exact three-step fixture order or the exact four-step capacity order, outcomes consistent with the failure point, and selected-target/observation linkage. The managed test compares complete terminal reports and nonce `0 -> 2 -> 4`. |
+| 8. Exact failure facts and cold terminals | Deterministic fixture tests cover both reversions, all three observation failure reasons, and invalid ABI bytes; they compare unchanged cold head/value, retained frames, and adapter counts. Distinct three-step and four-step root reports retain plans once with an executed evidence prefix, check continuation/outcome and target/observation linkage, and derive the failure reason. The managed test compares complete terminal reports and nonce `0 -> 2 -> 4`. |
 | 9. Capacity | `context_capacity.rs` executes two creations, a call selecting the second creation, anchored observation, and ABI reporting. It covers all measured input sizes, every failure point at maximum inputs, and maximum returned evidence. It checks exact schema identity lengths, terminal bytes, each repeated frame object closure, frame maxima, total run bytes, and cold terminal equality under unchanged limits. |
 | 10. Internal execution errors | `runtime/tests/support/callback_errors.rs` proves Pure/Read head preservation, Effect prepare preservation, exact retry command/EffectId, and no completed cold interpretation. The EVM tests reject an incompatible success mode before prepare append or adapter entry. |
 | 11. Complete deletion | Current EVM domain/live source and current contract documentation contain no superseded caller-context wrappers, fixture preparation bridges, old State-ID constants, or local one-transaction wrappers. Original RFC/problem descriptions remain historical specification material. |
@@ -35,18 +35,18 @@ The test paths above are:
 
 ## Production capacity measurements
 
-Measured from the production types and actual Runtime/Journal execution. Schema identities are
+Schema identities below describe the current shared-parameter and prefix-report types. Payload measurements below are from the pre-reduction cutover and will be refreshed by its capacity acceptance run. Schema identities are
 an independent admission constraint, bounded at 65,536 bytes.
 
 | Value | Schema identity bytes |
 | --- | ---: |
-| Initial two-creation context | 16,891 |
-| After first creation | 28,394 |
-| After second creation | 39,897 |
-| After configuration | 51,392 |
-| After observation | 57,452 |
-| Successful report | 58,272 |
-| Normalized failure report | 39,427 |
+| Initial two-creation context | 19,285 |
+| After first creation | 30,788 |
+| After second creation | 42,291 |
+| After configuration | 53,786 |
+| After observation | 59,846 |
+| Successful report | 60,666 |
+| Normalized failure report | 53,665 |
 
 Successful runs retain 24 frames. Input sizes are per creation and per call/observation. All
 measurements below are bytes; returned success evidence contains the 32-byte ABI word.

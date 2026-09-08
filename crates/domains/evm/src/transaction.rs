@@ -604,9 +604,6 @@ pub(crate) fn validate_input_bytes(input: &[u8], maximum: usize) -> Result<(), E
 pub(crate) mod recipes;
 pub use recipes::*;
 
-mod report;
-pub use report::*;
-
 mod facts;
 pub use facts::*;
 
