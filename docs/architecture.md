@@ -115,7 +115,10 @@ settlement. Runtime schedules the expanded graph with no EVM or signer knowledge
 creation-dependent call, ordinary call, and anchored observation recipes. Products select context
 field names and recipe connections, and own ABI decoding and terminal report/failure policy.
 `EvmTransaction<C, R>` is the reusable domain Operation; live EVM owns its pure four-State
-registration helper, separately from IO adapter registration.
+registration helper, separately from IO adapter registration. Outer authoring and registration
+bounds name the existing executable contracts; slot reconstruction equalities belong to their
+State implementations. Read subject-family classification belongs to EVM and is reused by live
+preflight, which captures immutable binding references at registration.
 `EvmAnchoredContractCallRead` owns only the exact Program-visible
 intent/evidence and context-preserving State. Its route reference is the content ref of
 `EvmTransactionRoute`, while the transaction Effect binds the complete

@@ -21,8 +21,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
-    EvmReadProvider, EvmTransactionProvider, EvmTransactionProviderFuture, ProviderFuture,
-    ProviderReceipt, ProviderReceiptResult,
+    EvmReadProvider, EvmTransactionProvider, ProviderFuture, ProviderReceipt, ProviderReceiptResult,
 };
 
 /// Largest admitted JSON-RPC response body.
@@ -124,11 +123,19 @@ impl JsonRpcEvmProvider {
         serde_json::from_slice(&body).map_err(|_| AdapterError::Unavailable)
     }
 
-    async fn broad_anchor(&self, tag: &str) -> Result<EvmBlockAnchor, AdapterError> {
-        self.rpc::<_, RpcBlock>("eth_getBlockByNumber", &(tag, false))
+    async fn chain_id(&self) -> Result<NonZeroU64, AdapterError> {
+        self.rpc::<_, RpcQuantity>("eth_chainId", &[] as &[u8; 0])
             .await?
             .into_result()?
-            .into_anchor()
+            .to_u64()
+            .and_then(NonZeroU64::new)
+            .ok_or(AdapterError::Unavailable)
+    }
+
+    async fn broad_anchor(&self, tag: &str) -> Result<EvmBlockAnchor, AdapterError> {
+        self.block_anchor(tag)
+            .await?
+            .ok_or(AdapterError::Unavailable)
     }
 
     async fn token_contract_call(
@@ -158,13 +165,7 @@ impl JsonRpcEvmProvider {
     ) -> Result<EvmReadEvidence, AdapterError> {
         let value = match intent.subject() {
             EvmReadSubject::ChainIdentity => {
-                let chain_id = self
-                    .rpc::<_, RpcQuantity>("eth_chainId", &[] as &[u8; 0])
-                    .await?
-                    .into_result()?
-                    .to_u64()
-                    .and_then(NonZeroU64::new)
-                    .ok_or(AdapterError::Unavailable)?;
+                let chain_id = self.chain_id().await?;
                 EvmReadValue::ChainId(chain_id)
             }
             EvmReadSubject::InitialAnchor => {
@@ -220,7 +221,7 @@ impl JsonRpcEvmProvider {
     ) -> Result<AnchoredContractCallEvidence, AdapterError> {
         let authored_anchor = intent.anchor();
         let Some(observed_anchor) = self
-            .strict_block_anchor(block_tag(&authored_anchor.number)?)
+            .block_anchor(&block_tag(&authored_anchor.number)?)
             .await?
         else {
             return Ok(AnchoredContractCallEvidence::safe_failure(
@@ -260,7 +261,7 @@ impl JsonRpcEvmProvider {
             .0;
 
         let Some(confirmed_anchor) = self
-            .strict_block_anchor(block_tag(&authored_anchor.number)?)
+            .block_anchor(&block_tag(&authored_anchor.number)?)
             .await?
         else {
             return Ok(AnchoredContractCallEvidence::safe_failure(
@@ -280,10 +281,7 @@ impl JsonRpcEvmProvider {
         ))
     }
 
-    async fn strict_block_anchor(
-        &self,
-        tag: String,
-    ) -> Result<Option<EvmBlockAnchor>, AdapterError> {
+    async fn block_anchor(&self, tag: &str) -> Result<Option<EvmBlockAnchor>, AdapterError> {
         self.rpc::<_, Option<RpcBlock>>("eth_getBlockByNumber", &(tag, false))
             .await?
             .into_result()?
@@ -322,21 +320,13 @@ impl EvmReadProvider for JsonRpcEvmProvider {
 }
 
 impl EvmTransactionProvider for JsonRpcEvmProvider {
-    fn chain_instance(&self) -> EvmTransactionProviderFuture<'_, EvmChainInstance> {
+    fn chain_instance(&self) -> ProviderFuture<'_, EvmChainInstance> {
         Box::pin(async move {
-            let chain_id = self
-                .rpc::<_, RpcQuantity>("eth_chainId", &[] as &[u8; 0])
-                .await?
-                .into_result()?
-                .to_u64()
-                .and_then(NonZeroU64::new)
-                .ok_or(AdapterError::Unavailable)?;
+            let chain_id = self.chain_id().await?;
             let genesis = self
-                .rpc::<_, Option<RpcBlock>>("eth_getBlockByNumber", &("0x0", false))
+                .block_anchor("0x0")
                 .await?
-                .into_result()?
-                .ok_or(AdapterError::Unavailable)?
-                .into_anchor()?;
+                .ok_or(AdapterError::Unavailable)?;
             if genesis.number.as_str() != "0" {
                 return Err(AdapterError::Unavailable);
             }
@@ -347,10 +337,7 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
         })
     }
 
-    fn pending_nonce<'a>(
-        &'a self,
-        sender: &'a EvmAddress,
-    ) -> EvmTransactionProviderFuture<'a, u64> {
+    fn pending_nonce<'a>(&'a self, sender: &'a EvmAddress) -> ProviderFuture<'a, u64> {
         Box::pin(async move {
             self.rpc::<_, RpcQuantity>("eth_getTransactionCount", &(sender, "pending"))
                 .await?
@@ -363,7 +350,7 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
     fn receipt<'a>(
         &'a self,
         transaction_hash: &'a EvmHash,
-    ) -> EvmTransactionProviderFuture<'a, Option<ProviderReceipt>> {
+    ) -> ProviderFuture<'a, Option<ProviderReceipt>> {
         Box::pin(async move {
             self.rpc::<_, Option<RpcReceipt>>("eth_getTransactionReceipt", &(transaction_hash,))
                 .await?
@@ -376,10 +363,10 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
     fn canonical_block<'a>(
         &'a self,
         block_number: &'a EvmU256,
-    ) -> EvmTransactionProviderFuture<'a, EvmBlockAnchor> {
+    ) -> ProviderFuture<'a, EvmBlockAnchor> {
         Box::pin(async move {
             let tag = block_tag(block_number)?;
-            self.strict_block_anchor(tag)
+            self.block_anchor(&tag)
                 .await?
                 .ok_or(AdapterError::Unavailable)
         })
@@ -388,7 +375,7 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
     fn submit_raw<'a>(
         &'a self,
         raw_transaction: &'a ExactRawTransaction,
-    ) -> EvmTransactionProviderFuture<'a, EvmHash> {
+    ) -> ProviderFuture<'a, EvmHash> {
         let encoded = format!("0x{}", hex::encode(raw_transaction.as_bytes()));
         Box::pin(async move {
             self.rpc::<_, EvmHash>("eth_sendRawTransaction", &(encoded,))

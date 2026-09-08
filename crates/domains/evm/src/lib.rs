@@ -1212,33 +1212,34 @@ impl EvmReadEvidence {
 
 /// Groups the subject variants one Read capability admits.
 #[derive(Debug, Clone, Copy)]
-enum ReadCapabilityFamily {
+pub enum ReadCapabilityFamily {
+    /// Chain identity observations.
     ChainIdentity,
     /// Initial anchor observes the head; confirmation re-observes the block its intent names.
     Anchor,
+    /// Native and token balance observations.
     Balance,
 }
 
-fn validate_read_capability_intent(
-    intent: &EvmReadIntent,
-    family: ReadCapabilityFamily,
-) -> Result<(), EvmDomainError> {
-    let valid = match family {
-        ReadCapabilityFamily::ChainIdentity => {
-            matches!(&intent.subject, EvmReadSubject::ChainIdentity)
+impl ReadCapabilityFamily {
+    /// Returns whether this capability admits the checked intent's subject.
+    pub fn accepts(self, subject: &EvmReadSubject) -> bool {
+        match self {
+            ReadCapabilityFamily::ChainIdentity => {
+                matches!(subject, EvmReadSubject::ChainIdentity)
+            }
+            ReadCapabilityFamily::Anchor => matches!(
+                subject,
+                EvmReadSubject::InitialAnchor | EvmReadSubject::ConfirmAnchor { .. }
+            ),
+            ReadCapabilityFamily::Balance => matches!(
+                subject,
+                EvmReadSubject::NativeBalance { .. }
+                    | EvmReadSubject::TokenDecimals { .. }
+                    | EvmReadSubject::TokenBalance { .. }
+            ),
         }
-        ReadCapabilityFamily::Anchor => matches!(
-            &intent.subject,
-            EvmReadSubject::InitialAnchor | EvmReadSubject::ConfirmAnchor { .. }
-        ),
-        ReadCapabilityFamily::Balance => matches!(
-            &intent.subject,
-            EvmReadSubject::NativeBalance { .. }
-                | EvmReadSubject::TokenDecimals { .. }
-                | EvmReadSubject::TokenBalance { .. }
-        ),
-    };
-    valid.then_some(()).ok_or(EvmDomainError::EvidenceBinding)
+    }
 }
 
 /// Observational EVM Read capability for the target chain identity.
@@ -1268,7 +1269,10 @@ macro_rules! impl_read_capability {
                     .then_some(())
                     .ok_or(EvmDomainError::EvidenceBinding)
                     .and_then(|_| {
-                        validate_read_capability_intent(intent, ReadCapabilityFamily::$family)
+                        ReadCapabilityFamily::$family
+                            .accepts(intent.subject())
+                            .then_some(())
+                            .ok_or(EvmDomainError::EvidenceBinding)
                     })
                     .and_then(|_| evidence.validate_for(intent))
                     .map_err(|_| mfm_capabilities::CapabilityError::EvidenceBinding)

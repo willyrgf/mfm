@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::{future::Future, pin::Pin};
 
 use k256::ecdsa::signature::hazmat::RandomizedPrehashSigner;
 use mfm_evm::custody::{
@@ -347,7 +348,7 @@ impl ScriptedProvider {
 }
 
 impl EvmTransactionProvider for ScriptedProvider {
-    fn chain_instance(&self) -> EvmTransactionProviderFuture<'_, EvmChainInstance> {
+    fn chain_instance(&self) -> ProviderFuture<'_, EvmChainInstance> {
         Box::pin(async move {
             self.operations
                 .lock()
@@ -357,10 +358,7 @@ impl EvmTransactionProvider for ScriptedProvider {
         })
     }
 
-    fn pending_nonce<'a>(
-        &'a self,
-        sender: &'a EvmAddress,
-    ) -> EvmTransactionProviderFuture<'a, u64> {
+    fn pending_nonce<'a>(&'a self, sender: &'a EvmAddress) -> ProviderFuture<'a, u64> {
         Box::pin(async move {
             self.operations
                 .lock()
@@ -373,7 +371,7 @@ impl EvmTransactionProvider for ScriptedProvider {
     fn receipt<'a>(
         &'a self,
         transaction_hash: &'a EvmHash,
-    ) -> EvmTransactionProviderFuture<'a, Option<ProviderReceipt>> {
+    ) -> ProviderFuture<'a, Option<ProviderReceipt>> {
         Box::pin(async move {
             self.operations
                 .lock()
@@ -394,7 +392,7 @@ impl EvmTransactionProvider for ScriptedProvider {
     fn canonical_block<'a>(
         &'a self,
         block_number: &'a EvmU256,
-    ) -> EvmTransactionProviderFuture<'a, EvmBlockAnchor> {
+    ) -> ProviderFuture<'a, EvmBlockAnchor> {
         Box::pin(async move {
             self.operations
                 .lock()
@@ -407,7 +405,7 @@ impl EvmTransactionProvider for ScriptedProvider {
     fn submit_raw<'a>(
         &'a self,
         raw_transaction: &'a ExactRawTransaction,
-    ) -> EvmTransactionProviderFuture<'a, EvmHash> {
+    ) -> ProviderFuture<'a, EvmHash> {
         Box::pin(async move {
             let raw = raw_transaction.as_bytes().to_vec();
             self.operations

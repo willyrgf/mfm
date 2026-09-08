@@ -1,12 +1,10 @@
 use mfm_evm::{
-    CompletedContext, CompletedTransactionFacts, EvmNonceReservationEffect, EvmTransactionEffect,
-    EvmTransactionPreparationEffect, ExecuteEvmTransaction, ExecutedContext,
-    ExecutedTransactionFacts, PrepareEvmTransaction, PreparedContext, PreparedTransactionFacts,
-    ProjectEvmTransactionOutcome, ReserveEvmNonce, ReservedContext, ReservedEvmTransaction,
+    EvmNonceReservationEffect, EvmTransactionEffect, EvmTransactionPreparationEffect,
+    ExecuteEvmTransaction, PrepareEvmTransaction, ProjectEvmTransactionOutcome, ReserveEvmNonce,
     TransactionRecipe,
 };
 use mfm_runtime::RuntimeAssemblyBuilder;
-use mfm_values::{ContextSlot, MfmValue};
+use mfm_values::MfmValue;
 
 /// Registers the four exact State ABIs of one accumulated-context transaction.
 ///
@@ -16,19 +14,9 @@ pub fn register_evm_transaction_states<C: MfmValue, R: TransactionRecipe<C>>(
     builder: &mut RuntimeAssemblyBuilder,
 ) -> mfm_runtime::Result<()>
 where
-    R::Slot: ContextSlot<
-            ReservedContext<C, R>,
-            Value = ReservedEvmTransaction,
-            With<PreparedTransactionFacts> = PreparedContext<C, R>,
-        > + ContextSlot<
-            PreparedContext<C, R>,
-            Value = PreparedTransactionFacts,
-            With<ExecutedTransactionFacts> = ExecutedContext<C, R>,
-        > + ContextSlot<
-            ExecutedContext<C, R>,
-            Value = ExecutedTransactionFacts,
-            With<CompletedTransactionFacts<R::Success>> = CompletedContext<C, R>,
-        >,
+    PrepareEvmTransaction<C, R>: mfm_program::EffectState<EvmTransactionPreparationEffect>,
+    ExecuteEvmTransaction<C, R>: mfm_program::EffectState<EvmTransactionEffect>,
+    ProjectEvmTransactionOutcome<C, R>: mfm_program::PureState,
 {
     builder.register_effect::<ReserveEvmNonce<C, R>, EvmNonceReservationEffect>()?;
     builder.register_effect::<PrepareEvmTransaction<C, R>, EvmTransactionPreparationEffect>()?;
