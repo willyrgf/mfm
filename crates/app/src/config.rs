@@ -202,7 +202,10 @@ impl EvmRouteWire {
             .endpoint_ref()
             .map_err(|_| ConfigDocumentError::Internal)?;
         let chain_id = NonZeroU64::new(self.chain_id).ok_or(ConfigDocumentError::Invalid)?;
-        Ok(EvmPhysicalTarget::new(chain_id, endpoint_ref))
+        Ok(EvmPhysicalTarget {
+            chain_id,
+            endpoint_ref,
+        })
     }
 }
 

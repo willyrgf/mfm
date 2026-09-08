@@ -71,3 +71,5 @@ result relationship. The domain also validates anchors, quantities, byte bounds,
 shape, and closed evidence. Authenticated integrity evidence maps to the distinct
 `IntegrityBlocked` failure. This crate has no signing dependency and no Runtime, Store, live client,
 signer handle, nonce authority, broadcast, or ambient IO dependency.
+
+Checked identity products expose named fields; commands and correlated facts retain checked constructors.

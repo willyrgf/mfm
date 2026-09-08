@@ -1005,7 +1005,7 @@ pub fn plan_snapshot(
     if targets.is_empty()
         || targets
             .windows(2)
-            .any(|pair| pair[0].chain_id() >= pair[1].chain_id())
+            .any(|pair| pair[0].chain_id >= pair[1].chain_id)
     {
         return Err(PortfolioError::InvalidValue);
     }
@@ -1020,7 +1020,7 @@ pub fn plan_snapshot(
         || !required_chains
             .iter()
             .copied()
-            .eq(targets.iter().map(EvmPhysicalTarget::chain_id))
+            .eq(targets.iter().map(|target| target.chain_id))
     {
         return Err(PortfolioError::InvalidValue);
     }
@@ -1035,7 +1035,7 @@ pub fn plan_snapshot(
             .map(EvmBalanceSource::chain_id)
             .ok_or(PortfolioError::Program)?;
         let target_index = targets
-            .binary_search_by_key(&chain_id, EvmPhysicalTarget::chain_id)
+            .binary_search_by_key(&chain_id, |target| target.chain_id)
             .map_err(|_| PortfolioError::Program)?;
         let target = &targets[target_index];
         let route_ref = target.binding_ref().map_err(|_| PortfolioError::Program)?;

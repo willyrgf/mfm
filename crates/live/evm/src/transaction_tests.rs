@@ -309,16 +309,16 @@ struct ScriptedProvider {
 impl ScriptedProvider {
     fn new(chain_id: u64) -> Self {
         Self {
-            chain: EvmChainInstance::new(
-                nonzero(chain_id),
-                EvmHash::new(GENESIS).expect("genesis"),
-            ),
+            chain: EvmChainInstance {
+                chain_id: nonzero(chain_id),
+                expected_genesis_hash: EvmHash::new(GENESIS).expect("genesis"),
+            },
             pending: 7,
             receipts: Mutex::new(VecDeque::new()),
-            canonical: EvmBlockAnchor::new(
-                EvmU256::from_u64(9),
-                EvmHash::new(BLOCK).expect("block"),
-            ),
+            canonical: EvmBlockAnchor {
+                number: EvmU256::from_u64(9),
+                hash: EvmHash::new(BLOCK).expect("block"),
+            },
             submissions: Mutex::new(VecDeque::new()),
             operations: Mutex::new(Vec::new()),
             block_receipt_once: AtomicBool::new(false),
@@ -445,14 +445,21 @@ async fn fixture() -> (
         .expect("signer");
     let sender = ethereum_address(signer.public_key());
     let signer = Arc::new(signer);
-    let route = EvmTransactionRoute::new(
-        EvmChainInstance::new(nonzero(1337), EvmHash::new(GENESIS).expect("genesis")),
-        EvmEndpoint::new("transaction-test")
+    let route = EvmTransactionRoute {
+        chain_instance: EvmChainInstance {
+            chain_id: nonzero(1337),
+            expected_genesis_hash: EvmHash::new(GENESIS).expect("genesis"),
+        },
+        endpoint_ref: EvmEndpoint::new("transaction-test")
             .expect("endpoint")
             .endpoint_ref()
             .expect("endpoint ref"),
-    );
-    let binding = EvmTransactionBinding::new(route, EvmAuthorityEpoch::new([3; 32]), sender);
+    };
+    let binding = EvmTransactionBinding {
+        route,
+        authority_epoch: EvmAuthorityEpoch::new([3; 32]),
+        sender,
+    };
     let command = Eip1559TransactionCommand::create(
         binding.clone(),
         vec![0x60, 0x00],
@@ -475,7 +482,7 @@ async fn fixture() -> (
 async fn transaction_registration_uses_the_complete_binding_as_its_only_key() {
     let (_owner, signer, binding, _command, _effect_id) = fixture().await;
     let authority: Arc<dyn EvmTransactionAuthority> =
-        Arc::new(MemoryAuthority::new(binding.authority_epoch().clone()));
+        Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
     let provider: Arc<dyn EvmTransactionProvider> = Arc::new(ScriptedProvider::new(1337));
     let signer: Arc<dyn Secp256k1Signer> = signer;
     let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
@@ -565,7 +572,7 @@ async fn reserve(
 async fn graph_retries_identical_wire_and_cold_projection_needs_no_signer_call() {
     for reverted in [false, true] {
         let (_owner, signer, binding, command, _) = fixture().await;
-        let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch().clone()));
+        let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
         let provider = Arc::new(ScriptedProvider::new(1337));
         let store = Arc::new(MemoryStore::new());
         let hot = runtime(
@@ -631,12 +638,12 @@ async fn graph_retries_identical_wire_and_cold_projection_needs_no_signer_call()
             ProviderReceiptResult::RevertedCreate
         } else {
             ProviderReceiptResult::SuccessCreate {
-                contract_address: create_address(binding.sender(), 7),
+                contract_address: create_address(&binding.sender, 7),
             }
         };
         provider.push_receipt(Ok(Some(ProviderReceipt::new(
             prepared.transaction_hash().clone(),
-            binding.sender().clone(),
+            binding.sender.clone(),
             result,
             provider.canonical.clone(),
         ))));
@@ -666,7 +673,7 @@ async fn graph_retries_identical_wire_and_cold_projection_needs_no_signer_call()
 async fn custody_acknowledgement_loss_recovers_each_stage() {
     for fault in [1, 2] {
         let (_owner, signer, binding, command, _) = fixture().await;
-        let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch().clone()));
+        let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
         authority.fault.store(fault, Ordering::SeqCst);
         let provider = Arc::new(ScriptedProvider::new(1337));
         let store = Arc::new(MemoryStore::new());
@@ -723,7 +730,7 @@ async fn custody_acknowledgement_loss_recovers_each_stage() {
 #[tokio::test]
 async fn concurrent_varying_signatures_return_the_immutable_first_winner() {
     let (_owner, _, binding, command, id) = fixture().await;
-    let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch().clone()));
+    let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
     let provider = ScriptedProvider::new(1337);
     let reserved = reserve(&binding, &authority, &provider, &id, &command).await;
     let signer = Arc::new(VaryingSigner::new(Arc::new(Barrier::new(2))));
@@ -759,33 +766,33 @@ async fn concurrent_varying_signatures_return_the_immutable_first_winner() {
             .prepared
             .unwrap()
             .transaction_hash(),
-        winner.transaction_hash()
+        (&winner.transaction_hash)
     );
 }
 
 #[tokio::test]
 async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_bytes() {
     let (_owner, signer, binding, command, id) = fixture().await;
-    let authority = MemoryAuthority::new(binding.authority_epoch().clone());
+    let authority = MemoryAuthority::new(binding.authority_epoch.clone());
     let provider = ScriptedProvider::new(1337);
     let reserved = reserve(&binding, &authority, &provider, &id, &command).await;
     let evidence =
         settled(prepare_transaction(&binding, &authority, signer.as_ref(), &id, &reserved).await);
-    let prepared = PreparedEvmTransaction::new(reserved, evidence.transaction_hash().clone());
+    let prepared = PreparedEvmTransaction::new(reserved, evidence.transaction_hash.clone());
     for result in [
         ProviderReceiptResult::SuccessCall {
-            target: binding.sender().clone(),
+            target: binding.sender.clone(),
         },
         ProviderReceiptResult::RevertedCall {
-            target: binding.sender().clone(),
+            target: binding.sender.clone(),
         },
         ProviderReceiptResult::SuccessCreate {
-            contract_address: binding.sender().clone(),
+            contract_address: binding.sender.clone(),
         },
     ] {
         provider.push_receipt(Ok(Some(ProviderReceipt::new(
             prepared.transaction_hash().clone(),
-            binding.sender().clone(),
+            binding.sender.clone(),
             result,
             provider.canonical.clone(),
         ))));
@@ -798,9 +805,12 @@ async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_by
     }
     provider.push_receipt(Ok(Some(ProviderReceipt::new(
         prepared.transaction_hash().clone(),
-        binding.sender().clone(),
+        binding.sender.clone(),
         ProviderReceiptResult::RevertedCreate,
-        EvmBlockAnchor::new(EvmU256::from_u64(9), EvmHash::from_bytes([0x44; 32])),
+        EvmBlockAnchor {
+            number: EvmU256::from_u64(9),
+            hash: EvmHash::from_bytes([0x44; 32]),
+        },
     ))));
     assert_eq!(
         execute_transaction(&binding, &authority, &provider, &id, &prepared)
@@ -834,7 +844,7 @@ async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_by
 #[tokio::test]
 async fn incorrect_signatures_and_corrupt_retained_wire_fail_before_provider_entry() {
     let (owner, signer, binding, command, id) = fixture().await;
-    let authority = MemoryAuthority::new(binding.authority_epoch().clone());
+    let authority = MemoryAuthority::new(binding.authority_epoch.clone());
     let provider = ScriptedProvider::new(1337);
     let reserved = reserve(&binding, &authority, &provider, &id, &command).await;
     let wrong = WrongDigestSigner {
@@ -855,7 +865,7 @@ async fn incorrect_signatures_and_corrupt_retained_wire_fail_before_provider_ent
     assert!(authority.state().unwrap().prepared.is_none());
     let evidence =
         settled(prepare_transaction(&binding, &authority, signer.as_ref(), &id, &reserved).await);
-    let prepared = PreparedEvmTransaction::new(reserved, evidence.transaction_hash().clone());
+    let prepared = PreparedEvmTransaction::new(reserved, evidence.transaction_hash.clone());
     authority.state.lock().unwrap().as_mut().unwrap().prepared = Some(PreparedRecord::new(
         prepared.transaction_hash().clone(),
         ExactRawTransaction::new(vec![2, 0xc0]).unwrap(),
@@ -921,7 +931,7 @@ async fn every_transaction_journal_boundary_recovers_after_ambiguous_append() {
     for commit in [false, true] {
         for sequence in 2..=8 {
             let (_owner, signer, binding, command, _) = fixture().await;
-            let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch().clone()));
+            let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
             let provider = Arc::new(ScriptedProvider::new(1337));
             let store = Arc::new(FaultStore {
                 inner: MemoryStore::new(),
@@ -959,9 +969,9 @@ async fn every_transaction_journal_boundary_recovers_after_ambiguous_append() {
                 let next_signer: Arc<dyn Secp256k1Signer> = if let Some(prepared) = prepared {
                     provider.push_receipt(Ok(Some(ProviderReceipt::new(
                         prepared.transaction_hash().clone(),
-                        binding.sender().clone(),
+                        binding.sender.clone(),
                         ProviderReceiptResult::SuccessCreate {
-                            contract_address: create_address(binding.sender(), 7),
+                            contract_address: create_address(&binding.sender, 7),
                         },
                         provider.canonical.clone(),
                     ))));
@@ -997,7 +1007,7 @@ async fn every_transaction_journal_boundary_recovers_after_ambiguous_append() {
 #[tokio::test]
 async fn cancelled_receipt_wait_resumes_exact_prepared_wire() {
     let (_owner, signer, binding, command, _) = fixture().await;
-    let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch().clone()));
+    let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
     let provider = Arc::new(ScriptedProvider::new(1337));
     provider.block_receipt_once.store(true, Ordering::SeqCst);
     let store = Arc::new(MemoryStore::new());

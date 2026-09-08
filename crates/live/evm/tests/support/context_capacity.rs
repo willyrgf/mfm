@@ -236,7 +236,7 @@ impl Operation for CapacityOperation {
             |body| body.pure::<Abort<CallFailure, AfterCall>>(),
         )?;
         body.with_failure_handler::<ObservationFailure, AfterObservation>(
-            |body| body.read::<Observation, EvmAnchoredContractCallRead>(self.binding.route()),
+            |body| body.read::<Observation, EvmAnchoredContractCallRead>(&self.binding.route),
             |body| body.pure::<Abort<ObservationFailure, AfterObservation>>(),
         )?;
         body.pure::<CapacityDecode>()
@@ -381,17 +381,20 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
         println!("context schema {label}: {size}");
     }
     for (case, (create_bytes, call_bytes, fault, returned, expected_reason)) in cases.enumerate() {
-        let binding = EvmTransactionBinding::new(
-            EvmTransactionRoute::new(
-                EvmChainInstance::new(nonzero(1), EvmHash::from_bytes([1; 32])),
-                EvmEndpoint::new("capacity-fixture")
+        let binding = EvmTransactionBinding {
+            route: EvmTransactionRoute {
+                chain_instance: EvmChainInstance {
+                    chain_id: nonzero(1),
+                    expected_genesis_hash: EvmHash::from_bytes([1; 32]),
+                },
+                endpoint_ref: EvmEndpoint::new("capacity-fixture")
                     .unwrap()
                     .endpoint_ref()
                     .unwrap(),
-            ),
-            EvmAuthorityEpoch::new([2; 32]),
-            EvmAddress::from_bytes([3; 20]),
-        );
+            },
+            authority_epoch: EvmAuthorityEpoch::new([2; 32]),
+            sender: EvmAddress::from_bytes([3; 20]),
+        };
         let input = CapacityWorkflow {
             request: FixtureRequest { label: 99 },
             prior: CheckedCreatePlan::new(
@@ -421,7 +424,7 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
                 EvmU256::from_u64(MAX_FEE),
             )
             .unwrap(),
-            observation: CheckedObservationPlan::new(binding.route().clone(), vec![4; call_bytes])
+            observation: CheckedObservationPlan::new(binding.route.clone(), vec![4; call_bytes])
                 .unwrap(),
         };
         let source = ScriptedEvidence::new(fault, returned);

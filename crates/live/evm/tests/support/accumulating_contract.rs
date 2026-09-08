@@ -111,12 +111,12 @@ impl ScriptedEvidence {
                         .lock()
                         .unwrap()
                         .push((id.clone(), reference.clone()));
-                    let evidence = PreparedEvmTransactionEvidence::new(
-                        id.clone(),
-                        EvmHash::from_bytes(
+                    let evidence = PreparedEvmTransactionEvidence {
+                        effect_id: id.clone(),
+                        transaction_hash: EvmHash::from_bytes(
                             [u8::try_from(command.reservation().nonce()).unwrap() + 10; 32],
                         ),
-                    );
+                    };
                     Box::pin(async move { Ok(EffectAdapterOutcome::Settled(evidence)) })
                 }
             })
@@ -132,13 +132,13 @@ impl ScriptedEvidence {
                         .unwrap()
                         .push((id.clone(), reference.clone()));
                     let nonce = command.reserved().reservation().nonce();
-                    let receipt = EvmTransactionReceipt::new(
-                        EvmBlockAnchor::new(
-                            EvmU256::from_u64(nonce + 100),
-                            EvmHash::from_bytes([20; 32]),
-                        ),
-                        command.transaction_hash().clone(),
-                    );
+                    let receipt = EvmTransactionReceipt {
+                        block_anchor: EvmBlockAnchor {
+                            number: EvmU256::from_u64(nonce + 100),
+                            hash: EvmHash::from_bytes([20; 32]),
+                        },
+                        transaction_hash: command.transaction_hash().clone(),
+                    };
                     let evidence = if matches!(source.fault, Fault::Revert(n) if n == nonce) {
                         EvmTransactionSettlement::reverted(id.clone(), nonce, receipt)
                     } else if command.reserved().command().to().is_none() {
@@ -156,7 +156,7 @@ impl ScriptedEvidence {
             })
             .unwrap();
         builder
-            .register_adapter::<EvmAnchoredContractCallRead, _, _>(binding.route().clone(), {
+            .register_adapter::<EvmAnchoredContractCallRead, _, _>(binding.route.clone(), {
                 let source = self.clone();
                 move |reference, intent| {
                     source.calls.fetch_add(1, Ordering::SeqCst);
@@ -233,17 +233,20 @@ async fn accumulated_fixture_preserves_all_success_failure_and_cold_facts() {
             Some(FixtureFailureReason::InvalidReturnData),
         ),
     ] {
-        let binding = EvmTransactionBinding::new(
-            EvmTransactionRoute::new(
-                EvmChainInstance::new(nonzero(1), EvmHash::from_bytes([1; 32])),
-                EvmEndpoint::new("context-fixture")
+        let binding = EvmTransactionBinding {
+            route: EvmTransactionRoute {
+                chain_instance: EvmChainInstance {
+                    chain_id: nonzero(1),
+                    expected_genesis_hash: EvmHash::from_bytes([1; 32]),
+                },
+                endpoint_ref: EvmEndpoint::new("context-fixture")
                     .unwrap()
                     .endpoint_ref()
                     .unwrap(),
-            ),
-            EvmAuthorityEpoch::new([2; 32]),
-            EvmAddress::from_bytes([3; 20]),
-        );
+            },
+            authority_epoch: EvmAuthorityEpoch::new([2; 32]),
+            sender: EvmAddress::from_bytes([3; 20]),
+        };
         let input = ContractWorkflow {
             request: FixtureRequest { label: 17 },
             deployment: CheckedCreatePlan::new(
@@ -265,7 +268,7 @@ async fn accumulated_fixture_preserves_all_success_failure_and_cold_facts() {
             )
             .unwrap(),
             observation: CheckedObservationPlan::new(
-                binding.route().clone(),
+                binding.route.clone(),
                 VALUE_SELECTOR.to_vec(),
             )
             .unwrap(),
@@ -327,7 +330,7 @@ async fn accumulated_fixture_preserves_all_success_failure_and_cold_facts() {
                 ] {
                     assert_eq!(facts.reservation().effect_id(), &effects[offset].0);
                     assert_eq!(facts.reservation().command_value_ref(), &effects[offset].1);
-                    assert_eq!(facts.preparation().effect_id(), &effects[offset + 1].0);
+                    assert_eq!((&facts.preparation().effect_id), &effects[offset + 1].0);
                     assert_eq!(facts.settlement().effect_id(), &effects[offset + 2].0);
                 }
                 let mut hostile = serde_json::to_value(&report).unwrap();

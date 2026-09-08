@@ -138,7 +138,7 @@ impl JsonRpcEvmProvider {
         data: String,
     ) -> Result<Option<AbiWord>, AdapterError> {
         let token = source.token().ok_or(AdapterError::Internal)?;
-        let tag = block_tag(anchor.number())?;
+        let tag = block_tag(&anchor.number)?;
         let call = RpcCall { to: token, data };
         let data = self
             .rpc::<_, RpcDataText>("eth_call", &(call, tag))
@@ -171,7 +171,7 @@ impl JsonRpcEvmProvider {
                 EvmReadValue::Anchor(self.broad_anchor("latest").await?)
             }
             EvmReadSubject::NativeBalance { source, anchor } => {
-                let tag = block_tag(anchor.number())?;
+                let tag = block_tag(&anchor.number)?;
                 let units = self
                     .rpc::<_, RpcQuantity>("eth_getBalance", &(source.address(), tag))
                     .await?
@@ -206,7 +206,7 @@ impl JsonRpcEvmProvider {
             }
             // Confirmation reads the committed number, never the moving head.
             EvmReadSubject::ConfirmAnchor { anchor, .. } => {
-                let tag = block_tag(anchor.number())?;
+                let tag = block_tag(&anchor.number)?;
                 EvmReadValue::Anchor(self.broad_anchor(&tag).await?)
             }
         };
@@ -220,7 +220,7 @@ impl JsonRpcEvmProvider {
     ) -> Result<AnchoredContractCallEvidence, AdapterError> {
         let authored_anchor = intent.anchor();
         let Some(observed_anchor) = self
-            .strict_block_anchor(block_tag(authored_anchor.number())?)
+            .strict_block_anchor(block_tag(&authored_anchor.number)?)
             .await?
         else {
             return Ok(AnchoredContractCallEvidence::safe_failure(
@@ -234,7 +234,7 @@ impl JsonRpcEvmProvider {
         }
 
         let selector = RpcBlockSelector {
-            block_hash: authored_anchor.hash(),
+            block_hash: (&authored_anchor.hash),
             require_canonical: true,
         };
         let code = self
@@ -260,7 +260,7 @@ impl JsonRpcEvmProvider {
             .0;
 
         let Some(confirmed_anchor) = self
-            .strict_block_anchor(block_tag(authored_anchor.number())?)
+            .strict_block_anchor(block_tag(&authored_anchor.number)?)
             .await?
         else {
             return Ok(AnchoredContractCallEvidence::safe_failure(
@@ -337,10 +337,13 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
                 .into_result()?
                 .ok_or(AdapterError::Unavailable)?
                 .into_anchor()?;
-            if genesis.number().as_str() != "0" {
+            if genesis.number.as_str() != "0" {
                 return Err(AdapterError::Unavailable);
             }
-            Ok(EvmChainInstance::new(chain_id, genesis.hash().clone()))
+            Ok(EvmChainInstance {
+                chain_id,
+                expected_genesis_hash: genesis.hash.clone(),
+            })
         })
     }
 
@@ -506,10 +509,10 @@ struct RpcBlock {
 
 impl RpcBlock {
     fn into_anchor(self) -> Result<EvmBlockAnchor, AdapterError> {
-        Ok(EvmBlockAnchor::new(
-            EvmU256::new(self.number.decimal()).map_err(|_| AdapterError::Unavailable)?,
-            self.hash,
-        ))
+        Ok(EvmBlockAnchor {
+            number: EvmU256::new(self.number.decimal()).map_err(|_| AdapterError::Unavailable)?,
+            hash: self.hash,
+        })
     }
 }
 
@@ -667,10 +670,11 @@ fn word_to_u8(word: AbiWord) -> Option<u8> {
 
 fn parse_receipt(value: RpcReceipt) -> Result<ProviderReceipt, AdapterError> {
     let status = value.status.to_u64().filter(|status| *status <= 1);
-    let block_anchor = EvmBlockAnchor::new(
-        EvmU256::new(value.block_number.decimal()).map_err(|_| AdapterError::Unavailable)?,
-        value.block_hash,
-    );
+    let block_anchor = EvmBlockAnchor {
+        number: EvmU256::new(value.block_number.decimal())
+            .map_err(|_| AdapterError::Unavailable)?,
+        hash: value.block_hash,
+    };
     let result = match (status, value.to, value.contract_address) {
         (Some(1), None, Some(contract_address)) => {
             ProviderReceiptResult::SuccessCreate { contract_address }

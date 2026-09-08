@@ -21,6 +21,29 @@ use mfm_values::{string_contains_secret_marker, MfmValue as MfmValueTrait};
 use serde::de;
 use serde::{Deserialize, Serialize};
 
+macro_rules! impl_checked_deserialize {
+    ($type:ident { $($field:ident: $field_type:ty),+ $(,)? }) => {
+        impl<'de> Deserialize<'de> for $type {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Wire {
+                    $($field: $field_type,)+
+                }
+
+                let wire = Wire::deserialize(deserializer)?;
+                let value = Self {
+                    $($field: wire.$field,)+
+                };
+                value.validate().map(|_| value).map_err(de::Error::custom)
+            }
+        }
+    };
+}
+
 mod anchored_call;
 pub mod custody;
 mod transaction;
@@ -46,31 +69,8 @@ pub use transaction::{
     MAX_EVM_INITCODE_BYTES,
 };
 
-macro_rules! impl_checked_deserialize {
-    ($type:ident { $($field:ident: $field_type:ty),+ $(,)? }) => {
-        impl<'de> Deserialize<'de> for $type {
-            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct Wire {
-                    $($field: $field_type,)+
-                }
-
-                let wire = Wire::deserialize(deserializer)?;
-                let value = Self {
-                    $($field: wire.$field,)+
-                };
-                value.validate().map(|_| value).map_err(de::Error::custom)
-            }
-        }
-    };
-}
-
 /// Secret-free public identity of one live EVM route.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
@@ -79,43 +79,18 @@ macro_rules! impl_checked_deserialize {
     schema = "mfm.evm-physical-target"
 )]
 pub struct EvmPhysicalTarget {
-    chain_id: NonZeroU64,
-    endpoint_ref: ContentRef,
+    /// Chain id.
+    pub chain_id: NonZeroU64,
+    /// Endpoint ref.
+    pub endpoint_ref: ContentRef,
 }
 
-impl_checked_deserialize!(EvmPhysicalTarget {
-    chain_id: NonZeroU64,
-    endpoint_ref: ContentRef,
-});
-
 impl EvmPhysicalTarget {
-    /// Constructs one public route identity.
-    pub fn new(chain_id: NonZeroU64, endpoint_ref: ContentRef) -> Self {
-        Self {
-            chain_id,
-            endpoint_ref,
-        }
-    }
-
-    /// Returns the public EVM chain id.
-    pub const fn chain_id(&self) -> NonZeroU64 {
-        self.chain_id
-    }
-
-    /// Returns the public endpoint identity.
-    pub const fn endpoint_ref(&self) -> &ContentRef {
-        &self.endpoint_ref
-    }
-
     /// Derives the exact canonical adapter binding identity.
     pub fn binding_ref(&self) -> Result<ContentRef, EvmDomainError> {
         mfm_values::canonicalize_mfm_value(self)
             .map(|(_, reference)| reference)
             .map_err(|_| EvmDomainError::Program)
-    }
-
-    fn validate(&self) -> Result<(), EvmDomainError> {
-        Ok(())
     }
 }
 
@@ -253,20 +228,9 @@ impl_checked_deserialize!(EvmBalanceRequest {
 impl EvmBalanceRequest {
     /// Creates one bounded declaration-ordered source list.
     pub fn new(sources: Vec<EvmBalanceSource>, decimals: u8) -> Result<Self, EvmDomainError> {
-        if sources.is_empty()
-            || sources.len() > EVM_BALANCE_SOURCE_LIMIT
-            || decimals > 30
-            || sources.iter().any(|source| source.validate().is_err())
-            || duplicate_source_ids(&sources)
-            || sources.first().is_some_and(|first| {
-                sources
-                    .iter()
-                    .any(|source| source.chain_id != first.chain_id)
-            })
-        {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(Self { sources, decimals })
+        let request = Self { sources, decimals };
+        request.validate()?;
+        Ok(request)
     }
 
     /// Validates a decoded balance request and every admitted source.
@@ -274,7 +238,6 @@ impl EvmBalanceRequest {
         if self.sources.is_empty()
             || self.sources.len() > EVM_BALANCE_SOURCE_LIMIT
             || self.decimals > 30
-            || self.sources.iter().any(|source| source.validate().is_err())
             || duplicate_source_ids(&self.sources)
             || self.sources.first().is_some_and(|first| {
                 self.sources
@@ -344,37 +307,13 @@ impl EvmBalanceResultMetadata {
 }
 
 /// Committed public block anchor of one bounded EVM observation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct EvmBlockAnchor {
-    hash: EvmHash,
-    number: EvmU256,
-}
-
-impl_checked_deserialize!(EvmBlockAnchor {
-    hash: EvmHash,
-    number: EvmU256,
-});
-
-impl EvmBlockAnchor {
-    /// Constructs one exact provider-qualified block anchor.
-    pub fn new(number: EvmU256, hash: EvmHash) -> Self {
-        Self { hash, number }
-    }
-
-    /// Returns the canonical decimal block number.
-    pub const fn number(&self) -> &EvmU256 {
-        &self.number
-    }
-
-    /// Returns the exact public block hash.
-    pub const fn hash(&self) -> &EvmHash {
-        &self.hash
-    }
-
-    fn validate(&self) -> Result<(), EvmDomainError> {
-        Ok(())
-    }
+    /// Hash.
+    pub hash: EvmHash,
+    /// Number.
+    pub number: EvmU256,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -521,11 +460,10 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
             return Err(EvmDomainError::InvalidValue);
         }
         if let Some(anchor) = work_initial_anchor(&self.work) {
-            if anchor.validate().is_err()
-                || self
-                    .completed
-                    .first()
-                    .is_some_and(|result| result.anchor != *anchor)
+            if self
+                .completed
+                .first()
+                .is_some_and(|result| result.anchor != *anchor)
             {
                 return Err(EvmDomainError::InvalidValue);
             }
@@ -536,7 +474,7 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
             (EvmBalanceWork::Complete, Some(_)) => return Err(EvmDomainError::InvalidValue),
             (work, Some(expected_source)) => {
                 let source = self.active_source().ok_or(EvmDomainError::InvalidValue)?;
-                if source != expected_source || source.validate().is_err() {
+                if source != expected_source {
                     return Err(EvmDomainError::InvalidValue);
                 }
                 match work {
@@ -557,13 +495,11 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
                     EvmBalanceWork::ConfirmAnchor {
                         source_decimals,
                         raw_balance,
-                        initial_anchor,
                         checked_chain_id,
                         ..
                     } if *source_decimals > 30
                         || (source.token.is_none()
                             && *source_decimals != self.request.decimals)
-                        || initial_anchor.validate().is_err()
                         || *checked_chain_id != source.chain_id =>
                     {
                         return Err(EvmDomainError::InvalidValue)
@@ -671,8 +607,7 @@ impl_checked_deserialize!(EvmBalanceResult {
 
 impl EvmBalanceResult {
     fn validate(&self) -> Result<(), EvmDomainError> {
-        if self.source.validate().is_err() || self.decimals > 30 || self.anchor.validate().is_err()
-        {
+        if self.decimals > 30 {
             return Err(EvmDomainError::InvalidValue);
         }
         Ok(())
@@ -797,8 +732,7 @@ impl_checked_deserialize!(EvmBalanceCollectionResult {
 
 impl EvmBalanceCollectionResult {
     fn validate(&self) -> Result<(), EvmDomainError> {
-        if self.anchor.validate().is_err()
-            || self.balances.is_empty()
+        if self.balances.is_empty()
             || self.balances.len() > EVM_BALANCE_SOURCE_LIMIT
             || self
                 .balances
@@ -1056,22 +990,7 @@ impl<'de> Deserialize<'de> for EvmReadSubject {
                 anchor: value.anchor,
             },
         };
-        value.validate().map(|_| value).map_err(de::Error::custom)
-    }
-}
-
-impl EvmReadSubject {
-    fn validate(&self) -> Result<(), EvmDomainError> {
-        match self {
-            Self::ChainIdentity | Self::InitialAnchor => Ok(()),
-            Self::NativeBalance { source, anchor }
-            | Self::TokenDecimals { source, anchor }
-            | Self::TokenBalance { source, anchor }
-            | Self::ConfirmAnchor { source, anchor } => {
-                source.validate()?;
-                anchor.validate()
-            }
-        }
+        Ok(value)
     }
 }
 
@@ -1128,15 +1047,12 @@ impl EvmReadIntent {
     }
 
     fn validate(&self) -> Result<(), EvmDomainError> {
-        self.subject.validate()?;
         match &self.subject {
             EvmReadSubject::ChainIdentity | EvmReadSubject::InitialAnchor => {}
-            EvmReadSubject::NativeBalance { source, anchor }
-            | EvmReadSubject::TokenDecimals { source, anchor }
-            | EvmReadSubject::TokenBalance { source, anchor }
-            | EvmReadSubject::ConfirmAnchor { source, anchor } => {
-                source.validate()?;
-                anchor.validate()?;
+            EvmReadSubject::NativeBalance { source, .. }
+            | EvmReadSubject::TokenDecimals { source, .. }
+            | EvmReadSubject::TokenBalance { source, .. }
+            | EvmReadSubject::ConfirmAnchor { source, .. } => {
                 if source.chain_id != self.chain_id {
                     return Err(EvmDomainError::InvalidValue);
                 }
@@ -1308,7 +1224,6 @@ fn validate_read_capability_intent(
     intent: &EvmReadIntent,
     family: ReadCapabilityFamily,
 ) -> Result<(), EvmDomainError> {
-    intent.validate()?;
     let valid = match family {
         ReadCapabilityFamily::ChainIdentity => {
             matches!(&intent.subject, EvmReadSubject::ChainIdentity)

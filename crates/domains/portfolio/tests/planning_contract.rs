@@ -41,18 +41,18 @@ fn planning_uses_the_selected_routes_and_rejects_unusable_route_sets() {
         "quote": "usd"
     }))
     .expect("selector");
-    let alpha = EvmPhysicalTarget::new(
-        NonZeroU64::new(1).expect("nonzero chain"),
-        EvmEndpoint::new("alpha")
+    let alpha = EvmPhysicalTarget {
+        chain_id: NonZeroU64::new(1).expect("nonzero chain"),
+        endpoint_ref: EvmEndpoint::new("alpha")
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("alpha endpoint"),
-    );
-    let beta = EvmPhysicalTarget::new(
-        NonZeroU64::new(2).expect("nonzero chain"),
-        EvmEndpoint::new("beta")
+    };
+    let beta = EvmPhysicalTarget {
+        chain_id: NonZeroU64::new(2).expect("nonzero chain"),
+        endpoint_ref: EvmEndpoint::new("beta")
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("beta endpoint"),
-    );
+    };
 
     let (program, input) = plan_snapshot(selector.clone(), &config, &[alpha.clone(), beta.clone()])
         .expect("planned snapshot");
@@ -76,12 +76,12 @@ fn planning_uses_the_selected_routes_and_rejects_unusable_route_sets() {
         serde_json::to_value(beta.binding_ref().expect("beta binding")).expect("binding JSON")
     );
 
-    let replacement = EvmPhysicalTarget::new(
-        NonZeroU64::new(2).expect("nonzero chain"),
-        EvmEndpoint::new("replacement")
+    let replacement = EvmPhysicalTarget {
+        chain_id: NonZeroU64::new(2).expect("nonzero chain"),
+        endpoint_ref: EvmEndpoint::new("replacement")
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("replacement endpoint"),
-    );
+    };
     let (replacement_program, replacement_input) =
         plan_snapshot(selector.clone(), &config, &[alpha.clone(), replacement])
             .expect("replacement plan");
@@ -130,12 +130,12 @@ fn the_supported_source_capacity_plans_and_one_more_is_rejected() {
         "quote": "usd"
     }))
     .expect("selector");
-    let target = EvmPhysicalTarget::new(
-        NonZeroU64::new(1).expect("nonzero chain"),
-        EvmEndpoint::new("alpha")
+    let target = EvmPhysicalTarget {
+        chain_id: NonZeroU64::new(1).expect("nonzero chain"),
+        endpoint_ref: EvmEndpoint::new("alpha")
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("endpoint"),
-    );
+    };
 
     let (program, input) = plan_snapshot(selector, &config, &[target]).expect("maximum plan");
     assert_eq!(program.declarations().len(), 518);

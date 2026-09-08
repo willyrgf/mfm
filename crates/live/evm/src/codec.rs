@@ -107,7 +107,7 @@ fn unsigned_transaction(
         return Err(EvmCodecError::Invalid);
     }
     Ok(TxEip1559 {
-        chain_id: command.binding().route().chain_instance().chain_id().get(),
+        chain_id: command.binding().route.chain_instance.chain_id.get(),
         nonce,
         gas_limit: command.gas_limit().get(),
         max_fee_per_gas: command

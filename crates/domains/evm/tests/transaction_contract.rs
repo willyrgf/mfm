@@ -34,18 +34,21 @@ fn nonzero(value: u64) -> NonZeroU64 {
 }
 
 fn route() -> EvmTransactionRoute {
-    EvmTransactionRoute::new(
-        EvmChainInstance::new(nonzero(1), EvmHash::from_bytes([0xaa; 32])),
-        content_ref(),
-    )
+    EvmTransactionRoute {
+        chain_instance: EvmChainInstance {
+            chain_id: nonzero(1),
+            expected_genesis_hash: EvmHash::from_bytes([0xaa; 32]),
+        },
+        endpoint_ref: content_ref(),
+    }
 }
 
 fn binding() -> EvmTransactionBinding {
-    EvmTransactionBinding::new(
-        route(),
-        EvmAuthorityEpoch::new([0x11; 32]),
-        EvmAddress::new("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf").expect("sender"),
-    )
+    EvmTransactionBinding {
+        route: route(),
+        authority_epoch: EvmAuthorityEpoch::new([0x11; 32]),
+        sender: EvmAddress::new("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf").expect("sender"),
+    }
 }
 
 fn create_command() -> Eip1559TransactionCommand {
@@ -74,7 +77,10 @@ fn call_command() -> Eip1559TransactionCommand {
 }
 
 fn anchor(number: u64) -> EvmBlockAnchor {
-    EvmBlockAnchor::new(EvmU256::from_u64(number), EvmHash::from_bytes([0xdd; 32]))
+    EvmBlockAnchor {
+        number: EvmU256::from_u64(number),
+        hash: EvmHash::from_bytes([0xdd; 32]),
+    }
 }
 
 fn transaction_hash(byte: u8) -> EvmHash {
@@ -165,8 +171,11 @@ fn checked_evm_primitives_reject_every_noncanonical_boundary() {
     }
     assert!(serde_json::from_str::<EvmU256>("1").is_err());
 
-    let chain = EvmChainInstance::new(nonzero(1), EvmHash::from_bytes([0xab; 32]));
-    assert_eq!(chain.chain_id(), nonzero(1));
+    let chain = EvmChainInstance {
+        chain_id: nonzero(1),
+        expected_genesis_hash: EvmHash::from_bytes([0xab; 32]),
+    };
+    assert_eq!(chain.chain_id, nonzero(1));
     assert!(
         serde_json::from_value::<EvmChainInstance>(serde_json::json!({
             "chain_id": 0,
@@ -254,7 +263,10 @@ fn fixed_eip1559_command_has_exact_wire_and_checked_factories() {
 
 #[test]
 fn transaction_identity_and_wire_ledger_is_frozen() {
-    let receipt = EvmTransactionReceipt::new(anchor(1), transaction_hash(0xcc));
+    let receipt = EvmTransactionReceipt {
+        block_anchor: anchor(1),
+        transaction_hash: transaction_hash(0xcc),
+    };
     let settlement = EvmTransactionSettlement::created(
         effect_id(0x33),
         9,
@@ -284,12 +296,12 @@ fn transaction_identity_and_wire_ledger_is_frozen() {
         }),
         serde_json::json!({
             "effect_id": effect_id(0x33), "nonce": 9,
-            "receipt": EvmTransactionReceipt::new(anchor(1), transaction_hash(0xcc)),
+            "receipt": EvmTransactionReceipt { block_anchor: anchor(1), transaction_hash: transaction_hash(0xcc) },
             "outcome": { "kind": "created", "value": {} },
         }),
         serde_json::json!({
             "effect_id": effect_id(0x33), "nonce": 9,
-            "receipt": EvmTransactionReceipt::new(anchor(1), transaction_hash(0xcc)),
+            "receipt": EvmTransactionReceipt { block_anchor: anchor(1), transaction_hash: transaction_hash(0xcc) },
             "outcome": { "kind": "reverted" }, "extra": true,
         }),
     ] {
@@ -384,11 +396,11 @@ fn reservation_descriptors_reject_mismatched_commands_domains_and_exhaustion() {
     wire["nonce"] = serde_json::json!(u64::MAX);
     assert!(serde_json::from_value::<Reservation>(wire).is_err());
     assert!(ReservedEvmTransaction::new(call_command(), reservation).is_err());
-    let wrong_domain = NonceDomain::new(
-        domain.authority_epoch().clone(),
-        domain.chain_instance().clone(),
-        EvmAddress::from_bytes([0x99; 20]),
-    );
+    let wrong_domain = NonceDomain {
+        authority_epoch: domain.authority_epoch.clone(),
+        chain_instance: domain.chain_instance.clone(),
+        sender: EvmAddress::from_bytes([0x99; 20]),
+    };
     let wrong = Reservation::new(effect_id(1), reference, wrong_domain, 0).unwrap();
     assert!(ReservedEvmTransaction::new(command, wrong.clone()).is_err());
     let mut wire = serde_json::to_value(&reserved).unwrap();
@@ -571,7 +583,10 @@ fn cumulative_facts_preserve_every_stage_and_reject_hostile_combinations() {
                 .is_err()
         );
         let reserved = ReservedEvmTransaction::new(command.clone(), reservation.clone()).unwrap();
-        let preparation = PreparedEvmTransactionEvidence::new(effect_id(2), transaction_hash(9));
+        let preparation = PreparedEvmTransactionEvidence {
+            effect_id: effect_id(2),
+            transaction_hash: transaction_hash(9),
+        };
         EvmTransactionPreparationEffect::bind_evidence(&effect_id(2), &reserved, &preparation)
             .unwrap();
         assert!(EvmTransactionPreparationEffect::bind_evidence(
@@ -581,7 +596,10 @@ fn cumulative_facts_preserve_every_stage_and_reject_hostile_combinations() {
         )
         .is_err());
         let prepared = PreparedTransactionFacts::new(reserved.clone(), preparation.clone());
-        let receipt = EvmTransactionReceipt::new(anchor(1), transaction_hash(9));
+        let receipt = EvmTransactionReceipt {
+            block_anchor: anchor(1),
+            transaction_hash: transaction_hash(9),
+        };
         let settlement = if command.to().is_none() {
             EvmTransactionSettlement::created(
                 effect_id(3),

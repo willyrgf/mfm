@@ -126,8 +126,7 @@ async fn read_anchored(
     intent: &AnchoredContractCallIntent,
 ) -> std::result::Result<AnchoredContractCallEvidence, AdapterError> {
     let binding_ref = route.binding_ref().map_err(|_| AdapterError::Internal)?;
-    if intent.chain_id() != route.chain_instance().chain_id() || intent.route_ref() != &binding_ref
-    {
+    if intent.chain_id() != route.chain_instance.chain_id || intent.route_ref() != &binding_ref {
         return Err(AdapterError::Internal);
     }
     provider
@@ -165,7 +164,7 @@ async fn read(
                 | EvmReadSubject::TokenBalance { .. }
         ),
     };
-    if intent.chain_id() != target.chain_id()
+    if intent.chain_id() != target.chain_id
         || intent.route_ref() != &binding_ref
         || !subject_matches
     {
@@ -237,12 +236,15 @@ mod tests {
             ),
         )
         .expect("endpoint");
-        EvmPhysicalTarget::new(NonZeroU64::new(chain_id).expect("nonzero chain"), endpoint)
+        EvmPhysicalTarget {
+            chain_id: NonZeroU64::new(chain_id).expect("nonzero chain"),
+            endpoint_ref: endpoint,
+        }
     }
 
     fn intent(target: &EvmPhysicalTarget) -> EvmReadIntent {
         EvmReadIntent::new(
-            target.chain_id(),
+            target.chain_id,
             target.binding_ref().expect("binding"),
             EvmReadSubject::ChainIdentity,
         )
@@ -250,25 +252,29 @@ mod tests {
     }
 
     fn route(physical: &EvmPhysicalTarget) -> EvmTransactionRoute {
-        EvmTransactionRoute::new(
-            mfm_evm::EvmChainInstance::new(
-                physical.chain_id(),
-                EvmHash::new("0x1111111111111111111111111111111111111111111111111111111111111111")
-                    .expect("genesis"),
-            ),
-            physical.endpoint_ref().clone(),
-        )
+        EvmTransactionRoute {
+            chain_instance: mfm_evm::EvmChainInstance {
+                chain_id: physical.chain_id,
+                expected_genesis_hash: EvmHash::new(
+                    "0x1111111111111111111111111111111111111111111111111111111111111111",
+                )
+                .expect("genesis"),
+            },
+            endpoint_ref: physical.endpoint_ref.clone(),
+        }
     }
 
     fn anchored_intent(route: &EvmTransactionRoute) -> AnchoredContractCallIntent {
         AnchoredContractCallIntent::new(
-            route.chain_instance().chain_id(),
+            route.chain_instance.chain_id,
             route.binding_ref().expect("binding"),
-            EvmBlockAnchor::new(
-                EvmU256::from_u64(7),
-                EvmHash::new("0x2222222222222222222222222222222222222222222222222222222222222222")
-                    .expect("anchor hash"),
-            ),
+            EvmBlockAnchor {
+                number: EvmU256::from_u64(7),
+                hash: EvmHash::new(
+                    "0x2222222222222222222222222222222222222222222222222222222222222222",
+                )
+                .expect("anchor hash"),
+            },
             EvmAddress::new("0x3333333333333333333333333333333333333333").expect("target"),
             vec![1, 2],
         )
@@ -284,7 +290,7 @@ mod tests {
             calls: AtomicUsize::new(0),
         };
         let intent = intent(&target);
-        let intent_value_ref = target.endpoint_ref().clone();
+        let intent_value_ref = target.endpoint_ref.clone();
         let future = read(
             &target,
             &provider,
@@ -304,7 +310,7 @@ mod tests {
         let provider = Provider {
             calls: AtomicUsize::new(0),
         };
-        let intent_value_ref = registered.endpoint_ref().clone();
+        let intent_value_ref = registered.endpoint_ref.clone();
 
         let wrong_chain = target(2, 2);
         assert_eq!(
@@ -380,7 +386,7 @@ mod tests {
         });
         let wrong = route(&target(1, 3));
         let intent = anchored_intent(&wrong);
-        let intent_value_ref = physical.endpoint_ref().clone();
+        let intent_value_ref = physical.endpoint_ref.clone();
         assert_eq!(
             read_anchored(
                 &registered_route,

@@ -143,13 +143,13 @@ fn content_length(headers: &[u8]) -> usize {
 }
 
 fn target() -> EvmPhysicalTarget {
-    EvmPhysicalTarget::new(
-        NonZeroU64::new(1337).expect("nonzero chain"),
-        EvmEndpoint::new("reth-dev")
+    EvmPhysicalTarget {
+        chain_id: NonZeroU64::new(1337).expect("nonzero chain"),
+        endpoint_ref: EvmEndpoint::new("reth-dev")
             .expect("endpoint")
             .endpoint_ref()
             .expect("endpoint ref"),
-    )
+    }
 }
 
 fn intent(subject: serde_json::Value) -> EvmReadIntent {
@@ -162,16 +162,16 @@ fn intent(subject: serde_json::Value) -> EvmReadIntent {
 }
 
 fn anchored_intent(subject: serde_json::Value) -> AnchoredContractCallIntent {
-    let route = mfm_evm::EvmTransactionRoute::new(
-        mfm_evm::EvmChainInstance::new(
-            NonZeroU64::new(1337).expect("nonzero chain"),
-            EvmHash::new(BLOCK_HASH).expect("genesis"),
-        ),
-        EvmEndpoint::new("reth-dev")
+    let route = mfm_evm::EvmTransactionRoute {
+        chain_instance: mfm_evm::EvmChainInstance {
+            chain_id: NonZeroU64::new(1337).expect("nonzero chain"),
+            expected_genesis_hash: EvmHash::new(BLOCK_HASH).expect("genesis"),
+        },
+        endpoint_ref: EvmEndpoint::new("reth-dev")
             .expect("endpoint")
             .endpoint_ref()
             .expect("endpoint ref"),
-    );
+    };
     let value = subject.get("value").expect("anchored value");
     serde_json::from_value(serde_json::json!({
         "chain_id": 1337,
@@ -371,10 +371,7 @@ async fn anchor_confirmation_never_asks_for_the_moving_head() {
         EvmReadEvidence::Returned {
             value: EvmReadValue::Anchor(observed),
             ..
-        } if observed == EvmBlockAnchor::new(
-            EvmU256::new("17").expect("number"),
-            EvmHash::new(BLOCK_HASH).expect("hash"),
-        )
+        } if observed == EvmBlockAnchor { number: EvmU256::new("17").expect("number"), hash: EvmHash::new(BLOCK_HASH).expect("hash") }
     ));
     assert_eq!(
         stub.observed_request()["params"],
@@ -678,10 +675,10 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         .await
         .expect("chain instance");
     assert_eq!(
-        observed.chain_id(),
+        observed.chain_id,
         NonZeroU64::new(1337).expect("nonzero chain")
     );
-    assert_eq!(observed.expected_genesis_hash().to_string(), genesis);
+    assert_eq!(observed.expected_genesis_hash.to_string(), genesis);
     let requests = chain.observed_requests();
     assert_eq!(requests[0]["method"], "eth_chainId");
     assert_eq!(requests[1]["method"], "eth_getBlockByNumber");
@@ -791,7 +788,7 @@ async fn anchored_call_observes_code_and_same_anchor_before_returning_bytes() {
         panic!("expected anchored result")
     };
     assert_eq!(result.return_bytes(), [1, 2]);
-    assert_eq!(result.anchor().hash().to_string(), BLOCK_HASH);
+    assert_eq!(result.anchor().hash.to_string(), BLOCK_HASH);
     let requests = stub.observed_requests();
     assert_eq!(
         requests

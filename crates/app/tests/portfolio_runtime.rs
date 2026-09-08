@@ -47,10 +47,10 @@ impl EvmReadProvider for Provider {
                     NonZeroU64::new(self.chain_id).ok_or(AdapterError::Internal)?,
                 ),
                 EvmReadSubject::InitialAnchor | EvmReadSubject::ConfirmAnchor { .. } => {
-                    EvmReadValue::Anchor(EvmBlockAnchor::new(
-                        EvmU256::new("100").expect("number"),
-                        EvmHash::new(ANCHOR).expect("hash"),
-                    ))
+                    EvmReadValue::Anchor(EvmBlockAnchor {
+                        number: EvmU256::new("100").expect("number"),
+                        hash: EvmHash::new(ANCHOR).expect("hash"),
+                    })
                 }
                 EvmReadSubject::NativeBalance { .. } => {
                     EvmReadValue::RawUnits(EvmU256::new("1000000000000000000").expect("units"))
@@ -297,10 +297,10 @@ fn composed_runtime_owns_one_checked_multi_route_truth() {
         let endpoint_ref = EvmEndpoint::new(expected_endpoint)
             .and_then(|endpoint| endpoint.endpoint_ref())
             .expect("endpoint ref");
-        let target = mfm_evm::EvmPhysicalTarget::new(
-            NonZeroU64::new(expected_chain).expect("nonzero chain"),
+        let target = mfm_evm::EvmPhysicalTarget {
+            chain_id: NonZeroU64::new(expected_chain).expect("nonzero chain"),
             endpoint_ref,
-        );
+        };
         assert_eq!(binding_ref, &target.binding_ref().expect("binding ref"));
     }
 
