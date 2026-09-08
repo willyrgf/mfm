@@ -544,14 +544,23 @@ fn emit_error(output: OutputFormat, error: &CliError) -> Result<(), ()> {
             if let Some(recovery) = error.recovery() {
                 render_recovery_text(&mut stderr, recovery)?;
             }
+            if let CliError::RunRequest(error) = error {
+                let message = error.to_string();
+                let detail =
+                    serde_json::to_value(SerializableClientError::for_run(error, &message))
+                        .map_err(|_| ())?;
+                for field in ["invocation", "last_observed"] {
+                    if let Some(value) = detail.get(field) {
+                        writeln!(stderr, "{field}={value}").map_err(|_| ())?;
+                    }
+                }
+            }
         }
         OutputFormat::Json => {
             let message = error.message();
-            let value = match error.recovery() {
-                Some(recovery) => {
-                    SerializableClientError::recoverable(error.code(), &message, recovery)
-                }
-                None => SerializableClientError::new(error.code(), &message),
+            let value = match error {
+                CliError::RunRequest(error) => SerializableClientError::for_run(error, &message),
+                _ => SerializableClientError::new(error.code(), &message),
             };
             serde_json::to_writer(&mut stderr, &value).map_err(|_| ())?;
             stderr.write_all(b"\n").map_err(|_| ())?;
@@ -592,19 +601,27 @@ fn render_run_view(view: &RunView) -> String {
         view.head_sequence(),
         view.head_digest(),
         match view.state() {
-            RunViewState::Runnable => "runnable",
+            RunViewState::Runnable { .. } => "runnable",
+            RunViewState::EffectPending { .. } => "effect_pending",
             RunViewState::Succeeded(_) => "succeeded",
             RunViewState::Failed(_) => "failed",
         }
     );
-    if let RunViewState::Succeeded(value) | RunViewState::Failed(value) = view.state() {
-        rendered.push_str(&format!(
-            "contract_ref={}\nvalue_ref={}\nvalue=",
-            serde_json::to_string(value.contract_ref()).unwrap_or_else(|_| "{}".to_owned()),
-            serde_json::to_string(value.value_ref()).unwrap_or_else(|_| "{}".to_owned())
-        ));
-        rendered.push_str(std::str::from_utf8(value.canonical_bytes()).unwrap_or("{}"));
-        rendered.push('\n');
+    let model = serde_json::to_value(SerializableRunView::new(view));
+    if let Ok(model) = model {
+        for field in [
+            "position",
+            "reason",
+            "effect_id",
+            "contract_ref",
+            "value_ref",
+            "value",
+            "report",
+        ] {
+            if let Some(value) = model["state"].get(field) {
+                rendered.push_str(&format!("{field}={value}\n"));
+            }
+        }
     }
     rendered
 }
@@ -612,7 +629,9 @@ fn render_run_view(view: &RunView) -> String {
 fn run_exit(view: &RunView) -> ExitCode {
     match view.state() {
         RunViewState::Succeeded(_) => ExitCode::SUCCESS,
-        RunViewState::Runnable | RunViewState::Failed(_) => ExitCode::from(1),
+        RunViewState::Runnable { .. }
+        | RunViewState::EffectPending { .. }
+        | RunViewState::Failed(_) => ExitCode::from(1),
     }
 }
 
@@ -647,7 +666,7 @@ mod tests {
         assert_eq!(rendered.lines().count(), items.len() * 4);
         assert!(rendered.starts_with("kind=entry_point\nid=mfm.portfolio/snapshot@1\ndescription="));
         assert!(rendered
-            .contains("kind=operation\nid=mfm.evm.operation.collect-balances@1\ndescription="));
+            .contains("kind=operation\nid=mfm.evm.operation.collect-balances@2\ndescription="));
         assert!(rendered
             .contains("kind=read_state\nid=mfm.evm.state.read-native-balance@1\ndescription="));
     }

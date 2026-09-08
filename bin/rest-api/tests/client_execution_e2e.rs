@@ -13,8 +13,8 @@ const FAULT_EVM_LOCATOR_ENV: &str = "MFM_E2E_FAULT_EVM_ADAPTER_LOCATOR";
 const FUNDED_RAW_UNITS: &str = "1000000000000000000000000";
 // Genesis and the two leading Portfolio Pure conclusions precede the first Read.
 const INTERRUPTED_HEAD_SEQUENCE: u64 = 3;
-// The native two-source path executes fifteen States; its two Matches append no frames.
-const TERMINAL_HEAD_SEQUENCE: u64 = 16;
+// Two native sources execute eight Reads and five Portfolio/collection Pure States.
+const TERMINAL_HEAD_SEQUENCE: u64 = 14;
 const OUTPUT_CONTRACT_DIGEST: &str =
     "content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927";
 const OUTPUT_SCHEMA_ID: &str = "schema:mfm.derived.portfolio_snapshot_output:1:sha256-jcs-v1:e9cf985feb7415fdcf3d4e84eb53a6273ac0a2330ca4137ca72c806d72d112f6";
@@ -92,51 +92,46 @@ fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() {
     assert_eq!(replacement["outcome"], "created");
     assert_ne!(replacement["config"]["digest"], historical_digest);
 
-    let unavailable = UnavailableRpc::start();
+    let blocked = BlockedRpc::start();
     let mut fault_daemon = Daemon::start(
         &rest,
         &xdg,
         &socket,
         Some(&fault_deployment),
-        Some(unavailable.locator()),
+        Some(blocked.locator()),
     );
     fault_daemon.wait_ready();
 
     let start_body = format!(r#"{{"config":{{"name":"daily","digest":"{historical_digest}"}}}}"#);
-    let interrupted = rest_json(
-        &socket,
-        "POST",
-        "/v1/runs/start",
-        Some((&start_body, "application/json")),
-    );
-    assert_eq!(interrupted.0, 503);
-    let run_id = interrupted.1["run_id"]
+    let start_socket = socket.clone();
+    let start_request = std::thread::spawn(move || {
+        http(
+            &start_socket,
+            "POST",
+            "/v1/runs/start",
+            Some((&start_body, "application/json")),
+        )
+    });
+    blocked.assert_chain_identity_request();
+    // The shared mechanical index reveals the generated identity while execution is in flight.
+    let indexed = rest_json(&socket, "GET", "/v1/runs?limit=1", None);
+    assert_eq!(indexed.0, 200);
+    let items = indexed.1["items"].as_array().expect("run index");
+    assert_eq!(items.len(), 1);
+    let run_id = items[0]["run_id"]
         .as_str()
         .expect("generated REST run id")
         .to_owned();
-    assert_digest(&interrupted.1["run_id"], "run:sha256-jcs-v1:");
-    assert_eq!(
-        interrupted.1,
-        serde_json::json!({
-            "code": "dependency_unavailable",
-            "message": "application dependency is unavailable",
-            "run_id": run_id
-        })
-    );
-    unavailable.assert_chain_identity_request();
-
-    let runnable = rest_json(&socket, "GET", &format!("/v1/runs/{run_id}"), None);
-    assert_eq!(runnable.0, 200);
-    assert_eq!(runnable.1["run_id"], run_id);
-    assert_eq!(runnable.1["head_sequence"], INTERRUPTED_HEAD_SEQUENCE);
-    assert_eq!(
-        runnable.1["state"],
-        serde_json::json!({ "kind": "runnable" })
-    );
-    assert_digest(&runnable.1["head_digest"], "content:sha256-v1:");
-
-    fault_daemon.stop();
-    assert!(!socket.exists(), "fault daemon must remove the socket");
+    assert_digest(&items[0]["run_id"], "run:sha256-jcs-v1:");
+    assert_eq!(items[0]["head_sequence"], INTERRUPTED_HEAD_SEQUENCE);
+    fault_daemon.crash();
+    assert!(start_request
+        .join()
+        .expect("interrupted HTTP thread")
+        .is_err());
+    blocked.finish();
+    // Abrupt termination leaves the Unix socket; remove it only after the daemon is reaped.
+    std::fs::remove_file(&socket).expect("remove crashed daemon socket");
 
     let deleted = run_cli(
         &cli,
@@ -147,6 +142,17 @@ fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() {
 
     let mut live_daemon = Daemon::start(&rest, &xdg, &socket, None, None);
     live_daemon.wait_ready();
+    let runnable = rest_json(&socket, "GET", &format!("/v1/runs/{run_id}"), None);
+    assert_eq!(runnable.0, 200);
+    assert_eq!(runnable.1["run_id"], run_id);
+    assert_eq!(runnable.1["head_sequence"], INTERRUPTED_HEAD_SEQUENCE);
+    assert_eq!(
+        runnable.1["state"],
+        serde_json::json!({
+            "kind": "runnable", "position": {"state": 2, "visit": 2}, "reason": {"kind": "advance"}
+        })
+    );
+    assert_digest(&runnable.1["head_digest"], "content:sha256-v1:");
     let progressed = rest_json(
         &socket,
         "POST",
@@ -352,16 +358,16 @@ fn is_lower_hex_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-struct UnavailableRpc {
+struct BlockedRpc {
     locator: String,
     observed: Receiver<Vec<u8>>,
     server: JoinHandle<()>,
 }
 
-impl UnavailableRpc {
+impl BlockedRpc {
     fn start() -> Self {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
-            .expect("bind unavailable RPC stub");
+            .expect("bind blocked RPC stub");
         let address = listener.local_addr().expect("stub address");
         let (sender, observed) = mpsc::sync_channel(1);
         let server = std::thread::spawn(move || {
@@ -374,12 +380,13 @@ impl UnavailableRpc {
                 .expect("stub write timeout");
             let encoded = read_http_request(&mut stream).expect("read provider request");
             sender.send(encoded).expect("retain provider request");
-            stream
-                .write_all(
-                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .expect("write unavailable response");
-            stream.flush().expect("flush unavailable response");
+            let mut byte = [0_u8; 1];
+            assert_eq!(
+                stream
+                    .read(&mut byte)
+                    .expect("wait for interrupted provider connection"),
+                0
+            );
         });
         Self {
             locator: format!("http://{address}"),
@@ -392,17 +399,20 @@ impl UnavailableRpc {
         &self.locator
     }
 
-    fn assert_chain_identity_request(self) {
+    fn assert_chain_identity_request(&self) {
         let encoded = self
             .observed
             .recv_timeout(Duration::from_secs(5))
             .expect("provider request");
-        self.server.join().expect("RPC stub");
         let body = http_request_body(&encoded);
         let request: serde_json::Value = serde_json::from_slice(body).expect("provider JSON-RPC");
         assert_eq!(request["jsonrpc"], "2.0");
         assert_eq!(request["method"], "eth_chainId");
         assert_eq!(request["params"], serde_json::json!([]));
+    }
+
+    fn finish(self) {
+        self.server.join().expect("blocked RPC stub");
     }
 }
 
@@ -499,6 +509,15 @@ impl Daemon {
             std::thread::sleep(Duration::from_millis(50));
         }
         panic!("REST daemon did not become ready");
+    }
+
+    fn crash(&mut self) {
+        self.child.kill().expect("interrupt daemon during Read");
+        assert!(!self
+            .child
+            .wait()
+            .expect("reap interrupted daemon")
+            .success());
     }
 
     fn stop(&mut self) {

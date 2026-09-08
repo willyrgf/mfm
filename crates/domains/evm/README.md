@@ -6,7 +6,7 @@ infallible exact byte access; their strict string wires remain lowercase `0x` he
 `EvmU256` owns canonical decimal EVM words, while canonical base64 values retain
 `CanonicalBytes` directly and chain IDs and gas limits retain `NonZeroU64`.
 
-`EvmTransaction<C, R>::new(binding)` authors one transaction using a static `TransactionRecipe<C>`.
+`EvmTransaction<C, R>::new(binding, bounds)` authors one transaction using a static `TransactionRecipe<C>`.
 Capability injection expands its `ExecuteEvmTransaction<C, R>` into reservation, preparation,
 execution, and Pure outcome projection. `CreateAt<Slot>`, `CallCreatedAt<CallSlot, DeploymentSlot>`,
 and `CallAt<Slot>` construct commands from checked plans and the selected successful creation.
@@ -27,7 +27,7 @@ slot identities, and outcome mode. Changing a selected same-typed source changes
 `custody` owns the reusable asynchronous nonce-reservation and opaque signed-byte retention port.
 The live adapter supplies signer/provider IO and PostgreSQL supplies atomic persistence. Custody
 returns immutable first prepared winners; Journal alone retains transaction settlement. The reserve
-State EffectId identifies custody throughout the graph. Raw signed bytes have no serde or debug
+State EffectId identifies custody throughout the sequence. Raw signed bytes have no serde or debug
 surface. No State performs IO, and Runtime has no EVM-specific logic.
 
 Products own named context records, selected recipe connections, ABI decoding, and terminal
@@ -43,10 +43,24 @@ constructs intent during prepare and retains the exact intent and accepted evide
 `AnchoredObservationFacts`. Failure contexts also retain rejected, safe-failure, or
 integrity-blocked evidence. The live provider algorithm remains outside this crate.
 
-Six balance Read States and two Pure States continue to implement the cumulative balance contract.
-`CollectEvmBalances<K>` deterministically unrolls the native/token topology per source without
-exposing declaration counts or indices. Its work cursor derives the active source from the completed
-prefix instead of duplicating source values in every stage.
+Six balance Read States and one consolidation Pure State implement the cumulative balance contract.
+`CollectEvmBalances<K>::new(binding, request, conclusion_bound)` authors native/token State sequences
+from the complete checked request. Root validation compares the request, route and initial work state
+with the supplied input before Program construction. There is no runtime selector State or Match
+payload. Initial-anchor interpretation advances the ordinary data stage using the checked active
+source; the work cursor derives that source from the completed prefix.
+
+Concrete planners supply complete conclusion bounds covering the reachable caller continuation and
+mapped root failure. Transaction bounds separately cover reservation, preparation, execution and
+projection, including each Effect's prepare/conclusion closure. These authoring bounds enter Program;
+Runtime enforces them before admission and when concluding a State. Supplying a bound is not evidence
+that a concrete workload fits: maximal reachable fixtures must validate the planner's calculation.
+
+Operational failures use bounded typed causes. Balance contexts retain source/collection ordinals and
+the exact intent; anchored-call contexts retain route, anchor and target without calldata. Transaction
+contexts retain binding, reservation or transaction-hash facts, and operational causes distinguish
+provider, authority and signer unavailability. These contexts exclude caller continuations and command
+bytes and do not claim Runtime phase or settlement authority.
 
 The State definitions and public reusable `CollectEvmBalances<K>` Operation own their
 compiled-product inspection IDs and descriptions. This source metadata is not lowered into Program
@@ -75,3 +89,9 @@ Checked identity products expose named fields; commands and correlated facts ret
 
 Transaction factories accept `u128` fees. Plans and complete commands share nested `parameters`
 with `binding`, `value`, `gas_limit`, and checked `fees` (`priority` and `maximum` decimal strings).
+
+`EvmBalanceClassifier` is an explicitly selectable policy for balance incidents. It assesses
+operational provider failures and authenticated `AnchorChanged` evidence as recoverable; other
+balance failures stop. It does not choose retries or install itself inside collection authoring.
+Callers own handler selection, checkpoint regions and finite allowances. `AnchorChanged` retains
+the previous and observed anchors and rejects equal anchors during qualification.

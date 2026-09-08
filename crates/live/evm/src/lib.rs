@@ -11,13 +11,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use mfm_capabilities::{AdapterError, AdapterInvariantError};
+use mfm_evm::EvmOperationalError;
 use mfm_evm::{
     AnchoredContractCallEvidence, AnchoredContractCallIntent, EvmAnchorRead,
     EvmAnchoredContractCallRead, EvmBalanceRead, EvmChainIdentityRead, EvmPhysicalTarget,
     EvmReadEvidence, EvmReadIntent, EvmTransactionRoute,
 };
 use mfm_ids::ContentRef;
-use mfm_runtime::{AdapterError, RuntimeAssemblyBuilder};
+use mfm_runtime::RuntimeAssemblyBuilder;
 
 mod assembly;
 pub use assembly::register_evm_transaction_states;
@@ -37,8 +39,9 @@ pub use transaction::{
 pub use codec::{ethereum_address, evm_keccak256, EvmCodecError};
 
 /// Duplicate-safe typed provider future.
-pub type ProviderFuture<'a, T> =
-    Pin<Box<dyn Future<Output = std::result::Result<T, AdapterError>> + Send + 'a>>;
+pub type ProviderFuture<'a, T> = Pin<
+    Box<dyn Future<Output = std::result::Result<T, AdapterError<EvmOperationalError>>> + Send + 'a>,
+>;
 
 /// Typed observational provider paired with one immutable public target.
 ///
@@ -143,9 +146,9 @@ async fn read_anchored(
     provider: &dyn EvmReadProvider,
     intent_value_ref: &ContentRef,
     intent: &AnchoredContractCallIntent,
-) -> std::result::Result<AnchoredContractCallEvidence, AdapterError> {
+) -> std::result::Result<AnchoredContractCallEvidence, AdapterError<EvmOperationalError>> {
     if intent.chain_id() != route.chain_instance.chain_id || intent.route_ref() != binding_ref {
-        return Err(AdapterError::Internal);
+        return Err(AdapterError::Invariant(AdapterInvariantError));
     }
     provider
         .observe_anchored_call(intent_value_ref, intent)
@@ -159,12 +162,12 @@ async fn read(
     registration: ReadCapabilityFamily,
     intent_value_ref: &ContentRef,
     intent: &EvmReadIntent,
-) -> std::result::Result<EvmReadEvidence, AdapterError> {
+) -> std::result::Result<EvmReadEvidence, AdapterError<EvmOperationalError>> {
     if intent.chain_id() != target.chain_id
         || intent.route_ref() != binding_ref
         || !registration.accepts(intent.subject())
     {
-        return Err(AdapterError::Internal);
+        return Err(AdapterError::Invariant(AdapterInvariantError));
     }
     provider.observe(intent_value_ref, intent).await
 }
@@ -209,7 +212,7 @@ mod tests {
             Box::pin(async move {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 let result = AnchoredContractCallResult::new(intent.anchor().clone(), vec![])
-                    .map_err(|_| AdapterError::Internal)?;
+                    .map_err(|_| AdapterError::Invariant(AdapterInvariantError))?;
                 Ok(AnchoredContractCallEvidence::returned(
                     intent_value_ref.clone(),
                     result,
@@ -322,7 +325,7 @@ mod tests {
                 &intent(&wrong_chain),
             )
             .await,
-            Err(AdapterError::Internal)
+            Err(AdapterError::Invariant(AdapterInvariantError))
         );
         let wrong_route = target(1, 3);
         assert_eq!(
@@ -335,7 +338,7 @@ mod tests {
                 &intent(&wrong_route),
             )
             .await,
-            Err(AdapterError::Internal)
+            Err(AdapterError::Invariant(AdapterInvariantError))
         );
         assert_eq!(
             read(
@@ -347,7 +350,7 @@ mod tests {
                 &intent(&registered),
             )
             .await,
-            Err(AdapterError::Internal)
+            Err(AdapterError::Invariant(AdapterInvariantError))
         );
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     }
@@ -398,7 +401,7 @@ mod tests {
                 &intent,
             )
             .await,
-            Err(AdapterError::Internal)
+            Err(AdapterError::Invariant(AdapterInvariantError))
         );
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 

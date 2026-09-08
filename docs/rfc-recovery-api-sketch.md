@@ -270,14 +270,14 @@ impl<I: MfmValue, O: MfmValue, F: MfmValue> OperationExpansion<I, O, F> {
         policy: Occurrence, bound: ConclusionBound,
     ) -> Result<(), ProgramError>
     where C: ReadCapabilityContract + CapabilityInjection<S>, S: ReadState<C>,
-          M: ValueMap<Input = S::Failure, Output = F>;
+          M: ValueMap<Input = <C as CapabilityInjection<S>>::ExpandedFailure, Output = F>;
 
     pub fn effect<S, C, M>(
         &mut self, setup: &<C as CapabilityInjection<S>>::Setup, root_map: M::Params,
         policy: Occurrence, bounds: EffectBounds,
     ) -> Result<(), ProgramError>
     where C: EffectCapabilityContract + CapabilityInjection<S>, S: EffectState<C>,
-          M: ValueMap<Input = S::Failure, Output = F>;
+          M: ValueMap<Input = <C as CapabilityInjection<S>>::ExpandedFailure, Output = F>;
 
     pub fn operation<C, M>(&mut self, child: &C, root_map: M::Params)
         -> Result<(), ProgramError>
@@ -315,6 +315,23 @@ resolves the designated binding from that setup once and expands before/designat
 the same scope machinery. A raw binding reference cannot replace the setup contract for injected
 transaction States.
 
+Injection owns the designated State's explicit root conversion into `ExpandedFailure`:
+
+```rust,ignore
+pub trait CapabilityInjection<S: State> {
+    // Existing setup, expanded input/output/failure and hook contracts remain.
+    type FailureMap: ValueMap<Input = S::Failure, Output = Self::ExpandedFailure>;
+    fn failure_map_params(setup: &Self::Setup)
+        -> Result<<Self::FailureMap as ValueMap>::Params, ProgramError>;
+}
+```
+
+The designated root path is `S::Failure -> ExpandedFailure -> F`. Hook States already map
+their local failures into `ExpandedFailure`, then receive the same caller map into `F`.
+Transaction injection uses `FromNever<ExpandedFailure>` for its infallible designated State;
+unchanged-failure injection uses `Identity<ExpandedFailure>`. This is root reporting only:
+classification still begins with each State's original incident.
+
 ## Checkpoints, limits, and immutable declarations
 
 ```rust,ignore
@@ -336,14 +353,14 @@ impl StateDeclaration {
 
 pub struct RecoveryAllowances { /* private u32 retries and restarts */ }
 impl RecoveryAllowances {
-    pub fn new(retries: u32, restarts: u32) -> Result<Self, ProgramError>;
+    pub const fn new(retries: u32, restarts: u32) -> Self;
     pub fn retries(&self) -> u32;
     pub fn restarts(&self) -> u32;
 }
 
 pub struct ProgramLimits { /* private global recovery-decision allowance */ }
 impl ProgramLimits {
-    pub fn new(max_recovery_decisions: u32) -> Result<Self, ProgramError>;
+    pub const fn new(max_recovery_decisions: u32) -> Self;
 }
 
 pub struct ConclusionBound { /* private maximum complete-frame bytes */ }
@@ -359,6 +376,7 @@ impl EffectBounds {
 pub fn expand_program<O: Operation>(
     entry_point: EntryPointId,
     operation: &O,
+    input: &O::Input,
     limits: ProgramLimits,
 ) -> Result<Program, ProgramError>;
 
@@ -427,6 +445,28 @@ for Pure/Read, or `EffectBounds` for Effect, with private fields and checked con
 must cover the complete closure and participate in Program identity. Registration validates compatibility
 and execution enforces them. The exact numeric bounds for real EVM/Portfolio values are an
 implementation handoff gate, not numbers invented by this signature sketch.
+
+Journal remains the sole owner of frame/count/history format ceilings. Program's size-bound
+constructors check positive representable lifecycle costs and its conservative history arithmetic
+checks overflow. Finite `u32` allowances need no additional constructor restriction. Runtime
+admission compares the derived cost and every complete-frame bound with Journal's exported
+ceilings before genesis append. A structurally valid Program may therefore be inadmissible under
+the current Journal capacity. Program does not import Journal or duplicate its numeric ceilings.
+
+## Checked root input specialization
+
+`Operation` requires `fn validate_input(&self, input: &Self::Input) -> Result<(), ProgramError>`.
+`expand_program(entry, operation, input, limits)` invokes this deterministic authoring check before
+expansion, qualifies the input, and commits its exact value reference into Program. The check proves
+agreement with the root Operation's checked planning assumptions; schema equality alone does not
+prove source order or asset shape. Child input agreement is owned by parent planning and deterministic
+State contracts. No authoring callback enters Runtime.
+
+Runtime checks exact input identity before genesis/provider entry, and cold reconstruction checks
+genesis against the same commitment. Reusing a Program under another RunId requires the same initial
+value. Programs contain the reference only; genesis retains the value bytes. Native/token collection
+specialization stores the checked ordered request, and planning validates it against initial demand.
+Test both inconsistent authoring (request A with input B) and later input substitution separately.
 
 ## Assembly association and adapter signatures
 
@@ -525,7 +565,7 @@ pub enum InvocationFailure {
     },
     RecoveryStopped {
         observed: RunView,
-        incident: AdapterIncidentView,
+        incident: Box<AdapterIncidentView>,
         reason: StopReason,
     },
 }

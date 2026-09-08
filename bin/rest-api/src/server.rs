@@ -274,26 +274,21 @@ fn start_run_error(run_id: &RunId, error: RunRequestError) -> Response {
                 &SerializableClientError::identified(error.code(), &message, run_id),
             )
         }
-        RunRequestError::AppendIndeterminate { recovery } => {
-            run_request_error(RunRequestError::AppendIndeterminate { recovery })
+        error @ (RunRequestError::AppendIndeterminate { .. } | RunRequestError::Invocation(_)) => {
+            run_request_error(error)
         }
     }
 }
 
 fn run_request_error(error: RunRequestError) -> Response {
-    match error {
-        RunRequestError::Request(error) => request_error(error),
-        error @ RunRequestError::AppendIndeterminate { .. } => {
-            let message = error.to_string();
-            let recovery = error
-                .recovery()
-                .expect("append-indeterminate error always carries recovery");
-            json_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &SerializableClientError::recoverable(error.code(), &message, recovery),
-            )
-        }
-    }
+    let status = error
+        .request_error()
+        .map(request_error_status)
+        .unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+    json_response(
+        status,
+        &SerializableClientError::for_run(&error, &error.to_string()),
+    )
 }
 
 fn config_json_rejection(error: JsonRejection) -> Response {
@@ -384,6 +379,7 @@ mod tests {
     use axum::http::header::CONTENT_TYPE;
     use axum::http::{HeaderValue, Method, Request};
     use mfm_app::{Application, BoundCapabilitySet, ComposedRuntime, RunRecovery};
+    use mfm_capabilities::{AdapterError, AdapterInvariantError};
     use mfm_config::MemoryConfigRepository;
     use mfm_evm::{
         AnchoredContractCallEvidence, AnchoredContractCallIntent, EvmBlockAnchor, EvmEndpoint,
@@ -391,7 +387,6 @@ mod tests {
     };
     use mfm_evm_live::{EvmReadProvider, ProviderFuture};
     use mfm_ids::ContentRef;
-    use mfm_runtime::AdapterError;
     use mfm_store::MemoryStore;
     use tower::ServiceExt;
 
@@ -426,7 +421,7 @@ mod tests {
                     EvmReadSubject::NativeBalance { .. } => {
                         EvmReadValue::RawUnits(EvmU256::new("1000000000000000000").expect("units"))
                     }
-                    _ => return Err(AdapterError::Internal),
+                    _ => return Err(AdapterError::Invariant(AdapterInvariantError)),
                 };
                 Ok(EvmReadEvidence::returned(intent_value_ref.clone(), value))
             })
@@ -437,7 +432,7 @@ mod tests {
             _intent_value_ref: &'a ContentRef,
             _intent: &'a AnchoredContractCallIntent,
         ) -> ProviderFuture<'a, AnchoredContractCallEvidence> {
-            Box::pin(async { Err(AdapterError::Internal) })
+            Box::pin(async { Err(AdapterError::Invariant(AdapterInvariantError)) })
         }
     }
 
@@ -716,6 +711,7 @@ mod tests {
         let run_id = RunId::parse(RUN_ID).expect("run id");
         let recovery = run_request_error(RunRequestError::AppendIndeterminate {
             recovery: RunRecovery::Progress { run_id },
+            last_observed: None,
         });
         assert_eq!(recovery.status(), StatusCode::SERVICE_UNAVAILABLE);
         let recovery = response_json(recovery).await;

@@ -1,126 +1,36 @@
-error[E0599]: no method named `label` found for mutable reference `&mut OperationExpansion<Never, Never, Never>` in the current scope
- --> tests/ui/scoped_authoring.rs:7:15
-  |
-7 |     expansion.label();
-  |               ^^^^^ method not found in `&mut OperationExpansion<Never, Never, Never>`
-
-error[E0599]: no method named `place` found for mutable reference `&mut OperationExpansion<Never, Never, Never>` in the current scope
- --> tests/ui/scoped_authoring.rs:8:15
-  |
-8 |     expansion.place();
-  |               ^^^^^ method not found in `&mut OperationExpansion<Never, Never, Never>`
-
-error[E0599]: no method named `select` found for mutable reference `&mut OperationExpansion<Never, Never, Never>` in the current scope
- --> tests/ui/scoped_authoring.rs:9:15
-  |
-9 |     expansion.select();
-  |               ^^^^^^ method not found in `&mut OperationExpansion<Never, Never, Never>`
-
-error[E0599]: no method named `branch_to` found for mutable reference `&mut OperationExpansion<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:10:15
-   |
-10 |     expansion.branch_to();
-   |               ^^^^^^^^^ method not found in `&mut OperationExpansion<Never, Never, Never>`
-
-error[E0599]: no method named `return_success` found for mutable reference `&mut OperationExpansion<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:11:15
-   |
-11 |     expansion.return_success();
-   |               ^^^^^^^^^^^^^^ method not found in `&mut OperationExpansion<Never, Never, Never>`
-
-error[E0599]: no method named `finish` found for mutable reference `&mut OperationExpansion<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:12:15
-   |
-12 |     expansion.finish();
-   |               ^^^^^^ method not found in `&mut OperationExpansion<Never, Never, Never>`
-
-error[E0599]: no method named `select` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:16:10
-   |
-16 |     join.select();
-   |          ^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
-
-error[E0599]: no method named `place` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:17:10
-   |
-17 |     join.place();
-   |          ^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
-
-error[E0599]: no method named `label` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:18:10
-   |
-18 |     join.label();
-   |          ^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
-
-error[E0599]: no method named `branch_to` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:19:10
-   |
-19 |     join.branch_to();
-   |          ^^^^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
-
-error[E0599]: no method named `return_success` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:20:10
-   |
-20 |     join.return_success();
-   |          ^^^^^^^^^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
-
-error[E0599]: no method named `finish` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:21:10
-   |
-21 |     join.finish();
-   |          ^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
-
-error[E0599]: no method named `effect` found for mutable reference `&mut MatchJoin<Never, Never, Never>` in the current scope
-  --> tests/ui/scoped_authoring.rs:22:10
-   |
-22 |     join.effect();
-   |          ^^^^^^ method not found in `&mut MatchJoin<Never, Never, Never>`
-
 error: cannot construct `OperationExpansion<Never, Never, Never>` with struct literal syntax due to private fields
-  --> tests/ui/scoped_authoring.rs:26:22
-   |
-26 |     let _expansion = OperationExpansion::<Never, Never, Never> {};
-   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-help: you might have meant to use the `new` associated function
-   |
-26 -     let _expansion = OperationExpansion::<Never, Never, Never> {};
-26 +     let _expansion = OperationExpansion::<Never, Never, Never>::new(_, _, _, _, _, _);
-   |
+ --> tests/ui/scoped_authoring.rs:7:22
+  |
+7 |     let _expansion = OperationExpansion::<Never, Never, Never> {};
+  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error: cannot construct `MatchJoin<Never, Never, Never>` with struct literal syntax due to private fields
-  --> tests/ui/scoped_authoring.rs:27:17
-   |
-27 |     let _join = MatchJoin::<Never, Never, Never> {};
-   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error: cannot construct `Checkpoint<Never>` with struct literal syntax due to private fields
+ --> tests/ui/scoped_authoring.rs:8:23
+  |
+8 |     let _checkpoint = Checkpoint::<Never> {};
+  |                       ^^^^^^^^^^^^^^^^^^^
+  |
+help: you might have meant to use the `at` associated function
+  |
+8 -     let _checkpoint = Checkpoint::<Never> {};
+8 +     let _checkpoint = Checkpoint::<Never>::at(_, _, _);
+  |
 
 error[E0624]: associated function `new` is private
-  --> tests/ui/scoped_authoring.rs:28:56
-   |
-28 |       let _ = OperationExpansion::<Never, Never, Never>::new;
-   |                                                          ^^^ private associated function
-   |
-  ::: src/authoring.rs
-   |
-   | /     fn new(
-   | |         input_contract_ref: ContentRef,
-   | |         output_contract_ref: ContentRef,
-   | |         failure_contract_ref: ContentRef,
-...  |
-   | |         identities: IdentityMemo,
-   | |     ) -> Self {
-   | |_____________- private associated function defined here
-
-error[E0599]: no associated function or constant named `new` found for struct `MatchJoin<I, O, F>` in the current scope
-  --> tests/ui/scoped_authoring.rs:29:47
-   |
-29 |     let _ = MatchJoin::<Never, Never, Never>::new;
-   |                                               ^^^ associated function or constant not found in `MatchJoin<Never, Never, Never>`
+ --> tests/ui/scoped_authoring.rs:9:56
+  |
+9 |     let _ = OperationExpansion::<Never, Never, Never>::new;
+  |                                                        ^^^ private associated function
+  |
+ ::: src/authoring.rs
+  |
+  |     fn new(depth: u8, recovery_defaults: RecoveryDefaults) -> Result<Self> {
+  |     ---------------------------------------------------------------------- private associated function defined here
 
 error[E0277]: the trait bound `OperationExpansion<Never, Never, Never>: Clone` is not satisfied
-  --> tests/ui/scoped_authoring.rs:30:21
+  --> tests/ui/scoped_authoring.rs:10:21
    |
-30 |     require_clone::<OperationExpansion<Never, Never, Never>>();
+10 |     require_clone::<OperationExpansion<Never, Never, Never>>();
    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `OperationExpansion<Never, Never, Never>`
    |
 note: required by a bound in `require_clone`
@@ -130,9 +40,9 @@ note: required by a bound in `require_clone`
    |                     ^^^^^ required by this bound in `require_clone`
 
 error[E0277]: the trait bound `OperationExpansion<Never, Never, Never>: Default` is not satisfied
-  --> tests/ui/scoped_authoring.rs:31:23
+  --> tests/ui/scoped_authoring.rs:11:23
    |
-31 |     require_default::<OperationExpansion<Never, Never, Never>>();
+11 |     require_default::<OperationExpansion<Never, Never, Never>>();
    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `OperationExpansion<Never, Never, Never>`
    |
 note: required by a bound in `require_default`
@@ -141,23 +51,11 @@ note: required by a bound in `require_default`
  4 | fn require_default<T: Default>() {}
    |                       ^^^^^^^ required by this bound in `require_default`
 
-error[E0277]: the trait bound `MatchJoin<Never, Never, Never>: Clone` is not satisfied
-  --> tests/ui/scoped_authoring.rs:32:21
+error[E0277]: the trait bound `Checkpoint<Never>: Default` is not satisfied
+  --> tests/ui/scoped_authoring.rs:12:23
    |
-32 |     require_clone::<MatchJoin<Never, Never, Never>>();
-   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `MatchJoin<Never, Never, Never>`
-   |
-note: required by a bound in `require_clone`
-  --> tests/ui/scoped_authoring.rs:3:21
-   |
- 3 | fn require_clone<T: Clone>() {}
-   |                     ^^^^^ required by this bound in `require_clone`
-
-error[E0277]: the trait bound `MatchJoin<Never, Never, Never>: Default` is not satisfied
-  --> tests/ui/scoped_authoring.rs:33:23
-   |
-33 |     require_default::<MatchJoin<Never, Never, Never>>();
-   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `MatchJoin<Never, Never, Never>`
+12 |     require_default::<Checkpoint<Never>>();
+   |                       ^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `Checkpoint<Never>`
    |
 note: required by a bound in `require_default`
   --> tests/ui/scoped_authoring.rs:4:23

@@ -36,7 +36,7 @@ the architect rule above.
 - `docs/design.md` is authoritative. Fix code that disagrees, or update the contract and its tests in
   the same change.
 - `docs/architecture.md` owns taxonomy and placement:
-  - Program is an immutable, content-addressed State/Match graph;
+  - Program is an immutable, content-addressed linear State sequence;
   - Runtime associates the Program with typed implementations and owns the sole semantic fold;
   - State implementations are deterministic and perform no ambient IO;
   - Read adapters bind typed intent to explicit observational capabilities;
@@ -78,7 +78,7 @@ composition. Follow the pinned Nixfied adopter guide for framework changes.
 
 ## Surface-specific rules
 
-- Program/Runtime: keep graph association and scheduling deterministic; test hot/cold equivalence,
+- Program/Runtime: keep sequence association and recovery scheduling deterministic; test hot/cold equivalence,
   cancellation safety, typed error mapping, and semantic changes.
 - Journal/Store: keep exact wire qualification in Journal and physical atomicity in Store. Store must
   not acquire Program, domain, capability, or reducer semantics.

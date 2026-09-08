@@ -22,8 +22,21 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+mfm-journal = { path = "../../kernel/journal" }
+mfm-capabilities = { path = "../../kernel/capabilities" }
+mfm-runtime = { path = "../../kernel/runtime" }
+mfm-store = { path = "../../kernel/store" }
+tokio = { workspace = true }
 serde_json = { workspace = true }
 
 [[test]]
 name = "planning_contract"
 path = "tests/planning_contract.rs"
+
+[[test]]
+name = "runtime_contract"
+path = "tests/runtime_contract.rs"
+
+[[test]]
+name = "recovery_policy"
+path = "tests/recovery_policy.rs"

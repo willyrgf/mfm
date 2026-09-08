@@ -7,7 +7,9 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use alloy_primitives::{hex, Address, U256};
+use mfm_capabilities::{AdapterError, AdapterInvariantError};
 use mfm_evm::custody::ExactRawTransaction;
+use mfm_evm::EvmOperationalError;
 use mfm_evm::{
     AnchoredContractCallEvidence, AnchoredContractCallIntent, AnchoredContractCallResult,
     EvmAddress, EvmBalanceSource, EvmBlockAnchor, EvmChainInstance, EvmHash, EvmReadEvidence,
@@ -15,7 +17,6 @@ use mfm_evm::{
     MAX_EVM_CALL_RETURN_BYTES,
 };
 use mfm_ids::ContentRef;
-use mfm_runtime::AdapterError;
 use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -94,7 +95,7 @@ impl JsonRpcEvmProvider {
         &self,
         method: &'static str,
         params: &P,
-    ) -> Result<RpcEnvelope<T>, AdapterError> {
+    ) -> Result<RpcEnvelope<T>, AdapterError<EvmOperationalError>> {
         let response = self
             .http
             .post(self.url.clone())
@@ -106,27 +107,34 @@ impl JsonRpcEvmProvider {
             })
             .send()
             .await
-            .map_err(|_| AdapterError::Unavailable)?;
+            .map_err(map_transport_error)?;
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(AdapterError::Operational(EvmOperationalError::RateLimited));
+        }
         if !response.status().is_success() {
-            return Err(AdapterError::Unavailable);
+            return Err(AdapterError::Operational(EvmOperationalError::Unavailable));
         }
         let body = bounded_body(response).await?;
-        serde_json::from_slice(&body).map_err(|_| AdapterError::Unavailable)
+        serde_json::from_slice(&body)
+            .map_err(|_| AdapterError::Operational(EvmOperationalError::Unavailable))
     }
 
-    async fn chain_id(&self) -> Result<NonZeroU64, AdapterError> {
+    async fn chain_id(&self) -> Result<NonZeroU64, AdapterError<EvmOperationalError>> {
         self.rpc::<_, RpcQuantity>("eth_chainId", &[] as &[u8; 0])
             .await?
             .into_result()?
             .to_u64()
             .and_then(NonZeroU64::new)
-            .ok_or(AdapterError::Unavailable)
+            .ok_or(AdapterError::Operational(EvmOperationalError::Unavailable))
     }
 
-    async fn broad_anchor(&self, tag: &str) -> Result<EvmBlockAnchor, AdapterError> {
+    async fn broad_anchor(
+        &self,
+        tag: &str,
+    ) -> Result<EvmBlockAnchor, AdapterError<EvmOperationalError>> {
         self.block_anchor(tag)
             .await?
-            .ok_or(AdapterError::Unavailable)
+            .ok_or(AdapterError::Operational(EvmOperationalError::Unavailable))
     }
 
     async fn token_contract_call(
@@ -134,8 +142,10 @@ impl JsonRpcEvmProvider {
         source: &EvmBalanceSource,
         anchor: &EvmBlockAnchor,
         data: String,
-    ) -> Result<Option<AbiWord>, AdapterError> {
-        let token = source.token().ok_or(AdapterError::Internal)?;
+    ) -> Result<Option<AbiWord>, AdapterError<EvmOperationalError>> {
+        let token = source
+            .token()
+            .ok_or(AdapterError::Invariant(AdapterInvariantError))?;
         let tag = block_tag(&anchor.number)?;
         let call = RpcCall { to: token, data };
         let data = self
@@ -153,7 +163,7 @@ impl JsonRpcEvmProvider {
         &self,
         intent_value_ref: &ContentRef,
         intent: &EvmReadIntent,
-    ) -> Result<EvmReadEvidence, AdapterError> {
+    ) -> Result<EvmReadEvidence, AdapterError<EvmOperationalError>> {
         let value = match intent.subject() {
             EvmReadSubject::ChainIdentity => {
                 let chain_id = self.chain_id().await?;
@@ -169,7 +179,10 @@ impl JsonRpcEvmProvider {
                     .await?
                     .into_result()?
                     .decimal();
-                EvmReadValue::RawUnits(EvmU256::new(units).map_err(|_| AdapterError::Unavailable)?)
+                EvmReadValue::RawUnits(
+                    EvmU256::new(units)
+                        .map_err(|_| AdapterError::Operational(EvmOperationalError::Unavailable))?,
+                )
             }
             EvmReadSubject::TokenDecimals { source, anchor } => {
                 let Some(word) = self
@@ -178,9 +191,11 @@ impl JsonRpcEvmProvider {
                 else {
                     return Ok(EvmReadEvidence::safe_failure(intent_value_ref.clone()));
                 };
-                let decimals = word_to_u8(word).ok_or(AdapterError::Unavailable)?;
+                let decimals = word_to_u8(word)
+                    .ok_or(AdapterError::Operational(EvmOperationalError::Unavailable))?;
                 EvmReadValue::TokenDecimals(
-                    EvmTokenDecimals::new(decimals).map_err(|_| AdapterError::Unavailable)?,
+                    EvmTokenDecimals::new(decimals)
+                        .map_err(|_| AdapterError::Operational(EvmOperationalError::Unavailable))?,
                 )
             }
             EvmReadSubject::TokenBalance { source, anchor } => {
@@ -193,7 +208,7 @@ impl JsonRpcEvmProvider {
                 };
                 EvmReadValue::RawUnits(
                     EvmU256::new(decode_abi_u256(word).to_string())
-                        .map_err(|_| AdapterError::Unavailable)?,
+                        .map_err(|_| AdapterError::Operational(EvmOperationalError::Unavailable))?,
                 )
             }
             // Confirmation reads the committed number, never the moving head.
@@ -209,7 +224,7 @@ impl JsonRpcEvmProvider {
         &self,
         intent_value_ref: &ContentRef,
         intent: &AnchoredContractCallIntent,
-    ) -> Result<AnchoredContractCallEvidence, AdapterError> {
+    ) -> Result<AnchoredContractCallEvidence, AdapterError<EvmOperationalError>> {
         let authored_anchor = intent.anchor();
         let Some(observed_anchor) = self
             .block_anchor(&block_tag(&authored_anchor.number)?)
@@ -265,14 +280,17 @@ impl JsonRpcEvmProvider {
             ));
         }
         let result = AnchoredContractCallResult::new(confirmed_anchor, return_bytes)
-            .map_err(|_| AdapterError::Unavailable)?;
+            .map_err(|_| AdapterError::Operational(EvmOperationalError::Unavailable))?;
         Ok(AnchoredContractCallEvidence::returned(
             intent_value_ref.clone(),
             result,
         ))
     }
 
-    async fn block_anchor(&self, tag: &str) -> Result<Option<EvmBlockAnchor>, AdapterError> {
+    async fn block_anchor(
+        &self,
+        tag: &str,
+    ) -> Result<Option<EvmBlockAnchor>, AdapterError<EvmOperationalError>> {
         self.rpc::<_, Option<RpcBlock>>("eth_getBlockByNumber", &(tag, false))
             .await?
             .into_result()?
@@ -317,9 +335,9 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
             let genesis = self
                 .block_anchor("0x0")
                 .await?
-                .ok_or(AdapterError::Unavailable)?;
+                .ok_or(AdapterError::Operational(EvmOperationalError::Unavailable))?;
             if genesis.number.as_str() != "0" {
-                return Err(AdapterError::Unavailable);
+                return Err(AdapterError::Operational(EvmOperationalError::Unavailable));
             }
             Ok(EvmChainInstance {
                 chain_id,
@@ -334,7 +352,7 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
                 .await?
                 .into_result()?
                 .to_u64()
-                .ok_or(AdapterError::Unavailable)
+                .ok_or(AdapterError::Operational(EvmOperationalError::Unavailable))
         })
     }
 
@@ -359,7 +377,7 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
             let tag = block_tag(block_number)?;
             self.block_anchor(&tag)
                 .await?
-                .ok_or(AdapterError::Unavailable)
+                .ok_or(AdapterError::Operational(EvmOperationalError::Unavailable))
         })
     }
 
@@ -410,7 +428,7 @@ enum RpcEnvelope<T> {
 }
 
 impl<T> RpcEnvelope<T> {
-    fn into_result(self) -> Result<T, AdapterError> {
+    fn into_result(self) -> Result<T, AdapterError<EvmOperationalError>> {
         match self {
             Self::Success(RpcSuccess {
                 jsonrpc,
@@ -422,7 +440,7 @@ impl<T> RpcEnvelope<T> {
             }
             Self::Failure(RpcFailure { jsonrpc, id, error }) => {
                 let _ = (jsonrpc, id, error.code, error.message.len(), error.data);
-                Err(AdapterError::Unavailable)
+                Err(AdapterError::Operational(EvmOperationalError::Unavailable))
             }
         }
     }
@@ -486,9 +504,10 @@ struct RpcBlock {
 }
 
 impl RpcBlock {
-    fn into_anchor(self) -> Result<EvmBlockAnchor, AdapterError> {
+    fn into_anchor(self) -> Result<EvmBlockAnchor, AdapterError<EvmOperationalError>> {
         Ok(EvmBlockAnchor {
-            number: EvmU256::new(self.number.decimal()).map_err(|_| AdapterError::Unavailable)?,
+            number: EvmU256::new(self.number.decimal())
+                .map_err(|_| AdapterError::Operational(EvmOperationalError::Unavailable))?,
             hash: self.hash,
         })
     }
@@ -521,18 +540,20 @@ where
 struct RpcQuantity(U256);
 
 impl RpcQuantity {
-    fn parse(value: &str) -> Result<Self, AdapterError> {
-        let digits = value.strip_prefix("0x").ok_or(AdapterError::Unavailable)?;
+    fn parse(value: &str) -> Result<Self, AdapterError<EvmOperationalError>> {
+        let digits = value
+            .strip_prefix("0x")
+            .ok_or(AdapterError::Operational(EvmOperationalError::Unavailable))?;
         if digits.is_empty()
             || (digits.len() > 1 && digits.starts_with('0'))
             || digits.len() > 64
             || !is_lower_hex(digits)
         {
-            return Err(AdapterError::Unavailable);
+            return Err(AdapterError::Operational(EvmOperationalError::Unavailable));
         }
         U256::from_str_radix(digits, 16)
             .map(Self)
-            .map_err(|_| AdapterError::Unavailable)
+            .map_err(|_| AdapterError::Operational(EvmOperationalError::Unavailable))
     }
 
     fn decimal(&self) -> String {
@@ -559,7 +580,7 @@ impl<'de> Deserialize<'de> for RpcQuantity {
 struct RpcDataText(String);
 
 impl RpcDataText {
-    fn parse(self, maximum: usize) -> Result<RpcData, AdapterError> {
+    fn parse(self, maximum: usize) -> Result<RpcData, AdapterError<EvmOperationalError>> {
         RpcData::parse(&self.0, maximum)
     }
 }
@@ -569,14 +590,16 @@ impl RpcDataText {
 struct RpcData(Vec<u8>);
 
 impl RpcData {
-    fn parse(value: &str, maximum: usize) -> Result<Self, AdapterError> {
-        let digits = value.strip_prefix("0x").ok_or(AdapterError::Unavailable)?;
+    fn parse(value: &str, maximum: usize) -> Result<Self, AdapterError<EvmOperationalError>> {
+        let digits = value
+            .strip_prefix("0x")
+            .ok_or(AdapterError::Operational(EvmOperationalError::Unavailable))?;
         if digits.len() % 2 != 0 || digits.len() / 2 > maximum || !is_lower_hex(digits) {
-            return Err(AdapterError::Unavailable);
+            return Err(AdapterError::Operational(EvmOperationalError::Unavailable));
         }
         hex::decode(digits)
             .map(Self)
-            .map_err(|_| AdapterError::Unavailable)
+            .map_err(|_| AdapterError::Operational(EvmOperationalError::Unavailable))
     }
 }
 
@@ -584,31 +607,37 @@ impl RpcData {
 struct AbiWord([u8; 32]);
 
 impl TryFrom<RpcData> for AbiWord {
-    type Error = AdapterError;
+    type Error = AdapterError<EvmOperationalError>;
 
     fn try_from(data: RpcData) -> Result<Self, Self::Error> {
         data.0
             .try_into()
             .map(Self)
-            .map_err(|_| AdapterError::Unavailable)
+            .map_err(|_| AdapterError::Operational(EvmOperationalError::Unavailable))
     }
 }
 
-async fn bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, AdapterError> {
+fn map_transport_error(error: reqwest::Error) -> AdapterError<EvmOperationalError> {
+    AdapterError::Operational(if error.is_timeout() {
+        EvmOperationalError::Timeout
+    } else {
+        EvmOperationalError::Unavailable
+    })
+}
+
+async fn bounded_body(
+    mut response: reqwest::Response,
+) -> Result<Vec<u8>, AdapterError<EvmOperationalError>> {
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
     {
-        return Err(AdapterError::Unavailable);
+        return Err(AdapterError::Operational(EvmOperationalError::Unavailable));
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| AdapterError::Unavailable)?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(map_transport_error)? {
         if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
-            return Err(AdapterError::Unavailable);
+            return Err(AdapterError::Operational(EvmOperationalError::Unavailable));
         }
         body.extend_from_slice(&chunk);
     }
@@ -624,12 +653,12 @@ fn balance_of_calldata(holder: &Address) -> String {
 }
 
 /// Renders one checked decimal block number as its `0x` quantity tag.
-fn block_tag(number: &EvmU256) -> Result<String, AdapterError> {
+fn block_tag(number: &EvmU256) -> Result<String, AdapterError<EvmOperationalError>> {
     number
         .as_str()
         .parse::<U256>()
         .map(|number| format!("{number:#x}"))
-        .map_err(|_| AdapterError::Internal)
+        .map_err(|_| AdapterError::Invariant(AdapterInvariantError))
 }
 
 fn is_lower_hex(digits: &str) -> bool {
@@ -646,11 +675,11 @@ fn word_to_u8(word: AbiWord) -> Option<u8> {
     u8::try_from(decode_abi_u256(word)).ok()
 }
 
-fn parse_receipt(value: RpcReceipt) -> Result<ProviderReceipt, AdapterError> {
+fn parse_receipt(value: RpcReceipt) -> Result<ProviderReceipt, AdapterError<EvmOperationalError>> {
     let status = value.status.to_u64().filter(|status| *status <= 1);
     let block_anchor = EvmBlockAnchor {
         number: EvmU256::new(value.block_number.decimal())
-            .map_err(|_| AdapterError::Unavailable)?,
+            .map_err(|_| AdapterError::Operational(EvmOperationalError::Unavailable))?,
         hash: value.block_hash,
     };
     let result = match (status, value.to, value.contract_address) {
@@ -660,7 +689,7 @@ fn parse_receipt(value: RpcReceipt) -> Result<ProviderReceipt, AdapterError> {
         (Some(0), None, None) => ProviderReceiptResult::RevertedCreate,
         (Some(1), Some(target), None) => ProviderReceiptResult::SuccessCall { target },
         (Some(0), Some(target), None) => ProviderReceiptResult::RevertedCall { target },
-        _ => return Err(AdapterError::Unavailable),
+        _ => return Err(AdapterError::Operational(EvmOperationalError::Unavailable)),
     };
     Ok(ProviderReceipt::new(
         value.transaction_hash,

@@ -5,6 +5,8 @@
 //! collection is expanded into an ordinary sequential child State; there is no runtime collection
 //! loop, output map, parallel branch, or multi-result join.
 
+mod bounds;
+
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 
@@ -523,7 +525,7 @@ pub struct EnterPortfolioCollection;
 /// Resumes Portfolio aggregation after one EVM balance collection.
 pub struct ResumePortfolioCollection;
 
-/// Maps an EVM balance failure into the Portfolio failure contract.
+/// Maps an original EVM balance failure into the Portfolio root failure contract.
 pub struct MapEvmBalanceFailure;
 
 /// Consolidates all completed collections into the Portfolio snapshot output.
@@ -571,13 +573,6 @@ impl_portfolio_state!(
     PortfolioContinuation,
     "mfm.portfolio.state.resume-collection@1",
     "Resumes Portfolio aggregation after one EVM balance collection."
-);
-impl_portfolio_state!(
-    MapEvmBalanceFailure,
-    EvmBalanceFailure,
-    PortfolioSnapshotOutput,
-    "mfm.portfolio.state.map-evm-failure@1",
-    "Maps an EVM balance failure into the Portfolio failure contract."
 );
 impl_portfolio_state!(
     ConsolidatePortfolio,
@@ -674,10 +669,27 @@ fn resume_portfolio_collection(
     }
 }
 
-fn map_evm_balance_failure(
-    input: EvmBalanceFailure,
-) -> ProposedStateOutcome<PortfolioSnapshotOutput, PortfolioSnapshotFailure> {
+impl mfm_program::ValueMap for MapEvmBalanceFailure {
+    type Input = EvmBalanceFailure;
+    type Output = PortfolioSnapshotFailure;
+    type Params = mfm_program::NoParams;
+    fn implementation_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.portfolio.map.evm-failure@1")
+            .map_err(|_| mfm_program::ProgramError::InvalidContract)
+    }
+    fn apply(
+        _: &Self::Params,
+        input: EvmBalanceFailure,
+    ) -> Result<PortfolioSnapshotFailure, mfm_program::StateExecutionError> {
+        Ok(map_evm_balance_failure(input))
+    }
+}
+
+fn map_evm_balance_failure(input: EvmBalanceFailure) -> PortfolioSnapshotFailure {
     let (collection_ordinal, code) = match input {
+        EvmBalanceFailure::AnchorChanged {
+            collection_ordinal, ..
+        } => (collection_ordinal, "anchor_changed".to_owned()),
         EvmBalanceFailure::SourceUnavailable {
             collection_ordinal,
             code,
@@ -689,11 +701,10 @@ fn map_evm_balance_failure(
             ..
         } => (collection_ordinal, code),
     };
-    let failure = match u16::try_from(collection_ordinal) {
+    match u16::try_from(collection_ordinal) {
         Ok(ordinal) => PortfolioSnapshotFailure::CollectionFailed { ordinal, code },
         Err(_) => PortfolioSnapshotFailure::ConsolidationFailed,
-    };
-    portfolio_failure(failure)
+    }
 }
 
 fn consolidate_portfolio(
@@ -770,7 +781,7 @@ macro_rules! impl_portfolio_pure {
 impl_portfolio_pure!(InitializePortfolio, initialize_portfolio);
 impl_portfolio_pure!(EnterPortfolioCollection, enter_portfolio_collection);
 impl_portfolio_pure!(ResumePortfolioCollection, resume_portfolio_collection);
-impl_portfolio_pure!(MapEvmBalanceFailure, map_evm_balance_failure);
+
 impl_portfolio_pure!(ConsolidatePortfolio, consolidate_portfolio);
 
 fn portfolio_success<O, F>(output: O) -> ProposedStateOutcome<O, F> {
@@ -1026,7 +1037,6 @@ pub fn plan_snapshot(
     }
 
     let mut demand = Vec::with_capacity(config.collections.len());
-    let mut checked_collections = Vec::with_capacity(config.collections.len());
     for collection in &config.collections {
         let chain_id = collection
             .request
@@ -1044,25 +1054,40 @@ pub fn plan_snapshot(
             collection.request.clone(),
             route_ref.clone(),
         )?);
-        checked_collections.push(
-            CollectEvmBalances::<PortfolioContinuation>::new(
-                route_ref,
-                collection.request.sources().len(),
-            )
-            .map_err(|_| PortfolioError::Program)?,
-        );
     }
     let input =
         PortfolioSnapshotInput::from_demand(config.portfolio_id.clone(), demand, selector.quote)?;
+    let (conclusion_bound, child_bounds) = bounds::conclusion_bounds(&input)?;
+    let checked_collections = input
+        .collections
+        .iter()
+        .zip(child_bounds)
+        .map(|(demand, bound)| {
+            CollectEvmBalances::<PortfolioContinuation>::new(
+                demand.route_ref.clone(),
+                demand.request.clone(),
+                bound,
+            )
+            .map_err(|_| PortfolioError::Program)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let root = PortfolioSnapshotOperation {
         checked_collections,
+        conclusion_bound,
     };
-    let program = expand_program(entry_point_id()?, &root).map_err(|_| PortfolioError::Program)?;
+    let program = expand_program(
+        entry_point_id()?,
+        &root,
+        &input,
+        mfm_program::ProgramLimits::new(0),
+    )
+    .map_err(|_| PortfolioError::Program)?;
     Ok((program, input))
 }
 
 struct PortfolioSnapshotOperation {
     checked_collections: Vec<CollectEvmBalances<PortfolioContinuation>>,
+    conclusion_bound: mfm_program::ConclusionBound,
 }
 
 impl Operation for PortfolioSnapshotOperation {
@@ -1070,22 +1095,51 @@ impl Operation for PortfolioSnapshotOperation {
     type Output = PortfolioSnapshotOutput;
     type Failure = PortfolioSnapshotFailure;
 
+    fn validate_input(&self, input: &Self::Input) -> mfm_program::Result<()> {
+        input
+            .validate()
+            .map_err(|_| mfm_program::ProgramError::InvalidContract)?;
+        if input.collections.len() != self.checked_collections.len()
+            || !input
+                .collections
+                .iter()
+                .zip(&self.checked_collections)
+                .all(|(demand, child)| child.matches_request(&demand.request, &demand.route_ref))
+        {
+            return Err(mfm_program::ProgramError::InvalidContract);
+        }
+        Ok(())
+    }
     fn expand(
         &self,
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
-        body.pure::<InitializePortfolio>()?;
+        use mfm_program::{Identity, NoParams, Occurrence};
+        body.pure::<InitializePortfolio, Identity<Self::Failure>>(
+            NoParams,
+            Occurrence::new(),
+            self.conclusion_bound,
+        )?;
         for child in &self.checked_collections {
-            body.pure::<EnterPortfolioCollection>()?;
-            body.with_failure_handler::<EvmBalanceFailure, PortfolioContinuation>(
-                |protected| {
-                    protected.operation(child)?;
-                    protected.pure::<ResumePortfolioCollection>()
-                },
-                |handler| handler.pure::<MapEvmBalanceFailure>(),
+            body.pure::<EnterPortfolioCollection, Identity<Self::Failure>>(
+                NoParams,
+                Occurrence::new(),
+                self.conclusion_bound,
+            )?;
+            body.operation::<CollectEvmBalances<PortfolioContinuation>, MapEvmBalanceFailure>(
+                child, NoParams,
+            )?;
+            body.pure::<ResumePortfolioCollection, Identity<Self::Failure>>(
+                NoParams,
+                Occurrence::new(),
+                self.conclusion_bound,
             )?;
         }
-        body.pure::<ConsolidatePortfolio>()
+        body.pure::<ConsolidatePortfolio, Identity<Self::Failure>>(
+            NoParams,
+            Occurrence::new(),
+            self.conclusion_bound,
+        )
     }
 }
 

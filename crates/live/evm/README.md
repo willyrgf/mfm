@@ -21,8 +21,9 @@ value ref and returns evidence carrying that same ref. No operation ID, serializ
 transport, adapter recanonicalization, or provider-side domain decode remains. The confirmation
 subject re-observes the committed block its intent names and never the head.
 
-Every JSON-RPC error, unexpected null, malformed field, oversize body, and transport failure is
-Unavailable. An empty broad token-call result alone is SafeFailure where the balance contract
+Provider failures retain the closed `EvmOperationalError` cause: request/body deadlines are Timeout,
+HTTP 429 is RateLimited, and other transport, JSON-RPC, unexpected-null, malformed-field and
+oversize-body failures are Unavailable. An empty broad token-call result alone is SafeFailure where the balance contract
 admits a missing token interface; receipt null alone means not yet mined.
 Anchored block absence is SafeFailure, codeless target is Rejected, and replacement of the authored
 block is authenticated IntegrityBlocked evidence. Local capability, route, binding, signer purpose,
@@ -37,13 +38,17 @@ remains in `mfm-keystore`.
 
 `register_evm_transaction_adapters` registers reservation, preparation, and execution callbacks.
 `register_evm_transaction_states::<C, R>` separately installs the four exact executable State
-ABIs for an accumulated context and recipe; it binds no IO and performs no graph planning. Reservation captures binding,
+ABIs and injected failure map for an accumulated context and recipe; it binds no IO and performs no Program planning. Reservation captures binding,
 custody, and provider; preparation captures binding, custody, and signer; execution captures no
 signer. Reservation loads first, then observes pending nonce if absent. Preparation loads first,
 signs only when necessary, and validates the immutable first winner returned by custody.
 Execution decodes exact retained wire, recovers sender, checks receipt before submission, and
 submits at most once per invocation. CPU work runs in immediately awaited blocking closures;
 provider, signer, and custody IO stay outside them.
+
+Transaction adapter errors retain provider causes inside `EvmTransactionOperationalError::Provider`;
+custody and signer failures are AuthorityUnavailable and SignerUnavailable respectively. Local
+invariants bypass recovery classification and carry no external detail.
 
 A matching submission returns Pending. Transport failures, missing acknowledgements, malformed
 ingress, or mismatched returned hashes are Unavailable. A validated receipt and matching canonical

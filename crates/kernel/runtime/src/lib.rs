@@ -7,11 +7,13 @@
 
 mod assembly;
 mod engine;
+mod report;
+pub use report::{AdapterIncidentView, FailureCauseView, FailureReport, InvocationFailure};
 
 use std::sync::Arc;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_ids::{ContentDigest, ContentRef, RunId};
+use mfm_ids::{ContentDigest, ContentRef, EffectId, ExecutionPosition, RunId, StatePosition};
 use mfm_program::Program;
 use mfm_store::Store;
 use mfm_values::MfmValue;
@@ -30,9 +32,9 @@ pub enum RuntimeError {
     /// The requested admission differs from retained genesis.
     #[error("run admission conflicts with retained history")]
     AdmissionConflict,
-    /// A Store append may have committed.
-    #[error("append outcome is indeterminate")]
-    Indeterminate,
+    /// A mechanical Store operation failed; ambiguous acknowledgement remains distinguishable.
+    #[error("store operation failed")]
+    Store(#[from] mfm_store::StoreError),
     /// Retained physical, structural, or semantic history is invalid.
     #[error("retained run history is invalid")]
     InvalidHistory,
@@ -42,22 +44,8 @@ pub enum RuntimeError {
     /// A local fixed capacity was exceeded.
     #[error("runtime capacity exceeded")]
     Capacity,
-    /// A required Store or capability dependency is unavailable.
-    #[error("runtime dependency is unavailable")]
-    Unavailable,
     /// A trusted local invariant failed.
     #[error("runtime internal failure")]
-    Internal,
-}
-
-/// Redaction-safe error available to Read and Effect adapters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum AdapterError {
-    /// No trusted observation or settlement evidence was produced.
-    #[error("adapter is unavailable")]
-    Unavailable,
-    /// A trusted adapter invariant failed.
-    #[error("adapter failed")]
     Internal,
 }
 
@@ -76,21 +64,61 @@ pub enum EffectAdapterOutcome<E> {
 /// Durable public state of a run.
 pub enum RunViewState {
     /// The selected State is waiting for caller-driven progression.
-    Runnable,
+    Runnable {
+        /// Selected execution occurrence.
+        position: ExecutionPosition,
+        /// Committed transition that selected this occurrence.
+        reason: RunnableReason,
+    },
+    /// Acknowledged command awaiting reconciliation with the same authority.
+    EffectPending {
+        /// Prepared execution occurrence.
+        position: ExecutionPosition,
+        /// Exact retained Effect identity.
+        effect_id: EffectId,
+    },
     /// The Program reached its declared root success.
-    Succeeded(RetainedValueView),
+    Succeeded(ValueView),
     /// The Program reached its declared root failure.
-    Failed(RetainedValueView),
+    Failed(FailureReport),
 }
 
-/// Qualified retained terminal value.
-pub struct RetainedValueView {
+/// Committed transition that selected a runnable occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnableReason {
+    /// The preceding State succeeded, or the run was admitted.
+    Advance,
+    /// Retry with the same exact input.
+    Retry,
+    /// Restore the active retained checkpoint input.
+    Restart {
+        /// Selected checkpoint boundary.
+        checkpoint: StatePosition,
+    },
+}
+
+/// Qualified canonical value with an exact typed contract.
+pub struct ValueView {
     contract_ref: ContentRef,
     value_ref: ContentRef,
     canonical: PlainCanonicalJsonBytes,
 }
 
-impl RetainedValueView {
+impl ValueView {
+    /// Decodes the requested exact schema contract, rejecting structurally similar other types.
+    pub fn decode<T: MfmValue>(&self) -> mfm_values::Result<T> {
+        let expected = mfm_program::nominal_contract_ref::<T>()
+            .map_err(|_| mfm_values::ValueError::InvalidSchemaIdentity)?;
+        if expected != self.contract_ref {
+            return Err(mfm_values::ValueError::SchemaShapeMismatch);
+        }
+        T::schema_descriptor()?
+            .identity()
+            .validate_canonical_value(self.canonical_bytes())?;
+        serde_json::from_slice(self.canonical_bytes())
+            .map_err(|_| mfm_values::ValueError::SchemaShapeMismatch)
+    }
+
     /// Returns the nominal typed contract.
     pub const fn contract_ref(&self) -> &ContentRef {
         &self.contract_ref
@@ -155,7 +183,7 @@ impl Runtime {
         run_id: RunId,
         program: Program,
         c0: T,
-    ) -> Result<RunView> {
+    ) -> std::result::Result<RunView, InvocationFailure> {
         engine::start(
             self.assembly.handle(),
             Arc::clone(&self.store),
@@ -167,7 +195,7 @@ impl Runtime {
     }
 
     /// Loads and progresses an existing run.
-    pub async fn resume(&self, run_id: &RunId) -> Result<RunView> {
+    pub async fn resume(&self, run_id: &RunId) -> std::result::Result<RunView, InvocationFailure> {
         engine::resume(
             self.assembly.handle(),
             Arc::clone(&self.store),
@@ -177,7 +205,7 @@ impl Runtime {
     }
 
     /// Loads and folds an existing run without executing a State or adapter.
-    pub async fn read(&self, run_id: &RunId) -> Result<RunView> {
+    pub async fn read(&self, run_id: &RunId) -> std::result::Result<RunView, InvocationFailure> {
         engine::read(
             self.assembly.handle(),
             Arc::clone(&self.store),

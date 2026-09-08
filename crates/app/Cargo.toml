@@ -29,4 +29,5 @@ tokio = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
+mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-journal = { path = "../kernel/journal" }

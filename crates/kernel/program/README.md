@@ -1,86 +1,90 @@
 # mfm-program
 
-Program owns deterministic typed source authoring and the one checked canonical
-`mfm-program-document@3` graph with the required `mfm.program.v3` domain. An `Operation` describes
-reusable authoring-only composition; `OperationExpansion` lowers Pure States, exact-pair Reads and
-Effects, child Operations, structured Match
-joins, and exact failure handlers through one private flat draft. Operation values, callbacks,
-injection setup, and scope metadata are erased before Program construction.
+Program owns the immutable `mfm-program-document@4` sequence with the `mfm.program.v4` domain.
+An Operation performs deterministic source authoring; its input check and expansion commit the
+exact initial value, State contracts, resolved policies, root failure maps, checkpoints and finite
+bounds. Runtime associates typed implementations and owns execution and recovery. Old graph bytes
+are rejected.
 
 ```rust
 use mfm_ids::{EntryPointId, StableId};
 use mfm_program::{
-    expand_program, Never, Operation, OperationExpansion, ProgramError, ProposedStateOutcome,
-    PureState, State,
+    expand_program, ConclusionBound, Identity, Never, NoParams, Occurrence, Operation,
+    OperationExpansion, ProgramError, ProgramLimits, ProposedStateOutcome, PureState, State,
+    StateExecutionError,
 };
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
-struct Count {
-    value: u64,
-}
-
+struct Count { value: u64 }
 struct Increment;
-
 impl State for Increment {
     type Input = Count;
     type Output = Count;
     type Failure = Never;
-
     fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("example.program/increment@1")
-            .map_err(|_| ProgramError::InvalidContract)
+        StableId::new("mfm.example.increment@1").map_err(|_| ProgramError::InvalidContract)
     }
 }
-
 impl PureState for Increment {
-    fn evaluate(input: Count) -> ProposedStateOutcome<Count, Never> {
-        ProposedStateOutcome::Success {
-            output: Count {
-                value: input.value + 1,
-            },
-        }
+    fn evaluate(input: Count) -> Result<ProposedStateOutcome<Count, Never>, StateExecutionError> {
+        Ok(ProposedStateOutcome::Success {
+            output: Count { value: input.value.checked_add(1).ok_or(StateExecutionError)? },
+        })
     }
 }
-
 struct IncrementTwice;
-
 impl Operation for IncrementTwice {
     type Input = Count;
     type Output = Count;
     type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.pure::<Increment>()?;
-        body.pure::<Increment>()
+    fn validate_input(&self, input: &Count) -> mfm_program::Result<()> {
+        if input.value > u64::MAX - 2 { return Err(ProgramError::InvalidContract); }
+        Ok(())
+    }
+    fn expand(&self, body: &mut OperationExpansion<Count, Count, Never>) -> mfm_program::Result<()> {
+        let bound = ConclusionBound::new(4096)?;
+        body.pure::<Increment, Identity<Never>>(NoParams, Occurrence::new(), bound)?;
+        body.pure::<Increment, Identity<Never>>(NoParams, Occurrence::new(), bound)
     }
 }
-
+let input = Count { value: 10 };
 let program = expand_program(
-    EntryPointId::new("example.program/increment-twice@1").expect("entry point"),
+    EntryPointId::new("mfm.example/increment-twice@1").unwrap(),
     &IncrementTwice,
-)
-.expect("valid Program");
+    &input,
+    ProgramLimits::new(0),
+).unwrap();
 assert_eq!(program.declarations().len(), 2);
 ```
 
-Index zero is root. Final declarations are State or closed-sum Match. State successors are
-optional forward `u16` indices; absence means that branch's exact root contract. Read declarations
-retain capability, intent, evidence, and binding refs; Effect declarations retain capability,
-command, evidence, and binding refs. `Program::decode_canonical` is the retained
-wire ingress; raw declaration and Program source constructors are private.
+Classifiers select recoverability; handlers request retry, restart or Stop. They do not authorize
+execution. Independent scoped classifier/handler families and occurrence overrides resolve during
+expansion, with exact typed parameters and explicit domain/context maps. Framework defaults are
+NoRecovery and Stop with zero allowances. Explicit ValueMaps compose each original domain failure
+into the root contract; `FromNever` represents the uninhabited path.
 
-Program is content addressed and has no catalog, registry, erased value, runtime implementation,
-configuration contract, persisted Operation, or second wire DTO. The global frame bound counts
-genesis plus Pure/Read weight one and Effect weight two. Capability injection is deterministic
-authoring-time topology only and grants no provider, signer, or mutation authority.
-Operation implementations compose children only through `OperationExpansion`, and capability
-policies use typed `OperationExpansion` scopes for their before and after graphs. Direct trait callback calls bypass
-kernel callback accounting and are forbidden in reviewed production code. This trusted-code rule
-is not a security or authorization boundary; checked Program construction remains the persisted
-graph boundary.
+Checkpoint tokens belong to their authoring scope. Installed inherited handler bindings retain
+that owner; direct parent/sibling token capture in another scope is rejected. Final lowering resolves
+permitted tokens to typed sequence boundaries. Runtime qualifies activation, restored inputs,
+visits, budgets and Effect barriers from retained history.
+
+Capability injection authors before/after scopes around one designated Read or Effect. The
+expanded failure contract and designated failure conversion are explicit; suffixes are successful
+continuations. The complete scratch expansion must validate before merging into its caller. Hooks
+perform no IO or adapter registration.
+
+Synchronous authoring supports 16 callback levels including the root. Child Operations and injection
+hooks share that limit; before and after hooks are siblings. Nested entry is checked before its
+policy/execution descriptors are built, and suspended designated descriptors live in one boxed
+payload. A rejected expansion returns Capacity without leaking prefix, checkpoint, designated or
+suffix declarations. This bounds framework composition; trusted Rust callbacks must not recurse
+outside OperationExpansion or assume arbitrary stack allocation is sandboxed.
+
+Each Pure/Read conclusion has a complete frame bound; Effects separately bound prepare and
+conclusion. For global recovery limit G, Program conservatively reserves genesis plus G+1 full
+sequence segments. Bounds include retained objects, original/root failures and envelopes. Journal
+owns format ceilings and Runtime checks concrete admission before genesis or adapter IO. Recovery
+allowances and frame bounds are immutable Program data.

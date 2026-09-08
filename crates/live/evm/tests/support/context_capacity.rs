@@ -309,32 +309,52 @@ impl PureState for CapacityDecode {
 }
 struct CapacityOperation {
     binding: EvmTransactionBinding,
+    bound: mfm_program::ConclusionBound,
 }
 impl Operation for CapacityOperation {
     type Input = CapacityInitial;
     type Output = CapacityReport;
     type Failure = CapacityFailure;
+    fn validate_input(&self, input: &CapacityInitial) -> mfm_program::Result<()> {
+        if input.prior.binding() != &self.binding
+            || input.deployment.binding() != &self.binding
+            || input.configuration.binding() != &self.binding
+            || input.observation.route_ref()
+                != &self
+                    .binding
+                    .route
+                    .binding_ref()
+                    .map_err(|_| ProgramError::InvalidContract)?
+            || input.observation.chain_id() != self.binding.route.chain_instance.chain_id
+        {
+            return Err(ProgramError::InvalidContract);
+        }
+        Ok(())
+    }
     fn expand(
         &self,
         body: &mut OperationExpansion<CapacityInitial, CapacityReport, CapacityFailure>,
     ) -> mfm_program::Result<()> {
-        body.with_failure_handler::<FirstFailure, AfterFirst>(
-            |body| body.operation(&FirstTransaction::new(self.binding.clone())),
-            |body| body.pure::<Abort<FirstFailure, AfterFirst, CapacityFailure>>(),
+        use mfm_program::{Identity, NoParams, Occurrence};
+        let bounds = transaction_bounds(self.bound);
+        body.operation::<FirstTransaction, MapFailure<FirstFailure, CapacityFailure>>(
+            &FirstTransaction::new(self.binding.clone(), bounds),
+            NoParams,
         )?;
-        body.with_failure_handler::<SecondFailure, AfterSecond>(
-            |body| body.operation(&SecondTransaction::new(self.binding.clone())),
-            |body| body.pure::<Abort<SecondFailure, AfterSecond, CapacityFailure>>(),
+        body.operation::<SecondTransaction, MapFailure<SecondFailure, CapacityFailure>>(
+            &SecondTransaction::new(self.binding.clone(), bounds),
+            NoParams,
         )?;
-        body.with_failure_handler::<CallFailure, AfterCall>(
-            |body| body.operation(&CallTransaction::new(self.binding.clone())),
-            |body| body.pure::<Abort<CallFailure, AfterCall, CapacityFailure>>(),
+        body.operation::<CallTransaction, MapFailure<CallFailure, CapacityFailure>>(
+            &CallTransaction::new(self.binding.clone(), bounds),
+            NoParams,
         )?;
-        body.with_failure_handler::<ObservationFailure, AfterObservation>(
-            |body| body.read::<Observation, EvmAnchoredContractCallRead>(&self.binding.route),
-            |body| body.pure::<Abort<ObservationFailure, AfterObservation, CapacityFailure>>(),
-        )?;
-        body.pure::<CapacityDecode>()
+        body.read::<Observation, EvmAnchoredContractCallRead, MapFailure<ObservationFailure, CapacityFailure>>(&self.binding.route, NoParams, Occurrence::new(), self.bound)?;
+        body.pure::<CapacityDecode, Identity<CapacityFailure>>(
+            NoParams,
+            Occurrence::new(),
+            self.bound,
+        )
     }
 }
 
@@ -533,16 +553,16 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
             .unwrap();
         builder.register_pure::<CapacityDecode>().unwrap();
         builder
-            .register_pure::<Abort<FirstFailure, AfterFirst, CapacityFailure>>()
+            .register_map::<MapFailure<FirstFailure, CapacityFailure>>()
             .unwrap();
         builder
-            .register_pure::<Abort<SecondFailure, AfterSecond, CapacityFailure>>()
+            .register_map::<MapFailure<SecondFailure, CapacityFailure>>()
             .unwrap();
         builder
-            .register_pure::<Abort<CallFailure, AfterCall, CapacityFailure>>()
+            .register_map::<MapFailure<CallFailure, CapacityFailure>>()
             .unwrap();
         builder
-            .register_pure::<Abort<ObservationFailure, AfterObservation, CapacityFailure>>()
+            .register_map::<MapFailure<ObservationFailure, CapacityFailure>>()
             .unwrap();
         source.register(&mut builder, &binding);
         let runtime = Runtime::new(builder.finish(), store.clone());
@@ -551,11 +571,16 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
         ));
         let program = expand_program(
             EntryPointId::new("mfm.test/capacity-contract@1").unwrap(),
-            &CapacityOperation { binding },
+            &CapacityOperation {
+                binding,
+                bound: fixture_bound(&input),
+            },
+            &input,
+            mfm_program::ProgramLimits::new(1),
         )
         .unwrap();
         let terminal = runtime
-            .start(id.clone(), program, input.clone())
+            .start(id.clone(), program.clone(), input.clone())
             .await
             .unwrap();
         let value = match (terminal.state(), expected_reason) {
@@ -589,11 +614,10 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
                     report.context.configuration.outcome().target()
                 );
                 assert_eq!(terminal.head_sequence(), 24);
-                value
+                value.canonical_bytes()
             }
             (RunViewState::Failed(value), Some(reason)) => {
-                let report: CapacityFailure =
-                    serde_json::from_slice(value.canonical_bytes()).unwrap();
+                let report: CapacityFailure = root_failure(value);
                 assert_eq!(report.reason(), reason);
                 assert_eq!(report.request.label, 99);
                 assert_eq!(report.plans.creations.prior, input.prior);
@@ -606,17 +630,32 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
                     wire["plans"]["creations"]["deployment"].clone();
                 wire["plans"]["creations"]["deployment"] = prior;
                 assert!(serde_json::from_value::<CapacityFailure>(wire).is_err());
-                value
+                value.canonical_bytes()
             }
             _ => panic!("capacity branch mismatch"),
         };
-        assert!(value.canonical_bytes().len() < 8_388_608);
+        assert!(value.len() < 8_388_608);
         {
             let frames = store.frames.lock().unwrap();
             let total: usize = frames.iter().map(Vec::len).sum();
             let largest = frames.iter().map(Vec::len).max().unwrap();
             assert!(total < 536_870_912);
             assert!(largest < 25_231_360);
+            let admitted = program
+                .history_bound(mfm_program::ConclusionBound::new(frames[0].len() as u64).unwrap())
+                .unwrap();
+            assert_eq!(admitted.frames(), 47);
+            assert!(admitted.bytes() <= mfm_journal::MAX_RUN_BYTES);
+            assert!(total as u64 <= admitted.bytes());
+            assert!(frames
+                .iter()
+                .skip(1)
+                .all(|frame| frame.len() as u64 <= fixture_bound(&input).max_frame_bytes()));
+            println!(
+                "admitted {} frames / {} bytes",
+                admitted.frames(),
+                admitted.bytes()
+            );
             // Inspect every repeated object closure, rather than only the terminal payload.
             for frame in frames.iter() {
                 #[derive(Deserialize)]
@@ -633,14 +672,15 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
                     assert!(object.canonical.get().len() < 8_388_608);
                 }
             }
-            println!("context capacity {case} {create_bytes}/{call_bytes} {fault:?}: value={} total={total} largest={largest}", value.canonical_bytes().len());
+            println!("context capacity {case} {create_bytes}/{call_bytes} {fault:?}: value={} total={total} largest={largest}", value.len());
         }
         let cold = runtime.read(&id).await.unwrap();
         assert_eq!(cold.head_digest(), terminal.head_digest());
         let cold_value = match cold.state() {
-            RunViewState::Succeeded(v) | RunViewState::Failed(v) => v,
+            RunViewState::Succeeded(v) => v.canonical_bytes(),
+            RunViewState::Failed(v) => v.canonical_bytes(),
             _ => panic!("cold terminal"),
         };
-        assert_eq!(cold_value.canonical_bytes(), value.canonical_bytes());
+        assert_eq!(cold_value, value);
     }
 }

@@ -55,15 +55,29 @@ non-semantic and never enter Program bytes or durable history.
 Every execution receives an explicit caller-owned `RunId`. The shared `generate_run_id()` client
 primitive obtains exactly 32 bytes of OS cryptographic entropy and applies
 `mfm.run-id.random.v1`; an entropy failure is the stable `RunIdGenerationError`.
-`StartRunResult` reports the actual selected config revision. An ambiguously acknowledged append is
-the only `RunRequestError` carrying data, through the exact `RunRecovery::Start` or
-`RunRecovery::Progress` sum.
+`StartRunResult` reports the actual selected config revision. `RunRequestError` distinguishes
+pre-execution request errors, ambiguous appends with exact `RunRecovery::Start`/`Progress` identity,
+and stopped Runtime invocations. Ambiguous appends also retain the last completely qualified
+observation, or null when none was obtained. That observation is not a claim about the current head.
 
-`RequestError` owns stable redaction-safe codes and messages. `SerializableClientError` owns the one
-JSON envelope for plain, identified-start, and append-recovery errors. Retained revisions are
-revalidated as canonical documents on every start/list. Unbound routes fail before Runtime Store IO;
-deleting a revision does not revoke already admitted runs. Shared serializers preserve the
-`RunViewState` sum and embed terminal canonical bytes as a raw JSON value.
+`RequestError` owns reviewed codes and messages. `SerializableClientError::for_run` renders the
+shared invocation/recovery detail. An execution-stopped invocation includes its RunId and optional
+last observation; stopped Effect recovery includes the observed pending Effect, original reviewed
+operational cause, State-owned context and stop reason. It does not assert settlement or request
+automatic retry. `read_run`, `progress_run` and `start_run` preserve that distinction.
+
+`SerializableRunView` renders the current durable state as:
+
+- `runnable`: execution position/visit and tagged advance, retry or restart reason;
+- `effect_pending`: execution position/visit and exact retained EffectId;
+- `succeeded`: exact contract/value references and raw canonical value;
+- `failed`: canonical report reference and raw report containing original cause, applicable root
+  mapping, stop reason, execution position and committed recovery usage.
+
+The shipping Portfolio uses NoRecovery/Stop with zero allowances. Operational Read failure is a
+durable failed result; it cannot be resumed into a fresh attempt. Cancellation before a conclusion
+retains a runnable prefix. Retained revisions are checked on start/list; deleting a revision does
+not revoke an admitted run. No provider details or locators enter client models.
 
 The ignored `evm_contract_effect_e2e` integration test is the only app-level composition of the EVM
 transaction Effect and anchored transaction-route Read. It compiles a first-party Solidity fixture,

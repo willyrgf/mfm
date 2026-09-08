@@ -298,9 +298,9 @@ enum ProviderOperation {
 struct ScriptedProvider {
     chain: EvmChainInstance,
     pending: u64,
-    receipts: Mutex<VecDeque<Result<Option<ProviderReceipt>, AdapterError>>>,
+    receipts: Mutex<VecDeque<Result<Option<ProviderReceipt>, AdapterError<EvmOperationalError>>>>,
     canonical: EvmBlockAnchor,
-    submissions: Mutex<VecDeque<Result<Option<EvmHash>, AdapterError>>>,
+    submissions: Mutex<VecDeque<Result<Option<EvmHash>, AdapterError<EvmOperationalError>>>>,
     operations: Mutex<Vec<ProviderOperation>>,
     block_receipt_once: AtomicBool,
     receipt_entered: Notify,
@@ -328,14 +328,17 @@ impl ScriptedProvider {
         }
     }
 
-    fn push_receipt(&self, receipt: Result<Option<ProviderReceipt>, AdapterError>) {
+    fn push_receipt(
+        &self,
+        receipt: Result<Option<ProviderReceipt>, AdapterError<EvmOperationalError>>,
+    ) {
         self.receipts
             .lock()
             .expect("receipts lock")
             .push_back(receipt);
     }
 
-    fn push_submission(&self, result: Result<Option<EvmHash>, AdapterError>) {
+    fn push_submission(&self, result: Result<Option<EvmHash>, AdapterError<EvmOperationalError>>) {
         self.submissions
             .lock()
             .expect("submissions lock")
@@ -419,7 +422,9 @@ impl EvmTransactionProvider for ScriptedProvider {
                 .pop_front()
             {
                 Some(Ok(Some(hash))) => Ok(hash),
-                Some(Ok(None)) | None => evm_keccak256(&raw).map_err(|_| AdapterError::Internal),
+                Some(Ok(None)) | None => {
+                    evm_keccak256(&raw).map_err(|_| AdapterError::Invariant(AdapterInvariantError))
+                }
                 Some(Err(error)) => Err(error),
             }
         })
@@ -529,17 +534,33 @@ fn runtime(
         .unwrap();
     Runtime::new(builder.finish(), store)
 }
-fn program(binding: &EvmTransactionBinding) -> mfm_program::Program {
+fn program(input: &InitialContext) -> mfm_program::Program {
+    let frame_bytes = 4 * canonicalize_mfm_value(input).unwrap().0.as_bytes().len() as u64 + 16_384;
+    let effect = mfm_program::EffectBounds::new(frame_bytes, frame_bytes).unwrap();
+    let bounds = mfm_evm::EvmTransactionBounds {
+        reservation: effect,
+        preparation: effect,
+        execution: effect,
+        projection: mfm_program::ConclusionBound::new(frame_bytes).unwrap(),
+    };
     expand_program(
         EntryPointId::new("mfm.test/transaction@1").unwrap(),
-        &EvmTransaction::<InitialContext, RecoveryRecipe>::new(binding.clone()),
+        &EvmTransaction::<InitialContext, RecoveryRecipe>::new(
+            input.transaction.command().binding().clone(),
+            bounds,
+        ),
+        input,
+        mfm_program::ProgramLimits::new(0),
     )
     .unwrap()
 }
+
 fn run_id() -> RunId {
     RunId::from_digest(DigestBytes::from_array([8; 32]))
 }
-fn settled<T>(result: Result<EffectAdapterOutcome<T>, AdapterError>) -> T {
+fn settled<T>(
+    result: Result<EffectAdapterOutcome<T>, AdapterError<EvmTransactionOperationalError>>,
+) -> T {
     match result.unwrap() {
         EffectAdapterOutcome::Settled(value) => value,
         _ => panic!("expected settled stage"),
@@ -567,7 +588,7 @@ async fn reserve(
 }
 
 #[tokio::test]
-async fn graph_retries_identical_wire_and_cold_projection_needs_no_signer_call() {
+async fn pending_effect_reuses_identical_wire_and_cold_projection_needs_no_signer_call() {
     for reverted in [false, true] {
         let (_owner, signer, binding, command, _) = fixture().await;
         let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
@@ -580,25 +601,19 @@ async fn graph_retries_identical_wire_and_cold_projection_needs_no_signer_call()
             provider.clone(),
             store.clone(),
         );
-        let _view = hot
-            .start(
-                run_id(),
-                program(&binding),
-                RecoveryContext {
-                    unrelated: EvmU256::from_u64(42),
-                    transaction: CheckedCreatePlan::new(
-                        command.binding().clone(),
-                        command.input().to_vec(),
-                        command.value().clone(),
-                        command.gas_limit(),
-                        command.max_priority_fee_per_gas(),
-                        command.max_fee_per_gas(),
-                    )
-                    .unwrap(),
-                },
+        let input = RecoveryContext {
+            unrelated: EvmU256::from_u64(42),
+            transaction: CheckedCreatePlan::new(
+                command.binding().clone(),
+                command.input().to_vec(),
+                command.value().clone(),
+                command.gas_limit(),
+                command.max_priority_fee_per_gas(),
+                command.max_fee_per_gas(),
             )
-            .await
-            .unwrap();
+            .unwrap(),
+        };
+        let _view = hot.start(run_id(), program(&input), input).await.unwrap();
         let prepared = authority.state().unwrap().prepared.unwrap();
         let reject = Arc::new(RejectingSigner::matching(signer.as_ref()));
         let cold = runtime(
@@ -658,9 +673,8 @@ async fn graph_retries_identical_wire_and_cold_projection_needs_no_signer_call()
         );
         assert_eq!(provider.operations().len(), operation_count);
         let wire = match terminal.state() {
-            RunViewState::Succeeded(value) | RunViewState::Failed(value) => {
-                std::str::from_utf8(value.canonical_bytes()).unwrap()
-            }
+            RunViewState::Succeeded(value) => std::str::from_utf8(value.canonical_bytes()).unwrap(),
+            RunViewState::Failed(report) => std::str::from_utf8(report.canonical_bytes()).unwrap(),
             _ => panic!("terminal result"),
         };
         assert!(!wire.contains("raw_transaction"));
@@ -682,25 +696,22 @@ async fn custody_acknowledgement_loss_recovers_each_stage() {
             provider.clone(),
             store.clone(),
         );
-        assert!(matches!(
-            hot.start(
-                run_id(),
-                program(&binding),
-                RecoveryContext {
-                    unrelated: EvmU256::from_u64(0),
-                    transaction: CheckedCreatePlan::new(
-                        command.binding().clone(),
-                        command.input().to_vec(),
-                        command.value().clone(),
-                        command.gas_limit(),
-                        command.max_priority_fee_per_gas(),
-                        command.max_fee_per_gas()
-                    )
-                    .unwrap()
-                }
+        let input = RecoveryContext {
+            unrelated: EvmU256::from_u64(0),
+            transaction: CheckedCreatePlan::new(
+                command.binding().clone(),
+                command.input().to_vec(),
+                command.value().clone(),
+                command.gas_limit(),
+                command.max_priority_fee_per_gas(),
+                command.max_fee_per_gas(),
             )
-            .await,
-            Err(RuntimeError::Unavailable)
+            .unwrap(),
+        };
+        assert!(matches!(
+            hot.start(run_id(), program(&input), input).await,
+            Err(mfm_runtime::InvocationFailure::RecoveryStopped { incident, .. })
+                if matches!(incident.error.decode::<EvmTransactionOperationalError>().unwrap(), EvmTransactionOperationalError::AuthorityUnavailable)
         ));
         let signer: Arc<dyn Secp256k1Signer> = if fault == 2 {
             Arc::new(RejectingSigner::matching(signer.as_ref()))
@@ -798,7 +809,7 @@ async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_by
             execute_transaction(&binding, &authority, &provider, &id, &prepared)
                 .await
                 .err(),
-            Some(AdapterError::Internal)
+            Some(AdapterError::Invariant(AdapterInvariantError))
         );
     }
     provider.push_receipt(Ok(Some(ProviderReceipt::new(
@@ -814,10 +825,14 @@ async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_by
         execute_transaction(&binding, &authority, &provider, &id, &prepared)
             .await
             .err(),
-        Some(AdapterError::Unavailable)
+        Some(AdapterError::Operational(
+            EvmTransactionOperationalError::Provider {
+                cause: EvmOperationalError::Unavailable
+            }
+        ))
     );
     for submission in [
-        Err(AdapterError::Unavailable),
+        Err(AdapterError::Operational(EvmOperationalError::Unavailable)),
         Ok(Some(EvmHash::from_bytes([0x55; 32]))),
     ] {
         provider.push_submission(submission);
@@ -825,7 +840,11 @@ async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_by
             execute_transaction(&binding, &authority, &provider, &id, &prepared)
                 .await
                 .err(),
-            Some(AdapterError::Unavailable)
+            Some(AdapterError::Operational(
+                EvmTransactionOperationalError::Provider {
+                    cause: EvmOperationalError::Unavailable
+                }
+            ))
         );
     }
     assert_eq!(
@@ -858,7 +877,7 @@ async fn incorrect_signatures_and_corrupt_retained_wire_fail_before_provider_ent
         prepare_transaction(&binding, &authority, &wrong, &id, &reserved)
             .await
             .err(),
-        Some(AdapterError::Internal)
+        Some(AdapterError::Invariant(AdapterInvariantError))
     );
     assert!(authority.state().unwrap().prepared.is_none());
     let evidence =
@@ -873,7 +892,7 @@ async fn incorrect_signatures_and_corrupt_retained_wire_fail_before_provider_ent
         execute_transaction(&binding, &authority, &provider, &id, &prepared)
             .await
             .err(),
-        Some(AdapterError::Internal)
+        Some(AdapterError::Invariant(AdapterInvariantError))
     );
     assert_eq!(provider.operations(), operations);
 }
@@ -943,24 +962,19 @@ async fn every_transaction_journal_boundary_recovers_after_ambiguous_append() {
                 provider.clone(),
                 store.clone(),
             );
-            let _ = hot
-                .start(
-                    run_id(),
-                    program(&binding),
-                    RecoveryContext {
-                        unrelated: EvmU256::from_u64(42),
-                        transaction: CheckedCreatePlan::new(
-                            command.binding().clone(),
-                            command.input().to_vec(),
-                            command.value().clone(),
-                            command.gas_limit(),
-                            command.max_priority_fee_per_gas(),
-                            command.max_fee_per_gas(),
-                        )
-                        .unwrap(),
-                    },
+            let input = RecoveryContext {
+                unrelated: EvmU256::from_u64(42),
+                transaction: CheckedCreatePlan::new(
+                    command.binding().clone(),
+                    command.input().to_vec(),
+                    command.value().clone(),
+                    command.gas_limit(),
+                    command.max_priority_fee_per_gas(),
+                    command.max_fee_per_gas(),
                 )
-                .await;
+                .unwrap(),
+            };
+            let _ = hot.start(run_id(), program(&input), input).await;
             let mut completed = None;
             for _ in 0..5 {
                 let prepared = authority.state().and_then(|state| state.prepared);
@@ -989,8 +1003,11 @@ async fn every_transaction_journal_boundary_recovers_after_ambiguous_append() {
                         completed = Some(view);
                         break;
                     }
-                    Ok(view) => assert!(matches!(view.state(), RunViewState::Runnable)),
-                    Err(RuntimeError::Indeterminate) => {}
+                    Ok(view) => assert!(matches!(view.state(), RunViewState::EffectPending { .. })),
+                    Err(mfm_runtime::InvocationFailure::Execution {
+                        error: RuntimeError::Store(mfm_store::StoreError::Indeterminate),
+                        ..
+                    }) => {}
                     Err(error) => panic!("unexpected recovery result: {error:?}"),
                 }
             }
@@ -1016,26 +1033,20 @@ async fn cancelled_receipt_wait_resumes_exact_prepared_wire() {
         provider.clone(),
         store.clone(),
     );
-    let entry = program(&binding);
-    let task = tokio::spawn(async move {
-        hot.start(
-            run_id(),
-            entry,
-            RecoveryContext {
-                unrelated: EvmU256::from_u64(42),
-                transaction: CheckedCreatePlan::new(
-                    command.binding().clone(),
-                    command.input().to_vec(),
-                    command.value().clone(),
-                    command.gas_limit(),
-                    command.max_priority_fee_per_gas(),
-                    command.max_fee_per_gas(),
-                )
-                .unwrap(),
-            },
+    let input = RecoveryContext {
+        unrelated: EvmU256::from_u64(42),
+        transaction: CheckedCreatePlan::new(
+            command.binding().clone(),
+            command.input().to_vec(),
+            command.value().clone(),
+            command.gas_limit(),
+            command.max_priority_fee_per_gas(),
+            command.max_fee_per_gas(),
         )
-        .await
-    });
+        .unwrap(),
+    };
+    let entry = program(&input);
+    let task = tokio::spawn(async move { hot.start(run_id(), entry, input).await });
     provider.receipt_entered.notified().await;
     task.abort();
     assert!(matches!(task.await, Err(error) if error.is_cancelled()));
@@ -1049,7 +1060,41 @@ async fn cancelled_receipt_wait_resumes_exact_prepared_wire() {
     );
     assert!(matches!(
         cold.resume(&run_id()).await.unwrap().state(),
-        RunViewState::Runnable
+        RunViewState::EffectPending { .. }
     ));
     assert!(provider.operations().iter().any(|op| matches!(op, ProviderOperation::SubmitRaw(raw) if raw == prepared.raw_transaction().as_bytes())));
+}
+
+#[tokio::test]
+async fn unavailable_signer_retains_reservation_and_its_distinct_operational_cause() {
+    let (_owner, signer, binding, command, _) = fixture().await;
+    let authority = MemoryAuthority::new(binding.authority_epoch.clone());
+    let provider = ScriptedProvider::new(1337);
+    let reserved = reserve(
+        &binding,
+        &authority,
+        &provider,
+        &EffectId::from_digest(DigestBytes::from_array([1; 32])),
+        &command,
+    )
+    .await;
+    let operations = provider.operations().len();
+    let rejected = prepare_transaction(
+        &binding,
+        &authority,
+        &RejectingSigner::matching(signer.as_ref()),
+        &EffectId::from_digest(DigestBytes::from_array([2; 32])),
+        &reserved,
+    )
+    .await;
+    assert!(matches!(
+        rejected,
+        Err(AdapterError::Operational(
+            EvmTransactionOperationalError::SignerUnavailable
+        ))
+    ));
+    let retained = authority.state().unwrap();
+    assert_eq!(&retained.reservation, reserved.reservation());
+    assert!(retained.prepared.is_none());
+    assert_eq!(provider.operations().len(), operations);
 }

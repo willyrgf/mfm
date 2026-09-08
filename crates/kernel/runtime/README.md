@@ -1,32 +1,46 @@
 # mfm-runtime
 
-`RuntimeAssemblyBuilder::new` fallibly installs the framework codec. The builder registers typed
-values, Pure/Read/Effect States, Match descriptors, and distinct Read and Effect callbacks through
-one private capability registry; later registration errors never poison it. Infallible `finish`
-freezes one immutable assembly. Program association pre-resolves each State by its exact
-implementation/input/output/failure ABI into one closed mode-specific executable with only its
-valid functions, codecs, validators, and exact callback.
-Multiple exact value schemas may belong to one semantic family; exact `ContentRef`, Rust `TypeId`,
-and descriptor equality own codec registration and lookup. Semantic identity is never a fallback
-lookup key. Fold state keeps only declaration identity and qualified values; execution never
-performs a registry lookup or carries a second driver object.
+Runtime associates an immutable linear Program with typed States, codecs, root maps, classifiers,
+handlers and adapters. `RuntimeAssemblyBuilder::new` installs framework units; explicit registrations
+select exact contracts and parameters. A failed registration does not poison the builder. `finish`
+freezes the assembly. Generic States may share an implementation ID with different exact ABIs;
+value semantic IDs never substitute for exact schema/Rust-type/descriptor agreement.
 
-Runtime owns `start`, `resume`, `read`, and the sole hot/cold semantic fold. It appends genesis and
-fused Pure/Read conclusions through Store. An Effect first appends its exact command and derived
-`EffectId`, calls its adapter only after known insertion, then appends evidence and outcome as the
-adjacent conclusion. Runtime extends locally after `Inserted` and completely reloads after
-`NotInserted` or on cold entry. Match is a no-frame structural projection. `read` never progresses
-or calls an adapter; it re-prepares only to validate a retained Effect command and identity.
-The Match projection selects and qualifies the exact nested canonical payload bytes through the
-registered payload codec; it never serializes a typed selector or payload.
+The sole semantic fold drives admission, hot pre-append validation, local advancement and cold
+reconstruction. It derives position/visit, active checkpoint input, recovery usage and Effect
+barriers from retained history. Program commits the exact initial value. Admission checks that
+commitment and the complete bounded history before genesis or provider entry.
 
-Every Read callback receives `QualifiedValue.value_ref` for its exact intent, and hot and cold
-evidence binding receives that same reference. Every Effect callback receives the exact command
-value ref used in `EffectId` derivation. Neither callback receives the shared codec contract ref in
-its place.
+`start` admits and progresses, `resume` explicitly progresses an existing run, and `read`
+reconstructs without progression. Pure/Read outcomes and recovery decisions append atomically.
+Operational Read errors retain their original capability error and State-owned context without
+fabricating evidence or domain failure. Accepted retry/restart spends the committed allowance and
+yields at a fresh visit. Classification, handling, mapping or validation failure before append
+leaves the previous head unchanged.
 
-An Effect adapter returns `Pending` or `Settled(evidence)`. Pending appends no conclusion, restores
-the identical prepared fold state, and returns a publicly Runnable view without another adapter
-entry in that invocation. Adapter errors remain distinct redaction-safe Runtime errors and also
-append no conclusion. Dropping at any await is safety-neutral; Runtime has no background finalizer,
-semaphore, timeout, internal retry loop, or public State-by-State lifecycle.
+An Effect appends its complete command before adapter entry. Pending settlement yields an
+`EffectPending` view with the exact EffectId and visit; operational failure returns
+`InvocationFailure::RecoveryStopped` with that observed pending authority and typed incident.
+Neither appends a settlement or authorizes a replacement. Explicit resume reconciles the same
+command/identity. Accepted settlement appends the adjacent conclusion. Settled Effects cannot retry
+or restart, and retained prepares prevent checkpoint restart across their position.
+
+Store insertion extends the local fold. A losing append reloads and returns the winner without
+executing its newly selected visit. Ambiguous acknowledgement preserves the Store error source and
+last observed qualified head; that observation does not assert the current state. Cancellation
+before append spends no recovery allowance and there is no background completion or retry loop.
+
+Cold reconstruction never reruns completed State interpretations, classifiers, handlers, context
+builders or maps, and performs no provider/signer IO. It re-prepares only the final unresolved
+Effect to qualify its exact retained command before reconciliation. Completed outcomes and policy
+decisions are authoritative retained facts, subject to structural and Runtime safety qualification.
+
+RunView distinguishes runnable (position and advance/retry/restart reason), Effect-pending,
+succeeded ValueView and failed FailureReport. Reports are content-addressed canonical values derived
+from retained original/root causes, reason, position and usage; they are not independent Journal
+frames. Typed decoding rechecks the exact value contract. InvocationFailure separately represents
+an interrupted call, possibly with unknown durable state. Application owns transport rendering.
+
+Heavy qualification, callback evaluation and report construction run in immediately awaited pure
+blocking work. Store and adapter IO stay in the async driver. Public callbacks receive exact intent
+or command instance references, never codec contract references in their place.

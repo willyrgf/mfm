@@ -22,4 +22,8 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+mfm-journal = { path = "../../kernel/journal" }
+mfm-runtime = { path = "../../kernel/runtime" }
+mfm-store = { path = "../../kernel/store" }
+tokio = { workspace = true }
 serde_json = { workspace = true }

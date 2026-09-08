@@ -13,8 +13,10 @@ use mfm_evm::custody::{
     PreparedRecord, Reservation,
 };
 use mfm_evm::{EvmAddress, EvmAuthorityEpoch, EvmChainInstance, EvmHash};
-use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
-use mfm_journal::{JournalHistory, OutcomeKind};
+use mfm_ids::{
+    ContentRef, DigestAlgorithm, DigestBytes, ExecutionPosition, SchemaId, StatePosition, VisitId,
+};
+use mfm_journal::{DomainConclusion, JournalHistory, JournalObject};
 use mfm_store::{AppendResult, RunIndex, RunPageLimit};
 use sqlx::postgres::PgSslMode;
 use sqlx::{Connection, Executor};
@@ -85,9 +87,13 @@ fn successor(run_id: &RunId) -> EncodedRunFrame {
     let output = br#"{"value":2}"#;
     history
         .encode_pure_conclusion(
-            OutcomeKind::Success,
-            &reference("mfm.test.output", output),
-            output,
+            ExecutionPosition {
+                state: StatePosition::new(0).unwrap(),
+                visit: VisitId::new(0),
+            },
+            DomainConclusion::Success {
+                output: JournalObject::new(&reference("mfm.test.output", output), output).unwrap(),
+            },
         )
         .expect("successor")
 }

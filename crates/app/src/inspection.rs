@@ -1,7 +1,7 @@
 use mfm_evm::{
     CheckChainIdentity, CollectEvmBalances, ConfirmBalanceAnchor, ConsolidateBalanceCollection,
     EvmAnchorRead, EvmBalanceRead, EvmChainIdentityRead, ReadInitialAnchor, ReadNativeBalance,
-    ReadTokenBalance, ReadTokenDecimals, SelectBalanceAsset,
+    ReadTokenBalance, ReadTokenDecimals,
 };
 use mfm_portfolio::{
     ConsolidatePortfolio, EnterPortfolioCollection, InitializePortfolio, MapEvmBalanceFailure,
@@ -110,18 +110,16 @@ const OPERATIONS: [ComponentSummary; 1] = [ComponentSummary::new(
     CollectEvmBalances::<PortfolioContinuation>::DESCRIPTION,
 )];
 
-const STATES: [StateRegistration; 13] = [
+const STATES: [StateRegistration; 11] = [
     pure_state!(InitializePortfolio),
     pure_state!(EnterPortfolioCollection),
     pure_state!(ResumePortfolioCollection),
-    pure_state!(MapEvmBalanceFailure),
     pure_state!(ConsolidatePortfolio),
     read_state!(
         CheckChainIdentity<PortfolioContinuation>,
         EvmChainIdentityRead
     ),
     read_state!(ReadInitialAnchor<PortfolioContinuation>, EvmAnchorRead),
-    pure_state!(SelectBalanceAsset<PortfolioContinuation>),
     read_state!(ReadNativeBalance<PortfolioContinuation>, EvmBalanceRead),
     read_state!(ReadTokenDecimals<PortfolioContinuation>, EvmBalanceRead),
     read_state!(ReadTokenBalance<PortfolioContinuation>, EvmBalanceRead),
@@ -133,7 +131,7 @@ pub(crate) fn register_states(builder: &mut RuntimeAssemblyBuilder) -> mfm_runti
     for state in &STATES {
         (state.register)(builder)?;
     }
-    Ok(())
+    builder.register_map::<MapEvmBalanceFailure>()
 }
 
 pub(crate) fn components() -> Vec<ComponentSummary> {

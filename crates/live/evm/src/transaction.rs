@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use mfm_capabilities::EffectCapabilityContract;
+use mfm_capabilities::{AdapterError, AdapterInvariantError};
 use mfm_evm::custody::{
     AuthorityError, EvmTransactionAuthority, ExactRawTransaction, NonceDomain, PreparedRecord,
     Reservation,
@@ -11,8 +12,9 @@ use mfm_evm::{
     Eip1559TransactionCommand, EvmAddress, EvmBlockAnchor, EvmChainInstance, EvmHash,
     EvmTransactionBinding, EvmTransactionEffect, EvmTransactionReceipt, EvmTransactionSettlement,
 };
+use mfm_evm::{EvmOperationalError, EvmTransactionOperationalError};
 use mfm_ids::{ContentRef, EffectId, StableId};
-use mfm_runtime::{AdapterError, EffectAdapterOutcome, RuntimeAssemblyBuilder, RuntimeError};
+use mfm_runtime::{EffectAdapterOutcome, RuntimeAssemblyBuilder, RuntimeError};
 use mfm_signing::{recover_public_key, Secp256k1Signer};
 
 use crate::codec::{
@@ -206,9 +208,9 @@ fn check_binding(
     binding: &EvmTransactionBinding,
     authority: &dyn EvmTransactionAuthority,
     command: &Eip1559TransactionCommand,
-) -> Result<(), AdapterError> {
+) -> Result<(), AdapterError<EvmTransactionOperationalError>> {
     if command.binding() != binding || (&binding.authority_epoch) != authority.authority_epoch() {
-        return Err(AdapterError::Internal);
+        return Err(AdapterError::Invariant(AdapterInvariantError));
     }
     Ok(())
 }
@@ -219,13 +221,16 @@ async fn reserve_nonce(
     id: &EffectId,
     reference: &ContentRef,
     command: &Eip1559TransactionCommand,
-) -> Result<EffectAdapterOutcome<Reservation>, AdapterError> {
+) -> Result<EffectAdapterOutcome<Reservation>, AdapterError<EvmTransactionOperationalError>> {
     check_binding(binding, authority, command)?;
     let reservation = match authority.load(id).await.map_err(map_authority_error)? {
         Some(loaded) => loaded.reservation,
         None => {
             verify_chain(command, provider).await?;
-            let observed = provider.pending_nonce(&binding.sender).await?;
+            let observed = provider
+                .pending_nonce(&binding.sender)
+                .await
+                .map_err(map_provider_error)?;
             authority
                 .reserve_or_compare(id, reference, &NonceDomain::from_binding(binding), observed)
                 .await
@@ -239,27 +244,27 @@ async fn reserve_nonce(
         &NonceDomain::from_binding(binding),
     )?;
     EvmNonceReservationEffect::bind_evidence(id, command, &reservation)
-        .map_err(|_| AdapterError::Internal)?;
+        .map_err(|_| AdapterError::Invariant(AdapterInvariantError))?;
     Ok(EffectAdapterOutcome::Settled(reservation))
 }
 async fn load_reserved(
     authority: &dyn EvmTransactionAuthority,
     command: &ReservedEvmTransaction,
-) -> Result<Option<PreparedRecord>, AdapterError> {
+) -> Result<Option<PreparedRecord>, AdapterError<EvmTransactionOperationalError>> {
     let loaded = authority
         .load(command.reservation().effect_id())
         .await
         .map_err(map_authority_error)?
-        .ok_or(AdapterError::Internal)?;
+        .ok_or(AdapterError::Invariant(AdapterInvariantError))?;
     if &loaded.reservation != command.reservation() {
-        return Err(AdapterError::Internal);
+        return Err(AdapterError::Invariant(AdapterInvariantError));
     }
     Ok(loaded.prepared)
 }
 async fn qualify_prepared(
     command: &ReservedEvmTransaction,
     prepared: PreparedRecord,
-) -> Result<PreparedRecord, AdapterError> {
+) -> Result<PreparedRecord, AdapterError<EvmTransactionOperationalError>> {
     let command = command.clone();
     tokio::task::spawn_blocking(move || {
         validate_signed_transaction(
@@ -269,11 +274,11 @@ async fn qualify_prepared(
             prepared.raw_transaction(),
             &command.command().binding().sender,
         )
-        .map_err(|_| AdapterError::Internal)?;
+        .map_err(|_| AdapterError::Invariant(AdapterInvariantError))?;
         Ok(prepared)
     })
     .await
-    .map_err(|_| AdapterError::Internal)?
+    .map_err(|_| AdapterError::Invariant(AdapterInvariantError))?
 }
 async fn prepare_transaction(
     binding: &EvmTransactionBinding,
@@ -281,7 +286,10 @@ async fn prepare_transaction(
     signer: &dyn Secp256k1Signer,
     id: &EffectId,
     command: &ReservedEvmTransaction,
-) -> Result<EffectAdapterOutcome<PreparedEvmTransactionEvidence>, AdapterError> {
+) -> Result<
+    EffectAdapterOutcome<PreparedEvmTransactionEvidence>,
+    AdapterError<EvmTransactionOperationalError>,
+> {
     check_binding(binding, authority, command.command())?;
     let prepared = match load_reserved(authority, command).await? {
         Some(prepared) => qualify_prepared(command, prepared).await?,
@@ -291,26 +299,25 @@ async fn prepare_transaction(
                 transaction_signing_digest(owned.command(), owned.reservation().nonce())
             })
             .await
-            .map_err(|_| AdapterError::Internal)?
-            .map_err(|_| AdapterError::Internal)?;
-            let signature = signer
-                .sign(digest)
-                .await
-                .map_err(|_| AdapterError::Unavailable)?;
+            .map_err(|_| AdapterError::Invariant(AdapterInvariantError))?
+            .map_err(|_| AdapterError::Invariant(AdapterInvariantError))?;
+            let signature = signer.sign(digest).await.map_err(|_| {
+                AdapterError::Operational(EvmTransactionOperationalError::SignerUnavailable)
+            })?;
             let owned = command.clone();
             let candidate = tokio::task::spawn_blocking(move || {
-                let recovered =
-                    recover_public_key(digest, &signature).map_err(|_| AdapterError::Internal)?;
+                let recovered = recover_public_key(digest, &signature)
+                    .map_err(|_| AdapterError::Invariant(AdapterInvariantError))?;
                 if ethereum_address(&recovered) != owned.command().binding().sender {
-                    return Err(AdapterError::Internal);
+                    return Err(AdapterError::Invariant(AdapterInvariantError));
                 }
                 let (raw, hash) =
                     signed_transaction(owned.command(), owned.reservation().nonce(), signature)
-                        .map_err(|_| AdapterError::Internal)?;
+                        .map_err(|_| AdapterError::Invariant(AdapterInvariantError))?;
                 Ok(PreparedRecord::new(hash, raw))
             })
             .await
-            .map_err(|_| AdapterError::Internal)??;
+            .map_err(|_| AdapterError::Invariant(AdapterInvariantError))??;
             let winner = authority
                 .retain_prepared(command.reservation(), &candidate)
                 .await
@@ -335,20 +342,34 @@ async fn execute_transaction(
     provider: &dyn EvmTransactionProvider,
     id: &EffectId,
     command: &PreparedEvmTransaction,
-) -> Result<EffectAdapterOutcome<EvmTransactionSettlement>, AdapterError> {
+) -> Result<
+    EffectAdapterOutcome<EvmTransactionSettlement>,
+    AdapterError<EvmTransactionOperationalError>,
+> {
     check_binding(binding, authority, command.reserved().command())?;
     let prepared = load_reserved(authority, command.reserved())
         .await?
-        .ok_or(AdapterError::Internal)?;
+        .ok_or(AdapterError::Invariant(AdapterInvariantError))?;
     if prepared.transaction_hash() != command.transaction_hash() {
-        return Err(AdapterError::Internal);
+        return Err(AdapterError::Invariant(AdapterInvariantError));
     }
     let prepared = qualify_prepared(command.reserved(), prepared).await?;
     verify_chain(command.reserved().command(), provider).await?;
-    let Some(receipt) = provider.receipt(command.transaction_hash()).await? else {
-        let submitted = provider.submit_raw(prepared.raw_transaction()).await?;
+    let Some(receipt) = provider
+        .receipt(command.transaction_hash())
+        .await
+        .map_err(map_provider_error)?
+    else {
+        let submitted = provider
+            .submit_raw(prepared.raw_transaction())
+            .await
+            .map_err(map_provider_error)?;
         if &submitted != command.transaction_hash() {
-            return Err(AdapterError::Unavailable);
+            return Err(AdapterError::Operational(
+                EvmTransactionOperationalError::Provider {
+                    cause: EvmOperationalError::Unavailable,
+                },
+            ));
         }
         return Ok(EffectAdapterOutcome::Pending);
     };
@@ -361,12 +382,17 @@ async fn execute_transaction(
     )?;
     let canonical = provider
         .canonical_block(&receipt.block_anchor().number)
-        .await?;
+        .await
+        .map_err(map_provider_error)?;
     if &canonical != receipt.block_anchor() {
-        return Err(AdapterError::Unavailable);
+        return Err(AdapterError::Operational(
+            EvmTransactionOperationalError::Provider {
+                cause: EvmOperationalError::Unavailable,
+            },
+        ));
     }
     EvmTransactionEffect::bind_evidence(id, command, &evidence)
-        .map_err(|_| AdapterError::Internal)?;
+        .map_err(|_| AdapterError::Invariant(AdapterInvariantError))?;
     Ok(EffectAdapterOutcome::Settled(evidence))
 }
 fn validate_receipt(
@@ -375,16 +401,16 @@ fn validate_receipt(
     prepared: &PreparedRecord,
     command: &Eip1559TransactionCommand,
     nonce: u64,
-) -> Result<EvmTransactionSettlement, AdapterError> {
+) -> Result<EvmTransactionSettlement, AdapterError<EvmTransactionOperationalError>> {
     if receipt.transaction_hash() != prepared.transaction_hash()
         || receipt.sender() != (&command.binding().sender)
     {
-        return Err(AdapterError::Internal);
+        return Err(AdapterError::Invariant(AdapterInvariantError));
     }
     match (command.to(), receipt.result()) {
         (None, ProviderReceiptResult::SuccessCreate { contract_address }) => {
             if contract_address != &create_address(&command.binding().sender, nonce) {
-                return Err(AdapterError::Internal);
+                return Err(AdapterError::Invariant(AdapterInvariantError));
             }
             Ok(EvmTransactionSettlement::created(
                 effect_id.clone(),
@@ -424,18 +450,21 @@ fn validate_receipt(
                 },
             ))
         }
-        _ => Err(AdapterError::Internal),
+        _ => Err(AdapterError::Invariant(AdapterInvariantError)),
     }
 }
 
 async fn verify_chain(
     command: &Eip1559TransactionCommand,
     provider: &dyn EvmTransactionProvider,
-) -> Result<(), AdapterError> {
+) -> Result<(), AdapterError<EvmTransactionOperationalError>> {
     let expected = &command.binding().route.chain_instance;
-    let observed = provider.chain_instance().await?;
+    let observed = provider
+        .chain_instance()
+        .await
+        .map_err(map_provider_error)?;
     if &observed != expected {
-        return Err(AdapterError::Internal);
+        return Err(AdapterError::Invariant(AdapterInvariantError));
     }
     Ok(())
 }
@@ -445,20 +474,35 @@ fn validate_reservation(
     effect_id: &EffectId,
     command_value_ref: &ContentRef,
     domain: &NonceDomain,
-) -> Result<(), AdapterError> {
+) -> Result<(), AdapterError<EvmTransactionOperationalError>> {
     if reservation.effect_id() != effect_id
         || reservation.command_value_ref() != command_value_ref
         || reservation.domain() != domain
     {
-        return Err(AdapterError::Internal);
+        return Err(AdapterError::Invariant(AdapterInvariantError));
     }
     Ok(())
 }
 
-const fn map_authority_error(error: AuthorityError) -> AdapterError {
+const fn map_provider_error(
+    error: AdapterError<EvmOperationalError>,
+) -> AdapterError<EvmTransactionOperationalError> {
     match error {
-        AuthorityError::Unavailable => AdapterError::Unavailable,
-        AuthorityError::Internal => AdapterError::Internal,
+        AdapterError::Operational(cause) => {
+            AdapterError::Operational(EvmTransactionOperationalError::Provider { cause })
+        }
+        AdapterError::Invariant(error) => AdapterError::Invariant(error),
+    }
+}
+
+const fn map_authority_error(
+    error: AuthorityError,
+) -> AdapterError<EvmTransactionOperationalError> {
+    match error {
+        AuthorityError::Unavailable => {
+            AdapterError::Operational(EvmTransactionOperationalError::AuthorityUnavailable)
+        }
+        AuthorityError::Internal => AdapterError::Invariant(AdapterInvariantError),
     }
 }
 

@@ -66,17 +66,23 @@ or duplicate fields, and uses the shared 1–200 page bound with default 50.
 
 Ordinary routed errors are exactly `{"code":"...","message":"..."}` with the shared stable
 Application error serializer, except that a start request after identity selection also carries its
-`run_id`. Ambiguous run appends add the shared tagged `recovery` object. REST-local errors cover
+`run_id`. Ambiguous run appends add the shared tagged `recovery` object and `last_observed` (possibly null).
+Other stopped Runtime calls add a tagged `invocation` containing their RunId and last observation,
+or the unresolved Effect observation, typed operational incident/context and stop reason. These
+are request failures, not newly appended terminal run states. Stopped recovery returns 503;
+execution faults use their reviewed request status. REST-local errors cover
 invalid body/query/media/path/header, fallback 404/405, body size, and RunId entropy failure. HTTP
 parser failures before Axum routing are outside that JSON contract. A durably failed run remains a
 successful HTTP request with status 200 and tagged `state.kind:"failed"`.
 
 The CLI-only `postgres init` retains schema authority outside the daemon. Both client surfaces may
 generate a RunId before their one Application call. HTTP status represents request success, while
-CLI exit 1 may represent a runnable or durably failed run.
+CLI exit 1 represents a runnable, Effect-pending or durably failed run. Runnable views carry
+position/visit and tagged reason; pending views carry the exact EffectId. Failed views embed the
+canonical `report` and its reference, while successful views embed the canonical `value`.
 
 `nix run .#run -- --task client-e2e` builds the CLI and REST binaries explicitly. It admits an exact
-historical run with a generated REST identity through a deliberately unavailable live Read, proves
+historical run with a generated REST identity by interrupting an in-flight live Read, proves
 the durable runnable prefix, deletes the selected config, cold-resumes the admitted Program through
 this listener against Reth, validates the complete snapshot, and reloads the identical RunView
 through the CLI. It then reimports the same revision and requires a fresh CLI-generated run to

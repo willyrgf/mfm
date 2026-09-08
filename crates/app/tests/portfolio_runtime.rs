@@ -10,6 +10,7 @@ use mfm_app::{
     SerializableRunView, MAX_EVM_BINDINGS,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_capabilities::{AdapterError, AdapterInvariantError};
 use mfm_config::{
     ConfigDigest, ConfigFuture, ConfigImportResult, ConfigName, ConfigRepository,
     ConfigRepositoryError, ConfigRevision, MemoryConfigRepository, MAX_CONFIG_DOCUMENT_BYTES,
@@ -20,7 +21,7 @@ use mfm_evm::{
 };
 use mfm_evm_live::{EvmReadProvider, ProviderFuture};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId};
-use mfm_runtime::{AdapterError, RunViewState};
+use mfm_runtime::RunViewState;
 use mfm_store::{AppendResult, MemoryStore, Store, StoreError};
 
 const ANCHOR: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -28,7 +29,8 @@ const ANCHOR: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 struct Provider {
     chain_id: u64,
     calls: AtomicUsize,
-    available: std::sync::atomic::AtomicBool,
+    blocked: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
 }
 
 impl EvmReadProvider for Provider {
@@ -39,12 +41,14 @@ impl EvmReadProvider for Provider {
     ) -> ProviderFuture<'a, EvmReadEvidence> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            if !self.available.load(Ordering::SeqCst) {
-                return Err(AdapterError::Unavailable);
+            if self.blocked.load(Ordering::SeqCst) {
+                self.entered.notify_one();
+                return std::future::pending().await;
             }
             let value = match intent.subject() {
                 EvmReadSubject::ChainIdentity => EvmReadValue::ChainId(
-                    NonZeroU64::new(self.chain_id).ok_or(AdapterError::Internal)?,
+                    NonZeroU64::new(self.chain_id)
+                        .ok_or(AdapterError::Invariant(AdapterInvariantError))?,
                 ),
                 EvmReadSubject::InitialAnchor | EvmReadSubject::ConfirmAnchor { .. } => {
                     EvmReadValue::Anchor(EvmBlockAnchor {
@@ -71,7 +75,7 @@ impl EvmReadProvider for Provider {
         _intent_value_ref: &'a ContentRef,
         _intent: &'a AnchoredContractCallIntent,
     ) -> ProviderFuture<'a, AnchoredContractCallEvidence> {
-        Box::pin(async { Err(AdapterError::Internal) })
+        Box::pin(async { Err(AdapterError::Invariant(AdapterInvariantError)) })
     }
 }
 
@@ -79,7 +83,8 @@ fn provider(chain_id: u64) -> Arc<Provider> {
     Arc::new(Provider {
         chain_id,
         calls: AtomicUsize::new(0),
-        available: std::sync::atomic::AtomicBool::new(true),
+        blocked: std::sync::atomic::AtomicBool::new(false),
+        entered: tokio::sync::Notify::new(),
     })
 }
 
@@ -597,6 +602,12 @@ async fn ambiguous_run_appends_carry_exact_start_and_progress_recovery_sums() {
         panic!("start append must be ambiguous");
     };
     assert_eq!(error.code(), "run_append_indeterminate");
+    let serialized = serde_json::to_value(mfm_app::SerializableClientError::for_run(
+        &error,
+        &error.to_string(),
+    ))
+    .unwrap();
+    assert_eq!(serialized["last_observed"], serde_json::Value::Null);
     assert!(matches!(
         error.recovery(),
         Some(RunRecovery::Start { run_id: retained, config })
@@ -605,7 +616,7 @@ async fn ambiguous_run_appends_carry_exact_start_and_progress_recovery_sums() {
 
     let progress_backend = Arc::new(FaultStore::new());
     let progress_provider = provider(1);
-    progress_provider.available.store(false, Ordering::SeqCst);
+    progress_provider.blocked.store(true, Ordering::SeqCst);
     let progress_app = application_with_backend(
         &[(1, "alpha", Arc::clone(&progress_provider))],
         Arc::clone(&progress_backend),
@@ -615,15 +626,20 @@ async fn ambiguous_run_appends_carry_exact_start_and_progress_recovery_sums() {
         .import_config(progress_name.clone(), document(vec![(1, "alpha")]).await)
         .await
         .expect("import");
-    assert!(matches!(
-        progress_app
-            .start_run(run_id(41), &selection(&progress_config))
-            .await,
-        Err(mfm_app::RunRequestError::Request(
-            RequestError::DependencyUnavailable
-        ))
-    ));
-    progress_provider.available.store(true, Ordering::SeqCst);
+    {
+        let selected = selection(&progress_config);
+        let start = progress_app.start_run(run_id(41), &selected);
+        tokio::pin!(start);
+        tokio::select! {
+            result = &mut start => panic!("blocked Read unexpectedly completed: {}", result.is_ok()),
+            _ = progress_provider.entered.notified() => {},
+            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => panic!("Read was not entered"),
+        }
+    }
+    let retained = progress_app.read_run(&run_id(41)).await.unwrap();
+    assert_eq!(retained.head_sequence(), 3);
+    assert!(matches!(retained.state(), RunViewState::Runnable { .. }));
+    progress_provider.blocked.store(false, Ordering::SeqCst);
     progress_backend.fail_next_append();
     let Err(error) = progress_app.progress_run(&run_id(41)).await else {
         panic!("progress append must be ambiguous");
@@ -632,4 +648,88 @@ async fn ambiguous_run_appends_carry_exact_start_and_progress_recovery_sums() {
         error.recovery(),
         Some(RunRecovery::Progress { run_id: retained }) if retained == &run_id(41)
     ));
+    let serialized = serde_json::to_value(mfm_app::SerializableClientError::for_run(
+        &error,
+        &error.to_string(),
+    ))
+    .unwrap();
+    assert_eq!(serialized["last_observed"]["head_sequence"], 3);
+    assert_eq!(serialized["last_observed"]["state"]["kind"], "runnable");
+}
+
+struct TimedOutProvider(AtomicUsize);
+impl EvmReadProvider for TimedOutProvider {
+    fn observe<'a>(
+        &'a self,
+        _: &'a ContentRef,
+        _: &'a EvmReadIntent,
+    ) -> ProviderFuture<'a, EvmReadEvidence> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {
+            Err(AdapterError::Operational(
+                mfm_evm::EvmOperationalError::Timeout,
+            ))
+        })
+    }
+    fn observe_anchored_call<'a>(
+        &'a self,
+        _: &'a ContentRef,
+        _: &'a AnchoredContractCallIntent,
+    ) -> ProviderFuture<'a, AnchoredContractCallEvidence> {
+        panic!("balance Program cannot enter transaction-route observation")
+    }
+}
+
+#[tokio::test]
+async fn client_models_distinguish_durable_provider_failure_from_unknown_invocation_scope() {
+    let provider = Arc::new(TimedOutProvider(AtomicUsize::new(0)));
+    let bindings = BoundCapabilitySet::new(vec![(
+        1,
+        EvmEndpoint::new("alpha").unwrap(),
+        provider.clone() as Arc<dyn EvmReadProvider>,
+    )])
+    .unwrap();
+    let composed = ComposedRuntime::compose(Arc::new(MemoryStore::new()), bindings).unwrap();
+    let app = Application::from_parts(composed, Arc::new(MemoryConfigRepository::default()));
+    let imported = app
+        .import_config(
+            config_name("typed-failure"),
+            document(vec![(1, "alpha")]).await,
+        )
+        .await
+        .unwrap();
+    let started = app
+        .start_run(run_id(70), &selection(&imported))
+        .await
+        .unwrap();
+    let model = serde_json::to_value(SerializableRunView::new(started.run())).unwrap();
+    assert_eq!(model["state"]["kind"], "failed");
+    assert_eq!(model["state"]["report"]["reason"], "nonrecoverable");
+    assert_eq!(model["state"]["report"]["cause"]["kind"], "adapter");
+    assert_eq!(
+        model["state"]["report"]["cause"]["error"]["canonical"],
+        "timeout"
+    );
+    assert_eq!(
+        model["state"]["report"]["cause"]["state_context"]["canonical"]["source_ordinal"],
+        0
+    );
+    assert!(model["state"]["report"]["cause"].get("root").is_none());
+    let cold = app.read_run(&run_id(70)).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(SerializableRunView::new(&cold)).unwrap(),
+        model
+    );
+    assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+    let error = app.read_run(&run_id(71)).await.err().unwrap();
+    let error_model = serde_json::to_value(mfm_app::SerializableClientError::for_run(
+        &error,
+        &error.to_string(),
+    ))
+    .unwrap();
+    assert_eq!(error_model["code"], "run_absent");
+    assert_eq!(
+        error_model["invocation"],
+        serde_json::json!({"kind":"execution_stopped", "run_id":run_id(71), "last_observed":null})
+    );
 }

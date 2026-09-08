@@ -43,7 +43,7 @@ The whole harness includes:
 
 - [Managed E2E](crates/live/evm/tests/evm_contract_effect_e2e.rs): resources, funding, acknowledgement
   loss, Runtime construction, progress, external nonce advancement, recovery, and assertions.
-- [Workflow support](crates/live/evm/tests/support/contract_workflow.rs): contexts, graph, recipe
+- [Workflow support](crates/live/evm/tests/support/contract_workflow.rs): contexts, sequence, recipe
   selection, ABI/report semantics, failure adaptation, and State registrations.
 - [Deterministic coverage](crates/live/evm/tests/support/accumulating_contract.rs): scripted external
   evidence, recording Store, failures, and cold terminal checks.
@@ -75,10 +75,10 @@ that the capabilities already exist. Detailed fault verification belongs in sepa
 | **1. Obtain a wallet** | `generated_signer`: entropy, checked scalar construction, rejected-candidate retries, and import | Reviewed wallet creation and key-handle lifecycle, reusing checked keystore primitives | Request an ephemeral wallet or supply a key through the supported import API; secrets stay outside persisted workflow configuration |
 | **1. Fund the wallet** | `fund_sender`, `funding_rpc`, `funding_response_body`, `FundingResponse<T>`, `FundingError` | A reusable **`DevNodeFundWallet` Effect State** with a dev-node adapter and shared bounded RPC transport. No separate general faucet-authority subsystem is required. Define funded readiness and retry behavior that cannot accidentally fund twice | Select the dev node, recipient, amount, and supported funding options; inspect funding evidence in the report |
 | **2. Import the key and supply capabilities** | The test's `runtime(...)` opens Store/authority/provider, installs State and adapter families, and reconstructs handles | A production entry point owns import, dependency construction/lifecycle, exact registrations, and use of the **existing sole Runtime**. The local factory duplicates composition work, not the Runtime engine. Fault wrappers and deliberate reconstruction move to dedicated integration infrastructure | Select deployment and explicit capabilities. No test-owned Runtime factory, assembly builder, resource-recovery implementation, or fault wrapper |
-| **3. Select workflow, ABI, and inputs** | `EffectFixtureOperation`, recipe aliases, ABI helpers, `DecodeValue`, and `register_fixture_states` | Checked configuration of supported operation order, ABI/function or selector, and **static typed arguments**; production encoding/decoding, graph construction, and executable registration | Configure which operations run, which ABI/function to invoke, and values such as `configure(42)`. No custom fixture State, codec, or registration list |
+| **3. Select workflow, ABI, and inputs** | `EffectFixtureOperation`, recipe aliases, ABI helpers, `DecodeValue`, and `register_fixture_states` | Checked configuration of supported operation order, ABI/function or selector, and **static typed arguments**; production encoding/decoding, sequence construction, and executable registration | Configure which operations run, which ABI/function to invoke, and values such as `configure(42)`. No custom fixture State, codec, or registration list |
 | **3. Select/discover fees** | Fixed fee constants and manually constructed transaction plans | Reusable **RPC fee-discovery Read States**, retained fee evidence, and deterministic application of configured fee rules/bounds. Recovery of an acknowledged prepare reuses its original command and fees | Select fixed fees or discovery and its supported policy/bounds; no fee-query or calculation implementation |
 | **3. Connect prior outputs — future gap** | Specialized production `CallCreatedAt` and `ObserveAt` recipes; no general configurable output-to-argument mapping | Future checked references such as **“argument X takes output Y from State Z”**, including type, dependency-order, branch-availability, and identity checks. Tracked in [known gaps](docs/known-gaps.md#configuration-driven-workflows); not required for the initial static-input surface | Initially use static inputs and supported built-in connections. Later select named output references through configuration, not new forwarding States |
-| **3. Define terminal failure classes** | `Abort`, its State implementations/registrations, failure regions, and `TryFrom` conversions | Simple supported class-based terminal/retry policy with production classification and propagation. **General recovery remains a [known gap](docs/known-gaps.md#general-execution-and-recovery-policy)**. Stopping on a deadline or infrastructure error must not fabricate a durable domain failure | Configure which supported failure classes terminate the operation and which permit supported retries; no custom failure converter or recovery graph for ordinary policy |
+| **3. Define terminal failure classes** | `Abort`, its State implementations/registrations, failure regions, and `TryFrom` conversions | Simple supported class-based terminal/retry policy with production classification and propagation. **Configured product orchestration remains a [known gap](docs/known-gaps.md#general-execution-and-recovery-policy)**. Stopping on a deadline or infrastructure error must not fabricate a durable domain failure | Configure which supported failure classes terminate the operation and which permit supported retries; no custom failure converter or recovery policy for ordinary policy |
 | **3 / 5. Define and retain report content** | `FixtureFailure` construction/decoding, context-to-report conversion, and analogous capacity code | Complete checked **success and failure reports** containing configured product/step names and order, selected public inputs/plans, retained facts, available outputs, failure classes, and supported consistency-check results. Preserve declared facts within capacity limits | Configure names, chosen report content, and supported expectation rules. These are report configuration/data, not test-owned schemas, converters, or validators |
 | **4. Execute under policy** | `drive_to_success`, resume-before-start logic, polling/deadline handling, and repeated reconstruction | Production owns admission, execution, progress/deadline/retry policy, lifecycle, supported recovery, and typed result delivery over the existing Runtime. Optional injected-fault schedules are configuration of dedicated dev/test infrastructure, not ordinary operation semantics | Supply execution policy as configuration. No local driver, forced interruption, or intermediate head/nonce assertions in the consumer E2E; those belong to focused unit/integration tests |
 | **5. Inspect the typed terminal report** | `terminal_value`, failure/wallet JSON decoding, and mixed terminal/intermediate assertions | Exact-contract-checked typed result access; distinguish durable success/failure reports from a stopped attempt with resumable history | **Check final report results against the configured scenario.** No manual JSON decoding or reconstruction of execution history; independent wire/recovery assertions remain in dedicated tests |
@@ -142,7 +142,7 @@ consumer E2E should not reproduce either policy in a local helper.
 For supported EVM behavior, consumers should configure an ordered list of operations, selected
 ABI/function or selector, static typed arguments, public plan options, and reporting/failure policy.
 Production code should validate that configuration, encode/decode ABI values, construct the exact
-graph, and install its executable requirements. It should reject incompatible selectors, argument
+sequence, and install its executable requirements. It should reject incompatible selectors, argument
 shapes, and unsupported operations through checked admission, without asking the test author to
 write another State or registration list.
 
@@ -169,7 +169,7 @@ stable identity; it must not become a dynamic untyped context bag. See
 
 Consumers should select which supported failure classes terminate an operation and which admit
 supported retry/recovery behavior. The implementation must not require consumer-written `Abort`
-States, `TryFrom` report conversions, failure-handler registration, or a new recovery graph merely
+States, `TryFrom` report conversions, policy registration, or a new recovery policy merely
 to express ordinary policy.
 
 Production components own reviewed failure classes, classification, and typed propagation. The
@@ -240,8 +240,8 @@ prepared-wire recovery, external nonce advancement, cold history, or capacity gu
 | Runtime/database teardown and reconstruction | Production lifecycle where supported for users; deliberate boundary manipulation in dedicated recovery tests |
 | Solidity fixture source/compiler task and managed service provisioning | Managed test infrastructure; E2E receives the artifact and deployment configuration |
 | ABI selectors, setter values, fee choices, operation order, report selections | Checked consumer configuration interpreted by production components |
-| Calldata codecs, `DecodeValue`, graph/registration assembly, failure/report conversion | Reusable production implementation for the supported configurable operations |
-| Capacity graphs, hostile report wires, exact head/append assertions | Focused unit/integration/capacity suites |
+| Calldata codecs, `DecodeValue`, sequence/registration assembly, failure/report conversion | Reusable production implementation for the supported configurable operations |
+| Capacity sequences, hostile report wires, exact head/append assertions | Focused unit/integration/capacity suites |
 | Final expected report values | Consumer E2E assertions |
 
 Resource provisioning can remain part of the managed test environment. That does not imply the

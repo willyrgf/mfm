@@ -223,6 +223,7 @@ pub(super) fn action_matches(
 /// Capability for the reserve-nonce Effect.
 pub struct EvmNonceReservationEffect;
 impl EffectCapabilityContract for EvmNonceReservationEffect {
+    type OperationalError = crate::EvmTransactionOperationalError;
     type Command = Eip1559TransactionCommand;
     type Evidence = Reservation;
     fn contract_id() -> mfm_capabilities::Result<StableId> {
@@ -250,6 +251,7 @@ impl EffectCapabilityContract for EvmNonceReservationEffect {
 /// Capability for the prepare-transaction Effect.
 pub struct EvmTransactionPreparationEffect;
 impl EffectCapabilityContract for EvmTransactionPreparationEffect {
+    type OperationalError = crate::EvmTransactionOperationalError;
     type Command = ReservedEvmTransaction;
     type Evidence = PreparedEvmTransactionEvidence;
     fn contract_id() -> mfm_capabilities::Result<StableId> {
@@ -274,6 +276,7 @@ impl EffectCapabilityContract for EvmTransactionPreparationEffect {
 /// Capability for the execute-transaction Effect.
 pub struct EvmTransactionEffect;
 impl EffectCapabilityContract for EvmTransactionEffect {
+    type OperationalError = crate::EvmTransactionOperationalError;
     type Command = PreparedEvmTransaction;
     type Evidence = EvmTransactionSettlement;
     fn contract_id() -> mfm_capabilities::Result<StableId> {
@@ -364,6 +367,22 @@ impl<C: MfmValueTrait, R: TransactionRecipe<C>> State for ProjectEvmTransactionO
 impl<C: MfmValueTrait, R: TransactionRecipe<C>> EffectState<EvmNonceReservationEffect>
     for ReserveEvmNonce<C, R>
 {
+    type AdapterContext = crate::EvmTransactionAdapterContext;
+    fn adapter_context(
+        input: &Self::Input,
+        command: &Eip1559TransactionCommand,
+        _: &crate::EvmTransactionOperationalError,
+    ) -> Result<Self::AdapterContext, StateExecutionError> {
+        if &<Self as EffectState<EvmNonceReservationEffect>>::prepare(input)
+            .map_err(|_| StateExecutionError)?
+            != command
+        {
+            return Err(StateExecutionError);
+        }
+        Ok(crate::EvmTransactionAdapterContext::Reservation {
+            binding: command.binding().clone(),
+        })
+    }
     fn prepare(input: &C) -> Result<Eip1559TransactionCommand, PreparationError> {
         let command = R::command(input);
         if !R::Success::accepts(&command) {
@@ -395,6 +414,22 @@ where
         With<PreparedTransactionFacts> = PreparedContext<C, R>,
     >,
 {
+    type AdapterContext = crate::EvmTransactionAdapterContext;
+    fn adapter_context(
+        input: &Self::Input,
+        command: &ReservedEvmTransaction,
+        _: &crate::EvmTransactionOperationalError,
+    ) -> Result<Self::AdapterContext, StateExecutionError> {
+        if &<Self as EffectState<EvmTransactionPreparationEffect>>::prepare(input)
+            .map_err(|_| StateExecutionError)?
+            != command
+        {
+            return Err(StateExecutionError);
+        }
+        Ok(crate::EvmTransactionAdapterContext::Preparation {
+            reservation: command.reservation().clone(),
+        })
+    }
     fn prepare(input: &Self::Input) -> Result<ReservedEvmTransaction, PreparationError> {
         Ok(<R::Slot as ContextSlot<Self::Input>>::get(input).clone())
     }
@@ -420,6 +455,23 @@ where
         With<ExecutedTransactionFacts> = ExecutedContext<C, R>,
     >,
 {
+    type AdapterContext = crate::EvmTransactionAdapterContext;
+    fn adapter_context(
+        input: &Self::Input,
+        command: &PreparedEvmTransaction,
+        _: &crate::EvmTransactionOperationalError,
+    ) -> Result<Self::AdapterContext, StateExecutionError> {
+        if &<Self as EffectState<EvmTransactionEffect>>::prepare(input)
+            .map_err(|_| StateExecutionError)?
+            != command
+        {
+            return Err(StateExecutionError);
+        }
+        Ok(crate::EvmTransactionAdapterContext::Execution {
+            reservation: command.reserved().reservation().clone(),
+            transaction_hash: command.transaction_hash().clone(),
+        })
+    }
     fn prepare(input: &Self::Input) -> Result<PreparedEvmTransaction, PreparationError> {
         Ok(<R::Slot as ContextSlot<Self::Input>>::get(input).execution_command())
     }
@@ -474,6 +526,10 @@ impl<C: MfmValueTrait, R: TransactionRecipe<C>> CapabilityInjection<ReserveEvmNo
     type ExpandedInput = <ReserveEvmNonce<C, R> as State>::Input;
     type ExpandedOutput = <ReserveEvmNonce<C, R> as State>::Output;
     type ExpandedFailure = Never;
+    type FailureMap = mfm_program::Identity<Never>;
+    fn failure_map_params(_: &Self::Setup) -> mfm_program::Result<mfm_program::NoParams> {
+        Ok(mfm_program::NoParams)
+    }
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         setup
             .binding_ref()
@@ -488,6 +544,10 @@ impl<C: MfmValueTrait, R: TransactionRecipe<C>> CapabilityInjection<PrepareEvmTr
     type ExpandedInput = <PrepareEvmTransaction<C, R> as State>::Input;
     type ExpandedOutput = <PrepareEvmTransaction<C, R> as State>::Output;
     type ExpandedFailure = Never;
+    type FailureMap = mfm_program::Identity<Never>;
+    fn failure_map_params(_: &Self::Setup) -> mfm_program::Result<mfm_program::NoParams> {
+        Ok(mfm_program::NoParams)
+    }
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         setup
             .binding_ref()
@@ -495,18 +555,45 @@ impl<C: MfmValueTrait, R: TransactionRecipe<C>> CapabilityInjection<PrepareEvmTr
     }
 }
 
+/// Complete caller-specific closure bounds for the four injected transaction States.
+#[derive(Debug, Clone, Copy)]
+pub struct EvmTransactionBounds {
+    /// Nonce reservation command and conclusion maxima.
+    pub reservation: mfm_program::EffectBounds,
+    /// Wire preparation command and conclusion maxima.
+    pub preparation: mfm_program::EffectBounds,
+    /// Transaction execution command and conclusion maxima.
+    pub execution: mfm_program::EffectBounds,
+    /// Projection success or original/root failure closure maximum.
+    pub projection: mfm_program::ConclusionBound,
+}
+
+/// Immutable authoring setup for transaction injection; no execution handles are retained.
+pub struct EvmTransactionSetup {
+    /// Checked public adapter binding.
+    pub binding: EvmTransactionBinding,
+    /// Complete bounds derived for the concrete recipe and caller context.
+    pub bounds: EvmTransactionBounds,
+}
+
 impl<C: MfmValueTrait, R: TransactionRecipe<C>> CapabilityInjection<ExecuteEvmTransaction<C, R>>
     for EvmTransactionEffect
 where
     PrepareEvmTransaction<C, R>: EffectState<EvmTransactionPreparationEffect>,
-    ProjectEvmTransactionOutcome<C, R>: PureState,
+    ProjectEvmTransactionOutcome<C, R>:
+        PureState<Failure = EvmTransactionFailure<ExecutedContext<C, R>>>,
 {
-    type Setup = EvmTransactionBinding;
+    type Setup = EvmTransactionSetup;
     type ExpandedInput = C;
     type ExpandedOutput = CompletedContext<C, R>;
     type ExpandedFailure = EvmTransactionFailure<ExecutedContext<C, R>>;
+    type FailureMap = mfm_program::FromNever<Self::ExpandedFailure>;
+    fn failure_map_params(_: &Self::Setup) -> mfm_program::Result<mfm_program::NoParams> {
+        Ok(mfm_program::NoParams)
+    }
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         setup
+            .binding
             .binding_ref()
             .map_err(|_| ProgramError::InvalidContract)
     }
@@ -518,31 +605,31 @@ where
             Self::ExpandedFailure,
         >,
     ) -> mfm_program::Result<()> {
-        expansion.effect::<ReserveEvmNonce<C, R>, EvmNonceReservationEffect>(setup)?;
-        expansion.effect::<PrepareEvmTransaction<C, R>, EvmTransactionPreparationEffect>(setup)
+        expansion.effect::<ReserveEvmNonce<C, R>, EvmNonceReservationEffect, mfm_program::FromNever<Self::ExpandedFailure>>(&setup.binding, mfm_program::NoParams, mfm_program::Occurrence::new(), setup.bounds.reservation)?;
+        expansion.effect::<PrepareEvmTransaction<C, R>, EvmTransactionPreparationEffect, mfm_program::FromNever<Self::ExpandedFailure>>(&setup.binding, mfm_program::NoParams, mfm_program::Occurrence::new(), setup.bounds.preparation)
     }
     fn write_after(
-        _: &Self::Setup,
+        setup: &Self::Setup,
         expansion: &mut OperationExpansion<
             <ExecuteEvmTransaction<C, R> as State>::Output,
             Self::ExpandedOutput,
             Self::ExpandedFailure,
         >,
     ) -> mfm_program::Result<()> {
-        expansion.pure::<ProjectEvmTransactionOutcome<C, R>>()
+        expansion.pure::<ProjectEvmTransactionOutcome<C, R>, mfm_program::Identity<Self::ExpandedFailure>>(mfm_program::NoParams, mfm_program::Occurrence::new(), setup.bounds.projection)
     }
 }
 
 /// Public one-transaction authoring entry point; injection installs all four durable States.
 pub struct EvmTransaction<C, R> {
-    binding: EvmTransactionBinding,
+    setup: EvmTransactionSetup,
     context: PhantomData<fn() -> (C, R)>,
 }
 impl<C, R> EvmTransaction<C, R> {
     /// Selects the explicit adapter binding for this authored transaction.
-    pub const fn new(binding: EvmTransactionBinding) -> Self {
+    pub const fn new(binding: EvmTransactionBinding, bounds: EvmTransactionBounds) -> Self {
         Self {
-            binding,
+            setup: EvmTransactionSetup { binding, bounds },
             context: PhantomData,
         }
     }
@@ -552,7 +639,7 @@ where
     ExecuteEvmTransaction<C, R>: EffectState<EvmTransactionEffect>,
     EvmTransactionEffect: CapabilityInjection<
         ExecuteEvmTransaction<C, R>,
-        Setup = EvmTransactionBinding,
+        Setup = EvmTransactionSetup,
         ExpandedInput = C,
         ExpandedOutput = CompletedContext<C, R>,
         ExpandedFailure = EvmTransactionFailure<ExecutedContext<C, R>>,
@@ -561,10 +648,17 @@ where
     type Input = C;
     type Output = CompletedContext<C, R>;
     type Failure = EvmTransactionFailure<ExecutedContext<C, R>>;
+    fn validate_input(&self, input: &C) -> mfm_program::Result<()> {
+        let command = R::command(input);
+        if command.binding() != &self.setup.binding || !R::Success::accepts(&command) {
+            return Err(ProgramError::InvalidContract);
+        }
+        Ok(())
+    }
     fn expand(
         &self,
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
-        body.effect::<ExecuteEvmTransaction<C, R>, EvmTransactionEffect>(&self.binding)
+        body.effect::<ExecuteEvmTransaction<C, R>, EvmTransactionEffect, mfm_program::Identity<Self::Failure>>(&self.setup, mfm_program::NoParams, mfm_program::Occurrence::new(), self.setup.bounds.execution)
     }
 }

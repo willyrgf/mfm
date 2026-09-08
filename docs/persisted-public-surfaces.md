@@ -1,12 +1,15 @@
 # Persisted and public surfaces
 
-Program v3 is one strict checked canonical document requiring `domain: "mfm.program.v3"`. It
-contains entry point, admitted-context contract, exact root success/failure contracts, and an
-ordered State/Match declaration array. There is no public wire DTO parallel to `Program`.
+Program v4 is one strict checked canonical document requiring `domain: "mfm.program.v4"`. It
+contains the entry point, admitted-context contract and exact initial value ref, root success/failure
+contracts, and an ordered State sequence with selected recovery policies, maps, checkpoints, and
+finite lifecycle bounds. There is no public wire DTO parallel to `Program`.
 
-Journal persists only canonical `mfm.run.frame.v2` frames. Genesis records the exact Program and C0.
+Journal persists only canonical `mfm.run.frame.v3` frames. Genesis records the exact Program and C0.
 Later frames are a fused Pure conclusion, a fused Read intent/evidence/outcome conclusion, an Effect
-prepare, or its immediately adjacent conclusion. A prepare may be the final record of a complete
+prepare, or its immediately adjacent conclusion. Conclusions retain the execution position and visit,
+original domain failure or typed operational error/context, and the atomic recovery decision. A Stop
+also retains the mapped root failure when applicable. A prepare may be the final record of a complete
 valid prefix. Every referenced object appears exactly once in the frame-local sorted object closure.
 Recursive heads use `content:sha256-v1` over exact canonical frame bytes.
 
@@ -52,12 +55,14 @@ and no mutable status. Public config management exposes import, complete listing
 Exact retained run-start selection never adds config provenance to Journal or the mechanical
 RunIndex: the exact Program and C0 remain the durable execution admission.
 
-Public `RunView` contains RunId, durable sequence/head, and `Runnable`, typed `Succeeded`, or typed
-`Failed`. Terminal retained values expose contract ref, instance ref, and exact canonical bytes.
-A selected State and a prepared pending Effect both render as `Runnable`; Effect command, evidence,
-and identity are not added to the public view.
-Client JSON preserves that sum and embeds the terminal canonical bytes as a raw JSON value rather
-than a quoted string.
+Public `RunView` contains RunId, durable sequence/head, and one of `Runnable`, `EffectPending`,
+`Succeeded`, or `Failed`. Runnable retains position and Advance/Retry/Restart reason; a pending
+Effect retains position and EffectId. Success exposes the output contract ref, instance ref, and exact
+canonical bytes. Failure exposes the content ref and canonical FailureReport, including the original
+failure or operational error/context, Stop reason, position, and recovery usage.
+Client JSON preserves that sum and embeds retained canonical bytes as raw JSON values.
+An invocation failure is separate from durable run failure: execution errors retain the last observed
+view when available, while pending recovery errors retain the observed view and typed error/context.
 
 Signing public keys, digests, compact signatures, recovery IDs, private scalars, owner channels,
 and signer handles are transient and have no persisted serde surface. EVM binds durable authority
@@ -72,16 +77,17 @@ Call action, value, nonzero gas limit, and ordered fee pair. It contains no nonc
 settlement policy, access list, timeout, or arbitrary metadata.
 
 `EvmTransactionSettlement` retains EffectId, nonce, one shared transaction receipt, and a closed
-Created, Called, or Reverted outcome. The generic transaction completion retains caller context,
-command binding, that receipt, and only the created address or checked call target. A transaction
-reversion retains caller context and the same receipt. These projections omit EffectId, nonce,
-command, raw receipt, logs, and provider response. Anchored contract-call intents retain target, bounded calldata,
+Created, Called, or Reverted outcome. The generic transaction completion retains caller context
+and complete checked command, reservation, preparation, and settlement facts. Transaction failure
+preserves the facts completed before failure, including the checked receipt on reversion. No raw
+transaction bytes or unreviewed provider response enter these projections. Anchored contract-call intents retain target, bounded calldata,
 exact anchor, chain ID, operation ID, and transaction-route ref; returned evidence retains only the
 anchor and bounded return bytes. Transient signing digests/signatures and raw-transaction custody
 never enter these values.
 
-Ambiguous start/progress acknowledgement is the only shared use-case error carrying data. Both
-client transports use the same Application-owned error serializer and the exact recovery envelopes
+Ambiguous start/progress acknowledgement carries exact recovery identity and the last observed
+view, or null if none was observed. Other invocation errors expose their reviewed execution or
+recovery detail. Both client transports use the same Application-owned error serializer and recovery envelopes
 frozen under `docs/contracts/client-surface/`; an identified REST start error may additionally carry
 the already selected RunId.
 Public surfaces never contain credentials, private keys, raw provider material, or unreviewed error
