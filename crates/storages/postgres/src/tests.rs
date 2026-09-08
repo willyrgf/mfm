@@ -1245,33 +1245,6 @@ async fn managed_postgres_persistence_authority_contract() {
     .is_err());
 
     connection
-        .execute("GRANT TRUNCATE ON public.mfm_run_frames TO mfm_runtime")
-        .await
-        .expect("grant excess run privilege");
-    assert!(matches!(
-        PostgresBackend::connect(&runtime).await,
-        Err(PostgresOpenError::Incompatible)
-    ));
-    connection
-        .execute("REVOKE TRUNCATE ON public.mfm_run_frames FROM mfm_runtime")
-        .await
-        .expect("revoke excess run privilege");
-    assert!(PostgresBackend::connect(&runtime).await.is_ok());
-
-    connection
-        .execute("GRANT CREATE ON SCHEMA mfm_config TO mfm_runtime")
-        .await
-        .expect("grant excess config privilege");
-    assert!(matches!(
-        PostgresBackend::connect(&runtime).await,
-        Err(PostgresOpenError::Incompatible)
-    ));
-    connection
-        .execute("REVOKE CREATE ON SCHEMA mfm_config FROM mfm_runtime")
-        .await
-        .expect("revoke excess config privilege");
-
-    connection
         .execute("GRANT DELETE ON mfm_evm_tx.nonce_reservations TO mfm_runtime")
         .await
         .expect("grant excess transaction privilege");
@@ -1285,7 +1258,46 @@ async fn managed_postgres_persistence_authority_contract() {
         .await
         .expect("revoke excess transaction privilege");
 
-    for (grant, revoke) in [
+    for (mutation, restoration) in [
+        (
+            "GRANT MAINTAIN ON public.mfm_run_frames TO mfm_runtime",
+            "REVOKE MAINTAIN ON public.mfm_run_frames FROM mfm_runtime",
+        ),
+        (
+            "CREATE RULE mfm_hostile_rule AS ON DELETE TO mfm_config.config_revisions \
+             DO ALSO NOTHING",
+            "DROP RULE mfm_hostile_rule ON mfm_config.config_revisions",
+        ),
+        (
+            "ALTER TABLE mfm_config.config_revisions SET (fillfactor = 90)",
+            "ALTER TABLE mfm_config.config_revisions RESET (fillfactor)",
+        ),
+        (
+            "CREATE INDEX mfm_hostile_expression_index \
+             ON mfm_config.config_revisions ((octet_length(canonical))) \
+             WHERE octet_length(canonical) > 0",
+            "DROP INDEX mfm_config.mfm_hostile_expression_index",
+        ),
+        (
+            "UPDATE pg_catalog.pg_constraint SET convalidated = false \
+             WHERE conname = 'mfm_config_revisions_bytes_check' \
+               AND conrelid = 'mfm_config.config_revisions'::regclass",
+            "UPDATE pg_catalog.pg_constraint SET convalidated = true \
+             WHERE conname = 'mfm_config_revisions_bytes_check' \
+               AND conrelid = 'mfm_config.config_revisions'::regclass",
+        ),
+        (
+            "CREATE TABLE mfm_config.unexpected_relation (value bigint)",
+            "DROP TABLE mfm_config.unexpected_relation",
+        ),
+        (
+            "GRANT TRUNCATE ON public.mfm_run_frames TO mfm_runtime",
+            "REVOKE TRUNCATE ON public.mfm_run_frames FROM mfm_runtime",
+        ),
+        (
+            "GRANT CREATE ON SCHEMA mfm_config TO mfm_runtime",
+            "REVOKE CREATE ON SCHEMA mfm_config FROM mfm_runtime",
+        ),
         (
             "GRANT UPDATE (frame_bytes) ON public.mfm_run_frames TO mfm_runtime",
             "REVOKE UPDATE (frame_bytes) ON public.mfm_run_frames FROM mfm_runtime",
@@ -1299,15 +1311,13 @@ async fn managed_postgres_persistence_authority_contract() {
             "REVOKE UPDATE (canonical) ON mfm_config.config_revisions FROM mfm_runtime",
         ),
     ] {
-        connection
-            .execute(grant)
-            .await
-            .expect("grant hostile column privilege");
+        connection.execute(mutation).await.expect(mutation);
         assert_base_gate_rejects(&runtime).await;
-        connection
-            .execute(revoke)
-            .await
-            .expect("revoke hostile column privilege");
+        connection.execute(restoration).await.expect(restoration);
+        assert!(
+            PostgresBackend::connect(&runtime).await.is_ok(),
+            "{restoration}"
+        );
     }
 
     connection
@@ -1325,16 +1335,6 @@ async fn managed_postgres_persistence_authority_contract() {
         )
         .await
         .expect("revoke raw transaction mutation authority");
-
-    connection
-        .execute("GRANT MAINTAIN ON public.mfm_run_frames TO mfm_runtime")
-        .await
-        .expect("grant maintain");
-    assert_base_gate_rejects(&runtime).await;
-    connection
-        .execute("REVOKE MAINTAIN ON public.mfm_run_frames FROM mfm_runtime")
-        .await
-        .expect("revoke maintain");
 
     connection
         .execute("CREATE ROLE mfm_unexpected_runtime_grant NOLOGIN")
@@ -1407,29 +1407,6 @@ async fn managed_postgres_persistence_authority_contract() {
         .await
         .expect("disable policy");
 
-    connection
-        .execute(
-            "CREATE RULE mfm_hostile_rule AS ON DELETE TO mfm_config.config_revisions \
-             DO ALSO NOTHING",
-        )
-        .await
-        .expect("create hostile rule");
-    assert_base_gate_rejects(&runtime).await;
-    connection
-        .execute("DROP RULE mfm_hostile_rule ON mfm_config.config_revisions")
-        .await
-        .expect("drop hostile rule");
-
-    connection
-        .execute("ALTER TABLE mfm_config.config_revisions SET (fillfactor = 90)")
-        .await
-        .expect("set hostile relation option");
-    assert_base_gate_rejects(&runtime).await;
-    connection
-        .execute("ALTER TABLE mfm_config.config_revisions RESET (fillfactor)")
-        .await
-        .expect("reset hostile relation option");
-
     let tablespace_path = std::env::temp_dir().join(format!(
         "mfm-postgres-hostile-tablespace-{}",
         std::process::id()
@@ -1492,47 +1469,6 @@ async fn managed_postgres_persistence_authority_contract() {
             .expect("restore expected index state");
     }
 
-    connection
-        .execute(
-            "CREATE INDEX mfm_hostile_expression_index \
-             ON mfm_config.config_revisions ((octet_length(canonical))) \
-             WHERE octet_length(canonical) > 0",
-        )
-        .await
-        .expect("create hostile expression and partial index");
-    assert_base_gate_rejects(&runtime).await;
-    connection
-        .execute("DROP INDEX mfm_config.mfm_hostile_expression_index")
-        .await
-        .expect("drop hostile expression index");
-
-    connection
-        .execute(
-            "UPDATE pg_catalog.pg_constraint SET convalidated = false \
-             WHERE conname = 'mfm_config_revisions_bytes_check' \
-               AND conrelid = 'mfm_config.config_revisions'::regclass",
-        )
-        .await
-        .expect("invalidate expected constraint");
-    assert_base_gate_rejects(&runtime).await;
-    connection
-        .execute(
-            "UPDATE pg_catalog.pg_constraint SET convalidated = true \
-             WHERE conname = 'mfm_config_revisions_bytes_check' \
-               AND conrelid = 'mfm_config.config_revisions'::regclass",
-        )
-        .await
-        .expect("restore expected constraint");
-
-    connection
-        .execute("CREATE TABLE mfm_config.unexpected_relation (value bigint)")
-        .await
-        .expect("create unexpected relation");
-    assert_base_gate_rejects(&runtime).await;
-    connection
-        .execute("DROP TABLE mfm_config.unexpected_relation")
-        .await
-        .expect("drop unexpected relation");
     connection
         .execute("ALTER TABLE mfm_config.config_revisions ADD COLUMN unexpected bytea")
         .await

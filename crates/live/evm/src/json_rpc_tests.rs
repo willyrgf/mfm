@@ -13,19 +13,13 @@ const HOLDER: &str = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8";
 const TOKEN: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const BLOCK_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 
-/// Serves exactly one canned JSON body over plain HTTP and then closes.
-pub(crate) struct Stub {
-    url: String,
-    worker: Option<JoinHandle<Vec<u8>>>,
-}
-
 /// Serves one response for each accepted request and retains every request body.
-struct SequenceStub {
+struct Stub {
     url: String,
-    worker: Option<JoinHandle<Vec<Vec<u8>>>>,
+    worker: JoinHandle<Vec<Vec<u8>>>,
 }
 
-impl SequenceStub {
+impl Stub {
     fn new(bodies: Vec<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind sequence stub");
         let url = format!("http://{}", listener.local_addr().expect("stub address"));
@@ -46,59 +40,21 @@ impl SequenceStub {
                 })
                 .collect()
         });
-        Self {
-            url,
-            worker: Some(worker),
-        }
+        Self { url, worker }
     }
 
     fn provider(&self) -> JsonRpcEvmProvider {
-        JsonRpcEvmProvider::new_http_for_test(self.url.clone()).expect("provider")
+        JsonRpcEvmProvider::connect(&EvmAdapterLocator::parse(&self.url).expect("locator"))
+            .expect("provider")
     }
 
-    fn observed_requests(&mut self) -> Vec<serde_json::Value> {
+    fn observed_requests(self) -> Vec<serde_json::Value> {
         self.worker
-            .take()
-            .expect("one join")
             .join()
             .expect("join")
             .into_iter()
             .map(|request| serde_json::from_slice(&request).expect("request json"))
             .collect()
-    }
-}
-
-impl Stub {
-    pub(crate) fn new(body: impl Into<String>) -> Self {
-        let body = body.into();
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
-        let url = format!("http://{}", listener.local_addr().expect("stub address"));
-        let worker = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let request = read_http_request(&mut stream);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
-                 Connection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).expect("write");
-            stream.flush().expect("flush");
-            request
-        });
-        Self {
-            url,
-            worker: Some(worker),
-        }
-    }
-
-    pub(crate) fn provider(&self) -> JsonRpcEvmProvider {
-        JsonRpcEvmProvider::new_http_for_test(self.url.clone()).expect("provider")
-    }
-
-    /// Returns the exact JSON body the provider sent.
-    fn observed_request(&mut self) -> serde_json::Value {
-        let bytes = self.worker.take().expect("one join").join().expect("join");
-        serde_json::from_slice(&bytes).expect("request json")
     }
 }
 
@@ -302,7 +258,7 @@ fn conversions_and_calldata_are_exact() {
 
 #[tokio::test]
 async fn chain_identity_reads_the_exact_json_rpc_envelope() {
-    let mut stub = Stub::new(r#"{"jsonrpc":"2.0","id":1,"result":"0x539"}"#);
+    let stub = Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":"0x539"}"#.into()]);
     let response = observe_broad(
         stub.provider(),
         intent(serde_json::json!({ "kind": "chain_identity" })),
@@ -317,7 +273,7 @@ async fn chain_identity_reads_the_exact_json_rpc_envelope() {
         } if chain_id == NonZeroU64::new(1337).expect("nonzero chain")
     ));
     assert_eq!(
-        stub.observed_request(),
+        stub.observed_requests()[0],
         serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -329,7 +285,9 @@ async fn chain_identity_reads_the_exact_json_rpc_envelope() {
 
 #[tokio::test]
 async fn native_balance_reads_the_committed_anchor_by_number() {
-    let mut stub = Stub::new(r#"{"jsonrpc":"2.0","id":1,"result":"0xd3c21bcecceda1000000"}"#);
+    let stub = Stub::new(vec![
+        r#"{"jsonrpc":"2.0","id":1,"result":"0xd3c21bcecceda1000000"}"#.into(),
+    ]);
     let response = observe_broad(
         stub.provider(),
         intent(serde_json::json!({
@@ -347,16 +305,16 @@ async fn native_balance_reads_the_committed_anchor_by_number() {
         } if units == EvmU256::new("1000000000000000000000000").expect("units")
     ));
     assert_eq!(
-        stub.observed_request()["params"],
+        stub.observed_requests()[0]["params"],
         serde_json::json!([HOLDER, "0x11"])
     );
 }
 
 #[tokio::test]
 async fn anchor_confirmation_never_asks_for_the_moving_head() {
-    let mut stub = Stub::new(format!(
+    let stub = Stub::new(vec![format!(
         r#"{{"jsonrpc":"2.0","id":1,"result":{{"number":"0x11","hash":"{BLOCK_HASH}"}}}}"#
-    ));
+    )]);
     let response = observe_broad(
         stub.provider(),
         intent(serde_json::json!({
@@ -374,16 +332,14 @@ async fn anchor_confirmation_never_asks_for_the_moving_head() {
         } if observed == EvmBlockAnchor { number: EvmU256::new("17").expect("number"), hash: EvmHash::new(BLOCK_HASH).expect("hash") }
     ));
     assert_eq!(
-        stub.observed_request()["params"],
+        stub.observed_requests()[0]["params"],
         serde_json::json!(["0x11", false])
     );
 }
 
 #[tokio::test]
 async fn token_decimals_splices_no_address_and_decodes_one_word() {
-    let mut stub = Stub::new(
-        r#"{"jsonrpc":"2.0","id":1,"result":"0x0000000000000000000000000000000000000000000000000000000000000012"}"#,
-    );
+    let stub = Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":"0x0000000000000000000000000000000000000000000000000000000000000012"}"#.into()]);
     let response = observe_broad(
         stub.provider(),
         intent(serde_json::json!({
@@ -401,16 +357,14 @@ async fn token_decimals_splices_no_address_and_decodes_one_word() {
         } if decimals == EvmTokenDecimals::new(18).expect("decimals")
     ));
     assert_eq!(
-        stub.observed_request()["params"],
+        stub.observed_requests()[0]["params"],
         serde_json::json!([{ "to": TOKEN, "data": "0x313ce567" }, "0x11"])
     );
 }
 
 #[tokio::test]
 async fn token_balance_decodes_a_zero_padded_abi_word() {
-    let mut stub = Stub::new(
-        r#"{"jsonrpc":"2.0","id":1,"result":"0x0000000000000000000000000000000000000000000000000000000000000001"}"#,
-    );
+    let stub = Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":"0x0000000000000000000000000000000000000000000000000000000000000001"}"#.into()]);
     let response = observe_broad(
         stub.provider(),
         intent(serde_json::json!({
@@ -428,7 +382,7 @@ async fn token_balance_decodes_a_zero_padded_abi_word() {
         } if units == EvmU256::new("1").expect("units")
     ));
     assert_eq!(
-        stub.observed_request()["params"],
+        stub.observed_requests()[0]["params"],
         serde_json::json!([{
             "to": TOKEN,
             "data": "0x70a0823100000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c8"
@@ -446,7 +400,7 @@ async fn malformed_or_wrong_sized_abi_data_is_unavailable() {
     ] {
         let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result });
         let response = observe_broad(
-            Stub::new(body.to_string()).provider(),
+            Stub::new(vec![(body.to_string())]).provider(),
             intent(serde_json::json!({
                 "kind": "token_balance",
                 "value": { "source": source(Some(TOKEN)), "anchor": anchor() }
@@ -466,15 +420,18 @@ async fn rpc_errors_are_unavailable_but_empty_token_data_is_safe_failure() {
         }))
     };
     let rpc_error = observe_broad(
-        Stub::new(r#"{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}"#)
-            .provider(),
+        Stub::new(vec![
+            (r#"{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}"#)
+                .into(),
+        ])
+        .provider(),
         token_intent(),
     )
     .await;
     assert_eq!(rpc_error, Err(AdapterError::Unavailable));
 
     let empty = observe_broad(
-        Stub::new(r#"{"jsonrpc":"2.0","id":1,"result":"0x"}"#).provider(),
+        Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":"0x"}"#.into()]).provider(),
         token_intent(),
     )
     .await
@@ -491,7 +448,7 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
         r#"not json"#,
     ] {
         let response = observe_broad(
-            Stub::new(body).provider(),
+            Stub::new(vec![body.into()]).provider(),
             intent(serde_json::json!({ "kind": "initial_anchor" })),
         )
         .await;
@@ -502,7 +459,8 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
     let url = format!("http://{}", unbound.local_addr().expect("address"));
     drop(unbound);
     let response = observe_broad(
-        JsonRpcEvmProvider::new_http_for_test(url).expect("provider"),
+        JsonRpcEvmProvider::connect(&EvmAdapterLocator::parse(url).expect("locator"))
+            .expect("provider"),
         intent(serde_json::json!({ "kind": "chain_identity" })),
     )
     .await;
@@ -521,7 +479,7 @@ async fn incomplete_or_malformed_rpc_errors_are_unavailable() {
     ] {
         let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "error": error });
         let response = observe_broad(
-            Stub::new(body.to_string()).provider(),
+            Stub::new(vec![(body.to_string())]).provider(),
             intent(serde_json::json!({ "kind": "chain_identity" })),
         )
         .await;
@@ -584,7 +542,7 @@ async fn rpc_envelope_version_id_and_fields_are_exact() {
         r#"{"jsonrpc":"2.0","id":1}"#,
     ] {
         let response = observe_broad(
-            Stub::new(body).provider(),
+            Stub::new(vec![body.into()]).provider(),
             intent(serde_json::json!({ "kind": "chain_identity" })),
         )
         .await;
@@ -629,7 +587,8 @@ async fn redirects_never_leave_the_selected_endpoint() {
     });
 
     let response = observe_broad(
-        JsonRpcEvmProvider::new_http_for_test(redirect_url).expect("provider"),
+        JsonRpcEvmProvider::connect(&EvmAdapterLocator::parse(redirect_url).expect("locator"))
+            .expect("provider"),
         intent(serde_json::json!({ "kind": "chain_identity" })),
     )
     .await;
@@ -650,7 +609,7 @@ async fn loopback_submission_acknowledgement_drop_after_full_request_is_unavaila
     });
     let raw = ExactRawTransaction::new(vec![0x02, 0xc0]).expect("bounded raw");
     assert_eq!(
-        JsonRpcEvmProvider::new_http_for_test(url)
+        JsonRpcEvmProvider::connect(&EvmAdapterLocator::parse(url).expect("locator"))
             .expect("provider")
             .submit_raw(&raw)
             .await,
@@ -665,7 +624,7 @@ async fn loopback_submission_acknowledgement_drop_after_full_request_is_unavaila
 #[tokio::test]
 async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
     let genesis = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let mut chain = SequenceStub::new(vec![
+    let chain = Stub::new(vec![
         r#"{"jsonrpc":"2.0","id":1,"result":"0x539"}"#.to_owned(),
         format!(r#"{{"jsonrpc":"2.0","id":1,"result":{{"number":"0x0","hash":"{genesis}"}}}}"#),
     ]);
@@ -691,7 +650,7 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         r#"{{"jsonrpc":"2.0","id":1,"result":{{"transactionHash":"{}","from":"{HOLDER}","to":"{TOKEN}","contractAddress":null,"status":"0x1","blockNumber":"0x11","blockHash":"{BLOCK_HASH}"}}}}"#,
         transaction_hash
     );
-    let mut receipt_stub = Stub::new(receipt_body);
+    let receipt_stub = Stub::new(vec![(receipt_body)]);
     let receipt = receipt_stub
         .provider()
         .receipt(&transaction_hash)
@@ -704,11 +663,11 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         ProviderReceiptResult::SuccessCall { target } if target.to_string() == TOKEN
     ));
     assert_eq!(
-        receipt_stub.observed_request()["params"],
+        receipt_stub.observed_requests()[0]["params"],
         serde_json::json!([transaction_hash.to_string()])
     );
 
-    let mut pending_stub = Stub::new(r#"{"jsonrpc":"2.0","id":1,"result":"0x7"}"#);
+    let pending_stub = Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":"0x7"}"#.into()]);
     assert_eq!(
         pending_stub
             .provider()
@@ -717,21 +676,21 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         Ok(7)
     );
     assert_eq!(
-        pending_stub.observed_request()["params"],
+        pending_stub.observed_requests()[0]["params"],
         serde_json::json!([HOLDER, "pending"])
     );
 
     let raw = ExactRawTransaction::new(vec![0x02, 0xc0]).expect("bounded raw");
-    let mut submit_stub = Stub::new(format!(
+    let submit_stub = Stub::new(vec![format!(
         r#"{{"jsonrpc":"2.0","id":1,"result":"{}"}}"#,
         transaction_hash
-    ));
+    )]);
     assert_eq!(
         submit_stub.provider().submit_raw(&raw).await,
         Ok(transaction_hash.clone())
     );
     assert_eq!(
-        submit_stub.observed_request()["params"],
+        submit_stub.observed_requests()[0]["params"],
         serde_json::json!(["0x02c0"])
     );
 
@@ -742,7 +701,10 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         r#"not json"#,
     ] {
         assert_eq!(
-            Stub::new(body).provider().submit_raw(&raw).await,
+            Stub::new(vec![body.into()])
+                .provider()
+                .submit_raw(&raw)
+                .await,
             Err(AdapterError::Unavailable),
             "body {body}"
         );
@@ -752,7 +714,10 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         r#"{"jsonrpc":"2.0","id":1,"result":null}"#,
         r#"{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"opaque"}}"#,
     ] {
-        let result = Stub::new(body).provider().receipt(&transaction_hash).await;
+        let result = Stub::new(vec![body.into()])
+            .provider()
+            .receipt(&transaction_hash)
+            .await;
         if body.contains("result") {
             assert_eq!(result, Ok(None));
         } else {
@@ -765,7 +730,7 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
 async fn anchored_call_observes_code_and_same_anchor_before_returning_bytes() {
     let block =
         format!(r#"{{"jsonrpc":"2.0","id":1,"result":{{"number":"0x11","hash":"{BLOCK_HASH}"}}}}"#);
-    let mut stub = SequenceStub::new(vec![
+    let stub = Stub::new(vec![
         block.clone(),
         r#"{"jsonrpc":"2.0","id":1,"result":"0x6000"}"#.to_owned(),
         r#"{"jsonrpc":"2.0","id":1,"result":"0x0102"}"#.to_owned(),
@@ -819,7 +784,7 @@ async fn anchored_call_observes_code_and_same_anchor_before_returning_bytes() {
 #[tokio::test]
 async fn anchored_absence_codeless_and_anchor_replacement_are_closed_evidence() {
     let absent = observe_anchored(
-        Stub::new(r#"{"jsonrpc":"2.0","id":1,"result":null}"#).provider(),
+        Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":null}"#.into()]).provider(),
         anchored_intent(serde_json::json!({
             "kind": "anchored_contract_call",
             "value": { "anchor": anchor(), "calldata": "", "target": TOKEN }
@@ -833,9 +798,9 @@ async fn anchored_absence_codeless_and_anchor_replacement_are_closed_evidence() 
 
     let replacement = "0x3333333333333333333333333333333333333333333333333333333333333333";
     let replaced = observe_anchored(
-        Stub::new(format!(
+        Stub::new(vec![format!(
             r#"{{"jsonrpc":"2.0","id":1,"result":{{"number":"0x11","hash":"{replacement}"}}}}"#
-        ))
+        )])
         .provider(),
         anchored_intent(serde_json::json!({
             "kind": "anchored_contract_call",
@@ -851,7 +816,7 @@ async fn anchored_absence_codeless_and_anchor_replacement_are_closed_evidence() 
     let block =
         format!(r#"{{"jsonrpc":"2.0","id":1,"result":{{"number":"0x11","hash":"{BLOCK_HASH}"}}}}"#);
     let codeless = observe_anchored(
-        SequenceStub::new(vec![
+        Stub::new(vec![
             block,
             r#"{"jsonrpc":"2.0","id":1,"result":"0x"}"#.to_owned(),
         ])
@@ -870,8 +835,8 @@ async fn anchored_absence_codeless_and_anchor_replacement_are_closed_evidence() 
 
 #[test]
 fn an_unusable_url_fails_construction_without_naming_it() {
-    // The provider implements no `Debug`, so no accident can print the URL it holds.
-    let Err(error) = JsonRpcEvmProvider::new_http_for_test("not-a-url".to_owned()) else {
+    // The locator implements no `Debug`, so no accident can print the URL it holds.
+    let Err(error) = EvmAdapterLocator::parse("not-a-url") else {
         panic!("an unusable url must fail construction");
     };
     assert_eq!(
@@ -906,7 +871,7 @@ async fn nullable_rpc_results_require_the_result_field() {
         r#"{"jsonrpc":"2.0","id":1,"result":null,"result":null}"#,
     ] {
         assert_eq!(
-            Stub::new(body).provider().receipt(&hash).await,
+            Stub::new(vec![body.into()]).provider().receipt(&hash).await,
             Err(AdapterError::Unavailable)
         );
         let intent = anchored_intent(serde_json::json!({
@@ -914,13 +879,13 @@ async fn nullable_rpc_results_require_the_result_field() {
             "value": { "anchor": anchor(), "calldata": "", "target": TOKEN }
         }));
         assert_eq!(
-            observe_anchored(Stub::new(body).provider(), intent.clone()).await,
+            observe_anchored(Stub::new(vec![body.into()]).provider(), intent.clone()).await,
             Err(AdapterError::Unavailable)
         );
         let block = format!(
             r#"{{"jsonrpc":"2.0","id":1,"result":{{"number":"0x11","hash":"{BLOCK_HASH}"}}}}"#
         );
-        let mut stub = SequenceStub::new(vec![
+        let stub = Stub::new(vec![
             block,
             r#"{"jsonrpc":"2.0","id":1,"result":"0x6000"}"#.to_owned(),
             r#"{"jsonrpc":"2.0","id":1,"result":"0x"}"#.to_owned(),
@@ -933,7 +898,7 @@ async fn nullable_rpc_results_require_the_result_field() {
         assert_eq!(stub.observed_requests().len(), 4);
     }
     assert_eq!(
-        Stub::new(r#"{"jsonrpc":"2.0","id":1,"result":null}"#)
+        Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":null}"#.into()])
             .provider()
             .receipt(&hash)
             .await,

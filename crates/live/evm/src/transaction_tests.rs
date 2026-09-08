@@ -463,8 +463,8 @@ async fn fixture() -> (
         vec![0x60, 0x00],
         EvmU256::from_u64(0),
         nonzero(100_000),
-        (2) as u128,
-        (10) as u128,
+        2_u128,
+        10_u128,
     )
     .expect("command");
     (

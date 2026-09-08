@@ -70,8 +70,8 @@ fn plan(binding: EvmTransactionBinding) -> CheckedCreatePlan {
         vec![1, 2, 3],
         EvmU256::from_u64(0),
         nonzero(100_000),
-        (1) as u128,
-        (2) as u128,
+        1_u128,
+        2_u128,
     )
     .unwrap()
 }
@@ -415,8 +415,8 @@ async fn selecting_another_same_typed_source_requires_its_own_assembly_before_io
             vec![],
             EvmU256::from_u64(0),
             nonzero(1),
-            (1) as u128,
-            (2) as u128,
+            1_u128,
+            2_u128,
         )
         .unwrap(),
     };

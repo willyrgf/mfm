@@ -1170,20 +1170,10 @@ enum AppendAction {
     RetainThenIndeterminate,
 }
 
-impl AppendAction {
-    fn retains_candidate(self) -> bool {
-        matches!(
-            self,
-            Self::RetainThenNotInserted | Self::RetainThenIndeterminate
-        )
-    }
-}
-
 struct ScriptedStore {
     inner: MemoryStore,
     actions: std::sync::Mutex<VecDeque<(u64, AppendAction)>>,
     frames: std::sync::Mutex<Vec<Vec<u8>>>,
-    retained: Option<Vec<Vec<u8>>>,
 }
 
 impl ScriptedStore {
@@ -1192,21 +1182,11 @@ impl ScriptedStore {
             inner: MemoryStore::new(),
             actions: std::sync::Mutex::new(actions.into_iter().collect()),
             frames: std::sync::Mutex::new(Vec::new()),
-            retained: None,
         }
     }
 
     fn recording() -> Self {
         Self::new([])
-    }
-
-    fn with_retained(frames: Vec<Vec<u8>>) -> Self {
-        Self {
-            inner: MemoryStore::new(),
-            actions: std::sync::Mutex::new(VecDeque::new()),
-            frames: std::sync::Mutex::new(Vec::new()),
-            retained: Some(frames),
-        }
     }
 
     fn snapshot(&self) -> Vec<Vec<u8>> {
@@ -1234,11 +1214,6 @@ impl Store for ScriptedStore {
                 + 'a,
         >,
     > {
-        if let Some(frames) = &self.retained {
-            let retained =
-                StoredRunBytes::new(frames.clone()).map_err(|_| StoreError::CorruptPhysicalState);
-            return Box::pin(async move { retained.map(Some) });
-        }
         self.inner.load_run(run_id)
     }
 
@@ -1247,9 +1222,6 @@ impl Store for ScriptedStore {
         frame: &'a EncodedRunFrame,
     ) -> Pin<Box<dyn Future<Output = Result<AppendResult, StoreError>> + Send + 'a>> {
         Box::pin(async move {
-            if self.retained.is_some() {
-                return Err(StoreError::CorruptPhysicalState);
-            }
             let action = {
                 let mut actions = self.actions.lock().expect("append actions");
                 actions
@@ -1277,6 +1249,28 @@ impl Store for ScriptedStore {
                 }
             }
         })
+    }
+}
+
+struct RetainedStore(Vec<Vec<u8>>);
+
+impl Store for RetainedStore {
+    fn load_run<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<StoredRunBytes>, StoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            StoredRunBytes::new(self.0.clone())
+                .map(Some)
+                .map_err(|_| StoreError::CorruptPhysicalState)
+        })
+    }
+
+    fn append_run<'a>(
+        &'a self,
+        _frame: &'a EncodedRunFrame,
+    ) -> Pin<Box<dyn Future<Output = Result<AppendResult, StoreError>> + Send + 'a>> {
+        Box::pin(async { Err(StoreError::CorruptPhysicalState) })
     }
 }
 
@@ -1315,7 +1309,7 @@ fn effect_runtime_with_counting_adapter(
 
 fn retained_effect_reader(frames: Vec<Vec<u8>>, calls: Arc<AtomicUsize>) -> Runtime {
     effect_runtime_with_counting_adapter(
-        Arc::new(ScriptedStore::with_retained(frames)),
+        Arc::new(RetainedStore(frames)),
         calls,
         Arc::new(std::sync::Mutex::new(Vec::new())),
     )
@@ -1331,47 +1325,42 @@ fn qualify_recorded_prefix(run_id: &RunId, frames: &[Vec<u8>]) -> JournalHistory
 
 #[tokio::test]
 async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
-    struct Case {
-        name: &'static str,
-        candidate_sequence: u64,
-        action: AppendAction,
-    }
-
+    // Expected retained heads and adapter counts are independent of the Store script.
     let cases = [
-        Case {
-            name: "prepare-absent",
-            candidate_sequence: 2,
-            action: AppendAction::Indeterminate,
-        },
-        Case {
-            name: "prepare-retained",
-            candidate_sequence: 2,
-            action: AppendAction::RetainThenIndeterminate,
-        },
-        Case {
-            name: "conclusion-absent",
-            candidate_sequence: 3,
-            action: AppendAction::Indeterminate,
-        },
-        Case {
-            name: "conclusion-retained",
-            candidate_sequence: 3,
-            action: AppendAction::RetainThenIndeterminate,
-        },
+        ("prepare-absent", 2, AppendAction::Indeterminate, 1, 0, 1),
+        (
+            "prepare-retained",
+            2,
+            AppendAction::RetainThenIndeterminate,
+            2,
+            0,
+            1,
+        ),
+        ("conclusion-absent", 3, AppendAction::Indeterminate, 2, 1, 2),
+        (
+            "conclusion-retained",
+            3,
+            AppendAction::RetainThenIndeterminate,
+            3,
+            1,
+            1,
+        ),
     ];
-
-    for (offset, case) in cases.into_iter().enumerate() {
-        let candidate_retained = case.action.retains_candidate();
-        let expected_head_after_start = case.candidate_sequence - u64::from(!candidate_retained);
-        let expected_calls_after_start = usize::from(case.candidate_sequence == 3);
-        let expected_calls_after_resume = if case.candidate_sequence == 2 || candidate_retained {
-            1
-        } else {
-            2
-        };
+    for (
+        offset,
+        (
+            name,
+            sequence,
+            action,
+            expected_head_after_start,
+            expected_calls_after_start,
+            expected_calls_after_resume,
+        ),
+    ) in cases.into_iter().enumerate()
+    {
         let calls = Arc::new(AtomicUsize::new(0));
         let effect_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let store = Arc::new(ScriptedStore::new([(case.candidate_sequence, case.action)]));
+        let store = Arc::new(ScriptedStore::new([(sequence, action)]));
         let runtime = effect_runtime_with_counting_adapter(
             store,
             Arc::clone(&calls),
@@ -1381,7 +1370,7 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
             [u8::try_from(33 + offset).expect("RunId byte"); 32],
         ));
         let program = expand_program(
-            EntryPointId::new(format!("mfm.test.runtime/ambiguous-{}@1", case.name))
+            EntryPointId::new(format!("mfm.test.runtime/ambiguous-{}@1", name))
                 .expect("entry point"),
             &EffectProgram,
         )
@@ -1403,14 +1392,14 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
             calls.load(Ordering::SeqCst),
             expected_calls_after_start,
             "{} adapter entries after start",
-            case.name
+            name
         );
         let after_start = runtime.read(&run_id).await.expect("retained prefix");
         assert_eq!(
             after_start.head_sequence(),
             expected_head_after_start,
             "{} retained head after start",
-            case.name
+            name
         );
         if expected_head_after_start == 3 {
             assert!(matches!(after_start.state(), RunViewState::Succeeded(_)));
@@ -1419,17 +1408,17 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
         }
 
         let completed = runtime.resume(&run_id).await.expect("ambiguous recovery");
-        assert_eq!(completed.head_sequence(), 3, "{} terminal head", case.name);
+        assert_eq!(completed.head_sequence(), 3, "{} terminal head", name);
         assert!(
             matches!(completed.state(), RunViewState::Succeeded(_)),
             "{} terminal state",
-            case.name
+            name
         );
         assert_eq!(
             calls.load(Ordering::SeqCst),
             expected_calls_after_resume,
             "{} adapter entries after resume",
-            case.name
+            name
         );
         let effect_ids = effect_ids.lock().expect("effect ids");
         assert!(effect_ids.windows(2).all(|pair| pair[0] == pair[1]));

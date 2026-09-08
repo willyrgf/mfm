@@ -57,8 +57,8 @@ fn create_command() -> Eip1559TransactionCommand {
         vec![1, 2, 3],
         EvmU256::from_u64(0),
         nonzero(2_000_000),
-        (1_000_000_000) as u128,
-        (10_000_000_000) as u128,
+        1_000_000_000_u128,
+        10_000_000_000_u128,
     )
     .expect("create command")
 }
@@ -70,8 +70,8 @@ fn call_command() -> Eip1559TransactionCommand {
         vec![4, 5, 6],
         EvmU256::from_u64(7),
         nonzero(200_000),
-        (1) as u128,
-        (2) as u128,
+        1_u128,
+        2_u128,
     )
     .expect("call command")
 }
@@ -225,8 +225,8 @@ fn fixed_eip1559_command_has_exact_wire_and_checked_factories() {
         vec![0; MAX_EVM_INITCODE_BYTES],
         EvmU256::from_u64(0),
         nonzero(1),
-        (1) as u128,
-        (1) as u128,
+        1_u128,
+        1_u128,
     )
     .is_ok());
     assert!(Eip1559TransactionCommand::create(
@@ -234,8 +234,8 @@ fn fixed_eip1559_command_has_exact_wire_and_checked_factories() {
         vec![0; MAX_EVM_INITCODE_BYTES + 1],
         EvmU256::from_u64(0),
         nonzero(1),
-        (1) as u128,
-        (1) as u128,
+        1_u128,
+        1_u128,
     )
     .is_err());
     assert!(Eip1559TransactionCommand::call(
@@ -244,8 +244,8 @@ fn fixed_eip1559_command_has_exact_wire_and_checked_factories() {
         vec![0; MAX_EVM_CALLDATA_BYTES + 1],
         EvmU256::from_u64(0),
         nonzero(1),
-        (1) as u128,
-        (1) as u128,
+        1_u128,
+        1_u128,
     )
     .is_err());
 }
@@ -406,8 +406,8 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
             vec![1; size],
             EvmU256::from_u64(0),
             nonzero(1),
-            (1) as u128,
-            (2) as u128,
+            1_u128,
+            2_u128,
         )
         .unwrap();
         assert_eq!(
@@ -417,8 +417,8 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
                 vec![1; size],
                 EvmU256::from_u64(0),
                 nonzero(1),
-                (1) as u128,
-                (2) as u128
+                1_u128,
+                2_u128
             )
             .unwrap()
         );
@@ -432,8 +432,8 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
             vec![2; size],
             EvmU256::from_u64(0),
             nonzero(1),
-            (1) as u128,
-            (2) as u128,
+            1_u128,
+            2_u128,
         )
         .unwrap();
         for target in [
@@ -446,8 +446,8 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
                 vec![2; size],
                 EvmU256::from_u64(0),
                 nonzero(1),
-                (1) as u128,
-                (2) as u128,
+                1_u128,
+                2_u128,
             )
             .unwrap();
             assert_eq!(plan.command_for(target.clone()), expected);
@@ -462,8 +462,8 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
         vec![0; 49_153],
         EvmU256::from_u64(0),
         nonzero(1),
-        (1) as u128,
-        (2) as u128
+        1_u128,
+        2_u128
     )
     .is_err());
     assert!(CheckedCallPlan::new(
@@ -471,8 +471,8 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
         vec![0; 131_073],
         EvmU256::from_u64(0),
         nonzero(1),
-        (1) as u128,
-        (2) as u128
+        1_u128,
+        2_u128
     )
     .is_err());
     let ceiling = u128::MAX;
@@ -485,26 +485,12 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
         ceiling
     )
     .is_ok());
-    for (priority, maximum) in [(2, 1)] {
-        assert!(CheckedCreatePlan::new(
-            binding(),
-            vec![],
-            EvmU256::from_u64(0),
-            nonzero(1),
-            priority,
-            maximum
-        )
-        .is_err());
-        assert!(CheckedCallPlan::new(
-            binding(),
-            vec![],
-            EvmU256::from_u64(0),
-            nonzero(1),
-            priority,
-            maximum
-        )
-        .is_err());
-    }
+    assert!(
+        CheckedCreatePlan::new(binding(), vec![], EvmU256::from_u64(0), nonzero(1), 2, 1).is_err()
+    );
+    assert!(
+        CheckedCallPlan::new(binding(), vec![], EvmU256::from_u64(0), nonzero(1), 2, 1).is_err()
+    );
     let create = CheckedCreatePlan::new(
         binding(),
         vec![],
