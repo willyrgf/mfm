@@ -33,9 +33,17 @@ fn frozen_signature() -> CompactRecoverableSignature {
 #[test]
 fn checked_public_key_accepts_only_valid_uncompressed_points() {
     assert!(Secp256k1PublicKey::new(GENERATOR_PUBLIC_KEY).is_ok());
-    let mut compressed_prefix = GENERATOR_PUBLIC_KEY;
-    compressed_prefix[0] = 2;
-    assert!(Secp256k1PublicKey::new(compressed_prefix).is_err());
+    for prefix in [0, 2, 3, 6, 7] {
+        let mut invalid = GENERATOR_PUBLIC_KEY;
+        invalid[0] = prefix;
+        assert!(Secp256k1PublicKey::new(invalid).is_err());
+    }
+    let verifying = k256::ecdsa::VerifyingKey::from_sec1_bytes(&GENERATOR_PUBLIC_KEY).unwrap();
+    let converted = Secp256k1PublicKey::try_from(verifying).unwrap();
+    assert_eq!(converted.as_bytes(), &GENERATOR_PUBLIC_KEY);
+    let mut invalid = [0; 65];
+    invalid[0] = 4;
+    assert!(Secp256k1PublicKey::new(invalid).is_err());
     let mut off_curve = GENERATOR_PUBLIC_KEY;
     off_curve[64] ^= 1;
     assert!(Secp256k1PublicKey::new(off_curve).is_err());

@@ -319,12 +319,9 @@ async fn external_wallet_transfer(
         .sign(digest)
         .await
         .expect("external wallet signature");
-    let bytes = signature.as_bytes();
-    let signature = Signature::from_scalars_and_parity(
-        alloy_primitives::B256::from_slice(&bytes[..32]),
-        alloy_primitives::B256::from_slice(&bytes[32..]),
-        signature.recovery_id() == 1,
-    );
+    assert!(signature.recovery_id() <= 1);
+    let signature =
+        Signature::from_bytes_and_parity(signature.as_bytes(), signature.recovery_id() == 1);
     let signed = transaction.into_signed(signature);
     let raw = mfm_evm::custody::ExactRawTransaction::new(signed.encoded_2718())
         .expect("bounded external transaction");
