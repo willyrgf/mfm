@@ -37,23 +37,8 @@ pub async fn provision_postgres(
     admin: &AdminPostgresLocator,
     runtime: &RuntimePostgresLocator,
 ) -> Result<(), ProvisionError> {
-    if admin.target() != runtime.target() {
-        return Err(ProvisionError::Incompatible);
-    }
-    let admin_options = admin
-        .connect_options("mfm-schema-provisioner")
-        .map_err(|_| ProvisionError::Unavailable)?;
-    let mut connection = PgConnection::connect_with(&admin_options)
-        .await
-        .map_err(|_| ProvisionError::Unavailable)?;
-    verify_durability(&mut connection)
-        .await
-        .map_err(classify_gate)?;
-    verify_target_role(&mut connection).await?;
-    let owner: String = sqlx::query_scalar!("SELECT current_user AS \"value!\"")
-        .fetch_one(&mut connection)
-        .await
-        .map_err(|_| ProvisionError::Unavailable)?;
+    let (mut connection, owner) =
+        provision_connection(admin, runtime, "mfm-schema-provisioner").await?;
     let run_state = inspect_run_schema(&mut connection, &owner).await?;
     let config_state = inspect_config_schema(&mut connection, &owner).await?;
     let states = [run_state, config_state];
@@ -88,13 +73,7 @@ pub async fn provision_postgres(
             .execute(&mut *transaction)
             .await
             .map_err(|_| ProvisionError::Unavailable)?;
-        match transaction.commit().await {
-            Ok(()) => {}
-            Err(error) if error.as_database_error().is_some() => {
-                return Err(ProvisionError::Unavailable)
-            }
-            Err(_) => return Err(ProvisionError::Indeterminate),
-        }
+        transaction.commit().await.map_err(classify_commit)?;
     }
 
     verify_surface(&mut connection, &RUN_SURFACE, Some(&owner))
@@ -124,23 +103,8 @@ pub async fn provision_evm_transaction_authority(
     admin: &AdminPostgresLocator,
     runtime: &RuntimePostgresLocator,
 ) -> Result<(), ProvisionError> {
-    if admin.target() != runtime.target() {
-        return Err(ProvisionError::Incompatible);
-    }
-    let admin_options = admin
-        .connect_options("mfm-evm-authority-provisioner")
-        .map_err(|_| ProvisionError::Unavailable)?;
-    let mut connection = PgConnection::connect_with(&admin_options)
-        .await
-        .map_err(|_| ProvisionError::Unavailable)?;
-    verify_durability(&mut connection)
-        .await
-        .map_err(classify_gate)?;
-    verify_target_role(&mut connection).await?;
-    let owner: String = sqlx::query_scalar!("SELECT current_user AS \"value!\"")
-        .fetch_one(&mut connection)
-        .await
-        .map_err(|_| ProvisionError::Unavailable)?;
+    let (mut connection, owner) =
+        provision_connection(admin, runtime, "mfm-evm-authority-provisioner").await?;
     let state = inspect_evm_tx_schema(&mut connection, &owner).await?;
     if state == SchemaState::Absent {
         let mut epoch = [0_u8; 32];
@@ -167,13 +131,7 @@ pub async fn provision_evm_transaction_authority(
         .execute(&mut *transaction)
         .await
         .map_err(|_| ProvisionError::Unavailable)?;
-        match transaction.commit().await {
-            Ok(()) => {}
-            Err(error) if error.as_database_error().is_some() => {
-                return Err(ProvisionError::Unavailable)
-            }
-            Err(_) => return Err(ProvisionError::Indeterminate),
-        }
+        transaction.commit().await.map_err(classify_commit)?;
     }
     verify_surface(&mut connection, &EVM_TX_SURFACE, Some(&owner))
         .await
@@ -189,6 +147,39 @@ pub async fn provision_evm_transaction_authority(
         .map_err(classify_open)?;
     drop(authority);
     Ok(())
+}
+
+async fn provision_connection(
+    admin: &AdminPostgresLocator,
+    runtime: &RuntimePostgresLocator,
+    application: &'static str,
+) -> Result<(PgConnection, String), ProvisionError> {
+    if admin.target() != runtime.target() {
+        return Err(ProvisionError::Incompatible);
+    }
+    let options = admin
+        .connect_options(application)
+        .map_err(|_| ProvisionError::Unavailable)?;
+    let mut connection = PgConnection::connect_with(&options)
+        .await
+        .map_err(|_| ProvisionError::Unavailable)?;
+    verify_durability(&mut connection)
+        .await
+        .map_err(classify_gate)?;
+    verify_target_role(&mut connection).await?;
+    let owner = sqlx::query_scalar!("SELECT current_user AS \"value!\"")
+        .fetch_one(&mut connection)
+        .await
+        .map_err(|_| ProvisionError::Unavailable)?;
+    Ok((connection, owner))
+}
+
+fn classify_commit(error: sqlx::Error) -> ProvisionError {
+    if error.as_database_error().is_some() {
+        ProvisionError::Unavailable
+    } else {
+        ProvisionError::Indeterminate
+    }
 }
 
 async fn verify_target_role(connection: &mut PgConnection) -> Result<(), ProvisionError> {
