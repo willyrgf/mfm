@@ -869,3 +869,5 @@ async fn cancelled_read_preserves_visit_and_spends_no_recovery_allowance() {
     assert_eq!(position.visit.value(), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
+
+mod nested;
