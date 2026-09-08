@@ -88,11 +88,6 @@ impl PostgresBackend {
             .connect_with(options)
             .await
             .map_err(classify_open_error)?;
-        let mut admitted_connection = pool.acquire().await.map_err(classify_open_error)?;
-        verify_connection(&mut admitted_connection)
-            .await
-            .map_err(classify_gate_error)?;
-        drop(admitted_connection);
         Ok(Self { pool })
     }
 

@@ -323,6 +323,7 @@ struct AclGrant {
     grant_option: bool,
 }
 
+#[derive(PartialEq, Eq)]
 struct CatalogSnapshot {
     database_owner: String,
     schema_owner: String,
@@ -350,7 +351,7 @@ pub(crate) async fn verify_surface(
     }
     let expected = expected_snapshot(spec, owner);
     actual.sort();
-    (actual.matches(&expected))
+    (actual == expected)
         .then_some(())
         .ok_or(GateError::Incompatible)
 }
@@ -396,21 +397,6 @@ impl CatalogSnapshot {
         self.policies.sort();
         self.rules.sort();
         self.triggers.sort();
-    }
-
-    fn matches(&self, expected: &CatalogSnapshot) -> bool {
-        self.database_owner == expected.database_owner
-            && self.schema_owner == expected.schema_owner
-            && self.relations == expected.relations
-            && self.columns == expected.columns
-            && self.constraints == expected.constraints
-            && self.indexes == expected.indexes
-            && self.schema_acl == expected.schema_acl
-            && self.relation_acl == expected.relation_acl
-            && self.column_acl == expected.column_acl
-            && self.policies == expected.policies
-            && self.rules == expected.rules
-            && self.triggers == expected.triggers
     }
 }
 

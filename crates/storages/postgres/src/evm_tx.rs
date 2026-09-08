@@ -7,7 +7,7 @@ use mfm_evm::custody::{
 };
 use mfm_evm::{EvmAddress, EvmAuthorityEpoch, EvmChainInstance, EvmHash};
 use mfm_ids::{ContentDigest, ContentRef, EffectId, SchemaId};
-use sqlx::{PgConnection, Row};
+use sqlx::PgConnection;
 
 use crate::{GateError, PostgresEvmTransactionAuthority};
 
@@ -41,15 +41,7 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
             if domain.authority_epoch != self.authority_epoch {
                 return Err(AuthorityError::Internal);
             }
-            let mut transaction = self.pool.begin().await.map_err(unavailable)?;
-            sqlx::query!("SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE")
-                .execute(&mut *transaction)
-                .await
-                .map_err(unavailable)?;
-            sqlx::query!("SET LOCAL synchronous_commit = on")
-                .execute(&mut *transaction)
-                .await
-                .map_err(unavailable)?;
+            let mut transaction = begin_authority(&self.pool).await?;
             let lock_key = nonce_domain_lock_key(domain)?;
             sqlx::Executor::execute(
                 &mut *transaction,
@@ -117,15 +109,7 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
     ) -> AuthorityFuture<'a, PreparedRecord> {
         Box::pin(async move {
             let effect_id = reservation.effect_id();
-            let mut transaction = self.pool.begin().await.map_err(unavailable)?;
-            sqlx::query!("SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE")
-                .execute(&mut *transaction)
-                .await
-                .map_err(unavailable)?;
-            sqlx::query!("SET LOCAL synchronous_commit = on")
-                .execute(&mut *transaction)
-                .await
-                .map_err(unavailable)?;
+            let mut transaction = begin_authority(&self.pool).await?;
             let state = load_state(&mut transaction, effect_id, &self.authority_epoch)
                 .await?
                 .ok_or(AuthorityError::Internal)?;
@@ -158,6 +142,21 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
             Ok(retained)
         })
     }
+}
+
+async fn begin_authority(
+    pool: &sqlx::PgPool,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, AuthorityError> {
+    let mut transaction = pool.begin().await.map_err(unavailable)?;
+    sqlx::query!("SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE")
+        .execute(&mut *transaction)
+        .await
+        .map_err(unavailable)?;
+    sqlx::query!("SET LOCAL synchronous_commit = on")
+        .execute(&mut *transaction)
+        .await
+        .map_err(unavailable)?;
+    Ok(transaction)
 }
 
 fn unavailable(_: impl Sized) -> AuthorityError {
@@ -227,9 +226,7 @@ async fn load_state(
     effect_id: &EffectId,
     captured_epoch: &EvmAuthorityEpoch,
 ) -> Result<Option<LoadedTransaction>, AuthorityError> {
-    let mut rows = sqlx::Executor::fetch_all(
-        connection,
-        sqlx::query!(
+    let rows = sqlx::query!(
             "SELECT marker.schema_contract, marker.authority_epoch AS \
          admitted_epoch, reservation.effect_id, reservation.command_schema_id, \
          reservation.command_content_digest, reservation.authority_epoch AS \
@@ -241,50 +238,25 @@ async fn load_state(
          mfm_evm_tx.prepared_transactions AS prepared ON prepared.effect_id = \
          reservation.effect_id",
             effect_id.as_str(),
-        ),
-    )
+        )
+    .fetch_all(connection)
     .await
     .map_err(unavailable)?;
-    if rows.len() != 1 {
+    let [row]: [_; 1] = rows.try_into().map_err(internal)?;
+    let admitted_epoch = epoch_from_bytes(&row.admitted_epoch)?;
+    if row.schema_contract != EVM_TX_SCHEMA_CONTRACT || &admitted_epoch != captured_epoch {
         return Err(AuthorityError::Internal);
     }
-    parse_authority_state(rows.pop().ok_or(AuthorityError::Internal)?, captured_epoch)
-}
-
-fn parse_authority_state(
-    row: sqlx::postgres::PgRow,
-    captured_epoch: &EvmAuthorityEpoch,
-) -> Result<Option<LoadedTransaction>, AuthorityError> {
-    let schema_contract: String = row.try_get("schema_contract").map_err(internal)?;
-    let admitted_epoch = epoch_from_bytes(
-        &row.try_get::<Vec<u8>, _>("admitted_epoch")
-            .map_err(internal)?,
-    )?;
-    if schema_contract != EVM_TX_SCHEMA_CONTRACT || &admitted_epoch != captured_epoch {
-        return Err(AuthorityError::Internal);
-    }
-
-    let retained_effect: Option<String> = row.try_get("effect_id").map_err(internal)?;
-    let command_schema: Option<String> = row.try_get("command_schema_id").map_err(internal)?;
-    let command_digest: Option<String> = row.try_get("command_content_digest").map_err(internal)?;
-    let reservation_epoch: Option<Vec<u8>> = row.try_get("reservation_epoch").map_err(internal)?;
-    let chain_id: Option<String> = row.try_get("chain_id").map_err(internal)?;
-    let genesis_hash: Option<Vec<u8>> = row.try_get("genesis_hash").map_err(internal)?;
-    let sender: Option<Vec<u8>> = row.try_get("sender").map_err(internal)?;
-    let reserved_nonce: Option<String> = row.try_get("reserved_nonce").map_err(internal)?;
-    let hash: Option<Vec<u8>> = row.try_get("transaction_hash").map_err(internal)?;
-    let raw: Option<Vec<u8>> = row.try_get("raw_transaction").map_err(internal)?;
-
-    let reservation_absent = retained_effect.is_none()
-        && command_schema.is_none()
-        && command_digest.is_none()
-        && reservation_epoch.is_none()
-        && chain_id.is_none()
-        && genesis_hash.is_none()
-        && sender.is_none()
-        && reserved_nonce.is_none();
+    let reservation_absent = row.effect_id.is_none()
+        && row.command_schema_id.is_none()
+        && row.command_content_digest.is_none()
+        && row.reservation_epoch.is_none()
+        && row.chain_id.is_none()
+        && row.genesis_hash.is_none()
+        && row.sender.is_none()
+        && row.reserved_nonce.is_none();
     if reservation_absent {
-        return if hash.is_none() && raw.is_none() {
+        return if row.transaction_hash.is_none() && row.raw_transaction.is_none() {
             Ok(None)
         } else {
             Err(AuthorityError::Internal)
@@ -301,14 +273,14 @@ fn parse_authority_state(
         Some(sender),
         Some(reserved_nonce),
     ) = (
-        retained_effect,
-        command_schema,
-        command_digest,
-        reservation_epoch,
-        chain_id,
-        genesis_hash,
-        sender,
-        reserved_nonce,
+        row.effect_id,
+        row.command_schema_id,
+        row.command_content_digest,
+        row.reservation_epoch,
+        row.chain_id,
+        row.genesis_hash,
+        row.sender,
+        row.reserved_nonce,
     )
     else {
         return Err(AuthorityError::Internal);
@@ -334,7 +306,7 @@ fn parse_authority_state(
     };
     let reservation =
         Reservation::new(retained_effect, command_value_ref, domain, nonce).map_err(internal)?;
-    let prepared = match (hash, raw) {
+    let prepared = match (row.transaction_hash, row.raw_transaction) {
         (None, None) => None,
         (Some(hash), Some(raw)) => Some(PreparedRecord::new(
             evm_hash_from_bytes(&hash)?,
