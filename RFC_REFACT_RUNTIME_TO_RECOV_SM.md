@@ -3,6 +3,11 @@
 Status: proposed. This RFC records the replacement design; it does not change the current
 implementation contract in [docs/design.md](docs/design.md) until the implementation cutover.
 
+The [API sketch and engineer handoff](docs/rfc-recovery-api-sketch.md) defines the proposed Rust
+types, signatures, exact association, wire shapes, and implementation gates. Its linked standalone
+signature proof checks typed composition in the pinned Nix shell; it does not implement Runtime
+or prove production codecs, checkpoint scoping, or persistence.
+
 ## Decision
 
 Replace the current forward-only State/Match execution model with one immutable, ordered sequence
@@ -272,11 +277,20 @@ unless explicitly configured. A complete binding covers the State's domain failu
 adapter incident, with reusable framework defaults for adapter handling. Runtime and Store errors
 do not add policy-association requirements.
 
+Each explicit classifier/handler setting is a finite checked family of exact typed bindings.
+Generic implementations such as `Stop<I>` are instantiated for the declared incident input types
+during authoring and registration; Runtime cannot instantiate them from a type ID. An explicit
+child family replaces that setting's parent family completely. Missing exact coverage is a
+construction error, not fallback to an outer family. Only the selected binding is persisted in
+each declaration; the families are neither a Program catalog nor runtime inheritance machinery.
+
 ### Typed composition examples
 
-These sketches specify the intended mapping order; the final Rust signatures must be demonstrated
-in a consuming crate before the API and wire are frozen. Each selected classifier declares its
-input contract. Expansion composes explicit incident mappings into that contract, using the
+These sketches specify the mapping order, with concrete signatures and an executable finite-binding
+example in the [API appendix](docs/rfc-recovery-api-sketch.md). Integration with real checked values
+and Runtime association remains a consuming-crate gate before the API and wire are frozen.
+Each selected classifier declares its input contract. Expansion composes explicit incident mappings
+into that contract, using the
 existing typed child-to-parent failure mappings and declared State-context mappings. It never
 discovers conversions at execution time or adds a second `Operation::Cause` contract.
 
@@ -709,10 +723,11 @@ Tests must use public boundaries and independently specify observable behavior:
 
 ## Ordered implementation commits and verification
 
-1. **Record the agreed proposal.** This RFC only; specify public composable classification and
-   recovery, typed examples, derived data, fixed stop behavior, and explicit enrichment revisions
-   without changing current implementation contracts. Before implementation, validate the small
-   consuming API and capacity arithmetic; do not freeze wire contracts around unproven generics.
+1. **Record the agreed proposal.** Documentation only; specify public composable classification and
+   recovery, the linked type/signature appendix and standalone proof, derived data, fixed stop
+   behavior, and explicit enrichment revisions without changing current implementation contracts.
+   Before implementation freeze, integrate the consuming API with real codecs and validate capacity
+   arithmetic; the standalone proof does not replace those gates.
 2. **Replace the execution contract completely.** Keep the inseparable Program/Runtime/Journal/
    Effect-identity cutover, all dependent domain/adapter/application/binary changes, deletions,
    fixtures, tests, and current design documentation in one coherent logical commit. Do not split
@@ -778,7 +793,8 @@ uncertainties concern implementation validation and the concrete discovery follo
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
-| Explicit typed mappings and State context keep the two implementation contracts compact. | Rust signatures and typed decoding of original adapter incidents have not been prototyped. | Excessive generic or codec machinery could undermine simplification. | Prototype the examples above with Runtime-independent EVM/Portfolio domains, typed context construction, heterogeneous handler defaults, report reconstruction, and one checkpoint before freezing the API. |
+| Finite exact typed bindings integrate compactly with real checked values. | The standalone Rust proof validates generic selection and non-Clone mapping, but substitutes marker values and TypeId for real codecs/content refs. | Codec/association bounds could require revising the signatures. | Port the appendix's four consuming cases to real MfmValue types and Runtime assembly, including original error preservation and typed report decoding. |
+| Typed checkpoint tokens with checked scope identity are sufficient. | The signature proof does not implement scope bookkeeping or injection. | Incorrect construction checks could permit direct parent-token capture. | Test legal parent-installed inherited recovery and rejected direct child reinstallation after complete injection. |
 | Input plus prepared intent/command provides sufficient State recovery context. | Concrete adapter-error augmentation has not been exercised. | Additional retained facts could enlarge the State callback contract. | Exercise anchor confirmation and pending transaction errors; add only inputs required by those examples. |
 | A bounded discovery output can publish through the existing configuration repository contract. | The concrete discovery source and output schema are not selected. | The enrichment follow-up may need a domain-specific schema or publication binding. | Choose one discovery workflow and test exact revision publication, repeated publication, and dependent admission without expiration or rediscovery. |
 | Conservative full-history admission bounds can fit useful portfolios and recovery allowances. | Per-step complete-closure bounds have not yet been measured against the existing capacity fixtures. | Overly broad bounds could reject useful runs; tighter checked contracts or an explicit format-capacity decision would be required. | Prove bounds for the existing 64-source and transaction fixtures with representative retry budgets before freezing the wire. |
