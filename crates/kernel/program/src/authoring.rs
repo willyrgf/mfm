@@ -2,7 +2,7 @@ use std::collections::hash_map::Entry;
 use std::{any::TypeId, collections::HashMap, marker::PhantomData};
 
 use mfm_capabilities::{EffectCapabilityContract, ReadCapabilityContract};
-use mfm_ids::{ContentRef, EntryPointId, SchemaId, SemanticTypeId, StableId};
+use mfm_ids::{ContentRef, EntryPointId, StableId};
 use mfm_values::{EnumTagging, MfmValue, SchemaDescriptor, SchemaShape};
 
 use crate::{
@@ -173,46 +173,17 @@ where
         S: ReadState<C>,
         C: ReadCapabilityContract + CapabilityInjection<S>,
     {
-        let expanded_input = self.identities.value_ref::<C::ExpandedInput>()?;
-        let expanded_output = self.identities.value_ref::<C::ExpandedOutput>()?;
-        let expanded_failure = self.identities.value_ref::<C::ExpandedFailure>()?;
-        let state_input = self.identities.value_ref::<S::Input>()?;
-        let state_output = self.identities.value_ref::<S::Output>()?;
-        let state_failure = self.identities.value_ref::<S::Failure>()?;
-        let never = self.identities.value_ref::<Never>()?;
-        self.draft.require_current(&expanded_input)?;
-        require_legal_failure(
-            &expanded_failure,
-            &never,
-            &self.failure_contract_ref,
-            &self.admitted_failure_contract_refs,
-        )?;
-        nested_callback_depth(self.callback_depth)?;
-        let (identities, suffix) = expand_capability_suffix::<S, C, _>(
-            setup,
-            std::mem::take(&mut self.identities),
-            expanded_input,
-            expanded_output,
-            expanded_failure,
-            state_input,
-            state_output,
-            state_failure,
-            never,
-            self.callback_depth,
-            |identities, binding_ref| {
-                let capability_contract_ref = identities.read_capability_ref::<C>()?;
-                let intent_contract_ref = identities.value_ref::<C::Intent>()?;
-                let evidence_contract_ref = identities.value_ref::<C::Evidence>()?;
-                Ok(Execution::read(
-                    capability_contract_ref,
-                    intent_contract_ref,
-                    evidence_contract_ref,
-                    binding_ref,
-                ))
-            },
-        );
-        self.identities = identities;
-        self.draft.merge_connected(suffix?)
+        self.capability::<S, C, _>(setup, |identities, binding_ref| {
+            let capability_contract_ref = identities.read_capability_ref::<C>()?;
+            let intent_contract_ref = identities.value_ref::<C::Intent>()?;
+            let evidence_contract_ref = identities.value_ref::<C::Evidence>()?;
+            Ok(Execution::read(
+                capability_contract_ref,
+                intent_contract_ref,
+                evidence_contract_ref,
+                binding_ref,
+            ))
+        })
     }
 
     /// Appends one exact-pair Effect occurrence with deterministic capability-owned injection.
@@ -220,6 +191,29 @@ where
     where
         S: EffectState<C>,
         C: EffectCapabilityContract + CapabilityInjection<S>,
+    {
+        self.capability::<S, C, _>(setup, |identities, binding_ref| {
+            let capability_contract_ref = identities.effect_capability_ref::<C>()?;
+            let command_contract_ref = identities.value_ref::<C::Command>()?;
+            let evidence_contract_ref = identities.value_ref::<C::Evidence>()?;
+            Ok(Execution::effect(
+                capability_contract_ref,
+                command_contract_ref,
+                evidence_contract_ref,
+                binding_ref,
+            ))
+        })
+    }
+
+    fn capability<S, C, BuildExecution>(
+        &mut self,
+        setup: &C::Setup,
+        build_execution: BuildExecution,
+    ) -> Result<()>
+    where
+        S: State,
+        C: CapabilityInjection<S>,
+        BuildExecution: FnOnce(&mut IdentityMemo, ContentRef) -> Result<Execution>,
     {
         let expanded_input = self.identities.value_ref::<C::ExpandedInput>()?;
         let expanded_output = self.identities.value_ref::<C::ExpandedOutput>()?;
@@ -247,17 +241,7 @@ where
             state_failure,
             never,
             self.callback_depth,
-            |identities, binding_ref| {
-                let capability_contract_ref = identities.effect_capability_ref::<C>()?;
-                let command_contract_ref = identities.value_ref::<C::Command>()?;
-                let evidence_contract_ref = identities.value_ref::<C::Evidence>()?;
-                Ok(Execution::effect(
-                    capability_contract_ref,
-                    command_contract_ref,
-                    evidence_contract_ref,
-                    binding_ref,
-                ))
-            },
+            build_execution,
         );
         self.identities = identities;
         self.draft.merge_connected(suffix?)
@@ -1141,7 +1125,10 @@ fn selector_variants(selector: &CachedValueContract) -> Result<Vec<SelectorVaria
         .enumerate()
         .map(|(descriptor_ordinal, variant)| {
             StableId::new(&variant.name).map_err(|_| ProgramError::InvalidContract)?;
-            match_payload_descriptor(&variant.shape).ok_or(ProgramError::InvalidContract)?;
+            variant
+                .shape
+                .value_payload_descriptor()
+                .ok_or(ProgramError::InvalidContract)?;
             Ok(SelectorVariant {
                 tag: variant.name.clone(),
                 descriptor_ordinal,
@@ -1149,37 +1136,6 @@ fn selector_variants(selector: &CachedValueContract) -> Result<Vec<SelectorVaria
             })
         })
         .collect()
-}
-
-fn match_payload_descriptor(
-    shape: &SchemaShape,
-) -> Option<(&SchemaId, &SemanticTypeId, &SchemaShape)> {
-    let payload = match shape {
-        SchemaShape::Tuple(elements) if elements.len() == 1 => &elements[0],
-        other => other,
-    };
-    match payload {
-        SchemaShape::InlineValue {
-            schema_id,
-            semantic_type_id,
-            serialized_shape,
-        } => Some((schema_id, semantic_type_id, serialized_shape)),
-        SchemaShape::Generic {
-            constructor,
-            arguments,
-            serialized_shape,
-        } if constructor == "mfm/generic-value" => {
-            let [argument] = arguments.as_slice() else {
-                return None;
-            };
-            Some((
-                &argument.schema_id,
-                &argument.semantic_type_id,
-                serialized_shape,
-            ))
-        }
-        _ => None,
-    }
 }
 
 fn require_payload<P: MfmValue>(
@@ -1207,8 +1163,10 @@ fn require_payload<P: MfmValue>(
     let variant = variants
         .get(descriptor_ordinal)
         .ok_or(ProgramError::InvalidContract)?;
-    let (schema_id, semantic_type_id, serialized_shape) =
-        match_payload_descriptor(&variant.shape).ok_or(ProgramError::InvalidContract)?;
+    let (schema_id, semantic_type_id, serialized_shape) = variant
+        .shape
+        .value_payload_descriptor()
+        .ok_or(ProgramError::InvalidContract)?;
     let payload_identity = payload.descriptor.identity();
     (schema_id == payload.contract_ref.schema_id()
         && Some(semantic_type_id) == payload_identity.semantic_type_id.as_ref()

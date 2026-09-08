@@ -82,6 +82,9 @@ Application client primitive to generate one before their one use-case call. RES
 for a durably failed run, while the CLI uses exit 1 for Runnable or Failed. These are named transport
 asymmetries, not second use-case implementations.
 
+Values owns interpretation of exact inline/generic enum payload descriptors; Program validates
+graph edges and Runtime validates associated codecs using that same shape operation.
+
 The source-authoring sequence is separate from progression:
 
 ```text
