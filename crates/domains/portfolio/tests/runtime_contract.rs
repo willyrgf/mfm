@@ -387,14 +387,17 @@ async fn enrichment_retains_native_and_nonzero_candidates_and_never_filters_prov
                     .as_array_mut()
                     .unwrap()
                     .pop();
-                assert_eq!(serde_json::to_value(output.portfolio()).unwrap(), expected);
                 assert_eq!(
                     output.bindings().collect::<Vec<_>>(),
                     vec![(target.chain_id, &target.binding_ref().unwrap())]
                 );
                 let wire = serde_json::to_value(&output).unwrap();
                 assert_eq!(wire["collections"][0]["anchor"]["number"], "7");
-                assert_eq!(wire["selector"]["quote"], "usd");
+                assert_eq!(wire["quote"], "usd");
+                assert_eq!(
+                    serde_json::to_value(output.into_snapshot_config().0).unwrap(),
+                    expected
+                );
             }
             RunViewState::Failed(report) if fail => {
                 let FailureCauseView::Adapter(incident) = report.cause() else {

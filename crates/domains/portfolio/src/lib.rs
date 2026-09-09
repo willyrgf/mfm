@@ -965,63 +965,42 @@ pub struct PortfolioConfig {
     collections: Vec<PortfolioCollectionConfig>,
 }
 
-impl<'de> Deserialize<'de> for PortfolioConfig {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            portfolio_id: PortfolioId,
-            quotes: Vec<QuoteCode>,
-            collections: Vec<PortfolioCollectionConfig>,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let config = Self {
-            portfolio_id: wire.portfolio_id,
-            quotes: wire.quotes,
-            collections: wire.collections,
-        };
-        validate_portfolio_config(&config)
-            .map(|_| config)
-            .map_err(de::Error::custom)
+impl_checked_deserialize!(PortfolioConfig {
+    portfolio_id: PortfolioId,
+    quotes: Vec<QuoteCode>,
+    collections: Vec<PortfolioCollectionConfig>,
+});
+impl PortfolioConfig {
+    fn validate(&self) -> Result<(), PortfolioError> {
+        validate_config_parts(&self.portfolio_id, &self.quotes, self.collections.iter())
     }
 }
 
-fn validate_portfolio_config(config: &PortfolioConfig) -> Result<(), PortfolioError> {
-    if !valid_public_text(&config.portfolio_id.value, 256)
-        || config.quotes.is_empty()
-        || config.collections.is_empty()
-        || config.collections.len() > PORTFOLIO_COLLECTION_LIMIT
-        || config.collections.iter().any(|collection| {
+fn validate_config_parts<'a>(
+    portfolio_id: &PortfolioId,
+    quotes: &[QuoteCode],
+    collections: impl ExactSizeIterator<Item = &'a PortfolioCollectionConfig> + Clone,
+) -> Result<(), PortfolioError> {
+    if !valid_public_text(&portfolio_id.value, 256)
+        || quotes.is_empty()
+        || collections.len() == 0
+        || collections.len() > PORTFOLIO_COLLECTION_LIMIT
+        || collections.clone().any(|collection| {
             !valid_public_text(&collection.correlation, 256)
                 || collection.request.validate().is_err()
         })
-        || config
-            .quotes
+        || quotes
             .iter()
             .enumerate()
-            .any(|(index, quote)| config.quotes[..index].contains(quote))
+            .any(|(index, quote)| quotes[..index].contains(quote))
         || duplicate_text(
-            config
-                .collections
-                .iter()
+            collections
+                .clone()
                 .map(|collection| collection.correlation.as_str()),
         )
-        || total_sources(
-            config
-                .collections
-                .iter()
-                .map(|collection| &collection.request),
-        ) > mfm_evm::EVM_BALANCE_SOURCE_LIMIT
-        || duplicate_source_ids(
-            config
-                .collections
-                .iter()
-                .map(|collection| &collection.request),
-        )
+        || total_sources(collections.clone().map(|collection| &collection.request))
+            > mfm_evm::EVM_BALANCE_SOURCE_LIMIT
+        || duplicate_source_ids(collections.map(|collection| &collection.request))
     {
         return Err(PortfolioError::InvalidValue);
     }
@@ -1054,7 +1033,7 @@ where
     {
         return Err(PortfolioError::InvalidValue);
     }
-    validate_portfolio_config(config).map_err(|_| PortfolioError::Program)?;
+    config.validate().map_err(|_| PortfolioError::Program)?;
     selector.validate()?;
     if selector.target != config.portfolio_id || !config.quotes.contains(&selector.quote) {
         return Err(PortfolioError::InvalidValue);

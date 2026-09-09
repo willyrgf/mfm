@@ -35,6 +35,8 @@ pub(super) fn conclusion_bounds(
     let summaries = (input.collections.len() as u64)
         .checked_mul(256)
         .ok_or(PortfolioError::Program)?;
+    // This also covers enrichment: its paired configs retain a subset of these sources,
+    // while collection headers cover route/anchor metadata and the selected quote.
     let output = add(
         add(
             add(

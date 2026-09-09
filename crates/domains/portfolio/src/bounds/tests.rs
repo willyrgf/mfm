@@ -83,7 +83,12 @@ fn calculated_root_bound_covers_completed_prefix_and_snapshot_with_maximum_publi
             panic!("bounded native/token candidates must resolve")
         };
         assert!(bytes(&resolved).unwrap() <= bound.max_frame_bytes());
-        assert!(serde_json::to_vec(resolved.portfolio()).unwrap().len() < 128 * 1024);
+        assert!(
+            serde_json::to_vec(&resolved.into_snapshot_config().0)
+                .unwrap()
+                .len()
+                < 128 * 1024
+        );
         let ProposedStateOutcome::Success { output } =
             ConsolidatePortfolio::evaluate(continuation).unwrap()
         else {

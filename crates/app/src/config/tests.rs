@@ -28,10 +28,18 @@ async fn maximum_candidate_output_and_published_config_fit_the_existing_document
         let candidate_bytes = serde_json::to_vec(&candidate).unwrap();
         assert!(candidate_bytes.len() < 128 * 1024);
         ConfigDocument::new(candidate_bytes).await.unwrap();
-        let output: PortfolioEnrichmentOutput = serde_json::from_value(serde_json::json!({
+        let old_output = serde_json::json!({
             "portfolio": portfolio, "selector": selector,
             "collections": targets.iter().map(|target| serde_json::json!({
                 "chain_id": target.chain_id, "route_ref": target.binding_ref().unwrap(),
+                "anchor": {"number": "9".repeat(80), "hash": "\"".repeat(256)}
+            })).collect::<Vec<_>>()
+        });
+        assert!(serde_json::from_value::<PortfolioEnrichmentOutput>(old_output).is_err());
+        let output: PortfolioEnrichmentOutput = serde_json::from_value(serde_json::json!({
+            "portfolio_id": portfolio["portfolio_id"], "quotes": portfolio["quotes"], "quote": selector["quote"],
+            "collections": targets.iter().zip(portfolio["collections"].as_array().unwrap()).map(|(target, config)| serde_json::json!({
+                "config": config, "route_ref": target.binding_ref().unwrap(),
                 "anchor": {"number": "9".repeat(80), "hash": "\"".repeat(256)}
             })).collect::<Vec<_>>()
         }))
@@ -47,9 +55,18 @@ async fn maximum_candidate_output_and_published_config_fit_the_existing_document
             reference,
         )
         .unwrap();
-        let published = ConfigDocument::from_enrichment(&output, &provenance, routes).unwrap();
+        let published =
+            ConfigDocument::from_enrichment(output, provenance.clone(), routes).unwrap();
         assert!(published.canonical.as_bytes().len() < 128 * 1024);
-        assert!(published.matches_enrichment(&output));
+        assert!(published.matches_enrichment(serde_json::from_slice(canonical.as_bytes()).unwrap()));
+        assert_eq!(
+            serde_json::to_value(&published.wire.portfolio).unwrap(),
+            portfolio
+        );
+        assert_eq!(
+            serde_json::to_value(&published.wire.selector).unwrap(),
+            selector
+        );
         assert_eq!(published.enrichment(), Some(&provenance));
     }
 }

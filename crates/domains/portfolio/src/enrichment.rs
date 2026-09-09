@@ -99,66 +99,78 @@ impl PortfolioAdmission {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 struct EnrichmentCollection {
-    chain_id: NonZeroU64,
+    config: PortfolioCollectionConfig,
     route_ref: ContentRef,
     anchor: PortfolioAnchor,
 }
 
-/// Checked candidate selection; it makes no claim about assets outside the supplied list.
+/// Checked candidate selection; each resolved collection retains its exact binding and anchor.
 #[derive(Debug, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioEnrichmentOutput {
-    portfolio: PortfolioConfig,
+    portfolio_id: PortfolioId,
+    quotes: Vec<QuoteCode>,
+    quote: QuoteCode,
     collections: Vec<EnrichmentCollection>,
-    selector: PortfolioSnapshotSelector,
 }
 impl_checked_deserialize!(PortfolioEnrichmentOutput {
-    portfolio: PortfolioConfig,
+    portfolio_id: PortfolioId,
+    quotes: Vec<QuoteCode>,
+    quote: QuoteCode,
     collections: Vec<EnrichmentCollection>,
-    selector: PortfolioSnapshotSelector,
 });
 impl PortfolioEnrichmentOutput {
     fn validate(&self) -> Result<(), PortfolioError> {
-        validate_portfolio_config(&self.portfolio)?;
-        self.selector.validate()?;
-        if self.selector.target != self.portfolio.portfolio_id
-            || !self.portfolio.quotes.contains(&self.selector.quote)
-            || self.collections.len() != self.portfolio.collections.len()
-            || self
-                .collections
-                .iter()
-                .zip(&self.portfolio.collections)
-                .any(|(bound, collection)| {
-                    bound.anchor.validate().is_err()
-                        || collection
-                            .request
-                            .sources()
-                            .first()
-                            .is_none_or(|source| source.chain_id() != bound.chain_id)
-                        || !collection
-                            .request
-                            .sources()
-                            .iter()
-                            .any(|source| source.token().is_none())
-                })
+        validate_config_parts(
+            &self.portfolio_id,
+            &self.quotes,
+            self.collections.iter().map(|collection| &collection.config),
+        )?;
+        if !self.quotes.contains(&self.quote)
+            || self.collections.iter().any(|collection| {
+                collection.anchor.validate().is_err()
+                    || !collection
+                        .config
+                        .request
+                        .sources()
+                        .iter()
+                        .any(|source| source.token().is_none())
+            })
         {
             return Err(PortfolioError::InvalidValue);
         }
         Ok(())
     }
-    /// Returns the checked resolved configuration in original candidate order.
-    pub fn portfolio(&self) -> &PortfolioConfig {
-        &self.portfolio
+
+    /// Moves the selected collections into a snapshot configuration and matching selector.
+    pub fn into_snapshot_config(self) -> (PortfolioConfig, PortfolioSnapshotSelector) {
+        let selector = PortfolioSnapshotSelector {
+            target: self.portfolio_id.clone(),
+            quote: self.quote,
+        };
+        let config = PortfolioConfig {
+            portfolio_id: self.portfolio_id,
+            quotes: self.quotes,
+            collections: self
+                .collections
+                .into_iter()
+                .map(|collection| collection.config)
+                .collect(),
+        };
+        (config, selector)
     }
-    /// Returns the original snapshot selector.
-    pub fn selector(&self) -> &PortfolioSnapshotSelector {
-        &self.selector
-    }
+
     /// Returns declaration-ordered chain and binding references for publication verification.
     pub fn bindings(&self) -> impl Iterator<Item = (NonZeroU64, &ContentRef)> {
-        self.collections
-            .iter()
-            .map(|collection| (collection.chain_id, &collection.route_ref))
+        self.collections.iter().flat_map(|collection| {
+            // The checked request is nonempty and all its sources have the same chain.
+            collection
+                .config
+                .request
+                .sources()
+                .first()
+                .map(|source| (source.chain_id(), &collection.route_ref))
+        })
     }
 }
 
@@ -181,8 +193,7 @@ impl PureState for ResolvePortfolioAssets {
             if input.completed_collections.len() != input.input.collections.len() {
                 return Err(PortfolioError::InvalidContinuation);
             }
-            let mut configs = Vec::with_capacity(input.input.collections.len());
-            let mut collections = Vec::with_capacity(configs.capacity());
+            let mut collections = Vec::with_capacity(input.input.collections.len());
             for (demand, result) in input
                 .input
                 .collections
@@ -199,27 +210,20 @@ impl PureState for ResolvePortfolioAssets {
                     })
                     .map(|(source, _)| source.clone())
                     .collect();
-                configs.push(PortfolioCollectionConfig {
-                    correlation: demand.correlation.clone(),
-                    request: EvmBalanceRequest::new(sources, demand.request.decimals())
-                        .map_err(|_| PortfolioError::InvalidValue)?,
-                });
                 collections.push(EnrichmentCollection {
-                    chain_id: result.chain_id,
+                    config: PortfolioCollectionConfig {
+                        correlation: demand.correlation.clone(),
+                        request: EvmBalanceRequest::new(sources, demand.request.decimals())
+                            .map_err(|_| PortfolioError::InvalidValue)?,
+                    },
                     route_ref: demand.route_ref.clone(),
                     anchor: result.anchor.clone(),
                 });
             }
             let output = PortfolioEnrichmentOutput {
-                portfolio: PortfolioConfig {
-                    portfolio_id: input.input.portfolio_id.clone(),
-                    quotes: input.input.quotes.clone(),
-                    collections: configs,
-                },
-                selector: PortfolioSnapshotSelector {
-                    target: input.input.portfolio_id.clone(),
-                    quote: input.input.quote.clone(),
-                },
+                portfolio_id: input.input.portfolio_id,
+                quotes: input.input.quotes,
+                quote: input.input.quote,
                 collections,
             };
             output.validate()?;

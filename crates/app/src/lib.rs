@@ -703,7 +703,7 @@ impl Application {
                     return Err(RequestError::BindingUnbound);
                 }
             }
-            ConfigDocument::from_enrichment(&output, &provenance, routes.into_iter().collect())
+            ConfigDocument::from_enrichment(output, provenance, routes.into_iter().collect())
                 .map_err(|_| RequestError::InvalidEnrichment)
         })
         .await
@@ -777,7 +777,7 @@ impl Application {
                     .map_err(|_| RequestError::InvalidEnrichment)?;
                 if observed.head_digest() != provenance.head()
                     || value.value_ref() != provenance.output()
-                    || !document.matches_enrichment(&output)
+                    || !document.matches_enrichment(output)
                 {
                     return Err(RequestError::InvalidEnrichment);
                 }
