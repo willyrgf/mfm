@@ -1,34 +1,22 @@
 use crate::{ProgramError, ProgramLimits, Result};
+use std::num::NonZeroU64;
 
 /// Positive maximum complete conclusion-frame bytes for one Pure or Read occurrence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(try_from = "u64", into = "u64")]
-pub struct ConclusionBound(u64);
-
-impl TryFrom<u64> for ConclusionBound {
-    type Error = ProgramError;
-    fn try_from(value: u64) -> Result<Self> {
-        Self::new(value)
-    }
-}
-impl From<ConclusionBound> for u64 {
-    fn from(value: ConclusionBound) -> Self {
-        value.0
-    }
-}
+#[serde(transparent)]
+pub struct ConclusionBound(NonZeroU64);
 
 impl ConclusionBound {
     /// Checks positivity; Runtime admission additionally checks Journal's format ceiling.
     pub fn new(max_frame_bytes: u64) -> Result<Self> {
-        if max_frame_bytes == 0 {
-            return Err(ProgramError::InvalidContract);
-        }
-        Ok(Self(max_frame_bytes))
+        NonZeroU64::new(max_frame_bytes)
+            .map(Self)
+            .ok_or(ProgramError::InvalidContract)
     }
 
     /// Maximum bytes, including envelope and complete frame-local object closure.
     pub const fn max_frame_bytes(self) -> u64 {
-        self.0
+        self.0.get()
     }
 }
 
@@ -49,8 +37,8 @@ struct EffectBoundsWire {
 impl From<EffectBounds> for EffectBoundsWire {
     fn from(value: EffectBounds) -> Self {
         Self {
-            prepare: value.prepare.0,
-            conclusion: value.conclusion.0,
+            prepare: value.prepare.max_frame_bytes(),
+            conclusion: value.conclusion.max_frame_bytes(),
         }
     }
 }
@@ -77,11 +65,11 @@ impl EffectBounds {
 
     /// Complete maximum preparation frame bytes.
     pub const fn prepare_bytes(self) -> u64 {
-        self.prepare.0
+        self.prepare.max_frame_bytes()
     }
     /// Complete maximum settlement frame bytes, including terminal failure alternatives.
     pub const fn conclusion_bytes(self) -> u64 {
-        self.conclusion.0
+        self.conclusion.max_frame_bytes()
     }
 }
 
@@ -116,13 +104,12 @@ impl HistoryBound {
         let mut bytes = 0_u64;
         for lifecycle in sequence {
             let (count, size) = match lifecycle {
-                LifecycleBound::Conclusion(bound) => (1, bound.0),
+                LifecycleBound::Conclusion(bound) => (1, bound.max_frame_bytes()),
                 LifecycleBound::Effect(bounds) => (
                     2,
                     bounds
-                        .prepare
-                        .0
-                        .checked_add(bounds.conclusion.0)
+                        .prepare_bytes()
+                        .checked_add(bounds.conclusion_bytes())
                         .ok_or(ProgramError::Capacity)?,
                 ),
             };
@@ -137,7 +124,7 @@ impl HistoryBound {
                 .ok_or(ProgramError::Capacity)?,
             bytes: bytes
                 .checked_mul(segments)
-                .and_then(|value| value.checked_add(genesis.0))
+                .and_then(|value| value.checked_add(genesis.max_frame_bytes()))
                 .ok_or(ProgramError::Capacity)?,
         })
     }
