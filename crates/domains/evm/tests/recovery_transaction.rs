@@ -207,7 +207,10 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
             assert!(matches!(
                 runtime.start(run.clone(), oversized, input.clone()).await,
                 Err(InvocationFailure::Execution {
-                    error: mfm_runtime::RuntimeError::Capacity,
+                    error: mfm_runtime::RuntimeError::SizeLimit {
+                        resource: mfm_runtime::SizeResource::FrameCount,
+                        ..
+                    },
                     last_observed: None,
                     ..
                 })

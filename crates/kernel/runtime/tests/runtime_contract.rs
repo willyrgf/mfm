@@ -2037,7 +2037,7 @@ impl Store for FaultStore {
 #[tokio::test]
 async fn store_failures_preserve_mechanical_source_and_unknown_observation() {
     for (offset, failure) in [
-        StoreError::Capacity,
+        StoreError::ArithmeticOverflow,
         StoreError::CorruptPhysicalState,
         StoreError::Unavailable,
         StoreError::Indeterminate,

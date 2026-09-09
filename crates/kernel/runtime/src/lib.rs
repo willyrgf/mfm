@@ -40,12 +40,78 @@ pub enum RuntimeError {
     /// Static assembly and Program associations are incomplete or inconsistent.
     #[error("runtime assembly is incompatible")]
     IncompatibleAssembly,
-    /// A local fixed capacity was exceeded.
-    #[error("runtime capacity exceeded")]
-    Capacity,
+    /// A measured size or declared admission bound exceeded its limit.
+    #[error("{resource} {size}")]
+    SizeLimit {
+        /// Resource whose inclusive limit was exceeded.
+        resource: SizeResource,
+        /// Safe numeric evidence of the violation.
+        size: mfm_values::SizeLimitExceeded,
+    },
+    /// Capacity arithmetic could not represent the result.
+    #[error("capacity arithmetic overflow")]
+    ArithmeticOverflow,
     /// A trusted local invariant failed.
     #[error("runtime internal failure")]
     Internal,
+}
+
+/// Resource measured by a Runtime size-limit failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SizeResource {
+    /// One canonical typed value.
+    CanonicalObject,
+    /// One complete Journal frame.
+    Frame,
+    /// Non-payload frame metadata.
+    FrameEnvelope,
+    /// The complete run's accumulated frame bytes.
+    HistoryBytes,
+    /// The complete run's frame count.
+    FrameCount,
+    /// The executing declaration's admitted frame bound.
+    DeclaredFrame,
+    /// The derived inline terminal failure report.
+    FailureReport,
+}
+
+impl std::fmt::Display for SizeResource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::CanonicalObject => "canonical_object",
+            Self::Frame => "frame",
+            Self::FrameEnvelope => "frame_envelope",
+            Self::HistoryBytes => "history_bytes",
+            Self::FrameCount => "frame_count",
+            Self::DeclaredFrame => "declared_frame",
+            Self::FailureReport => "failure_report",
+        })
+    }
+}
+
+impl RuntimeError {
+    /// Returns exact safe size diagnostics, including mechanical Store failures.
+    pub const fn size_limit(self) -> Option<(SizeResource, mfm_values::SizeLimitExceeded)> {
+        match self {
+            Self::SizeLimit { resource, size } => Some((resource, size)),
+            Self::Store(mfm_store::StoreError::FrameSize(size)) => {
+                Some((SizeResource::Frame, size))
+            }
+            Self::Store(mfm_store::StoreError::HistorySize(size)) => {
+                Some((SizeResource::HistoryBytes, size))
+            }
+            Self::Store(mfm_store::StoreError::FrameCount(size)) => {
+                Some((SizeResource::FrameCount, size))
+            }
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn check_size(resource: SizeResource, actual: u64, limit: u64) -> Result<()> {
+    mfm_values::SizeLimitExceeded::check(actual, limit)
+        .map_err(|size| RuntimeError::SizeLimit { resource, size })
 }
 
 /// Result of one successful Effect adapter invocation.

@@ -101,7 +101,12 @@ fn successor(run_id: &RunId) -> EncodedRunFrame {
 fn observe_store<T>(result: Result<T, StoreError>) -> store_hostile::Observation {
     match result {
         Ok(_) => panic!("expected Store error"),
-        Err(StoreError::Capacity) => store_hostile::Observation::Capacity,
+        Err(
+            StoreError::FrameSize(_)
+            | StoreError::HistorySize(_)
+            | StoreError::FrameCount(_)
+            | StoreError::ArithmeticOverflow,
+        ) => store_hostile::Observation::Capacity,
         Err(StoreError::CorruptPhysicalState) => store_hostile::Observation::Corrupt,
         Err(StoreError::Unavailable | StoreError::Indeterminate) => {
             store_hostile::Observation::Unavailable
@@ -186,7 +191,7 @@ async fn reset_schemas(connection: &mut PgConnection) {
 fn migration_and_classifier_contracts_are_exact() {
     static_assertions::assert_not_impl_any!(PostgresBackend: EvmTransactionAuthority);
     static_assertions::assert_not_impl_any!(PostgresEvmTransactionAuthority: Store, RunIndex, ConfigRepository);
-    assert_eq!(SCHEMA_CONTRACT, "mfm.run-history-postgres.v1");
+    assert_eq!(SCHEMA_CONTRACT, "mfm.run-history-postgres.v2");
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_store_schema"));
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_frames"));
     assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_heads"));
@@ -1563,6 +1568,23 @@ async fn managed_postgres_persistence_authority_contract() {
     provision_postgres(&admin, &runtime)
         .await
         .expect("restore schemas");
+    connection
+        .execute(
+            "ALTER TABLE public.mfm_store_schema DROP CONSTRAINT mfm_store_schema_contract_check",
+        )
+        .await
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE public.mfm_store_schema SET schema_contract = 'mfm.run-history-postgres.v1'",
+        )
+        .await
+        .unwrap();
+    assert_base_gate_rejects(&runtime).await;
+    reset_schemas(&mut connection).await;
+    provision_postgres(&admin, &runtime)
+        .await
+        .expect("restore current run capacity baseline");
     connection
         .execute("DELETE FROM public.mfm_store_schema")
         .await

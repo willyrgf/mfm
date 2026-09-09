@@ -224,9 +224,12 @@ pub enum RequestError {
     /// The immutable assembly cannot execute retained history.
     #[error("runtime assembly is incompatible")]
     IncompatibleAssembly,
-    /// A run capacity was exceeded.
-    #[error("run capacity exceeded")]
-    RunCapacity,
+    /// A measured run resource exceeded its explicit limit.
+    #[error("size limit exceeded")]
+    SizeLimitExceeded,
+    /// Capacity arithmetic could not represent a result.
+    #[error("capacity arithmetic overflow")]
+    CapacityArithmeticOverflow,
     /// A config selects a capability not present in the composition.
     #[error("required capability binding is unavailable")]
     BindingUnbound,
@@ -254,7 +257,8 @@ impl RequestError {
             Self::RunAdmissionConflict => "run_admission_conflict",
             Self::InvalidRunHistory => "invalid_run_history",
             Self::IncompatibleAssembly => "incompatible_assembly",
-            Self::RunCapacity => "run_capacity",
+            Self::SizeLimitExceeded => "size_limit_exceeded",
+            Self::CapacityArithmeticOverflow => "capacity_arithmetic_overflow",
             Self::BindingUnbound => "binding_unbound",
             Self::InvalidRunIndex => "invalid_run_index",
             Self::DependencyUnavailable => "dependency_unavailable",
@@ -915,13 +919,17 @@ const fn map_runtime_error(error: RuntimeError) -> RequestError {
         RuntimeError::AdmissionConflict => RequestError::RunAdmissionConflict,
         RuntimeError::Store(error) => match error {
             mfm_store::StoreError::Unavailable => RequestError::DependencyUnavailable,
-            mfm_store::StoreError::Capacity => RequestError::RunCapacity,
+            mfm_store::StoreError::FrameSize(_)
+            | mfm_store::StoreError::HistorySize(_)
+            | mfm_store::StoreError::FrameCount(_) => RequestError::SizeLimitExceeded,
+            mfm_store::StoreError::ArithmeticOverflow => RequestError::CapacityArithmeticOverflow,
             mfm_store::StoreError::CorruptPhysicalState => RequestError::InvalidRunHistory,
             mfm_store::StoreError::Indeterminate => RequestError::Internal,
         },
         RuntimeError::InvalidHistory => RequestError::InvalidRunHistory,
         RuntimeError::IncompatibleAssembly => RequestError::IncompatibleAssembly,
-        RuntimeError::Capacity => RequestError::RunCapacity,
+        RuntimeError::SizeLimit { .. } => RequestError::SizeLimitExceeded,
+        RuntimeError::ArithmeticOverflow => RequestError::CapacityArithmeticOverflow,
         RuntimeError::Internal => RequestError::Internal,
     }
 }
@@ -1168,9 +1176,9 @@ mod tests {
                 "runtime assembly is incompatible",
             ),
             (
-                RequestError::RunCapacity,
-                "run_capacity",
-                "run capacity exceeded",
+                RequestError::SizeLimitExceeded,
+                "size_limit_exceeded",
+                "size limit exceeded",
             ),
             (
                 RequestError::BindingUnbound,
@@ -1197,5 +1205,28 @@ mod tests {
             assert_eq!(error.code(), code);
             assert_eq!(error.to_string(), message);
         }
+    }
+    #[test]
+    fn size_limit_client_errors_preserve_safe_numeric_details() {
+        let size = mfm_values::SizeLimitExceeded::check(35_651_584, 33_554_432).unwrap_err();
+        let failure = RunRequestError::Invocation(InvocationFailure::Execution {
+            run_id: RunId::from_digest(mfm_ids::DigestBytes::from_array([90; 32])),
+            error: RuntimeError::SizeLimit {
+                resource: mfm_runtime::SizeResource::FailureReport,
+                size,
+            },
+            last_observed: None,
+        });
+        assert_eq!(failure.code(), "size_limit_exceeded");
+        let message = failure.to_string();
+        let wire =
+            serde_json::to_value(SerializableClientError::for_run(&failure, &message)).unwrap();
+        assert_eq!(
+            wire["invocation"]["size_limit"],
+            serde_json::json!({
+                "resource": "failure_report", "actual": 35_651_584, "limit": 33_554_432
+            })
+        );
+        assert_eq!(wire["invocation"]["last_observed"], serde_json::Value::Null);
     }
 }

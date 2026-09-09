@@ -67,12 +67,20 @@ fn canonicalization_proves_descriptor_bytes_secret_policy_and_exact_digest() {
 }
 
 #[test]
-fn valid_object_over_the_shared_ceiling_is_capacity() {
+fn exact_32_mib_object_is_accepted_and_one_more_byte_has_precise_error() {
+    let exact = TextValue {
+        text: "a".repeat(33_554_432 - 11),
+    };
+    let (canonical, _) = canonicalize_mfm_value(&exact).expect("exact object limit");
+    assert_eq!(canonical.as_bytes().len(), 33_554_432);
+    drop(canonical);
     let oversized = TextValue {
-        text: "a".repeat(mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES),
+        text: "a".repeat(33_554_432 - 10),
     };
     assert_eq!(
         canonicalize_mfm_value(&oversized),
-        Err(ValueError::Capacity)
+        Err(ValueError::SizeLimit(
+            mfm_values::SizeLimitExceeded::check(33_554_433, 33_554_432).unwrap_err()
+        ))
     );
 }

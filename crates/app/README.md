@@ -100,3 +100,11 @@ Imported provenance is verified against the successful enrichment history before
 C0 retains the selected revision identity and full resolved demand. Start first reads the requested
 RunId and checks that identity; matching recovery survives config deletion, while conflicts reject.
 Read/progress never reload configuration or enrichment history.
+
+Size-limit invocation failures use `size_limit_exceeded` and include
+`invocation.size_limit` with `resource`, `actual`, and `limit` (bytes, or frames for
+`frame_count`). The last observation remains historical; oversized inline reports do not
+append a terminal conclusion or discard pending Effect authority. Capacity arithmetic overflow
+uses `capacity_arithmetic_overflow` without fabricated measurements. CLI uses exit 2; REST uses
+422 for these stopped invocations. Response payloads retain the shared full inline report; request
+body limits do not impose a response-size limit.

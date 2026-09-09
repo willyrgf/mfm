@@ -9,10 +9,10 @@
 pub const MAX_ARRAY_ITEMS: usize = 1048576;
 
 /// Maximum characters in one base64url-without-padding string.
-pub const MAX_BASE64URL_CHARACTERS: usize = 22369622;
+pub const MAX_BASE64URL_CHARACTERS: usize = 33554430;
 
 /// Maximum bytes in one canonical JSON document.
-pub const MAX_CANONICAL_JSON_BYTES: usize = 33554432;
+pub const MAX_CANONICAL_JSON_BYTES: usize = 268435456;
 
 /// Maximum nested array/object depth in one canonical JSON document.
 pub const MAX_CANONICAL_JSON_DEPTH: usize = 64;

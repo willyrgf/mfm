@@ -736,7 +736,7 @@ fn object_one_byte_over_the_exact_limit_is_capacity() {
             &object_ref("mfm.test.oversized", oversized.as_bytes()),
             oversized.as_bytes()
         ),
-        Err(JournalError::Capacity)
+        Err(JournalError::ObjectSize(_))
     ));
 }
 

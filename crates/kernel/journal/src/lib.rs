@@ -9,12 +9,15 @@ use std::fmt;
 
 use mfm_canonical::{raw_content_digest, sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, EffectId, ExecutionPosition, RunId};
+pub use mfm_values::SizeLimitExceeded;
 use mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 /// Maximum canonical bytes in one frame.
-pub const MAX_FRAME_BYTES: usize = 25_231_360;
+// A terminal Read can retain intent, evidence, original failure and mapped failure.
+pub const MAX_FRAME_BYTES: usize =
+    4 * MAX_RUN_OBJECT_CANONICAL_BYTES + MAX_FRAME_NON_PAYLOAD_ENVELOPE;
 /// Maximum measured frame bytes outside embedded object values.
 pub const MAX_FRAME_NON_PAYLOAD_ENVELOPE: usize = 65_536;
 /// Maximum frames in one run.
@@ -28,9 +31,24 @@ type Result<T> = std::result::Result<T, JournalError>;
 /// Redaction-safe Journal failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum JournalError {
-    /// A fixed frame, object, count, or run-byte ceiling was exceeded.
-    #[error("journal capacity exceeded")]
-    Capacity,
+    /// One canonical object exceeded its byte ceiling.
+    #[error("object {0}")]
+    ObjectSize(SizeLimitExceeded),
+    /// One complete frame exceeded its byte ceiling.
+    #[error("frame {0}")]
+    FrameSize(SizeLimitExceeded),
+    /// Frame metadata exceeded its byte ceiling.
+    #[error("frame envelope {0}")]
+    EnvelopeSize(SizeLimitExceeded),
+    /// A complete history exceeded its byte ceiling.
+    #[error("history {0}")]
+    HistorySize(SizeLimitExceeded),
+    /// A complete history exceeded its frame-count ceiling.
+    #[error("frame count {0}")]
+    FrameCount(SizeLimitExceeded),
+    /// Capacity arithmetic could not represent the result.
+    #[error("journal capacity arithmetic overflow")]
+    ArithmeticOverflow,
     /// A locally constructed frame violated the sealed frame contract.
     #[error("journal frame is invalid")]
     InvalidFrame,
@@ -59,9 +77,11 @@ pub struct JournalObject<'a> {
 impl<'a> JournalObject<'a> {
     /// Checks a canonical object and its exact instance reference for local frame construction.
     pub fn new(content_ref: &'a ContentRef, canonical: &'a [u8]) -> Result<Self> {
-        if canonical.len() > MAX_RUN_OBJECT_CANONICAL_BYTES {
-            return Err(JournalError::Capacity);
-        }
+        SizeLimitExceeded::check(
+            canonical.len() as u64,
+            MAX_RUN_OBJECT_CANONICAL_BYTES as u64,
+        )
+        .map_err(JournalError::ObjectSize)?;
         PlainCanonicalJsonBytes::from_canonical_json_slice(canonical)
             .map_err(|_| JournalError::InvalidFrame)?;
         if content_ref.content_digest() != &raw_content_digest(canonical) {
@@ -239,20 +259,16 @@ fn validate_transfer_lengths(
     if frame_count == 0 {
         return Err(JournalError::InvalidHistory);
     }
-    if u64::try_from(frame_count).map_err(|_| JournalError::Capacity)? > MAX_RUN_FRAMES {
-        return Err(JournalError::Capacity);
-    }
+    SizeLimitExceeded::check(frame_count as u64, MAX_RUN_FRAMES)
+        .map_err(JournalError::FrameCount)?;
     let mut total = 0_u64;
     for frame_len in lengths {
-        if frame_len > MAX_FRAME_BYTES {
-            return Err(JournalError::Capacity);
-        }
+        SizeLimitExceeded::check(frame_len as u64, MAX_FRAME_BYTES as u64)
+            .map_err(JournalError::FrameSize)?;
         total = total
-            .checked_add(u64::try_from(frame_len).map_err(|_| JournalError::Capacity)?)
-            .ok_or(JournalError::Capacity)?;
-        if total > MAX_RUN_BYTES {
-            return Err(JournalError::Capacity);
-        }
+            .checked_add(u64::try_from(frame_len).map_err(|_| JournalError::ArithmeticOverflow)?)
+            .ok_or(JournalError::ArithmeticOverflow)?;
+        SizeLimitExceeded::check(total, MAX_RUN_BYTES).map_err(JournalError::HistorySize)?;
     }
     Ok(())
 }
@@ -328,8 +344,8 @@ impl JournalHistory {
         {
             return Err(JournalError::InvalidFrame);
         }
-        let total_bytes =
-            u64::try_from(frame.canonical_bytes().len()).map_err(|_| JournalError::Capacity)?;
+        let total_bytes = u64::try_from(frame.canonical_bytes().len())
+            .map_err(|_| JournalError::ArithmeticOverflow)?;
         Ok(Self {
             frames: vec![frame.frame],
             total_bytes,
@@ -426,10 +442,8 @@ impl JournalHistory {
         let sequence = self
             .head_sequence()
             .checked_add(1)
-            .ok_or(JournalError::Capacity)?;
-        if sequence > MAX_RUN_FRAMES {
-            return Err(JournalError::Capacity);
-        }
+            .ok_or(JournalError::ArithmeticOverflow)?;
+        SizeLimitExceeded::check(sequence, MAX_RUN_FRAMES).map_err(JournalError::FrameCount)?;
         let frame = construct_frame(
             self.run_id().clone(),
             sequence,
@@ -437,14 +451,13 @@ impl JournalHistory {
             record,
             objects,
         )?;
-        let candidate =
-            u64::try_from(frame.canonical_bytes().len()).map_err(|_| JournalError::Capacity)?;
-        let remaining = MAX_RUN_BYTES
-            .checked_sub(self.total_bytes)
-            .ok_or(JournalError::Capacity)?;
-        if candidate > remaining {
-            return Err(JournalError::Capacity);
-        }
+        let candidate = u64::try_from(frame.canonical_bytes().len())
+            .map_err(|_| JournalError::ArithmeticOverflow)?;
+        let total = self
+            .total_bytes
+            .checked_add(candidate)
+            .ok_or(JournalError::ArithmeticOverflow)?;
+        SizeLimitExceeded::check(total, MAX_RUN_BYTES).map_err(JournalError::HistorySize)?;
         Ok(frame)
     }
 
@@ -467,14 +480,13 @@ impl JournalHistory {
         {
             return Err(JournalError::InvalidFrame);
         }
-        let candidate =
-            u64::try_from(inserted.canonical_bytes().len()).map_err(|_| JournalError::Capacity)?;
-        let remaining = MAX_RUN_BYTES
-            .checked_sub(self.total_bytes)
-            .ok_or(JournalError::Capacity)?;
-        if candidate > remaining {
-            return Err(JournalError::Capacity);
-        }
+        let candidate = u64::try_from(inserted.canonical_bytes().len())
+            .map_err(|_| JournalError::ArithmeticOverflow)?;
+        let total = self
+            .total_bytes
+            .checked_add(candidate)
+            .ok_or(JournalError::ArithmeticOverflow)?;
+        SizeLimitExceeded::check(total, MAX_RUN_BYTES).map_err(JournalError::HistorySize)?;
         self.total_bytes += candidate;
         self.frames.push(inserted.frame);
         self.frames
@@ -632,11 +644,7 @@ fn construct_frame(
         previous_head_digest.as_ref(),
         &record,
         &objects,
-    )
-    .map_err(|error| match error {
-        JournalError::Capacity => JournalError::Capacity,
-        _ => JournalError::InvalidFrame,
-    })?;
+    )?;
     let head_digest = frame_head_digest(canonical.as_bytes());
     Ok(EncodedRunFrame {
         frame: QualifiedFrame {
@@ -656,9 +664,8 @@ fn qualify_local_objects(
 ) -> std::result::Result<Vec<ObjectOwned>, JournalError> {
     let mut objects: BTreeMap<ContentRef, PlainCanonicalJsonBytes> = BTreeMap::new();
     for (content_ref, bytes) in raw_objects {
-        if bytes.len() > MAX_RUN_OBJECT_CANONICAL_BYTES {
-            return Err(JournalError::Capacity);
-        }
+        SizeLimitExceeded::check(bytes.len() as u64, MAX_RUN_OBJECT_CANONICAL_BYTES as u64)
+            .map_err(JournalError::ObjectSize)?;
         let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
             .map_err(|_| JournalError::InvalidFrame)?;
         if content_ref.content_digest() != &raw_content_digest(canonical.as_bytes()) {
@@ -757,24 +764,24 @@ fn encode_frame(
         objects: wire_objects,
     };
     let json = serde_json::to_string(&wire).map_err(|_| JournalError::InvalidFrame)?;
+    SizeLimitExceeded::check(json.len() as u64, MAX_FRAME_BYTES as u64)
+        .map_err(JournalError::FrameSize)?;
     let canonical =
         PlainCanonicalJsonBytes::from_json_str(&json).map_err(|_| JournalError::InvalidFrame)?;
-    if canonical.as_bytes().len() > MAX_FRAME_BYTES {
-        return Err(JournalError::Capacity);
-    }
+    SizeLimitExceeded::check(canonical.as_bytes().len() as u64, MAX_FRAME_BYTES as u64)
+        .map_err(JournalError::FrameSize)?;
     let payload = objects.iter().try_fold(0usize, |total, object| {
         total
             .checked_add(object.canonical.as_bytes().len())
-            .ok_or(JournalError::Capacity)
+            .ok_or(JournalError::ArithmeticOverflow)
     })?;
     let envelope = canonical
         .as_bytes()
         .len()
         .checked_sub(payload)
         .ok_or(JournalError::InvalidFrame)?;
-    if envelope > MAX_FRAME_NON_PAYLOAD_ENVELOPE {
-        return Err(JournalError::Capacity);
-    }
+    SizeLimitExceeded::check(envelope as u64, MAX_FRAME_NON_PAYLOAD_ENVELOPE as u64)
+        .map_err(JournalError::EnvelopeSize)?;
     Ok(canonical)
 }
 
@@ -912,14 +919,16 @@ mod tests {
     }
 
     #[test]
-    fn maximum_sequence_and_three_maximum_objects_fit_before_successor_capacity() {
+    fn maximum_sequence_and_four_maximum_objects_fit_before_successor_capacity() {
         let intent = maximum_object('i');
         let evidence = maximum_object('e');
         let outcome = maximum_object('o');
+        let root = maximum_object('r');
         let maximum_schema_name = format!("m{}", "a".repeat(423));
         let intent_ref = object_ref(&maximum_schema_name, intent.as_bytes());
         let evidence_ref = object_ref(&maximum_schema_name, evidence.as_bytes());
         let outcome_ref = object_ref(&maximum_schema_name, outcome.as_bytes());
+        let root_ref = object_ref(&maximum_schema_name, root.as_bytes());
         assert_eq!(intent_ref.schema_id().as_str().len(), 512);
         assert_eq!(evidence_ref.schema_id().as_str().len(), 512);
         assert_eq!(outcome_ref.schema_id().as_str().len(), 512);
@@ -942,13 +951,18 @@ mod tests {
                 intent: intent_ref.clone(),
                 outcome: ReadConclusion::Observed {
                     evidence: evidence_ref.clone(),
-                    outcome: DomainConclusion::Success {
-                        output: outcome_ref.clone(),
+                    outcome: DomainConclusion::Failure {
+                        original: outcome_ref.clone(),
+                        decision: DomainDecision::Stop {
+                            root: root_ref.clone(),
+                            reason: StopCode::Requested,
+                        },
                     },
                 },
             },
             vec![
                 (outcome_ref, outcome.as_bytes()),
+                (root_ref, root.as_bytes()),
                 (intent_ref, intent.as_bytes()),
                 (evidence_ref, evidence.as_bytes()),
             ],
@@ -956,7 +970,7 @@ mod tests {
         .expect("maximum frame");
         assert_eq!(frame.run_sequence(), MAX_RUN_FRAMES);
         assert!(frame.canonical_bytes().len() <= MAX_FRAME_BYTES);
-        let payload = intent.len() + evidence.len() + outcome.len();
+        let payload = intent.len() + evidence.len() + outcome.len() + root.len();
         let envelope = frame
             .canonical_bytes()
             .len()
@@ -980,7 +994,7 @@ mod tests {
                     output: JournalObject::new(&object_ref("mfm.test.next", next), next).unwrap()
                 },
             ),
-            Err(JournalError::Capacity)
+            Err(JournalError::FrameCount(_))
         ));
     }
 
@@ -992,7 +1006,9 @@ mod tests {
         );
         assert_eq!(
             validate_transfer_lengths(MAX_RUN_FRAMES as usize + 1, std::iter::empty()),
-            Err(JournalError::Capacity)
+            Err(JournalError::FrameCount(
+                SizeLimitExceeded::check(65_537, 65_536).unwrap_err()
+            ))
         );
         assert_eq!(
             validate_transfer_lengths(
@@ -1004,7 +1020,9 @@ mod tests {
         assert_eq!(validate_transfer_lengths(1, [MAX_FRAME_BYTES]), Ok(()));
         assert_eq!(
             validate_transfer_lengths(1, [MAX_FRAME_BYTES + 1]),
-            Err(JournalError::Capacity)
+            Err(JournalError::FrameSize(
+                SizeLimitExceeded::check(134_283_265, 134_283_264).unwrap_err()
+            ))
         );
 
         let full_frames = (MAX_RUN_BYTES / MAX_FRAME_BYTES as u64) as usize;
@@ -1016,7 +1034,9 @@ mod tests {
             std::iter::repeat_n(MAX_FRAME_BYTES, full_frames).chain(std::iter::once(remainder + 1));
         assert_eq!(
             validate_transfer_lengths(full_frames + 1, overflow),
-            Err(JournalError::Capacity)
+            Err(JournalError::HistorySize(
+                SizeLimitExceeded::check(536_870_913, 536_870_912).unwrap_err()
+            ))
         );
     }
 }

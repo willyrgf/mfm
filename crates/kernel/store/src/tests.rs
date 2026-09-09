@@ -53,7 +53,12 @@ async fn install_run(store: &MemoryStore, run_id: &RunId, run: MemoryRun) {
 fn observe<T>(result: std::result::Result<T, StoreError>) -> hostile::Observation {
     match result {
         Ok(_) => panic!("expected Store error"),
-        Err(StoreError::Capacity) => hostile::Observation::Capacity,
+        Err(
+            StoreError::FrameSize(_)
+            | StoreError::HistorySize(_)
+            | StoreError::FrameCount(_)
+            | StoreError::ArithmeticOverflow,
+        ) => hostile::Observation::Capacity,
         Err(StoreError::CorruptPhysicalState) => hostile::Observation::Corrupt,
         Err(StoreError::Unavailable) => hostile::Observation::Unavailable,
         Err(StoreError::Indeterminate) => panic!("Memory must not manufacture Indeterminate"),

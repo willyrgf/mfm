@@ -27,7 +27,7 @@ pub(crate) const RUN_SURFACE: PgSurfaceSpec = PgSurfaceSpec {
                 column(4, "head_digest", "text", -1, true, Some("C")),
             ],
             constraints: &[
-                constraint("mfm_run_frames_bytes_check", "c", "CHECK (((octet_length(frame_bytes) >= 1) AND (octet_length(frame_bytes) <= 25231360)))"),
+                constraint("mfm_run_frames_bytes_check", "c", "CHECK (((octet_length(frame_bytes) >= 1) AND (octet_length(frame_bytes) <= 134283264)))"),
                 constraint("mfm_run_frames_digest_check", "c", "CHECK ((head_digest ~ '^content:sha256-v1:[0-9a-f]{64}$'::text))"),
                 constraint("mfm_run_frames_pkey", "p", "PRIMARY KEY (run_id, run_sequence)"),
                 constraint("mfm_run_frames_run_id_check", "c", "CHECK ((run_id ~ '^run:sha256-jcs-v1:[0-9a-f]{64}$'::text))"),
@@ -57,7 +57,7 @@ pub(crate) const RUN_SURFACE: PgSurfaceSpec = PgSurfaceSpec {
             name: "mfm_store_schema",
             columns: &[column(1, "schema_contract", "text", -1, true, Some("C"))],
             constraints: &[
-                constraint("mfm_store_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.run-history-postgres.v1'::text))"),
+                constraint("mfm_store_schema_contract_check", "c", "CHECK ((schema_contract = 'mfm.run-history-postgres.v2'::text))"),
                 constraint("mfm_store_schema_pkey", "p", "PRIMARY KEY (schema_contract)"),
             ],
             indexes: &[index("mfm_store_schema_pkey", "CREATE UNIQUE INDEX mfm_store_schema_pkey ON public.mfm_store_schema USING btree (schema_contract)")],

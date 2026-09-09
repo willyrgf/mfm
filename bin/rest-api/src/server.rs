@@ -278,7 +278,8 @@ const fn request_error_status(error: RequestError) -> StatusCode {
         RequestError::RunAdmissionConflict | RequestError::BindingUnbound => StatusCode::CONFLICT,
         RequestError::InvalidConfigDocument
         | RequestError::InvalidEnrichment
-        | RequestError::RunCapacity => StatusCode::UNPROCESSABLE_ENTITY,
+        | RequestError::SizeLimitExceeded
+        | RequestError::CapacityArithmeticOverflow => StatusCode::UNPROCESSABLE_ENTITY,
         RequestError::ConfigMutationIndeterminate | RequestError::DependencyUnavailable => {
             StatusCode::SERVICE_UNAVAILABLE
         }

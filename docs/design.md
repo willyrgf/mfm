@@ -89,7 +89,7 @@ strict frame-local object closure, Effect prepare/conclusion adjacency and histo
 Store sees only sealed frames and opaque complete transfers. It atomically inserts at the exact
 head or writes nothing and has no Effect semantics.
 
-The fixed limits are 8 MiB per canonical run object, 65,536 non-payload envelope bytes, 25,231,360
+The fixed limits are 32 MiB per canonical run object, 65,536 non-payload envelope bytes, 134,283,264
 bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. For global recovery limit `G`,
 Program bounds frames by `1 + (G + 1) * (Pure + Read + 2*Effect)` and bounds cumulative bytes by
 genesis plus `G + 1` copies of the declared complete sequence closure. Each Pure/Read occurrence
@@ -106,6 +106,19 @@ the owner channel. Duplicate same-key imports return handles with the same publi
 carry different purposes without consuming another key slot. Explicit async shutdown requests exit
 and immediately awaits an OS-thread join in blocking work; dropping the final sender also ends the
 owner loop.
+
+Inline failure reports retain original and mapped payloads even when identical. Each report is
+limited to 32 MiB independently of its individually qualified cause values. Admission bounds Journal
+lifecycles, not the size of every combined report. Report overflow returns `size_limit_exceeded`
+before the terminal append, preserving the acknowledged Runnable or EffectPending head and any
+pending command authority; repeated explicit progress can encounter the same limit. No report is
+persisted separately. Size errors identify the resource, actual size and limit without payload
+contents; unrepresentable capacity arithmetic is a distinct invocation error.
+
+The generic canonical JSON syntax ceiling is 256 MiB so complete frames fit; it does not replace
+Values' object or Journal's frame limits. Run-history PostgreSQL baseline v2 enforces the larger
+frame limit and rejects v1 installations. Provision a fresh development schema; no existing history
+or acknowledged head is migrated, rewritten or truncated.
 
 EVM Program values use byte-backed checked lowercase `EvmAddress` and `EvmHash`, canonical decimal
 `EvmU256`, exact `CanonicalBytes`, and `NonZeroU64` chain IDs and gas limits. A transaction binding
