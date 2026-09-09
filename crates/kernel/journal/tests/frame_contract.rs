@@ -688,6 +688,24 @@ fn history_requires_exact_sequence_predecessor_and_recursive_head() {
         ),
         Err(JournalError::InvalidHistory)
     ));
+    let other_context = b"false";
+    let other_genesis = EncodedRunFrame::admission(
+        &run,
+        &object_ref("mfm.test.program", program),
+        program,
+        &object_ref("mfm.test.context", other_context),
+        other_context,
+    )
+    .unwrap();
+    let mut other = JournalHistory::from_genesis(other_genesis).unwrap();
+    let previous = other.head_digest().clone();
+    // A sealed frame from another valid prefix cannot extend this prefix.
+    assert!(matches!(
+        other.extend_inserted(second),
+        Err(JournalError::InvalidFrame)
+    ));
+    assert_eq!(other.head_sequence(), 1);
+    assert_eq!(other.head_digest(), &previous);
 }
 
 #[test]

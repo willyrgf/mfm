@@ -48,6 +48,13 @@ caller -> Application -> Runtime -> Journal frame -> Store append
 Store load -> Journal qualify -> Runtime fold -> RunView
 ```
 
+Journal uses one privately constructed `EncodedRunFrame` for locally encoded and decoded frames.
+`StoredRunBytes` proves only transfer-length bounds; `JournalHistory` validates the complete frame
+chain, exact encoding, object hashes and closure, sequence, and structural adjacency before Runtime
+interprets it. These checks reject inconsistent bytes; they do not repair or normalize them. An
+encoded frame alone does not prove succession to a particular history, so inserted-frame extension
+still checks the expected predecessor and sequence.
+
 Concrete storage backends may implement both `Store` and the separate `RunIndex`, but Runtime
 receives only `dyn Store`. Config custody and run enumeration therefore cannot widen Runtime's
 append-only storage authority. Config listing returns all retained revisions as one unpaginated

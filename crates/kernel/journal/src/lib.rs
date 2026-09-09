@@ -159,16 +159,22 @@ pub enum JournalRecord<'a> {
 
 /// One sealed valid canonical frame.
 pub struct EncodedRunFrame {
-    frame: QualifiedFrame,
+    run_id: RunId,
+    run_sequence: u64,
+    previous_head_digest: Option<ContentDigest>,
+    record: Record,
+    objects: Vec<ObjectOwned>,
+    canonical: PlainCanonicalJsonBytes,
+    head_digest: ContentDigest,
 }
 
 impl fmt::Debug for EncodedRunFrame {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("EncodedRunFrame")
-            .field("run_id", &self.frame.run_id)
-            .field("run_sequence", &self.frame.run_sequence)
-            .field("head_digest", &self.frame.head_digest)
+            .field("run_id", &self.run_id)
+            .field("run_sequence", &self.run_sequence)
+            .field("head_digest", &self.head_digest)
             .field("canonical_bytes", &"<redacted>")
             .finish()
     }
@@ -200,32 +206,27 @@ impl EncodedRunFrame {
 
     /// Returns the run identity.
     pub const fn run_id(&self) -> &RunId {
-        &self.frame.run_id
+        &self.run_id
     }
 
     /// Returns the one-based frame sequence.
     pub const fn run_sequence(&self) -> u64 {
-        self.frame.run_sequence
+        self.run_sequence
     }
 
     /// Returns the predecessor head, absent only at genesis.
     pub const fn previous_head_digest(&self) -> Option<&ContentDigest> {
-        self.frame.previous_head_digest.as_ref()
+        self.previous_head_digest.as_ref()
     }
 
     /// Returns the exact-byte digest of this frame.
     pub const fn head_digest(&self) -> &ContentDigest {
-        &self.frame.head_digest
+        &self.head_digest
     }
 
     /// Returns exact canonical RunFrameV3 bytes.
     pub fn canonical_bytes(&self) -> &[u8] {
-        self.frame.canonical.as_bytes()
-    }
-
-    /// Returns the structurally qualified record for local semantic validation before append.
-    pub fn record(&self) -> JournalRecord<'_> {
-        self.frame.record_view()
+        self.canonical.as_bytes()
     }
 }
 
@@ -275,7 +276,7 @@ fn validate_transfer_lengths(
 
 /// One qualified complete nonempty run prefix.
 pub struct JournalHistory {
-    frames: Vec<QualifiedFrame>,
+    frames: Vec<EncodedRunFrame>,
     total_bytes: u64,
 }
 
@@ -298,15 +299,11 @@ impl JournalHistory {
         expected_run_id: &RunId,
         stored: StoredRunBytes,
     ) -> std::result::Result<Self, JournalError> {
-        let mut frames: Vec<QualifiedFrame> = Vec::with_capacity(stored.ordered_frames.len());
+        let mut frames: Vec<EncodedRunFrame> = Vec::with_capacity(stored.ordered_frames.len());
         let mut total = 0_u64;
         for (offset, bytes) in stored.ordered_frames.into_iter().enumerate() {
-            total = total
-                .checked_add(u64::try_from(bytes.len()).map_err(|_| JournalError::InvalidHistory)?)
-                .ok_or(JournalError::InvalidHistory)?;
-            if total > MAX_RUN_BYTES {
-                return Err(JournalError::InvalidHistory);
-            }
+            // StoredRunBytes already proves the complete transfer fits the fixed byte budget.
+            total += bytes.len() as u64;
             let frame = qualify_frame(&bytes)?;
             let expected_sequence =
                 u64::try_from(offset + 1).map_err(|_| JournalError::InvalidHistory)?;
@@ -340,14 +337,14 @@ impl JournalHistory {
     pub fn from_genesis(frame: EncodedRunFrame) -> std::result::Result<Self, JournalError> {
         if frame.run_sequence() != 1
             || frame.previous_head_digest().is_some()
-            || !matches!(frame.frame.record, Record::RunAdmitted { .. })
+            || !matches!(frame.record, Record::RunAdmitted { .. })
         {
             return Err(JournalError::InvalidFrame);
         }
         let total_bytes = u64::try_from(frame.canonical_bytes().len())
             .map_err(|_| JournalError::ArithmeticOverflow)?;
         Ok(Self {
-            frames: vec![frame.frame],
+            frames: vec![frame],
             total_bytes,
         })
     }
@@ -473,10 +470,7 @@ impl JournalHistory {
         if inserted.run_id() != self.run_id()
             || inserted.run_sequence() != expected_sequence
             || inserted.previous_head_digest() != Some(self.head_digest())
-            || !records_are_adjacent(
-                &self.frames[self.frames.len() - 1].record,
-                &inserted.frame.record,
-            )
+            || !records_are_adjacent(&self.frames[self.frames.len() - 1].record, &inserted.record)
         {
             return Err(JournalError::InvalidFrame);
         }
@@ -488,16 +482,16 @@ impl JournalHistory {
             .ok_or(JournalError::ArithmeticOverflow)?;
         SizeLimitExceeded::check(total, MAX_RUN_BYTES).map_err(JournalError::HistorySize)?;
         self.total_bytes += candidate;
-        self.frames.push(inserted.frame);
+        self.frames.push(inserted);
         self.frames
             .last()
-            .map(QualifiedFrame::record_view)
+            .map(EncodedRunFrame::record)
             .ok_or(JournalError::InvalidFrame)
     }
 
     /// Iterates over borrowed qualified records.
     pub fn records(&self) -> impl ExactSizeIterator<Item = JournalRecord<'_>> + '_ {
-        self.frames.iter().map(QualifiedFrame::record_view)
+        self.frames.iter().map(EncodedRunFrame::record)
     }
 
     /// Returns canonical frame lengths in record order for semantic admission-bound checks.
@@ -526,18 +520,9 @@ impl JournalHistory {
     }
 }
 
-struct QualifiedFrame {
-    run_id: RunId,
-    run_sequence: u64,
-    previous_head_digest: Option<ContentDigest>,
-    record: Record,
-    objects: Vec<ObjectOwned>,
-    canonical: PlainCanonicalJsonBytes,
-    head_digest: ContentDigest,
-}
-
-impl QualifiedFrame {
-    fn record_view(&self) -> JournalRecord<'_> {
+impl EncodedRunFrame {
+    /// Returns the structurally qualified record for local semantic validation before append.
+    pub fn record(&self) -> JournalRecord<'_> {
         match &self.record {
             Record::RunAdmitted {
                 program_ref,
@@ -647,15 +632,13 @@ fn construct_frame(
     )?;
     let head_digest = frame_head_digest(canonical.as_bytes());
     Ok(EncodedRunFrame {
-        frame: QualifiedFrame {
-            run_id,
-            run_sequence,
-            previous_head_digest,
-            record,
-            objects,
-            canonical,
-            head_digest,
-        },
+        run_id,
+        run_sequence,
+        previous_head_digest,
+        record,
+        objects,
+        canonical,
+        head_digest,
     })
 }
 
@@ -803,7 +786,7 @@ struct ObjectWire {
     canonical: Box<RawValue>,
 }
 
-fn qualify_frame(bytes: &[u8]) -> std::result::Result<QualifiedFrame, JournalError> {
+fn qualify_frame(bytes: &[u8]) -> std::result::Result<EncodedRunFrame, JournalError> {
     if bytes.len() > MAX_FRAME_BYTES {
         return Err(JournalError::InvalidHistory);
     }
@@ -868,7 +851,7 @@ fn qualify_frame(bytes: &[u8]) -> std::result::Result<QualifiedFrame, JournalErr
         return Err(JournalError::InvalidHistory);
     }
     let head_digest = frame_head_digest(bytes);
-    Ok(QualifiedFrame {
+    Ok(EncodedRunFrame {
         run_id,
         run_sequence,
         previous_head_digest,
@@ -980,7 +963,7 @@ mod tests {
 
         let total_bytes = u64::try_from(frame.canonical_bytes().len()).expect("frame length");
         let history = JournalHistory {
-            frames: vec![frame.frame],
+            frames: vec![frame],
             total_bytes,
         };
         let next = b"null";
