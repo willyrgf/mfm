@@ -1,8 +1,8 @@
 # Recoverable Runtime: API sketch and engineer handoff
 
-This appendix belongs to the proposed [linear recovery RFC](../RFC_REFACT_RUNTIME_TO_RECOV_SM.md).
-It specifies the target API shape; it does not introduce another implementation or supersede the
-current [design](design.md) before the complete cutover. Type names below are proposed names.
+This appendix records the API design for the implemented
+[linear recovery RFC](../RFC_REFACT_RUNTIME_TO_RECOV_SM.md). The current [design](design.md),
+production APIs, and consuming tests are authoritative; the sketches describe the design intent.
 Existing checked IDs, value codecs, canonicalization, async adapter callbacks, and mechanical Store
 interfaces remain the foundation. Private representation and exhaustive rustdoc are omitted from
 signature sketches.
@@ -303,7 +303,8 @@ For example, a Portfolio handler family explicitly binds generic `Stop` for Port
 and EVM incidents. A child may replace only its classifier family with `EvmClassifier` and still
 inherit that handler. One Read occurrence can replace only its handler with `RetryRead`. A second
 child that supplies no defaults selects the parent's explicit EVM-to-Portfolio classifier binding.
-See the [executable signature proof](examples/recovery-api-signatures.rs) for all four selections.
+See the [Portfolio consuming tests](../crates/domains/portfolio/tests/recovery_policy.rs)
+for all four selections using production values and Runtime assembly.
 
 `operation<C, M>` composes the child's explicit local root mapping paths with `M`. Those are
 bounded exact paths of already registered mapper implementations; State registration does not
@@ -759,45 +760,40 @@ mapped root failure. Four independent maximum-size objects exceed the current fr
 Use checked domain bounds and maximum alternative conclusions for native, token, mixed 64-source,
 and fully injected transaction fixtures before selecting useful nonzero recovery allowances.
 
-Concrete enrichment remains a subsequent commit: user-requested discovery, exact immutable DB
-configuration publication, and admission from the selected revision. Do not mix a discovery source
-or new enrichment-specific transport API into the core signature proof.
+Concrete enrichment is implemented separately: user-requested discovery, exact immutable DB
+configuration publication, and admission from the selected revision. Its consuming tests live in
+[the application](../crates/app/tests/portfolio_runtime.rs).
 
 Use [scope-driven verification](build-and-verification.md). The final implementation candidate
 requires the affected focused and managed boundary tests followed by one `nix run .#ci`. A
 documentation signature check alone does not satisfy those implementation gates.
 
-## Signature proof and validation scope
+## Production consuming examples and validation
 
-The [standalone example](examples/recovery-api-signatures.rs) lives outside the Cargo workspace.
-It checks Rust generic instantiation and finite selection of explicitly bound policies, including
-parent/child defaults, occurrence overrides, domain mapping, non-`Clone` original error preservation,
-and rejection of missing/duplicate bindings. Its assembly methods and root-map lowering are
-signature stubs. It has no State executor, provider, Store, Journal decoder, or second Runtime.
+The workspace tests exercise the contracts with real checked values, adapters, Journal, and Store:
 
-For this proof only, `MfmValue` is a marker and `TypeId` substitutes for exact component schema
-refs. `type_name` labels make selected implementations visible to the example assertions; neither
-identifier is a persisted ABI or a production fallback. The sealed `IncidentContract` models the
-actual structural bound. Real codec registration, parameter canonicalization, checkpoint scopes,
-adjacent IO types, capacity, async cancellation, and persistence are not proved by this example.
+- [Portfolio policy selection](../crates/domains/portfolio/tests/recovery_policy.rs): parent and child
+  defaults, inherited bindings, occurrence overrides, original domain classification, and restart.
+- [Runtime contracts](../crates/kernel/runtime/tests/runtime_contract.rs): exact association,
+  original/mapped reports, cancellation, retained Effect authority, and hot/cold equivalence.
+- [Scoped authoring](../crates/kernel/program/tests/authoring_boundaries.rs): compile-fail coverage
+  for private authority and checkpoint scope.
+- [Transaction recovery](../crates/domains/evm/tests/recovery_transaction.rs): production Effect
+  settlement, failure, and pending authority under finite recovery budgets.
 
-Run it without host Rust or a Cargo workspace change:
+Run focused consuming tests in the pinned shell, for example:
 
 ```sh
-proof_dir=$(mktemp -d /tmp/mfm-recovery-signatures.XXXXXX)
-nix develop -c rustc --edition=2021 docs/examples/recovery-api-signatures.rs -o "$proof_dir/check"
-"$proof_dir/check"
+nix develop -c cargo test -p mfm-runtime --test runtime_contract
+nix develop -c cargo test -p mfm-portfolio --test recovery_policy
 ```
 
-The signatures and finite-selection example compile and its assertions pass in the pinned Nix
-shell. Rustdoc-style `rust,ignore` blocks above specify proposed interfaces and deliberately omit
-implementation bodies; the claim applies to the linked example, not every fragment as a standalone
-compilation unit. No implementation CI result is implied.
+[Validation evidence](recovery-validation.md) records capacity measurements, managed transport and
+PostgreSQL results, and the completed composed CI run. The sketches above are explanatory fragments;
+production Rust and its workspace verification define the executable API.
 
 ## Material uncertainties
 
-| Assumption | Why uncertain | Consequence if wrong | Validation before implementation freeze |
-| --- | --- | --- | --- |
-| The finite typed binding design integrates with existing checked values without additional public abstractions. | The proof substitutes marker values and process-local type IDs for real codecs/content refs. | Codec/association bounds could require revising signatures. | Port the four consuming cases to real MfmValue types and Runtime assembly, including exact mismatch rejection and typed report decoding. |
-| Typed checkpoint tokens with checked scope IDs suffice. | The signature proof does not implement scope bookkeeping or injection. | A scope bug could permit unintended parent capture. | Exercise parent-installed inherited recovery and rejected child reinstallation after complete injection. |
-| Complete frame bounds admit useful recovery allowances. | Real canonical closure sizes have not been measured. | The conservative rule could reject useful portfolios. | Measure the 64-source and transaction fixtures, including maximum error/context and conclusion sizes. |
+none. Real codecs and exact association, scoped checkpoint authority, and measured complete-history
+bounds are covered by the linked consuming tests and validation evidence. Oversized inline reports
+remain an explicit [size-limit contract](design.md), with boundary and pending-Effect regressions.

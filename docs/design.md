@@ -157,7 +157,7 @@ Executable identity hashes a canonical domain-separated descriptor containing im
 version, stage, explicit recipe identity, ordered selected slots, and outcome mode. Exact value
 schemas remain additional ABI association keys. Cold fold re-prepares retained commands from
 exact snapshots and does not rerun completed interpretation. A completed transaction adds seven
-frames after admission; Program v3, Journal wire, and the Runtime fold remain unchanged.
+frames after admission; this uses the current Program v4, Journal frame v3, and Runtime fold contracts.
 
 Terminal reporting uses existing checked execution facts and settlement outcomes; there is no
 separate persisted outcome projection. Products own root failure policy. The fixture reports retain

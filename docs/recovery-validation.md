@@ -42,8 +42,8 @@ Operations, adapters, Runtime assembly, and the current Journal format.
 | Accumulating transactions (`evm_contract_effect_e2e`, deterministic tests) | Success/failure/cold facts passed in 635.11 seconds. All 12 capacity cases passed in 1,452.92 seconds, including maximum creation/call and returned evidence. Budget is 47 frames / 133,736,464 bytes; maximum actual run is 9,315,661 bytes, frame 1,327,931 bytes, terminal value 1,675,520 bytes. |
 | Live EVM library | All 36 tests passed in 262.32 seconds, including real loopback timeout/429 classification, cancellation, and ambiguous acknowledgements at each transaction boundary. Additional signer and authority cause regressions passed. |
 
-The standalone signature proof is supporting evidence only. The results above establish the
-production milestone before the complete consumer replacement and current wire declaration.
+The results above establish the production milestone before the complete consumer replacement
+and current wire declaration. Production consuming tests now cover the original signature examples.
 
 ## Replacement verification
 
@@ -98,9 +98,44 @@ The first composed CI run passed format, SQLx, Clippy and workspace compilation.
 during workspace tests after the acceptance audit identified missing nested/global-budget coverage.
 The new Runtime regression alternates inner and outer checkpoint restoration, proves preserved
 inputs and cold positions, and exhausts global and local restart allowances independently. It passed
-in 0.32 seconds without implementation changes. The final composed CI result remains pending.
+in 0.32 seconds without implementation changes.
+
+The final composed `nix run .#ci` passed on `ae3b5b53`, run
+`run-3931623-1788905182655598248`, in 4,587.728 seconds. Its `artifacts/run-summary.json` records
+all 12 tasks successful with exit code zero: format, SQLx, Clippy, workspace check, workspace tests,
+rustdoc, application/Runtime/Store capacity, PostgreSQL, client E2E, and Effect E2E. Workspace tests
+took 2,798.802 seconds; application capacity took 1,461.01 seconds. This closes the replacement and
+enrichment CI gate.
+
+## Independent-review follow-up
+
+The object and inline-report ceiling is now 32 MiB; complete frames allow four maximum objects plus
+a 64 KiB envelope. History remains limited to 65,536 frames and 512 MiB. PostgreSQL baseline v2
+matches the frame ceiling and rejects the older baseline. Original and mapped failures remain inline.
+A combined report can still exceed its ceiling: `size_limit_exceeded` exposes the resource, actual
+bytes and limit, and stops before the terminal append. The run stays Runnable or EffectPending.
+This is an accepted contract, not a guarantee that every admitted failure can terminate.
+
+Focused verification passed in the pinned shell:
+
+| Boundary | Evidence |
+| --- | --- |
+| Values and reports | Exact 32 MiB accepted; one byte over rejected with precise metrics. Pure and Effect runs with 5 MiB failures terminate and reconstruct cold; 17 MiB failures exceed the combined report limit, and 33 MiB failures exceed the object limit, preserving the prior head and Effect identity. |
+| Journal and Store | All-targets tests passed, including four distinct maximum-size Read objects, precise frame/history limits, malformed wire and predecessor checks, and rejection of a valid frame extending the wrong history without changing its head. |
+| Runtime simplification | Canonical and Runtime all-targets tests passed after shared immutable value storage and precomputed checkpoint membership, including 19 external Runtime contracts, nested restart/barrier tests, and report boundaries. |
+| Public errors | Application serialization test passed for the safe resource/actual/limit fields; workspace compilation and warnings-denied Clippy passed. |
+| PostgreSQL and task graph | `sqlx-prepare` passed (run `run-86637-1788948818927666024`); managed PostgreSQL tests passed (run `run-93707-1788948951259946209`), including rejection of the old baseline; `model-check` passed. |
+
+Raw Store transfer bytes remain untrusted. Journal qualifies canonical bytes, hashes, exact chain
+linkage, object closure, and lifecycle adjacency before Runtime folds them. The encoded-frame wrapper
+has been merged into the sole checked frame representation. Effect prepare and conclusion records
+remain intact. Production consuming examples replace the deleted signature prototype.
+
+Follow-up candidates use one final `nix run .#ci` after their focused checks. The candidate-specific
+result is recorded by Nixfied in `runs/<run-id>/artifacts/run-summary.json` under its state directory
+and reported with the candidate commit; the earlier composed result above applies to `ae3b5b53`.
 
 ## Material uncertainties
 
-none for the completed focused scenarios. Final CI remains required; focused results do not
-substitute for that gate.
+none. The oversized-report behavior is explicitly accepted and covered by regressions; focused
+follow-up results and the earlier composed result are identified separately above.
