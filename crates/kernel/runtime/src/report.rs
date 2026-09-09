@@ -108,11 +108,18 @@ impl FailureReport {
             },
         };
         let json = serde_json::to_string(&wire).map_err(|_| RuntimeError::Internal)?;
+        // Original and mapped failures intentionally remain inline, including identity maps.
+        // Individually admissible values may exceed the report limit when combined. Reject
+        // before the terminal append: the acknowledged Runnable/EffectPending head and any
+        // pending Effect authority remain intact. Admission does not guarantee report fit.
+        // Every embedded value is already canonical, so serialization preserves its byte size.
+        crate::check_size(
+            crate::SizeResource::FailureReport,
+            json.len() as u64,
+            MAX_RUN_OBJECT_CANONICAL_BYTES as u64,
+        )?;
         let canonical =
             PlainCanonicalJsonBytes::from_json_str(&json).map_err(|_| RuntimeError::Internal)?;
-        if canonical.as_bytes().len() > MAX_RUN_OBJECT_CANONICAL_BYTES {
-            return Err(RuntimeError::Capacity);
-        }
         let schema = SchemaIdentity::new(
             SchemaKind::PersistedContract,
             None,
@@ -235,3 +242,6 @@ impl std::error::Error for InvocationFailure {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

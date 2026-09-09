@@ -149,7 +149,7 @@ let
         SQL
         trap 'psql -X "$admin_dsn" -v ON_ERROR_STOP=1 -c "DROP DATABASE $metadata_db WITH (FORCE)" >/dev/null' EXIT
         export DATABASE_URL="postgresql://postgres@''${host:postgres}:''${port:postgres}/$metadata_db?sslmode=disable"
-        for baseline in run_history_postgres_v1 config_postgres_v2 evm_transaction_postgres_v2; do
+        for baseline in run_history_postgres_v2 config_postgres_v2 evm_transaction_postgres_v2; do
           psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "crates/storages/postgres/migrations/$baseline.sql" >/dev/null
         done
         SQLX_OFFLINE=false cargo sqlx prepare --no-dotenv ${lib.optionalString check "--check"} --workspace -- --locked -p mfm-storage-postgres --lib

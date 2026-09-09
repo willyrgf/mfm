@@ -95,3 +95,11 @@ Publication requires its successful exact-schema result and accepts only the des
 RunId. `invalid_enrichment` returns 400 for incomplete, wrong-schema, or inconsistent linkage.
 Repeated publication has no discovery IO. New dependent admission verifies retained provenance;
 matching start recovery and ordinary read/progress survive configuration deletion.
+
+Size-limit invocation failures use `size_limit_exceeded` and include
+`invocation.size_limit` with `resource`, `actual`, and `limit` (bytes, or frames for
+`frame_count`). The last observation remains historical; oversized inline reports do not
+append a terminal conclusion or discard pending Effect authority. Capacity arithmetic overflow
+uses `capacity_arithmetic_overflow` without fabricated measurements. CLI uses exit 2; REST uses
+422 for these stopped invocations. Response payloads retain the shared full inline report; request
+body limits do not impose a response-size limit.

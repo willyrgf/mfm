@@ -171,18 +171,28 @@ fn validate_admission_bound(program: &Program, genesis_bytes: usize) -> Result<(
                 bounds.prepare_bytes().max(bounds.conclusion_bytes())
             }
         };
-        if maximum > mfm_journal::MAX_FRAME_BYTES as u64 {
-            return Err(RuntimeError::Capacity);
-        }
+        crate::check_size(
+            crate::SizeResource::Frame,
+            maximum,
+            mfm_journal::MAX_FRAME_BYTES as u64,
+        )?;
     }
     let bound = program
         .history_bound(
-            ConclusionBound::new(genesis_bytes as u64).map_err(|_| RuntimeError::Capacity)?,
+            ConclusionBound::new(genesis_bytes as u64)
+                .map_err(|_| RuntimeError::ArithmeticOverflow)?,
         )
-        .map_err(|_| RuntimeError::Capacity)?;
-    if bound.frames() > mfm_journal::MAX_RUN_FRAMES || bound.bytes() > mfm_journal::MAX_RUN_BYTES {
-        return Err(RuntimeError::Capacity);
-    }
+        .map_err(|_| RuntimeError::ArithmeticOverflow)?;
+    crate::check_size(
+        crate::SizeResource::FrameCount,
+        bound.frames(),
+        mfm_journal::MAX_RUN_FRAMES,
+    )?;
+    crate::check_size(
+        crate::SizeResource::HistoryBytes,
+        bound.bytes(),
+        mfm_journal::MAX_RUN_BYTES,
+    )?;
     Ok(())
 }
 
@@ -794,11 +804,11 @@ fn current_frame_bound(executable: &ExecutableProgram, state: &FoldState) -> Res
 }
 
 fn prepare_append(mut accumulator: Accumulator, frame: EncodedRunFrame) -> Result<PreparedAppend> {
-    if frame.canonical_bytes().len() as u64
-        > current_frame_bound(&accumulator.executable, &accumulator.state)?
-    {
-        return Err(RuntimeError::Capacity);
-    }
+    crate::check_size(
+        crate::SizeResource::DeclaredFrame,
+        frame.canonical_bytes().len() as u64,
+        current_frame_bound(&accumulator.executable, &accumulator.state)?,
+    )?;
     accumulator
         .state
         .apply(
@@ -1088,14 +1098,37 @@ where
 
 fn map_hot_value_error(error: ValueError) -> RuntimeError {
     match error {
-        ValueError::Capacity => RuntimeError::Capacity,
+        ValueError::SizeLimit(size) => RuntimeError::SizeLimit {
+            resource: crate::SizeResource::CanonicalObject,
+            size,
+        },
         _ => RuntimeError::Internal,
     }
 }
 
 fn map_local_journal_error(error: JournalError) -> RuntimeError {
     match error {
-        JournalError::Capacity => RuntimeError::Capacity,
+        JournalError::ObjectSize(size) => RuntimeError::SizeLimit {
+            resource: crate::SizeResource::CanonicalObject,
+            size,
+        },
+        JournalError::FrameSize(size) => RuntimeError::SizeLimit {
+            resource: crate::SizeResource::Frame,
+            size,
+        },
+        JournalError::EnvelopeSize(size) => RuntimeError::SizeLimit {
+            resource: crate::SizeResource::FrameEnvelope,
+            size,
+        },
+        JournalError::HistorySize(size) => RuntimeError::SizeLimit {
+            resource: crate::SizeResource::HistoryBytes,
+            size,
+        },
+        JournalError::FrameCount(size) => RuntimeError::SizeLimit {
+            resource: crate::SizeResource::FrameCount,
+            size,
+        },
+        JournalError::ArithmeticOverflow => RuntimeError::ArithmeticOverflow,
         JournalError::InvalidFrame | JournalError::InvalidHistory => RuntimeError::Internal,
     }
 }

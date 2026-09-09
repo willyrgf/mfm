@@ -85,7 +85,10 @@ async fn committed_read_recovery_yields_and_reconstructs_without_provider_calls(
                 .start(run.clone(), oversized, Offset { value: 7 })
                 .await,
             Err(crate::InvocationFailure::Execution {
-                error: RuntimeError::Capacity,
+                error: RuntimeError::SizeLimit {
+                    resource: crate::SizeResource::FrameCount,
+                    ..
+                },
                 last_observed: None,
                 ..
             })

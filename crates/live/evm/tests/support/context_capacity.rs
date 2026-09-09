@@ -634,13 +634,13 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
             }
             _ => panic!("capacity branch mismatch"),
         };
-        assert!(value.len() < 8_388_608);
+        assert!(value.len() < 33_554_432);
         {
             let frames = store.frames.lock().unwrap();
             let total: usize = frames.iter().map(Vec::len).sum();
             let largest = frames.iter().map(Vec::len).max().unwrap();
             assert!(total < 536_870_912);
-            assert!(largest < 25_231_360);
+            assert!(largest < 134_283_264);
             let admitted = program
                 .history_bound(mfm_program::ConclusionBound::new(frames[0].len() as u64).unwrap())
                 .unwrap();
@@ -669,7 +669,7 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
                 let wire: Closure = serde_json::from_slice(frame).unwrap();
                 assert!(!wire.objects.is_empty());
                 for object in wire.objects {
-                    assert!(object.canonical.get().len() < 8_388_608);
+                    assert!(object.canonical.get().len() < 33_554_432);
                 }
             }
             println!("context capacity {case} {create_bytes}/{call_bytes} {fault:?}: value={} total={total} largest={largest}", value.len());

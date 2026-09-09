@@ -97,3 +97,11 @@ Candidate discovery is selected by a `mfm.portfolio/enrich@1` configuration and 
 `run start/show/progress`. `config publish-enrichment` explicitly publishes a successful result as
 a snapshot revision. Repetition returns the same revision without discovery. Start of an admitted
 RunId with the same selection works after config deletion; a different revision conflicts.
+
+Size-limit invocation failures use `size_limit_exceeded` and include
+`invocation.size_limit` with `resource`, `actual`, and `limit` (bytes, or frames for
+`frame_count`). The last observation remains historical; oversized inline reports do not
+append a terminal conclusion or discard pending Effect authority. Capacity arithmetic overflow
+uses `capacity_arithmetic_overflow` without fabricated measurements. CLI uses exit 2; REST uses
+422 for these stopped invocations. Response payloads retain the shared full inline report; request
+body limits do not impose a response-size limit.

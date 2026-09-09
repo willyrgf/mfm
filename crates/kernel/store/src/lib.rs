@@ -183,8 +183,17 @@ pub enum AppendResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
     /// The insertion candidate exceeded a fixed format capacity.
-    #[error("store capacity exceeded")]
-    Capacity,
+    #[error("frame {0}")]
+    FrameSize(mfm_journal::SizeLimitExceeded),
+    /// The accumulated run bytes exceeded their limit.
+    #[error("history {0}")]
+    HistorySize(mfm_journal::SizeLimitExceeded),
+    /// The run frame count exceeded its limit.
+    #[error("frame count {0}")]
+    FrameCount(mfm_journal::SizeLimitExceeded),
+    /// Capacity arithmetic could not represent the result.
+    #[error("store capacity arithmetic overflow")]
+    ArithmeticOverflow,
     /// Retained physical rows or metadata were inconsistent.
     #[error("store physical state is corrupt")]
     CorruptPhysicalState,
@@ -462,16 +471,22 @@ fn plan_append(
         return Ok(AppendPlan::NotInserted);
     }
 
-    let frame_len = u64::try_from(candidate.bytes.len()).map_err(|_| StoreError::Capacity)?;
-    if candidate.bytes.len() > MAX_FRAME_BYTES || candidate.sequence > MAX_RUN_FRAMES {
-        return Err(StoreError::Capacity);
-    }
+    let frame_len =
+        u64::try_from(candidate.bytes.len()).map_err(|_| StoreError::ArithmeticOverflow)?;
+    mfm_journal::SizeLimitExceeded::check(frame_len, MAX_FRAME_BYTES as u64)
+        .map_err(StoreError::FrameSize)?;
+    mfm_journal::SizeLimitExceeded::check(candidate.sequence, MAX_RUN_FRAMES)
+        .map_err(StoreError::FrameCount)?;
     let current_total = head.as_ref().map_or(0, |current| current.total_bytes);
     let remaining = MAX_RUN_BYTES
         .checked_sub(current_total)
         .ok_or(StoreError::CorruptPhysicalState)?;
     if frame_len > remaining {
-        return Err(StoreError::Capacity);
+        let total = current_total
+            .checked_add(frame_len)
+            .ok_or(StoreError::ArithmeticOverflow)?;
+        mfm_journal::SizeLimitExceeded::check(total, MAX_RUN_BYTES)
+            .map_err(StoreError::HistorySize)?;
     }
     if frame_head_digest(&candidate.bytes) != candidate.head_digest {
         return Err(StoreError::CorruptPhysicalState);
@@ -480,7 +495,7 @@ fn plan_append(
         .as_ref()
         .map_or(0, |current| current.total_bytes)
         .checked_add(frame_len)
-        .ok_or(StoreError::Capacity)?;
+        .ok_or(StoreError::ArithmeticOverflow)?;
     Ok(AppendPlan::Insert {
         stored: StoredFrame {
             bytes: candidate.bytes,

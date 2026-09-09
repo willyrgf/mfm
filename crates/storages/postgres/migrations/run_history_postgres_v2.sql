@@ -2,11 +2,11 @@ CREATE TABLE public.mfm_store_schema (
     schema_contract TEXT COLLATE "C" NOT NULL,
     CONSTRAINT mfm_store_schema_pkey PRIMARY KEY (schema_contract),
     CONSTRAINT mfm_store_schema_contract_check
-        CHECK (schema_contract = 'mfm.run-history-postgres.v1')
+        CHECK (schema_contract = 'mfm.run-history-postgres.v2')
 );
 
 INSERT INTO public.mfm_store_schema (schema_contract)
-VALUES ('mfm.run-history-postgres.v1');
+VALUES ('mfm.run-history-postgres.v2');
 
 CREATE TABLE public.mfm_run_frames (
     run_id       TEXT COLLATE "C" NOT NULL,
@@ -19,7 +19,7 @@ CREATE TABLE public.mfm_run_frames (
     CONSTRAINT mfm_run_frames_sequence_check
         CHECK (run_sequence BETWEEN 1 AND 65536),
     CONSTRAINT mfm_run_frames_bytes_check
-        CHECK (octet_length(frame_bytes) BETWEEN 1 AND 25231360),
+        CHECK (octet_length(frame_bytes) BETWEEN 1 AND 134283264),
     CONSTRAINT mfm_run_frames_digest_check
         CHECK (head_digest ~ '^content:sha256-v1:[0-9a-f]{64}$')
 );

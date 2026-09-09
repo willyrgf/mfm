@@ -104,6 +104,13 @@ impl Serialize for SerializableRunView<'_> {
     }
 }
 
+#[derive(Serialize)]
+struct SizeViolation {
+    resource: mfm_runtime::SizeResource,
+    actual: u64,
+    limit: u64,
+}
+
 pub(super) struct Invocation<'a>(pub(super) &'a mfm_runtime::InvocationFailure);
 impl Serialize for Invocation<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -114,6 +121,8 @@ impl Serialize for Invocation<'_> {
             ExecutionStopped {
                 run_id: &'a mfm_ids::RunId,
                 last_observed: Option<SerializableRunView<'a>>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                size_limit: Option<SizeViolation>,
             },
             RecoveryStopped {
                 observed: SerializableRunView<'a>,
@@ -126,10 +135,15 @@ impl Serialize for Invocation<'_> {
             mfm_runtime::InvocationFailure::Execution {
                 run_id,
                 last_observed,
-                ..
+                error,
             } => Wire::ExecutionStopped {
                 run_id,
                 last_observed: last_observed.as_ref().map(SerializableRunView::new),
+                size_limit: error.size_limit().map(|(resource, size)| SizeViolation {
+                    resource,
+                    actual: size.actual(),
+                    limit: size.limit(),
+                }),
             },
             mfm_runtime::InvocationFailure::RecoveryStopped {
                 observed,

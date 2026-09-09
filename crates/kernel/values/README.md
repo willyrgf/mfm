@@ -3,7 +3,7 @@
 `MfmValue` defines strict Serde/schema identity for persisted typed values.
 `canonicalize_mfm_value` is the sole qualification path and returns exact canonical bytes plus the
 content ref. Values reject floats, malformed schema descriptors, known secret markers, and payloads
-above `MAX_RUN_OBJECT_CANONICAL_BYTES` (8 MiB).
+above `MAX_RUN_OBJECT_CANONICAL_BYTES` (32 MiB).
 
 Persisted string shapes name checked owner grammars, including the exact `EffectId` grammar; schema
 validation delegates to the corresponding checked identity type.

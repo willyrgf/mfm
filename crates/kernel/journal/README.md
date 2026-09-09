@@ -18,6 +18,11 @@ Journal checks canonical bytes, references, closure, capacities and Effect adjac
 Program association, EffectId derivation, State/visit agreement, policy safety, checkpoint activation,
 budgets and barriers. Store owns physical complete-prefix loading and atomic exact-head append.
 
-Format ceilings are 8 MiB per canonical object, 65,536 non-payload envelope bytes, 25,231,360 bytes
+Format ceilings are 32 MiB per canonical object, 65,536 non-payload envelope bytes, 134,283,264 bytes
 per frame, 65,536 frames and 512 MiB cumulative frame bytes. These are fixed format bounds.
 Program supplies a conservative declared history budget and Runtime validates it at admission.
+
+The frame ceiling covers four maximum-sized objects (Read intent, evidence, original failure and
+mapped failure) plus metadata. All payloads belong to the same atomic frame; they are not separate
+appends. The generic canonical parser has a larger syntax ceiling. PostgreSQL provisioning uses
+run-history baseline v2 for this capacity contract and rejects the old baseline.

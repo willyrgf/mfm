@@ -21,7 +21,7 @@ use mfm_store::{AppendResult, RunIndex, RunIndexError, RunPage, RunPageLimit, St
 use sqlx::postgres::{PgArguments, PgPoolOptions, PgRow};
 use sqlx::{Connection, PgConnection, PgPool, Row};
 
-const SCHEMA_CONTRACT: &str = "mfm.run-history-postgres.v1";
+const SCHEMA_CONTRACT: &str = "mfm.run-history-postgres.v2";
 
 mod catalog;
 mod config;
@@ -622,7 +622,8 @@ async fn append_run(
     fault: CommitFault,
 ) -> std::result::Result<AppendResult, StoreError> {
     let run_id = frame.run_id().as_str().to_owned();
-    let sequence = i64::try_from(frame.run_sequence()).map_err(|_| StoreError::Capacity)?;
+    let sequence =
+        i64::try_from(frame.run_sequence()).map_err(|_| StoreError::ArithmeticOverflow)?;
     let predecessor = frame.previous_head_digest().cloned();
     let head_digest = frame.head_digest().clone();
     let bytes = own_candidate_bytes(frame.canonical_bytes()).await?;
@@ -816,32 +817,32 @@ fn plan_pg_append(
         return Ok(PgAppendPlan::NotInserted);
     }
 
-    let frame_len = i64::try_from(candidate.bytes.len()).map_err(|_| StoreError::Capacity)?;
+    let frame_len =
+        i64::try_from(candidate.bytes.len()).map_err(|_| StoreError::ArithmeticOverflow)?;
     let current_total = current.as_ref().map_or(0, |head| head.total_bytes);
-    if candidate.bytes.is_empty()
-        || candidate.bytes.len() > MAX_FRAME_BYTES
-        || u64::try_from(candidate.sequence)
-            .ok()
-            .is_none_or(|sequence| sequence == 0 || sequence > MAX_RUN_FRAMES)
-        || current_total < 0
-    {
-        return Err(StoreError::Capacity);
+    if candidate.bytes.is_empty() || candidate.sequence <= 0 || current_total < 0 {
+        return Err(StoreError::CorruptPhysicalState);
     }
-    let current_total = u64::try_from(current_total).map_err(|_| StoreError::Capacity)?;
-    let remaining = MAX_RUN_BYTES
-        .checked_sub(current_total)
-        .ok_or(StoreError::CorruptPhysicalState)?;
-    let frame_len_u64 = u64::try_from(frame_len).map_err(|_| StoreError::Capacity)?;
-    if frame_len_u64 > remaining {
-        return Err(StoreError::Capacity);
+    let current_total = current_total as u64;
+    let frame_len_u64 = frame_len as u64;
+    mfm_journal::SizeLimitExceeded::check(frame_len_u64, MAX_FRAME_BYTES as u64)
+        .map_err(StoreError::FrameSize)?;
+    mfm_journal::SizeLimitExceeded::check(candidate.sequence as u64, MAX_RUN_FRAMES)
+        .map_err(StoreError::FrameCount)?;
+    if current_total > MAX_RUN_BYTES {
+        return Err(StoreError::CorruptPhysicalState);
     }
+    let total = current_total
+        .checked_add(frame_len_u64)
+        .ok_or(StoreError::ArithmeticOverflow)?;
+    mfm_journal::SizeLimitExceeded::check(total, MAX_RUN_BYTES).map_err(StoreError::HistorySize)?;
     if frame_head_digest(&candidate.bytes) != candidate.head_digest {
         return Err(StoreError::CorruptPhysicalState);
     }
     let total_bytes = current_total
         .checked_add(frame_len_u64)
         .and_then(|total| i64::try_from(total).ok())
-        .ok_or(StoreError::Capacity)?;
+        .ok_or(StoreError::ArithmeticOverflow)?;
     let query = sqlx::query!(
         "INSERT INTO public.mfm_run_frames (run_id, run_sequence, frame_bytes, \
          head_digest) VALUES ($1,$2,$3,$4)",
@@ -1006,7 +1007,7 @@ fn classify_precommit_sql(error: sqlx::Error) -> StoreError {
 
 fn assert_send_static<T: Send + 'static>() {}
 
-const RUN_SCHEMA_SQL: &str = include_str!("../migrations/run_history_postgres_v1.sql");
+const RUN_SCHEMA_SQL: &str = include_str!("../migrations/run_history_postgres_v2.sql");
 const CONFIG_SCHEMA_SQL: &str = include_str!("../migrations/config_postgres_v2.sql");
 
 #[cfg(test)]

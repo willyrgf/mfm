@@ -73,8 +73,11 @@ const SECRET_MARKERS: &[&str] = &[
     "bearer ",
 ];
 const MAX_SCHEMA_IDENTITY_BYTES: usize = 65_536;
+mod size;
+pub use size::SizeLimitExceeded;
+
 /// Maximum canonical bytes of one value retained in a run frame.
-pub const MAX_RUN_OBJECT_CANONICAL_BYTES: usize = 8_388_608;
+pub const MAX_RUN_OBJECT_CANONICAL_BYTES: usize = 33_554_432;
 /// Maximum recursive depth admitted by current schema identities and values.
 ///
 /// Schema identities add three object levels around their shape — the identity
@@ -102,8 +105,8 @@ pub enum ValueError {
     #[error("value does not match schema shape")]
     SchemaShapeMismatch,
     /// Canonical value bytes exceeded the retained object ceiling before shape qualification.
-    #[error("value capacity exceeded")]
-    Capacity,
+    #[error(transparent)]
+    SizeLimit(#[from] SizeLimitExceeded),
     /// Artifact reference identity does not match the expected value type.
     #[error("artifact reference {field} mismatch: expected {expected}, got {actual}")]
     ArtifactTypeMismatch {
@@ -179,11 +182,13 @@ pub fn canonicalize_mfm_value<T: MfmValue>(
     let schema_id = descriptor.schema_id()?;
 
     let json = serde_json::to_string(value).map_err(|_| ValueError::SchemaShapeMismatch)?;
+    SizeLimitExceeded::check(json.len() as u64, MAX_RUN_OBJECT_CANONICAL_BYTES as u64)?;
     let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
         .map_err(|_| ValueError::SchemaShapeMismatch)?;
-    if canonical.as_bytes().len() > MAX_RUN_OBJECT_CANONICAL_BYTES {
-        return Err(ValueError::Capacity);
-    }
+    SizeLimitExceeded::check(
+        canonical.as_bytes().len() as u64,
+        MAX_RUN_OBJECT_CANONICAL_BYTES as u64,
+    )?;
     descriptor
         .identity()
         .validate_canonical_value(canonical.as_bytes())?;

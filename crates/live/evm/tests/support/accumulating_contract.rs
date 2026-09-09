@@ -386,7 +386,7 @@ async fn accumulated_fixture_preserves_all_success_failure_and_cold_facts() {
             _ => panic!("unexpected terminal branch"),
         }
         let frames = store.frames.lock().unwrap().clone();
-        assert!(frames.iter().all(|frame| frame.len() < 25_231_360));
+        assert!(frames.iter().all(|frame| frame.len() < 134_283_264));
         assert!(frames.iter().map(Vec::len).sum::<usize>() < 536_870_912);
         let calls = source.calls.load(Ordering::SeqCst);
         let mut cold_builder = RuntimeAssemblyBuilder::new().unwrap();
