@@ -502,71 +502,16 @@ async fn changed_anchor_restarts_the_real_collection_and_preserves_its_acknowled
         .unwrap();
         assert_eq!(terminal.head_sequence(), yielded.head_sequence() + 9);
         use mfm_journal::{DomainConclusion, DomainDecision, JournalRecord, ReadConclusion};
-        for (before, after) in prefix.records().zip(history.records()) {
-            match (before, after) {
-                (
-                    JournalRecord::RunAdmitted {
-                        program: p,
-                        admitted_context: c,
-                    },
-                    JournalRecord::RunAdmitted {
-                        program: q,
-                        admitted_context: d,
-                    },
-                ) => {
-                    assert_eq!(p.canonical_bytes(), q.canonical_bytes());
-                    assert_eq!(c.canonical_bytes(), d.canonical_bytes());
-                }
-                (
-                    JournalRecord::ReadConcluded {
-                        position: p,
-                        intent: i,
-                        outcome:
-                            ReadConclusion::Observed {
-                                evidence: e,
-                                outcome: a,
-                            },
-                    },
-                    JournalRecord::ReadConcluded {
-                        position: q,
-                        intent: j,
-                        outcome:
-                            ReadConclusion::Observed {
-                                evidence: f,
-                                outcome: b,
-                            },
-                    },
-                ) => {
-                    assert_eq!(p, q);
-                    assert_eq!(i.canonical_bytes(), j.canonical_bytes());
-                    assert_eq!(e.canonical_bytes(), f.canonical_bytes());
-                    match (a, b) {
-                        (
-                            DomainConclusion::Success { output: x },
-                            DomainConclusion::Success { output: y },
-                        ) => assert_eq!(x.canonical_bytes(), y.canonical_bytes()),
-                        (
-                            DomainConclusion::Failure {
-                                original: x,
-                                decision: DomainDecision::Restart { checkpoint: a },
-                            },
-                            DomainConclusion::Failure {
-                                original: y,
-                                decision: DomainDecision::Restart { checkpoint: b },
-                            },
-                        ) => {
-                            assert_eq!(x.canonical_bytes(), y.canonical_bytes());
-                            assert_eq!(a, b);
-                            assert!(
-                                matches!(serde_json::from_slice::<EvmBalanceFailure>(x.canonical_bytes()).unwrap(), EvmBalanceFailure::AnchorChanged { previous, observed, .. } if previous.number == EvmU256::from_u64(7) && observed.number == EvmU256::from_u64(8))
-                            );
-                        }
-                        _ => panic!("retained Read outcome changed"),
-                    }
-                }
-                _ => panic!("retained collection prefix changed"),
-            }
-        }
+        let prefix_len = prefix.records().len();
+        assert!(history.records().len() >= prefix_len);
+        assert!(prefix.records().eq(history.records().take(prefix_len)));
+        assert!(prefix.records().any(|record| matches!(record,
+            JournalRecord::ReadConcluded { outcome: ReadConclusion::Observed {
+                outcome: DomainConclusion::Failure { original, decision: DomainDecision::Restart { .. } }, ..
+            }, .. } if matches!(serde_json::from_slice::<EvmBalanceFailure>(original.canonical_bytes()).unwrap(),
+                EvmBalanceFailure::AnchorChanged { previous, observed, .. }
+                if previous.number == EvmU256::from_u64(7) && observed.number == EvmU256::from_u64(8))
+        )));
         let cold = runtime.read(&run).await.unwrap();
         let RunViewState::Succeeded(cold_value) = cold.state() else {
             panic!("cold completion")

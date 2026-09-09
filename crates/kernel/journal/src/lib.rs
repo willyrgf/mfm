@@ -68,7 +68,7 @@ pub fn frame_head_digest(frame_bytes: &[u8]) -> ContentDigest {
 }
 
 /// Borrowed view of one frame-local canonical object.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct JournalObject<'a> {
     content_ref: &'a ContentRef,
     canonical: &'a [u8],
@@ -114,7 +114,7 @@ impl fmt::Debug for JournalObject<'_> {
 }
 
 /// Borrowed qualified structural record. Runtime owns transition semantics.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum JournalRecord<'a> {
     /// Exact immutable admission.
     RunAdmitted {

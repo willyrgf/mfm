@@ -613,58 +613,11 @@ async fn injected_effect_blocks_prior_checkpoint_but_preserves_post_effect_resta
     }
 }
 
-struct AmbiguousRecoveryStore {
-    inner: mfm_store::MemoryStore,
-    reported: std::sync::atomic::AtomicBool,
-}
-impl mfm_store::Store for AmbiguousRecoveryStore {
-    fn load_run<'a>(
-        &'a self,
-        run: &'a mfm_ids::RunId,
-    ) -> Pin<
-        Box<
-            dyn Future<
-                    Output = std::result::Result<
-                        Option<mfm_journal::StoredRunBytes>,
-                        mfm_store::StoreError,
-                    >,
-                > + Send
-                + 'a,
-        >,
-    > {
-        self.inner.load_run(run)
-    }
-    fn append_run<'a>(
-        &'a self,
-        frame: &'a mfm_journal::EncodedRunFrame,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = std::result::Result<mfm_store::AppendResult, mfm_store::StoreError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            let result = self.inner.append_run(frame).await?;
-            if frame.run_sequence() == 2
-                && result == mfm_store::AppendResult::Inserted
-                && !self
-                    .reported
-                    .swap(true, std::sync::atomic::Ordering::SeqCst)
-            {
-                Err(mfm_store::StoreError::Indeterminate)
-            } else {
-                Ok(result)
-            }
-        })
-    }
-}
-
 #[tokio::test]
 async fn ambiguous_recovery_append_stops_with_historical_observation_and_preserved_source() {
     use crate::{InvocationFailure, RunViewState, Runtime};
     use mfm_ids::{DigestBytes, EntryPointId, RunId};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&calls);
     let mut builder = RuntimeAssemblyBuilder::new().unwrap();
@@ -683,10 +636,10 @@ async fn ambiguous_recovery_append_stops_with_historical_observation_and_preserv
             })
         })
         .unwrap();
-    let store = Arc::new(AmbiguousRecoveryStore {
-        inner: mfm_store::MemoryStore::new(),
-        reported: AtomicBool::new(false),
-    });
+    let store = Arc::new(ScriptedStore::new([(
+        2,
+        AppendAction::RetainThenIndeterminate,
+    )]));
     let runtime = Runtime::new(builder.finish(), store);
     let program = mfm_program::expand_program(
         EntryPointId::new("mfm.test/ambiguous-recovery@1").unwrap(),

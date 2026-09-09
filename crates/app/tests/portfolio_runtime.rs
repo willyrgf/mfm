@@ -27,10 +27,17 @@ use mfm_store::{AppendResult, MemoryStore, Store, StoreError};
 
 const ANCHOR: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[derive(Clone, Copy)]
+enum ProviderMode {
+    Ready,
+    Blocked,
+    Timeout,
+}
+
 struct Provider {
     chain_id: u64,
     calls: AtomicUsize,
-    blocked: std::sync::atomic::AtomicBool,
+    mode: std::sync::Mutex<ProviderMode>,
     entered: tokio::sync::Notify,
 }
 
@@ -42,9 +49,18 @@ impl EvmReadProvider for Provider {
     ) -> ProviderFuture<'a, EvmReadEvidence> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.blocked.load(Ordering::SeqCst) {
-                self.entered.notify_one();
-                return std::future::pending().await;
+            let mode = *self.mode.lock().unwrap();
+            match mode {
+                ProviderMode::Blocked => {
+                    self.entered.notify_one();
+                    return std::future::pending().await;
+                }
+                ProviderMode::Timeout => {
+                    return Err(AdapterError::Operational(
+                        mfm_evm::EvmOperationalError::Timeout,
+                    ))
+                }
+                ProviderMode::Ready => {}
             }
             let value = match intent.subject() {
                 EvmReadSubject::ChainIdentity => EvmReadValue::ChainId(
@@ -84,7 +100,7 @@ fn provider(chain_id: u64) -> Arc<Provider> {
     Arc::new(Provider {
         chain_id,
         calls: AtomicUsize::new(0),
-        blocked: std::sync::atomic::AtomicBool::new(false),
+        mode: std::sync::Mutex::new(ProviderMode::Ready),
         entered: tokio::sync::Notify::new(),
     })
 }
@@ -617,7 +633,7 @@ async fn ambiguous_run_appends_carry_exact_start_and_progress_recovery_sums() {
 
     let progress_backend = Arc::new(FaultStore::new());
     let progress_provider = provider(1);
-    progress_provider.blocked.store(true, Ordering::SeqCst);
+    *progress_provider.mode.lock().unwrap() = ProviderMode::Blocked;
     let progress_app = application_with_backend(
         &[(1, "alpha", Arc::clone(&progress_provider))],
         Arc::clone(&progress_backend),
@@ -640,7 +656,7 @@ async fn ambiguous_run_appends_carry_exact_start_and_progress_recovery_sums() {
     let retained = progress_app.read_run(&run_id(41)).await.unwrap();
     assert_eq!(retained.head_sequence(), 3);
     assert!(matches!(retained.state(), RunViewState::Runnable { .. }));
-    progress_provider.blocked.store(false, Ordering::SeqCst);
+    *progress_provider.mode.lock().unwrap() = ProviderMode::Ready;
     progress_backend.fail_next_append();
     let Err(error) = progress_app.progress_run(&run_id(41)).await else {
         panic!("progress append must be ambiguous");
@@ -658,32 +674,10 @@ async fn ambiguous_run_appends_carry_exact_start_and_progress_recovery_sums() {
     assert_eq!(serialized["last_observed"]["state"]["kind"], "runnable");
 }
 
-struct TimedOutProvider(AtomicUsize);
-impl EvmReadProvider for TimedOutProvider {
-    fn observe<'a>(
-        &'a self,
-        _: &'a ContentRef,
-        _: &'a EvmReadIntent,
-    ) -> ProviderFuture<'a, EvmReadEvidence> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async {
-            Err(AdapterError::Operational(
-                mfm_evm::EvmOperationalError::Timeout,
-            ))
-        })
-    }
-    fn observe_anchored_call<'a>(
-        &'a self,
-        _: &'a ContentRef,
-        _: &'a AnchoredContractCallIntent,
-    ) -> ProviderFuture<'a, AnchoredContractCallEvidence> {
-        panic!("balance Program cannot enter transaction-route observation")
-    }
-}
-
 #[tokio::test]
 async fn client_models_distinguish_durable_provider_failure_from_unknown_invocation_scope() {
-    let provider = Arc::new(TimedOutProvider(AtomicUsize::new(0)));
+    let provider = provider(1);
+    *provider.mode.lock().unwrap() = ProviderMode::Timeout;
     let bindings = BoundCapabilitySet::new(vec![(
         1,
         EvmEndpoint::new("alpha").unwrap(),
@@ -721,7 +715,7 @@ async fn client_models_distinguish_durable_provider_failure_from_unknown_invocat
         serde_json::to_value(SerializableRunView::new(&cold)).unwrap(),
         model
     );
-    assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     let error = app.read_run(&run_id(71)).await.err().unwrap();
     let error_model = serde_json::to_value(mfm_app::SerializableClientError::for_run(
         &error,
@@ -737,3 +731,6 @@ async fn client_models_distinguish_durable_provider_failure_from_unknown_invocat
 
 #[path = "support/enrichment.rs"]
 mod enrichment;
+
+#[path = "support/portfolio_contract.rs"]
+mod portfolio_contract;

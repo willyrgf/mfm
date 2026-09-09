@@ -1,7 +1,7 @@
 use mfm_capabilities::AdapterError;
 use mfm_evm::*;
 use mfm_ids::{DigestBytes, EntryPointId, RunId};
-use mfm_program::{ConclusionBound, EffectBounds, FromNever, ProgramLimits};
+use mfm_program::{ConclusionBound, EffectBounds, ProgramLimits};
 use mfm_program_derive::{MfmContext, MfmValue};
 use mfm_runtime::{
     EffectAdapterOutcome, InvocationFailure, RunViewState, Runtime, RuntimeAssemblyBuilder,
@@ -32,7 +32,6 @@ struct Context<T> {
 }
 type Input = Context<CheckedCreatePlan>;
 type Recipe = CreateAt<ContextTransactionSlot>;
-type Failure = EvmTransactionFailure<ExecutedContext<Input, Recipe>>;
 
 #[tokio::test]
 async fn maximum_transaction_closures_fit_and_pending_operational_failure_preserves_authority() {
@@ -109,17 +108,7 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
     .unwrap();
     for scenario in 0..3 {
         let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-        builder
-            .register_effect::<ReserveEvmNonce<Input, Recipe>, EvmNonceReservationEffect>()
-            .unwrap();
-        builder.register_effect::<PrepareEvmTransaction<Input, Recipe>, EvmTransactionPreparationEffect>().unwrap();
-        builder
-            .register_effect::<ExecuteEvmTransaction<Input, Recipe>, EvmTransactionEffect>()
-            .unwrap();
-        builder
-            .register_pure::<ProjectEvmTransactionOutcome<Input, Recipe>>()
-            .unwrap();
-        builder.register_map::<FromNever<Failure>>().unwrap();
+        mfm_evm_live::register_evm_transaction_states::<Input, Recipe>(&mut builder).unwrap();
         builder
             .register_effect_adapter::<EvmNonceReservationEffect, _, _>(
                 binding.clone(),

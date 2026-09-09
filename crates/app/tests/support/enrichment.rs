@@ -26,7 +26,7 @@ async fn enrichment_publication_and_matching_admission_survive_configuration_del
         .await
         .unwrap();
     let enrichment_id = run_id(71);
-    provider.blocked.store(true, Ordering::SeqCst);
+    *provider.mode.lock().unwrap() = ProviderMode::Blocked;
     {
         let selected = selection(&imported);
         let starting = app.start_run(enrichment_id.clone(), &selected);
@@ -43,7 +43,7 @@ async fn enrichment_publication_and_matching_admission_survive_configuration_del
         .expect_err("incomplete discovery cannot publish");
     assert_eq!(pending.code(), "invalid_enrichment");
     assert_eq!(provider.calls.load(Ordering::SeqCst), pending_calls);
-    provider.blocked.store(false, Ordering::SeqCst);
+    *provider.mode.lock().unwrap() = ProviderMode::Ready;
     backend
         .indeterminate_next_append
         .store(true, Ordering::SeqCst);

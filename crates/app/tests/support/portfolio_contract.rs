@@ -38,7 +38,8 @@ async fn planned_native_and_token_collections_execute_and_reconstruct_typed_fail
         };
         let (program, input) =
             plan_snapshot(selector, &config, std::slice::from_ref(&target), None).unwrap();
-        let mut builder = portfolio_states();
+        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
+        mfm_app::register_portfolio_states(&mut builder).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&calls);
         builder
@@ -169,39 +170,6 @@ async fn planned_native_and_token_collections_execute_and_reconstruct_typed_fail
     }
 }
 
-fn portfolio_states() -> RuntimeAssemblyBuilder {
-    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-    builder.register_pure::<InitializePortfolio>().unwrap();
-    builder.register_pure::<EnterPortfolioCollection>().unwrap();
-    builder
-        .register_pure::<ResumePortfolioCollection>()
-        .unwrap();
-    builder.register_pure::<ConsolidatePortfolio>().unwrap();
-    builder
-        .register_pure::<ConsolidateBalanceCollection<PortfolioContinuation>>()
-        .unwrap();
-    builder
-        .register_read::<CheckChainIdentity<PortfolioContinuation>, EvmChainIdentityRead>()
-        .unwrap();
-    builder
-        .register_read::<ReadInitialAnchor<PortfolioContinuation>, EvmAnchorRead>()
-        .unwrap();
-    builder
-        .register_read::<ConfirmBalanceAnchor<PortfolioContinuation>, EvmAnchorRead>()
-        .unwrap();
-    builder
-        .register_read::<ReadNativeBalance<PortfolioContinuation>, EvmBalanceRead>()
-        .unwrap();
-    builder
-        .register_read::<ReadTokenDecimals<PortfolioContinuation>, EvmBalanceRead>()
-        .unwrap();
-    builder
-        .register_read::<ReadTokenBalance<PortfolioContinuation>, EvmBalanceRead>()
-        .unwrap();
-    builder.register_map::<MapEvmBalanceFailure>().unwrap();
-    builder
-}
-
 #[tokio::test]
 async fn maximum_token_portfolio_admits_and_retains_the_first_typed_provider_failure() {
     let portfolio_id = "\"".repeat(256);
@@ -234,7 +202,8 @@ async fn maximum_token_portfolio_admits_and_retains_the_first_typed_provider_fai
     };
     let (program, input) =
         plan_snapshot(selector, &config, std::slice::from_ref(&target), None).unwrap();
-    let mut builder = portfolio_states();
+    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
+    mfm_app::register_portfolio_states(&mut builder).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
     builder
@@ -327,8 +296,8 @@ async fn enrichment_retains_native_and_nonzero_candidates_and_never_filters_prov
         };
         let (program, input) =
             plan_enrichment(selector, &config, std::slice::from_ref(&target), None).unwrap();
-        let mut builder = portfolio_states();
-        builder.register_pure::<ResolvePortfolioAssets>().unwrap();
+        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
+        mfm_app::register_portfolio_states(&mut builder).unwrap();
         builder
             .register_adapter::<EvmChainIdentityRead, _, _>(target.clone(), |reference, intent| {
                 Box::pin(async move {
