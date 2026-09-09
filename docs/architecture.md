@@ -97,6 +97,10 @@ Application client primitive to generate one before their one use-case call. RES
 for a durably failed run, while the CLI uses exit 1 for Runnable, EffectPending, or Failed. These are named transport
 asymmetries, not second use-case implementations.
 
+Program authoring and wire decoding share one private State data representation. Whole-sequence
+validation constructs the public immutable declarations; those declarations have no unchecked
+deserializer. Serialization borrows the validated data.
+
 Values owns qualification against exact inline/generic value descriptors. Program checks adjacent
 State contracts and selected policy/mapping ABIs; Runtime associates the exact typed implementations.
 
