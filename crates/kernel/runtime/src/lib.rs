@@ -166,7 +166,7 @@ pub enum RunnableReason {
 pub struct ValueView {
     contract_ref: ContentRef,
     value_ref: ContentRef,
-    canonical: Vec<u8>,
+    canonical: mfm_canonical::PlainCanonicalJsonBytes,
 }
 
 impl ValueView {
@@ -196,7 +196,7 @@ impl ValueView {
 
     /// Returns exact canonical retained bytes.
     pub fn canonical_bytes(&self) -> &[u8] {
-        &self.canonical
+        self.canonical.as_bytes()
     }
 }
 
@@ -206,7 +206,7 @@ pub struct RunView {
     head_sequence: u64,
     head_digest: ContentDigest,
     state: RunViewState,
-    admitted_context: Box<ValueView>,
+    admitted_context: Arc<ValueView>,
     entry_point: mfm_ids::EntryPointId,
 }
 

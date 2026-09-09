@@ -18,7 +18,7 @@ fn cause(bytes: usize) -> FailureCauseView {
         ValueView {
             contract_ref: mfm_program::nominal_contract_ref::<TextFailure>().unwrap(),
             value_ref,
-            canonical: canonical.to_vec(),
+            canonical,
         }
     }
     FailureCauseView::Domain {

@@ -80,7 +80,9 @@ adjacent conclusion. `Pending` retains the identical prepare, appends nothing an
 `EffectPending` view. An operational adapter error also preserves the prepare, returning a stopped
 invocation with the last observed view and typed incident. Explicit resume uses the same command
 and EffectId. A settled Effect cannot retry or restart. Zero-State Programs terminate at genesis.
-Hot advancement, pre-append validation and cold reconstruction use the sole semantic fold. Cold
+Hot advancement, pre-append validation and cold reconstruction use the sole semantic fold.
+Pre-append validation constructs a report only for terminal failure candidates. Public observations
+share immutable qualified bytes; retaining `last_observed` does not copy the complete admitted input. Cold
 fold re-prepares only the final pending Effect command to validate its exact bytes and identity;
 completed conclusions remain authoritative event-log outcomes.
 

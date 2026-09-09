@@ -27,7 +27,10 @@ semantic identity. Program association converts each registered mode into one mo
 executable carrying only its valid functions, codecs, validators, and exact callback. Read
 callbacks and hot/cold binding receive the qualified intent value ref; Effect callbacks receive the
 qualified command value ref. Fold state retains declaration identity and qualified values only;
-the fold performs no public registry lookup and exposes no erased value workflow.
+the fold performs no public registry lookup and exposes no erased value workflow. Association marks
+checkpoint boundaries once in the private executable State; entering a State does not rescan the
+Program. Canonical byte wrappers share immutable storage, and RunView borrows that ownership
+through a shared qualified admission value rather than copying the admitted input per transition.
 
 Application's private compiled State table couples each State's domain-owned inspection metadata to
 the same monomorphized Runtime registration function used by live composition. The component
