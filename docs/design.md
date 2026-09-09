@@ -336,3 +336,10 @@ fresh external authority and fresh RunIds.
 ## Material uncertainties
 
 none
+
+Enrichment output pairs every resolved collection configuration with its route and observed anchor.
+Portfolio identity and selected quote are stored once; consuming projection produces the existing
+snapshot configuration and selector. Publication retains the exact output ref in provenance: a
+changed output identity changes the configuration revision, while repeated publication of the
+same qualified terminal output is idempotent. Superseded output schemas are rejected; histories
+and existing revisions are never rewritten.

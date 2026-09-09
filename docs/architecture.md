@@ -84,7 +84,8 @@ shared Application request contains only bounded, secret-free data and stable se
 pre-bound capabilities. It cannot introduce environment resolution, a filesystem or network
 locator, secret custody, schema authority, or an unbounded durable effect.
 
-Portfolio owns candidate selection and its checked enrichment output. Application alone publishes
+Portfolio owns candidate selection and its checked enrichment output, pairing each collection
+with its route and anchor and consuming it into the snapshot configuration/selector. Application alone publishes
 that output through configuration custody and verifies RunId/head/output linkage before a new
 dependent admission. Runtime exposes already-qualified genesis input and entry-point identity for
 matching start recovery; it acquires no configuration lookup or write authority.

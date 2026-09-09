@@ -1,7 +1,7 @@
 # Explicit candidate-asset enrichment
 
-This is the dedicated architect's target for the separate enrichment commit required by
-[the recovery RFC](../RFC_REFACT_RUNTIME_TO_RECOV_SM.md). Complete the execution replacement first.
+This document records the current candidate selection and publication contract.
+[Design](design.md) owns execution and persistence invariants.
 
 ## Domain and planning
 
@@ -11,14 +11,15 @@ It makes no claim to find assets outside that list. Require at least one native 
 collection so publication never needs an empty-collection contract. Preserve candidate order,
 source IDs, account and chain identity, quotes and route bindings.
 
-Add a Portfolio enrichment entry point and `ResolvePortfolioAssets` Pure State. Factor the common
-initialize/enter/`CollectEvmBalances`/resume authoring prefix once, then choose the final State
-according to the entry point. Reuse the existing anchored provider Reads and aggregate 64-source
+The Portfolio enrichment entry point uses the `ResolvePortfolioAssets` Pure State and the common
+initialize/enter/`CollectEvmBalances`/resume authoring prefix, selecting the final State
+according to the entry point. It reuses anchored provider Reads and the aggregate 64-source
 bound. Provider or integrity failures fail the enrichment run instead of silently excluding assets.
 Dependent execution continues to read token decimals through the ordinary anchored contract.
 
-`PortfolioEnrichmentOutput` contains the resolved checked Portfolio configuration, exact public
-chain/route bindings and bounded collection anchors. Domain derives it from the retained original
+`PortfolioEnrichmentOutput` pairs each resolved collection config with its exact route and anchor.
+It stores portfolio identity, supported quotes and selected quote once; consuming projection returns
+the checked snapshot configuration and selector. Chain identity comes from the checked request. Domain derives it from the retained original
 candidate demand and checked collection results. Application does not inspect balances to select
 assets. The output contains no self-referential RunId/head/output linkage.
 
@@ -32,6 +33,9 @@ binding inventory; reject missing/inconsistent bindings and never resolve arbitr
 Use the existing opaque `ConfigRepository::import_config` and its Created/Unchanged result.
 Publication accepts no replacement discovery request or resolved values. Repetition, including
 a lost acknowledgement, reads the same output and imports the same revision without discovery IO.
+A different output reference changes provenance and therefore the published revision. A schema
+cutover preserves resolved configuration/route semantics, not the old provenance-bearing digest;
+old output schemas are rejected and retained histories/revisions are not rewritten.
 
 Static snapshot documents remain valid without enrichment provenance. Before new dependent
 admission, Application verifies enriched provenance against the successful run's exact head,
@@ -40,7 +44,8 @@ merely because JSON contains it. The dependent initial value retains the full re
 enrichment provenance and a bounded source-revision identity sufficient to compare ConfigSelection;
 the domain gains no ConfigRepository dependency. `PortfolioAdmission::config_digest_hex` retains
 exactly 64 lowercase hexadecimal characters: SHA-256 of the canonical configuration document.
-Application strips/restores the fixed `content:sha256-jcs-v1:` prefix through ConfigDigest. The
+Admission uses IDs-owned `ConfigName` and `DigestBytes`; Application converts ConfigDigest through
+checked bytes, without string-prefix reconstruction. The
 persisted raw ContentDigest grammar remains unchanged; the revision is never retagged or rehashed.
 
 Matching start recovery reads the requested dependent RunId before loading configuration. Expose
