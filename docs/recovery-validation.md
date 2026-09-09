@@ -10,11 +10,18 @@ The simplification replaces duplicate state/recovery descriptors, uses checked a
 pairs enriched collections with their publication bindings, shares invocation errors and test
 boundaries, and removes the unchecked API sketch. Focused verification uses the pinned Nix shell.
 
-<!-- CURRENT_CI_EVIDENCE -->
-The composed CI result for this simplification has not yet been recorded. Earlier branch CI results
-are not evidence for these changes. The final run must identify its exact candidate and Nixfied
-`artifacts/run-summary.json`; this section is updated only after its result is known.
-<!-- END_CI_EVIDENCE -->
+`nix run .#ci` passed on 2026-09-09 for the clean implementation candidate
+`e9e698bdc7d0081419d814bb365c73003c213e52`: **12 tasks passed, 0 failed**, in 4324.43 seconds.
+This includes formatting, SQLx metadata, Clippy, compilation, workspace and rustdoc tests, the
+capacity gates, PostgreSQL, CLI/REST e2e, and managed Effect recovery.
+
+Nixfied run: `run-229050-1788966525912763219`. The local evidence is
+`~/.local/state/nixfied/mfm/dev/0/runs/run-229050-1788966525912763219/artifacts/run-summary.json`;
+its sibling `logs/` directory retains per-task output. The summary records `success: true`.
+
+The commit recording this evidence changes documentation only; the implementation candidate above
+is the exact revision tested. Its follow-up verification is documentation link review and
+`git diff --check`.
 
 ## Coverage
 
@@ -37,6 +44,5 @@ authority. Admission bounds Journal lifecycles, not every derived report. See [d
 
 ## Material uncertainties
 
-No unresolved architecture choices. Composed verification status is stated above; focused tests alone
-do not establish that gate. Production finality and other deliberately deferred capabilities remain
+none for this cutover. Production finality and other deliberately deferred capabilities remain
 listed in [known gaps](known-gaps.md).
