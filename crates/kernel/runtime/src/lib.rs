@@ -56,6 +56,18 @@ pub enum RuntimeError {
     Internal,
 }
 
+impl From<mfm_values::ValueError> for RuntimeError {
+    fn from(error: mfm_values::ValueError) -> Self {
+        match error {
+            mfm_values::ValueError::SizeLimit(size) => Self::SizeLimit {
+                resource: SizeResource::CanonicalObject,
+                size,
+            },
+            _ => Self::Internal,
+        }
+    }
+}
+
 /// Resource measured by a Runtime size-limit failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]

@@ -9,8 +9,8 @@ use mfm_journal::{
     EncodedRunFrame, JournalError, JournalHistory, JournalObject, JournalRecord, StoredRunBytes,
 };
 use mfm_program::{EffectState, Program, ProposedStateOutcome, PureState, ReadState};
-use mfm_store::{AppendResult, Store, StoreError};
-use mfm_values::{MfmValue, ValueError};
+use mfm_store::{AppendResult, Store};
+use mfm_values::MfmValue;
 use serde::Serialize;
 
 use crate::assembly::{
@@ -69,7 +69,7 @@ pub(crate) async fn start<T: MfmValue>(
     let result = store
         .append_run(&proposed.genesis)
         .await
-        .map_err(|error| invocation_error(identity.clone(), map_append_error(error), None))?;
+        .map_err(|error| invocation_error(identity.clone(), RuntimeError::from(error), None))?;
     match result {
         AppendResult::Inserted => {
             let accumulator = run_blocking(move || {
@@ -87,7 +87,9 @@ pub(crate) async fn start<T: MfmValue>(
             let stored = store
                 .load_run(&identity)
                 .await
-                .map_err(|error| invocation_error(identity.clone(), map_load_error(error), None))?
+                .map_err(|error| {
+                    invocation_error(identity.clone(), RuntimeError::from(error), None)
+                })?
                 .ok_or_else(|| invocation_error(identity.clone(), RuntimeError::Internal, None))?;
             let run_id = identity.clone();
             run_blocking(move || {
@@ -140,7 +142,7 @@ fn prepare_admission<T: MfmValue>(
     program: Program,
     c0: T,
 ) -> Result<PreparedAdmission> {
-    let c0 = qualify_hot(c0).map_err(map_hot_value_error)?;
+    let c0 = qualify_hot(c0).map_err(RuntimeError::from)?;
     if program.admitted_context_contract_ref() != &c0.contract_ref
         || program.initial_value_ref() != &c0.value_ref
     {
@@ -235,7 +237,7 @@ async fn load_and_fold(
     let stored = store
         .load_run(run_id)
         .await
-        .map_err(map_load_error)?
+        .map_err(RuntimeError::from)?
         .ok_or(if required_reload {
             RuntimeError::Internal
         } else {
@@ -471,10 +473,10 @@ fn conclude<O: MfmValue, F: MfmValue>(
     use mfm_journal::{DomainConclusion, DomainDecision, RecoveryDecision, StopCode};
     match proposed {
         ProposedStateOutcome::Success { output } => Ok(DomainConclusion::Success {
-            output: qualify_hot(output).map_err(map_hot_value_error)?,
+            output: qualify_hot(output).map_err(RuntimeError::from)?,
         }),
         ProposedStateOutcome::Failure { failure } => {
-            let original = qualify_hot(failure).map_err(map_hot_value_error)?;
+            let original = qualify_hot(failure).map_err(RuntimeError::from)?;
             let selected = &accumulator.executable.declarations[position.state.index()];
             let incident = crate::assembly::recovery::QualifiedIncident::Domain(copy_value(
                 &original,
@@ -563,7 +565,7 @@ pub(crate) async fn start_read<S: ReadState<C>, C: ReadCapabilityContract>(
             .downcast_ref::<S::Input>()
             .ok_or(RuntimeError::Internal)?;
         let intent = qualify_hot(S::prepare(typed).map_err(|_| RuntimeError::Internal)?)
-            .map_err(map_hot_value_error)?;
+            .map_err(RuntimeError::from)?;
         Ok((accumulator, position, input, intent))
     })
     .await?;
@@ -571,7 +573,7 @@ pub(crate) async fn start_read<S: ReadState<C>, C: ReadCapabilityContract>(
     let prepared = run_blocking(move || {
         let frame = match response {
             Ok(qualify) => {
-                let evidence = qualify().map_err(map_hot_value_error)?;
+                let evidence = qualify().map_err(RuntimeError::from)?;
                 let typed_evidence = evidence
                     .typed
                     .downcast_ref::<C::Evidence>()
@@ -606,7 +608,7 @@ pub(crate) async fn start_read<S: ReadState<C>, C: ReadCapabilityContract>(
                     .map_err(map_local_journal_error)?
             }
             Err(AdapterError::Operational(qualify)) => {
-                let error = qualify().map_err(map_hot_value_error)?;
+                let error = qualify().map_err(RuntimeError::from)?;
                 let ExecutableMode::Read { incident, .. } =
                     &accumulator.executable.declarations[position.state.index()].mode
                 else {
@@ -658,7 +660,7 @@ pub(crate) async fn start_effect<S: EffectState<C>, C: EffectCapabilityContract>
             )
             .map_err(|_| RuntimeError::Internal)?,
         )
-        .map_err(map_hot_value_error)?;
+        .map_err(RuntimeError::from)?;
         let effect_id = derive_effect_id(
             accumulator.history.run_id(),
             accumulator.executable.program.content_ref(),
@@ -702,7 +704,7 @@ pub(crate) async fn start_pending_effect<S: EffectState<C>, C: EffectCapabilityC
         Err(AdapterError::Invariant(_)) => return Err(RuntimeError::Internal),
         Err(AdapterError::Operational(qualify)) => {
             return run_blocking(move || {
-                let error = qualify().map_err(map_hot_value_error)?;
+                let error = qualify().map_err(RuntimeError::from)?;
                 let ExecutableMode::Effect { incident, .. } =
                     &accumulator.executable.declarations[position.state.index()].mode
                 else {
@@ -739,7 +741,7 @@ pub(crate) async fn start_pending_effect<S: EffectState<C>, C: EffectCapabilityC
         }
     };
     let prepared = run_blocking(move || {
-        let evidence = qualify().map_err(map_hot_value_error)?;
+        let evidence = qualify().map_err(RuntimeError::from)?;
         let typed_evidence = evidence
             .typed
             .downcast_ref::<C::Evidence>()
@@ -834,7 +836,7 @@ async fn finish_append(
     match store
         .append_run(&prepared.frame)
         .await
-        .map_err(map_append_error)?
+        .map_err(RuntimeError::from)?
     {
         AppendResult::NotInserted => Ok(DriverDisposition::Reload),
         AppendResult::Inserted => {
@@ -1085,16 +1087,6 @@ where
         .map_err(|_| RuntimeError::Internal)?
 }
 
-fn map_hot_value_error(error: ValueError) -> RuntimeError {
-    match error {
-        ValueError::SizeLimit(size) => RuntimeError::SizeLimit {
-            resource: crate::SizeResource::CanonicalObject,
-            size,
-        },
-        _ => RuntimeError::Internal,
-    }
-}
-
 fn map_local_journal_error(error: JournalError) -> RuntimeError {
     match error {
         JournalError::ObjectSize(size) => RuntimeError::SizeLimit {
@@ -1120,11 +1112,4 @@ fn map_local_journal_error(error: JournalError) -> RuntimeError {
         JournalError::ArithmeticOverflow => RuntimeError::ArithmeticOverflow,
         JournalError::InvalidFrame | JournalError::InvalidHistory => RuntimeError::Internal,
     }
-}
-
-fn map_load_error(error: StoreError) -> RuntimeError {
-    RuntimeError::Store(error)
-}
-fn map_append_error(error: StoreError) -> RuntimeError {
-    RuntimeError::Store(error)
 }

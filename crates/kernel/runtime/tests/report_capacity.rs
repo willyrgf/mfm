@@ -73,13 +73,15 @@ impl PureState for Failing {
     }
 }
 impl EffectState<Mutation> for Failing {
-    type AdapterContext = NoContext;
+    type AdapterContext = Failure;
     fn adapter_context(
-        _: &Input,
+        input: &Input,
         _: &Input,
         _: &NoContext,
-    ) -> Result<NoContext, StateExecutionError> {
-        Ok(NoContext)
+    ) -> Result<Failure, StateExecutionError> {
+        Ok(Failure {
+            detail: "x".repeat(input.bytes as usize),
+        })
     }
     fn prepare(input: &Input) -> Result<Input, PreparationError> {
         Ok(Input { bytes: input.bytes })
@@ -236,3 +238,6 @@ async fn inline_report_size_preserves_original_values_and_pending_authority() {
         }
     }
 }
+
+#[path = "support/qualification_capacity.rs"]
+mod qualification_capacity;
