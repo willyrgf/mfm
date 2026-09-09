@@ -37,6 +37,7 @@ pub(crate) struct DriverContext<'a> {
 }
 
 pub(crate) struct Accumulator {
+    admitted_context: Arc<ValueView>,
     executable: ExecutableProgram,
     history: JournalHistory,
     state: FoldState,
@@ -215,8 +216,10 @@ fn accumulator_from_inserted_genesis(
     if !admission_matches {
         return Err(RuntimeError::Internal);
     }
+    let admitted_context = Arc::new(retained_view(&c0));
     let state = FoldState::initial(&executable, c0)?;
     Ok(Accumulator {
+        admitted_context,
         executable,
         history,
         state,
@@ -817,8 +820,10 @@ fn prepare_append(mut accumulator: Accumulator, frame: EncodedRunFrame) -> Resul
             frame.record(),
         )
         .map_err(|_| RuntimeError::Internal)?;
-    // Check terminal report capacity before the append can acknowledge its retained facts.
-    view(&accumulator)?;
+    // Reports are derived only for terminal failures, before their facts can be acknowledged.
+    if let Cursor::Failed(failure) = &accumulator.state.cursor {
+        failure_report(failure)?;
+    }
     Ok(PreparedAppend { accumulator, frame })
 }
 
@@ -948,6 +953,7 @@ fn fold(executable: ExecutableProgram, history: JournalHistory) -> Result<Accumu
             .ok_or(RuntimeError::InvalidHistory)?,
     )
     .map_err(|_| RuntimeError::InvalidHistory)?;
+    let admitted_context = Arc::new(retained_view(&c0));
     let mut state = FoldState::initial(&executable, c0)?;
     let run_id = history.run_id().clone();
     for (record, bytes) in history.records().zip(history.frame_lengths()).skip(1) {
@@ -958,6 +964,7 @@ fn fold(executable: ExecutableProgram, history: JournalHistory) -> Result<Accumu
     }
     state.validate_pending(&executable)?;
     Ok(Accumulator {
+        admitted_context,
         executable,
         history,
         state,
@@ -1003,57 +1010,39 @@ fn view(accumulator: &Accumulator) -> Result<RunView> {
             effect_id: effect_id.clone(),
         },
         Cursor::Succeeded(value) => RunViewState::Succeeded(retained_view(value)),
-        Cursor::Failed(failure) => {
-            let cause = match &failure.cause {
-                fold::FailureCause::Domain { original, root } => crate::FailureCauseView::Domain {
-                    original: retained_view(original),
-                    root: retained_view(root),
-                },
-                fold::FailureCause::Adapter { error, context } => {
-                    crate::FailureCauseView::Adapter(crate::AdapterIncidentView {
-                        error: retained_view(error),
-                        state_context: retained_view(context),
-                    })
-                }
-            };
-            RunViewState::Failed(crate::FailureReport::new(
-                failure.position,
-                failure.reason,
-                failure.usage,
-                cause,
-            )?)
-        }
+        Cursor::Failed(failure) => RunViewState::Failed(failure_report(failure)?),
     };
-    let Some(JournalRecord::RunAdmitted {
-        admitted_context, ..
-    }) = accumulator.history.records().next()
-    else {
-        return Err(RuntimeError::InvalidHistory);
-    };
-    let admitted_context = Box::new(ValueView {
-        contract_ref: accumulator
-            .executable
-            .program
-            .admitted_context_contract_ref()
-            .clone(),
-        value_ref: admitted_context.content_ref().clone(),
-        canonical: admitted_context.canonical_bytes().to_vec(),
-    });
     Ok(RunView {
         run_id: accumulator.history.run_id().clone(),
         head_sequence: accumulator.history.head_sequence(),
         head_digest: accumulator.history.head_digest().clone(),
         state,
-        admitted_context,
+        admitted_context: Arc::clone(&accumulator.admitted_context),
         entry_point: accumulator.executable.program.entry_point_id().clone(),
     })
+}
+
+fn failure_report(failure: &fold::Failure) -> Result<crate::FailureReport> {
+    let cause = match &failure.cause {
+        fold::FailureCause::Domain { original, root } => crate::FailureCauseView::Domain {
+            original: retained_view(original),
+            root: retained_view(root),
+        },
+        fold::FailureCause::Adapter { error, context } => {
+            crate::FailureCauseView::Adapter(crate::AdapterIncidentView {
+                error: retained_view(error),
+                state_context: retained_view(context),
+            })
+        }
+    };
+    crate::FailureReport::new(failure.position, failure.reason, failure.usage, cause)
 }
 
 fn retained_view(value: &QualifiedValue) -> ValueView {
     ValueView {
         contract_ref: value.contract_ref.clone(),
         value_ref: value.value_ref.clone(),
-        canonical: value.canonical.to_vec(),
+        canonical: value.canonical.clone(),
     }
 }
 

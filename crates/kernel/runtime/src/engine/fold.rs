@@ -99,12 +99,7 @@ impl FoldState {
         if declaration.input_contract_ref() != &input.contract_ref {
             return Err(RuntimeError::InvalidHistory);
         }
-        if executable.program.declarations().iter().any(|state| {
-            state
-                .recovery_targets()
-                .iter()
-                .any(|target| target.position() == position.state)
-        }) {
+        if executable.declarations[position.state.index()].is_checkpoint {
             self.checkpoints.insert(position.state, Arc::clone(&input));
         }
         self.cursor = Cursor::Runnable {

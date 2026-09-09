@@ -998,6 +998,7 @@ impl RuntimeAssembly {
                 }
             };
             declarations.push(ExecutableState {
+                is_checkpoint: false,
                 output_codec,
                 failure_codec,
                 mode,
@@ -1010,6 +1011,11 @@ impl RuntimeAssembly {
                     state.root_maps(),
                 )?,
             });
+        }
+        for state in program.declarations() {
+            for target in state.recovery_targets() {
+                declarations[target.position().index()].is_checkpoint = true;
+            }
         }
         let root_failure_codec = self
             .inner
@@ -1044,6 +1050,7 @@ pub(crate) struct ExecutableProgram {
 }
 
 pub(crate) struct ExecutableState {
+    pub(crate) is_checkpoint: bool,
     pub(crate) recovery: recovery::AssociatedRecovery,
     pub(crate) root_map: recovery::AssociatedRootMap,
     pub(crate) output_codec: Arc<ValueCodec>,

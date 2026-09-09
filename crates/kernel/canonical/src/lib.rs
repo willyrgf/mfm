@@ -133,7 +133,7 @@ impl CanonicalError {
 /// canonicalization contract.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CanonicalJsonBytes {
-    bytes: String,
+    bytes: std::sync::Arc<str>,
 }
 
 impl CanonicalJsonBytes {
@@ -141,7 +141,9 @@ impl CanonicalJsonBytes {
     pub fn from_value(value: &CanonicalValue) -> Self {
         let mut bytes = String::new();
         value.write_json(&mut bytes);
-        Self { bytes }
+        Self {
+            bytes: bytes.into(),
+        }
     }
 
     /// Promotes already-canonical plain JSON emitted from a checked typed
@@ -188,10 +190,11 @@ impl CanonicalJsonBytes {
 /// unsupported number spellings. It does not reinterpret ordinary JSON strings
 /// as typed bytes or decimals; typed persisted value surfaces must use
 /// [`CanonicalJsonBytes::from_value`] with [`CanonicalBytes`] and
-/// [`DecimalString`] constructors.
+/// [`DecimalString`] constructors. Cloning this wrapper shares immutable bytes; it does not
+/// repeat parsing, qualification, or payload allocation.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PlainCanonicalJsonBytes {
-    bytes: String,
+    bytes: std::sync::Arc<str>,
 }
 
 impl PlainCanonicalJsonBytes {
@@ -234,7 +237,9 @@ impl PlainCanonicalJsonBytes {
     fn from_value(value: &PlainJsonValue) -> Self {
         let mut bytes = String::new();
         value.write_json(&mut bytes);
-        Self { bytes }
+        Self {
+            bytes: bytes.into(),
+        }
     }
 
     /// Returns the canonical JSON bytes.
