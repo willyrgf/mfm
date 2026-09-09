@@ -411,9 +411,10 @@ impl ExpansionDraft {
                         .checked_add(checkpoint.offset)
                         .ok_or(ProgramError::Capacity)?;
                     if target > index
-                        || self.states.get(target).is_none_or(|state| {
-                            &state.state.input_contract_ref != &checkpoint.input
-                        })
+                        || self
+                            .states
+                            .get(target)
+                            .is_none_or(|state| state.state.input_contract_ref != checkpoint.input)
                     {
                         return Err(ProgramError::InvalidContract);
                     }

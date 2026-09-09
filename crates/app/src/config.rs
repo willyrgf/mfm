@@ -151,7 +151,7 @@ impl ConfigDocument {
 
     pub(crate) fn enrichment(&self) -> Option<&EnrichmentProvenance> {
         match &self.wire.entry {
-            ConfigEntry::Snapshot { provenance } => provenance.as_ref(),
+            ConfigEntry::Snapshot { provenance } => provenance.as_deref(),
             ConfigEntry::Enrichment => None,
         }
     }
@@ -223,7 +223,7 @@ struct ConfigInputWire {
 
 enum ConfigEntry {
     Snapshot {
-        provenance: Option<EnrichmentProvenance>,
+        provenance: Option<Box<EnrichmentProvenance>>,
     },
     Enrichment,
 }
@@ -239,7 +239,7 @@ impl ConfigDocumentWireUnchecked {
     fn check(self) -> Result<ConfigDocumentWire, ConfigDocumentError> {
         let (entry, input) = match self {
             Self::PortfolioSnapshot(mut input) => {
-                let provenance = input.provenance.take();
+                let provenance = input.provenance.take().map(Box::new);
                 (ConfigEntry::Snapshot { provenance }, input)
             }
             Self::PortfolioEnrichment(input) if input.provenance.is_none() => {
