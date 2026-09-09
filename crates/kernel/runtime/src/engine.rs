@@ -18,7 +18,9 @@ use crate::assembly::{
     ErasedReadAdapterCallback, ExecutableMode, ExecutableProgram, QualifiedValue, ReadStart,
     RuntimeAssembly, StateStart, ValueCodec,
 };
-use crate::{EffectAdapterOutcome, Result, RunView, RunViewState, RuntimeError, ValueView};
+use crate::{
+    EffectAdapterOutcome, Result, RunView, RunViewState, RunnableReason, RuntimeError, ValueView,
+};
 
 pub(crate) enum DriverDisposition {
     Continue(Accumulator),
@@ -824,7 +826,7 @@ fn prepare_append(mut accumulator: Accumulator, frame: EncodedRunFrame) -> Resul
         .map_err(|_| RuntimeError::Internal)?;
     // Reports are derived only for terminal failures, before their facts can be acknowledged.
     if let Cursor::Failed(failure) = &accumulator.state.cursor {
-        failure_report(failure)?;
+        failure_report(&accumulator.state, failure)?;
     }
     Ok(PreparedAppend { accumulator, frame })
 }
@@ -852,7 +854,7 @@ async fn finish_append(
                 if matches!(
                     accumulator.state.cursor,
                     Cursor::Runnable {
-                        reason: fold::RunnableReason::Retry | fold::RunnableReason::Restart(_),
+                        reason: RunnableReason::Retry | RunnableReason::Restart { .. },
                         ..
                     }
                 ) {
@@ -995,13 +997,7 @@ fn view(accumulator: &Accumulator) -> Result<RunView> {
             position, reason, ..
         } => RunViewState::Runnable {
             position: *position,
-            reason: match reason {
-                fold::RunnableReason::Advance => crate::RunnableReason::Advance,
-                fold::RunnableReason::Retry => crate::RunnableReason::Retry,
-                fold::RunnableReason::Restart(checkpoint) => crate::RunnableReason::Restart {
-                    checkpoint: *checkpoint,
-                },
-            },
+            reason: *reason,
         },
         Cursor::EffectPending {
             position,
@@ -1012,7 +1008,9 @@ fn view(accumulator: &Accumulator) -> Result<RunView> {
             effect_id: effect_id.clone(),
         },
         Cursor::Succeeded(value) => RunViewState::Succeeded(retained_view(value)),
-        Cursor::Failed(failure) => RunViewState::Failed(failure_report(failure)?),
+        Cursor::Failed(failure) => {
+            RunViewState::Failed(failure_report(&accumulator.state, failure)?)
+        }
     };
     Ok(RunView {
         run_id: accumulator.history.run_id().clone(),
@@ -1024,7 +1022,7 @@ fn view(accumulator: &Accumulator) -> Result<RunView> {
     })
 }
 
-fn failure_report(failure: &fold::Failure) -> Result<crate::FailureReport> {
+fn failure_report(state: &FoldState, failure: &fold::Failure) -> Result<crate::FailureReport> {
     let cause = match &failure.cause {
         fold::FailureCause::Domain { original, root } => crate::FailureCauseView::Domain {
             original: retained_view(original),
@@ -1037,7 +1035,12 @@ fn failure_report(failure: &fold::Failure) -> Result<crate::FailureReport> {
             })
         }
     };
-    crate::FailureReport::new(failure.position, failure.reason, failure.usage, cause)
+    crate::FailureReport::new(
+        failure.position,
+        failure.reason,
+        state.usage(failure.position.state)?,
+        cause,
+    )
 }
 
 fn retained_view(value: &QualifiedValue) -> ValueView {

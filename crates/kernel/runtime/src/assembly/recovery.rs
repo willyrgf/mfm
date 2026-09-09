@@ -148,19 +148,19 @@ fn insert<K: Ord, F>(
     implementation_type: TypeId,
     callback: F,
 ) -> Result<()> {
-    if let Some(previous) = registry.get(&key) {
-        return (previous.implementation_type == implementation_type)
+    match registry.entry(key) {
+        std::collections::btree_map::Entry::Occupied(slot) => (slot.get().implementation_type
+            == implementation_type)
             .then_some(())
-            .ok_or(RuntimeError::IncompatibleAssembly);
+            .ok_or(RuntimeError::IncompatibleAssembly),
+        std::collections::btree_map::Entry::Vacant(slot) => {
+            slot.insert(Registration {
+                implementation_type,
+                callback,
+            });
+            Ok(())
+        }
     }
-    registry.insert(
-        key,
-        Registration {
-            implementation_type,
-            callback,
-        },
-    );
-    Ok(())
 }
 
 impl AssemblyInner {
