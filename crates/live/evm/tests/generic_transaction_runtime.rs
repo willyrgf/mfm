@@ -495,3 +495,6 @@ fn custom_recipe_identity_is_committed_even_when_slots_mode_and_command_are_equa
         ReserveEvmNonce::<FirstInitial, CustomCreate>::state_id().unwrap()
     );
 }
+
+#[path = "support/recovery_transaction.rs"]
+mod recovery_transaction;

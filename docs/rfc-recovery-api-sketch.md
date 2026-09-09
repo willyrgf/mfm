@@ -778,7 +778,7 @@ The workspace tests exercise the contracts with real checked values, adapters, J
   original/mapped reports, cancellation, retained Effect authority, and hot/cold equivalence.
 - [Scoped authoring](../crates/kernel/program/tests/authoring_boundaries.rs): compile-fail coverage
   for private authority and checkpoint scope.
-- [Transaction recovery](../crates/domains/evm/tests/recovery_transaction.rs): production Effect
+- [Transaction recovery](../crates/live/evm/tests/support/recovery_transaction.rs): production Effect
   settlement, failure, and pending authority under finite recovery budgets.
 
 Run focused consuming tests in the pinned shell, for example:

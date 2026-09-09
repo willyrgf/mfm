@@ -2,7 +2,7 @@ use super::*;
 use mfm_ids::StableId;
 use mfm_program::{
     Classifiers, ExecutionPhase, Handlers, Identity, NoContext, NoParams, ProgramError,
-    RecoveryAllowances, StateExecutionError,
+    RecoveryAllowances, StateExecutionError, Stop,
 };
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
@@ -127,22 +127,6 @@ impl Classifier<EvmIncident> for EvmClassifier {
         _: &RecoveryContext<'_>,
     ) -> std::result::Result<Assessment, StateExecutionError> {
         Ok(Assessment::Recoverable)
-    }
-}
-
-struct Stop;
-impl<I: IncidentContract> Handler<I> for Stop {
-    type Params = NoParams;
-    fn implementation_id() -> mfm_program::Result<StableId> {
-        StableId::new("test.recovery.stop@1").map_err(|_| ProgramError::InvalidContract)
-    }
-    fn handle(
-        _: &NoParams,
-        _: &I,
-        _: Assessment,
-        _: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
-        Ok(RecoveryRequest::Stop)
     }
 }
 
@@ -508,64 +492,10 @@ impl mfm_program::CapabilityInjection<EvmRead> for Observation {
     }
 }
 
-struct ChildReads;
-impl mfm_program::Operation for ChildReads {
-    type Input = Offset;
-    type Output = Offset;
-    type Failure = EvmFailure;
-    fn validate_input(&self, _: &Self::Input) -> mfm_program::Result<()> {
-        Ok(())
-    }
-    fn expand(
-        &self,
-        scope: &mut mfm_program::OperationExpansion<Offset, Offset, EvmFailure>,
-    ) -> mfm_program::Result<()> {
-        let mut classifiers = Classifiers::new();
-        classifiers
-            .bind::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>(
-                NoParams, NoParams, NoParams,
-            )?;
-        scope.classifiers(classifiers)?;
-        scope.read::<EvmRead, Observation, Identity<EvmFailure>>(
-            &Offset { value: 1 },
-            NoParams,
-            mfm_program::Occurrence::new(),
-            mfm_program::ConclusionBound::new(4096)?,
-        )?;
-        let mut handlers = Handlers::new();
-        handlers.bind::<EvmIncident, RetryRead>(NoParams)?;
-        scope.read::<EvmRead, Observation, Identity<EvmFailure>>(
-            &Offset { value: 1 },
-            NoParams,
-            mfm_program::Occurrence::new().handlers(handlers),
-            mfm_program::ConclusionBound::new(4096)?,
-        )
-    }
-}
-struct InheritedRead;
-impl mfm_program::Operation for InheritedRead {
-    type Input = Offset;
-    type Output = Offset;
-    type Failure = EvmFailure;
-    fn validate_input(&self, _: &Self::Input) -> mfm_program::Result<()> {
-        Ok(())
-    }
-    fn expand(
-        &self,
-        scope: &mut mfm_program::OperationExpansion<Offset, Offset, EvmFailure>,
-    ) -> mfm_program::Result<()> {
-        scope.read::<EvmRead, Observation, Identity<EvmFailure>>(
-            &Offset { value: 1 },
-            NoParams,
-            mfm_program::Occurrence::new(),
-            mfm_program::ConclusionBound::new(4096)?,
-        )
-    }
-}
-struct AuthoredPortfolio {
+struct MappedRead {
     mapped_offset: u64,
 }
-impl mfm_program::Operation for AuthoredPortfolio {
+impl mfm_program::Operation for MappedRead {
     type Input = Offset;
     type Output = Offset;
     type Failure = PortfolioFailure;
@@ -587,39 +517,17 @@ impl mfm_program::Operation for AuthoredPortfolio {
             Offset { value: 17 },
         )?;
         scope.classifiers(classifiers)?;
-        let mut handlers = Handlers::new();
-        handlers.bind::<PortfolioIncident, Stop>(NoParams)?;
-        handlers.bind::<EvmIncident, Stop>(NoParams)?;
-        scope.handlers(handlers)?;
         scope.read::<EvmRead, Observation, MapFailure>(
             &Offset { value: 1 },
             Offset { value: 100 },
             mfm_program::Occurrence::new(),
             mfm_program::ConclusionBound::new(4096)?,
-        )?;
-        scope.operation::<ChildReads, MapFailure>(&ChildReads, Offset { value: 100 })?;
-        scope.operation::<InheritedRead, MapFailure>(&InheritedRead, Offset { value: 100 })
+        )
     }
 }
 
 #[test]
-fn authored_recovery_flows_through_normal_program_association() {
-    let entry = mfm_ids::EntryPointId::new("mfm.test/authored-recovery@1").unwrap();
-    let program = mfm_program::expand_program(
-        entry.clone(),
-        &AuthoredPortfolio { mapped_offset: 10 },
-        &Offset { value: 7 },
-        mfm_program::ProgramLimits::new(2),
-    )
-    .unwrap();
-    let changed = mfm_program::expand_program(
-        entry,
-        &AuthoredPortfolio { mapped_offset: 11 },
-        &Offset { value: 7 },
-        mfm_program::ProgramLimits::new(2),
-    )
-    .unwrap();
-    assert_ne!(program.content_ref(), changed.content_ref());
+fn mapped_parameters_change_program_identity_and_survive_cold_association() {
     let mut builder = RuntimeAssemblyBuilder::new().unwrap();
     builder.register_read::<EvmRead, Observation>().unwrap();
     builder
@@ -636,99 +544,47 @@ fn authored_recovery_flows_through_normal_program_association() {
         .unwrap();
     builder
         .register_handler::<PortfolioIncident, Stop>()
-        .unwrap();
-    builder.register_handler::<EvmIncident, Stop>().unwrap();
-    let incomplete = builder.finish();
-    assert!(matches!(
-        incomplete.associate(program.clone()),
-        Err(RuntimeError::IncompatibleAssembly)
-    ));
-
-    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-    builder.register_read::<EvmRead, Observation>().unwrap();
-    builder
-        .register_adapter::<Observation, _, _>(Offset { value: 1 }, |_, intent| {
-            Box::pin(async move {
-                Ok(Offset {
-                    value: intent.value,
-                })
-            })
-        })
-        .unwrap();
-    builder
-        .register_classifier::<ProviderError, MapFailure, MapContext, PortfolioClassifier>()
-        .unwrap();
-    builder.register_classifier::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>().unwrap();
-    builder
-        .register_handler::<PortfolioIncident, Stop>()
-        .unwrap();
-    builder.register_handler::<EvmIncident, Stop>().unwrap();
-    builder
-        .register_handler::<EvmIncident, RetryRead>()
         .unwrap();
     let assembly = builder.finish();
-    let executable = assembly
-        .associate(mfm_program::Program::decode_canonical(program.canonical_bytes()).unwrap())
-        .unwrap();
     let context = RecoveryContext::new(ExecutionPhase::Read, RecoveryAllowances::new(2, 0), 2, &[]);
-    for (index, expected) in [
-        RecoveryRequest::Stop,
-        RecoveryRequest::Stop,
-        RecoveryRequest::RetryState,
-        RecoveryRequest::Stop,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let state = &executable.declarations[index];
-        let ExecutableMode::Read { incident, .. } = &state.mode else {
-            panic!("expected Read")
-        };
-        let original = qualify_hot(ProviderError::Unavailable).unwrap();
-        let augmented = (incident.context)(
-            &qualify_hot(Offset { value: 7 }).unwrap(),
-            &qualify_hot(Offset { value: 7 }).unwrap(),
-            &original,
+    let mut previous = None;
+    for (mapped_offset, expected) in [
+        (10, Assessment::Recoverable),
+        (11, Assessment::Nonrecoverable),
+    ] {
+        let program = mfm_program::expand_program(
+            mfm_ids::EntryPointId::new("mfm.test/mapped-read@1").unwrap(),
+            &MappedRead { mapped_offset },
+            &Offset { value: 7 },
+            mfm_program::ProgramLimits::new(2),
         )
         .unwrap();
+        assert_ne!(previous.as_ref(), Some(program.content_ref()));
+        previous = Some(program.content_ref().clone());
+        let executable = assembly
+            .associate(mfm_program::Program::decode_canonical(program.canonical_bytes()).unwrap())
+            .unwrap();
         assert_eq!(
-            state
+            executable.declarations[0]
                 .recovery
                 .request(
-                    QualifiedIncident::Adapter {
-                        original,
-                        context: Box::new(augmented)
-                    },
-                    &context
+                    QualifiedIncident::Domain(qualify_hot(EvmFailure { source: 7 }).unwrap()),
+                    &context,
                 )
                 .unwrap(),
-            (Assessment::Recoverable, expected)
+            (expected, RecoveryRequest::Stop)
         );
-        let root = state
+        let root = executable.declarations[0]
             .root_map
             .apply(qualify_hot(EvmFailure { source: 7 }).unwrap())
             .unwrap();
         assert_eq!(take::<PortfolioFailure>(root).unwrap().collection, 107);
     }
-    let changed = assembly.associate(changed).unwrap();
-    for (index, expected) in [
-        Assessment::Nonrecoverable,
-        Assessment::Recoverable,
-        Assessment::Recoverable,
-        Assessment::Nonrecoverable,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let (assessment, _) = changed.declarations[index]
-            .recovery
-            .request(
-                QualifiedIncident::Domain(qualify_hot(EvmFailure { source: 7 }).unwrap()),
-                &context,
-            )
-            .unwrap();
-        assert_eq!(assessment, expected);
-    }
 }
 
+// The integration suite exercises the remaining scripted append outcomes.
+#[allow(dead_code)]
+#[path = "../../../tests/support/scripted_store.rs"]
+mod scripted_store;
+use scripted_store::{AppendAction, ScriptedStore};
 mod execution;

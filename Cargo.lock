@@ -2241,16 +2241,12 @@ dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-ids",
- "mfm-journal",
  "mfm-program",
  "mfm-program-derive",
- "mfm-runtime",
- "mfm-store",
  "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
- "tokio",
 ]
 
 [[package]]

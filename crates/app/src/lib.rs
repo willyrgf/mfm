@@ -47,8 +47,8 @@ pub const MAX_EVM_BINDINGS: usize = 256;
 
 /// Registers every Portfolio and EVM State implementation the snapshot Program declares.
 ///
-/// [`ComposedRuntime`] is the composition trusted callers want. This entry stays public only for
-/// adapterless tests that prove association rejects a Program before Store IO.
+/// [`ComposedRuntime`] binds live capabilities. Consuming tests use this same State registry
+/// with controlled adapters, including association rejection before Store IO.
 pub fn register_portfolio_states(builder: &mut RuntimeAssemblyBuilder) -> mfm_runtime::Result<()> {
     inspection::register_states(builder)
 }

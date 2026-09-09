@@ -737,16 +737,6 @@ fn opaque_transfer_must_contain_a_complete_prefix() {
 
 #[test]
 fn object_one_byte_over_the_exact_limit_is_capacity() {
-    let run = run(14);
-    let genesis = EncodedRunFrame::admission(
-        &run,
-        &object_ref("mfm.test.program", b"{}"),
-        b"{}",
-        &object_ref("mfm.test.context", b"[]"),
-        b"[]",
-    )
-    .expect("genesis");
-    JournalHistory::from_genesis(genesis).expect("history");
     let oversized = format!("\"{}\"", "a".repeat(MAX_RUN_OBJECT_CANONICAL_BYTES - 1));
     assert_eq!(oversized.len(), MAX_RUN_OBJECT_CANONICAL_BYTES + 1);
     assert!(matches!(
