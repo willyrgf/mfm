@@ -4,16 +4,18 @@ use super::*;
 fn source_revision_hex_is_checked_and_survives_canonical_value_qualification() {
     let entry = EntryPointId::new(PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID).unwrap();
     let admission = PortfolioAdmission::new(
-        "candidates".to_owned(),
-        "ab".repeat(32),
+        ConfigName::new("candidates").unwrap(),
+        DigestBytes::from_array([0xab; 32]),
         entry.clone(),
         None,
-    )
-    .unwrap();
+    );
     let (canonical, _) = mfm_values::canonicalize_mfm_value(&admission).unwrap();
     let decoded: PortfolioAdmission = serde_json::from_slice(canonical.as_bytes()).unwrap();
     assert_eq!(decoded, admission);
-    assert_eq!(decoded.config_digest_hex(), "ab".repeat(32));
+    assert_eq!(
+        decoded.config_digest_hex(),
+        DigestBytes::from_array([0xab; 32])
+    );
     for invalid in [
         "AB".repeat(32),
         "a".repeat(63),
@@ -21,15 +23,13 @@ fn source_revision_hex_is_checked_and_survives_canonical_value_qualification() {
         "g".repeat(64),
         format!("content:sha256-jcs-v1:{}", "ab".repeat(32)),
     ] {
-        assert!(PortfolioAdmission::new(
-            "candidates".to_owned(),
-            invalid.clone(),
-            entry.clone(),
-            None
-        )
-        .is_err());
         let mut wire = serde_json::to_value(&admission).unwrap();
         wire["config_digest_hex"] = serde_json::json!(invalid);
+        assert!(serde_json::from_value::<PortfolioAdmission>(wire).is_err());
+    }
+    for invalid in ["", "Bad", "-daily", "daily_1", "daily-", &"x".repeat(65)] {
+        let mut wire = serde_json::to_value(&admission).unwrap();
+        wire["name"] = serde_json::json!(invalid);
         assert!(serde_json::from_value::<PortfolioAdmission>(wire).is_err());
     }
 }

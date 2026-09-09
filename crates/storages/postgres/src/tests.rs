@@ -5,14 +5,14 @@ use std::sync::Arc;
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_config::{
-    ConfigDigest, ConfigImportResult, ConfigName, ConfigRepository, ConfigRepositoryError,
-    ConfigRevision,
+    ConfigDigest, ConfigImportResult, ConfigRepository, ConfigRepositoryError, ConfigRevision,
 };
 use mfm_evm::custody::{
     AuthorityError, EvmTransactionAuthority, ExactRawTransaction, LoadedTransaction, NonceDomain,
     PreparedRecord, Reservation,
 };
 use mfm_evm::{EvmAddress, EvmAuthorityEpoch, EvmChainInstance, EvmHash};
+use mfm_ids::ConfigName;
 use mfm_ids::{
     ContentRef, DigestAlgorithm, DigestBytes, ExecutionPosition, SchemaId, StatePosition, VisitId,
 };

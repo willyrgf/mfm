@@ -7,7 +7,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
-use mfm_ids::{ContentDigest, DigestAlgorithm};
+use mfm_ids::{ConfigName, ContentDigest, DigestAlgorithm, DigestBytes};
 use serde::{Deserialize, Deserializer, Serialize};
 
 mod memory;
@@ -16,57 +16,6 @@ pub use memory::MemoryConfigRepository;
 
 /// Maximum retained canonical bytes in one configuration document.
 pub const MAX_CONFIG_DOCUMENT_BYTES: usize = 256 * 1024;
-
-/// Error returned when a configuration name violates its public grammar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("config name is invalid")]
-pub struct ConfigNameError;
-
-/// A bounded lowercase name in the durable configuration repository.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(transparent)]
-pub struct ConfigName(String);
-
-impl ConfigName {
-    /// Parses a configuration name.
-    pub fn new(value: impl AsRef<str>) -> Result<Self, ConfigNameError> {
-        let value = value.as_ref();
-        let bytes = value.as_bytes();
-        if bytes.is_empty()
-            || bytes.len() > 64
-            || !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit()
-            || !bytes[bytes.len() - 1].is_ascii_lowercase()
-                && !bytes[bytes.len() - 1].is_ascii_digit()
-            || bytes
-                .iter()
-                .any(|byte| !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && *byte != b'-')
-        {
-            return Err(ConfigNameError);
-        }
-        Ok(Self(value.to_owned()))
-    }
-
-    /// Returns the checked name.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ConfigName {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for ConfigName {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
 
 /// Error returned when a configuration digest is not a canonical-JSON digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -85,6 +34,19 @@ impl ConfigDigest {
             return Err(ConfigDigestError);
         }
         Ok(Self(digest))
+    }
+
+    /// Constructs the canonical-JSON digest from checked SHA-256 bytes.
+    pub fn from_digest_bytes(bytes: DigestBytes) -> Self {
+        Self(ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            bytes,
+        ))
+    }
+
+    /// Returns the checked digest bytes without formatting or parsing an identity string.
+    pub const fn digest_bytes(&self) -> DigestBytes {
+        *self.0.digest()
     }
 
     /// Parses a checked configuration digest.

@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_config::{
-    ConfigDigest, ConfigFuture, ConfigImportResult, ConfigName, ConfigRepository, ConfigRevision,
+    ConfigDigest, ConfigFuture, ConfigImportResult, ConfigRepository, ConfigRevision,
 };
 use mfm_evm::EvmAuthorityEpoch;
+use mfm_ids::ConfigName;
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId};
 use mfm_journal::{
     frame_head_digest, EncodedRunFrame, StoredRunBytes, MAX_FRAME_BYTES, MAX_RUN_BYTES,
