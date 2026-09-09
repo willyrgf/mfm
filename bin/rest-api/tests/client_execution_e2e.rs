@@ -1,8 +1,7 @@
 //! Managed cross-transport execution verification over production composition.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -19,9 +18,9 @@ const OUTPUT_CONTRACT_DIGEST: &str =
     "content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927";
 const OUTPUT_SCHEMA_ID: &str = "schema:mfm.derived.portfolio_snapshot_output:1:sha256-jcs-v1:e9cf985feb7415fdcf3d4e84eb53a6273ac0a2330ca4137ca72c806d72d112f6";
 
-#[test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires explicit CLI/REST binaries and managed PostgreSQL/Reth services"]
-fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() {
+async fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() {
     let cli = required_path("MFM_E2E_CLI_BIN");
     let rest = required_path("MFM_E2E_REST_BIN");
     for name in [
@@ -100,21 +99,22 @@ fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() {
         Some(&fault_deployment),
         Some(blocked.locator()),
     );
-    fault_daemon.wait_ready();
+    fault_daemon.wait_ready().await;
 
     let start_body = format!(r#"{{"config":{{"name":"daily","digest":"{historical_digest}"}}}}"#);
     let start_socket = socket.clone();
-    let start_request = std::thread::spawn(move || {
+    let start_request = tokio::spawn(async move {
         http(
             &start_socket,
             "POST",
             "/v1/runs/start",
             Some((&start_body, "application/json")),
         )
+        .await
     });
     blocked.assert_chain_identity_request();
     // The shared mechanical index reveals the generated identity while execution is in flight.
-    let indexed = rest_json(&socket, "GET", "/v1/runs?limit=1", None);
+    let indexed = rest_json(&socket, "GET", "/v1/runs?limit=1", None).await;
     assert_eq!(indexed.0, 200);
     let items = indexed.1["items"].as_array().expect("run index");
     assert_eq!(items.len(), 1);
@@ -125,10 +125,7 @@ fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() {
     assert_digest(&items[0]["run_id"], "run:sha256-jcs-v1:");
     assert_eq!(items[0]["head_sequence"], INTERRUPTED_HEAD_SEQUENCE);
     fault_daemon.crash();
-    assert!(start_request
-        .join()
-        .expect("interrupted HTTP thread")
-        .is_err());
+    assert!(start_request.await.expect("interrupted HTTP task").is_err());
     blocked.finish();
     // Abrupt termination leaves the Unix socket; remove it only after the daemon is reaped.
     std::fs::remove_file(&socket).expect("remove crashed daemon socket");
@@ -141,8 +138,8 @@ fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() {
     assert_success(&deleted, "delete admitted historical revision");
 
     let mut live_daemon = Daemon::start(&rest, &xdg, &socket, None, None);
-    live_daemon.wait_ready();
-    let runnable = rest_json(&socket, "GET", &format!("/v1/runs/{run_id}"), None);
+    live_daemon.wait_ready().await;
+    let runnable = rest_json(&socket, "GET", &format!("/v1/runs/{run_id}"), None).await;
     assert_eq!(runnable.0, 200);
     assert_eq!(runnable.1["run_id"], run_id);
     assert_eq!(runnable.1["head_sequence"], INTERRUPTED_HEAD_SEQUENCE);
@@ -158,11 +155,12 @@ fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() {
         "POST",
         &format!("/v1/runs/{run_id}/progress"),
         Some(("{}", "application/json")),
-    );
+    )
+    .await;
     assert_eq!(progressed.0, 200);
     assert_exact_live_snapshot(&progressed.1, &run_id);
     assert_eq!(
-        rest_json(&socket, "GET", &format!("/v1/runs/{run_id}"), None),
+        rest_json(&socket, "GET", &format!("/v1/runs/{run_id}"), None).await,
         progressed
     );
 
@@ -214,11 +212,17 @@ fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() {
     assert_ne!(repeated["run"]["head_digest"], progressed.1["head_digest"]);
     assert_eq!(repeated["run"]["state"], progressed.1["state"]);
 
-    verify_enrichment_publication(&cli, &rest, &xdg, &socket, &root);
+    verify_enrichment_publication(&cli, &rest, &xdg, &socket, &root).await;
     std::fs::remove_dir_all(&root).expect("remove client e2e tree");
 }
 
-fn verify_enrichment_publication(cli: &Path, rest: &Path, xdg: &Path, socket: &Path, root: &Path) {
+async fn verify_enrichment_publication(
+    cli: &Path,
+    rest: &Path,
+    xdg: &Path,
+    socket: &Path,
+    root: &Path,
+) {
     let mut candidate: serde_json::Value =
         serde_json::from_str(historical_config()).expect("candidate config");
     candidate["entry_point"] = serde_json::json!("mfm.portfolio/enrich@1");
@@ -231,7 +235,7 @@ fn verify_enrichment_publication(cli: &Path, rest: &Path, xdg: &Path, socket: &P
     );
     let digest = imported["config"]["digest"].as_str().unwrap();
     let mut daemon = Daemon::start(rest, xdg, socket, None, None);
-    daemon.wait_ready();
+    daemon.wait_ready().await;
     let request =
         serde_json::json!({"config": {"name": "candidates", "digest": digest}}).to_string();
     let enriched = rest_json(
@@ -239,7 +243,8 @@ fn verify_enrichment_publication(cli: &Path, rest: &Path, xdg: &Path, socket: &P
         "POST",
         "/v1/runs/start",
         Some((&request, "application/json")),
-    );
+    )
+    .await;
     assert_eq!(enriched.0, 200);
     assert_eq!(enriched.1["run"]["state"]["kind"], "succeeded");
     let enrichment_id = enriched.1["run"]["run_id"].as_str().unwrap();
@@ -255,7 +260,8 @@ fn verify_enrichment_publication(cli: &Path, rest: &Path, xdg: &Path, socket: &P
         "POST",
         "/v1/configs/resolved/publish-enrichment",
         Some((&body, "application/json")),
-    );
+    )
+    .await;
     assert_eq!(published.0, 201);
     assert_eq!(published.1["outcome"], "created");
     let repeated = cli_json(
@@ -294,6 +300,7 @@ fn verify_enrichment_publication(cli: &Path, rest: &Path, xdg: &Path, socket: &P
             &format!("/v1/configs/resolved/revisions/{resolved_digest}"),
             None
         )
+        .await
         .expect("delete published revision")
         .status,
         204
@@ -314,7 +321,9 @@ fn verify_enrichment_publication(cli: &Path, rest: &Path, xdg: &Path, socket: &P
     );
     assert_eq!(recovered, started);
     assert_eq!(
-        rest_json(socket, "GET", &format!("/v1/runs/{dependent_id}"), None).1,
+        rest_json(socket, "GET", &format!("/v1/runs/{dependent_id}"), None)
+            .await
+            .1,
         started["run"]
     );
     daemon.stop();
@@ -519,19 +528,23 @@ impl BlockedRpc {
     }
 }
 
+fn invalid_rpc_request() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid RPC request")
+}
+
 fn read_http_request(stream: &mut impl Read) -> std::io::Result<Vec<u8>> {
     let mut encoded = Vec::new();
     let mut buffer = [0_u8; 4096];
     loop {
         let read = stream.read(&mut buffer)?;
         if read == 0 {
-            return Err(invalid_http());
+            return Err(invalid_rpc_request());
         }
         encoded.extend_from_slice(&buffer[..read]);
         let Some(split) = encoded.windows(4).position(|window| window == b"\r\n\r\n") else {
             continue;
         };
-        let head = std::str::from_utf8(&encoded[..split]).map_err(|_| invalid_http())?;
+        let head = std::str::from_utf8(&encoded[..split]).map_err(|_| invalid_rpc_request())?;
         let length = head
             .lines()
             .skip(1)
@@ -542,7 +555,7 @@ fn read_http_request(stream: &mut impl Read) -> std::io::Result<Vec<u8>> {
                         .flatten()
                 })
             })
-            .ok_or_else(invalid_http)?;
+            .ok_or_else(invalid_rpc_request)?;
         if encoded.len() >= split + 4 + length {
             return Ok(encoded);
         }
@@ -590,7 +603,7 @@ impl Daemon {
         }
     }
 
-    fn wait_ready(&mut self) {
+    async fn wait_ready(&mut self) {
         for _ in 0..600 {
             if let Some(status) = self.child.try_wait().expect("observe daemon") {
                 let mut stderr = String::new();
@@ -603,13 +616,13 @@ impl Daemon {
                 panic!("REST daemon exited {status}: {stderr}");
             }
             if self.socket.exists() {
-                if let Ok(response) = http(&self.socket, "GET", "/healthz", None) {
+                if let Ok(response) = http(&self.socket, "GET", "/healthz", None).await {
                     if response.status == 200 {
                         return;
                     }
                 }
             }
-            std::thread::sleep(Duration::from_millis(50));
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
         panic!("REST daemon did not become ready");
     }
@@ -653,95 +666,45 @@ struct HttpResponse {
     body: Vec<u8>,
 }
 
-fn rest_json(
+async fn rest_json(
     socket: &Path,
     method: &str,
     target: &str,
     body: Option<(&str, &str)>,
 ) -> (u16, serde_json::Value) {
-    let response = http(socket, method, target, body).expect("REST request");
+    let response = http(socket, method, target, body)
+        .await
+        .expect("REST request");
     let json = serde_json::from_slice(&response.body).expect("REST response JSON");
     (response.status, json)
 }
 
-fn http(
+async fn http(
     socket: &Path,
     method: &str,
     target: &str,
     body: Option<(&str, &str)>,
-) -> std::io::Result<HttpResponse> {
-    let mut stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(Duration::from_secs(130)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let (body, content_type) = body.unwrap_or(("", ""));
-    write!(
-        stream,
-        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
-        body.len()
-    )?;
-    if !content_type.is_empty() {
-        write!(stream, "Content-Type: {content_type}\r\n")?;
+) -> Result<HttpResponse, reqwest::Error> {
+    let client = reqwest::Client::builder()
+        .unix_socket(socket)
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(130))
+        .build()?;
+    let mut request = client.request(
+        method.parse().expect("fixture HTTP method"),
+        format!("http://localhost{target}"),
+    );
+    if let Some((body, content_type)) = body {
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body.to_owned());
     }
-    write!(stream, "\r\n{body}")?;
-    stream.flush()?;
-    let mut encoded = Vec::new();
-    stream.read_to_end(&mut encoded)?;
-    parse_http_response(encoded)
-}
-
-fn parse_http_response(encoded: Vec<u8>) -> std::io::Result<HttpResponse> {
-    let split = encoded
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(invalid_http)?;
-    let head = std::str::from_utf8(&encoded[..split]).map_err(|_| invalid_http())?;
-    let status = head
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|value| value.parse().ok())
-        .ok_or_else(invalid_http)?;
-    let body = &encoded[split + 4..];
-    let chunked = head.lines().skip(1).any(|line| {
-        line.split_once(':').is_some_and(|(name, value)| {
-            name.eq_ignore_ascii_case("transfer-encoding")
-                && value.trim().eq_ignore_ascii_case("chunked")
-        })
-    });
-    let body = if chunked {
-        decode_chunked(body)?
-    } else {
-        body.to_vec()
-    };
-    Ok(HttpResponse { status, body })
-}
-
-fn decode_chunked(mut encoded: &[u8]) -> std::io::Result<Vec<u8>> {
-    let mut decoded = Vec::new();
-    loop {
-        let end = encoded
-            .windows(2)
-            .position(|window| window == b"\r\n")
-            .ok_or_else(invalid_http)?;
-        let size = std::str::from_utf8(&encoded[..end])
-            .ok()
-            .and_then(|value| value.split(';').next())
-            .and_then(|value| usize::from_str_radix(value, 16).ok())
-            .ok_or_else(invalid_http)?;
-        encoded = &encoded[end + 2..];
-        if size == 0 {
-            return Ok(decoded);
-        }
-        if encoded.len() < size + 2 || &encoded[size..size + 2] != b"\r\n" {
-            return Err(invalid_http());
-        }
-        decoded.extend_from_slice(&encoded[..size]);
-        encoded = &encoded[size + 2..];
-    }
-}
-
-fn invalid_http() -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid HTTP response")
+    let response = request.send().await?;
+    Ok(HttpResponse {
+        status: response.status().as_u16(),
+        body: response.bytes().await?.to_vec(),
+    })
 }
 
 fn cli_json(binary: &Path, xdg: &Path, arguments: &[&str]) -> serde_json::Value {
