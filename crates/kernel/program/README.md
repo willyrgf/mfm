@@ -1,6 +1,6 @@
 # mfm-program
 
-Program owns the immutable `mfm-program-document@4` sequence with the `mfm.program.v4` domain.
+Program owns the immutable `mfm-program-document@5` sequence with the `mfm.program.v5` domain.
 An Operation performs deterministic source authoring; its input check and expansion commit the
 exact initial value, State contracts, resolved policies, root failure maps, checkpoints and finite
 bounds. Runtime associates typed implementations and owns execution and recovery. Old graph bytes

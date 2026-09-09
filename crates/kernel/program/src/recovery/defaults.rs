@@ -107,23 +107,17 @@ impl RecoveryDefaults {
             .or(self.classifiers.as_ref())
         {
             Some(family) => family.binding(&source)?.clone(),
-            None => {
-                let mut family = Classifiers::new();
-                family.bind::<E, Identity<D>, Identity<X>, NoRecovery>(
-                    NoParams, NoParams, NoParams,
-                )?;
-                family.binding(&source)?.clone()
-            }
+            None => ClassifierBinding::new::<E, Identity<D>, Identity<X>, NoRecovery>(
+                NoParams, NoParams, NoParams,
+            )?,
         };
+        let mapped = classifier.abi().mapped();
         let (handler, checkpoints) = match occurrence.handlers.as_ref().or(self.handlers.as_ref()) {
-            Some(family) => (
-                family.binding(classifier.abi().mapped())?.clone(),
-                family.checkpoints(classifier.abi().mapped())?.to_vec(),
-            ),
-            None => (
-                HandlerBinding::stop(classifier.abi().mapped().clone())?,
-                Vec::new(),
-            ),
+            Some(family) => {
+                let setting = family.setting(&mapped)?;
+                (setting.binding.clone(), setting.checkpoints.clone())
+            }
+            None => (HandlerBinding::stop(mapped)?, Vec::new()),
         };
         Ok(SelectedRecovery {
             classifier,

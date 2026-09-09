@@ -100,7 +100,7 @@ fn emitted_linear_program_binds_recovery_and_relocates_inherited_checkpoints() {
     );
     assert_eq!(
         program.declarations()[1].classifier().abi().source(),
-        &IncidentAbi::of::<Cause>().unwrap()
+        IncidentAbi::of::<Cause>().unwrap()
     );
     let cold = Program::decode_canonical(program.canonical_bytes()).unwrap();
     assert_eq!(cold, program);
@@ -137,7 +137,28 @@ fn emitted_linear_program_binds_recovery_and_relocates_inherited_checkpoints() {
     tampered["declarations"][1]["recovery_targets"] = serde_json::json!([2]);
     let bytes = PlainCanonicalJsonBytes::from_json_str(&tampered.to_string()).unwrap();
     assert!(Program::decode_canonical(bytes.as_bytes()).is_err());
-    tampered["domain"] = serde_json::json!("mfm.program.v3");
+    // Selected ABI parameters must match their retained value, and removed fields are rejected.
+    for (field, replacement) in [
+        ("canonical", serde_json::json!({"unexpected": true})),
+        ("value", serde_json::json!(program.initial_value_ref())),
+        (
+            "contract",
+            serde_json::json!(program.admitted_context_contract_ref()),
+        ),
+    ] {
+        let mut wire: serde_json::Value =
+            serde_json::from_slice(program.canonical_bytes()).unwrap();
+        wire["declarations"][0]["classifier"]["params"][field] = replacement;
+        let bytes = PlainCanonicalJsonBytes::from_json_str(&wire.to_string()).unwrap();
+        assert!(Program::decode_canonical(bytes.as_bytes()).is_err());
+    }
+    let mut wire: serde_json::Value = serde_json::from_slice(program.canonical_bytes()).unwrap();
+    wire["declarations"][0]["classifier"]["abi"]["params"] =
+        serde_json::json!(program.admitted_context_contract_ref());
+    let bytes = PlainCanonicalJsonBytes::from_json_str(&wire.to_string()).unwrap();
+    assert!(Program::decode_canonical(bytes.as_bytes()).is_err());
+    tampered = serde_json::from_slice(program.canonical_bytes()).unwrap();
+    tampered["domain"] = serde_json::json!("mfm.program.v4");
     let bytes = PlainCanonicalJsonBytes::from_json_str(&tampered.to_string()).unwrap();
     assert!(Program::decode_canonical(bytes.as_bytes()).is_err());
 }

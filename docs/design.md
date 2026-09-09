@@ -9,7 +9,7 @@ Runtime transition. `Never` remains the uninhabited failure contract.
 Source code authors the sequence through a deterministic `Operation`. Its required `validate_input`
 check establishes agreement between root planning assumptions and the initial value before expansion.
 `expand_program(entry, operation, input, limits)` qualifies that input and commits its exact value
-reference into Program v4. Runtime rejects input substitution before genesis or provider entry;
+reference into Program v5. Runtime rejects input substitution before genesis or provider entry;
 cold reconstruction checks genesis against the same commitment. Parent planning and deterministic
 States establish future child input agreement. No authoring callback enters Runtime. Multiple RunIds
 may reuse the same exact Program/input pair.
@@ -17,7 +17,10 @@ may reuse the same exact Program/input pair.
 OperationExpansion lowers Pure/Read/Effect States and child Operations through one private symbolic
 draft. Scoped checkpoint tokens cannot be captured for direct installation in another scope, while
 inherited installed bindings retain their owning scope for final relocation. Operations, callbacks,
-and injection setup remain authoring-only. Program retains only the selected immutable descriptors.
+and injection setup remain authoring-only. Program retains only the selected immutable descriptors. Classifier descriptors retain map ABIs
+and one operational-error contract; their original and mapped incident keys are derived. Policy
+parameters retain their value reference and canonical bytes; the selected ABI supplies the expected
+nominal contract, and Runtime associates its exact codec. Program v5 rejects superseded descriptors.
 
 The framework defaults to `NoRecovery` and `Stop`. The shipping Portfolio planner selects those
 defaults with zero global and local recovery allowances. Library callers may explicitly install
@@ -157,7 +160,7 @@ Executable identity hashes a canonical domain-separated descriptor containing im
 version, stage, explicit recipe identity, ordered selected slots, and outcome mode. Exact value
 schemas remain additional ABI association keys. Cold fold re-prepares retained commands from
 exact snapshots and does not rerun completed interpretation. A completed transaction adds seven
-frames after admission; this uses the current Program v4, Journal frame v3, and Runtime fold contracts.
+frames after admission; this uses the current Program v5, Journal frame v3, and Runtime fold contracts.
 
 Terminal reporting uses existing checked execution facts and settlement outcomes; there is no
 separate persisted outcome projection. Products own root failure policy. The fixture reports retain

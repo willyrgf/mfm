@@ -6,7 +6,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | --- | --- | --- |
 | IDs / Values | checked identities including `EffectId`, schema descriptors, canonical typed values, mechanical typed context slots, 32 MiB object bound | execution or IO |
 | Capabilities | Read intent/evidence and Effect command/evidence contracts | State outcomes or retries |
-| Program | typed Operation authoring and root input validation, sole private lowering draft, checked v4 ordered State sequence and exact initial-value commitment, Pure/Read/Effect State contracts, redaction-safe internal callback errors, `Never` | registries, IO, scheduling |
+| Program | typed Operation authoring and root input validation, sole private lowering draft, checked v5 ordered State sequence and exact initial-value commitment, Pure/Read/Effect State contracts, redaction-safe internal callback errors, `Never` | registries, IO, scheduling |
 | Runtime | immutable assembly, Program association, sole fold, typed execution/progression | persisted wire or physical storage |
 | Journal | exact frame encoding and complete-history qualification | domain interpretation or persistence IO |
 | Store / run index ports | object-safe complete load and atomic append; separate mechanical current-head enumeration | Program, State, capability, reducer, config semantics, or run-status derivation |
@@ -107,7 +107,7 @@ State contracts and selected policy/mapping ABIs; Runtime associates the exact t
 The source-authoring sequence is separate from progression:
 
 ```text
-domain Operation -> OperationExpansion -> one private symbolic draft -> immutable Program v4
+domain Operation -> OperationExpansion -> one private symbolic draft -> immutable Program v5
                          |-> typed before/designated/after capability injection
 ```
 

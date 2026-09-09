@@ -202,7 +202,7 @@ impl AssemblyInner {
         classifier: &ClassifierBinding,
         handler: &HandlerBinding,
     ) -> Result<AssociatedRecovery> {
-        if classifier.abi().mapped() != handler.abi().input() {
+        if &classifier.abi().mapped() != handler.abi().input() {
             return Err(RuntimeError::IncompatibleAssembly);
         }
         let classify = self
@@ -239,9 +239,6 @@ impl AssemblyInner {
         params: &PolicyParams,
         expected: &ContentRef,
     ) -> Result<QualifiedValue> {
-        if params.contract_ref() != expected {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
         self.values
             .get(expected)
             .ok_or(RuntimeError::IncompatibleAssembly)?

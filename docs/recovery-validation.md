@@ -1,7 +1,7 @@
 # Recovery replacement validation
 
 This records evidence for [the recovery RFC](../RFC_REFACT_RUNTIME_TO_RECOV_SM.md).
-The first milestone is complete. Program v4 and Journal frame v3 are the current contracts;
+The first milestone is complete. Program v5 and Journal frame v3 are the current contracts;
 there is one linear compiler and one Runtime semantic fold. Old graph bytes are rejected.
 The inseparable replacement and subsequent enrichment are validated by the focused gates below.
 
