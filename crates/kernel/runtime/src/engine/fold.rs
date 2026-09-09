@@ -10,7 +10,7 @@ use mfm_program::{Execution, RecoveryUsage};
 
 use super::{derive_effect_id, qualify_journal_object};
 use crate::assembly::{ExecutableMode, ExecutableProgram, QualifiedValue};
-use crate::{Result, RuntimeError};
+use crate::{Result, RunnableReason, RuntimeError};
 
 pub(super) struct FoldState {
     pub(super) cursor: Cursor,
@@ -36,16 +36,9 @@ pub(super) enum Cursor {
     Failed(Failure),
 }
 
-pub(super) enum RunnableReason {
-    Advance,
-    Retry,
-    Restart(StatePosition),
-}
-
 pub(super) struct Failure {
     pub(super) position: ExecutionPosition,
     pub(super) reason: StopCode,
-    pub(super) usage: RecoveryUsage,
     pub(super) cause: FailureCause,
 }
 
@@ -231,7 +224,7 @@ impl FoldState {
                 );
                 self.checkpoints
                     .retain(|position, _| *position <= checkpoint);
-                (checkpoint, restored, RunnableReason::Restart(checkpoint))
+                (checkpoint, restored, RunnableReason::Restart { checkpoint })
             }
             RecoveryDecision::Stop { .. } => return Err(RuntimeError::InvalidHistory),
         };
@@ -366,7 +359,6 @@ impl FoldState {
         self.cursor = Cursor::Failed(Failure {
             position,
             reason,
-            usage,
             cause,
         });
         Ok(())
