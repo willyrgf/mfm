@@ -35,7 +35,8 @@ pub use deployment::{
     Deployment, EnvironmentName, EnvironmentNameError, MAX_DEPLOYMENT_DOCUMENT_BYTES,
 };
 pub use inspection::{ComponentKind, ComponentSummary};
-pub use mfm_config::{ConfigDigest, ConfigName, MAX_CONFIG_DOCUMENT_BYTES};
+pub use mfm_config::{ConfigDigest, MAX_CONFIG_DOCUMENT_BYTES};
+pub use mfm_ids::ConfigName;
 pub use mfm_store::{RunPage, RunPageLimit};
 
 use config::ENTRY_POINTS;
@@ -731,8 +732,7 @@ impl Application {
                     if identity.entry_point() != run.entry_point() {
                         return Err(RequestError::RunAdmissionConflict);
                     }
-                    let config = ConfigSummary::from_admission(identity)
-                        .map_err(|_| RequestError::RunAdmissionConflict)?;
+                    let config = ConfigSummary::from_admission(identity);
                     Ok::<_, RequestError>(config)
                 })
                 .await
@@ -782,9 +782,7 @@ impl Application {
                     return Err(RequestError::InvalidEnrichment);
                 }
             }
-            let admission = document
-                .admission(&name)
-                .map_err(|_| RequestError::InvalidRetainedConfig)?;
+            let admission = document.admission(&name);
             let (program, c0) = document
                 .plan(Some(admission))
                 .map_err(|error| match error {

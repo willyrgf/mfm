@@ -1,6 +1,5 @@
-use mfm_config::{
-    ConfigDigest, ConfigImportResult, ConfigName, ConfigRepositoryError, ConfigRevision,
-};
+use mfm_config::{ConfigDigest, ConfigImportResult, ConfigRepositoryError, ConfigRevision};
+use mfm_ids::ConfigName;
 use sqlx::PgPool;
 
 pub(super) async fn load_config(

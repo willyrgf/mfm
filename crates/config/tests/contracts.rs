@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_config::{
-    ConfigDigest, ConfigImportResult, ConfigName, ConfigRepository, ConfigRepositoryError,
-    ConfigRevision, MemoryConfigRepository, MAX_CONFIG_DOCUMENT_BYTES,
+    ConfigDigest, ConfigImportResult, ConfigRepository, ConfigRepositoryError, ConfigRevision,
+    MemoryConfigRepository, MAX_CONFIG_DOCUMENT_BYTES,
 };
+use mfm_ids::ConfigName;
 use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
 
 fn revision(name: &str, value: usize) -> ConfigRevision {
@@ -19,25 +20,7 @@ fn revision(name: &str, value: usize) -> ConfigRevision {
 }
 
 #[test]
-fn config_name_digest_and_document_bounds_are_exact() {
-    for accepted in ["a", "0", "daily", "daily-main-2", &"a".repeat(64)] {
-        assert_eq!(
-            ConfigName::new(accepted).expect("accepted").as_str(),
-            accepted
-        );
-    }
-    for rejected in [
-        "",
-        "-daily",
-        "daily-",
-        "Daily",
-        "daily_main",
-        "daily/main",
-        &"a".repeat(65),
-    ] {
-        assert!(ConfigName::new(rejected).is_err(), "accepted {rejected:?}");
-    }
-
+fn config_digest_and_document_bounds_are_exact() {
     let jcs = ContentDigest::from_digest(
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([1; 32]),

@@ -3,6 +3,7 @@
 `mfm-config` owns domain-generic custody for immutable named configuration revisions through
 `ConfigRepository`.
 
+`mfm-ids` owns the checked `ConfigName`; this crate owns the canonical-JSON-specific `ConfigDigest`.
 Each `(ConfigName, ConfigDigest)` identifies one immutable, bounded opaque canonical document. A
 name may retain multiple independent revisions. Import creates or compares one exact revision,
 load and idempotent delete require its exact name/digest pair, and listing returns every revision in

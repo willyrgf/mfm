@@ -12,14 +12,15 @@ use mfm_app::{
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::{AdapterError, AdapterInvariantError};
 use mfm_config::{
-    ConfigDigest, ConfigFuture, ConfigImportResult, ConfigName, ConfigRepository,
-    ConfigRepositoryError, ConfigRevision, MemoryConfigRepository, MAX_CONFIG_DOCUMENT_BYTES,
+    ConfigDigest, ConfigFuture, ConfigImportResult, ConfigRepository, ConfigRepositoryError,
+    ConfigRevision, MemoryConfigRepository, MAX_CONFIG_DOCUMENT_BYTES,
 };
 use mfm_evm::{
     AnchoredContractCallEvidence, AnchoredContractCallIntent, EvmBlockAnchor, EvmEndpoint, EvmHash,
     EvmReadEvidence, EvmReadIntent, EvmReadSubject, EvmReadValue, EvmTokenDecimals, EvmU256,
 };
 use mfm_evm_live::{EvmReadProvider, ProviderFuture};
+use mfm_ids::ConfigName;
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId};
 use mfm_runtime::RunViewState;
 use mfm_store::{AppendResult, MemoryStore, Store, StoreError};

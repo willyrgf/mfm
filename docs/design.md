@@ -112,6 +112,9 @@ carry different purposes without consuming another key slot. Explicit async shut
 and immediately awaits an OS-thread join in blocking work; dropping the final sender also ends the
 owner loop.
 
+Portfolio admission retains checked `ConfigName` and `DigestBytes` identities. Their named value
+grammars delegate to IDs; raw strings are checked at ingress, not re-parsed by Application.
+
 Inline failure reports retain original and mapped payloads even when identical. Each report is
 limited to 32 MiB independently of its individually qualified cause values. Admission bounds Journal
 lifecycles, not the size of every combined report. Report overflow returns `size_limit_exceeded`

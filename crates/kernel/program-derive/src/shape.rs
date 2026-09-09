@@ -609,6 +609,8 @@ fn checked_identity_shape(ident: &str) -> Option<proc_macro2::TokenStream> {
         "ContentRef" => {
             return Some(quote!(::mfm_values::SchemaShape::content_ref()?));
         }
+        "ConfigName" => (quote!(ConfigName), 64),
+        "DigestBytes" => (quote!(DigestBytes), 64),
         "ContentDigest" => (quote!(ContentDigest), 128_u32),
         "SchemaId" => (quote!(SchemaId), 512),
         "SemanticTypeId" => (quote!(SemanticTypeId), 512),

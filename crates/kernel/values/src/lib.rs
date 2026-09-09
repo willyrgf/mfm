@@ -1640,6 +1640,8 @@ fn grammar_admits(grammar: StringGrammar, value: &str) -> bool {
 
     match grammar {
         StringGrammar::UnicodeScalarText => !value.chars().any(|ch| ch.is_control()),
+        StringGrammar::ConfigName => mfm_ids::ConfigName::new(value).is_ok(),
+        StringGrammar::DigestBytes => mfm_ids::DigestBytes::from_hex(value).is_ok(),
         StringGrammar::ContentDigest => ContentDigest::parse(value)
             .is_ok_and(|digest| digest.algorithm() == DigestAlgorithm::Sha256V1),
         StringGrammar::RunId => RunId::parse(value).is_ok(),
@@ -1994,6 +1996,8 @@ impl From<LiteralValueWire> for LiteralValue {
 fn parse_string_grammar(value: &str) -> Result<StringGrammar> {
     [
         StringGrammar::UnicodeScalarText,
+        StringGrammar::ConfigName,
+        StringGrammar::DigestBytes,
         StringGrammar::ContentDigest,
         StringGrammar::RunId,
         StringGrammar::EffectId,

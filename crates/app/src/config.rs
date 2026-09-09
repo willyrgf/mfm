@@ -2,8 +2,9 @@ use std::fmt;
 use std::num::NonZeroU64;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_config::{ConfigDigest, ConfigName, ConfigRevision, MAX_CONFIG_DOCUMENT_BYTES};
+use mfm_config::{ConfigDigest, ConfigRevision, MAX_CONFIG_DOCUMENT_BYTES};
 use mfm_evm::{EvmEndpoint, EvmPhysicalTarget, EVM_BALANCE_SOURCE_LIMIT};
+use mfm_ids::ConfigName;
 use mfm_ids::EntryPointId;
 use mfm_portfolio::{
     plan_enrichment, plan_snapshot, EnrichmentProvenance, PortfolioAdmission, PortfolioConfig,
@@ -170,17 +171,10 @@ impl ConfigDocument {
         .expect("compiled entry-point id is checked by contract tests")
     }
 
-    pub(crate) fn admission(
-        &self,
-        name: &ConfigName,
-    ) -> Result<PortfolioAdmission, PortfolioError> {
+    pub(crate) fn admission(&self, name: &ConfigName) -> PortfolioAdmission {
         PortfolioAdmission::new(
-            name.as_str().to_owned(),
-            self.digest
-                .as_str()
-                .strip_prefix("content:sha256-jcs-v1:")
-                .ok_or(PortfolioError::InvalidValue)?
-                .to_owned(),
+            name.clone(),
+            self.digest.digest_bytes(),
             self.entry_point(),
             self.wire.provenance.clone(),
         )
@@ -324,16 +318,12 @@ pub struct ConfigSummary {
 }
 
 impl ConfigSummary {
-    pub(crate) fn from_admission(admission: &PortfolioAdmission) -> Result<Self, ()> {
-        Ok(Self {
-            name: ConfigName::new(admission.name()).map_err(|_| ())?,
-            digest: ConfigDigest::parse(format!(
-                "content:sha256-jcs-v1:{}",
-                admission.config_digest_hex()
-            ))
-            .map_err(|_| ())?,
+    pub(crate) fn from_admission(admission: &PortfolioAdmission) -> Self {
+        Self {
+            name: admission.name().clone(),
+            digest: ConfigDigest::from_digest_bytes(admission.config_digest_hex()),
             entry_point: admission.entry_point().clone(),
-        })
+        }
     }
 
     /// Returns the configuration name.

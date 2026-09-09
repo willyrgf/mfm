@@ -24,6 +24,10 @@ pub const MAX_MEDIA_TYPE_BYTES: usize = 127;
 pub enum StringGrammar {
     /// Free Unicode scalar text within the declared byte bounds.
     UnicodeScalarText,
+    /// Checked configuration name owned by `mfm_ids::ConfigName`.
+    ConfigName,
+    /// Exactly 64 lowercase hexadecimal characters owned by `mfm_ids::DigestBytes`.
+    DigestBytes,
     /// `content:sha256-v1:<64 lowercase hex>` owned by `ContentDigest`.
     ContentDigest,
     /// `run:sha256-jcs-v1:<64 lowercase hex>` owned by `RunId`.
@@ -53,6 +57,8 @@ impl StringGrammar {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::UnicodeScalarText => "unicode_scalar_text",
+            Self::ConfigName => "config_name",
+            Self::DigestBytes => "digest_bytes",
             Self::ContentDigest => "content_digest",
             Self::RunId => "run_id",
             Self::EffectId => "effect_id",

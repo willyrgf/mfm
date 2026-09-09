@@ -60,6 +60,9 @@ pub use self::checked::*;
 mod identity;
 pub use self::identity::*;
 
+mod config_name;
+pub use config_name::{ConfigName, ConfigNameError};
+
 mod position;
 pub use position::{ExecutionPosition, StatePosition, VisitId};
 

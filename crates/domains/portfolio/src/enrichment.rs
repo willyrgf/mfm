@@ -1,7 +1,7 @@
 //! Explicit candidate selection and immutable admission provenance.
 
 use super::*;
-use mfm_ids::{ContentDigest, DigestAlgorithm, RunId};
+use mfm_ids::{ConfigName, ContentDigest, DigestAlgorithm, DigestBytes, RunId};
 
 /// Entry point for resolving a caller-supplied candidate asset list.
 pub const PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID: &str = "mfm.portfolio/enrich@1";
@@ -54,56 +54,36 @@ impl EnrichmentProvenance {
 }
 
 /// Bounded public source revision identity; Application owns repository interpretation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioAdmission {
-    name: String,
-    config_digest_hex: String,
+    name: ConfigName,
+    config_digest_hex: DigestBytes,
     entry_point: EntryPointId,
     enrichment: Option<EnrichmentProvenance>,
 }
-impl_checked_deserialize!(PortfolioAdmission {
-    name: String,
-    config_digest_hex: String,
-    entry_point: EntryPointId,
-    enrichment: Option<EnrichmentProvenance>,
-});
 impl PortfolioAdmission {
     /// Retains the selected public revision and optional verified enrichment linkage.
     pub fn new(
-        name: String,
-        config_digest_hex: String,
+        name: ConfigName,
+        config_digest_hex: DigestBytes,
         entry_point: EntryPointId,
         enrichment: Option<EnrichmentProvenance>,
-    ) -> Result<Self, PortfolioError> {
-        let value = Self {
+    ) -> Self {
+        Self {
             name,
             config_digest_hex,
             entry_point,
             enrichment,
-        };
-        value.validate()?;
-        Ok(value)
-    }
-    fn validate(&self) -> Result<(), PortfolioError> {
-        if !valid_public_text(&self.name, 64)
-            || self.config_digest_hex.len() != 64
-            || !self
-                .config_digest_hex
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(PortfolioError::InvalidValue);
         }
-        Ok(())
     }
     /// Returns the selected source name.
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &ConfigName {
         &self.name
     }
     /// Returns the lowercase SHA-256 hex digest of the canonical configuration document.
-    pub fn config_digest_hex(&self) -> &str {
-        &self.config_digest_hex
+    pub fn config_digest_hex(&self) -> DigestBytes {
+        self.config_digest_hex
     }
     /// Returns the selected entry point.
     pub fn entry_point(&self) -> &EntryPointId {
