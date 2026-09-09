@@ -268,7 +268,7 @@ fn borrow<T: MfmValue>(value: &QualifiedValue) -> Result<&T> {
 fn map<M: ValueMap>(params: &QualifiedValue, input: QualifiedValue) -> Result<QualifiedValue> {
     let output = M::apply(borrow::<M::Params>(params)?, take::<M::Input>(input)?)
         .map_err(|_| RuntimeError::Internal)?;
-    qualify_hot(output).map_err(|_| RuntimeError::Internal)
+    qualify_hot(output).map_err(RuntimeError::from)
 }
 
 fn classify<E, DM, XM, K>(

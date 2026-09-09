@@ -197,7 +197,7 @@ fn read_context<S: ReadState<C>, C: ReadCapabilityContract>(
             .ok_or(RuntimeError::Internal)?,
     )
     .map_err(|_| RuntimeError::Internal)?;
-    qualify_hot(context).map_err(|_| RuntimeError::Internal)
+    qualify_hot(context).map_err(RuntimeError::from)
 }
 
 fn effect_context<S: EffectState<C>, C: EffectCapabilityContract>(
@@ -220,7 +220,7 @@ fn effect_context<S: EffectState<C>, C: EffectCapabilityContract>(
             .ok_or(RuntimeError::Internal)?,
     )
     .map_err(|_| RuntimeError::Internal)?;
-    qualify_hot(context).map_err(|_| RuntimeError::Internal)
+    qualify_hot(context).map_err(RuntimeError::from)
 }
 
 struct RegisteredState {
