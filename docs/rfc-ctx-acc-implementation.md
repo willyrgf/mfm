@@ -79,7 +79,7 @@ limits.
 
 These are bounded product scenarios, not a promise of arbitrary workflow length. Full snapshots
 are copied into subsequent frames; long chains can grow retained bytes quadratically. Schema/object/frame/run ceilings and SQL baselines remain unchanged. These measurements use
-Program v4 and Journal frame v3; terminal failures include the canonical Runtime FailureReport. No implicit
+Program v5 and Journal frame v3; terminal failures include the canonical Runtime FailureReport. No implicit
 reference/delta representation or old-context reader exists.
 
 ## Verification workflow

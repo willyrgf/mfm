@@ -211,7 +211,7 @@ fn recovery_association_qualifies_real_parameters_and_preserves_nonclone_origina
     let classifier = classifiers
         .binding(&mfm_program::IncidentAbi::of::<EvmIncident>().unwrap())
         .unwrap();
-    let handler = handlers.binding(classifier.abi().mapped()).unwrap();
+    let handler = handlers.binding(&classifier.abi().mapped()).unwrap();
     let policy = assembly
         .inner
         .associate_recovery(classifier, handler)

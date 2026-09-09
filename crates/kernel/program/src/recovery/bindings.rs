@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap};
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::ContentRef;
@@ -113,7 +113,6 @@ impl MapBinding {
 /// Qualified immutable policy parameters bound into Program identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyParams {
-    contract: ContentRef,
     value: ContentRef,
     canonical: PlainCanonicalJsonBytes,
 }
@@ -121,18 +120,13 @@ pub struct PolicyParams {
 impl PolicyParams {
     /// Qualifies bounded canonical parameters with their exact schema.
     pub fn new<T: MfmValue>(value: &T) -> Result<Self> {
-        let contract = nominal_contract_ref::<T>()?;
         let (canonical, value) =
             canonicalize_mfm_value(value).map_err(|_| ProgramError::InvalidContract)?;
-        Ok(Self {
-            contract,
-            value,
-            canonical,
-        })
+        Ok(Self { value, canonical })
     }
-    /// Exact parameter schema contract.
-    pub const fn contract_ref(&self) -> &ContentRef {
-        &self.contract
+    pub(crate) fn matches(&self, contract: &ContentRef) -> bool {
+        self.value.schema_id() == contract.schema_id()
+            && contract.content_digest() == &mfm_canonical::raw_content_digest(b"mfm.contract.v1")
     }
     /// Exact parameter instance identity.
     pub const fn value_ref(&self) -> &ContentRef {
@@ -150,10 +144,9 @@ impl serde::Serialize for PolicyParams {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let value: serde_json::Value =
+        let value: &serde_json::value::RawValue =
             serde_json::from_slice(self.canonical_bytes()).map_err(serde::ser::Error::custom)?;
-        let mut fields = serializer.serialize_struct("PolicyParams", 3)?;
-        fields.serialize_field("contract", &self.contract)?;
+        let mut fields = serializer.serialize_struct("PolicyParams", 2)?;
         fields.serialize_field("value", &self.value)?;
         fields.serialize_field("canonical", &value)?;
         fields.end()
@@ -167,24 +160,19 @@ impl<'de> serde::Deserialize<'de> for PolicyParams {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
-            contract: ContentRef,
             value: ContentRef,
-            canonical: serde_json::Value,
+            canonical: Box<serde_json::value::RawValue>,
         }
         let wire = Wire::deserialize(deserializer)?;
-        let canonical = PlainCanonicalJsonBytes::from_json_str(&wire.canonical.to_string())
+        let canonical = PlainCanonicalJsonBytes::from_json_str(wire.canonical.get())
             .map_err(serde::de::Error::custom)?;
         if canonical.as_bytes().len() > mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES
-            || wire.value.schema_id() != wire.contract.schema_id()
             || wire.value.content_digest()
                 != &mfm_canonical::raw_content_digest(canonical.as_bytes())
-            || wire.contract.content_digest()
-                != &mfm_canonical::raw_content_digest(b"mfm.contract.v1")
         {
             return Err(serde::de::Error::custom("invalid policy parameters"));
         }
         Ok(Self {
-            contract: wire.contract,
             value: wire.value,
             canonical,
         })
@@ -195,8 +183,7 @@ impl<'de> serde::Deserialize<'de> for PolicyParams {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClassifierAbi {
-    source: IncidentAbi,
-    mapped: IncidentAbi,
+    error: ContentRef,
     domain_map: MapAbi,
     context_map: MapAbi,
     implementation: ContentRef,
@@ -213,8 +200,7 @@ impl ClassifierAbi {
         K: Classifier<Incident<DM::Output, E, XM::Output>>,
     {
         Ok(Self {
-            source: IncidentAbi::of::<Incident<DM::Input, E, XM::Input>>()?,
-            mapped: IncidentAbi::of::<Incident<DM::Output, E, XM::Output>>()?,
+            error: nominal_contract_ref::<E>()?,
             domain_map: MapAbi::of::<DM>()?,
             context_map: MapAbi::of::<XM>()?,
             implementation: implementation_ref("mfm.classifier", K::implementation_id()?)?,
@@ -222,12 +208,20 @@ impl ClassifierAbi {
         })
     }
     /// Original incident contracts.
-    pub const fn source(&self) -> &IncidentAbi {
-        &self.source
+    pub fn source(&self) -> IncidentAbi {
+        IncidentAbi {
+            domain: self.domain_map.input.clone(),
+            error: self.error.clone(),
+            context: self.context_map.input.clone(),
+        }
     }
-    /// Mapped incident borrowed by classifier and handler.
-    pub const fn mapped(&self) -> &IncidentAbi {
-        &self.mapped
+    /// Derives the mapped incident contract used by classifier and handler.
+    pub fn mapped(&self) -> IncidentAbi {
+        IncidentAbi {
+            domain: self.domain_map.output.clone(),
+            error: self.error.clone(),
+            context: self.context_map.output.clone(),
+        }
     }
     /// Domain conversion ABI.
     pub const fn domain_map(&self) -> &MapAbi {
@@ -290,6 +284,25 @@ pub struct ClassifierBinding {
 }
 
 impl ClassifierBinding {
+    pub(crate) fn new<E, DM, XM, K>(
+        domain_params: DM::Params,
+        context_params: XM::Params,
+        classifier_params: K::Params,
+    ) -> Result<Self>
+    where
+        E: MfmValue,
+        DM: ValueMap,
+        XM: ValueMap,
+        K: Classifier<Incident<DM::Output, E, XM::Output>>,
+    {
+        Ok(Self {
+            abi: ClassifierAbi::of::<E, DM, XM, K>()?,
+            domain_params: PolicyParams::new(&domain_params)?,
+            context_params: PolicyParams::new(&context_params)?,
+            params: PolicyParams::new(&classifier_params)?,
+        })
+    }
+
     /// Complete exact association contract.
     pub const fn abi(&self) -> &ClassifierAbi {
         &self.abi
@@ -361,17 +374,15 @@ impl Classifiers {
         XM: ValueMap,
         K: Classifier<Incident<DM::Output, E, XM::Output>>,
     {
-        let abi = ClassifierAbi::of::<E, DM, XM, K>()?;
-        if self.0.contains_key(abi.source()) {
+        let source = IncidentAbi::of::<Incident<DM::Input, E, XM::Input>>()?;
+        let Entry::Vacant(slot) = self.0.entry(source) else {
             return Err(ProgramError::InvalidContract);
-        }
-        let binding = ClassifierBinding {
-            domain_params: PolicyParams::new(&domain_params)?,
-            context_params: PolicyParams::new(&context_params)?,
-            params: PolicyParams::new(&classifier_params)?,
-            abi,
         };
-        self.0.insert(binding.abi.source.clone(), binding);
+        slot.insert(ClassifierBinding::new::<E, DM, XM, K>(
+            domain_params,
+            context_params,
+            classifier_params,
+        )?);
         Ok(())
     }
 
@@ -386,9 +397,9 @@ impl Classifiers {
 pub struct Handlers(BTreeMap<IncidentAbi, HandlerSetting>);
 
 #[derive(Debug, Clone)]
-struct HandlerSetting {
-    binding: HandlerBinding,
-    checkpoints: Vec<ScopedBoundary>,
+pub(super) struct HandlerSetting {
+    pub(super) binding: HandlerBinding,
+    pub(super) checkpoints: Vec<ScopedBoundary>,
 }
 
 impl Handlers {
@@ -400,20 +411,16 @@ impl Handlers {
     /// Binds one exact mapped incident; duplicate bindings fail construction.
     pub fn bind<I: IncidentContract, H: Handler<I>>(&mut self, params: H::Params) -> Result<()> {
         let abi = HandlerAbi::of::<I, H>()?;
-        if self.0.contains_key(abi.input()) {
+        let Entry::Vacant(slot) = self.0.entry(abi.input.clone()) else {
             return Err(ProgramError::InvalidContract);
-        }
-        let binding = HandlerBinding {
-            abi,
-            params: PolicyParams::new(&params)?,
         };
-        self.0.insert(
-            binding.abi.input.clone(),
-            HandlerSetting {
-                binding,
-                checkpoints: Vec::new(),
+        slot.insert(HandlerSetting {
+            binding: HandlerBinding {
+                abi,
+                params: PolicyParams::new(&params)?,
             },
-        );
+            checkpoints: Vec::new(),
+        });
         Ok(())
     }
 
@@ -443,18 +450,12 @@ impl Handlers {
         Ok(())
     }
 
-    pub(crate) fn checkpoints(&self, input: &IncidentAbi) -> Result<&[ScopedBoundary]> {
-        self.0
-            .get(input)
-            .map(|setting| setting.checkpoints.as_slice())
-            .ok_or(ProgramError::InvalidContract)
+    pub(super) fn setting(&self, input: &IncidentAbi) -> Result<&HandlerSetting> {
+        self.0.get(input).ok_or(ProgramError::InvalidContract)
     }
 
     /// Selects an exact policy input binding without an outer-family fallback.
     pub fn binding(&self, input: &IncidentAbi) -> Result<&HandlerBinding> {
-        self.0
-            .get(input)
-            .map(|setting| &setting.binding)
-            .ok_or(ProgramError::InvalidContract)
+        self.setting(input).map(|setting| &setting.binding)
     }
 }

@@ -1,6 +1,6 @@
 # Persisted and public surfaces
 
-Program v4 is one strict checked canonical document requiring `domain: "mfm.program.v4"`. It
+Program v5 is one strict checked canonical document requiring `domain: "mfm.program.v5"`. It
 contains the entry point, admitted-context contract and exact initial value ref, root success/failure
 contracts, and an ordered State sequence with selected recovery policies, maps, checkpoints, and
 finite lifecycle bounds. There is no public wire DTO parallel to `Program`.

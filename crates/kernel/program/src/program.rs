@@ -138,7 +138,7 @@ impl Program {
             return Err(ProgramError::InvalidContract);
         }
         let wire = ProgramWire {
-            domain: "mfm.program.v4".into(),
+            domain: "mfm.program.v5".into(),
             entry_point_id: entry_point_id.clone(),
             admitted_context_contract_ref: admitted.clone(),
             initial_value_ref: initial_value_ref.clone(),
@@ -157,7 +157,7 @@ impl Program {
             SchemaKind::PersistedContract,
             None,
             "mfm-program-document",
-            SchemaVersion::new("4").map_err(|_| ProgramError::InvalidContract)?,
+            SchemaVersion::new("5").map_err(|_| ProgramError::InvalidContract)?,
             SchemaShape::CanonicalJsonTerminal {
                 profile: CanonicalJsonProfile::GeneralFloatFree,
             },
@@ -192,7 +192,7 @@ impl Program {
             .map_err(|_| ProgramError::Canonical)?;
         let wire: ProgramWire =
             serde_json::from_slice(bytes).map_err(|_| ProgramError::Canonical)?;
-        if wire.domain != "mfm.program.v4" {
+        if wire.domain != "mfm.program.v5" {
             return Err(ProgramError::Canonical);
         }
         let program = Self::new(
@@ -281,10 +281,12 @@ fn validate(
     }
     let mut current = admitted;
     for (index, state) in states.iter().enumerate() {
+        let classifier = state.classifier.abi();
+        let source = classifier.source();
         if &state.input_contract_ref != current
             || state.output_contract_ref == never
-            || state.classifier.abi().source().domain() != &state.failure_contract_ref
-            || state.classifier.abi().mapped() != state.handler.abi().input()
+            || source.domain() != &state.failure_contract_ref
+            || &classifier.mapped() != state.handler.abi().input()
         {
             return Err(ProgramError::InvalidContract);
         }
@@ -301,18 +303,18 @@ fn validate(
                 ..
             } => (error_contract_ref, context_contract_ref),
         };
-        let classifier = state.classifier.abi();
-        if classifier.source().error() != error
-            || classifier.source().context() != context
-            || classifier.domain_map().input() != classifier.source().domain()
-            || classifier.domain_map().output() != classifier.mapped().domain()
-            || classifier.context_map().input() != classifier.source().context()
-            || classifier.context_map().output() != classifier.mapped().context()
-            || classifier.source().error() != classifier.mapped().error()
-            || classifier.params() != state.classifier.params().contract_ref()
-            || classifier.domain_map().params() != state.classifier.domain_params().contract_ref()
-            || classifier.context_map().params() != state.classifier.context_params().contract_ref()
-            || state.handler.abi().params() != state.handler.params().contract_ref()
+        if source.error() != error
+            || source.context() != context
+            || !state.classifier.params().matches(classifier.params())
+            || !state
+                .classifier
+                .domain_params()
+                .matches(classifier.domain_map().params())
+            || !state
+                .classifier
+                .context_params()
+                .matches(classifier.context_map().params())
+            || !state.handler.params().matches(state.handler.abi().params())
         {
             return Err(ProgramError::InvalidContract);
         }
@@ -321,7 +323,7 @@ fn validate(
         }
         let mut root = &state.failure_contract_ref;
         for map in &state.root_maps {
-            if map.abi().input() != root || map.abi().params() != map.params().contract_ref() {
+            if map.abi().input() != root || !map.params().matches(map.abi().params()) {
                 return Err(ProgramError::InvalidContract);
             }
             root = map.abi().output();
