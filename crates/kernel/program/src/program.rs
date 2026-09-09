@@ -48,8 +48,13 @@ pub enum Execution {
 }
 
 /// One immutable typed State and its fully selected recovery contracts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StateDeclaration {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct StateDeclaration(StateData);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StateData {
     pub(crate) state_implementation_ref: ContentRef,
     pub(crate) input_contract_ref: ContentRef,
     pub(crate) output_contract_ref: ContentRef,
@@ -58,49 +63,50 @@ pub struct StateDeclaration {
     pub(crate) classifier: ClassifierBinding,
     pub(crate) handler: HandlerBinding,
     pub(crate) root_maps: Vec<MapBinding>,
+    #[serde(deserialize_with = "decode_targets")]
     pub(crate) recovery_targets: Vec<RecoveryTarget>,
     pub(crate) allowances: RecoveryAllowances,
 }
 impl StateDeclaration {
     /// State implementation identity.
     pub const fn state_implementation_ref(&self) -> &ContentRef {
-        &self.state_implementation_ref
+        &self.0.state_implementation_ref
     }
     /// Exact input contract.
     pub const fn input_contract_ref(&self) -> &ContentRef {
-        &self.input_contract_ref
+        &self.0.input_contract_ref
     }
     /// Exact success contract.
     pub const fn output_contract_ref(&self) -> &ContentRef {
-        &self.output_contract_ref
+        &self.0.output_contract_ref
     }
     /// Exact original failure contract.
     pub const fn failure_contract_ref(&self) -> &ContentRef {
-        &self.failure_contract_ref
+        &self.0.failure_contract_ref
     }
     /// Complete execution-mode association.
     pub const fn execution(&self) -> &Execution {
-        &self.execution
+        &self.0.execution
     }
     /// Selected classifier and mapping parameters.
     pub const fn classifier(&self) -> &ClassifierBinding {
-        &self.classifier
+        &self.0.classifier
     }
     /// Independently selected handler and parameters.
     pub const fn handler(&self) -> &HandlerBinding {
-        &self.handler
+        &self.0.handler
     }
     /// Explicit ordered mapping path from original failure to root failure.
     pub fn root_maps(&self) -> &[MapBinding] {
-        &self.root_maps
+        &self.0.root_maps
     }
     /// Lowered permitted targets, in author-selected order.
     pub fn recovery_targets(&self) -> &[RecoveryTarget] {
-        &self.recovery_targets
+        &self.0.recovery_targets
     }
     /// Per-occurrence committed recovery allowances.
     pub const fn allowances(&self) -> RecoveryAllowances {
-        self.allowances
+        self.0.allowances
     }
 }
 
@@ -124,7 +130,7 @@ impl Program {
         initial_value_ref: ContentRef,
         success: ContentRef,
         failure: ContentRef,
-        declarations: Vec<StateDeclaration>,
+        declarations: Vec<StateData>,
         limits: ProgramLimits,
     ) -> Result<Self> {
         validate(&admitted, &success, &failure, &declarations)?;
@@ -139,7 +145,7 @@ impl Program {
             root_success_contract_ref: success.clone(),
             root_failure_contract_ref: failure.clone(),
             limits,
-            declarations: declarations.iter().map(StateWire::from).collect(),
+            declarations: &declarations,
         };
         let json = serde_json::to_string(&wire).map_err(|_| ProgramError::Canonical)?;
         let canonical_bytes =
@@ -166,7 +172,7 @@ impl Program {
             initial_value_ref,
             root_success_contract_ref: success,
             root_failure_contract_ref: failure,
-            declarations,
+            declarations: declarations.into_iter().map(StateDeclaration).collect(),
             limits,
             canonical_bytes,
             content_ref,
@@ -195,10 +201,7 @@ impl Program {
             wire.initial_value_ref,
             wire.root_success_contract_ref,
             wire.root_failure_contract_ref,
-            wire.declarations
-                .into_iter()
-                .map(StateWire::into_declaration)
-                .collect(),
+            wire.declarations,
             wire.limits,
         )?;
         if program.canonical_bytes() != bytes {
@@ -243,12 +246,14 @@ impl Program {
         HistoryBound::calculate(
             genesis,
             self.limits,
-            self.declarations.iter().map(|state| match state.execution {
-                Execution::Pure { bound } | Execution::Read { bound, .. } => {
-                    LifecycleBound::Conclusion(bound)
-                }
-                Execution::Effect { bounds, .. } => LifecycleBound::Effect(bounds),
-            }),
+            self.declarations
+                .iter()
+                .map(|state| match state.0.execution {
+                    Execution::Pure { bound } | Execution::Read { bound, .. } => {
+                        LifecycleBound::Conclusion(bound)
+                    }
+                    Execution::Effect { bounds, .. } => LifecycleBound::Effect(bounds),
+                }),
         )
     }
 }
@@ -257,7 +262,7 @@ fn validate(
     admitted: &ContentRef,
     success: &ContentRef,
     failure: &ContentRef,
-    states: &[StateDeclaration],
+    states: &[StateData],
 ) -> Result<()> {
     if states.len() > MAX_STATES {
         return Err(ProgramError::Capacity);
@@ -276,9 +281,9 @@ fn validate(
     }
     let mut current = admitted;
     for (index, state) in states.iter().enumerate() {
-        if state.input_contract_ref() != current
-            || state.output_contract_ref() == &never
-            || state.classifier.abi().source().domain() != state.failure_contract_ref()
+        if &state.input_contract_ref != current
+            || state.output_contract_ref == never
+            || state.classifier.abi().source().domain() != &state.failure_contract_ref
             || state.classifier.abi().mapped() != state.handler.abi().input()
         {
             return Err(ProgramError::InvalidContract);
@@ -314,7 +319,7 @@ fn validate(
         if state.root_maps.len() > 64 {
             return Err(ProgramError::Capacity);
         }
-        let mut root = state.failure_contract_ref();
+        let mut root = &state.failure_contract_ref;
         for map in &state.root_maps {
             if map.abi().input() != root || map.abi().params() != map.params().contract_ref() {
                 return Err(ProgramError::InvalidContract);
@@ -330,7 +335,7 @@ fn validate(
                 return Err(ProgramError::InvalidContract);
             }
         }
-        current = state.output_contract_ref();
+        current = &state.output_contract_ref;
     }
     if current != success {
         return Err(ProgramError::InvalidContract);
@@ -340,63 +345,23 @@ fn validate(
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProgramWire {
+struct ProgramWire<D = Vec<StateData>> {
     domain: String,
     entry_point_id: EntryPointId,
     admitted_context_contract_ref: ContentRef,
     initial_value_ref: ContentRef,
     root_success_contract_ref: ContentRef,
     root_failure_contract_ref: ContentRef,
-    declarations: Vec<StateWire>,
+    declarations: D,
     limits: ProgramLimits,
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StateWire {
-    state_implementation_ref: ContentRef,
-    input_contract_ref: ContentRef,
-    output_contract_ref: ContentRef,
-    failure_contract_ref: ContentRef,
-    execution: Execution,
-    classifier: ClassifierBinding,
-    handler: HandlerBinding,
-    root_maps: Vec<MapBinding>,
-    recovery_targets: Vec<StatePosition>,
-    allowances: RecoveryAllowances,
-}
-impl From<&StateDeclaration> for StateWire {
-    fn from(s: &StateDeclaration) -> Self {
-        Self {
-            state_implementation_ref: s.state_implementation_ref.clone(),
-            input_contract_ref: s.input_contract_ref.clone(),
-            output_contract_ref: s.output_contract_ref.clone(),
-            failure_contract_ref: s.failure_contract_ref.clone(),
-            execution: s.execution.clone(),
-            classifier: s.classifier.clone(),
-            handler: s.handler.clone(),
-            root_maps: s.root_maps.clone(),
-            recovery_targets: s.recovery_targets.iter().map(|t| t.position()).collect(),
-            allowances: s.allowances,
-        }
-    }
-}
-impl StateWire {
-    fn into_declaration(self) -> StateDeclaration {
-        StateDeclaration {
-            state_implementation_ref: self.state_implementation_ref,
-            input_contract_ref: self.input_contract_ref,
-            output_contract_ref: self.output_contract_ref,
-            failure_contract_ref: self.failure_contract_ref,
-            execution: self.execution,
-            classifier: self.classifier,
-            handler: self.handler,
-            root_maps: self.root_maps,
-            recovery_targets: self
-                .recovery_targets
-                .into_iter()
-                .map(|position| RecoveryTarget { position })
-                .collect(),
-            allowances: self.allowances,
-        }
-    }
+fn decode_targets<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<RecoveryTarget>, D::Error> {
+    Vec::<StatePosition>::deserialize(deserializer).map(|positions| {
+        positions
+            .into_iter()
+            .map(|position| RecoveryTarget { position })
+            .collect()
+    })
 }

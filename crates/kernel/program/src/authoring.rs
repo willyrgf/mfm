@@ -4,6 +4,7 @@ use mfm_capabilities::{EffectCapabilityContract, ReadCapabilityContract};
 use mfm_ids::{ContentRef, EntryPointId, StatePosition};
 use mfm_values::MfmValue;
 
+use crate::program::StateData;
 use crate::recovery::{
     defaults::{RecoveryDefaults, SelectedRecovery},
     scope::{ScopeId, ScopedBoundary},
@@ -314,7 +315,7 @@ pub trait CapabilityInjection<S: State> {
 }
 
 struct DraftState {
-    state: StateDeclaration,
+    state: StateData,
     checkpoints: Vec<ScopedBoundary>,
 }
 struct ExpansionDraft {
@@ -336,7 +337,7 @@ impl ExpansionDraft {
     fn current(&self) -> &ContentRef {
         self.states
             .last()
-            .map_or(&self.input, |s| s.state.output_contract_ref())
+            .map_or(&self.input, |s| &s.state.output_contract_ref)
     }
     fn require_current(&self, expected: &ContentRef) -> Result<()> {
         if self.current() != expected {
@@ -356,7 +357,7 @@ impl ExpansionDraft {
             return Err(ProgramError::Capacity);
         }
         self.states.push(DraftState {
-            state: StateDeclaration {
+            state: StateData {
                 state_implementation_ref: state_implementation_ref::<S>()?,
                 input_contract_ref,
                 output_contract_ref: nominal_contract_ref::<S::Output>()?,
@@ -394,7 +395,7 @@ impl ExpansionDraft {
         self.states.extend(child.states);
         Ok(())
     }
-    fn lower(mut self) -> Result<Vec<StateDeclaration>> {
+    fn lower(mut self) -> Result<Vec<StateData>> {
         for index in 0..self.states.len() {
             let targets = self.states[index]
                 .checkpoints
@@ -411,7 +412,7 @@ impl ExpansionDraft {
                         .ok_or(ProgramError::Capacity)?;
                     if target > index
                         || self.states.get(target).is_none_or(|state| {
-                            state.state.input_contract_ref() != &checkpoint.input
+                            &state.state.input_contract_ref != &checkpoint.input
                         })
                     {
                         return Err(ProgramError::InvalidContract);

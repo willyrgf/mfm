@@ -76,7 +76,8 @@ pub enum ExecutionPhase {
 }
 
 /// One checked authoring target; it grants no history or append authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
 pub struct RecoveryTarget {
     pub(crate) position: StatePosition,
 }
