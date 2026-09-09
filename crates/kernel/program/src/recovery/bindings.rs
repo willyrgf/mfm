@@ -111,9 +111,10 @@ impl MapBinding {
 }
 
 /// Qualified immutable policy parameters bound into Program identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PolicyParams {
     value: ContentRef,
+    #[serde(serialize_with = "serialize_canonical")]
     canonical: PlainCanonicalJsonBytes,
 }
 
@@ -138,19 +139,13 @@ impl PolicyParams {
     }
 }
 
-impl serde::Serialize for PolicyParams {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let value: &serde_json::value::RawValue =
-            serde_json::from_slice(self.canonical_bytes()).map_err(serde::ser::Error::custom)?;
-        let mut fields = serializer.serialize_struct("PolicyParams", 2)?;
-        fields.serialize_field("value", &self.value)?;
-        fields.serialize_field("canonical", &value)?;
-        fields.end()
-    }
+fn serialize_canonical<S: serde::Serializer>(
+    canonical: &PlainCanonicalJsonBytes,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    let raw: &serde_json::value::RawValue =
+        serde_json::from_slice(canonical.as_bytes()).map_err(serde::ser::Error::custom)?;
+    serde::Serialize::serialize(raw, serializer)
 }
 
 impl<'de> serde::Deserialize<'de> for PolicyParams {
@@ -374,15 +369,15 @@ impl Classifiers {
         XM: ValueMap,
         K: Classifier<Incident<DM::Output, E, XM::Output>>,
     {
-        let source = IncidentAbi::of::<Incident<DM::Input, E, XM::Input>>()?;
-        let Entry::Vacant(slot) = self.0.entry(source) else {
-            return Err(ProgramError::InvalidContract);
-        };
-        slot.insert(ClassifierBinding::new::<E, DM, XM, K>(
+        let binding = ClassifierBinding::new::<E, DM, XM, K>(
             domain_params,
             context_params,
             classifier_params,
-        )?);
+        )?;
+        let Entry::Vacant(slot) = self.0.entry(binding.abi().source()) else {
+            return Err(ProgramError::InvalidContract);
+        };
+        slot.insert(binding);
         Ok(())
     }
 
