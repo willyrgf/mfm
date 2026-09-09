@@ -2378,6 +2378,7 @@ dependencies = [
  "mfm-ids",
  "mfm-runtime",
  "mfm-store",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror",
