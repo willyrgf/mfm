@@ -436,6 +436,20 @@ impl fmt::Debug for RunRequestError {
 }
 
 impl RunRequestError {
+    fn from_invocation(error: InvocationFailure, recovery: RunRecovery) -> Self {
+        match error {
+            InvocationFailure::Execution {
+                error: RuntimeError::Store(mfm_store::StoreError::Indeterminate),
+                last_observed,
+                ..
+            } => Self::AppendIndeterminate {
+                recovery,
+                last_observed,
+            },
+            error => Self::Invocation(error),
+        }
+    }
+
     /// Returns the stable machine-readable error code.
     pub const fn code(&self) -> &'static str {
         match self {
@@ -491,15 +505,10 @@ impl StartRunResult {
     ) -> Result<Self, RunRequestError> {
         match result {
             Ok(run) => Ok(StartRunResult { config, run }),
-            Err(InvocationFailure::Execution {
-                error: RuntimeError::Store(mfm_store::StoreError::Indeterminate),
-                last_observed,
-                ..
-            }) => Err(RunRequestError::AppendIndeterminate {
-                recovery: RunRecovery::Start { run_id, config },
-                last_observed,
-            }),
-            Err(error) => Err(RunRequestError::Invocation(error)),
+            Err(error) => Err(RunRequestError::from_invocation(
+                error,
+                RunRecovery::Start { run_id, config },
+            )),
         }
     }
 
@@ -807,20 +816,14 @@ impl Application {
 
     /// Progresses one retained run under its exact immutable assembly.
     pub async fn progress_run(&self, run_id: &RunId) -> Result<RunView, RunRequestError> {
-        match self.composed.runtime.resume(run_id).await {
-            Ok(view) => Ok(view),
-            Err(InvocationFailure::Execution {
-                error: RuntimeError::Store(mfm_store::StoreError::Indeterminate),
-                last_observed,
-                ..
-            }) => Err(RunRequestError::AppendIndeterminate {
-                recovery: RunRecovery::Progress {
+        self.composed.runtime.resume(run_id).await.map_err(|error| {
+            RunRequestError::from_invocation(
+                error,
+                RunRecovery::Progress {
                     run_id: run_id.clone(),
                 },
-                last_observed,
-            }),
-            Err(error) => Err(RunRequestError::Invocation(error)),
-        }
+            )
+        })
     }
 
     /// Reads one retained run without progression.
