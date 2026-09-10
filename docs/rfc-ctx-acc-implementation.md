@@ -86,7 +86,7 @@ reference/delta representation or old-context reader exists.
 
 Use the scope-driven commands in [build and verification](build-and-verification.md), targeted
 generic/fixture tests, and the managed `effect-e2e` task. The final candidate requires `nix run .#ci`, including managed DB,
-client/Effect e2e, documentation, and capacity tasks. Nixfied's task result and run summary own
+client/Effect e2e, documentation, and capacity coverage through the workspace tests. Nixfied's task result and run summary own
 that final gate's result; focused results and this document do not substitute for it.
 
 Live EVM uses existing workspace dependencies `mfm-values` and `mfm-program` for checked values
