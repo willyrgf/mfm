@@ -27,6 +27,19 @@ owns verification selection and `nixfied.nix` owns the executable task graph.
   expand only when the affected boundary or risk requires it.
 - Commit subjects are lower case.
 - Never log, print, or persist passwords, mnemonics, private keys, or credentials.
+- Preserve the complete available causal error chain across every adapter and boundary conversion.
+  Classification and public rendering are projections; they must not replace or silently discard
+  the original causes. Existing lossy conversions are auditability gaps, not precedent.
+- Retain each cause layer, its originating operation, and available reviewed diagnostic fields in
+  the audit representation. Do not flatten a source into `Unavailable`, `Internal`, or a formatted
+  string without retaining its causal information. Follow `docs/code-quality.md` for error audit.
+- Error preservation does not authorize secret disclosure. Explicitly account for unavailable,
+  withheld, or size-limited details; never describe a partial representation as lossless. If full
+  preservation conflicts with the secret-free boundary, resolve the custody contract rather than
+  silently weakening either requirement.
+- Acknowledged operational failures must retain their cause chain durably. Never claim a Store
+  failure was audited through the same failed Store, or an interrupted physical attempt was
+  recorded when it was not. Preserve existing ambiguity and command-authority semantics.
 - Preserve crate boundaries and keep libraries usable without the CLI.
 - Add dependencies only with strong justification.
 - Do not commit third-party vendored source or use external git/path patches without explicit user

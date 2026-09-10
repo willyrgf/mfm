@@ -61,6 +61,48 @@ type machinery more complex than the invalid states, branches, or change sites i
 Test constructor rejection and invariant-preserving transformations. Use compile-fail tests when a
 compile-time exclusion is an intentional API contract.
 
+## Error Provenance and Auditability
+
+Preserve the complete available causal error chain through adapters, library ports, Runtime,
+Application and transport boundaries. "Error stack" means the chain of causes and boundary
+context, not a captured Rust backtrace. Classification, retry decisions and public error codes
+are projections of the retained error; none is a substitute for it.
+
+- Retain concrete sources while they are safely held within their owning boundary. At an audit
+  boundary, retain a bounded typed representation of each available cause layer, operation/stage,
+  protocol or OS code, and reviewed diagnostic fields. Use source-preserving conversions where
+  appropriate; `Error::source()` alone neither serializes a chain nor proves complete capture.
+- Do not silently discard a source with `map_err(|_| ...)`, a catch-all mapper, a unit replacement,
+  or a success-shaped fallback. A terse public message is legitimate only when the causal audit
+  representation remains available. Expected absence and Pending require their explicit protocol
+  meaning; they cannot hide a failed observation.
+- Secrets never enter Program, admitted context, Journal, public output, logs or error details.
+  Do not capture generic Debug/Display dumps, request-bearing channel errors, arbitrary provider
+  messages, database details or panic payloads as a shortcut. Preserve reviewed causal facts and
+  explicitly identify any withheld, unavailable or size-limited evidence. Partial capture must
+  never be labeled raw, complete or lossless.
+- Literal byte-exact external evidence and safe causal diagnostics are different contracts. If
+  full retention requires restricted custody, use the architect rule to settle that contract
+  before implementation. Encryption or moving a blob to another file is not implicit permission
+  to persist credentials. Do not introduce a universal opaque error bag or a second logging system
+  to conceal a missing design.
+- Carry retained causes into acknowledged operational failure records and cold observations.
+  Internal failures remain internal; do not manufacture a recoverable domain/provider incident to
+  obtain a Journal record. Store, startup and transport failures need their own explicit durability
+  contract: returning a causal error does not prove it was durably audited.
+- Preserve definite failure versus ambiguous acknowledgement, retained command identity, and
+  cancellation semantics. If recording fails, report the audit failure without asserting that the
+  candidate or underlying outcome was committed. Do not recursively try to audit a failed Store
+  through that same Store or silently fall back to plaintext logs.
+
+For each changed adapter, tests must inject distinguishable nested causes and assert retained
+layers/fields, unchanged classification semantics where applicable, hot/cold audit preservation,
+and secret exclusion. Exercise retention bounds and audit-write failure at the affected boundary.
+Document unresolved loss at the first lossy conversion, with affected callers and remediation;
+existing lossy implementations are gaps to fix within a coherent cutover, not allowed patterns.
+
+See [the adapter review](adapter-error-audit.md) for the current inventory and implementation gaps.
+
 ## Test Value
 
 Every test must be able to fail because an observable capability regressed. Prefer one scenario
