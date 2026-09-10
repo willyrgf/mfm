@@ -34,6 +34,12 @@ only with exactly one declared target that is eligible; all other combinations s
 may request retry of an unknown pending outcome under retained-command policy, without establishing
 nonacceptance or authorizing a replacement command.
 
+EVM provider errors retain one owner category and one reviewed provider source. The source owns
+method, stage, local checked facts and bounded diagnostics; response status and RPC code are
+observations separate from causal source ancestry. Runtime's current admitted failure path retains
+this exact value through cold reconstruction. This does not yet change the fused failure/recovery
+commit order or the internal-error limitations described below.
+
 The framework and shipping Portfolio default to Stop with zero global/local allowances. EVM's
 Read operational causes are Retryable; `AnchorChanged` is InputInvalidated. Transaction provider and
 authority failures are OutcomeUnknown; signer unavailability before prepared-wire retention is

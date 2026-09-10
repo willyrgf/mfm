@@ -81,6 +81,8 @@ generate a RunId before their one Application call. HTTP status represents reque
 CLI exit 1 represents a runnable, Effect-pending or durably failed run. Runnable views carry
 position/visit and tagged reason; pending views carry the exact EffectId. Failed views embed the
 canonical `report` and its reference, while successful views embed the canonical `value`.
+Provider failures in those reports retain reviewed method, stage, status/code, source facts and
+explicit capture omissions. Raw provider messages/bodies, URLs and credentials remain excluded.
 
 `nix run .#run -- --task client-e2e` builds the CLI and REST binaries explicitly. It admits an exact
 historical run with a generated REST identity by interrupting an in-flight live Read, proves

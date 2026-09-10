@@ -44,17 +44,15 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 const MAX_INITCODE_BYTES: usize = 49_152;
-const MAX_FUNDING_RESPONSE_BYTES: usize = 16 * 1024;
 // Cold progress requalifies the complete accumulating history on every invocation.
 const PROGRESS_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 const CONFIGURED_VALUE: u64 = 42;
 const DEPLOYMENT_GAS: u64 = 2_000_000;
 const CONFIGURATION_GAS: u64 = 200_000;
 const PRIORITY_FEE: u64 = 1_000_000_000;
 const MAX_FEE: u64 = 10_000_000_000;
-const FUNDING_WEI_HEX: &str = "0xde0b6b3a7640000";
+const FUNDING_WEI: u64 = 1_000_000_000_000_000_000;
 const CONFIGURE_SELECTOR: [u8; 4] = [0x1e, 0xb2, 0x5e, 0x0a];
 const VALUE_SELECTOR: [u8; 4] = [0x3f, 0xa4, 0xf2, 0x45];
 
@@ -202,87 +200,26 @@ fn decode_fixture_value(return_bytes: &[u8]) -> Option<EvmU256> {
     EvmU256::new(U256::from_be_bytes(word).to_string()).ok()
 }
 
-#[derive(Debug, Clone, Copy, thiserror::Error)]
-#[error("Reth development funding is unavailable")]
-struct FundingError;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FundingResponse<T> {
-    jsonrpc: String,
-    id: u64,
-    result: T,
-}
-
-async fn funding_rpc<T: serde::de::DeserializeOwned>(
-    client: &reqwest::Client,
-    url: &reqwest::Url,
-    method: &str,
-    params: serde_json::Value,
-) -> Result<T, FundingError> {
-    let response = client
-        .post(url.clone())
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
-        }))
-        .send()
-        .await
-        .map_err(|_| FundingError)?;
-    let response: FundingResponse<T> =
-        serde_json::from_slice(&funding_response_body(response).await?)
-            .map_err(|_| FundingError)?;
-    if response.jsonrpc != "2.0" || response.id != 1 {
-        return Err(FundingError);
-    }
-    Ok(response.result)
+#[derive(Debug, thiserror::Error)]
+enum FundingError {
+    #[error("Reth development funding is unavailable")]
+    Build(#[from] mfm_evm_live::EvmProviderBuildError),
+    #[error("Reth development funding is unavailable")]
+    Provider(#[from] mfm_capabilities::AdapterError<mfm_evm::EvmOperationalError>),
 }
 
 async fn fund_sender(locator: &str, sender: &EvmAddress) -> Result<(), FundingError> {
-    let url = reqwest::Url::parse(locator).map_err(|_| FundingError)?;
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .referer(false)
-        .retry(reqwest::retry::never())
-        .timeout(RPC_TIMEOUT)
-        .build()
-        .map_err(|_| FundingError)?;
-    let accounts: Vec<EvmAddress> =
-        funding_rpc(&client, &url, "eth_accounts", serde_json::json!([])).await?;
-    let source = accounts.first().ok_or(FundingError)?;
-    let _transaction_hash: EvmHash = funding_rpc(
-        &client,
-        &url,
-        "eth_sendTransaction",
-        serde_json::json!([{
-            "from": source,
-            "gas": format!("{:#x}", 21_000_u64),
-            "maxFeePerGas": format!("{MAX_FEE:#x}"),
-            "maxPriorityFeePerGas": format!("{PRIORITY_FEE:#x}"),
-            "to": sender,
-            "value": FUNDING_WEI_HEX,
-        }]),
-    )
-    .await?;
+    let locator = EvmAdapterLocator::parse(locator)?;
+    let provider = JsonRpcEvmProvider::connect(&locator)?;
+    provider
+        .fund_development_sender(
+            sender,
+            &EvmU256::from_u64(FUNDING_WEI),
+            u128::from(MAX_FEE),
+            u128::from(PRIORITY_FEE),
+        )
+        .await?;
     Ok(())
-}
-
-async fn funding_response_body(mut response: reqwest::Response) -> Result<Vec<u8>, FundingError> {
-    if !response.status().is_success()
-        || response
-            .content_length()
-            .is_some_and(|length| length > MAX_FUNDING_RESPONSE_BYTES as u64)
-    {
-        return Err(FundingError);
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| FundingError)? {
-        if body.len() + chunk.len() > MAX_FUNDING_RESPONSE_BYTES {
-            return Err(FundingError);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 // This transfer deliberately bypasses Program and custody, like another wallet application.

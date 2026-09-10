@@ -4,6 +4,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 
 | Owner | Responsibility | Must not own |
 | --- | --- | --- |
+| Diagnostics | closed checked causal evidence and its persisted schema; finite source-prefix capture with owner-supplied reviewed extraction | IO, client dependencies, classification, recovery or a second persistence service |
 | IDs / Values | checked identities including `EffectId`, `ConfigName` and `DigestBytes`, schema descriptors, canonical typed values, mechanical typed context slots, 32 MiB object bound | execution or IO |
 | Capabilities | Read intent/evidence and Effect command/evidence contracts | State outcomes or retries |
 | Program | typed Operation authoring and root input validation, sole private lowering draft, checked v6 ordered State sequence and exact initial-value commitment, Pure/Read/Effect State contracts, redaction-safe internal callback errors, `Never` | registries, IO, scheduling |
@@ -154,6 +155,11 @@ sequence. Its narrow pinned Alloy dependency owns EIP-1559/EIP-2718 consensus en
 hashing, and CREATE-address derivation. Transaction settlement is intentionally limited
 to the pinned non-reorging development fixture; `ComposedRuntime` registers neither transaction
 Effects nor anchored transaction-route Reads.
+
+Diagnostics depends only on foundational values/IDs, serialization and their derives. Only its
+complete evidence is a standalone value; nested components share their declared persisted shapes.
+EVM owns the provider kind/source carrier; live EVM owns concrete client inspection and the
+development funding calls through the same bounded RPC decoder.
 
 The domain graph is one-way: Portfolio depends on EVM domain contracts; EVM depends on foundations
 and Program; live EVM depends on EVM plus Runtime and captures concrete

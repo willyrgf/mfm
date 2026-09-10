@@ -77,7 +77,9 @@ automatic retry. `read_run`, `progress_run` and `start_run` preserve that distin
 The shipping Portfolio uses Stop with zero allowances. Operational Read failure is a
 durable failed result; it cannot be resumed into a fresh attempt. Cancellation before a conclusion
 retains a runnable prefix. Retained revisions are checked on start/list; deleting a revision does
-not revoke an admitted run. No provider details or locators enter client models.
+not revoke an admitted run. Provider failures retain reviewed method, stage, status/code, source
+facts and explicit capture omissions in canonical reports. Raw provider messages/bodies and
+locators remain excluded from client models.
 
 The ignored `evm_contract_effect_e2e` integration test is the only app-level composition of the EVM
 transaction Effect and anchored transaction-route Read. It compiles a first-party Solidity fixture,

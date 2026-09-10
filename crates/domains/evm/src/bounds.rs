@@ -49,7 +49,8 @@ impl EvmBalanceRequest {
         let intent = add(source, 2048)?;
         let domain = context.max(add(root_failure_bytes, 512)?);
         let observed = add(1024, domain)?;
-        let operational = add(intent, 128)?;
+        // Complete provider evidence has an 8 KiB budget; 2 KiB covers owner facts and wrappers.
+        let operational = add(intent, mfm_diagnostics::MAX_DIAGNOSTIC_BYTES as u64 + 2048)?;
         // Four frame-local objects need at most eight copies of bounded content references,
         // plus the fixed run/head/position/decision wire. 16 KiB conservatively covers this
         // envelope; it is a workload bound, not a duplicated Journal format ceiling.

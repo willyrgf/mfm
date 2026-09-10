@@ -29,7 +29,8 @@ mod json_rpc;
 mod transaction;
 
 pub use json_rpc::{
-    EvmAdapterLocator, EvmProviderBuildError, JsonRpcEvmProvider, MAX_EVM_ADAPTER_LOCATOR_BYTES,
+    EvmAdapterLocator, EvmLocatorCheck, EvmProviderBuildError, JsonRpcEvmProvider,
+    MAX_EVM_ADAPTER_LOCATOR_BYTES,
 };
 pub use transaction::{
     register_evm_transaction_adapters, EvmTransactionProvider, ProviderReceipt,

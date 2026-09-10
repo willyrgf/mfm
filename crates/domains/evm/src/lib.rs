@@ -45,10 +45,12 @@ macro_rules! impl_checked_deserialize {
 }
 
 mod bounds;
+mod provider_failure;
+pub use provider_failure::*;
 mod recovery;
 pub use recovery::{
-    AnchoredCallAdapterContext, EvmBalanceAdapterContext, EvmOperationalError,
-    EvmTransactionAdapterContext, EvmTransactionOperationalError,
+    AnchoredCallAdapterContext, EvmBalanceAdapterContext, EvmTransactionAdapterContext,
+    EvmTransactionOperationalError,
 };
 mod anchored_call;
 pub mod custody;
@@ -788,7 +790,14 @@ impl<K: MfmValueTrait> EvmBalanceCollectionCompletion<K> {
 }
 
 /// Redaction-safe EVM domain construction failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "domain-error",
+    version = "1",
+    schema = "mfm.evm-domain-error"
+)]
 pub enum EvmDomainError {
     /// A bounded public value is invalid.
     #[error("EVM domain value is invalid")]
@@ -2482,7 +2491,11 @@ mod tests {
         let incident = <Read as ReadState<EvmChainIdentityRead>>::adapter_context(
             &input,
             &intent,
-            &EvmOperationalError::Unavailable,
+            &EvmOperationalError::new(EvmOperationalKind::Unavailable, crate::ProviderFailure {
+        method: crate::EvmRpcMethod::ChainId, stage: crate::RpcStage::Send,
+        failure: crate::ProviderFailureKind::Client,
+        diagnostics: serde_json::from_str(r#"{"response":null,"sources":{"layers":[],"end":"unavailable"},"omissions":[],"omissions_truncated":false}"#).unwrap(),
+    }),
         )
         .unwrap();
         assert_eq!(incident.collection_ordinal(), 0);
@@ -2498,7 +2511,11 @@ mod tests {
         assert!(<Read as ReadState<EvmChainIdentityRead>>::adapter_context(
             &input,
             &different,
-            &EvmOperationalError::Unavailable
+            &EvmOperationalError::new(EvmOperationalKind::Unavailable, crate::ProviderFailure {
+        method: crate::EvmRpcMethod::ChainId, stage: crate::RpcStage::Send,
+        failure: crate::ProviderFailureKind::Client,
+        diagnostics: serde_json::from_str(r#"{"response":null,"sources":{"layers":[],"end":"unavailable"},"omissions":[],"omissions_truncated":false}"#).unwrap(),
+    })
         )
         .is_err());
     }

@@ -164,7 +164,12 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
                         if scenario == 2 && attempt == 0 {
                             return Err(AdapterError::Operational(
                                 EvmTransactionOperationalError::Provider {
-                                    cause: EvmOperationalError::Timeout,
+ operation: mfm_evm::TransactionProviderOperation::Submit,
+                                    cause: EvmOperationalError::new(mfm_evm::EvmOperationalKind::Timeout, mfm_evm::ProviderFailure {
+        method: mfm_evm::EvmRpcMethod::SendRawTransaction, stage: mfm_evm::RpcStage::Send,
+        failure: mfm_evm::ProviderFailureKind::Client,
+        diagnostics: serde_json::from_str(r#"{"response":null,"sources":{"layers":[],"end":"unavailable"},"omissions":[],"omissions_truncated":false}"#).unwrap(),
+    }),
                                 },
                             ));
                         }

@@ -2,24 +2,6 @@
 
 use super::*;
 
-/// Reviewed failure to obtain an EVM provider observation or settlement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(rename_all = "snake_case")]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "operational-error",
-    version = "1",
-    schema = "mfm.evm-operational-error"
-)]
-pub enum EvmOperationalError {
-    /// The provider did not produce a usable response.
-    Unavailable,
-    /// The bounded provider deadline expired.
-    Timeout,
-    /// The provider explicitly limited request traffic.
-    RateLimited,
-}
-
 /// Public context for one failed balance Read, excluding the caller continuation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -118,23 +100,29 @@ impl AnchoredCallAdapterContext {
 }
 
 /// Reviewed operational cause during transaction preparation or reconciliation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
     name = "transaction-operational-error",
-    version = "1",
+    version = "2",
     schema = "mfm.evm-transaction-operational-error"
 )]
 pub enum EvmTransactionOperationalError {
     /// The EVM provider did not produce the required observation.
+    #[error("transaction provider failed")]
     Provider {
+        /// Originating transaction provider operation.
+        operation: TransactionProviderOperation,
         /// Closed provider cause without response text.
+        #[source]
         cause: EvmOperationalError,
     },
     /// Transaction authority did not acknowledge the requested operation.
+    #[error("transaction authority unavailable")]
     AuthorityUnavailable,
     /// The signer could not produce a signature.
+    #[error("transaction signer unavailable")]
     SignerUnavailable,
 }
 
@@ -170,10 +158,10 @@ pub enum EvmTransactionAdapterContext {
 impl mfm_program::ClassifyError for EvmOperationalError {
     fn classify(&self) -> mfm_program::Classification {
         // Executable Reads using this exact cause contract are duplicate-safe observations.
-        match self {
-            Self::Unavailable | Self::Timeout | Self::RateLimited => {
-                mfm_program::Classification::Retryable
-            }
+        match self.kind() {
+            EvmOperationalKind::Unavailable
+            | EvmOperationalKind::Timeout
+            | EvmOperationalKind::RateLimited => mfm_program::Classification::Retryable,
         }
     }
 }
@@ -209,14 +197,40 @@ mod tests {
 
     #[test]
     fn operational_semantics_distinguish_observations_from_unknown_transaction_outcomes() {
-        for cause in [
-            EvmOperationalError::Unavailable,
-            EvmOperationalError::Timeout,
-            EvmOperationalError::RateLimited,
+        for kind in [
+            EvmOperationalKind::Unavailable,
+            EvmOperationalKind::Timeout,
+            EvmOperationalKind::RateLimited,
         ] {
+            let cause = EvmOperationalError::new(
+                kind,
+                ProviderFailure {
+                    method: EvmRpcMethod::ChainId,
+                    stage: RpcStage::Send,
+                    failure: ProviderFailureKind::Client,
+                    diagnostics: mfm_diagnostics::DiagnosticEvidence::capture(
+                        None,
+                        None,
+                        mfm_diagnostics::ChainEnd::Unavailable,
+                        |_| unreachable!("no source"),
+                    ),
+                },
+            );
+            let bytes = mfm_values::canonicalize_mfm_value(&cause).unwrap().0;
+            assert_eq!(
+                serde_json::from_slice::<EvmOperationalError>(bytes.as_bytes()).unwrap(),
+                cause
+            );
+            let mut invalid = serde_json::to_value(&cause).unwrap();
+            invalid["kind"] = serde_json::json!("unknown");
+            assert!(serde_json::from_value::<EvmOperationalError>(invalid).is_err());
             assert_eq!(cause.classify(), Classification::Retryable);
             assert_eq!(
-                EvmTransactionOperationalError::Provider { cause }.classify(),
+                EvmTransactionOperationalError::Provider {
+                    operation: crate::TransactionProviderOperation::Submit,
+                    cause
+                }
+                .classify(),
                 Classification::OutcomeUnknown
             );
         }

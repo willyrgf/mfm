@@ -181,7 +181,11 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
                                 EvmReadValue::ChainId(intent.chain_id()),
                             ))
                         } else {
-                            Err(AdapterError::Operational(EvmOperationalError::Timeout))
+                            Err(AdapterError::Operational(EvmOperationalError::new(EvmOperationalKind::Timeout, mfm_evm::ProviderFailure {
+        method: mfm_evm::EvmRpcMethod::ChainId, stage: mfm_evm::RpcStage::Send,
+        failure: mfm_evm::ProviderFailureKind::Client,
+        diagnostics: serde_json::from_str(r#"{"response":null,"sources":{"layers":[],"end":"unavailable"},"omissions":[],"omissions_truncated":false}"#).unwrap(),
+    })))
                         }
                     })
                 },
@@ -189,7 +193,11 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
             .unwrap();
         builder
             .register_adapter::<EvmAnchorRead, _, _>(target, |_, _| {
-                Box::pin(async { Err(AdapterError::Operational(EvmOperationalError::Timeout)) })
+                Box::pin(async { Err(AdapterError::Operational(EvmOperationalError::new(EvmOperationalKind::Timeout, mfm_evm::ProviderFailure {
+        method: mfm_evm::EvmRpcMethod::ChainId, stage: mfm_evm::RpcStage::Send,
+        failure: mfm_evm::ProviderFailureKind::Client,
+        diagnostics: serde_json::from_str(r#"{"response":null,"sources":{"layers":[],"end":"unavailable"},"omissions":[],"omissions_truncated":false}"#).unwrap(),
+    }))) })
             })
             .unwrap();
         let runtime = Runtime::new(builder.finish(), Arc::new(mfm_store::MemoryStore::new()));

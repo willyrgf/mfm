@@ -33,7 +33,7 @@ final CI run. Run `nix run .#model-check` early after a Nixfied edit and
 
 ```bash
 nix develop -c cargo test \
-  -p mfm-ids -p mfm-values -p mfm-program-derive -p mfm-capabilities --all-targets
+  -p mfm-ids -p mfm-values -p mfm-program-derive -p mfm-capabilities -p mfm-diagnostics --all-targets
 nix develop -c cargo test -p mfm-program -p mfm-journal --all-targets
 nix develop -c cargo test -p mfm-store --all-targets
 nix develop -c cargo test -p mfm-storage-postgres --lib

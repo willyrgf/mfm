@@ -1,7 +1,8 @@
 # Known limitations
 
-- Adapter error chains are not yet preserved end to end. RPC, SQLx, signer, custody and startup
-  conversions discard source layers before Runtime can audit them. The new repository rule
+- Adapter error chains are not yet preserved end to end. SQLx, signer, custody and application startup
+  conversions still discard source layers. EVM transport capture now retains reviewed causes, but
+  internal State failures and recovery-before-commit still require the RFC lifecycle cutover. The new repository rule
   requires preservation; [the adapter error audit](adapter-error-audit.md) records concrete gaps,
   secret-free retention constraints and coherent remediation scope. Durable typed failure records
   must not be described as retaining raw client errors already discarded upstream.
@@ -60,10 +61,10 @@ The following are missing capabilities, not current API guarantees:
 
 ## Development-node funding
 
-- There is no reusable `DevNodeFundWallet` State/adapter. The E2E currently implements unlocked
-  account discovery, submission, and its own funding RPC path. The target is a small deterministic
-  Effect State with an explicitly selected dev-node adapter using shared bounded transport, not a
-  prerequisite general faucet-authority subsystem.
+- There is no reusable `DevNodeFundWallet` State. The E2E uses
+  `JsonRpcEvmProvider::fund_development_sender` for unlocked account discovery and one submission
+  through the shared bounded causal RPC path. A recoverable funding Effect still needs an explicit
+  convergent protocol; the provider helper alone does not establish that contract.
 - The funding completion/readiness and duplicate-entry contract remains undefined. The current
   helper's returned submission hash does not itself establish funded readiness, and blindly
   repeating `eth_sendTransaction` after lost acknowledgement can fund twice. Select and test the

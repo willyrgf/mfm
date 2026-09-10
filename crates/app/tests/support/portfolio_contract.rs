@@ -78,7 +78,11 @@ async fn planned_native_and_token_collections_execute_and_reconstruct_typed_fail
                 Box::pin(async move {
                     match failure {
                         1 => Ok(EvmReadEvidence::rejected(reference.clone())),
-                        2 => Err(AdapterError::Operational(EvmOperationalError::Timeout)),
+                        2 => Err(AdapterError::Operational(EvmOperationalError::new(mfm_evm::EvmOperationalKind::Timeout, mfm_evm::ProviderFailure {
+        method: mfm_evm::EvmRpcMethod::ChainId, stage: mfm_evm::RpcStage::Send,
+        failure: mfm_evm::ProviderFailureKind::Client,
+        diagnostics: serde_json::from_str(r#"{"response":null,"sources":{"layers":[],"end":"unavailable"},"omissions":[],"omissions_truncated":false}"#).unwrap(),
+    }))),
                         _ => {
                             let value =
                                 if matches!(intent.subject(), EvmReadSubject::TokenDecimals { .. })
@@ -131,10 +135,14 @@ async fn planned_native_and_token_collections_execute_and_reconstruct_typed_fail
                 let FailureCauseView::Adapter(incident) = report.cause() else {
                     panic!("typed adapter incident")
                 };
-                assert!(matches!(
-                    incident.error.decode::<EvmOperationalError>().unwrap(),
-                    EvmOperationalError::Timeout
-                ));
+                assert_eq!(
+                    incident
+                        .error
+                        .decode::<EvmOperationalError>()
+                        .unwrap()
+                        .kind(),
+                    mfm_evm::EvmOperationalKind::Timeout
+                );
                 let context = incident
                     .state_context
                     .decode::<EvmBalanceAdapterContext>()
@@ -236,7 +244,11 @@ async fn enrichment_retains_native_and_nonzero_candidates_and_never_filters_prov
                             EvmReadValue::RawUnits(EvmU256::from_u64(1))
                         }
                         EvmReadSubject::TokenBalance { .. } if fail => {
-                            return Err(AdapterError::Operational(EvmOperationalError::Timeout))
+                            return Err(AdapterError::Operational(EvmOperationalError::new(mfm_evm::EvmOperationalKind::Timeout, mfm_evm::ProviderFailure {
+        method: mfm_evm::EvmRpcMethod::ChainId, stage: mfm_evm::RpcStage::Send,
+        failure: mfm_evm::ProviderFailureKind::Client,
+        diagnostics: serde_json::from_str(r#"{"response":null,"sources":{"layers":[],"end":"unavailable"},"omissions":[],"omissions_truncated":false}"#).unwrap(),
+    })))
                         }
                         _ => EvmReadValue::RawUnits(EvmU256::from_u64(0)),
                     };
@@ -271,10 +283,14 @@ async fn enrichment_retains_native_and_nonzero_candidates_and_never_filters_prov
                 let FailureCauseView::Adapter(incident) = report.cause() else {
                     panic!("typed provider cause");
                 };
-                assert!(matches!(
-                    incident.error.decode::<EvmOperationalError>().unwrap(),
-                    EvmOperationalError::Timeout
-                ));
+                assert_eq!(
+                    incident
+                        .error
+                        .decode::<EvmOperationalError>()
+                        .unwrap()
+                        .kind(),
+                    mfm_evm::EvmOperationalKind::Timeout
+                );
             }
             _ => panic!("candidate enrichment outcome"),
         }

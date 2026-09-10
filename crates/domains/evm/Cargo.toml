@@ -12,6 +12,7 @@ domain = "evm"
 domain-role = "source"
 
 [dependencies]
+mfm-diagnostics = { path = "../../kernel/diagnostics" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-ids = { path = "../../kernel/ids" }

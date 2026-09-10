@@ -170,7 +170,11 @@ fn anchor() -> serde_json::Value {
     serde_json::json!({ "number": "17", "hash": BLOCK_HASH })
 }
 
-fn abi_word(value: &str) -> Result<AbiWord, AdapterError<EvmOperationalError>> {
+fn word_to_u8(word: AbiWord) -> Option<u8> {
+    u8::try_from(decode_abi_u256(word)).ok()
+}
+
+fn abi_word(value: &str) -> Result<AbiWord, RpcRejection> {
     AbiWord::try_from(RpcData::parse(value, 33)?)
 }
 
@@ -202,13 +206,13 @@ fn conversions_and_calldata_are_exact() {
 
     assert!(RpcData::parse("0x", 1).expect("empty data").0.is_empty());
     assert_eq!(RpcData::parse("0x00", 1).expect("zero byte").0, [0_u8]);
-    assert_eq!(
-        RpcData::parse("0x0", 1),
-        Err(AdapterError::Operational(EvmOperationalError::Unavailable))
-    );
+    assert_eq!(RpcData::parse("0x0", 1), Err(RpcRejection::Encoding));
     assert_eq!(
         RpcData::parse("0x0000", 1),
-        Err(AdapterError::Operational(EvmOperationalError::Unavailable))
+        Err(RpcRejection::Size {
+            limit: 1,
+            observed: ObservedSize::Exact { value: 2 }
+        })
     );
 
     let zero_word = format!("0x{}", "00".repeat(32));
@@ -413,10 +417,10 @@ async fn malformed_or_wrong_sized_abi_data_is_unavailable() {
             })),
         )
         .await;
-        assert_eq!(
+        assert!(matches!(
             response,
-            Err(AdapterError::Operational(EvmOperationalError::Unavailable))
-        );
+            Err(AdapterError::Operational(error)) if error.kind() == EvmOperationalKind::Unavailable
+        ));
     }
 }
 
@@ -437,10 +441,10 @@ async fn rpc_errors_are_unavailable_but_empty_token_data_is_safe_failure() {
         token_intent(),
     )
     .await;
-    assert_eq!(
+    assert!(matches!(
         rpc_error,
-        Err(AdapterError::Operational(EvmOperationalError::Unavailable))
-    );
+        Err(AdapterError::Operational(error)) if error.kind() == EvmOperationalKind::Unavailable
+    ));
 
     let empty = observe_broad(
         Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":"0x"}"#.into()]).provider(),
@@ -464,9 +468,11 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
             intent(serde_json::json!({ "kind": "initial_anchor" })),
         )
         .await;
-        assert_eq!(
-            response,
-            Err(AdapterError::Operational(EvmOperationalError::Unavailable)),
+        assert!(
+            matches!(
+                response,
+                Err(AdapterError::Operational(error)) if error.kind() == EvmOperationalKind::Unavailable
+            ),
             "body {body}"
         );
     }
@@ -480,10 +486,10 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
         intent(serde_json::json!({ "kind": "chain_identity" })),
     )
     .await;
-    assert_eq!(
+    assert!(matches!(
         response,
-        Err(AdapterError::Operational(EvmOperationalError::Unavailable))
-    );
+        Err(AdapterError::Operational(error)) if error.kind() == EvmOperationalKind::Unavailable
+    ));
 }
 
 #[tokio::test]
@@ -502,29 +508,29 @@ async fn incomplete_or_malformed_rpc_errors_are_unavailable() {
             intent(serde_json::json!({ "kind": "chain_identity" })),
         )
         .await;
-        assert_eq!(
+        assert!(matches!(
             response,
-            Err(AdapterError::Operational(EvmOperationalError::Unavailable))
-        );
+            Err(AdapterError::Operational(error)) if error.kind() == EvmOperationalKind::Unavailable
+        ));
     }
 }
 
 #[test]
 fn only_complete_exact_rpc_error_objects_parse() {
-    assert!(matches!(
-        serde_json::from_str::<RpcEnvelope<RpcQuantity>>(
-            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"opaque","data":null}}"#,
-        ),
-        Ok(RpcEnvelope::Failure(_))
-    ));
+    let envelope: RpcEnvelope<'_> = serde_json::from_str(
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"opaque","data":null}}"#,
+    )
+    .unwrap();
+    let error: RpcError<'_> = serde_json::from_str(envelope.error.unwrap().get()).unwrap();
+    assert_eq!(error.code, -1);
+    assert_eq!(error.data.unwrap().get(), "null");
     for error in [
         serde_json::json!({}),
         serde_json::json!({ "code": -1 }),
         serde_json::json!({ "message": "opaque" }),
         serde_json::json!({ "code": -1, "message": "opaque", "extra": true }),
     ] {
-        let envelope = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "error": error });
-        assert!(serde_json::from_value::<RpcEnvelope<RpcQuantity>>(envelope).is_err());
+        assert!(serde_json::from_str::<RpcError<'_>>(&error.to_string()).is_err());
     }
 }
 
@@ -568,9 +574,11 @@ async fn rpc_envelope_version_id_and_fields_are_exact() {
             intent(serde_json::json!({ "kind": "chain_identity" })),
         )
         .await;
-        assert_eq!(
-            response,
-            Err(AdapterError::Operational(EvmOperationalError::Unavailable)),
+        assert!(
+            matches!(
+                response,
+                Err(AdapterError::Operational(error)) if error.kind() == EvmOperationalKind::Unavailable
+            ),
             "body {body}"
         );
     }
@@ -618,10 +626,10 @@ async fn redirects_never_leave_the_selected_endpoint() {
         intent(serde_json::json!({ "kind": "chain_identity" })),
     )
     .await;
-    assert_eq!(
+    assert!(matches!(
         response,
-        Err(AdapterError::Operational(EvmOperationalError::Unavailable))
-    );
+        Err(AdapterError::Operational(error)) if error.kind() == EvmOperationalKind::Unavailable
+    ));
     redirect_worker.join().expect("redirect worker");
 
     let _ = TcpStream::connect(target_address);
@@ -637,13 +645,13 @@ async fn loopback_submission_acknowledgement_drop_after_full_request_is_unavaila
         read_http_request(&mut stream)
     });
     let raw = ExactRawTransaction::new(vec![0x02, 0xc0]).expect("bounded raw");
-    assert_eq!(
+    assert!(matches!(
         JsonRpcEvmProvider::connect(&EvmAdapterLocator::parse(url).expect("locator"))
             .expect("provider")
             .submit_raw(&raw)
             .await,
-        Err(AdapterError::Operational(EvmOperationalError::Unavailable))
-    );
+        Err(AdapterError::Operational(error)) if error.kind() == EvmOperationalKind::Unavailable
+    ));
     let request: serde_json::Value =
         serde_json::from_slice(&worker.join().expect("drop server")).expect("request JSON");
     assert_eq!(request["method"], "eth_sendRawTransaction");
@@ -729,12 +737,14 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         r#"{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"opaque"}}"#,
         r#"not json"#,
     ] {
-        assert_eq!(
-            Stub::new(vec![body.into()])
-                .provider()
-                .submit_raw(&raw)
-                .await,
-            Err(AdapterError::Operational(EvmOperationalError::Unavailable)),
+        assert!(
+            matches!(
+                Stub::new(vec![body.into()])
+                    .provider()
+                    .submit_raw(&raw)
+                    .await,
+                Err(AdapterError::Operational(error)) if error.kind() == EvmOperationalKind::Unavailable
+            ),
             "body {body}"
         );
     }
@@ -750,10 +760,10 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         if body.contains("result") {
             assert_eq!(result, Ok(None));
         } else {
-            assert_eq!(
+            assert!(matches!(
                 result,
-                Err(AdapterError::Operational(EvmOperationalError::Unavailable))
-            );
+                Err(AdapterError::Operational(error)) if error.kind() == EvmOperationalKind::Unavailable
+            ));
         }
     }
 }
@@ -902,18 +912,18 @@ async fn nullable_rpc_results_require_the_result_field() {
         r#"{"jsonrpc":"2.0","id":1,"result":null,"error":{"code":-1,"message":"opaque"}}"#,
         r#"{"jsonrpc":"2.0","id":1,"result":null,"result":null}"#,
     ] {
-        assert_eq!(
+        assert!(matches!(
             Stub::new(vec![body.into()]).provider().receipt(&hash).await,
-            Err(AdapterError::Operational(EvmOperationalError::Unavailable))
-        );
+            Err(AdapterError::Operational(error)) if error.kind() == EvmOperationalKind::Unavailable
+        ));
         let intent = anchored_intent(serde_json::json!({
             "kind": "anchored_contract_call",
             "value": { "anchor": anchor(), "calldata": "", "target": TOKEN }
         }));
-        assert_eq!(
+        assert!(matches!(
             observe_anchored(Stub::new(vec![body.into()]).provider(), intent.clone()).await,
-            Err(AdapterError::Operational(EvmOperationalError::Unavailable))
-        );
+            Err(AdapterError::Operational(error)) if error.kind() == EvmOperationalKind::Unavailable
+        ));
         let block = format!(
             r#"{{"jsonrpc":"2.0","id":1,"result":{{"number":"0x11","hash":"{BLOCK_HASH}"}}}}"#
         );
@@ -923,10 +933,10 @@ async fn nullable_rpc_results_require_the_result_field() {
             r#"{"jsonrpc":"2.0","id":1,"result":"0x"}"#.to_owned(),
             body.to_owned(),
         ]);
-        assert_eq!(
+        assert!(matches!(
             observe_anchored(stub.provider(), intent).await,
-            Err(AdapterError::Operational(EvmOperationalError::Unavailable))
-        );
+            Err(AdapterError::Operational(error)) if error.kind() == EvmOperationalKind::Unavailable
+        ));
         assert_eq!(stub.observed_requests().len(), 4);
     }
     assert_eq!(
@@ -967,13 +977,439 @@ async fn transport_deadline_and_http_rate_limit_preserve_typed_operational_cause
         }
         let request: serde_json::Value = serde_json::from_slice(&worker.join().unwrap()).unwrap();
         assert_eq!(request["method"], "eth_chainId");
+        let Err(AdapterError::Operational(error)) = response else {
+            panic!("operational failure");
+        };
+        assert!(if timeout {
+            error.kind() == EvmOperationalKind::Timeout
+        } else {
+            error.kind() == EvmOperationalKind::RateLimited
+        });
+        assert_eq!(error.provider_failure().method, EvmRpcMethod::ChainId);
         assert_eq!(
-            response,
-            Err(AdapterError::Operational(if timeout {
-                EvmOperationalError::Timeout
+            error.provider_failure().stage,
+            if timeout {
+                RpcStage::Send
             } else {
-                EvmOperationalError::RateLimited
-            }))
+                RpcStage::Status
+            }
         );
     }
+}
+
+#[tokio::test]
+async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
+    use mfm_evm::{
+        CheckChainIdentity, EvmBalanceContext, EvmBalanceFailure, EvmBalanceRequest,
+        EvmChainIdentityRead,
+    };
+    use mfm_program::{
+        ConclusionBound, Identity, NoContext, NoParams, Occurrence, Operation, OperationExpansion,
+        ProgramLimits,
+    };
+    use mfm_runtime::{FailureCauseView, RunViewState, Runtime, RuntimeAssemblyBuilder};
+    use std::sync::Arc;
+
+    struct ReadChain {
+        target: EvmPhysicalTarget,
+        bound: ConclusionBound,
+    }
+    impl Operation for ReadChain {
+        type Input = EvmBalanceContext<NoContext>;
+        type Output = Self::Input;
+        type Failure = EvmBalanceFailure;
+        fn validate_input(&self, _: &Self::Input) -> mfm_program::Result<()> {
+            Ok(())
+        }
+        fn expand(
+            &self,
+            body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
+        ) -> mfm_program::Result<()> {
+            body.read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead, Identity<EvmBalanceFailure>>(
+                &self.target.binding_ref().unwrap(), NoParams, Occurrence::new(), self.bound)
+        }
+    }
+    let mut retained = Vec::new();
+    for (ordinal, code) in [-32001, -32002].into_iter().enumerate() {
+        let stub = Stub::new(vec![format!(
+            r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":{code},"message":"secret-canary","data":{{"credential":"secret-canary"}}}}}}"#
+        )]);
+        let target = EvmPhysicalTarget {
+            chain_id: NonZeroU64::new(1).unwrap(),
+            endpoint_ref: EvmEndpoint::new("audit-fixture")
+                .unwrap()
+                .endpoint_ref()
+                .unwrap(),
+        };
+        let request = EvmBalanceRequest::new(
+            vec![EvmBalanceSource::new(
+                "wallet",
+                target.chain_id,
+                EvmAddress::from_bytes([1; 20]),
+                None,
+            )
+            .unwrap()],
+            18,
+        )
+        .unwrap();
+        let bound = request.conclusion_bound(2, 2048).unwrap();
+        let input = EvmBalanceContext::new(
+            request,
+            NoContext,
+            0,
+            "collection".into(),
+            target.binding_ref().unwrap(),
+        )
+        .unwrap();
+        let program = mfm_program::expand_program(
+            mfm_ids::EntryPointId::new("mfm.test.evm/causal-read@1").unwrap(),
+            &ReadChain {
+                target: target.clone(),
+                bound,
+            },
+            &input,
+            ProgramLimits::new(0),
+        )
+        .unwrap();
+        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
+        builder
+            .register_read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead>()
+            .unwrap();
+        crate::register_evm_reads(&mut builder, target, Arc::new(stub.provider())).unwrap();
+        let runtime = Runtime::new(builder.finish(), Arc::new(mfm_store::MemoryStore::new()));
+        let run =
+            mfm_ids::RunId::from_digest(mfm_ids::DigestBytes::from_array([ordinal as u8 + 1; 32]));
+        let hot = runtime.start(run.clone(), program, input).await.unwrap();
+        let cold = runtime.read(&run).await.unwrap();
+        assert_eq!(hot.head_digest(), cold.head_digest());
+        let mut errors = Vec::new();
+        for view in [&hot, &cold] {
+            let RunViewState::Failed(report) = view.state() else {
+                panic!("failed read");
+            };
+            let FailureCauseView::Adapter(incident) = report.cause() else {
+                panic!("provider cause");
+            };
+            let error = incident.error.decode::<EvmOperationalError>().unwrap();
+            assert_eq!(
+                mfm_program::ClassifyError::classify(&error),
+                mfm_program::Classification::Retryable
+            );
+            let cause = error.provider_failure();
+            assert_eq!(cause.method, EvmRpcMethod::ChainId);
+            assert_eq!(cause.stage, RpcStage::Envelope);
+            let response = cause.diagnostics.response().as_ref().unwrap();
+            assert_eq!(response.status().get(), 200);
+            assert_eq!(response.rpc_code(), Some(code));
+            assert!(cause.diagnostics.sources().layers().is_empty());
+            assert_eq!(
+                cause.diagnostics.sources().end(),
+                mfm_diagnostics::ChainEnd::Complete
+            );
+            assert_eq!(cause.diagnostics.omissions().len(), 2);
+            let (bytes, _) = canonicalize_mfm_value(&error).unwrap();
+            assert!(!bytes.as_str().contains("secret-canary"));
+            assert!(!format!("{error:?} {error}").contains("secret-canary"));
+            errors.push(error);
+        }
+        assert_eq!(errors[0], errors[1]);
+        retained.push(errors.remove(0));
+        assert_eq!(stub.observed_requests().len(), 1);
+    }
+    assert_ne!(retained[0], retained[1]);
+}
+
+#[tokio::test]
+async fn response_status_survives_body_failure_and_size_refusal() {
+    for bounded in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let locator =
+            EvmAdapterLocator::parse(format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_http_request(&mut stream);
+            let length = if bounded { MAX_RESPONSE_BYTES + 1 } else { 20 };
+            stream.write_all(format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {length}\r\nConnection: close\r\n\r\nx").as_bytes()).unwrap();
+        });
+        let error = JsonRpcEvmProvider::connect(&locator)
+            .unwrap()
+            .chain_id()
+            .await
+            .unwrap_err();
+        worker.join().unwrap();
+        let AdapterError::Operational(error) = error else {
+            panic!("provider failure");
+        };
+        let cause = error.provider_failure();
+        assert_eq!(cause.stage, RpcStage::Body);
+        assert_eq!(
+            cause
+                .diagnostics
+                .response()
+                .as_ref()
+                .unwrap()
+                .status()
+                .get(),
+            206
+        );
+        if bounded {
+            assert_eq!(
+                cause.failure,
+                ProviderFailureKind::Rejected {
+                    field: RpcField::Data,
+                    cause: RpcRejection::Size {
+                        limit: 524288,
+                        observed: ObservedSize::Exact { value: 524289 }
+                    }
+                }
+            );
+            assert!(cause.diagnostics.sources().layers().is_empty());
+        } else {
+            assert_eq!(cause.failure, ProviderFailureKind::Client);
+            assert_eq!(
+                cause.diagnostics.sources().layers()[0].kind(),
+                mfm_diagnostics::SourceKind::Transport
+            );
+            assert!(!cause.diagnostics.omissions().is_empty());
+        }
+        let (bytes, _) = canonicalize_mfm_value(&error).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<EvmOperationalError>(bytes.as_bytes()).unwrap(),
+            error
+        );
+    }
+}
+
+#[tokio::test]
+async fn development_funding_uses_the_shared_causal_rpc_boundary() {
+    let transaction_hash = EvmHash::from_bytes([7; 32]);
+    let stub = Stub::new(vec![
+        format!(r#"{{"jsonrpc":"2.0","id":1,"result":["{HOLDER}"]}}"#),
+        format!(r#"{{"jsonrpc":"2.0","id":1,"result":"{transaction_hash}"}}"#),
+    ]);
+    let sender = EvmAddress::from_bytes([2; 20]);
+    let value = EvmU256::from_u64(1_000_000_000_000_000_000);
+    let result = stub
+        .provider()
+        .fund_development_sender(&sender, &value, 10, 2)
+        .await
+        .unwrap();
+    assert_eq!(result, transaction_hash);
+    let requests = stub.observed_requests();
+    assert_eq!(requests[0]["method"], "eth_accounts");
+    assert_eq!(requests[1]["method"], "eth_sendTransaction");
+    assert_eq!(
+        requests[1]["params"],
+        serde_json::json!([{
+            "from": HOLDER, "to": sender, "value": "0xde0b6b3a7640000", "gas": "0x5208",
+            "maxFeePerGas": "0xa", "maxPriorityFeePerGas": "0x2",
+        }])
+    );
+    let rejected = Stub::new(vec![
+        format!(r#"{{"jsonrpc":"2.0","id":1,"result":["{HOLDER}"]}}"#),
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32011,"message":"secret-canary","data":null}}"#
+            .into(),
+    ]);
+    let AdapterError::Operational(error) = rejected
+        .provider()
+        .fund_development_sender(&sender, &value, 10, 2)
+        .await
+        .unwrap_err()
+    else {
+        panic!("funding cause");
+    };
+    assert_eq!(
+        error.provider_failure().method,
+        EvmRpcMethod::SendTransaction
+    );
+    assert_eq!(
+        error
+            .provider_failure()
+            .diagnostics
+            .response()
+            .as_ref()
+            .unwrap()
+            .rpc_code(),
+        Some(-32011)
+    );
+    assert!(!canonicalize_mfm_value(&error)
+        .unwrap()
+        .0
+        .as_str()
+        .contains("secret-canary"));
+    assert_eq!(rejected.observed_requests().len(), 2);
+}
+
+#[tokio::test]
+async fn body_deadline_retains_headers_and_parser_location_is_reviewed() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let locator =
+        EvmAdapterLocator::parse(format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let (release, released) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_http_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
+            .unwrap();
+        released.recv().unwrap();
+    });
+    let provider = JsonRpcEvmProvider {
+        url: locator.url,
+        http: reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap(),
+    };
+    let error = provider.chain_id().await.unwrap_err();
+    release.send(()).unwrap();
+    worker.join().unwrap();
+    let AdapterError::Operational(error) = error else {
+        panic!("body timeout");
+    };
+    assert_eq!(error.kind(), EvmOperationalKind::Timeout);
+    let source = error.provider_failure();
+    assert_eq!(source.stage, RpcStage::Body);
+    assert_eq!(
+        source
+            .diagnostics
+            .response()
+            .as_ref()
+            .unwrap()
+            .status()
+            .get(),
+        200
+    );
+    assert_eq!(
+        source.diagnostics.sources().layers()[0].kind(),
+        mfm_diagnostics::SourceKind::Transport
+    );
+
+    let stub = Stub::new(vec!["{\n  \"jsonrpc\": \"2.0\",\n  ?secret-canary".into()]);
+    let AdapterError::Operational(error) = stub.provider().chain_id().await.unwrap_err() else {
+        panic!("parser cause");
+    };
+    assert_eq!(error.provider_failure().stage, RpcStage::Envelope);
+    assert_eq!(
+        error.provider_failure().diagnostics.sources().layers()[0].facts(),
+        &[mfm_diagnostics::SourceFact::Parse {
+            category: mfm_diagnostics::ParseCategory::Syntax,
+            location: mfm_diagnostics::ParseLocation::LineColumn { line: 3, column: 3 }
+        },]
+    );
+    assert!(!canonicalize_mfm_value(&error)
+        .unwrap()
+        .0
+        .as_str()
+        .contains("secret-canary"));
+    assert_eq!(stub.observed_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn local_range_failure_retains_field_and_checked_observation() {
+    let stub = Stub::new(vec![
+        r#"{"jsonrpc":"2.0","id":1,"result":"0x10000000000000000"}"#.into(),
+    ]);
+    let AdapterError::Operational(error) = stub
+        .provider()
+        .pending_nonce(&EvmAddress::from_bytes([1; 20]))
+        .await
+        .unwrap_err()
+    else {
+        panic!("checked nonce rejection");
+    };
+    assert_eq!(
+        error.provider_failure().method,
+        EvmRpcMethod::GetTransactionCount
+    );
+    assert_eq!(
+        error.provider_failure().failure,
+        ProviderFailureKind::Rejected {
+            field: RpcField::Nonce,
+            cause: RpcRejection::Range {
+                minimum: 0,
+                maximum: u64::MAX,
+                observed: EvmU256::new("18446744073709551616").unwrap()
+            },
+        }
+    );
+    assert!(error
+        .provider_failure()
+        .diagnostics
+        .sources()
+        .layers()
+        .is_empty());
+    assert_eq!(stub.observed_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn send_failure_retains_os_ancestry_without_request_credentials() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let locator =
+        EvmAdapterLocator::parse(format!("http://user:secret-canary@{address}/secret-canary"))
+            .unwrap();
+    let AdapterError::Operational(error) = JsonRpcEvmProvider::connect(&locator)
+        .unwrap()
+        .chain_id()
+        .await
+        .unwrap_err()
+    else {
+        panic!("connect failure");
+    };
+    let cause = error.provider_failure();
+    assert_eq!(cause.stage, RpcStage::Send);
+    assert!(cause.diagnostics.response().is_none());
+    assert!(cause
+        .diagnostics
+        .sources()
+        .layers()
+        .iter()
+        .any(|layer| layer.kind() == mfm_diagnostics::SourceKind::Os));
+    assert!(cause
+        .diagnostics
+        .omissions()
+        .iter()
+        .any(|omission| omission.field() == mfm_diagnostics::OmittedField::Url));
+    assert!(!canonicalize_mfm_value(&error)
+        .unwrap()
+        .0
+        .as_str()
+        .contains("secret-canary"));
+    assert!(!format!("{error:?} {error}").contains("secret-canary"));
+}
+
+#[tokio::test]
+async fn streamed_body_overflow_records_a_lower_bound_without_an_invented_source() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let locator =
+        EvmAdapterLocator::parse(format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_http_request(&mut stream);
+        stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n80001\r\n").unwrap();
+        stream.write_all(&vec![b'x'; 524289]).unwrap();
+    });
+    let AdapterError::Operational(error) = JsonRpcEvmProvider::connect(&locator)
+        .unwrap()
+        .chain_id()
+        .await
+        .unwrap_err()
+    else {
+        panic!("body bound");
+    };
+    worker.join().unwrap();
+    assert_eq!(error.provider_failure().stage, RpcStage::Body);
+    assert!(matches!(error.provider_failure().failure,
+        ProviderFailureKind::Rejected { field: RpcField::Data, cause: RpcRejection::Size {
+            limit: 524288, observed: ObservedSize::AtLeast { value },
+        } } if value >= 524289));
+    assert!(error
+        .provider_failure()
+        .diagnostics
+        .sources()
+        .layers()
+        .is_empty());
 }

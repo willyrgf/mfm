@@ -21,13 +21,26 @@ value ref and returns evidence carrying that same ref. No operation ID, serializ
 transport, adapter recanonicalization, or provider-side domain decode remains. The confirmation
 subject re-observes the committed block its intent names and never the head.
 
-Provider failures retain the closed `EvmOperationalError` cause: request/body deadlines are Timeout,
+Provider failures retain an `EvmOperationalError` with one closed kind and one boxed
+`ProviderFailure`. Its exact wire has `kind` and `source`; the box is transparent. The source owns
+the RPC method, stage, local checked rejection facts and `mfm-diagnostics` evidence. Capture follows
+exposed client source links, retaining parser category/location and OS kind/code without client
+text. Response status/code remain outside ancestry; message/data/body/URL omissions are explicit.
+The complete shared diagnostic budget is 8 KiB. Unknown client source types remain opaque and
+accessible deeper sources are still captured. These are reviewed diagnostics, not raw evidence.
+
+Request/body deadlines are Timeout,
 HTTP 429 is RateLimited, and other transport, JSON-RPC, unexpected-null, malformed-field and
 oversize-body failures are Unavailable. An empty broad token-call result alone is SafeFailure where the balance contract
 admits a missing token interface; receipt null alone means not yet mined.
 Anchored block absence is SafeFailure, codeless target is Rejected, and replacement of the authored
 block is authenticated IntegrityBlocked evidence. Local capability, route, binding, signer purpose,
 public-key-derived sender, or retained-authority mismatch is Internal before authority/provider IO.
+
+`fund_development_sender` uses the same bounded transport and exact decoder for unlocked-account
+discovery and one funding submission, with the existing 16 KiB funding response bound. It has no
+Program/custody authority and does not retry an ambiguous submission. The managed E2E owns its
+funding amount and fees and retains build/provider causes through its helper.
 
 The pure codec maps the checked domain command into pinned `alloy-consensus` 1.6.1 `TxEip1559`
 values. Alloy owns signed EIP-2718 encoding, exact decoding, transaction hashing, and CREATE-address

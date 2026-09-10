@@ -1,6 +1,21 @@
 # RFC: commit complete execution data and preserve causal error chains
 
-Status: ready for engineering implementation; not implemented.
+Status: implementation in progress; the RPC/EVM causal cutover is implemented. The Runtime
+commit/recovery cutover and end-to-end completion criteria are not implemented yet.
+
+Commit 1 evidence: checked diagnostic capture, exact EVM v2 error descriptors and payload bounds,
+29 fake-server/decoder tests, transaction operation/mismatch assertions, and admitted hot/cold
+provider failure tests pass. Workspace all-target compilation and focused diagnostics/capabilities/
+live-EVM Clippy pass. Affected domain, Portfolio and Application regression tests pass; managed
+Effect/client scenarios and final CI remain required for the complete RFC candidate.
+
+This cutover removes the lossy RPC mapper, untagged envelope fallback, repeated operational-error
+schema branches and duplicate funding RPC implementation. Necessary additions are one bounded,
+checked diagnostic vocabulary/capture owner and typed provider operation/result facts. Production
+Rust grows by 1,698 physical lines including rustdoc (excluding separate test files and trailing
+`cfg(test)` modules); this buys explicit checked capture and secret-free causal retention rather
+than another recovery policy or configurable layer. Factoring the shared provider payload keeps
+the exact operational and transaction descriptors at 19,296 and 20,590 bytes respectively.
 
 This RFC develops the agreed remediation plan from the
 [adapter error-chain audit](docs/adapter-error-audit.md). It extends the implemented
@@ -279,10 +294,11 @@ struct ProviderFailure {
     diagnostics: DiagnosticEvidence,
 }
 
-enum EvmOperationalError {
-    Unavailable { source: ProviderFailure },
-    Timeout { source: ProviderFailure },
-    RateLimited { source: ProviderFailure },
+enum EvmOperationalKind { Unavailable, Timeout, RateLimited }
+
+struct EvmOperationalError {
+    kind: EvmOperationalKind,
+    source: Box<ProviderFailure>,
 }
 
 enum EvmTransactionOperationalError {
@@ -297,6 +313,13 @@ enum EvmTransactionOperationalError {
     Signer { cause: ReviewedSigningFailure },
 }
 ```
+
+The operational carrier factors the three legal alternatives into one closed kind and one common
+payload: `Unavailable(P) | Timeout(P) | RateLimited(P)` is `Kind × P`. Its sole wire shape is
+`{"kind":"timeout","source":{...}}`; boxing changes memory layout only. This avoids repeating the
+same diagnostic schema three times. `new(kind, source)`, `kind()` and borrowing
+`provider_failure()` expose the current API; no unit or compatibility constructor remains.
+Transaction provider, authority and signer alternatives retain their distinct typed payloads.
 
 These sketches preserve the current semantic categories while adding evidence. Do not introduce
 a second `Classification` field that can disagree with the intrinsic classifier.
@@ -1475,8 +1498,9 @@ fn provider_transport(method: EvmRpcMethod, stage: RpcStage,
                       error: &reqwest::Error) -> EvmOperationalError {
     let diagnostics = capture_reqwest(error); // one layer per error, several facts per layer
     let source = ProviderFailure { method, stage, diagnostics };
-    if error.is_timeout() { EvmOperationalError::Timeout { source } }
-    else { EvmOperationalError::Unavailable { source } }
+    let kind = if error.is_timeout() { EvmOperationalKind::Timeout }
+               else { EvmOperationalKind::Unavailable };
+    EvmOperationalError::new(kind, source)
 }
 
 async fn checked_acquire(pool: &PgPool) -> Result<CheckedConnection, GateFailure> {
