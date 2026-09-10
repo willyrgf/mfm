@@ -1,6 +1,6 @@
 # RFC: commit complete execution data and preserve causal error chains
 
-Status: proposed for discussion; not implemented.
+Status: ready for engineering implementation; not implemented.
 
 This RFC develops the agreed remediation plan from the
 [adapter error-chain audit](docs/adapter-error-audit.md). It extends the implemented
@@ -10,7 +10,10 @@ intrinsic classifiers or common static handler.
 [Design](docs/design.md) and [architecture](docs/architecture.md) remain authoritative for the
 current implementation. Contract changes proposed here must update those documents, repository
 instructions, producers, consumers, and tests together when implemented. Rust and wire examples
-below are sketches of the target contracts, not compiling implementations or frozen descriptors.
+below specify the target contracts. They omit derives, rustdoc, and mechanical error conversions;
+they are not a claim that a prototype compiles. The ownership, legal variants, sequencing, bounds,
+and deletion requirements are normative. Freeze generated exact descriptors with their consuming
+tests in the implementation commits.
 
 ## 1. Summary
 
@@ -80,7 +83,7 @@ commit, or permission to describe withheld client diagnostics as lossless raw ev
 | Is the additional storage cost acceptable? | Yes. Fuller execution/context snapshots and additional failure/recovery records are an accepted tradeoff for auditability and simpler contracts. Capacity correctness remains required; storage savings are not a condition for proceeding. |
 | Can every failure always be persisted? | No. Missing admission, invalid history, unavailable storage, exhausted capacity, and interruption have explicit limits. |
 
-The remaining design discussion should evaluate whether the proposed representation and recording
+Implementation review must verify that the selected representation and recording
 mechanics achieve these decisions with the least complexity. It should not silently substitute raw
 secret custody or a second persistence service for the selected contract.
 
@@ -185,8 +188,9 @@ The conceptual shared shape is:
 
 ```rust
 struct CauseChain {
-    // Private, nonempty, checked; outermost exposed source first.
-    causes: Vec<CauseFact>,
+    // Private checked fields; outermost exposed source first.
+    head: CauseFact,
+    tail: Vec<CauseFact>,
     omissions: OmittedEvidence,
 }
 
@@ -208,7 +212,7 @@ The sketch names categories, not a mandate to expose every helper type publicly.
 enums, checked codes, and integers. There is no arbitrary string/map escape hatch. Local checked
 failure details stay in their owning error types where this avoids centralizing domain vocabulary.
 
-Proposed fixed bounds are 32 source layers and 8 KiB of encoded causal data, including omission
+Fixed bounds are 32 source layers and 8 KiB of encoded causal data, including omission
 metadata. Constructors, capture, and deserialization enforce them. Bounded capture retains the
 available outer chain prefix and records the limit; it does not claim an omitted root survived.
 Capture must stop within its own bound even for a pathological source chain.
@@ -394,7 +398,7 @@ control to its successor. “Transition” includes handing a failure to recover
 mean incrementing the State index.
 
 ```rust
-// Conceptual Runtime-owned commit facade; exact Rust generics are not prescribed here.
+// Runtime-owned commit façade; section 16 specifies its private typed contract.
 let committed = journal.commit(&state_data, &ctx).await?;
 ```
 
@@ -633,49 +637,79 @@ that is durable before policy code runs.
 
 ## 8. Bound execution and recovery together
 
-Outcome-first storage does not remove finite-history accounting. A failure and its recovery decision
-now need two frames, and a recovery Fault can precede a later successful decision. Repeated explicit
-internal attempts and stopped pending Effects also need finite admitted capacity.
+Keep semantic recovery decisions separate from storage repetition. Add this Program-wide contract:
 
-Account for both the State execution and its possible recovery successor before entering work:
+```rust
+struct ExecutionCapacity {
+    explicit_reattempts: u32,
+    recovery_reevaluations: u32,
+}
 
-```text
-State execution slot:
-    complete outcome frame
-    + reserved recovery-result frame when the outcome may need recovery
+struct StateCommitBounds {
+    outcome: ConclusionBound,   // complete data + context + local closure
+    recovery: ConclusionBound,  // larger of Decision and Fault, including mapped root
+}
 
-Further recovery-evaluation slot:
-    one complete Decision or Fault frame
+struct EffectCommitBounds {
+    prepare: ConclusionBound,
+    execution: StateCommitBounds,
+}
 ```
 
-An internal State outcome consumes its ordinary execution slot. A recovery Fault consumes a recovery
-evaluation slot. A later explicit attempt cannot reuse already consumed capacity. A failure that
-is permitted under zero retry allowance still needs room for its outcome and terminal Stop result.
+`ConclusionBound` retains its checked nonzero byte-bound role; rename it `FrameBound` in this
+cutover because preparation and recovery are not conclusions. Pure/Read declare `StateCommitBounds`;
+Effect declares `EffectCommitBounds`. There is no per-Effect failure counter. Keep
+`ProgramLimits::max_recovery_decisions` (`G`) and add `execution_capacity` to the same admitted
+limits. Shipping Program constructors explicitly supply **8 explicit reattempts (`X`) and 8 recovery
+reevaluations (`Y`)**. Zero is legal for either: it disables extra attempts, never the first result
+of already admitted work. No hidden Runtime default or mutable resume override exists.
 
-Replace the former internal-only eight-record allowance with complete lifecycle accounting. Retain
-semantic retry/restart budgets independently: storage capacity does not authorize recovery, and a
-Fault does not spend a successful recovery decision. Existing pending-Effect attempt limits must be
-reconciled with the common accounting rather than counted twice or used as an internal-error budget.
+For State `i`, let `P_i` be its preparation bound (zero except Effect), `O_i` its outcome bound,
+`R_i` its recovery bound, `L_i = P_i + O_i + R_i`, and `k_i = 2 + is_effect(i)`. Admission computes:
 
-The selected direction is positive finite bounds for complete State-data/context and recovery-
-data/context commits, including full local object closure. Do not use an 8 KiB diagnostic bound as a frame bound or blindly
-double existing byte totals: success remains one outcome, while failure paths include potentially
-large originals, context, roots, and reports across two commits.
+```text
+nonempty Program:
+  frames = 1 + (G + 1) * sum(k_i) + X * max(k_i) + Y
+  bytes  = genesis + (G + 1) * sum(L_i) + X * max(L_i) + Y * max(R_i)
 
-Reserve settlement capacity and the result capacity required by already admitted work. Capacity
-checks happen before execution or recovery evaluation, not only after an error is produced. An
-unresolved committed failure must not consume the slot reserved for its own recovery result simply
-because its State outcome was appended first.
+empty Program:
+  frames = 1
+  bytes  = genesis
+```
 
-Checked admission must include first attempts, recovery-authorized State visits, pending-Effect
-attempts, explicit internal reentries, and recovery Fault reevaluations against current Journal/run
-ceilings. Exhaustion ends progression before further relevant work, preserves all acknowledged
-facts, and can leave an Effect unresolved. Explicit resume cannot enlarge the immutable Program.
+This conservatively reserves a whole sequence for every authorized recovery decision, a whole
+largest State lifecycle for each explicit reattempt, and a largest recovery result for each
+reevaluation. Use checked addition/multiplication and the existing object, descriptor, frame-count,
+frame-byte, and run-byte ceilings. Overflow or excess is an admission error, never saturation.
+For example, one Pure State with `G=0, X=8, Y=8` reserves 27 frames; one Effect reserves 36. A normal
+success does not append unused reservations. A zero-retry failure still has its first Stop slot.
 
-The exact authoring API, shared attempt counters, and shipping numeric allowances need review under
-this revised lifecycle. They are a material handoff item, not permission to preserve the old
-internal-only allowance or introduce unlimited error records. Section 16 and the uncertainty table
-make that remaining work explicit.
+Charge counters only in the sole fold of committed records:
+
+| Work | Reservation and charge |
+| --- | --- |
+| Initial or recovery-authorized execution | Existing sequence/recovery reservation; no extra counter |
+| Explicit reentry after Internal or pending Stop | Check `X` before work; charge on its first committed record |
+| Reentry that prepares an Effect | Preparation spends `X` once; its later outcome/recovery use the reserved remainder |
+| Reentry of a pending Effect or settled interpretation | Outcome spends `X`; no second preparation or charge |
+| First recovery evaluation for a committed failure | Uses the result slot reserved by that outcome; no `Y` charge |
+| Evaluation after a committed recovery Fault | Check `Y` first; its Decision or Fault spends one `Y` |
+| Adapter returns Pending, or interruption before any commit | No new record or charge |
+
+The preceding cursor establishes the charge; do not accept author-supplied attempt IDs or flags.
+Internal or pending Stop establishes `RequiresExplicitReentry`; a recovery Fault retains
+`AwaitingRecovery` with its last Fault. Initial recovery stays available even after extra counters
+are exhausted. A committed preparation retains enough capacity to finish its admitted lifecycle.
+Checks precede IO and callbacks. Exhaustion returns the qualified observation without entering
+further work. Storage slots never grant Retry/Restart permission or enlarge the immutable Program.
+
+Bounds include exact context snapshots, outcome alternatives, retained evidence, mapped roots,
+diagnostics, and complete frame-local closure. Do not substitute the 8 KiB causal bound for a
+complete frame bound. Size the maximum concrete schemas as well as payloads: current accumulated
+context descriptors are already near the 64 KiB descriptor ceiling. Use the existing schema
+composition rules and reject excess; do not quietly raise ceilings, skip context, or introduce
+cross-frame references to make an example fit. Update each shipping bound and its consuming maximum
+workload test in the same commit. Accepted storage cost does not waive finite admission.
 
 ## 9. When recording fails or another caller wins
 
@@ -841,7 +875,7 @@ Store continues to load complete opaque prefixes and atomically append exact-hea
 separate audit table or PostgreSQL schema migration follows from adding a Journal record. Do not
 rewrite acknowledged histories or introduce legacy readers; superseded formats are rejected.
 
-The proposed logical sequence is:
+The ordered implementation commits are:
 
 1. **`preserve rpc and evm error provenance`**: shared causal data, EVM capture/contracts, direct
    consumers, exact identities, and error-aware bounds.
@@ -852,8 +886,24 @@ The proposed logical sequence is:
 4. **`commit execution data and context before recovery`**: inseparable uniform Runtime commit
    facade, exact serialization contracts, direct-classification handler API, Program/Journal wire,
    lifecycle bounds, fold, invocation, observation, and client-contract changes.
-5. **`complete adapter error audit validation`**: remaining funding-helper coverage, inventory
-   reconciliation, and final cross-boundary evidence.
+5. **`complete adapter error audit validation`**: final cross-boundary scenarios, inventory
+   reconciliation, and handoff evidence. Funding-helper capture belongs in commit 1.
+
+| Commit | Coherent completion boundary | Required focused evidence |
+| --- | --- | --- |
+| 1 | Add the diagnostics crate and its single schema/checked constructors; revise RPC/EVM errors and direct consumers under the existing runtime wire. Fix the funding helper now. Update exact error identities and current bounds wherever payloads grow. | A2, provider portion of A3, A6; fake HTTP server covers send/body/parse/code/status/size and omission facts. Cold round trip proves richer errors survive today's committed path. |
+| 2 | Enrich Store/config/index/custody/provision errors and all conversions, including transaction wrappers. Replace all gate callback routing with checked owned acquisition. Keep the current Journal protocol working. | A4 and custody portion of A3; managed PostgreSQL exercises gate refusal before protected IO, SQLSTATE/decode failures, and definite versus ambiguous COMMIT. |
+| 3 | Enrich signer/keystore/memory/application/transport errors and all consumers. Update public safe-detail schemas and source-preserving library access together. | A5 and signer portion of A3; channel/thread/task/crypto/local-IO injection, secret sentinels, public code/status/exit policy and response-delivery failures. |
+| 4 | Replace State/handler signatures, derive Result support, assembly, Program v7, Journal v5, sole fold, bounds, views and clients in one cutover. Remove every old persistence/context/incident path from section 17. Update design, architecture, all fixtures and recovery validation. | A7–A12, A16–A25; consuming nested-Result tests, exact wire rejection, maximum-context admission, Read recovery Fault/resume, settled Effect interpretation reentry, cancellation and hostile Store conflicts/ambiguity. Run affected Program/Journal/Runtime/domain/app/client tests and managed Effect/client scenarios. |
+| 5 | Reconcile every audit first-loss row with implementation location and evidence; add only missing cross-boundary regressions. Report removals/additions and explicit upstream limits. | A1 and A13–A15 end to end, A1–A25 traceability, final `nix run .#ci` on the exact candidate. A prior commit's missing unit/boundary test is not deferred here. |
+
+Use `nix develop -c cargo test -p <affected-package> <filter>` while iterating and the managed tasks
+in [build and verification](docs/build-and-verification.md) for service-backed cases. Do not substitute
+ignored local tests for those managed scenarios. Commit 4 starts only after the causal carriers are
+available; its API, wire, fold, capacity and client changes are inseparable. Each earlier commit
+must update downstream consumers of its changed error types and remove superseded constructors.
+If an error schema cannot fit current bounds, solve that coherently in the owning commit rather
+than landing an admitted Program that cannot execute its declared error path.
 
 Every commit includes its meaningful tests and documentation. The last commit is not permission to
 defer a changed boundary's tests or leave its consumers lossy. Merge inseparable steps where a
@@ -1026,46 +1076,357 @@ followed by interpretation failure and retained-evidence reentry. Compare public
 branches, append counts, retained bytes, and production LOC against the current design. This is
 evidence for the selected protocol, not an invitation to keep a parallel prototype in production.
 
-## 16. Discussion focus
+## 16. Engineering contract and core sketches
 
-The selected guarantees are fixed for this proposal; these tradeoffs deserve particular scrutiny
-before implementation:
+This section resolves the implementation choices left abstract in the introductory balance example.
+The implementation target is Runtime-assembled data from existing typed State methods. State authors
+own input/output/failure fields; they do not construct a framework incident, invoke Store, or select
+a serialization callback after failure. Additional explanatory facts belong in those owned types.
 
-- Does one shared causal-data contract remove more duplication than it creates in public types?
-- Do the execution-data/context field contracts retain all necessary facts once, with explicit
-  exclusions and no fallible incident assembly before commit?
-- Does the uniform commit facade replace separate success/error paths without hiding a second
-  serialization model or moving IO into States?
-- Does the outcome/recovery representation remove the fused and internal-only paths completely,
-  with fewer responsibilities and future change sites despite a new recovery-pending cursor?
-- What is the smallest finite authoring contract that bounds execution and recovery evaluation,
-  including zero-retry Stops, explicit internal reentry, and repeated recovery Faults?
-- Do interruption and contention between outcome and recovery commits preserve acknowledgement
-  ordering and the semantics of reevaluating only unresolved recovery?
-- Can acquisition-time PostgreSQL checks preserve the existing security posture at acceptable cost?
-- Are withholding and unavailable-evidence markers clear enough that audit consumers cannot mistake
-  them for retained original messages or a record of every physical attempt?
+### 16.1 State and recovery signatures
 
-These questions are for reviewing the proposed tradeoffs, not instructions for an implementing
-engineer to choose a different architecture silently.
+```rust
+trait State: Send + Sync + 'static {
+    type Input: MfmValue;
+    type Output: MfmValue;
+    type Failure: ClassifyError;
+    fn state_id() -> Result<StableId>;
+}
 
-## Material uncertainties
+trait PureState: State {
+    fn evaluate(input: Self::Input)
+        -> Result<Result<Self::Output, Self::Failure>, StateExecutionError>;
+}
 
-The selected protocol is one `commit(state_data, ctx)` before control handoff, and the same commit
-operation for recovery data before its authorized action. The meaning of both inputs and the
-removal of `IncidentSummary` are settled. Custody remains secret-free and uses the existing State
-commit Store. Additional storage cost is accepted and is not a material uncertainty. The following
-assumptions and remaining lifecycle design work require evidence before this RFC is treated as a
-completed handoff:
+trait ReadState<C: ReadCapability>: State {
+    fn prepare(input: &Self::Input) -> Result<C::Intent, PreparationError>;
+    fn interpret(input: Self::Input, evidence: &C::Evidence)
+        -> Result<Result<Self::Output, Self::Failure>, StateExecutionError>;
+}
 
-| Assumption | Why uncertain | Consequence if wrong | Validation |
+// EffectState uses the same preparation/interpretation pattern with C::Command.
+// Keep its existing capability bounds; neither mode declares AdapterContext.
+trait Handler {
+    type Params: MfmValue;
+    fn handle(params: &Self::Params, classification: Classification,
+              context: &RecoveryContext<'_>)
+        -> Result<RecoveryRequest, StateExecutionError>;
+}
+```
+
+The two `Result` layers distinguish internal failure from an ordinary typed domain result. Retain
+separate `PreparationError` and `StateExecutionError` names for their existing API roles, but replace
+their unit payloads with reviewed internal provenance. They wrap `InternalFailure`, a checked
+`{ kind: InternalFailureKind, causes: CauseChain }` value. Its closed kinds distinguish local
+invariant, preparation, interpretation, qualification, task failure, and capture failure; owner-local
+errors carry any finer checked operation facts. Operational client errors stay in their existing
+typed ports rather than entering this internal category. Intrinsic classification remains infallible
+on a decoded typed error. Decode/association failures while reaching that classifier are recovery
+Faults. Handler defaults remain Operation-owned with State-occurrence overrides; root `ValueMap`
+association and recovery-target validation remain required.
+
+Add `Result<T,E>` handling to `program-derive/src/shape.rs`, recursively using the existing external
+enum schema for Serde's `{"Ok": value}` / `{"Err": value}` representation. Enclosing exact types own
+semantic identities. Do not add a blanket semantic identity for every standard-library Result or
+a new schema-language construct. Consuming derive tests cover nested results and rejection of
+unknown/missing tags and invalid payloads.
+
+### 16.2 Exact data and context ownership
+
+Use separate concrete mode types. This sketch shows their required alternatives, with generic
+parameters standing for the associated exact contracts, not dynamically typed payloads:
+
+```rust
+struct StateContext<I> { input: I }
+struct PureData<O, F> { result: Result<Result<O, F>, StateExecutionError> }
+
+enum ReadData<T, E, A, O, F> {
+    PreparationFailed { error: PreparationError },
+    AdapterFailed { intent: T, error: A },
+    AdapterInternal { intent: T, error: InternalFailure },
+    Interpreted {
+        intent: T, evidence: E,
+        result: Result<Result<O, F>, StateExecutionError>,
+    },
+    CaptureFailed { error: InternalFailure },
+}
+
+struct EffectPreparation<Q> { command: Q }
+enum EffectData<E, A, O, F> {
+    PreparationFailed { error: PreparationError },
+    PendingFailed { error: A },
+    PendingInternal { error: InternalFailure },
+    Settled {
+        evidence: E,
+        result: Result<Result<O, F>, StateExecutionError>,
+    },
+    CaptureFailed { error: InternalFailure },
+}
+
+enum EffectContext<I, Q> {
+    BeforePreparation { input: I },
+    Prepared { input: I, effect_id: EffectId, command: Q },
+}
+
+struct RecoveryData<R> {
+    result: Result<AuthorizedRecovery<R>, RecoveryFailure>,
+}
+struct RecoveryFailure { stage: RecoveryStage, diagnostic: InternalFailure }
+enum RecoveryStage { Classification, Handler, Authorization, RootMapping, Encoding }
+
+struct RecoveryExecutionContext<I> {
+    input: I,
+    failed_outcome: FrameRef,
+    recovery: PersistedRecoveryContext,
+}
+```
+
+`PureData`'s outer internal result also represents checked capture failure. `CaptureFailed` is the
+bounded fallback for a Read/Effect value that cannot qualify and has no further qualified mode facts; its diagnostic explicitly says
+which evidence is unavailable. It must not claim to retain an unqualified original or accepted
+settlement. For Reads, retain qualified intent through `AdapterInternal`; retain qualified accepted
+evidence and intent through `Interpreted` with an internal result. A later qualification failure
+cannot discard those facts or mark them unavailable. Already qualified settlement facts cannot be
+discarded into that fallback: use the
+`Settled` internal alternative with retained evidence. Failure to encode that alternative returns
+uncommitted evidence, not a fabricated pending record. Preparation/data/context variants are
+validated against the current phase; sharing an enum is not permission to use every variant at every
+cursor. No fabricated intent, command, evidence, output, or default error fills an absent field.
+
+The frame envelope owns run sequence and State position. State context owns the exact pre-execution
+input, including the accumulated context already carried by that input. Read data owns intent and
+accepted evidence. Prepared Effect context owns command/EffectId; settled data owns evidence.
+`PersistedRecoveryContext` is the exact serializable projection of Runtime's phase, recovery
+allowances/usage, barrier and authorized targets used by the handler; no caller can supply those
+facts independently. Recovery references the original outcome by exact frame identity in the
+qualified prefix. It must carry its own complete value/schema closure; this reference is a causal
+link, not a new object lookup or deduplication mechanism.
+
+`AuthorizedRecovery<R>` is a private-construction sum: `Retry`, `Restart { target }`,
+`StopDomain { reason, root: R }`, or `StopAdapter { reason }`. Each variant contains exactly the
+existing checked authorization facts needed by the fold. The original remains in the outcome;
+Stop does not copy it into a second incident. Root mapping runs only where existing policy requires
+it. Pending Stop preserves command authority, whereas terminal Stop finishes the run. The current
+phase determines the permitted variants. A Fault carries no authorized action.
+
+Runtime preserves qualified input bytes before invoking a consuming State callback and decodes an
+execution copy. Do not require `Input: Clone`. Immutable shared qualified values can support commit
+construction and views; later mutation of user values cannot change committed bytes. Mode-specific
+typed decoders are associated with the executable's exact contracts. They project data for the sole
+fold without calling State, classifier, handler, or root mapper during cold reconstruction.
+
+### 16.3 One commit façade and one acknowledged fold
+
+The following methods are **private Runtime infrastructure**, not a new public authoring registry:
+
+```rust
+trait CommitData<C>: sealed::Sealed {
+    // Qualify the selected exact mode/recovery contract and complete local closure.
+    fn encode(&self, context: &C, current: &Accumulator) -> Result<EncodedRunFrame>;
+}
+
+impl RuntimeJournal<'_> {
+    async fn commit<D, C>(&mut self, data: &D, ctx: &C)
+        -> Result<CommittedStep, CommitFailure>
+    where D: CommitData<C> {
+        let frame = data.encode(ctx, self.acknowledged)?;
+        self.check_reserved_bound(&frame)?;
+        let candidate = self.fold_candidate(&frame)?;
+        // No user callback occurs in encode/qualification/fold_candidate.
+        match self.store.append(self.exact_head(), &frame).await {
+            Ok(Inserted) => self.adopt(frame, candidate),
+            Ok(NotInserted) => Err(self.conflict_with_winning_observation(frame).await),
+            Err(error) => Err(self.recording_failure(frame, error)),
+        }
+    }
+}
+```
+
+These names describe stages, not new independently configurable services. Implement `CommitData`
+only for the associated mode/preparation/recovery types. Encoding rejects wrong context, phase,
+contract and binding before Store. Candidate construction must leave acknowledged history and
+counters unchanged. Only a known insertion adopts the candidate. Preserve the existing exact-head
+Store API and use its actual insertion/ambiguity types; the sketch abbreviates those names.
+The caller retains ownership of primary typed/qualified data across the await so an encoding or
+append failure cannot erase it. Do not use an early `?` that replaces the primary with a Store error.
+
+Journal frame v5 has `RunAdmitted`, `EffectPrepared`, `StateCommitted`, and `RecoveryCommitted`
+record kinds. The latter two contain State position and exact data/context references with full
+frame-local closure; the preparation record contains its data/context pair too. Journal owns
+structural wire and reference qualification. Runtime validates the selected mode and semantic
+adjacency in its sole fold. There are no `PureFailed`, internal-only event, or fused decision
+records. Encoding success and error follows the same selected State contract.
+
+On qualification failure, try the already-declared bounded internal alternative once, retaining
+safe phase facts and an omission reason. If it cannot qualify or append, return primary plus
+secondary failures. Do not recursively commit a failed audit attempt. `CommitFailure` distinguishes
+qualification/rejection, conflicting qualified winner, and indeterminate acknowledgement; it does
+not contain a recursively nested `RuntimeError`. Attach section 9's recording disposition to the
+invocation's retained primary evidence. An original not yet serializable can be returned in its
+reviewed in-memory carrier, but must not be described as durably preserved.
+
+### 16.4 Recovery driver and cursor table
+
+```rust
+async fn recover(journal: &mut RuntimeJournal<'_>, pending: &AwaitingRecovery) -> Invocation {
+    journal.check_recovery_capacity(pending)?; // first reserved result or a Y slot
+    let evaluation = (|| {
+        let classification = pending.classify_original().at(Classification)?;
+        let request = pending.handler(classification).at(Handler)?;
+        let authorized = pending.authorize(request).at(Authorization)?;
+        pending.map_required_root(authorized).at(RootMapping)
+    })();
+    let data = RecoveryData { result: evaluation };
+    let ctx = pending.checked_recovery_context();
+    let committed = journal.commit(&data, &ctx).await
+        .preserving_original(pending)?;
+    committed.dispatch() // Fault stops; only committed Decision can authorize action
+}
+```
+
+Stage annotation and `preserving_original` abbreviate ordinary typed conversions, not new public
+extension traits. Encoding the recovery value may itself require its bounded `Encoding` Fault;
+apply the same single-fallback rule. On resume, dispatch by the acknowledged cursor:
+
+| Current authority | Next permitted work | Committed result |
+| --- | --- | --- |
+| Runnable Pure/Read | Evaluate/prepare/read/interpret within its reserved slot | Success advances; typed failure awaits recovery; Internal requires explicit reentry |
+| Runnable Effect | Prepare command, then commit preparation before adapter IO | Pending command authority; preparation failure requires explicit reentry |
+| EffectPending | Invoke adapter with the same command/EffectId | Pending yields without record; failure awaits recovery; invariant failure requires explicit reentry; accepted settlement commits interpreted result |
+| AwaitingRecovery, no result | Evaluate associated policy | Authorized Decision or linked Fault |
+| AwaitingRecovery after Fault | Explicit reevaluation within `Y` | Decision or another Fault; never reenter State to reevaluate policy |
+| RequiresExplicitReentry, Pure/Read or pre-prepare Effect | Explicit execution within `X` | New outcome or preparation, charging once |
+| RequiresExplicitReentry, pending Effect | Explicit attempt within `X` using retained authority | No new command/EffectId |
+| RequiresExplicitReentry, settled Effect | Explicit deterministic interpretation within `X` | Retained evidence; no adapter call |
+| Committed Retry/Restart | Continue exactly as authorized, charging semantic counters once | Existing visit/checkpoint/barrier rules apply |
+| Committed pending Stop | End invocation, retain pending command | Later explicit entry requires `X` |
+| Terminal success/domain Stop/settled Stop | Return terminal view | No further State/recovery work |
+
+Evidence qualification and binding precede accepting settlement. A crash after external settlement
+but before its outcome commits retains the existing uncertainty boundary; it cannot claim durable
+settlement. Once settlement commits, every hot/cold path prohibits another adapter invocation for
+that settled command. Keep restart checkpoints: they retain the admitted input at authorized State
+positions. They are execution authority, not an alternative audit history, and this RFC does not
+remove them.
+
+`RunView` must expose `AwaitingRecovery` (original outcome and optional last recovery Fault) and
+`RequiresExplicitReentry` (internal cause or pending Stop with actual phase), alongside runnable,
+pending and terminal states. Optional last Fault expresses an actual absence, not an optional-field
+substitute for phase variants. Reuse the retained outcome in failure reports; remove separately
+assembled adapter incident/context reports. CLI/REST render those dispositions without inventing a
+terminal failure. Read-only load never performs recovery; explicit progression does.
+
+### 16.5 Capture implementations at owned boundaries
+
+Capture uses a checked nonempty chain (head plus bounded tail) of closed facts. Freeze omission
+metadata as a bounded list of `(layer index, field, reason)` entries plus a chain-truncation marker;
+fields are `Message`, `Data`, `Body`, `Url`, `DatabaseDetail`, `Parameters`, `PanicPayload`, and
+`SourceDetail`; reasons are `Withheld`, `Unavailable`, and `BoundReached`. Use at most 32 layers and
+32 omission entries within the **same 8 KiB canonical budget**. If omission metadata fills, set its
+own truncation marker rather than silently dropping omissions. Optional observed sizes are integers
+only when actually known. Check these invariants on construction and deserialization. An opaque
+layer remains explicit even when traversal finds a reviewed deeper source. Traversal stops at the
+layer bound, including cycles; never walk an unbounded chain to count what was omitted.
+
+Client extraction stays local. `CauseFact` uses the closed families in section 5, existing safe
+numeric code wrappers, parser line/column/offset, and explicit unknown categories. SQLSTATE is five
+validated ASCII alphanumeric bytes. OS numeric codes supplement the closed kind; unknown codes are
+not formatted into arbitrary messages. Owner-local check/stage enums retain domain vocabulary.
+Do not add client-library dependencies to diagnostics or a registry of downcasters.
+
+```rust
+fn provider_transport(method: EvmRpcMethod, stage: RpcStage,
+                      error: &reqwest::Error) -> EvmOperationalError {
+    let causes = capture_reqwest(error); // structured predicates + reviewed source traversal
+    let source = ProviderFailure { method, stage, causes };
+    if error.is_timeout() { EvmOperationalError::Timeout { source } }
+    else { EvmOperationalError::Unavailable { source } }
+}
+
+async fn checked_acquire(pool: &PgPool) -> Result<CheckedConnection, GateFailure> {
+    let mut connection = pool.acquire().await.map_err(capture_acquire)?;
+    if let Err(cause) = verify_connection(&mut connection).await {
+        connection.close_on_drop();
+        return Err(cause); // retain typed gate cause; no protected query ran
+    }
+    Ok(CheckedConnection::new(connection))
+}
+```
+
+Use the appropriate Store/config/index/custody gate on that same connection; a private checked
+connection wrapper owns the successful gate and exposes only the intended internal access. Do not
+leave an unchecked acquisition path beside it. Existing transaction/snapshot checks still apply.
+SQLx-hidden attempts are explicitly unavailable. Do not route gate errors through `after_connect`
+or parse `Protocol` text. Do not log source Display while capturing or closing.
+
+For RPC responses, retain status before bounded body read, parse the checked envelope without
+untagged fallback loss, retain numeric RPC code, and mark exposed message/data withheld. A body
+failure adds its cause to the status; it never replaces it. Keep current deadlines, body bounds and
+classification rules. A server error code alone is not proof that repeating a mutation is safe.
+For SQLx, capture category, SQLSTATE and exposed reviewed sources before selecting the existing
+port disposition. A network error acknowledging COMMIT remains Indeterminate. For channel errors,
+inspect closure/category and drop the command without formatting or retaining it. For crypto,
+retain the local operation and opaque rejection, never key-bearing payloads.
+
+## 17. Exact deletion and replacement checklist
+
+Paths below are relative to the repository. Delete the named obsolete implementation, its imports,
+constructors, fixtures and doc examples in the same commit as its replacement. A renamed wrapper
+around the old branch does not complete the deletion. Follow symbol references into all consumers;
+the adapter audit remains the exhaustive first-loss checklist for capture sites.
+
+| Location / old machinery | Required replacement or retained invariant | Commit |
+| --- | --- | --- |
+| `crates/live/evm/src/json_rpc.rs`: disposal of RPC code/message/data, unit `map_transport_error`, untagged error fallback | Owned bounded transport/envelope capture; preserve status and secondary body cause | 1 |
+| `crates/live/evm/src/transaction.rs`: unit provider/authority/signer and mismatch mappings | Existing typed categories with operation and nested source; keep command authority | 1, 2, 3 by source owner |
+| `crates/storages/postgres/src/lib.rs`: `after_connect` gate errors, `Protocol` markers and substring `classify_open_error` routing | Owned same-connection checked acquisition; direct gate causes | 2 |
+| `crates/storages/postgres/src/evm_tx.rs`: `unavailable(_: impl Sized)`, `internal(_: impl Sized)` and source-erasing commit mappings | One SQLx capture owner; typed authority dispositions, exact ambiguity | 2 |
+| `crates/storages/postgres/src/{config,index,provision,catalog}.rs`: query/decode/gate source sinks | Reviewed local stage plus common causal capture; preserve existing transaction and role checks | 2 |
+| `crates/{keystore,signing}/src/lib.rs`: unit channel/thread/signing conversions | Reviewed source carriers, opaque crypto facts, no retained secret command | 3 |
+| `crates/kernel/store/src/lib.rs`, `crates/config/src/lib.rs`: unit IO/task/allocation source sinks | Rich existing port errors; legitimate absence remains absence | 2, 3 |
+| `crates/app/src/{lib,deployment}.rs`, `bin/{cli,rest-api}/src`: source-erasing composition/input/delivery maps | Preserve reviewed causal carrier and project existing public disposition | 3, 4 |
+| `crates/live/evm/tests/evm_contract_effect_e2e.rs`: unit funding error capture | Fix existing real-IO test helper; no new production funding adapter | 1 |
+| `crates/kernel/program/src/lib.rs`: `ProposedStateOutcome`, `AdapterContext`, `adapter_context` | Native nested Result and Runtime-assembled mode data/context | 4 |
+| `crates/domains/evm/src/recovery.rs`: `EvmBalanceAdapterContext`, `AnchoredCallAdapterContext`, `EvmTransactionAdapterContext` and equivalent consumer contexts | Input/intent/command/typed error fields under section 16's explicit owners; retain every unique fact | 4 |
+| `crates/kernel/program/src/recovery.rs` and `recovery/defaults.rs`: `IncidentSummary`, summary-only `IncidentSource` and old handler arguments | Direct `Classification`; preserve default/override selection and policy semantics | 4 |
+| `crates/kernel/runtime/src/assembly/recovery.rs`: `QualifiedIncident`, summary-producing `ClassifyCallback`, fused request path | Decode retained typed error, project classification, evaluate only after outcome commit | 4 |
+| Runtime assembly adapter contextualizer registrations and callbacks | Associated exact mode codecs; no replacement contextualizer registry | 4 |
+| `crates/kernel/runtime/src/engine.rs`: `conclude`, `decide`, `domain_objects` as fused precommit policy/report paths | Outcome commit, then one recovery evaluator and recovery commit | 4 |
+| Same file: separate mode conclusion/failure append construction, old `prepare_append`/`finish_append` candidate adoption behavior | One private commit façade; acknowledged state unchanged until known insertion | 4 |
+| `crates/kernel/runtime/src/engine/fold.rs`: decision embedded in outcome, `PendingFailure` error/context copies and per-Effect failure count | Sole fold over outcome/recovery records and phase-aware cursors | 4 |
+| Runtime `AdapterIncidentView`/report assembly solely repackaging original/context | Views of exact retained outcome; preserve root mapping and public causal detail | 4 |
+| `crates/kernel/journal/src/lib.rs`: `PureConcluded`, `ReadConcluded`, `EffectAdapterFailed`, `EffectConcluded` records and encoders | v5 data/context commit records; keep preparation-before-IO and local closure | 4 |
+| `crates/kernel/journal/src/conclusion.rs`: `DomainConclusion`, `ReadConclusion`, `EffectConclusion`, `PendingDecision` and fused map-ref helpers | Checked recovery result; keep Stop reason and authorization semantics under one owner | 4 |
+| `crates/kernel/program/src/program.rs`: adapter `context_contract_ref` and old execution bound fields | Exact selected execution-data/context contracts and complete commit bounds | 4 |
+| `crates/kernel/program/src/recovery/bounds.rs`: `max_pending_failures`, `failure_frame`, old lifecycle formula | Section 8's `P/O/R`, global `X/Y`, checked admission; rename generic frame bound | 4 |
+| Earlier RFC's `InvocationFailed`, separate `InternalFailureBounds`, `commit_failure`, recovery advice or audit-sink proposal | Delete from current design/examples if present; no production replacement parallel path | 4 |
+| Superseded v6/v4 descriptors, fixtures and examples | Current v7/v5 baseline plus hostile old-format rejection cases, no reader/migration | 4 |
+
+**Keep:** intrinsic classifiers, static handlers, Operation defaults and State overrides, root maps,
+retry/restart authorization, checkpoints/barriers, exact evidence binding, Store atomicity,
+Indeterminate acknowledgement, redacted surface policy and keystore ownership. They carry necessary
+contracts. This simplification removes duplicate representations and responsibility paths, not the
+checks enforcing those contracts.
+
+## 18. Handoff completion and material uncertainties
+
+The engineer implements this target, rather than selecting a different storage or recovery model.
+Each commit closes its changed boundary and includes tests/docs; section 13 fixes ordering and
+section 17 fixes deletion scope. Before final CI, reconcile every audit row and A1–A25 with concrete
+consuming evidence and report the complexity changes specified in section 12. No placeholder unit
+error, compatibility constructor, or second commit path may remain to make sequencing easier.
+
+### Material uncertainties
+
+No unresolved architecture or ownership choice remains. The following are implementation validation
+risks with fixed responses, not permission to weaken the target:
+
+| Assumption | Why uncertain | Consequence if wrong | Validation / required response |
 | --- | --- | --- | --- |
-| Each execution-data/context schema captures the required facts without redundant or silently excluded fields | The exact field inventory differs across State modes, accumulated contexts, and adapters | A uniform API can still commit an incomplete audit record or exceed supported bounds | Review each schema's inclusion/exclusion table; test canonical round trips, full error chains, context pairing, and Effect authority |
-| The proposed causal vocabulary and 32-layer/8-KiB bound cover ordinary exposed chains | Concrete client source APIs vary; some hide causes internally | Ordinary failures may have explicitly partial diagnostics, or the representation may need a reviewed revision | Inject nested RPC, SQLx, OS, parser, signer, and task failures; inspect each first capture point and assert omission status |
-| A common finite lifecycle can replace internal-only bounds without excessive authoring knobs | Failure/decision splitting introduces pending recovery; repeated Faults and explicit internal resumes do not consume semantic retry budgets | Missing counters permit unbounded growth, while excessive reservation can reject supported workloads | Complete the authoring/counter design and checked formulas; test zero-retry Stop, repeated Faults, internal reentry, full object closure, and maximum workloads |
-| A unified outcome plus recovery result reduces implementation complexity overall | The original cause commits earlier, but the fold gains an unresolved recovery position and settlement interpretation must remain distinct | Superficial unification can leave duplicate paths or permit Effect reexecution | Prototype the sole-fold transition table and deletion scope; test each crash boundary and settled-evidence reentry before freezing the API |
-| Admission correctly bounds the full retained data and execution avoids unnecessary in-memory copies | Current State methods consume input, accumulated contexts grow, and recovery adds an append | Incorrect sizing can reject a supported workload or exhaust reserved capacity; naive cloning can increase memory use | Validate qualified ownership and complete frame/run arithmetic against maximum-context success, failure, and recovery Fault paths; do not treat lower storage cost as an acceptance criterion |
-| Acquisition-time PostgreSQL gates have acceptable cost | Checks move from connection creation to each owned acquisition | More catalog/validation IO can affect latency or throughput | Measure the focused managed Store/custody scenarios and compare gate work; any optimization must preserve same-connection validation and causal attribution |
+| Shipping maximum data and descriptors fit existing ceilings with `X=8, Y=8` | Exact generated schemas and closure grow, and current context descriptors approach the cap | Supported Program admission fails | Measure concrete maximum schemas/frames and checked formulas in commit 4; simplify redundant schema composition within current contracts. Report a blocker if supported workloads cannot fit; do not silently raise ceilings or remove evidence |
+| Reviewed causal extraction covers exposed client layers | Client APIs can hide attempts or expose only opaque errors | A record contains explicitly partial provenance | Inject failures at each owner; assert retained fields and omission markers. Hidden evidence is an explicit limit, never fabricated |
+| Same-connection acquisition gates have acceptable operational cost | Catalog checks occur at owned acquisition rather than only connection creation | Higher latency or query count | Exercise managed Store and custody scenarios; report measurements. Any later optimization must preserve gate attribution and authority |
+| The resulting implementation reduces complexity overall | New recovery cursors and audit data add necessary code | LOC can grow despite removing old paths | Report deleted/added production LOC, public types, callbacks and change sites separately; explain additions and remove duplicated owners. Do not weaken audit coverage to meet a line quota |
 
-Unavailable upstream evidence and impossibility of recording through a failed Store are explicit
-contract limits, not uncertainties to resolve by adding an independent sink.
+Storage cost is accepted. Store failure, pre-admission errors, unacknowledged physical attempts, and
+unavailable upstream evidence remain section 10's explicit limits.
