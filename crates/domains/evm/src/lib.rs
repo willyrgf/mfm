@@ -2323,7 +2323,7 @@ fn valid_public_text(value: &str, maximum: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, EntryPointId, SchemaId};
+    use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, SchemaId};
 
     use super::*;
 
