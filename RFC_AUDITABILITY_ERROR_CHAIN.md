@@ -18,17 +18,27 @@ Every first-party adapter and boundary conversion must preserve the available ca
 an error. Classification, recovery decisions, and public error codes are projections of that error;
 none may replace its cause.
 
-Run failure records belong in the existing Journal and State commit Store. Operational failures
-continue to use their existing records, enriched with the causes currently discarded upstream.
-Internal failures during execution of an admitted State gain a bounded Journal record that retains
-the failure while preserving the State cursor and any pending Effect command.
+Commit a State's outcome before handing control to its successor. On success, that successor is
+the next State; on a recoverable-path failure, it is the selected recovery handler. Commit the
+handler's authorized decision before executing its recovery action. Both records belong in the
+existing Journal and State commit Store.
+
+Internal execution errors are a distinct failure case in the State outcome, not an independent
+audit event. They remain internal and do not acquire automatic recovery permission merely because
+their cause is now durable.
+
+```text
+State -> success -> commit outcome -> next State
+State -> failure -> commit outcome -> recovery evaluation
+                                      -> commit decision -> authorized action
+```
 
 The proposed implementation has three responsibilities:
 
 1. The owner of an IO or validation boundary captures its available, reviewed causal facts once.
 2. Typed error wrappers preserve those facts and add their own operation context where needed.
-3. Runtime records eligible run failures through Journal and Store, and explicitly reports whether
-   recording succeeded, failed, or has ambiguous acknowledgement.
+3. Runtime commits each eligible outcome before control passes onward, and explicitly reports
+   whether recording succeeded, failed, or has ambiguous acknowledgement.
 
 There is no independent audit store, spool, raw diagnostic archive, generic logger, or classifier
 registry. States remain deterministic and perform no ambient IO.
@@ -40,8 +50,9 @@ registry. States remain deterministic and perform no ambient IO.
 | What does “whole error stack” mean? | Available causal layers and reviewed diagnostic facts, with explicit accounting for missing details. It is not a Rust backtrace or a promise of byte-exact raw evidence. |
 | What happens to secret-bearing diagnostics? | Withhold them explicitly. Error preservation does not authorize storing credentials or arbitrary provider/client text. |
 | Where are run errors stored? | In the existing State commit history, through Journal and the existing Store. |
-| Are internal State failures audited? | Yes, when execution has a valid admitted cursor and the Store can acknowledge the record. |
-| Does an internal failure advance execution? | No. Its record advances the history head but preserves execution position, input, visit, command, and EffectId. |
+| Are internal State failures audited? | Yes, as State failure outcomes when execution has a valid admitted cursor and the Store can acknowledge the record. |
+| Does an internal failure advance execution? | No. Its outcome advances the history head while retaining execution identity and the actual Effect phase, including any accepted settlement. |
+| When does the handler run? | After the original failure outcome is known to be committed. Its decision must commit before any recovery action. |
 | Does richer evidence enable new retries? | No. Classification remains error-owned and recovery remains Runtime-authorized. This cutover preserves current classification semantics. |
 | Can every failure always be persisted? | No. Missing admission, invalid history, unavailable storage, exhausted capacity, and interruption have explicit limits. |
 
@@ -244,16 +255,18 @@ HTTP / RPC ingress
          causes: [HttpStatus(200), RpcError(-32000)],
          omissions: message/data withheld
        }
-    -> Balance State's existing adapter context
-    -> intrinsic classify() -> Retryable
+    -> commit Read failure outcome containing the original error and intent
+    -> Balance State's adapter context and intrinsic classification
     -> selected static handler -> Stop or requested recovery
     -> Runtime authorization
-    -> existing Read failure frame containing original error + context + decision
+    -> commit recovery result containing context + authorized decision
+    -> execute the authorized action
 ```
 
-The State does not perform IO or rebuild the source. Its existing adapter-context callback adds
-the checked balance intent and collection/source position. If that callback fails, both the
-adapter cause and the internal callback error must survive through the internal-failure path.
+The State does not perform IO or rebuild the source. Its adapter-context callback runs during
+recovery evaluation, after the original cause is durable, and adds the checked balance intent and
+collection/source position. If that callback fails, record a recovery fault linked to the committed
+failure; the original adapter error is already retained.
 
 The classifier remains a pure projection:
 
@@ -300,152 +313,228 @@ Case-by-case classification refinements can be reviewed against the richer evide
 must revise the relevant exact error contract if semantics change. This RFC adds no `RecoveryAdvice`
 and no provider-message-based retry rule.
 
-## 7. Auditability in the existing State commit Store
+## 7. Commit outcomes before handing off control
 
-### 7.1 Operational failures
+### 7.1 One outcome boundary
 
-Enrich the original values already stored by Pure/Read failure conclusions and pending Effect
-failure records. Do not add a second audit append for the same operational outcome. The original
-cause, State context, and authorized decision belong in their existing atomic commit.
+The rule is: finish the current execution step, commit its outcome, then hand control to its
+successor. “Transition” includes handing a failure to recovery; it does not only mean incrementing
+the State index.
 
-Classification and handler execution remain hot-path behavior. Cold reconstruction uses retained
-values and committed decisions rather than reclassifying or rerunning a handler.
-
-### 7.2 Internal State execution failures
-
-Add one Journal record, conceptually:
+The conceptual outcome is:
 
 ```rust
-InvocationFailed {
+StateOutcomeRecorded {
     position: ExecutionPosition,
-    diagnostic: QualifiedInternalFailure,
-    original: Option<OriginalFailure>,
+    execution: ModeOutcome,
 }
 
-enum OriginalFailure {
-    Domain { error: QualifiedValue },
-    Adapter {
-        error: QualifiedValue,
-        // Present only if contextualization already completed successfully.
-        state_context: Option<QualifiedValue>,
+// Preserve mode-specific evidence and legal combinations in tagged variants.
+// This is not a bag of optional intent, command, evidence, and error fields.
+enum StateResult {
+    Success { output: QualifiedValue },
+    DomainFailure { original: QualifiedValue },
+    AdapterFailure { original: QualifiedValue },
+    InternalFailure { diagnostic: QualifiedInternalFailure },
+}
+```
+
+`ModeOutcome` retains the facts appropriate to Pure, Read, or Effect execution: the qualified Read
+intent and accepted evidence when present, and the actual prepared/pending/settled Effect phase.
+Adapter failures do not fabricate evidence. Internal failures retain available checked source
+facts without masquerading as domain outcomes.
+
+Journal owns the wire and complete object closure. Runtime's existing sole fold validates mode,
+position, exact contracts, phase, and command authority. The common outcome boundary must replace
+mode-specific duplicated recovery plumbing, not introduce a parallel event stream beside it.
+
+A successful outcome is enough to advance to the next State or establish terminal success; no
+separate success-transition frame is necessary. A domain/adapter failure outcome instead enters
+`AwaitingRecovery`, retaining the original failure, input, execution position, and mode facts. It
+contains no speculative handler decision and spends no recovery allowance.
+
+Qualification necessary to construct a valid outcome still happens before its append. Commit
+before classification, State adapter-context construction, handler execution, root failure mapping,
+and report construction so these later callbacks cannot erase an already obtained original cause.
+If the cause itself cannot qualify, the bounded internal outcome may account for the rejected
+original explicitly; qualification failure never permits storing invalid or secret-bearing bytes.
+
+### 7.2 Recovery is a durable successor step
+
+For a committed domain or adapter failure, Runtime evaluates the selected recovery policy from
+that retained outcome. This work includes State context, intrinsic classification, the static
+handler, authorization, and any root mapping needed for terminal reporting.
+
+```rust
+RecoveryRecorded {
+    failed_outcome_sequence: u64,
+    result: RecoveryResult,
+}
+
+enum RecoveryResult {
+    Decision {
+        // Typed variant retains context/root only where applicable.
+        authorized: AuthorizedRecovery,
+    },
+    Fault {
+        stage: RecoveryStage,
+        diagnostic: QualifiedInternalFailure,
+        // Retain State context only if it was already successfully constructed.
+        context: RetainedRecoveryContext,
     },
 }
 ```
 
-The tagged original keeps State context attached to an adapter cause rather than permitting an
-unrelated standalone context. Program owns the exact standalone internal diagnostic value contract;
-Journal owns the frame wire and object closure. The frame carries all referenced objects locally.
+The reference must identify the one unresolved failure at this cursor in the same qualified run.
+This is an explicit record link, not arbitrary cross-history object lookup. Each frame still has
+complete local closure for its own referenced value objects.
 
-This record is permitted only during hot execution against an already admitted and qualified
-nonterminal cursor. It covers preparation, interpretation, adapter invariants, hot qualification,
-and recovery callback failures. It does not require inventing a domain failure for an implementation
-error.
+A Decision records the final authorized Retry, Restart, or Stop, with applicable context/root facts.
+Only known insertion can spend recovery allowance, change a visit/checkpoint, establish a terminal
+failure, or release a recovery action. Retain existing phase restrictions and Stop semantics:
+Stop for a pending Effect ends the invocation and keeps its command; it does not manufacture
+settlement. A pending-Effect Retry spends the existing allowance and yields with the same command.
 
-On known insertion:
+A Fault records an internal failure of recovery evaluation and its stage. The primary error remains
+in the linked State outcome. A Fault ends the invocation, keeps recovery unresolved, and is never
+classified or recursively handed to the same handler. A later explicit resume may reevaluate that
+unresolved recovery while admitted capacity remains. It does not execute the failed State again.
 
-- the head and sequence advance;
-- State position, visit, current input, and recovery counters remain unchanged;
-- any pending command and EffectId remain authoritative;
-- the invocation ends with its internal error and the newly qualified observation;
-- no classifier or handler runs for the internal failure.
+If encoding or appending the recovery result fails, return the causal failure and recording status.
+Do not attempt to recover the failed recording through another recovery invocation.
 
-The applicable pending structure is:
+### 7.3 Internal State outcomes
+
+Preparation, interpretation, adapter invariant, and hot qualification errors use the internal case
+of the State outcome. Recording them preserves execution identity and ends the invocation. There
+is no user-handler call for an internal execution failure, no invented `Permanent` domain error,
+and no automatic Retry/Restart. Explicit resume can make another attempt only where the actual
+execution phase and existing authority permit it.
+
+This replaces the separate internal audit event and `latest_internal_failure` side channel from
+the earlier proposal. Internal outcomes participate in the ordinary run history and outcome view.
+They do not silently become terminal domain failure reports, nor do they advance to the next State.
+
+### 7.4 Effect authority is a prerequisite, not a success transition
+
+The command still commits before external IO. That commit authorizes entry to the Effect adapter;
+a commit after the adapter returns cannot replace it.
 
 ```text
-EffectPrepared
-    -> (EffectAdapterFailed | InvocationFailed)*
-    -> EffectConcluded
+commit command + EffectId
+    -> execute Effect adapter
+    -> commit State outcome
+        -> success: advance
+        -> operational failure: evaluate recovery, commit decision, act
+        -> internal failure: end invocation with retained authority
 ```
 
-An internal record can also occur while a Pure/Read State or an unprepared Effect is Runnable.
-Journal must qualify adjacency across internal records without mistaking the latest physical frame
-for a different execution phase. Runtime's existing sole fold validates cursor position, counters,
-and pending authority. There is no second diagnostic reducer.
+An actual `Pending` response remains an unchanged polling result. It is neither a failed State nor
+permission to append invented evidence.
 
-### 7.3 Secondary failures retain the primary cause
+Distinguish an unresolved command from accepted settlement. If accepted settlement evidence is
+followed by a domain or internal interpretation failure, the outcome must retain that evidence
+and the settled phase. A later recovery fault cannot turn it back into an unexecuted command.
 
-Suppose the provider returns a qualified error and `adapter_context` then fails:
+After a committed settled outcome, never reenter the Effect adapter to recreate the observation.
+A settled domain failure permits only the existing authorized terminal handling. If internal
+interpretation needs a later explicit attempt, use the retained evidence to reevaluate deterministic
+interpretation, not another external execution. The EffectId and command remain correlated audit
+facts, not fresh execution authority.
 
-```text
-provider failure P
-    -> contextualizer failure C
-    -> InvocationFailed { diagnostic: C, original: Adapter(P, no context) }
-```
+These distinctions belong in tagged mode outcomes and the sole Runtime fold. A generic `Failure`
+without execution phase would be smaller syntactically but would lose a necessary safety contract.
 
-If context succeeds but the handler fails, retain P and that context alongside the handler failure.
-Do not rerun a failed contextualizer merely to fill in the record.
+### 7.5 Crash boundaries and cold reconstruction
 
-If the original value cannot qualify, store the bounded qualification failure and explicit omission
-status when that diagnostic can be recorded. Retain safe primary evidence in the returned failure
-where representable. Do not bypass secret validation, frame limits, or type qualification to save
-the rejected value.
+| Last known committed point | Read-only reconstruction | Next explicit progression |
+| --- | --- | --- |
+| Before the State outcome | Restore the preceding authorized execution position | Execute according to that position; a physical attempt may have occurred without a committed outcome |
+| Success outcome | Restore the next State or terminal success | Execute only the next authorized State |
+| Domain/adapter failure outcome | Restore `AwaitingRecovery` and the original error | Evaluate recovery; do not repeat the failed State/adapter |
+| Recovery Fault | Restore the original failure and latest recovery fault | Reevaluate unresolved recovery within admitted bounds; no State/adapter reentry |
+| Recovery Decision | Restore the exact authorized action and counters | Follow that action without deciding again |
+| Internal State outcome | Restore the internal failure and retained execution facts | Only explicit phase-permitted reentry; reuse settled evidence instead of rerunning an Effect adapter |
 
-### 7.4 Cold observations
+Read-only reconstruction never invokes contextualizers, classifiers, handlers, adapters, or failed
+interpretation callbacks. Progress after a committed failure but before a committed decision is
+new recovery work, not replay of a previously decided action. A crash before decision insertion can
+therefore cause deterministic recovery evaluation to run again; committed decisions are final.
 
-Add a top-level `RunView.latest_internal_failure` containing the committed diagnostic, any retained
-original, its execution position, and its Journal sequence. Preserve it after later progress,
-including success, as historical evidence. It must not change the current State status to Failed.
+A checkpoint restart creates a new authorized visit and does not erase the failed outcome. Pending
+Effect retries retain the same command and EffectId. Earlier outcomes and recovery results remain
+available in Journal after later success.
 
-All earlier records remain in Journal. Cold reconstruction does not rerun failed callbacks. Existing
-pending-command qualification still applies; this RFC does not remove command-identity checks.
-Read-only run inspection neither appends diagnostics nor consumes an audit allowance.
+Expose pending recovery, the original cause, and any recovery fault through the ordinary qualified
+run view. Historical failure evidence must be labeled with position and sequence so it is not
+mistaken for the current terminal status. Do not add a second internal-only observation mechanism.
 
-### 7.5 Exact current contracts that change
+### 7.6 Current contracts and proposed machinery to replace
 
-The current design says internal execution failures leave the head unchanged. This RFC changes
-that to cursor preservation with a new failure frame when recording succeeds.
+The current implementation fuses failure and decision into one frame. Replace the nested decision
+parts of `DomainConclusion`, `ReadConclusion::AdapterFailed`, and pending Effect failure records
+with a committed failure outcome and its linked recovery result. Success needs no second append.
+
+The old assertion that cold reconstruction never executes a handler must distinguish read-only
+folding from progression of a newly exposed `AwaitingRecovery` cursor. The former stays callback-
+free; the latter executes only recovery that has no committed decision yet.
 
 The adapter rule in `AGENTS.md` currently says local mismatch has “no provider call or append.”
-Implementation must revise that rule: no provider call, operational conclusion, or fabricated
-integrity evidence is allowed, but an internal audit record is permitted for a qualified admitted
-cursor. Merely adding the new frame while leaving this instruction unchanged is an incomplete
-cutover.
+Implementation must revise it to permit an internal State outcome for a qualified admitted cursor,
+while still forbidding provider entry and fabricated external evidence. The current internal-error
+no-append contract changes accordingly.
 
-## 8. Finite capacity and the cost of durable internal failures
+Delete the earlier RFC's proposed `InvocationFailed`, `InternalFailureBounds`, separate internal
+counter, and `RunView.latest_internal_failure` design rather than retaining it alongside outcomes.
+The unavoidable addition is the explicit recovery-pending cursor and its result, not a parallel
+audit pipeline. This proposal trades an additional commit on recovery paths for an original failure
+that is durable before policy code runs.
 
-Add explicit positive authoring bounds:
+## 8. Bound execution and recovery together
 
-```rust
-InternalFailureBounds::new(max_records, max_complete_frame_bytes)
-```
+Outcome-first storage does not remove finite-history accounting. A failure and its recovery decision
+now need two frames, and a recovery Fault can precede a later successful decision. Repeated explicit
+internal attempts and stopped pending Effects also need finite admitted capacity.
 
-`ProgramLimits` must include these bounds. There is no hidden unlimited diagnostic allowance.
-The complete frame bound includes the internal diagnostic, optional original/context objects,
-references, and envelope. An 8 KiB causal-data bound alone does not bound that frame.
-
-If the existing admission estimate is F frames and B bytes, reserve:
-
-```text
-total_frames = F + max_records
-total_bytes  = B + max_records * max_complete_frame_bytes
-```
-
-The additional count is Program-wide, so it is not multiplied again by recovery segments. Runtime
-reconstructs usage from committed internal records, separately from recovery decisions and pending
-operational failure counts. All arithmetic and resulting limits are checked against existing
-Journal/run ceilings.
-
-The proposed shipping Portfolio allowance is eight records, with a caller-derived complete bound:
+Account for both the State execution and its possible recovery successor before entering work:
 
 ```text
-maximum authored complete State-frame bound
-    + 8 KiB diagnostic payload
-    + 64 KiB additional envelope/closure allowance
+State execution slot:
+    complete outcome frame
+    + reserved recovery-result frame when the outcome may need recovery
+
+Further recovery-evaluation slot:
+    one complete Decision or Fault frame
 ```
 
-This derivation assumes the retained original/context closure fits its applicable ordinary failure
-bound. Domain bound helpers must account for richer errors, and tests must prove that assumption
-for every supported maximum workload. Runtime checks actual candidate sizes. Generic authors
-supply explicit conservative bounds rather than relying on this Portfolio-specific choice.
+An internal State outcome consumes its ordinary execution slot. A recovery Fault consumes a recovery
+evaluation slot. A later explicit attempt cannot reuse already consumed capacity. A failure that
+is permitted under zero retry allowance still needs room for its outcome and terminal Stop result.
 
-Before a new hot execution entry, Runtime requires room for another internal failure record.
-Exhaustion prevents execution, including pending Effect polling. It leaves the acknowledged history
-and command intact. Success or settlement capacity cannot be consumed by diagnostic overflow.
+Replace the former internal-only eight-record allowance with complete lifecycle accounting. Retain
+semantic retry/restart budgets independently: storage capacity does not authorize recovery, and a
+Fault does not spend a successful recovery decision. Existing pending-Effect attempt limits must be
+reconciled with the common accounting rather than counted twice or used as an internal-error budget.
 
-This has a deliberate liveness cost: a pending Effect can remain unresolved after audit capacity
-is exhausted. Explicit resume cannot enlarge an immutable Program's allowance. This is the same
-fundamental finite-history tradeoff already present for pending operational failure records; the
-new allowance must be sized and tested honestly.
+The selected direction is positive finite bounds for complete State outcomes and recovery results,
+including full local object closure. Do not use an 8 KiB diagnostic bound as a frame bound or blindly
+double existing byte totals: success remains one outcome, while failure paths include potentially
+large originals, context, roots, and reports across two commits.
+
+Reserve settlement capacity and the result capacity required by already admitted work. Capacity
+checks happen before execution or recovery evaluation, not only after an error is produced. An
+unresolved committed failure must not consume the slot reserved for its own recovery result simply
+because its State outcome was appended first.
+
+Checked admission must include first attempts, recovery-authorized State visits, pending-Effect
+attempts, explicit internal reentries, and recovery Fault reevaluations against current Journal/run
+ceilings. Exhaustion ends progression before further relevant work, preserves all acknowledged
+facts, and can leave an Effect unresolved. Explicit resume cannot enlarge the immutable Program.
+
+The exact authoring API, shared attempt counters, and shipping numeric allowances need review under
+this revised lifecycle. They are a material handoff item, not permission to preserve the old
+internal-only allowance or introduce unlimited error records. Section 15 and the uncertainty table
+make that remaining work explicit.
 
 ## 9. When recording fails or another caller wins
 
@@ -473,8 +562,9 @@ optional errors. There is no recursive `RuntimeError` audit tree.
 | Definite rejection | Retain primary plus recording cause; identify the candidate as not committed. |
 | Ambiguous acknowledgement | Preserve Indeterminate, recovery identity, and the last qualified observation. Do not assert insertion or noninsertion. |
 | Another exact-head candidate wins | Reload the winning history; return this caller's original cause as uncommitted evidence alongside that observation. |
-| Candidate construction exceeds bounds | Retain the primary and size/qualification cause; do not claim the original was recorded. A bounded internal diagnostic is eligible only if it can itself be prepared safely. |
-| Internal diagnostic construction/append fails | Return available primary and secondary evidence. Do not recursively attempt another diagnostic record. |
+| State outcome construction exceeds bounds | Retain the primary and size/qualification cause; do not claim the original was recorded. A bounded internal outcome is eligible only if it can itself be prepared safely. |
+| Recovery construction fails | The original failure is already durable. Record a bounded recovery Fault when safely representable and within reserved capacity. |
+| Internal outcome or recovery Fault construction/append fails | Return available primary and secondary evidence. Do not recursively attempt another error record. |
 
 A losing failed candidate must not reenter the provider, silently rebase its append, or return only
 the winning view and discard its own cause. This explicitly changes that losing-failure response;
@@ -484,8 +574,8 @@ the winner's qualified history remains authoritative.
 
 | Failure boundary | Persistence contract |
 | --- | --- |
-| Operational State/adapter failure with an admitted cursor | Existing failure commit retains its enriched cause, context, and decision. |
-| Internal hot execution failure with an admitted cursor | Proposed internal record, subject to qualification, capacity, and known insertion. |
+| Domain/adapter failure with an admitted cursor | State outcome commits the original before recovery evaluation; its linked recovery result retains context and authorized decision or fault. |
+| Internal hot execution failure with an admitted cursor | Internal State outcome, subject to qualification, capacity, and known insertion; no user-handler recovery. |
 | Before genesis, including deployment and bootstrap | Return reviewed causal evidence. There is no admitted State history to append to. |
 | Store load failure or invalid/unqualified history | Return causal evidence. Do not append using an untrusted or unavailable head. |
 | Store append failure | Return primary and persistence causes, preserving definite/indeterminate semantics. Do not recursively audit through that failed Store. |
@@ -577,8 +667,9 @@ The implementation must remove the old lossy plumbing rather than place wrappers
 | One checked causal-data contract | Duplicated ad hoc capture, omission, and bounds conventions across ports. |
 | Richer existing typed errors | Unit replacement helpers and repeated loss of source categories. |
 | Owned PostgreSQL acquisition gates | Callback marker routing and the false assumption that callback errors propagate. |
-| One internal Journal record | The missing durable representation of internal State execution failure. |
-| One Program-wide finite allowance | Unaccounted diagnostic storage growth. |
+| One State outcome boundary | Separate internal audit events and pre-commit failure/context/decision assembly. |
+| One linked recovery result and pending cursor | Fused decision fields and loss of an original cause when policy work fails. |
+| Complete execution/recovery lifecycle bounds | Internal-only audit allowances and unaccounted repeat evaluation growth. |
 | Explicit recording outcome | Ambiguous conflation of the primary failure, audit failure, and winning history. |
 
 Do not add a universal exception bag, arbitrary extension fields, error registry, per-State handler
@@ -592,8 +683,8 @@ compressing code or weakening tests does not count as simplification.
 
 ## 13. Contract cutover and logical commits
 
-Use one current contract. Program v6 becomes v7 for the explicit internal bounds, and Journal frame
-v4 becomes v5 for the new record/adjacency. Revise affected exact error schemas and implementation
+Use one current contract. Program v6 becomes v7 for the revised lifecycle bounds, and Journal frame
+v4 becomes v5 for the outcome/recovery records and adjacency. Revise affected exact error schemas and implementation
 identities where their ABI or classification semantics change. Do not bump an unrelated envelope
 merely because a nested exact error contract changes.
 
@@ -609,8 +700,8 @@ The proposed logical sequence is:
    acquisition gates, provisioning, and all affected consumers.
 3. **`preserve signer and local io error chains`**: keystore/signing, memory, deployment, application,
    and transport propagation with strengthened secret tests.
-4. **`audit internal failures in run histories`**: inseparable Program/Journal/Runtime wire, bounds,
-   fold, invocation, observation, and client-contract changes.
+4. **`commit state outcomes before recovery`**: inseparable Program/Journal/Runtime outcome and
+   recovery wire, lifecycle bounds, fold, invocation, observation, and client-contract changes.
 5. **`complete adapter error audit validation`**: remaining funding-helper coverage, inventory
    reconciliation, and final cross-boundary evidence.
 
@@ -626,21 +717,23 @@ existing recovery RFC remains the rationale for intrinsic classification and sta
 
 | ID | Evidence required |
 | --- | --- |
-| A1 | Two RPC errors with equal classifications retain distinguishable numeric codes and reviewed facts through the State's existing failure commit and cold reconstruction. |
+| A1 | Two RPC errors with equal classifications retain distinguishable numeric codes and reviewed facts through the committed State outcome and cold reconstruction before any handler runs. |
 | A2 | HTTP status, send/body timeout, parser location/category, malformed field, and response bound remain distinguishable; a secondary body failure does not erase status. |
 | A3 | Provider/custody/signer causes retain transaction operation context through all relevant adapters; classification remains unchanged unless separately reviewed and versioned. |
 | A4 | SQLx connect/query/decode/COMMIT failures retain reviewed sources and exact definite/indeterminate behavior. Acquisition-gate failures reach the caller without protected IO. |
 | A5 | Thread/channel/owner/crypto and memory/task failures remain distinguishable. Synthetic secret sentinels are absent from canonical data, formatting, and client responses. |
 | A6 | Constructor and deserializer tests enforce causal bounds and explicit withheld/opaque/unavailable/bounded metadata. No arbitrary diagnostic text path is accepted. |
-| A7 | Internal failures at Runnable and EffectPending positions commit diagnostics while preserving position, visit, input, command, EffectId, and recovery counters. |
-| A8 | Contextualizer/handler failures retain a previously acquired original incident and any successfully qualified context; missing context is not recomputed. |
-| A9 | Hot/cold views agree on committed internal evidence, including after later success. Read-only inspection performs no append and invokes no failed callback. |
+| A7 | Success commits before successor entry; domain/adapter failure commits before any recovery callback. Internal State outcomes preserve execution identity and invoke no user handler. |
+| A8 | Contextualizer/classifier/handler/root-mapping failures retain the already committed original and record a linked recovery Fault, with available context and no recursive recovery. |
+| A9 | Every outcome/decision crash boundary has equivalent cold observation and correct resumed work. Read-only inspection runs no callbacks; progression reevaluates only unresolved recovery. |
 | A10 | Rejection, append ambiguity, and exact-head conflict preserve primary and secondary causes with accurate recording status. A losing failure returns the winning observation without reentering the provider. |
-| A11 | Maximum supported workloads fit revised bounds; overflow is checked, internal exhaustion stops execution before IO, and settlement reservation remains intact. |
+| A11 | Maximum workloads fit complete outcome/recovery bounds; zero-retry failures still have Stop capacity, repeated Faults consume finite slots, exhaustion prevents work, and settlement reservation remains intact. |
 | A12 | Oversized/unqualifiable originals and failed diagnostic writes never produce a false preservation claim or recursive audit loop. |
 | A13 | Pre-admission, invalid-history, unavailable-Store, cancellation, and postcommit delivery scenarios obey the same-Store limits. Expected absence and Pending remain valid outcomes. |
 | A14 | CLI/REST/library callers retain their reviewed public dispositions while receiving the causal and audit details permitted by their existing surface. |
 | A15 | Every first lossy conversion in the audit inventory is traced to its replacement and consuming evidence. Remaining upstream visibility limits are explicit rather than marked fixed. |
+| A16 | A committed settled Effect followed by interpretation or recovery failure never reenters its adapter; any permitted interpretation reentry uses retained evidence. |
+| A17 | Decision ambiguity/conflict cannot spend a budget twice, repeat a completed handler decision, or dispatch an action before known insertion. |
 
 Use boundary-focused tests through actual consuming APIs, not a second model of the error pipeline.
 Use synthetic injected failures and fake servers; do not collect real secret-bearing diagnostics
@@ -663,9 +756,12 @@ before implementation:
 - Does one shared causal-data contract remove more duplication than it creates in public types?
 - Are local operation enums and typed wrapping sufficient to preserve useful context without
   copying it into every source layer?
-- Is the internal record the smallest change that delivers the agreed same-Store audit guarantee?
-- Are eight records and the proposed complete-frame derivation appropriate for shipping workloads,
-  given that exhaustion intentionally blocks pending settlement polling?
+- Does the outcome/recovery representation remove the fused and internal-only paths completely,
+  with fewer responsibilities and future change sites despite a new recovery-pending cursor?
+- What is the smallest finite authoring contract that bounds execution and recovery evaluation,
+  including zero-retry Stops, explicit internal reentry, and repeated recovery Faults?
+- Are the extra failure-path commit and callback reevaluation after an interrupted recovery step
+  acceptable for shipping workloads?
 - Can acquisition-time PostgreSQL checks preserve the existing security posture at acceptable cost?
 - Are withholding and unavailable-evidence markers clear enough that audit consumers cannot mistake
   them for retained original messages or a record of every physical attempt?
@@ -675,14 +771,16 @@ engineer to choose a different architecture silently.
 
 ## Material uncertainties
 
-No architecture or custody choice remains unresolved: the proposal uses secret-free causal data,
-the existing State commit Store, and internal failure records. The following implementation
-assumptions require evidence before this RFC is treated as a completed handoff:
+The selected protocol is commit outcome, then hand off control; commit recovery decision, then
+execute its authorized action. Custody remains secret-free and uses the existing State commit
+Store. The following assumptions and remaining lifecycle design work require evidence before this
+RFC is treated as a completed handoff:
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
 | The proposed causal vocabulary and 32-layer/8-KiB bound cover ordinary exposed chains | Concrete client source APIs vary; some hide causes internally | Ordinary failures may have explicitly partial diagnostics, or the representation may need a reviewed revision | Inject nested RPC, SQLx, OS, parser, signer, and task failures; inspect each first capture point and assert omission status |
-| Shipping internal frames fit the proposed eight-record allowance and derived complete bound | Original/context closure varies by State and caller continuation; richer schemas add bytes | Admission can reject a supported workload or recording can fail on a valid original | Prove revised bound helpers against maximum supported inputs, full original/context closure, and candidate frame sizes |
+| A common finite lifecycle can replace internal-only bounds without excessive authoring knobs | Failure/decision splitting introduces pending recovery; repeated Faults and explicit internal resumes do not consume semantic retry budgets | Missing counters permit unbounded growth, while excessive reservation can reject supported workloads | Complete the authoring/counter design and checked formulas; test zero-retry Stop, repeated Faults, internal reentry, full object closure, and maximum workloads |
+| A unified outcome plus recovery result reduces implementation complexity overall | The original cause commits earlier, but the fold gains an unresolved recovery position and settlement interpretation must remain distinct | Superficial unification can leave duplicate paths or permit Effect reexecution | Prototype the sole-fold transition table and deletion scope; test each crash boundary and settled-evidence reentry before freezing the API |
 | Acquisition-time PostgreSQL gates have acceptable cost | Checks move from connection creation to each owned acquisition | More catalog/validation IO can affect latency or throughput | Measure the focused managed Store/custody scenarios and compare gate work; any optimization must preserve same-connection validation and causal attribution |
 
 Unavailable upstream evidence and impossibility of recording through a failed Store are explicit
