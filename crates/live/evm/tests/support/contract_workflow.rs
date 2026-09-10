@@ -96,7 +96,6 @@ impl<'de> Deserialize<'de> for FixtureReport {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FixtureFailureReason {
-    PriorDeploymentReverted,
     DeploymentReverted,
     ConfigurationReverted,
     ObservationFailed(AnchoredContractCallFailureReason),
@@ -289,15 +288,6 @@ impl FixtureFailure {
             plans,
             progress,
         })
-    }
-    pub fn request(&self) -> &FixtureRequest {
-        &self.request
-    }
-    pub(super) fn plans(&self) -> &FailurePlans<CheckedCreatePlan> {
-        &self.plans
-    }
-    pub(super) fn progress(&self) -> &CreateProgress<CallProgress> {
-        &self.progress
     }
     pub fn reason(&self) -> FixtureFailureReason {
         self.progress.next.as_ref().map_or(

@@ -668,8 +668,3 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
 
     owner.shutdown().await.expect("keystore shutdown");
 }
-
-#[path = "support/accumulating_contract.rs"]
-mod accumulating_contract;
-#[path = "support/context_capacity.rs"]
-mod context_capacity;
