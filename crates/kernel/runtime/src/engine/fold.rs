@@ -6,7 +6,7 @@ use mfm_journal::{
     DomainConclusion, DomainDecision, EffectConclusion, JournalRecord, PendingDecision,
     ReadConclusion, RecoveryDecision, StopCode,
 };
-use mfm_program::{Execution, RecoveryUsage};
+use mfm_program::{Execution, ExecutionPhase, RecoveryUsage};
 
 use super::{derive_effect_id, qualify_journal_object};
 use crate::assembly::{ExecutableMode, ExecutableProgram, QualifiedValue};
@@ -355,31 +355,55 @@ impl FoldState {
             .declarations()
             .get(position.state.index())
             .ok_or(RuntimeError::InvalidHistory)?;
-        let usage = self.usage(position.state)?;
-        let valid = match reason {
-            StopCode::Requested | StopCode::CheckpointUnavailable => true,
-            StopCode::StateRetryExhausted => {
-                usage.state_retries >= declaration.allowances().retries()
-            }
-            StopCode::StateRestartExhausted => {
-                usage.state_restarts >= declaration.allowances().restarts()
-            }
-            StopCode::RunExhausted => {
-                usage.run_decisions >= executable.program.limits().max_recovery_decisions()
-            }
-            StopCode::PureRetry => matches!(declaration.execution(), Execution::Pure { .. }),
-            StopCode::EffectBarrier => self.barrier.is_some(),
-            StopCode::EffectSettled => matches!(declaration.execution(), Execution::Effect { .. }),
+        let phase = match declaration.execution() {
+            Execution::Pure { .. } => ExecutionPhase::Pure,
+            Execution::Read { .. } => ExecutionPhase::Read,
+            Execution::Effect { .. } => ExecutionPhase::EffectSettled,
         };
-        if !valid {
-            return Err(RuntimeError::InvalidHistory);
-        }
+        self.validate_stop(executable, position.state, reason, phase)?;
         self.cursor = Cursor::Failed(Failure {
             position,
             reason,
             cause,
         });
         Ok(())
+    }
+
+    fn validate_stop(
+        &self,
+        executable: &ExecutableProgram,
+        position: StatePosition,
+        reason: StopCode,
+        phase: ExecutionPhase,
+    ) -> Result<()> {
+        let declaration = executable
+            .program
+            .declarations()
+            .get(position.index())
+            .ok_or(RuntimeError::InvalidHistory)?;
+        let usage = self.usage(position)?;
+        let pending = phase == ExecutionPhase::EffectPending;
+        let valid = match reason {
+            StopCode::Requested => true,
+            StopCode::CheckpointUnavailable => !pending,
+            StopCode::StateRetryExhausted => {
+                usage.state_retries >= declaration.allowances().retries()
+            }
+            StopCode::StateRestartExhausted => {
+                !pending && usage.state_restarts >= declaration.allowances().restarts()
+            }
+            StopCode::RunExhausted => {
+                usage.run_decisions >= executable.program.limits().max_recovery_decisions()
+            }
+            StopCode::PureRetry => phase == ExecutionPhase::Pure,
+            StopCode::EffectBarrier => pending || self.barrier.is_some(),
+            StopCode::EffectSettled => phase == ExecutionPhase::EffectSettled,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(RuntimeError::InvalidHistory)
+        }
     }
 
     pub(super) fn apply(
@@ -541,28 +565,12 @@ impl FoldState {
                             .checked_add(1)
                             .ok_or(RuntimeError::InvalidHistory)?;
                     }
-                    PendingDecision::Stop { reason } => {
-                        let valid = match reason {
-                            StopCode::Requested | StopCode::EffectBarrier => true,
-                            StopCode::StateRetryExhausted => {
-                                self.usage(recorded.state)?.state_retries
-                                    >= executable.program.declarations()[recorded.state.index()]
-                                        .allowances()
-                                        .retries()
-                            }
-                            StopCode::RunExhausted => {
-                                self.decisions
-                                    >= executable.program.limits().max_recovery_decisions()
-                            }
-                            StopCode::StateRestartExhausted
-                            | StopCode::PureRetry
-                            | StopCode::CheckpointUnavailable
-                            | StopCode::EffectSettled => false,
-                        };
-                        if !valid {
-                            return Err(RuntimeError::InvalidHistory);
-                        }
-                    }
+                    PendingDecision::Stop { reason } => self.validate_stop(
+                        executable,
+                        recorded.state,
+                        reason,
+                        ExecutionPhase::EffectPending,
+                    )?,
                 }
                 let Cursor::EffectPending {
                     failures,

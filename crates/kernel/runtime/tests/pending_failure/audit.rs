@@ -425,64 +425,87 @@ async fn cancellation_at_failure_append_exposes_only_the_complete_committed_pref
 }
 
 #[tokio::test]
-async fn cold_fold_rejects_failure_position_mismatch_before_adapter_entry() {
-    let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-    builder.register_effect::<Execute, Submit>().unwrap();
-    builder.register_handler::<StandardRecovery>().unwrap();
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let seen = Arc::clone(&calls);
-    builder
-        .register_effect_adapter::<Submit, _, _>(Number { value: 1 }, move |_, _, _| {
-            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Box::pin(async { Ok(EffectAdapterOutcome::<Number>::Pending) })
-        })
-        .unwrap();
-    let runtime = Runtime::new(builder.finish(), store.clone());
-    let run = RunId::from_digest(DigestBytes::from_array([92; 32]));
-    let program = expand_program(
-        EntryPointId::new("mfm.test/mismatched-failure@1").unwrap(),
-        &StopFlow,
-        &Number { value: 9 },
-        ProgramLimits::new(0),
-    )
-    .unwrap();
-    let pending = runtime
-        .start(run.clone(), program, Number { value: 9 })
-        .await
-        .unwrap();
-    let RunViewState::EffectPending { position, .. } = pending.state() else {
-        panic!("prepared")
-    };
-    let mut wrong = *position;
-    wrong.visit = wrong.visit.checked_next().unwrap();
-    let (error, error_ref) =
-        mfm_values::canonicalize_mfm_value(&Cause::Timeout { deadline_ms: 5000 }).unwrap();
-    let (context, context_ref) = mfm_values::canonicalize_mfm_value(&Number { value: 9 }).unwrap();
-    let history =
-        JournalHistory::qualify(&run, store.load_run(&run).await.unwrap().unwrap()).unwrap();
-    let frame = history
-        .encode_effect_failure(
-            wrong,
-            mfm_journal::JournalObject::new(&error_ref, error.as_bytes()).unwrap(),
-            mfm_journal::JournalObject::new(&context_ref, context.as_bytes()).unwrap(),
-            PendingDecision::Stop {
-                reason: StopCode::Requested,
-            },
+async fn cold_fold_validates_pending_failure_position_and_stop_reasons() {
+    for (wrong_visit, reason, run_limit, valid) in [
+        (true, StopCode::Requested, 0, false),
+        (false, StopCode::Requested, 0, true),
+        (false, StopCode::EffectBarrier, 0, true),
+        (false, StopCode::StateRetryExhausted, 0, true),
+        (false, StopCode::RunExhausted, 0, true),
+        (false, StopCode::RunExhausted, 1, false),
+        (false, StopCode::StateRestartExhausted, 0, false),
+        (false, StopCode::PureRetry, 0, false),
+        (false, StopCode::CheckpointUnavailable, 0, false),
+        (false, StopCode::EffectSettled, 0, false),
+    ] {
+        let store = Arc::new(MemoryStore::new());
+        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
+        builder.register_effect::<Execute, Submit>().unwrap();
+        builder.register_handler::<StandardRecovery>().unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        builder
+            .register_effect_adapter::<Submit, _, _>(Number { value: 1 }, move |_, _, _| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async { Ok(EffectAdapterOutcome::<Number>::Pending) })
+            })
+            .unwrap();
+        let runtime = Runtime::new(builder.finish(), store.clone());
+        let run = RunId::from_digest(DigestBytes::from_array([92; 32]));
+        let program = expand_program(
+            EntryPointId::new("mfm.test/mismatched-failure@1").unwrap(),
+            &StopFlow,
+            &Number { value: 9 },
+            ProgramLimits::new(run_limit),
         )
         .unwrap();
-    assert_eq!(
-        store.append_run(&frame).await.unwrap(),
-        mfm_store::AppendResult::Inserted
-    );
-    assert!(matches!(
-        runtime.read(&run).await,
-        Err(InvocationFailure::Execution {
-            error: RuntimeError::InvalidHistory,
-            ..
-        })
-    ));
-    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let pending = runtime
+            .start(run.clone(), program, Number { value: 9 })
+            .await
+            .unwrap();
+        let RunViewState::EffectPending { position, .. } = pending.state() else {
+            panic!("prepared")
+        };
+        let mut wrong = *position;
+        if wrong_visit {
+            wrong.visit = wrong.visit.checked_next().unwrap();
+        }
+        let (error, error_ref) =
+            mfm_values::canonicalize_mfm_value(&Cause::Timeout { deadline_ms: 5000 }).unwrap();
+        let (context, context_ref) =
+            mfm_values::canonicalize_mfm_value(&Number { value: 9 }).unwrap();
+        let history =
+            JournalHistory::qualify(&run, store.load_run(&run).await.unwrap().unwrap()).unwrap();
+        let frame = history
+            .encode_effect_failure(
+                wrong,
+                mfm_journal::JournalObject::new(&error_ref, error.as_bytes()).unwrap(),
+                mfm_journal::JournalObject::new(&context_ref, context.as_bytes()).unwrap(),
+                PendingDecision::Stop { reason },
+            )
+            .unwrap();
+        assert_eq!(
+            store.append_run(&frame).await.unwrap(),
+            mfm_store::AppendResult::Inserted
+        );
+        let observed = runtime.read(&run).await;
+        if valid {
+            assert!(
+                matches!(observed.unwrap().state(), RunViewState::EffectPending {
+                    latest_failure: Some(failure), ..
+                } if failure.decision == PendingDecision::Stop { reason })
+            );
+        } else {
+            assert!(matches!(
+                observed,
+                Err(InvocationFailure::Execution {
+                    error: RuntimeError::InvalidHistory,
+                    ..
+                })
+            ));
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 }
 
 #[tokio::test]
