@@ -99,7 +99,12 @@ after they are staged in Git.
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |
 | `nix run .#run -- --task capacity-envelope` | Compose the three capacity owners above. |
-| `nix run .#ci` | Compose format, Clippy, workspace check/tests, managed DB, the managed client and Effect e2es, docs, and capacity tasks. |
+| `nix run .#ci` | Compose format, Clippy, workspace check/tests (including capacity coverage), managed DB, the managed client and Effect e2es, and docs. |
+
+The standalone capacity tasks select tests already included in the workspace test stage. CI runs
+that coverage once through `cargo-test`; it does not invoke `capacity-envelope` again. Keep these
+commands for focused capacity verification. See the [slow test review](test-cost-review.md) for
+measured costs and the coverage questions to assess before changing tests.
 
 Do not run broad component gates immediately before `.#ci` on the same tree. Once focused failures
 are resolved, run CI exactly once on the final candidate when the workflow requires the composed

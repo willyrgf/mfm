@@ -427,7 +427,6 @@ in
         "cargo-check"
         "cargo-test"
         "doc-tests"
-        "capacity-envelope"
         "test-db"
         "client-e2e"
         "effect-e2e"
