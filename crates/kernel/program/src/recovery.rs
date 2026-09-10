@@ -59,35 +59,6 @@ pub struct IncidentSummary {
     pub classification: Classification,
 }
 
-/// Original domain failure or an operational adapter error with State-owned context.
-pub enum Incident<D, E, X> {
-    /// The deterministic State returned its declared failure.
-    Domain(D),
-    /// The adapter failed before returning accepted evidence.
-    Adapter {
-        /// Unmodified capability-owned operational cause.
-        original: E,
-        /// Meaning supplied by the selected deterministic State.
-        context: X,
-    },
-}
-
-impl<D: ClassifyError, E: ClassifyError, X> Incident<D, E, X> {
-    /// Projects the original cause without converting or replacing it.
-    pub fn summary(&self) -> IncidentSummary {
-        match self {
-            Self::Domain(error) => IncidentSummary {
-                source: IncidentSource::State,
-                classification: error.classify(),
-            },
-            Self::Adapter { original, .. } => IncidentSummary {
-                source: IncidentSource::Adapter,
-                classification: original.classify(),
-            },
-        }
-    }
-}
-
 /// Authoritative execution phase supplied to policy callbacks by Runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionPhase {

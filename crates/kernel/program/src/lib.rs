@@ -28,11 +28,10 @@ mod authoring;
 mod recovery;
 pub use recovery::{
     Checkpoint, Classification, ClassifyError, ConclusionBound, EffectBounds, ExecutionPhase,
-    FromNever, Handler, HandlerAbi, HandlerBinding, HistoryBound, Identity, Incident,
-    IncidentSource, IncidentSummary, MapAbi, MapBinding, NoContext, NoParams, Occurrence,
-    PolicyParams, ProgramLimits, RecoveryAllowances, RecoveryContext, RecoveryDenial,
-    RecoveryLimit, RecoveryRequest, RecoveryTarget, RecoveryUsage, StandardRecovery, Stop,
-    StopReason, ValueMap,
+    FromNever, Handler, HandlerAbi, HandlerBinding, HistoryBound, Identity, IncidentSource,
+    IncidentSummary, MapAbi, MapBinding, NoContext, NoParams, Occurrence, PolicyParams,
+    ProgramLimits, RecoveryAllowances, RecoveryContext, RecoveryDenial, RecoveryLimit,
+    RecoveryRequest, RecoveryTarget, RecoveryUsage, StandardRecovery, Stop, StopReason, ValueMap,
 };
 
 #[cfg(test)]
