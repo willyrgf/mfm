@@ -673,7 +673,7 @@ facts, and can leave an Effect unresolved. Explicit resume cannot enlarge the im
 
 The exact authoring API, shared attempt counters, and shipping numeric allowances need review under
 this revised lifecycle. They are a material handoff item, not permission to preserve the old
-internal-only allowance or introduce unlimited error records. Section 15 and the uncertainty table
+internal-only allowance or introduce unlimited error records. Section 16 and the uncertainty table
 make that remaining work explicit.
 
 ## 9. When recording fails or another caller wins
@@ -888,6 +888,9 @@ existing recovery RFC remains the rationale for intrinsic classification and sta
 | A20 | Execution data/context commit atomically: failure qualifying either side appends nothing; mismatched position, phase, contract, or stale head cannot be acknowledged. Subsequent context mutation cannot change committed bytes. |
 | A21 | Direct-classification handlers preserve Operation defaults, occurrence overrides, and existing recovery semantics while the committed original remains unchanged and accessible. |
 | A22 | Every required fact formerly supplied by `adapter_context` is present under one declared execution/context owner; removing the callback does not remove intent, source position, or other audit evidence. |
+| A23 | Resuming a committed failure with unresolved recovery requires the exact associated policy contracts. Incompatible assembly is rejected before callback execution; a committed decision is never replaced by a newly selected policy. |
+| A24 | Preparation failure without intent, adapter failure without accepted evidence, and interpretation failure with accepted evidence each have a valid exact representation. Reconstruction rejects fabricated defaults and illegal result/phase combinations. |
+| A25 | Maximum accumulated-context workloads retain the exact pre-execution context without introducing mandatory `Clone` bounds. Measure retained bytes and append counts for success, failure, and recovery Fault paths against the current implementation. |
 
 Use boundary-focused tests through actual consuming APIs, not a second model of the error pipeline.
 Use synthetic injected failures and fake servers; do not collect real secret-bearing diagnostics
@@ -902,7 +905,117 @@ queries change. Avoid redundant broad gates immediately before CI.
 Creating or revising this proposal is documentation-only and needs link/contract review and
 `git diff --check`, not Rust CI.
 
-## 15. Discussion focus
+## 15. Structural consequences
+
+This proposal changes the durable execution protocol as well as the commit API. A uniform
+`commit(state_data, ctx)` call can remove caller-side packaging. Committing an outcome before
+recovery changes which histories are valid, what work remains after a crash, and what callers can
+observe. Those consequences must be assessed independently of the method's short signature.
+
+### 15.1 Recovery becomes a resumable execution phase
+
+An original error can be committed while its recovery decision is still absent. That prefix is
+valid and must identify recovery as the next work, rather than reentering the failed State. Program
+remains an immutable linear State sequence; the intermediate execution phase belongs to Runtime's
+existing sole fold, not a new authoring State or a second execution engine.
+
+Recovery evaluation may run again after interruption if its result was never committed. Only the
+committed decision advances counters or authorizes action. Handlers must therefore remain
+deterministic and free of ambient IO; notification, provider mutation, or other external work
+cannot be hidden inside policy evaluation. Read-only reconstruction remains callback-free.
+
+### 15.2 Execution data is an explicit persisted interface
+
+Every failure boundary must have a valid representation even when normal success fields do not
+exist:
+
+| Boundary | Available facts |
+| --- | --- |
+| Intent preparation failed | Input/context and an internal cause; no prepared intent |
+| Adapter failed | Prepared intent or command and its causal error; no accepted evidence |
+| Interpretation failed | Accepted evidence and its binding, context, and an internal cause; no successful output |
+| Execution succeeded | The applicable checked evidence and successful output |
+
+Do not fill missing facts with defaults to make every record fit one struct. Typed result/phase
+variants must preserve these differences while the commit API stays uniform. This is a stronger
+contract than deriving serialization on whatever temporary struct happens to exist today.
+
+### 15.3 Serialization and policy identity affect execution correctness
+
+Omitting a field can change how a run resumes, not merely reduce the detail in its audit record.
+Exact schema, canonical encoding, result tags, and field meaning must therefore be reviewed as
+execution contracts. Successfully deserializing old-shaped data is not evidence of equivalent
+semantics. Required fields cannot disappear through `serde(skip)` or permissive defaults.
+
+There is also a longer interval in which deployment changes can matter: a failure can be committed
+before its handler ever runs. Resume must associate the exact policy contracts selected by the
+Program. Changes to policy semantics require the corresponding implementation identity change;
+an unchanged Rust function name or compatible-looking payload is insufficient. Contract identities
+depend on this versioning discipline and do not independently prove arbitrary code equivalence.
+Once a decision commits, a later deployment cannot replace it by evaluating a different policy.
+
+### 15.4 A recorded error and a failed run are different observations
+
+Callers need to distinguish an execution awaiting recovery, an authorized retry/restart, a terminal
+failure, a stopped pending Effect, and an internal recovery Fault. RunView, CLI/REST responses, and
+monitoring must not label every error entry as a terminal run failure or an immediately runnable
+State.
+
+Root mapping and terminal report construction become work after the original error is durable.
+That preserves the cause if reporting fails, but also permits a run to remain unresolved at that
+step. Repeated explicit progression can encounter the same reporting Fault within finite bounds.
+The audit history must show that distinction without inventing a domain outcome.
+
+### 15.5 Accepted Effect settlement separates external work from interpretation
+
+If accepted settlement evidence commits with an interpretation failure, the remaining work is
+deterministic processing of that evidence. A recovery or reporting error cannot make the external
+operation unexecuted again. Explicit interpretation reentry reuses the evidence and never reenters
+the Effect adapter to recreate it.
+
+This distinction can simplify reconciliation, but only if the actual phase is retained and checked
+by the sole fold. The generic commit entry point does not remove the need to distinguish prepared,
+unresolved, and settled commands, or to commit authority before external IO.
+
+### 15.6 Snapshot costs and append costs must be measured separately
+
+A recoverable failure now requires an outcome append followed by a recovery-result append. That
+adds a durability operation, a contention point, and a crash boundary. Success still needs only its
+outcome append, but retaining additional execution/context fields may increase its bytes too.
+
+Accumulating contexts already repeat full snapshots across frames. Copying the growing context
+into multiple independently supplied fields can produce quadratic retained-byte growth. Keeping
+one semantic authority per fact does not automatically remove physical repetition required by
+frame-local closure. This RFC introduces no deduplication or delta storage protocol.
+
+Current State evaluation and interpretation consume typed input. Retaining the exact context used
+by that execution requires preserving its qualified representation or arranging ownership before
+the input is consumed. Prefer the existing immutable qualified bytes/shared ownership where
+applicable; do not impose `Clone` on every State context or blindly duplicate accumulated payloads.
+
+### 15.7 Uniform serialization does not establish transition authority
+
+A value can match its schema and still describe an impossible execution transition. Runtime must
+validate the current head, position, context/result pairing, evidence binding, Effect phase, and
+recovery permissions. Journal qualifies the wire and Store performs the atomic append.
+
+The simplification succeeds when these responsibilities have one owner and the new entry point
+replaces duplicated paths. A facade wrapped around all the existing special cases would improve
+the call site without reducing the underlying complexity.
+
+### 15.8 Evidence needed before claiming a simpler implementation
+
+The governing rule is simpler, and preserving the original error no longer depends on policy or
+reporting success. A net reduction in implementation complexity or production LOC is not yet
+proven. The new recovery phase and legal mode combinations may offset some deletions.
+
+Before finalizing implementation, validate the sole-fold transition table with two consuming
+scenarios: Read failure followed by recovery Fault and resumed decision; and Effect settlement
+followed by interpretation failure and retained-evidence reentry. Compare public types, callbacks,
+branches, append counts, retained bytes, and production LOC against the current design. This is
+evidence for the selected protocol, not an invitation to keep a parallel prototype in production.
+
+## 16. Discussion focus
 
 The selected guarantees are fixed for this proposal; these tradeoffs deserve particular scrutiny
 before implementation:
@@ -939,6 +1052,7 @@ this RFC is treated as a completed handoff:
 | The proposed causal vocabulary and 32-layer/8-KiB bound cover ordinary exposed chains | Concrete client source APIs vary; some hide causes internally | Ordinary failures may have explicitly partial diagnostics, or the representation may need a reviewed revision | Inject nested RPC, SQLx, OS, parser, signer, and task failures; inspect each first capture point and assert omission status |
 | A common finite lifecycle can replace internal-only bounds without excessive authoring knobs | Failure/decision splitting introduces pending recovery; repeated Faults and explicit internal resumes do not consume semantic retry budgets | Missing counters permit unbounded growth, while excessive reservation can reject supported workloads | Complete the authoring/counter design and checked formulas; test zero-retry Stop, repeated Faults, internal reentry, full object closure, and maximum workloads |
 | A unified outcome plus recovery result reduces implementation complexity overall | The original cause commits earlier, but the fold gains an unresolved recovery position and settlement interpretation must remain distinct | Superficial unification can leave duplicate paths or permit Effect reexecution | Prototype the sole-fold transition table and deletion scope; test each crash boundary and settled-evidence reentry before freezing the API |
+| Retaining execution data/context fits supported memory and history budgets | Current State methods consume input, accumulated contexts grow, and recovery adds an append | Naive cloning or repeated snapshots can increase memory and retained bytes enough to reject supported workloads | Compare qualified ownership, append counts, and maximum-context measurements for success, failure, and recovery Fault paths |
 | Acquisition-time PostgreSQL gates have acceptable cost | Checks move from connection creation to each owned acquisition | More catalog/validation IO can affect latency or throughput | Measure the focused managed Store/custody scenarios and compare gate work; any optimization must preserve same-connection validation and causal attribution |
 
 Unavailable upstream evidence and impossibility of recording through a failed Store are explicit
