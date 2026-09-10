@@ -1,5 +1,10 @@
 # Known limitations
 
+- Adapter error chains are not yet preserved end to end. RPC, SQLx, signer, custody and startup
+  conversions discard source layers before Runtime can audit them. The new repository rule
+  requires preservation; [the adapter error audit](adapter-error-audit.md) records concrete gaps,
+  secret-free retention constraints and coherent remediation scope. Durable typed failure records
+  must not be described as retaining raw client errors already discarded upstream.
 - PostgreSQL claims primary crash/restart durability only. It does not claim safe writable rollback,
   host-loss failover, quorum, replica, or multi-primary authority.
 - Trusted Rust State implementations, assembly, and adapters are in the process trust base.
