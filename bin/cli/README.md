@@ -73,7 +73,9 @@ error serializer adds `recovery` plus `last_observed` for an ambiguous append, o
 `invocation` detail for an execution-stopped call or stopped pending-Effect recovery. A null
 last observation means no qualified head is known. Text prints the same recovery identity and
 invocation details after `error: <message>`. These errors do not claim a durable terminal state. Locator
-values, URLs, credentials, config bodies, and provider details are never rendered.
+values, URLs, credentials, config bodies, and raw provider messages/bodies are never rendered.
+Canonical reports can contain reviewed provider method, stage, status/code, source facts and
+explicit omissions from bounded diagnostic capture.
 
 ## Exit codes
 

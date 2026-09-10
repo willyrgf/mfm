@@ -12,7 +12,11 @@ use mfm_evm::{
     Eip1559TransactionCommand, EvmAddress, EvmBlockAnchor, EvmChainInstance, EvmHash,
     EvmTransactionBinding, EvmTransactionEffect, EvmTransactionReceipt, EvmTransactionSettlement,
 };
-use mfm_evm::{EvmOperationalError, EvmTransactionOperationalError};
+use mfm_evm::{
+    EvmOperationalError, EvmOperationalKind, EvmRpcMethod, EvmTransactionOperationalError,
+    ProviderFailure, ProviderFailureKind, RpcField, RpcRejection, RpcStage,
+    TransactionProviderOperation,
+};
 use mfm_ids::{ContentRef, EffectId, StableId};
 use mfm_runtime::{EffectAdapterOutcome, RuntimeAssemblyBuilder, RuntimeError};
 use mfm_signing::{recover_public_key, Secp256k1Signer};
@@ -230,7 +234,9 @@ async fn reserve_nonce(
             let observed = provider
                 .pending_nonce(&binding.sender)
                 .await
-                .map_err(map_provider_error)?;
+                .map_err(|error| {
+                    map_provider_error(TransactionProviderOperation::ObserveNonce, error)
+                })?;
             authority
                 .reserve_or_compare(id, reference, &NonceDomain::from_binding(binding), observed)
                 .await
@@ -358,16 +364,31 @@ async fn execute_transaction(
     let Some(receipt) = provider
         .receipt(command.transaction_hash())
         .await
-        .map_err(map_provider_error)?
+        .map_err(|error| map_provider_error(TransactionProviderOperation::Receipt, error))?
     else {
         let submitted = provider
             .submit_raw(prepared.raw_transaction())
             .await
-            .map_err(map_provider_error)?;
+            .map_err(|error| map_provider_error(TransactionProviderOperation::Submit, error))?;
         if &submitted != command.transaction_hash() {
             return Err(AdapterError::Operational(
                 EvmTransactionOperationalError::Provider {
-                    cause: EvmOperationalError::Unavailable,
+                    operation: TransactionProviderOperation::Submit,
+                    cause: EvmOperationalError::new(
+                        EvmOperationalKind::Unavailable,
+                        ProviderFailure {
+                            method: EvmRpcMethod::SendRawTransaction,
+                            stage: RpcStage::Validation,
+                            failure: ProviderFailureKind::Rejected {
+                                field: RpcField::Result,
+                                cause: RpcRejection::HashMismatch {
+                                    expected: command.transaction_hash().clone(),
+                                    observed: submitted,
+                                },
+                            },
+                            diagnostics: mfm_diagnostics::DiagnosticEvidence::local(),
+                        },
+                    ),
                 },
             ));
         }
@@ -383,11 +404,26 @@ async fn execute_transaction(
     let canonical = provider
         .canonical_block(&receipt.block_anchor().number)
         .await
-        .map_err(map_provider_error)?;
+        .map_err(|error| map_provider_error(TransactionProviderOperation::CanonicalBlock, error))?;
     if &canonical != receipt.block_anchor() {
         return Err(AdapterError::Operational(
             EvmTransactionOperationalError::Provider {
-                cause: EvmOperationalError::Unavailable,
+                operation: TransactionProviderOperation::CanonicalBlock,
+                cause: EvmOperationalError::new(
+                    EvmOperationalKind::Unavailable,
+                    ProviderFailure {
+                        method: EvmRpcMethod::GetBlockByNumber,
+                        stage: RpcStage::Validation,
+                        failure: ProviderFailureKind::Rejected {
+                            field: RpcField::Block,
+                            cause: RpcRejection::AnchorMismatch {
+                                expected: receipt.block_anchor().clone(),
+                                observed: canonical,
+                            },
+                        },
+                        diagnostics: mfm_diagnostics::DiagnosticEvidence::local(),
+                    },
+                ),
             },
         ));
     }
@@ -462,7 +498,7 @@ async fn verify_chain(
     let observed = provider
         .chain_instance()
         .await
-        .map_err(map_provider_error)?;
+        .map_err(|error| map_provider_error(TransactionProviderOperation::VerifyChain, error))?;
     if &observed != expected {
         return Err(AdapterError::Invariant(AdapterInvariantError));
     }
@@ -484,12 +520,13 @@ fn validate_reservation(
     Ok(())
 }
 
-const fn map_provider_error(
+fn map_provider_error(
+    operation: TransactionProviderOperation,
     error: AdapterError<EvmOperationalError>,
 ) -> AdapterError<EvmTransactionOperationalError> {
     match error {
         AdapterError::Operational(cause) => {
-            AdapterError::Operational(EvmTransactionOperationalError::Provider { cause })
+            AdapterError::Operational(EvmTransactionOperationalError::Provider { operation, cause })
         }
         AdapterError::Invariant(error) => AdapterError::Invariant(error),
     }

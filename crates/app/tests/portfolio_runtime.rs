@@ -57,7 +57,11 @@ impl EvmReadProvider for Provider {
                 }
                 ProviderMode::Timeout => {
                     return Err(AdapterError::Operational(
-                        mfm_evm::EvmOperationalError::Timeout,
+                        mfm_evm::EvmOperationalError::new(mfm_evm::EvmOperationalKind::Timeout, mfm_evm::ProviderFailure {
+        method: mfm_evm::EvmRpcMethod::ChainId, stage: mfm_evm::RpcStage::Send,
+        failure: mfm_evm::ProviderFailureKind::Client,
+        diagnostics: serde_json::from_str(r#"{"response":null,"sources":{"layers":[],"end":"unavailable"},"omissions":[],"omissions_truncated":false}"#).unwrap(),
+    }),
                     ))
                 }
                 ProviderMode::Ready => {}
@@ -703,7 +707,11 @@ async fn client_models_distinguish_durable_provider_failure_from_unknown_invocat
     assert_eq!(model["state"]["report"]["cause"]["kind"], "adapter");
     assert_eq!(
         model["state"]["report"]["cause"]["error"]["canonical"],
-        "timeout"
+        serde_json::json!({"kind":"timeout","source":{
+            "method":"chain_id","stage":"send","failure":{"kind":"client"},
+            "diagnostics":{"response":null,"sources":{"layers":[],"end":"unavailable"},
+                "omissions":[],"omissions_truncated":false}
+        }})
     );
     assert_eq!(
         model["state"]["report"]["cause"]["state_context"]["canonical"]["source_ordinal"],

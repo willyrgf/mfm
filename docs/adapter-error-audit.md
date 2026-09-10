@@ -7,9 +7,10 @@ were left untouched. Adapter source anchors below identify the reviewed conversi
 
 ## Result
 
-The repository does not currently preserve the whole causal error chain across its adapters.
-Runtime/Journal preserve the typed operational value they receive, but that value often no longer
-contains the original RPC, SQLx, signer or OS cause. Adding durable pending failure frames fixed
+The repository does not yet preserve the whole causal error chain across every adapter.
+The RPC/EVM cutover now retains reviewed provider evidence through the existing admitted failure
+path. SQLx, signer, custody and application boundaries still have the gaps below, and Runtime's
+execution/context and recovery commit cutover remains outstanding. Adding durable pending failure frames fixed
 one persistence gap; it could not recover evidence discarded before Runtime entry.
 
 The new repository requirement is in [AGENTS.md](../AGENTS.md) and
@@ -43,38 +44,39 @@ database operations or real secret-bearing diagnostic dumps were needed for this
 
 ## Findings by boundary
 
-### 1. Shared EVM HTTP/JSON-RPC ingress: original protocol evidence is discarded
+### 1. Shared EVM HTTP/JSON-RPC ingress: reviewed provenance retained
 
-Source: [json_rpc.rs](../crates/live/evm/src/json_rpc.rs), especially `rpc`,
-`RpcEnvelope::into_result`, `map_transport_error`, `bounded_body` and response-field conversions.
+Sources: [transport](../crates/live/evm/src/json_rpc.rs),
+[client capture](../crates/live/evm/src/json_rpc/capture.rs), and
+[domain carrier](../crates/domains/evm/src/provider_failure.rs).
 
-| Boundary | Retained today | Lost today |
+| Original first-loss boundary | Replacement | Consuming evidence |
 | --- | --- | --- |
-| HTTP send/body read | Timeout or Unavailable | Concrete transport source chain, connection versus body-read stage, available OS/TLS diagnostics |
-| HTTP non-success | RateLimited for 429; otherwise Unavailable | Exact status for other responses and any reviewable response diagnostic; non-success body is not read |
-| JSON-RPC error envelope | Unavailable | RPC code, message, data, and method-specific failure context |
-| JSON decoding | Unavailable | Syntax/type failure category, location and relevant field/stage |
-| Bounded response rejection | Unavailable | Limit, observed size when known, and whether declared content length or streamed bytes exceeded it |
-| Unexpected null/malformed quantity/hash/receipt | Unavailable | Which expected value failed and the checked mismatch details |
+| Send/body-to-unit mapper | Method/stage, bounded exposed source prefix, OS kind/code and explicit URL/source-detail omissions | `send_failure_retains_os_ancestry_without_request_credentials`, `body_deadline_retains_headers_and_parser_location_is_reviewed` |
+| HTTP status collapse | Received status retained separately from ancestry | `response_status_survives_body_failure_and_size_refusal`, existing 429/deadline test |
+| RPC envelope disposal | Strict envelope with present-null distinction, retained numeric code and withheld message/data sizes | `rpc_codes_remain_distinct_in_committed_and_cold_domain_failures` |
+| Untagged decoding fallback | One raw-field envelope admission followed by typed decoding; parser category/location captured at the failing stage | `only_complete_exact_rpc_error_objects_parse`, parser-location regression |
+| Body bound collapse | Exact declared size or observed streamed lower bound, inclusive limit and Body stage | `response_status_survives_body_failure_and_size_refusal`, `streamed_body_overflow_records_a_lower_bound_without_an_invented_source` |
+| Checked result collapse | Result field, numeric range, ABI size, receipt shape and transaction mismatch facts | `local_range_failure_retains_field_and_checked_observation`, receipt/submission tests |
 
-`RpcEnvelope::into_result` explicitly consumes `(error.code, error.message.len(), error.data)`
-without retaining them. `map_transport_error` tests only `reqwest::Error::is_timeout()` and drops
-the error. This affects all Reads using this client and the transaction provider facet; it is not
-limited to one balance State.
+Tests above are in [JSON-RPC tests](../crates/live/evm/src/json_rpc_tests.rs).
+The shared [diagnostic tests](../crates/kernel/diagnostics/src/tests.rs) cover constructor and
+wire bounds, omission ownership, source ordering, cyclic traversal, and opaque intermediate sources.
+The [consuming domain contract test](../crates/domains/evm/tests/provider_failure_contract.rs)
+freezes exact error identities and checks a near-budget diagnostic plus full-width owner facts.
 
-Remediation: retain method/stage and exact reviewed protocol facts in the capability-owned cause.
-Capture the client source chain before conversion loses it. Do not interpret "timeout" alone as
-proof of nonacceptance. JSON-RPC message/data and HTTP bodies require a concrete safety/custody
-decision; their availability does not make them safe public Journal content. Decode failures should
-retain structured parser category/location without copying potentially secret-bearing input.
+Client sources without reviewed downcasts remain opaque while accessible deeper sources are kept.
+Raw URL, body, RPC message/data and client formatting are withheld. Complete means the exposed
+source chain ended, not that hidden client attempts or raw diagnostic custody were recovered.
+Classification is unchanged; timeouts do not establish nonacceptance. The cold Read test proves
+retention through the current committed path, not the RFC's pending commit-before-handler cutover.
 
 ### 2. Read registration bridges preserve the cause they receive
 
 Source: [live EVM registration](../crates/live/evm/src/lib.rs), `read` and `read_anchored`.
 
 The chain/anchor/balance and anchored-call bridges pass provider errors through without replacing
-them. This is correct preservation at that layer, but the provider has already flattened its
-source as described above. Fix the first lossy owner rather than adding another wrapper here.
+them. They now carry the provider's reviewed causal value without a second persistence object.
 
 Wrong local route, chain or capability family returns a unit `AdapterInvariantError`. That correctly
 stays Internal and prevents provider entry; it still lacks causal diagnostic detail under the new
@@ -86,16 +88,15 @@ authenticated integrity evidence or a recoverable provider error.
 Source: [transaction.rs](../crates/live/evm/src/transaction.rs), `reserve_nonce`,
 `prepare_transaction`, `execute_transaction`, `map_provider_error` and `map_authority_error`.
 
-- `map_provider_error` nests the existing provider cause in
-  `EvmTransactionOperationalError::Provider { cause }`. This is a useful pattern to retain.
-  It cannot recover raw RPC details already dropped upstream, and the wrapper does not distinguish
-  chain verification, nonce observation, receipt lookup, canonical-block lookup and submission.
+- `map_provider_error` retains the complete reviewed provider carrier alongside the originating
+  chain-verification, nonce-observation, receipt, canonical-block or submission operation. The
+  transaction classification remains OutcomeUnknown.
 - `map_authority_error` maps the custody port to AuthorityUnavailable or a unit invariant. The
   port itself exposes only Unavailable/Internal, so SQLx/operation detail is already gone.
 - `signer.sign(...).await.map_err(|_| SignerUnavailable)` discards even the signer's existing
   Invalid/Failed distinction and source provenance.
-- A mismatched submitted hash or canonical receipt block becomes provider Unavailable, discarding
-  the exact reviewed discrepancy. These are important distinct diagnostic scenarios.
+- Submitted-hash and canonical-block mismatches now retain the checked expected/observed values
+  in the provider carrier while remaining Unavailable/OutcomeUnknown.
 - Codec validation and blocking task join errors become unit invariants. Preserve their internal
   causal category and stage; do not copy arbitrary panic payloads or relabel them operational.
 
@@ -236,28 +237,27 @@ Read and pending Effect operational records retain the qualified original cause 
 `RunRequestError::Invocation(#[source] InvocationFailure)` keeps its typed wrapper. These are useful
 preservation paths, but their sources are often already coarse values.
 
-`AdapterError<E>` safely hides operational payloads in Display/Debug, yet its empty Error
-implementation does not expose a source chain. Its typed Operational payload remains accessible;
-generic `source()` traversal alone is therefore not a complete audit API. Do not "fix" this by
-requiring unsafe formatting or by claiming every MfmValue implements std::error::Error.
+`AdapterError<E>` hides operational payloads in Display/Debug. Its conditional `Error`
+implementation now exposes nested sources when `E: Error`; ordinary typed payload access remains
+available without that bound. This preserves non-Error `MfmValue` capability contracts rather than
+requiring unsafe formatting or claiming every value implements `Error`. The capability boundary
+tests cover both unformattable non-Error payloads and nested standard sources.
 
 Runtime maps internal preparation, callback, codec and task failures to reviewed internal codes.
 Retain those distinctions in an appropriate internal causal representation; do not reclassify
 them as operational to force them into existing failure frames. Journal corruption errors also
 need internal provenance without echoing untrusted stored bytes.
 
-### 12. Development-only funding RPC has the same gap
+### 12. Development-only funding shares the reviewed RPC boundary
 
-Source: [Effect E2E funding helper](../crates/live/evm/tests/evm_contract_effect_e2e.rs),
-`funding_rpc`, `fund_sender` and `funding_response_body`.
-
-This helper is not a reusable production adapter, but it performs real external IO. Its URL/client,
-send/body/parse failures collapse into a unit FundingError. Preserve the reviewed method/stage and
-original cause when replacing this helper with the planned dev-node funding adapter. Do not copy
-this source-erasing pattern into production. The existing
-[funding limitations](known-gaps.md#development-node-funding) still apply; error detail cannot make
-blindly repeated funding safe. Other test doubles are fixtures rather than new first-party
-production adapter contracts and are not asserted to have full operational audit coverage here.
+The E2E's separate `funding_rpc`, `FundingResponse`, and `funding_response_body` were deleted.
+`JsonRpcEvmProvider::fund_development_sender` performs unlocked-account discovery and one submission
+through the same causal decoder, preserving its original 16 KiB response ceiling. The helper's
+`FundingError` now retains build or provider causes. The
+[funding regression](../crates/live/evm/src/json_rpc_tests.rs) checks exact requests, amount and fee
+encoding, RPC code retention and secret exclusion. The
+[funding limitations](known-gaps.md#development-node-funding) still apply: a returned hash is not
+funded readiness, and lost acknowledgement never authorizes blind resubmission.
 
 ## Preserve the existing successful design choices
 
@@ -281,8 +281,8 @@ objects must not be treated as interchangeable evidence.
 
 Complete boundary cutovers should replace/delete:
 
-1. JSON-RPC envelope disposal, transport-to-unit mapping and status/parse/size collapsing. Update
-   EVM operational schemas, classifiers, live adapters, fixtures and failure bounds together.
+1. RPC source-loss paths have been replaced as recorded above. Complete the remaining typed
+   internal adapter/Runtime cutover without changing the retained provider classifications.
 2. SQLx-to-unit helpers, generic `unavailable(_: impl Sized)`/`internal(_: impl Sized)` source sinks
    and repeated category-only translations. Preserve storage ports and commit semantics.
 3. Signer/keystore-to-unit conversions through the full signer-to-transaction chain, with explicit

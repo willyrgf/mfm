@@ -16,6 +16,9 @@ pub type Result<T> = std::result::Result<T, CapabilityError>;
 pub struct AdapterInvariantError;
 
 /// A capability-owned operational cause or an unrecoverable local invariant failure.
+///
+/// Typed payloads require no `Error` bound. When the operational type implements `Error`,
+/// standard source traversal exposes it without invoking its formatting implementation.
 #[derive(PartialEq, Eq)]
 pub enum AdapterError<E> {
     /// Reviewed typed operational cause, eligible for State contextualization.
@@ -42,7 +45,14 @@ impl<E> std::fmt::Display for AdapterError<E> {
     }
 }
 
-impl<E> std::error::Error for AdapterError<E> {}
+impl<E: std::error::Error + 'static> std::error::Error for AdapterError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(match self {
+            Self::Operational(error) => error,
+            Self::Invariant(error) => error,
+        })
+    }
+}
 
 /// Redaction-safe capability contract error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -98,6 +108,25 @@ pub trait EffectCapabilityContract: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adapter_error_exposes_the_original_nested_source_when_supported() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("reviewed owner failure")]
+        struct Owner(#[source] std::io::Error);
+        let error = AdapterError::Operational(Owner(std::io::Error::from_raw_os_error(104)));
+        let owner = std::error::Error::source(&error).unwrap();
+        assert!(owner.downcast_ref::<Owner>().is_some());
+        assert_eq!(
+            owner
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(104)
+        );
+    }
 
     #[test]
     fn adapter_error_formatting_never_formats_the_operational_cause() {

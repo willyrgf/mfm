@@ -100,7 +100,12 @@ async fn pending_json_retains_the_committed_original_cause_and_decision() {
                 } else {
                     Err(AdapterError::Operational(
                         EvmTransactionOperationalError::Provider {
-                            cause: EvmOperationalError::Timeout,
+ operation: mfm_evm::TransactionProviderOperation::Submit,
+                            cause: EvmOperationalError::new(mfm_evm::EvmOperationalKind::Timeout, mfm_evm::ProviderFailure {
+        method: mfm_evm::EvmRpcMethod::SendRawTransaction, stage: mfm_evm::RpcStage::Send,
+        failure: mfm_evm::ProviderFailureKind::Client,
+        diagnostics: serde_json::from_str(r#"{"response":null,"sources":{"layers":[],"end":"unavailable"},"omissions":[],"omissions_truncated":false}"#).unwrap(),
+    }),
                         },
                     ))
                 }
@@ -128,7 +133,13 @@ async fn pending_json_retains_the_committed_original_cause_and_decision() {
     assert_eq!(model["head_sequence"], 3);
     assert_eq!(
         model["state"]["latest_failure"]["error"]["value"],
-        serde_json::json!({"kind":"provider","cause":"timeout"})
+        serde_json::json!({"kind":"provider","operation":"submit","cause":{
+            "kind":"timeout","source":{
+                "method":"send_raw_transaction","stage":"send","failure":{"kind":"client"},
+                "diagnostics":{"response":null,"sources":{"layers":[],"end":"unavailable"},
+                    "omissions":[],"omissions_truncated":false}
+            }
+        }})
     );
     assert_eq!(
         model["state"]["latest_failure"]["decision"],

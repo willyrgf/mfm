@@ -2235,11 +2235,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "mfm-ids",
+ "mfm-program-derive",
+ "mfm-values",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "mfm-evm"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
+ "mfm-diagnostics",
  "mfm-ids",
  "mfm-program",
  "mfm-program-derive",
@@ -2259,6 +2272,7 @@ dependencies = [
  "getrandom 0.3.4",
  "k256",
  "mfm-capabilities",
+ "mfm-diagnostics",
  "mfm-evm",
  "mfm-ids",
  "mfm-journal",

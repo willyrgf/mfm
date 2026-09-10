@@ -1,0 +1,19 @@
+[package]
+name = "mfm-diagnostics"
+version = "0.1.0"
+edition = "2021"
+description = "Bounded secret-free causal evidence for MFM boundaries"
+license = "MIT"
+
+[package.metadata.mfm]
+layer = "kernel"
+domain-facing = true
+binary-facing = false
+
+[dependencies]
+mfm-values = { path = "../values" }
+mfm-ids = { path = "../ids" }
+mfm-program-derive = { path = "../program-derive" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

@@ -821,31 +821,59 @@ async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_by
             hash: EvmHash::from_bytes([0x44; 32]),
         },
     ))));
-    assert_eq!(
+    assert!(matches!(
         execute_transaction(&binding, &authority, &provider, &id, &prepared)
             .await
             .err(),
         Some(AdapterError::Operational(
             EvmTransactionOperationalError::Provider {
-                cause: EvmOperationalError::Unavailable
+                operation: TransactionProviderOperation::CanonicalBlock,
+                cause
             }
-        ))
-    );
+        )) if cause.kind() == EvmOperationalKind::Unavailable
+            && matches!(&cause.provider_failure().failure,
+                ProviderFailureKind::Rejected {
+                    field: RpcField::Block,
+                    cause: RpcRejection::AnchorMismatch { expected, observed },
+                } if expected.hash == EvmHash::from_bytes([0x44; 32])
+                    && observed == &provider.canonical)
+    ));
     for submission in [
-        Err(AdapterError::Operational(EvmOperationalError::Unavailable)),
+        Err(AdapterError::Operational(EvmOperationalError::new(
+            EvmOperationalKind::Unavailable,
+            ProviderFailure {
+                method: EvmRpcMethod::SendRawTransaction,
+                stage: RpcStage::Send,
+                failure: ProviderFailureKind::Client,
+                diagnostics: mfm_diagnostics::DiagnosticEvidence::local(),
+            },
+        ))),
         Ok(Some(EvmHash::from_bytes([0x55; 32]))),
     ] {
+        let expected_failure = match &submission {
+            Err(AdapterError::Operational(cause)) => cause.provider_failure().failure.clone(),
+            Ok(Some(observed)) => ProviderFailureKind::Rejected {
+                field: RpcField::Result,
+                cause: RpcRejection::HashMismatch {
+                    expected: prepared.transaction_hash().clone(),
+                    observed: observed.clone(),
+                },
+            },
+            _ => unreachable!("submission fixture"),
+        };
         provider.push_submission(submission);
-        assert_eq!(
+        assert!(matches!(
             execute_transaction(&binding, &authority, &provider, &id, &prepared)
                 .await
                 .err(),
             Some(AdapterError::Operational(
                 EvmTransactionOperationalError::Provider {
-                    cause: EvmOperationalError::Unavailable
+                    operation: TransactionProviderOperation::Submit,
+                    cause
                 }
-            ))
-        );
+            )) if cause.kind() == EvmOperationalKind::Unavailable
+                && cause.provider_failure().failure == expected_failure
+        ));
     }
     assert_eq!(
         authority

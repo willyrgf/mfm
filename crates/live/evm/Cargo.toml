@@ -12,6 +12,7 @@ domain = "evm"
 domain-role = "live"
 
 [dependencies]
+mfm-diagnostics = { path = "../../kernel/diagnostics" }
 mfm-program = { path = "../../kernel/program" }
 mfm-values = { path = "../../kernel/values" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
