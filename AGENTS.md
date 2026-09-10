@@ -8,6 +8,21 @@ owns verification selection and `nixfied.nix` owns the executable task graph.
 - Divide non-trivial work into ordered logical commits. Each commit must leave one coherent current
   design; keep inseparable cutovers together.
 - Follow `docs/code-quality.md` for code, tests, documentation, build, and workflow changes.
+- Treat reducing complexity as an objective of every non-trivial change. Prefer the smallest
+  coherent design that satisfies current requirements. Minimize concepts, public APIs,
+  configuration points, code paths, duplicated responsibilities, and future change sites.
+- Before adding an abstraction or extending existing machinery, identify what can instead be
+  simplified, unified, or deleted within the affected scope. Do not preserve unnecessary complexity
+  merely because it already exists. This does not authorize unrelated rewrites.
+- Before adding a layer, ask whether an existing layer can be removed. Before adding a special
+  case, ask whether the representation is wrong.
+- Delete superseded implementations, APIs, tests, and documentation in the same cutover. Preserve
+  coverage of retained behavior. Do not add wrappers that leave the old complexity underneath.
+- Prefer fewer LOC when behavior and guarantees are equivalent. Do not reduce LOC through
+  compressed code, weaker validation, omitted tests, or blurred ownership boundaries.
+- For non-trivial changes, report what was simplified and removed, what necessary complexity was
+  added, and the resulting production-code LOC change. Explain increases; use LOC as evidence,
+  not a quota, and do not optimize the metric at the expense of the design.
 - Verification is scope-driven. Use the narrowest command that exercises changed behavior, then
   expand only when the affected boundary or risk requires it.
 - Commit subjects are lower case.
