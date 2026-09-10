@@ -184,42 +184,88 @@ diagnostic schema in every domain or add optional schema implementations that ca
 
 ### 5.1 Shape and bounds
 
-The conceptual shared shape is:
+The shared representation separates a source's identity in the chain from its facts, and separates
+response observations from ancestry:
 
 ```rust
-struct CauseChain {
-    // Private checked fields; outermost exposed source first.
-    head: CauseFact,
-    tail: Vec<CauseFact>,
-    omissions: OmittedEvidence,
+struct DiagnosticEvidence {
+    response: Option<ResponseContext>,
+    sources: SourceChain,
+    omissions: Vec<Omission>,
+    omissions_truncated: bool,
 }
-
-enum CauseFact {
-    HttpStatus { status: HttpStatusCode },
-    RpcError { code: i64 },
+struct ResponseContext {
+    status: HttpStatusCode,
+    rpc_code: Option<i64>, // only when a checked RPC error envelope was received
+}
+struct SourceChain {
+    layers: Vec<SourceLayer>, // outermost captured error first; at most 32
+    end: ChainEnd,
+}
+struct SourceLayer {
+    kind: SourceKind,
+    facts: Vec<SourceFact>, // at most 8 reviewed facts about THIS source
+    facts_truncated: bool,
+}
+enum ChainEnd { Complete, Unavailable, BoundReached }
+enum SourceKind { Transport, Database, Os, Parse, Task, Channel, Crypto, Opaque }
+enum SourceFact {
     Transport { kind: TransportFailureKind },
-    Database { kind: DatabaseFailureKind, sqlstate: Option<SqlState> },
-    Os { kind: OsFailureKind, code: Option<i32> },
+    Database { kind: DatabaseFailureKind },
+    SqlState { code: SqlState },
+    Os { kind: OsFailureKind },
+    OsCode { code: i32 },
     Parse { category: ParseCategory, location: ParseLocation },
     Size { limit: u64, observed: ObservedSize },
     Task { outcome: TaskFailureKind },
     Channel { outcome: ChannelFailureKind },
-    OpaqueSource,
 }
+struct Omission {
+    at: EvidenceLocation,
+    field: OmittedField,
+    reason: OmissionReason,
+    observed_bytes: Option<u64>,
+}
+enum EvidenceLocation { Response, SourceLayer { index: u8 } }
 ```
 
-The sketch names categories, not a mandate to expose every helper type publicly. Facts use closed
-enums, checked codes, and integers. There is no arbitrary string/map escape hatch. Local checked
-failure details stay in their owning error types where this avoids centralizing domain vocabulary.
+Fields are private and checked. `DiagnosticEvidence` owns the **8 KiB total canonical budget**,
+including response context, layers, facts and omission metadata. There are at most 32 omission
+entries. A layer represents one concrete captured error, not one diagnostic field: an OS error can
+retain both kind and numeric code in the same layer. An opaque source has `kind: Opaque` and no
+invented facts; preserve any accessible deeper source in its own next layer. Source order follows
+actual exposed `source()` links, not the order in which observations arrived. Owner-typed outer
+wrappers already represent their own nesting and are not duplicated as fictitious client layers.
+An empty chain with `Complete` is legitimate when a local checked failure has no upstream source;
+`Unavailable` means the boundary knows upstream evidence was not exposed. Do not manufacture an
+opaque source for a local error whose full facts are already in its typed payload.
 
-Fixed bounds are 32 source layers and 8 KiB of encoded causal data, including omission
-metadata. Constructors, capture, and deserialization enforce them. Bounded capture retains the
-available outer chain prefix and records the limit; it does not claim an omitted root survived.
-Capture must stop within its own bound even for a pathological source chain.
+HTTP status and a received RPC error code belong to response context. They are not automatically
+ancestors of a later body or parsing failure. For a checked RPC error response without a client
+source object, response context plus an empty complete source chain is valid. For headers followed
+by a body failure, retain the status in response context and the body error/source links in the
+chain. Do not insert the status as an extra source layer. Local operation/stage and checked domain
+facts remain in the owner's exact error type (section 16.1).
 
-Client-specific capture helpers live beside the client. Walk exposed source layers using reviewed
-structured extraction. An opaque layer must not hide an accessible deeper source. Do not format a
-source to infer its identity or route a classifier by matching its message.
+Omission locations refer only to an existing layer index or a present response. Message/data/body
+withholding on the response uses `Response`; a withheld client URL belongs to the actual client
+layer. `ChainEnd::BoundReached` accounts for an unretained suffix without inventing an index or
+number of omitted sources. `facts_truncated` accounts for a layer's omitted facts, and
+`omissions_truncated` accounts for omitted omission entries. These flags have distinct meanings.
+
+Capture retains response context first, then an outer source prefix, within the shared byte bound.
+Reserve space for all fixed bound markers before appending variable entries. Stop before an entire
+next layer would exceed the byte/layer bound and mark the chain end; do not merge its facts into the
+previous layer. The per-layer fact bound uses `facts_truncated`. Omission overflow uses its marker.
+Constructors and deserialization enforce counts, byte bounds, legal kind/fact combinations, unique
+fact fields per layer, valid omission locations and response presence. Facts are emitted in their
+schema-defined field order so equivalent evidence has one canonical representation. Source kinds
+and omission vocabulary are closed; there is no arbitrary string/map escape hatch.
+
+Traversal stops at its own finite bound, including a pathological cyclic source chain. Do not walk
+the discarded suffix to count it. Do not format sources to infer identity or classify by messages.
+The byte/layer bounds describe only shared diagnostics; owner-typed checked facts are separately
+bounded by their exact value and complete outcome/recovery frame contracts.
 
 ### 5.2 Existing typed wrappers retain operation context
 
@@ -230,7 +276,7 @@ retains its own operation/stage vocabulary:
 struct ProviderFailure {
     method: EvmRpcMethod,
     stage: RpcStage,
-    causes: CauseChain,
+    diagnostics: DiagnosticEvidence,
 }
 
 enum EvmOperationalError {
@@ -291,8 +337,11 @@ result: Err(
     Provider {
         method: GetBalance,
         stage: RpcResponse,
-        causes: [HttpStatus(200), RpcError(-32000)],
-        omissions: message/data withheld
+        diagnostics: {
+            response: { status: 200, rpc_code: -32000 },
+            sources: { layers: [], end: Complete },
+            omissions: [Response.message withheld, Response.data withheld]
+        }
     }
 )
 ```
@@ -351,7 +400,7 @@ fn handle(
     params: &HandlerParams,
     classification: Classification,
     recovery: &RecoveryContext<'_>,
-) -> Result<RecoveryRequest, StateExecutionError>;
+) -> Result<RecoveryRequest, HandlerInternalError>;
 ```
 
 This is the existing duplicate-safe Read policy, not the transaction Effect classifier. An
@@ -505,10 +554,8 @@ struct RecoveryExecution {
     result: Result<AuthorizedRecovery, RecoveryFailure>,
 }
 
-struct RecoveryFailure {
-    stage: RecoveryStage,
-    diagnostic: InternalFailure,
-}
+// RecoveryFailure is the checked Framework / Handler / RootMapping sum in section 16.2.
+// Handler/map variants retain the exact owner error in the same frame's qualified closure.
 
 // Its checked context links to the original execution and current expected head.
 let committed_recovery = journal.commit(&recovery_data, &recovery_ctx).await?;
@@ -891,11 +938,11 @@ The ordered implementation commits are:
 
 | Commit | Coherent completion boundary | Required focused evidence |
 | --- | --- | --- |
-| 1 | Add the diagnostics crate and its single schema/checked constructors; revise RPC/EVM errors and direct consumers under the existing runtime wire. Fix the funding helper now. Update exact error identities and current bounds wherever payloads grow. | A2, provider portion of A3, A6; fake HTTP server covers send/body/parse/code/status/size and omission facts. Cold round trip proves richer errors survive today's committed path. |
+| 1 | Add the diagnostics crate and its single schema/checked constructors; revise RPC/EVM errors and direct consumers under the existing runtime wire. Fix the funding helper now. Update exact error identities and current bounds wherever payloads grow. | A2, provider portion of A3, A6, A27; fake HTTP server covers send/body/parse/code/status/size and omission facts. Cold round trip proves richer errors survive today's committed path. |
 | 2 | Enrich Store/config/index/custody/provision errors and all conversions, including transaction wrappers. Replace all gate callback routing with checked owned acquisition. Keep the current Journal protocol working. | A4 and custody portion of A3; managed PostgreSQL exercises gate refusal before protected IO, SQLSTATE/decode failures, and definite versus ambiguous COMMIT. |
 | 3 | Enrich signer/keystore/memory/application/transport errors and all consumers. Update public safe-detail schemas and source-preserving library access together. | A5 and signer portion of A3; channel/thread/task/crypto/local-IO injection, secret sentinels, public code/status/exit policy and response-delivery failures. |
-| 4 | Replace State/handler signatures, derive Result support, assembly, Program v7, Journal v5, sole fold, bounds, views and clients in one cutover. Remove every old persistence/context/incident path from section 17. Update design, architecture, all fixtures and recovery validation. | A7–A12, A16–A25; consuming nested-Result tests, exact wire rejection, maximum-context admission, Read recovery Fault/resume, settled Effect interpretation reentry, cancellation and hostile Store conflicts/ambiguity. Run affected Program/Journal/Runtime/domain/app/client tests and managed Effect/client scenarios. |
-| 5 | Reconcile every audit first-loss row with implementation location and evidence; add only missing cross-boundary regressions. Report removals/additions and explicit upstream limits. | A1 and A13–A15 end to end, A1–A25 traceability, final `nix run .#ci` on the exact candidate. A prior commit's missing unit/boundary test is not deferred here. |
+| 4 | Replace State/handler signatures, derive Result support, assembly, Program v7, Journal v5, sole fold, bounds, views and clients in one cutover. Remove every old persistence/context/incident path from section 17. Update design, architecture, all fixtures and recovery validation. | A7–A12, A16–A26, A28; consuming nested-Result tests, exact wire rejection, maximum-context admission, Read recovery Fault/resume, settled Effect interpretation reentry, cancellation and hostile Store conflicts/ambiguity. Run affected Program/Journal/Runtime/domain/app/client tests and managed Effect/client scenarios. |
+| 5 | Reconcile every audit first-loss row with implementation location and evidence; add only missing cross-boundary regressions. Report removals/additions and explicit upstream limits. | A1 and A13–A15 end to end, A1–A28 traceability, final `nix run .#ci` on the exact candidate. A prior commit's missing unit/boundary test is not deferred here. |
 
 Use `nix develop -c cargo test -p <affected-package> <filter>` while iterating and the managed tasks
 in [build and verification](docs/build-and-verification.md) for service-backed cases. Do not substitute
@@ -942,6 +989,9 @@ existing recovery RFC remains the rationale for intrinsic classification and sta
 | A23 | Resuming a committed failure with unresolved recovery requires the exact associated policy contracts. Incompatible assembly is rejected before callback execution; a committed decision is never replaced by a newly selected policy. |
 | A24 | Preparation failure without intent, adapter failure without accepted evidence, and interpretation failure with accepted evidence each have a valid exact representation. Reconstruction rejects fabricated defaults and illegal result/phase combinations. |
 | A25 | Maximum accumulated-context workloads retain the exact pre-execution context without introducing mandatory `Clone` bounds. Measure retained bytes and append counts for success, failure, and recovery Fault paths against the current implementation. |
+| A26 | A consuming State produces two owner-defined Internal failures with distinct operations/invariant variants and checked expected/observed values. Both survive canonical commit and cold observation unchanged; neither invokes classification or a handler. Repeat through an adapter invariant and capability binding failure. Equal Internal disposition must not collapse their facts. |
+| A27 | Capture multiple facts from one source as one layer; preserve an opaque intermediate source and a reviewed deeper source. Headers followed by body failure retain response status outside ancestry. Assert omission attribution, distinct encodings for different ancestry, invalid indices/kind-fact combinations, and independent layer/fact/byte/omission bounds through consuming capture and cold round trips. |
+| A28 | Handler and heterogeneous root-map failures preserve exact owner error values and schemas in the same recovery frame. Hot/cold views retain their operations/facts; wrong handler/map error contract, wrong map step, missing closure and unqualifiable owner errors follow rejection/explicit fallback rules. No callback runs during cold reconstruction. |
 
 Use boundary-focused tests through actual consuming APIs, not a second model of the error pipeline.
 Use synthetic injected failures and fake servers; do not collect real secret-bearing diagnostics
@@ -1090,40 +1140,95 @@ trait State: Send + Sync + 'static {
     type Input: MfmValue;
     type Output: MfmValue;
     type Failure: ClassifyError;
+    type InternalError: MfmValue;
     fn state_id() -> Result<StableId>;
 }
-
 trait PureState: State {
     fn evaluate(input: Self::Input)
-        -> Result<Result<Self::Output, Self::Failure>, StateExecutionError>;
+        -> Result<Result<Self::Output, Self::Failure>, Self::InternalError>;
 }
-
-trait ReadState<C: ReadCapability>: State {
-    fn prepare(input: &Self::Input) -> Result<C::Intent, PreparationError>;
+trait ReadState<C: ReadCapabilityContract>: State {
+    fn prepare(input: &Self::Input) -> Result<C::Intent, Self::InternalError>;
     fn interpret(input: Self::Input, evidence: &C::Evidence)
-        -> Result<Result<Self::Output, Self::Failure>, StateExecutionError>;
+        -> Result<Result<Self::Output, Self::Failure>, Self::InternalError>;
 }
-
-// EffectState uses the same preparation/interpretation pattern with C::Command.
-// Keep its existing capability bounds; neither mode declares AdapterContext.
+// EffectState follows the same pattern with C::Command and EffectCapabilityContract.
 trait Handler {
     type Params: MfmValue;
+    type InternalError: MfmValue;
     fn handle(params: &Self::Params, classification: Classification,
               context: &RecoveryContext<'_>)
-        -> Result<RecoveryRequest, StateExecutionError>;
+        -> Result<RecoveryRequest, Self::InternalError>;
+}
+trait ValueMap {
+    type Input: MfmValue;
+    type Output: MfmValue;
+    type Params: MfmValue;
+    type InternalError: MfmValue;
+    fn apply(params: &Self::Params, value: Self::Input)
+        -> Result<Self::Output, Self::InternalError>;
+    // Retain the existing implementation identity and association requirements.
+}
+enum AdapterError<E, I> { Operational(E), Invariant(I) }
+```
+
+Both capability contracts additionally declare `type InternalError: MfmValue`. Adapter methods use
+`AdapterError<C::OperationalError, C::InternalError>`; their evidence-binding methods return
+`Result<(), Self::InternalError>`. Binding failures therefore preserve the capability owner's
+checked facts too. Runtime-owned binding/association checks retain their own framework errors.
+Keep existing Send/Sync and identity requirements omitted from these shortened sketches.
+
+The outer State Result is an **Internal disposition**, not a classification to send to a handler.
+Owner errors need no `ClassifyError` implementation. The exact associated type retains operation,
+invariant variant, checked expected/observed values and any reviewed nested sources. Remove
+`PreparationError`, `StateExecutionError`, and unit `AdapterInvariantError`; the call/record variant
+already identifies their role. An infallible owner uses the existing exact empty failure value (or
+one shared exact empty value), not a dummy unit error. Built-in policies and identity maps use that
+infallible contract where appropriate.
+
+Runtime needs to record its own failures as well as callback failures. Use one small typed sum:
+
+```rust
+enum InternalFailure<I> {
+    Owner(I),
+    Framework(FrameworkFailure),
+}
+enum FrameworkFailure {
+    Qualification { operation: QualificationOperation, error: ReviewedValueError },
+    Journal { operation: JournalOperation, error: ReviewedJournalError },
+    Authorization { error: CheckedAuthorizationError },
+    Task { operation: RuntimeTask, diagnostics: DiagnosticEvidence },
+    Capture { error: CheckedCaptureError },
 }
 ```
 
-The two `Result` layers distinguish internal failure from an ordinary typed domain result. Retain
-separate `PreparationError` and `StateExecutionError` names for their existing API roles, but replace
-their unit payloads with reviewed internal provenance. They wrap `InternalFailure`, a checked
-`{ kind: InternalFailureKind, causes: CauseChain }` value. Its closed kinds distinguish local
-invariant, preparation, interpretation, qualification, task failure, and capture failure; owner-local
-errors carry any finer checked operation facts. Operational client errors stay in their existing
-typed ports rather than entering this internal category. Intrinsic classification remains infallible
-on a decoded typed error. Decode/association failures while reaching that classifier are recovery
-Faults. Handler defaults remain Operation-owned with State-occurrence overrides; root `ValueMap`
-association and recovery-target validation remain required.
+These are closed framework-owned types. `ReviewedValueError`, `ReviewedJournalError`,
+`CheckedAuthorizationError` and `CheckedCaptureError` mean the corresponding boundary's exact
+secret-free error contracts: retain their checked mismatch identities, numeric limits/observed
+sizes and validation variants where available. Do not replace them with code-only messages or
+opaque layers. They have no domain-operation catch-all. A State's local invariant never converts
+to `FrameworkFailure`; it stays `Owner(S::InternalError)`. Owned facts have their own exact value
+bounds in addition to the shared diagnostics bound. Failed qualification uses the explicitly partial
+fallback contract, not a false claim that an unavailable original survived.
+
+For example, these errors are both Internal and remain different after serialization:
+
+```rust
+enum BalanceInternalError {
+    AssetMismatch { expected: AssetId, observed: AssetId },
+    AnchorMismatch { expected: BlockHash, observed: BlockHash },
+}
+// BalanceState::InternalError = BalanceInternalError
+// evaluate/prepare/interpret returns Err(the_exact_variant).
+// Runtime persists InternalFailure::Owner(the_exact_variant), without classifying it.
+```
+
+The variant identifies the invariant/operation; add an owner-local operation enum only when the
+same invariant can fail in distinct operations that the surrounding typed record cannot identify.
+No global domain-error enum, formatted field bag, or generic callback reconstructs these facts.
+Intrinsic operational/domain classification stays infallible on the decoded typed value; failures
+in decoding/association are framework recovery Faults. Operation defaults, occurrence overrides,
+root maps and recovery authorization remain unchanged.
 
 Add `Result<T,E>` handling to `program-derive/src/shape.rs`, recursively using the existing external
 enum schema for Serde's `{"Ok": value}` / `{"Err": value}` representation. Enclosing exact types own
@@ -1138,29 +1243,29 @@ parameters standing for the associated exact contracts, not dynamically typed pa
 
 ```rust
 struct StateContext<I> { input: I }
-struct PureData<O, F> { result: Result<Result<O, F>, StateExecutionError> }
+struct PureData<O, F, SI> { result: Result<Result<O, F>, InternalFailure<SI>> }
 
-enum ReadData<T, E, A, O, F> {
-    PreparationFailed { error: PreparationError },
+enum ReadData<T, E, A, O, F, SI, AI> {
+    PreparationFailed { error: InternalFailure<SI> },
     AdapterFailed { intent: T, error: A },
-    AdapterInternal { intent: T, error: InternalFailure },
+    AdapterInternal { intent: T, error: InternalFailure<AI> },
     Interpreted {
         intent: T, evidence: E,
-        result: Result<Result<O, F>, StateExecutionError>,
+        result: Result<Result<O, F>, InternalFailure<SI>>,
     },
-    CaptureFailed { error: InternalFailure },
+    CaptureFailed { error: FrameworkFailure },
 }
 
 struct EffectPreparation<Q> { command: Q }
-enum EffectData<E, A, O, F> {
-    PreparationFailed { error: PreparationError },
+enum EffectData<E, A, O, F, SI, AI> {
+    PreparationFailed { error: InternalFailure<SI> },
     PendingFailed { error: A },
-    PendingInternal { error: InternalFailure },
+    PendingInternal { error: InternalFailure<AI> },
     Settled {
         evidence: E,
-        result: Result<Result<O, F>, StateExecutionError>,
+        result: Result<Result<O, F>, InternalFailure<SI>>,
     },
-    CaptureFailed { error: InternalFailure },
+    CaptureFailed { error: FrameworkFailure },
 }
 
 enum EffectContext<I, Q> {
@@ -1171,7 +1276,11 @@ enum EffectContext<I, Q> {
 struct RecoveryData<R> {
     result: Result<AuthorizedRecovery<R>, RecoveryFailure>,
 }
-struct RecoveryFailure { stage: RecoveryStage, diagnostic: InternalFailure }
+enum RecoveryFailure {
+    Framework { stage: RecoveryStage, error: FrameworkFailure },
+    Handler { error: ContentRef },
+    RootMapping { step: u8, error: ContentRef },
+}
 enum RecoveryStage { Classification, Handler, Authorization, RootMapping, Encoding }
 
 struct RecoveryExecutionContext<I> {
@@ -1181,14 +1290,43 @@ struct RecoveryExecutionContext<I> {
 }
 ```
 
+`SI` is the State's exact `InternalError`; `AI` is the capability's exact `InternalError`.
+Adapter `Invariant` and binding errors enter the adapter-owned variant unchanged. A binding failure
+precedes evidence acceptance: it belongs in `AdapterInternal`/`PendingInternal`, never an
+`Interpreted`/`Settled` variant claiming accepted evidence or settlement. State callback
+errors enter `Owner(SI)` unchanged; Runtime construction errors enter `Framework`. Preparation,
+interpretation and pending authority remain explicit in the surrounding mode variants. State and
+capability admission include their exact `internal_error_contract_ref` alongside the existing error
+contracts; associated execution-data schemas bind those types. Codecs, current descriptors and
+complete outcome bounds change together. An assembly with the wrong owner error contract must be
+rejected before execution, even if its public Internal disposition is the same.
+
+Recovery already associates a selected handler and a heterogeneous sequence of root maps. Each
+`HandlerAbi` and `MapAbi` adds its exact `internal_error_contract_ref`; Program admission and
+Runtime association check it with the other selected contracts. A Handler/RootMapping Fault's
+`ContentRef` names the **qualified original owner error and schema included in that same recovery
+frame's complete object closure**. The mapper step identifies the exact selected root-map entry.
+Runtime rejects missing closure, wrong owner contract or out-of-range step. Journal checks wire,
+hashes and closure; Runtime checks association. Cold views expose that exact retained value and
+schema without executing the callback. This is checked type erasure at the existing heterogeneous
+binding boundary, not arbitrary extension data, an error registry or a cross-frame object lookup.
+
+The associated callback bridge must qualify `H::InternalError` or `M::InternalError` directly on Err,
+attach its value/schema to recovery encoding, and construct the matching Fault variant. Never
+convert that error to `FrameworkFailure` merely to fit a common callback result. If its qualification
+fails, retain the reviewed original for the invocation and apply the explicit partial capture
+fallback; do not claim the owner error was stored. Distinct Fault variants encode the owner, so a
+separately supplied stage cannot contradict a Handler or RootMapping failure. Required root-map
+values retained by the existing report contract and the error closure count toward the declared
+recovery bound.
+
 `PureData`'s outer internal result also represents checked capture failure. `CaptureFailed` is the
-bounded fallback for a Read/Effect value that cannot qualify and has no further qualified mode facts; its diagnostic explicitly says
-which evidence is unavailable. It must not claim to retain an unqualified original or accepted
+bounded fallback for a Read/Effect value that cannot qualify and has no further qualified mode
+facts; its diagnostic explicitly says which evidence is unavailable. It must not claim to retain an unqualified original or accepted
 settlement. For Reads, retain qualified intent through `AdapterInternal`; retain qualified accepted
 evidence and intent through `Interpreted` with an internal result. A later qualification failure
 cannot discard those facts or mark them unavailable. Already qualified settlement facts cannot be
-discarded into that fallback: use the
-`Settled` internal alternative with retained evidence. Failure to encode that alternative returns
+discarded into that fallback: use the `Settled` internal alternative with retained evidence. Failure to encode that alternative returns
 uncommitted evidence, not a fabricated pending record. Preparation/data/context variants are
 validated against the current phase; sharing an enum is not permission to use every variant at every
 cursor. No fabricated intent, command, evidence, output, or default error fills an absent field.
@@ -1284,7 +1422,9 @@ async fn recover(journal: &mut RuntimeJournal<'_>, pending: &AwaitingRecovery) -
 }
 ```
 
-Stage annotation and `preserving_original` abbreviate ordinary typed conversions, not new public
+Stage annotation preserves Framework versus Handler versus RootMapping as specified above; it is
+not a conversion of every error into one diagnostic. `preserving_original` abbreviates ordinary
+typed conversions, not new public
 extension traits. Encoding the recovery value may itself require its bounded `Encoding` Fault;
 apply the same single-fallback rule. On resume, dispatch by the acknowledged cursor:
 
@@ -1318,27 +1458,23 @@ terminal failure. Read-only load never performs recovery; explicit progression d
 
 ### 16.5 Capture implementations at owned boundaries
 
-Capture uses a checked nonempty chain (head plus bounded tail) of closed facts. Freeze omission
-metadata as a bounded list of `(layer index, field, reason)` entries plus a chain-truncation marker;
-fields are `Message`, `Data`, `Body`, `Url`, `DatabaseDetail`, `Parameters`, `PanicPayload`, and
-`SourceDetail`; reasons are `Withheld`, `Unavailable`, and `BoundReached`. Use at most 32 layers and
-32 omission entries within the **same 8 KiB canonical budget**. If omission metadata fills, set its
-own truncation marker rather than silently dropping omissions. Optional observed sizes are integers
-only when actually known. Check these invariants on construction and deserialization. An opaque
-layer remains explicit even when traversal finds a reviewed deeper source. Traversal stops at the
-layer bound, including cycles; never walk an unbounded chain to count what was omitted.
+Use section 5.1's `DiagnosticEvidence` as the only shared capture representation. Omitted fields
+are the closed set `Message`, `Data`, `Body`, `Url`, `DatabaseDetail`, `Parameters`, `PanicPayload`,
+and `SourceDetail`; reasons are `Withheld`, `Unavailable`, and `BoundReached`. Observed sizes are
+integers only when known. Do not reinterpret a `SourceLayer` index as a fact index or assign response
+omissions to an unrelated body-error layer.
 
-Client extraction stays local. `CauseFact` uses the closed families in section 5, existing safe
-numeric code wrappers, parser line/column/offset, and explicit unknown categories. SQLSTATE is five
-validated ASCII alphanumeric bytes. OS numeric codes supplement the closed kind; unknown codes are
-not formatted into arbitrary messages. Owner-local check/stage enums retain domain vocabulary.
-Do not add client-library dependencies to diagnostics or a registry of downcasters.
+Client extraction stays local. `SourceFact` uses existing safe numeric wrappers and parser
+line/column/offset. SQLSTATE is five validated ASCII alphanumeric bytes. Unknown OS codes may remain
+numeric; unknown source categories remain opaque without formatted text. Owner-local internal and
+operational enums retain operations, invariant identities and checked values through section 16.1's
+typed paths. Do not add client-library dependencies to diagnostics or a registry of downcasters.
 
 ```rust
 fn provider_transport(method: EvmRpcMethod, stage: RpcStage,
                       error: &reqwest::Error) -> EvmOperationalError {
-    let causes = capture_reqwest(error); // structured predicates + reviewed source traversal
-    let source = ProviderFailure { method, stage, causes };
+    let diagnostics = capture_reqwest(error); // one layer per error, several facts per layer
+    let source = ProviderFailure { method, stage, diagnostics };
     if error.is_timeout() { EvmOperationalError::Timeout { source } }
     else { EvmOperationalError::Unavailable { source } }
 }
@@ -1386,7 +1522,10 @@ the adapter audit remains the exhaustive first-loss checklist for capture sites.
 | `crates/kernel/store/src/lib.rs`, `crates/config/src/lib.rs`: unit IO/task/allocation source sinks | Rich existing port errors; legitimate absence remains absence | 2, 3 |
 | `crates/app/src/{lib,deployment}.rs`, `bin/{cli,rest-api}/src`: source-erasing composition/input/delivery maps | Preserve reviewed causal carrier and project existing public disposition | 3, 4 |
 | `crates/live/evm/tests/evm_contract_effect_e2e.rs`: unit funding error capture | Fix existing real-IO test helper; no new production funding adapter | 1 |
-| `crates/kernel/program/src/lib.rs`: `ProposedStateOutcome`, `AdapterContext`, `adapter_context` | Native nested Result and Runtime-assembled mode data/context | 4 |
+| `crates/kernel/program/src/lib.rs`: `ProposedStateOutcome`, `AdapterContext`, `adapter_context`, unit `PreparationError`/`StateExecutionError` | Native nested Result, exact State-owned InternalError, Runtime-assembled mode data/context | 4 |
+| `crates/kernel/capabilities/src/lib.rs`: unit `AdapterInvariantError`, one-parameter adapter error and source-erasing binding failures | Exact capability-owned InternalError through adapter and bind_evidence signatures | 4 |
+| Program Handler/ValueMap and Runtime callback bridges: universal internal error conversion | Owner-associated errors; HandlerAbi/MapAbi exact internal error contracts and same-frame qualified Fault closure | 4 |
+| This RFC's former `{ kind, causes }` internal bag and one-CauseFact-per-layer sketch | Typed Owner/Framework sum; source-layer groups and separate response context. Do not implement the superseded shapes | 1, 4 |
 | `crates/domains/evm/src/recovery.rs`: `EvmBalanceAdapterContext`, `AnchoredCallAdapterContext`, `EvmTransactionAdapterContext` and equivalent consumer contexts | Input/intent/command/typed error fields under section 16's explicit owners; retain every unique fact | 4 |
 | `crates/kernel/program/src/recovery.rs` and `recovery/defaults.rs`: `IncidentSummary`, summary-only `IncidentSource` and old handler arguments | Direct `Classification`; preserve default/override selection and policy semantics | 4 |
 | `crates/kernel/runtime/src/assembly/recovery.rs`: `QualifiedIncident`, summary-producing `ClassifyCallback`, fused request path | Decode retained typed error, project classification, evaluate only after outcome commit | 4 |
@@ -1412,7 +1551,7 @@ checks enforcing those contracts.
 
 The engineer implements this target, rather than selecting a different storage or recovery model.
 Each commit closes its changed boundary and includes tests/docs; section 13 fixes ordering and
-section 17 fixes deletion scope. Before final CI, reconcile every audit row and A1–A25 with concrete
+section 17 fixes deletion scope. Before final CI, reconcile every audit row and A1–A28 with concrete
 consuming evidence and report the complexity changes specified in section 12. No placeholder unit
 error, compatibility constructor, or second commit path may remain to make sequencing easier.
 
