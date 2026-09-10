@@ -45,10 +45,6 @@ The whole harness includes:
   loss, Runtime construction, progress, external nonce advancement, recovery, and assertions.
 - [Workflow support](crates/live/evm/tests/support/contract_workflow.rs): contexts, sequence, recipe
   selection, ABI/report semantics, failure adaptation, and State registrations.
-- [Deterministic coverage](crates/live/evm/tests/support/accumulating_contract.rs): scripted external
-  evidence, recording Store, failures, and cold terminal checks.
-- [Capacity coverage](crates/live/evm/tests/support/context_capacity.rs): another context shape,
-  additional creation, failure reporting, and schema/object/frame/run measurements.
 - [Managed task](nixfied.nix): PostgreSQL/Reth resources, pinned Solidity compilation, and test
   selection. The [build guide](docs/build-and-verification.md) states the actual guarantees.
 

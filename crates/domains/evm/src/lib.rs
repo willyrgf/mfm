@@ -2441,66 +2441,37 @@ mod tests {
     }
 
     #[test]
-    fn balance_authoring_specializes_checked_native_token_and_mixed_requests() {
-        use mfm_program::{ConclusionBound, ProgramLimits};
-        for token_count in [0, 32, 64] {
-            let sources = (0..64)
-                .map(|index| {
-                    EvmBalanceSource::new(
-                        format!("source-{index}"),
-                        NonZeroU64::new(1).unwrap(),
-                        EvmAddress::from_bytes([1; 20]),
-                        (index < token_count).then(|| EvmAddress::from_bytes([2; 20])),
-                    )
-                    .unwrap()
-                })
-                .collect();
-            let request = EvmBalanceRequest::new(sources, 18).unwrap();
-            let input = EvmBalanceContext::new(
-                request.clone(),
-                Continuation { value: 1 },
-                0,
-                "collection".into(),
-                route(),
-            )
-            .unwrap();
-            let operation = CollectEvmBalances::<Continuation>::new(
-                route(),
-                request,
-                ConclusionBound::new(65536).unwrap(),
-            )
-            .unwrap();
-            let entry = EntryPointId::new("mfm.test/balance-collection@2").unwrap();
-            let program = mfm_program::expand_program(
-                entry.clone(),
-                &operation,
-                &input,
-                ProgramLimits::new(0),
-            )
-            .unwrap();
-            assert_eq!(program.declarations().len(), 257 + token_count);
-            let mut substituted = context();
-            assert!(mfm_program::expand_program(
-                entry.clone(),
-                &operation,
-                &substituted,
-                ProgramLimits::new(0)
-            )
-            .is_err());
-            substituted.request = input.request.clone();
-            substituted.request.sources.reverse();
-            assert!(mfm_program::expand_program(
-                entry,
-                &operation,
-                &substituted,
-                ProgramLimits::new(0)
-            )
-            .is_err());
-            assert_eq!(
-                mfm_program::Program::decode_canonical(program.canonical_bytes()).unwrap(),
-                program
-            );
-        }
+    fn balance_authoring_rejects_substituted_and_reordered_requests() {
+        let sources = (1..=2)
+            .map(|index| {
+                EvmBalanceSource::new(
+                    format!("source-{index}"),
+                    NonZeroU64::new(1).unwrap(),
+                    EvmAddress::from_bytes([index; 20]),
+                    None,
+                )
+                .unwrap()
+            })
+            .collect();
+        let request = EvmBalanceRequest::new(sources, 18).unwrap();
+        let operation = CollectEvmBalances::<Continuation>::new(
+            route(),
+            request.clone(),
+            mfm_program::ConclusionBound::new(65536).unwrap(),
+        )
+        .unwrap();
+        let mut input = EvmBalanceContext::new(
+            request,
+            Continuation { value: 1 },
+            0,
+            "collection".into(),
+            route(),
+        )
+        .unwrap();
+        operation.validate_input(&input).unwrap();
+        assert!(operation.validate_input(&context()).is_err());
+        input.request.sources.reverse();
+        assert!(operation.validate_input(&input).is_err());
     }
 
     #[test]

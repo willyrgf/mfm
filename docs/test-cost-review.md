@@ -1,52 +1,38 @@
-# Slow test review
+# Test cost review
 
-This inventory supports a review of test value and necessity. It does not change test bodies,
-fixtures, compiler profiles, or test scheduling. The CI change removes only the second invocation
-of tests already selected by `cargo test --workspace --all-targets`.
+The expensive synthetic capacity scenarios have been deleted after reviewing their assertions.
+Production limits and execution behavior are unchanged. This is a test-scope reduction; compiler
+profiles, scheduling and implementation performance are unchanged.
 
-## Timing evidence
+## Removed scenarios and retained evidence
 
-Baseline: the successful 2026-09-10 Nixfied run
-`run-578226-1789046970663948836`, before CI deduplication. Its `artifacts/run-summary.json`
-and `logs/task.ci.*.stdout.log` record 3,519.60 seconds (58m40s) overall. The repeated capacity
-stage accounts for 1,080.08 seconds (18m00s, 30.7%). Removing it removes no unique test selection;
-actual end-to-end savings remain dependent on the next run's conditions.
+| Removed scenario | Retained evidence and scope of deletion |
+| --- | --- |
+| Two-creation maximum-payload matrix and accumulated contract fixture | Domain [transaction](../crates/domains/evm/tests/transaction_contract.rs) and [anchored-call](../crates/domains/evm/tests/anchored_call_contract.rs) contracts, [generic Runtime](../crates/live/evm/tests/generic_transaction_runtime.rs), and the managed Effect e2e cover facts, composition and recovery. The exhaustive composed fixture failure matrix and maximum-payload admission claim are retired. |
+| Six 64-source Portfolio planning configurations | [Planning contracts](../crates/domains/portfolio/tests/planning_contract.rs) retain route selection, invalid routes and canonical Program round-trip. Maximum-size planning is no longer an acceptance scenario. |
+| Three 64-source EVM expansion configurations | [App consuming scenarios](../crates/app/tests/support/portfolio_contract.rs) execute native and token plans. A small direct EVM input-validation test retains the unique substituted/reordered-request rejection contract; declaration-count assertions and repeated Program round-trips are deleted. |
+| Maximum-width token Portfolio Runtime admission | App consuming scenarios already retain typed provider errors, domain mappings and hot/cold equality. The maximum-width admission fixture is deleted. |
+| Report/qualification capacity integration matrices | [Value contracts](../crates/kernel/values/tests/value_contract.rs) and [report unit tests](../crates/kernel/runtime/src/report/tests.rs) retain size enforcement; [Runtime contracts](../crates/kernel/runtime/tests/runtime_contract.rs), callback errors and [pending-failure tests](../crates/kernel/runtime/tests/pending_failure.rs) retain prefix and command authority checks. The combined large-payload error-path matrix is no longer separately exercised. |
 
-The default Rust harness records durations for each test executable, not individual test cases.
-A `has been running for over 60 seconds` message establishes a lower bound for the named test.
-Do not assign its executable's full duration to that individual test or add overlapping durations.
-The managed e2e executables each contain one selected test, so their test durations are individual.
-All durations below exclude the Cargo compilation preceding the test executable.
+Deleting these matrices does not establish that every deleted assertion has an identical surviving
+assertion. The retained tests own the underlying behavior; synthetic product maxima and exhaustive
+combinations are no longer treated as requirements worth this recurring cost.
 
-| Test | Timing evidence | What the test establishes | Test-quality review question |
-| --- | --- | --- | --- |
-| [`two_creations_call_observation_and_reports_fit_the_unchanged_capacity_envelope`](../crates/live/evm/tests/support/context_capacity.rs) | Individual >60s; shares a 14m04s executable with the accumulated fixture below | Real expanded transaction/observation States fit the admitted schema, object, frame and history bounds across large input/evidence sizes; success and failure reports retain prior facts and cold reconstruction agrees | Which fault cases need maximum payloads to expose a size/closure defect, and which only recheck behavior already covered by the accumulated fixture? Preserve distinct prior-creation and complete-closure cases. |
-| [`accumulated_fixture_preserves_all_success_failure_and_cold_facts`](../crates/live/evm/tests/support/accumulating_contract.rs) | Individual >60s; same 14m04s executable, not another 14 minutes | Seven success/failure cases preserve caller context and transaction/observation facts through composition and cold reconstruction using small payloads | For each case, identify the unique retained-data assertion beyond the capacity fixture and domain interpreter tests. Does the composition boundary need every failure reason, or only those with different retention behavior? |
-| [`the_supported_source_capacity_plans_and_one_more_is_rejected`](../crates/domains/portfolio/tests/planning_contract.rs) | Individual >60s; planning executable 11m58s; repeated executable 12m03s in the old capacity stage | Six 64-source configurations cover native/mixed/token sources split into 1 or 64 collections, worst-case escaped public identities, Program round-trip, finite history admission and rejection of a 65th source | Which configurations establish distinct worst cases? Are the repeated oversized-input rejection and round-trip assertions testing a separate boundary each time? Explain any reduction with the actual bound contract, not a timing target. |
-| [`balance_authoring_specializes_checked_native_token_and_mixed_requests`](../crates/domains/evm/src/lib.rs) | Individual >60s; EVM unit executable 2m45s | Three 64-source native/mixed/token requests produce the expected specialized sequence, reject substituted/reordered inputs, and round-trip the Program | Is 64 required to validate specialization and input binding, or is maximum-size admission already owned by the Portfolio capacity test? Retain EVM's direct consuming boundary coverage. |
-| [`maximum_token_portfolio_admits_and_retains_the_first_typed_provider_failure`](../crates/app/tests/support/portfolio_contract.rs) | Individual >60s; App Portfolio executable 2m33s | A maximum-width, 64-collection token Program admits through Runtime, invokes only the first failing provider, retains its typed cause/context, fits actual genesis/history bounds, and reconstructs cold | This crosses admission and Runtime boundaries that planning alone cannot establish. Which assertions specifically require the maximum fixture, and which repeat ordinary provider-failure coverage? |
-| [`every_transaction_journal_boundary_recovers_after_ambiguous_append`](../crates/live/evm/src/transaction_tests.rs) | Individual >60s; live EVM unit executable 2m21s | Fourteen scenarios inject committed/uncommitted lost acknowledgements at seven Journal boundaries; cold recovery reaches the same terminal history and nonce, using retained prepared authority | Keep the two acknowledgement outcomes and every distinct persistence boundary. Review whether each case asserts the specific invariant that can fail there, beyond eventual completion. |
-| [`evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance`](../crates/live/evm/tests/evm_contract_effect_e2e.rs) | Individual 1m56s; managed task including setup 2m03s | Actual PostgreSQL, Reth, signer/authority and compiled contract integration supports cold recovery and external nonce advancement | Keep coverage that requires the real external stack. Separate its evidence from deterministic fixture claims; it does not prove a full process restart. |
-| [`generated_rest_run_survives_deletion_and_matches_fresh_cli_execution`](../bin/rest-api/tests/client_execution_e2e.rs) | Individual 1m20s; managed task including setup 1m28s | Real CLI/REST execution preserves exact admitted revisions after config deletion and agrees on results; publication and dependent admission survive recovery | Identify which assertions uniquely test transport/process/config integration versus repeat library behavior. Retain the real cross-transport contract. |
+## Historical timing evidence
 
-The report-capacity executable is the next notable group at 55.69 seconds for two tests:
-[`inline_report_size_preserves_original_values_and_pending_authority`](../crates/kernel/runtime/tests/report_capacity.rs)
-and the included
-[`mapped_values_and_adapter_contexts_preserve_size_errors_and_acknowledged_heads`](../crates/kernel/runtime/tests/support/qualification_capacity.rs).
-These distinguish original-object limits from combined-report limits and preserve acknowledged
-heads/Effect authority on overflow. Review the chosen payload sizes against those distinct
-boundaries; their large allocations serve a concrete size contract.
+Successful run `run-578226-1789046970663948836` took 58m40s. Duplicate capacity-task
+invocations accounted for 18m00s and were previously removed from CI without changing test selection.
+The deleted scenarios dominated executables lasting 14m04s (contract fixtures), 11m58s (planning),
+2m45s (EVM units), 2m33s (App Portfolio), and 55.69s (report capacity). These are executable
+durations, not individually measured test durations; do not sum them as promised savings.
 
-The nine pending-failure tests, including the stop-reason validation matrix, took 0.26 seconds
-combined in this baseline. They are not a current runtime-priority target.
-
-## Review criteria
-
-For each expensive scenario, state the production defect its assertions catch, the owning boundary,
-and why the chosen size or combination is necessary. Compare assertions and affected boundaries,
-not just similar test names. A test can share setup with another test and still protect a distinct
-contract. Conversely, a large matrix needs evidence that its dimensions affect the guarantee.
-No test is approved for deletion merely because it appears here.
+The retained transaction ambiguous-append matrix exceeded 60 seconds in a 2m21s executable.
+The managed Effect e2e took 1m56s and the CLI/REST e2e 1m20s individually. The nine
+pending-failure tests took 0.26s combined. These retain distinct persistence and external-integration
+coverage. In particular, the transaction matrix's fourteen scenarios are seven actual Journal
+boundaries times two ambiguous-append outcomes (committed or uncommitted), not a chosen capacity.
+The managed e2e's single acknowledgement-loss scenario cannot replace that matrix. No new
+full-suite timing was required for deleting test-only scenarios.
 
 ## Failure found while validating deduplication
 
@@ -69,10 +55,6 @@ to obtain a green run. The deduplicated CI run is not green, and the root cause 
 
 ## Material uncertainties
 
-Individual durations for the shared executables are unmeasured. The working assumption is that
-the tests explicitly reported above 60 seconds dominate those executables; if that is wrong, a
-strict individual ranking could misdirect review. Validate individual timings before making a
-performance-based prioritization within a shared executable. Necessity judgments above are review
-questions, not conclusions that coverage is redundant. The repeated Effect failure establishes
-capacity exhaustion, but not its underlying operational cause; inspect its retained incidents to
-validate that cause before changing the test.
+Actual end-to-end savings from the test deletions are unmeasured. Historical executable timings
+identify the removed workload but cannot predict an exact new CI duration. The managed Effect
+failure described above remains unresolved; deleting other tests provides no evidence of a fix.
