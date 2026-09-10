@@ -250,11 +250,6 @@ it must not be recast as a pre-settlement operational rejection to obtain anothe
 Keep the current distinction between domain failures and adapter failures with State context:
 
 ```rust
-pub enum Incident<D, E, X> {
-    Domain(D),
-    Adapter { original: E, context: X },
-}
-
 #[derive(Clone, Copy)]
 pub enum IncidentSource { State, Adapter }
 
@@ -263,23 +258,10 @@ pub struct IncidentSummary {
     pub classification: Classification,
 }
 
-impl<D: ClassifyError, E: ClassifyError, X> Incident<D, E, X> {
-    pub fn summary(&self) -> IncidentSummary {
-        match self {
-            Self::Domain(error) => IncidentSummary {
-                source: IncidentSource::State,
-                classification: error.classify(),
-            },
-            Self::Adapter { original, .. } => IncidentSummary {
-                source: IncidentSource::Adapter,
-                classification: original.classify(),
-            },
-        }
-    }
-}
 ```
 
-Runtime composes this incident. The State does not call an adapter to return a combined IO result.
+Runtime projects each qualified original cause into this summary through its typed association.
+The State does not call an adapter to return a combined IO result.
 For an operational error, Runtime obtains the existing deterministic State-owned adapter context
 and preserves it alongside the original cause.
 
@@ -682,7 +664,7 @@ not a suggestion to keep both designs while adding a convenience layer.
 
 | Current location / mechanism | Simplification or deletion | Necessary responsibility retained |
 | --- | --- | --- |
-| [recovery.rs](crates/kernel/program/src/recovery.rs): `Classifier<I>`, `Assessment`, sealed `IncidentContract` association | Delete the selectable classifier trait and assessment. Delete the sealed incident contract abstraction once handler/binding users disappear; direct typed `Incident<D,E,X>` needs no associated-type facade | Intrinsic error classification, original incident sum |
+| [recovery.rs](crates/kernel/program/src/recovery.rs): `Classifier<I>`, `Assessment`, sealed `IncidentContract` association | Delete the selectable classifier trait and assessment. Delete the sealed incident contract abstraction and unused public incident wrapper once handler/binding users disappear | Intrinsic error classification, original causes retained by Runtime |
 | [bindings.rs](crates/kernel/program/src/recovery/bindings.rs): `ClassifierAbi`, `ClassifierBinding` | Delete source/mapped derivation, map identities, map parameter contracts, classifier identity/parameters and constructors | Exact State/capability error contracts already identify the intrinsic semantics |
 | Same file: `Classifiers(BTreeMap<IncidentAbi, ...>)` | Delete family construction, duplicate-source checks, exact family lookup and missing-family-source errors | Typed integration checks that each executable error implements classification |
 | Same file: `Handlers(BTreeMap<IncidentAbi, HandlerSetting>)` | Replace with one handler binding; delete incident-keyed selection, duplicate bindings and checkpoint attachment lookup by incident type | Handler identity, parameters and checked checkpoint list |
