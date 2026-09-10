@@ -77,6 +77,7 @@ commit, or permission to describe withheld client diagnostics as lossless raw ev
 | Does an internal failure advance execution? | No. Its outcome advances the history head while retaining execution identity and the actual Effect phase, including any accepted settlement. |
 | When does the handler run? | After the original failure outcome is known to be committed. Its decision must commit before any recovery action. |
 | Does richer evidence enable new retries? | No. Classification remains error-owned and recovery remains Runtime-authorized. This cutover preserves current classification semantics. |
+| Is the additional storage cost acceptable? | Yes. Fuller execution/context snapshots and additional failure/recovery records are an accepted tradeoff for auditability and simpler contracts. Capacity correctness remains required; storage savings are not a condition for proceeding. |
 | Can every failure always be persisted? | No. Missing admission, invalid history, unavailable storage, exhausted capacity, and interruption have explicit limits. |
 
 The remaining design discussion should evaluate whether the proposed representation and recording
@@ -977,11 +978,21 @@ This distinction can simplify reconciliation, but only if the actual phase is re
 by the sole fold. The generic commit entry point does not remove the need to distinguish prepared,
 unresolved, and settled commands, or to commit authority before external IO.
 
-### 15.6 Snapshot costs and append costs must be measured separately
+### 15.6 Storage growth is accepted; capacity and ownership remain explicit
+
+The additional storage cost is accepted. Retain the complete declared execution/context data and
+the necessary recovery records without weakening audit evidence to reduce retained bytes. Do not
+add deduplication, deltas, or selective history retention merely to justify this design economically.
+Storage-cost benchmarking is not an approval gate for this RFC.
 
 A recoverable failure now requires an outcome append followed by a recovery-result append. That
 adds a durability operation, a contention point, and a crash boundary. Success still needs only its
 outcome append, but retaining additional execution/context fields may increase its bytes too.
+
+Measure bytes and record counts to establish correct finite admission bounds and preserve reserved
+recovery/settlement capacity. These measurements establish that supported workloads fit the
+declared limits; they do not reopen the accepted storage tradeoff. Additional commit boundaries
+still require correctness tests for acknowledgement, interruption, and concurrency.
 
 Accumulating contexts already repeat full snapshots across frames. Copying the growing context
 into multiple independently supplied fields can produce quadratic retained-byte growth. Keeping
@@ -1029,8 +1040,8 @@ before implementation:
   with fewer responsibilities and future change sites despite a new recovery-pending cursor?
 - What is the smallest finite authoring contract that bounds execution and recovery evaluation,
   including zero-retry Stops, explicit internal reentry, and repeated recovery Faults?
-- Are the extra failure-path commit and callback reevaluation after an interrupted recovery step
-  acceptable for shipping workloads?
+- Do interruption and contention between outcome and recovery commits preserve acknowledgement
+  ordering and the semantics of reevaluating only unresolved recovery?
 - Can acquisition-time PostgreSQL checks preserve the existing security posture at acceptable cost?
 - Are withholding and unavailable-evidence markers clear enough that audit consumers cannot mistake
   them for retained original messages or a record of every physical attempt?
@@ -1043,8 +1054,9 @@ engineer to choose a different architecture silently.
 The selected protocol is one `commit(state_data, ctx)` before control handoff, and the same commit
 operation for recovery data before its authorized action. The meaning of both inputs and the
 removal of `IncidentSummary` are settled. Custody remains secret-free and uses the existing State
-commit Store. The following assumptions and remaining lifecycle design work require evidence before
-this RFC is treated as a completed handoff:
+commit Store. Additional storage cost is accepted and is not a material uncertainty. The following
+assumptions and remaining lifecycle design work require evidence before this RFC is treated as a
+completed handoff:
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
@@ -1052,7 +1064,7 @@ this RFC is treated as a completed handoff:
 | The proposed causal vocabulary and 32-layer/8-KiB bound cover ordinary exposed chains | Concrete client source APIs vary; some hide causes internally | Ordinary failures may have explicitly partial diagnostics, or the representation may need a reviewed revision | Inject nested RPC, SQLx, OS, parser, signer, and task failures; inspect each first capture point and assert omission status |
 | A common finite lifecycle can replace internal-only bounds without excessive authoring knobs | Failure/decision splitting introduces pending recovery; repeated Faults and explicit internal resumes do not consume semantic retry budgets | Missing counters permit unbounded growth, while excessive reservation can reject supported workloads | Complete the authoring/counter design and checked formulas; test zero-retry Stop, repeated Faults, internal reentry, full object closure, and maximum workloads |
 | A unified outcome plus recovery result reduces implementation complexity overall | The original cause commits earlier, but the fold gains an unresolved recovery position and settlement interpretation must remain distinct | Superficial unification can leave duplicate paths or permit Effect reexecution | Prototype the sole-fold transition table and deletion scope; test each crash boundary and settled-evidence reentry before freezing the API |
-| Retaining execution data/context fits supported memory and history budgets | Current State methods consume input, accumulated contexts grow, and recovery adds an append | Naive cloning or repeated snapshots can increase memory and retained bytes enough to reject supported workloads | Compare qualified ownership, append counts, and maximum-context measurements for success, failure, and recovery Fault paths |
+| Admission correctly bounds the full retained data and execution avoids unnecessary in-memory copies | Current State methods consume input, accumulated contexts grow, and recovery adds an append | Incorrect sizing can reject a supported workload or exhaust reserved capacity; naive cloning can increase memory use | Validate qualified ownership and complete frame/run arithmetic against maximum-context success, failure, and recovery Fault paths; do not treat lower storage cost as an acceptance criterion |
 | Acquisition-time PostgreSQL gates have acceptable cost | Checks move from connection creation to each owned acquisition | More catalog/validation IO can affect latency or throughput | Measure the focused managed Store/custody scenarios and compare gate work; any optimization must preserve same-connection validation and causal attribution |
 
 Unavailable upstream evidence and impossibility of recording through a failed Store are explicit
