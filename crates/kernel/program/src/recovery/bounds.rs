@@ -1,5 +1,5 @@
 use crate::{ProgramError, ProgramLimits, Result};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 
 /// Positive maximum complete conclusion-frame bytes for one Pure or Read occurrence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -20,12 +20,14 @@ impl ConclusionBound {
     }
 }
 
-/// Complete prepare and conclusion bounds for an Effect's retained lifecycle.
+/// Complete finite prepare, pending-failure and settlement bounds for an Effect lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "EffectBoundsWire", into = "EffectBoundsWire")]
 pub struct EffectBounds {
     prepare: ConclusionBound,
     conclusion: ConclusionBound,
+    max_pending_failures: NonZeroU32,
+    failure_frame: ConclusionBound,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -33,34 +35,66 @@ pub struct EffectBounds {
 struct EffectBoundsWire {
     prepare: u64,
     conclusion: u64,
+    max_pending_failures: u32,
+    failure_frame_bytes: u64,
 }
 impl From<EffectBounds> for EffectBoundsWire {
     fn from(value: EffectBounds) -> Self {
         Self {
             prepare: value.prepare.max_frame_bytes(),
             conclusion: value.conclusion.max_frame_bytes(),
+            max_pending_failures: value.max_pending_failures(),
+            failure_frame_bytes: value.failure_frame_bytes(),
         }
     }
 }
 impl TryFrom<EffectBoundsWire> for EffectBounds {
     type Error = ProgramError;
     fn try_from(value: EffectBoundsWire) -> Result<Self> {
-        Self::new(value.prepare, value.conclusion)
+        Self::new(
+            value.prepare,
+            value.conclusion,
+            value.max_pending_failures,
+            value.failure_frame_bytes,
+        )
     }
 }
 
 impl EffectBounds {
     /// Checks positive bounds and a representable complete lifecycle sum.
-    pub fn new(prepare_bytes: u64, conclusion_bytes: u64) -> Result<Self> {
+    pub fn new(
+        prepare_bytes: u64,
+        conclusion_bytes: u64,
+        max_pending_failures: u32,
+        failure_frame_bytes: u64,
+    ) -> Result<Self> {
         let prepare = ConclusionBound::new(prepare_bytes)?;
         let conclusion = ConclusionBound::new(conclusion_bytes)?;
+        let max_pending_failures =
+            NonZeroU32::new(max_pending_failures).ok_or(ProgramError::InvalidContract)?;
+        let failure_frame = ConclusionBound::new(failure_frame_bytes)?;
+        let failure_bytes = failure_frame_bytes
+            .checked_mul(u64::from(max_pending_failures.get()))
+            .ok_or(ProgramError::Capacity)?;
         prepare_bytes
             .checked_add(conclusion_bytes)
+            .and_then(|value| value.checked_add(failure_bytes))
             .ok_or(ProgramError::Capacity)?;
         Ok(Self {
             prepare,
             conclusion,
+            max_pending_failures,
+            failure_frame,
         })
+    }
+
+    /// Maximum recorded pending operational failures, including stopped invocations.
+    pub const fn max_pending_failures(self) -> u32 {
+        self.max_pending_failures.get()
+    }
+    /// Complete maximum failure frame bytes, including original cause and context closure.
+    pub const fn failure_frame_bytes(self) -> u64 {
+        self.failure_frame.max_frame_bytes()
     }
 
     /// Complete maximum preparation frame bytes.
@@ -106,10 +140,12 @@ impl HistoryBound {
             let (count, size) = match lifecycle {
                 LifecycleBound::Conclusion(bound) => (1, bound.max_frame_bytes()),
                 LifecycleBound::Effect(bounds) => (
-                    2,
+                    2 + u64::from(bounds.max_pending_failures()),
                     bounds
-                        .prepare_bytes()
-                        .checked_add(bounds.conclusion_bytes())
+                        .failure_frame_bytes()
+                        .checked_mul(u64::from(bounds.max_pending_failures()))
+                        .and_then(|value| value.checked_add(bounds.prepare_bytes()))
+                        .and_then(|value| value.checked_add(bounds.conclusion_bytes()))
                         .ok_or(ProgramError::Capacity)?,
                 ),
             };
@@ -141,13 +177,13 @@ mod tests {
             ProgramLimits::new(2),
             [
                 LifecycleBound::Conclusion(ConclusionBound::new(200).unwrap()),
-                LifecycleBound::Effect(EffectBounds::new(300, 400).unwrap()),
+                LifecycleBound::Effect(EffectBounds::new(300, 400, 2, 150).unwrap()),
                 LifecycleBound::Conclusion(ConclusionBound::new(500).unwrap()),
             ],
         )
         .unwrap();
-        assert_eq!(bound.frames(), 13);
-        assert_eq!(bound.bytes(), 4_300);
+        assert_eq!(bound.frames(), 19);
+        assert_eq!(bound.bytes(), 5_200);
         let empty = HistoryBound::calculate(
             ConclusionBound::new(100).unwrap(),
             ProgramLimits::new(u32::MAX),
@@ -161,9 +197,42 @@ mod tests {
     #[test]
     fn history_bound_rejects_zero_and_every_arithmetic_overflow() {
         assert_eq!(ConclusionBound::new(0), Err(ProgramError::InvalidContract));
-        assert_eq!(EffectBounds::new(0, 1), Err(ProgramError::InvalidContract));
-        assert_eq!(EffectBounds::new(1, 0), Err(ProgramError::InvalidContract));
-        assert_eq!(EffectBounds::new(u64::MAX, 1), Err(ProgramError::Capacity));
+        assert_eq!(
+            EffectBounds::new(0, 1, 1, 1),
+            Err(ProgramError::InvalidContract)
+        );
+        assert_eq!(
+            EffectBounds::new(1, 0, 1, 1),
+            Err(ProgramError::InvalidContract)
+        );
+        assert_eq!(
+            EffectBounds::new(u64::MAX, 1, 1, 1),
+            Err(ProgramError::Capacity)
+        );
+        assert_eq!(
+            EffectBounds::new(1, 1, 0, 1),
+            Err(ProgramError::InvalidContract)
+        );
+        assert_eq!(
+            EffectBounds::new(1, 1, 1, 0),
+            Err(ProgramError::InvalidContract)
+        );
+        assert_eq!(
+            EffectBounds::new(1, 1, 2, u64::MAX),
+            Err(ProgramError::Capacity)
+        );
+        assert_eq!(
+            EffectBounds::new(1, 1, 1, u64::MAX - 1),
+            Err(ProgramError::Capacity)
+        );
+        for wire in [
+            serde_json::json!({ "prepare": 1, "conclusion": 1, "max_pending_failures": 0, "failure_frame_bytes": 1 }),
+            serde_json::json!({ "prepare": 1, "conclusion": 1, "max_pending_failures": 1, "failure_frame_bytes": 0 }),
+            serde_json::json!({ "prepare": 1, "conclusion": 1, "max_pending_failures": 2, "failure_frame_bytes": u64::MAX }),
+            serde_json::json!({ "prepare": 1, "conclusion": 1 }),
+        ] {
+            assert!(serde_json::from_value::<EffectBounds>(wire).is_err());
+        }
         for (decisions, sizes) in [
             (0, vec![u64::MAX]),
             (1, vec![u64::MAX / 2 + 1]),

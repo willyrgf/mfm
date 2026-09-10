@@ -1,7 +1,8 @@
 # mfm-journal
 
-Journal owns the exact `mfm.run.frame.v3` canonical encoder and qualifier. Frames contain admission,
-fused Pure/Read conclusions, or separate Effect prepare and adjacent conclusion. Every frame has
+Journal owns the exact `mfm.run.frame.v4` canonical encoder and qualifier. Frames contain admission,
+fused Pure/Read conclusions, or an Effect prepare, zero or more operational failure records, and
+settlement conclusion. Every frame has
 an exact sorted local object closure and a recursive head over its exact bytes. Old frame domains
 are rejected; histories are never rewritten or migrated in place.
 
@@ -10,7 +11,9 @@ or stop with mapped root failure. A Read retains its exact intent and either bou
 outcome or the original operational error, State-owned context and recovery disposition. There is
 no fabricated evidence or independent report frame. Effect prepare retains execution position,
 EffectId and complete command. Its conclusion retains evidence and success or terminal failure;
-its shape cannot encode retry/restart. A prepare may end a complete prefix.
+its shape cannot encode retry/restart. EffectAdapterFailed retains execution position, original
+cause, State context and PendingDecision (Retry or Stop; never Restart). Prepare and each failure
+may end a complete prefix. No unrelated record intervenes and failures cannot follow settlement.
 
 `EncodedRunFrame` is sealed, `StoredRunBytes` is an opaque complete transfer, and `JournalHistory`
 provides qualified borrowed records/objects, exact head, frame lengths and cumulative bytes.

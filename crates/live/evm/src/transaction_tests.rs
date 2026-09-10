@@ -536,7 +536,7 @@ fn runtime(
 }
 fn program(input: &InitialContext) -> mfm_program::Program {
     let frame_bytes = 4 * canonicalize_mfm_value(input).unwrap().0.as_bytes().len() as u64 + 16_384;
-    let effect = mfm_program::EffectBounds::new(frame_bytes, frame_bytes).unwrap();
+    let effect = mfm_program::EffectBounds::new(frame_bytes, frame_bytes, 8, frame_bytes).unwrap();
     let bounds = mfm_evm::EvmTransactionBounds {
         reservation: effect,
         preparation: effect,

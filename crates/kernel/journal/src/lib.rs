@@ -59,7 +59,8 @@ pub enum JournalError {
 
 mod conclusion;
 pub use conclusion::{
-    DomainConclusion, DomainDecision, EffectConclusion, ReadConclusion, RecoveryDecision, StopCode,
+    DomainConclusion, DomainDecision, EffectConclusion, PendingDecision, ReadConclusion,
+    RecoveryDecision, StopCode,
 };
 
 /// Derives the exact-byte recursive frame head without qualifying the input.
@@ -141,12 +142,23 @@ pub enum JournalRecord<'a> {
     },
     /// A complete acknowledged command establishes pending Effect authority.
     EffectPrepared {
-        /// Prepared execution occurrence, shared with its adjacent conclusion.
+        /// Prepared execution occurrence retained through failures until settlement.
         position: ExecutionPosition,
         /// Exact Effect identity.
         effect_id: &'a EffectId,
         /// Complete retained command.
         command: JournalObject<'a>,
+    },
+    /// Audited operational failure of the unmatched prepared Effect.
+    EffectAdapterFailed {
+        /// Execution occurrence of the retained prepare.
+        position: ExecutionPosition,
+        /// Original qualified operational cause.
+        original: JournalObject<'a>,
+        /// State-owned deterministic context.
+        state_context: JournalObject<'a>,
+        /// Committed invocation decision.
+        decision: PendingDecision,
     },
     /// Adjacent settlement of the prepared Effect, with no recoverable decision.
     EffectConcluded {
@@ -402,7 +414,29 @@ impl JournalHistory {
         )
     }
 
-    /// Encodes settlement adjacent to the current retained prepare.
+    /// Encodes a pending operational failure and decision without replacing command authority.
+    pub fn encode_effect_failure(
+        &self,
+        position: ExecutionPosition,
+        original: JournalObject<'_>,
+        state_context: JournalObject<'_>,
+        decision: PendingDecision,
+    ) -> Result<EncodedRunFrame> {
+        self.construct_successor(
+            Record::EffectAdapterFailed {
+                position,
+                original: original.content_ref.clone(),
+                state_context: state_context.content_ref.clone(),
+                decision,
+            },
+            vec![
+                (original.content_ref.clone(), original.canonical),
+                (state_context.content_ref.clone(), state_context.canonical),
+            ],
+        )
+    }
+
+    /// Encodes settlement after the retained prepare and any pending failure records.
     pub fn encode_effect_conclusion(
         &self,
         evidence: JournalObject<'_>,
@@ -553,6 +587,17 @@ impl EncodedRunFrame {
                 effect_id,
                 command: self.object(command),
             },
+            Record::EffectAdapterFailed {
+                position,
+                original,
+                state_context,
+                decision,
+            } => JournalRecord::EffectAdapterFailed {
+                position: *position,
+                original: self.object(original),
+                state_context: self.object(state_context),
+                decision: *decision,
+            },
             Record::EffectConcluded { evidence, outcome } => JournalRecord::EffectConcluded {
                 evidence: self.object(evidence),
                 outcome: outcome.map_ref(&mut |reference| self.object(reference)),
@@ -598,6 +643,12 @@ enum Record {
         position: ExecutionPosition,
         effect_id: EffectId,
         command: ContentRef,
+    },
+    EffectAdapterFailed {
+        position: ExecutionPosition,
+        original: ContentRef,
+        state_context: ContentRef,
+        decision: PendingDecision,
     },
     EffectConcluded {
         evidence: ContentRef,
@@ -709,6 +760,14 @@ fn record_refs(record: &Record) -> BTreeSet<&ContentRef> {
         Record::EffectPrepared { command, .. } => {
             refs.insert(command);
         }
+        Record::EffectAdapterFailed {
+            original,
+            state_context,
+            ..
+        } => {
+            refs.insert(original);
+            refs.insert(state_context);
+        }
         Record::EffectConcluded { evidence, outcome } => {
             refs.insert(evidence);
             outcome.map_ref(&mut |reference| {
@@ -739,7 +798,7 @@ fn encode_frame(
         })
         .collect::<Result<Vec<_>>>()?;
     let wire = FrameWire {
-        domain: "mfm.run.frame.v3".to_owned(),
+        domain: "mfm.run.frame.v4".to_owned(),
         run_id: run_id.clone(),
         run_sequence,
         previous_head_digest: previous_head_digest.cloned(),
@@ -802,7 +861,7 @@ fn qualify_frame(bytes: &[u8]) -> std::result::Result<EncodedRunFrame, JournalEr
         record,
         objects: wire_objects,
     } = wire;
-    if domain != "mfm.run.frame.v3"
+    if domain != "mfm.run.frame.v4"
         || run_sequence == 0
         || run_sequence > MAX_RUN_FRAMES
         || (run_sequence == 1) != previous_head_digest.is_none()
@@ -864,10 +923,16 @@ fn qualify_frame(bytes: &[u8]) -> std::result::Result<EncodedRunFrame, JournalEr
 
 fn records_are_adjacent(previous: &Record, next: &Record) -> bool {
     match previous {
-        Record::EffectPrepared { .. } => {
-            matches!(next, Record::EffectConcluded { .. })
+        Record::EffectPrepared { .. } | Record::EffectAdapterFailed { .. } => {
+            matches!(
+                next,
+                Record::EffectAdapterFailed { .. } | Record::EffectConcluded { .. }
+            )
         }
-        _ => !matches!(next, Record::EffectConcluded { .. }),
+        _ => !matches!(
+            next,
+            Record::EffectAdapterFailed { .. } | Record::EffectConcluded { .. }
+        ),
     }
 }
 

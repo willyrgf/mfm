@@ -224,6 +224,7 @@ fn effect_context<S: EffectState<C>, C: EffectCapabilityContract>(
 }
 
 struct RegisteredState {
+    classify: recovery::ClassifyCallback,
     signature: StateSignature,
     mode: RegisteredMode,
 }
@@ -516,7 +517,7 @@ pub struct RuntimeAssemblyBuilder {
 }
 
 impl RuntimeAssemblyBuilder {
-    /// Constructs an empty builder with the framework Never codec installed.
+    /// Constructs a builder with the framework Never codec and common Stop handler installed.
     ///
     /// # Errors
     ///
@@ -529,6 +530,7 @@ impl RuntimeAssemblyBuilder {
             capabilities: BTreeMap::new(),
         };
         builder.ensure_value::<Never>()?;
+        builder.register_handler::<mfm_program::Stop>()?;
         Ok(builder)
     }
 
@@ -539,11 +541,12 @@ impl RuntimeAssemblyBuilder {
 
     /// Registers one Pure State and its complete value ABI.
     pub fn register_pure<S: PureState>(&mut self) -> Result<()> {
-        self.register_classifier::<Never, mfm_program::Identity<S::Failure>, mfm_program::Identity<mfm_program::NoContext>, mfm_program::NoRecovery>()?;
         let input = self.ensure_value::<S::Input>()?;
         let output = self.ensure_value::<S::Output>()?;
         let failure = self.ensure_value::<S::Failure>()?;
+        self.register_map::<mfm_program::Identity<S::Failure>>()?;
         self.register_state(RegisteredState {
+            classify: recovery::classify::<S::Failure, Never>,
             signature: state_signature::<S>(&input, &output, &failure)?,
             mode: RegisteredMode::Pure {
                 start: start_pure::<S>,
@@ -556,18 +559,20 @@ impl RuntimeAssemblyBuilder {
     where
         S: ReadState<C>,
         C: ReadCapabilityContract,
+        C::OperationalError: mfm_program::ClassifyError,
     {
         let input = self.ensure_value::<S::Input>()?;
         let output = self.ensure_value::<S::Output>()?;
         let failure = self.ensure_value::<S::Failure>()?;
+        self.register_map::<mfm_program::Identity<S::Failure>>()?;
         let capability_contract_ref = self.ensure_read_capability::<C>()?;
-        self.register_classifier::<C::OperationalError, mfm_program::Identity<S::Failure>, mfm_program::Identity<S::AdapterContext>, mfm_program::NoRecovery>()?;
         let incident = Arc::new(AdapterIncidentContract {
             error_codec: self.ensure_value::<C::OperationalError>()?,
             context_codec: self.ensure_value::<S::AdapterContext>()?,
             context: read_context::<S, C>,
         });
         self.register_state(RegisteredState {
+            classify: recovery::classify::<S::Failure, C::OperationalError>,
             signature: state_signature::<S>(&input, &output, &failure)?,
             mode: RegisteredMode::Read {
                 incident,
@@ -583,18 +588,20 @@ impl RuntimeAssemblyBuilder {
     where
         S: EffectState<C>,
         C: EffectCapabilityContract,
+        C::OperationalError: mfm_program::ClassifyError,
     {
         let input = self.ensure_value::<S::Input>()?;
         let output = self.ensure_value::<S::Output>()?;
         let failure = self.ensure_value::<S::Failure>()?;
+        self.register_map::<mfm_program::Identity<S::Failure>>()?;
         let capability_contract_ref = self.ensure_effect_capability::<C>()?;
-        self.register_classifier::<C::OperationalError, mfm_program::Identity<S::Failure>, mfm_program::Identity<S::AdapterContext>, mfm_program::NoRecovery>()?;
         let incident = Arc::new(AdapterIncidentContract {
             error_codec: self.ensure_value::<C::OperationalError>()?,
             context_codec: self.ensure_value::<S::AdapterContext>()?,
             context: effect_context::<S, C>,
         });
         self.register_state(RegisteredState {
+            classify: recovery::classify::<S::Failure, C::OperationalError>,
             signature: state_signature::<S>(&input, &output, &failure)?,
             mode: RegisteredMode::Effect {
                 incident,
@@ -1004,7 +1011,7 @@ impl RuntimeAssembly {
                 mode,
                 recovery: self
                     .inner
-                    .associate_recovery(state.classifier(), state.handler())?,
+                    .associate_recovery(registered.classify, state.handler())?,
                 root_map: self.inner.associate_root_map(
                     state.failure_contract_ref(),
                     program.root_failure_contract_ref(),

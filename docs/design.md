@@ -9,7 +9,7 @@ Runtime transition. `Never` remains the uninhabited failure contract.
 Source code authors the sequence through a deterministic `Operation`. Its required `validate_input`
 check establishes agreement between root planning assumptions and the initial value before expansion.
 `expand_program(entry, operation, input, limits)` qualifies that input and commits its exact value
-reference into Program v5. Runtime rejects input substitution before genesis or provider entry;
+reference into Program v6. Runtime rejects input substitution before genesis or provider entry;
 cold reconstruction checks genesis against the same commitment. Parent planning and deterministic
 States establish future child input agreement. No authoring callback enters Runtime. Multiple RunIds
 may reuse the same exact Program/input pair.
@@ -17,16 +17,28 @@ may reuse the same exact Program/input pair.
 OperationExpansion lowers Pure/Read/Effect States and child Operations through one private symbolic
 draft. Scoped checkpoint tokens cannot be captured for direct installation in another scope, while
 inherited installed bindings retain their owning scope for final relocation. Operations, callbacks,
-and injection setup remain authoring-only. Program retains only the selected immutable descriptors. Classifier descriptors retain map ABIs
-and one operational-error contract; their original and mapped incident keys are derived. Policy
-parameters retain their value reference and canonical bytes; the selected ABI supplies the expected
-nominal contract, and Runtime associates its exact codec. Program v5 rejects superseded descriptors.
+and injection setup remain authoring-only. Program retains one selected handler implementation,
+its exact parameter contract and qualified immutable parameters, checked target list, and allowances.
+Selection is occurrence override, nearest explicit enclosing Operation, then framework Stop.
+Replacement changes parameters and targets together; allowances inherit independently, including
+explicit zero. Program v6 rejects superseded descriptors.
 
-The framework defaults to `NoRecovery` and `Stop`. The shipping Portfolio planner selects those
-defaults with zero global and local recovery allowances. Library callers may explicitly install
-other policies. EVM owns the selectable `EvmBalanceClassifier` and the checked `AnchorChanged`
-cause for bound observations differing from a retained collection anchor; it does not override
-caller classification or handler defaults inside `CollectEvmBalances`.
+Changes to intrinsic classification semantics require revision of the exact error contract identity.
+Errors implement the pure `ClassifyError` projection into `Retryable`, `OutcomeUnknown`,
+`InputInvalidated` or `Permanent`. Runtime statically associates these projections with typed State
+registration. A common `IncidentSummary` carries source and classification to one static handler;
+original causes and State context remain separately retained. There is no classifier registry,
+policy-facing mapped incident, or classifier veto. Runtime alone authorizes the handler request.
+`StandardRecovery` retries Retryable Reads/pending Effects and restarts invalidated Pure/Read input
+only with exactly one declared target that is eligible; all other combinations stop. Custom handlers
+may request retry of an unknown pending outcome under retained-command policy, without establishing
+nonacceptance or authorizing a replacement command.
+
+The framework and shipping Portfolio default to Stop with zero global/local allowances. EVM's
+Read operational causes are Retryable; `AnchorChanged` is InputInvalidated. Transaction provider and
+authority failures are OutcomeUnknown; signer unavailability before prepared-wire retention is
+Retryable. Authenticated transaction reversion is a Permanent domain settlement failure.
+`CollectEvmBalances` inherits its caller's selected handler.
 
 Pure States deterministically map typed input to typed success/failure. Read States deterministically
 prepare typed intent, then interpret typed evidence. Effect States deterministically prepare a
@@ -58,7 +70,7 @@ are internal execution errors.
 
 Each Read or Effect occurrence applies the exact capability/State pair's authoring-time injection
 policy. Before and after hooks use typed `OperationExpansion` scopes with the same linear State,
-child Operation, classifier, handler and checkpoint authoring as Operations. The kernel inserts the
+child Operation, handler and checkpoint authoring as Operations. The kernel inserts the
 designated occurrence once between them. Hooks perform no IO or adapter registration and cannot
 modify the designated occurrence. Nested hooks share a 16-level callback bound, counting the root as one, and the declaration
 bounds. Before/after hooks are sibling levels. Nested entry is checked before descriptor
@@ -78,29 +90,41 @@ without invoking a classifier, handler or adapter. Checkpoints retain their acti
 restart drops later checkpoint snapshots. An acknowledged Effect prevents restart across its position.
 
 Effect execution first appends the complete command and derived `EffectId`, and enters the adapter
-only after known insertion. `Settled(evidence)` binds and interprets evidence before appending the
-adjacent conclusion. `Pending` retains the identical prepare, appends nothing and returns an
-`EffectPending` view. An operational adapter error also preserves the prepare, returning a stopped
-invocation with the last observed view and typed incident. Explicit resume uses the same command
-and EffectId. A settled Effect cannot retry or restart. Zero-State Programs terminate at genesis.
-Hot advancement, pre-append validation and cold reconstruction use the sole semantic fold.
-Pre-append validation constructs a report only for terminal failure candidates. Public observations
-share immutable qualified bytes; retaining `last_observed` does not copy the complete admitted input. Cold
-fold re-prepares only the final pending Effect command to validate its exact bytes and identity;
-completed conclusions remain authoritative event-log outcomes.
+only after known insertion. `Pending` returns the unchanged view without a record. Operational
+failure atomically appends `EffectAdapterFailed` with matching execution position, original cause,
+State context and a `PendingDecision` of Retry or Stop. Retry spends local/global allowance and
+yields; exhausted allowance records Stop. Stop ends the invocation with `RecoveryStopped`. Both
+retain position, visit, command and EffectId, and both count against finite failure-record capacity.
+Explicit resume reconciles that same command while capacity remains. Accepted settlement appends
+its conclusion; settled Effects cannot retry or restart. Zero-State Programs terminate at genesis.
 
-Journal owns the `mfm.run.frame.v3` canonical wire, recursive exact-byte SHA-256 heads,
-strict frame-local object closure, Effect prepare/conclusion adjacency and history qualification.
-Store sees only sealed frames and opaque complete transfers. It atomically inserts at the exact
-head or writes nothing and has no Effect semantics.
+Journal owns the `mfm.run.frame.v4` canonical wire, recursive exact-byte SHA-256 heads, exact
+frame-local object closure and `EffectPrepared -> EffectAdapterFailed* -> EffectConcluded`
+adjacency. A complete prefix may end after prepare or any failure. Runtime's sole fold validates
+positions, decisions, counters and retained command authority. Cold pending views expose the latest
+original error/context and decision without invoking classification or handlers. Earlier failures
+remain in Journal. Store atomically inserts a sealed frame at the exact head or writes nothing.
+
+No operational result is acknowledged before known failure insertion. A losing candidate returns
+the winner's observed history, and ambiguous acknowledgement uses the existing indeterminate
+protocol. Cancellation or crash between provider IO and append can leave an unrecorded physical
+attempt. The audit guarantee covers acknowledged qualified failures, not every physical invocation.
 
 The fixed limits are 32 MiB per canonical run object, 65,536 non-payload envelope bytes, 134,283,264
-bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. For global recovery limit `G`,
-Program bounds frames by `1 + (G + 1) * (Pure + Read + 2*Effect)` and bounds cumulative bytes by
-genesis plus `G + 1` copies of the declared complete sequence closure. Each Pure/Read occurrence
-bounds its complete conclusion; each Effect bounds prepare and conclusion separately. Bounds cover
-all retained canonical objects, root failures and envelopes. Runtime rejects excessive concrete
-admission before genesis or provider entry. Format ceilings are not tunable runtime policy.
+bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. Each Effect requires positive
+`max_pending_failures` and `failure_frame_bytes`, alongside prepare/conclusion bounds. Its lifecycle
+cost is `2 + max_pending_failures` frames and `prepare + max_pending_failures * failure_frame_bytes
++ conclusion` bytes. For global recovery limit G, admission reserves genesis plus G+1 copies of the
+complete sequence using checked arithmetic. All bounds include object closure and envelope bytes.
+Before every pending adapter entry Runtime checks room for another failure, preserving the reserved
+settlement capacity. Exhaustion returns the `pending_failures` size error before IO and can leave
+an unresolved command. Callers must author adequate immutable finite bounds; resume cannot enlarge
+them, delete history, or abandon remote authority.
+
+Hot advancement, pre-append validation and cold reconstruction use the sole semantic fold.
+Pre-append validation constructs terminal reports before acknowledgement. Public observations share
+immutable qualified bytes. Cold fold re-prepares only the final pending Effect command to validate
+its exact bytes and identity; completed conclusions remain authoritative event-log outcomes.
 
 Signing owns the checked transient recoverable-secp256k1 public key, 32-byte digest, low-S compact
 recoverable signature, public recovery, and key- and purpose-bound `Secp256k1Signer` contract.
@@ -163,7 +187,7 @@ Executable identity hashes a canonical domain-separated descriptor containing im
 version, stage, explicit recipe identity, ordered selected slots, and outcome mode. Exact value
 schemas remain additional ABI association keys. Cold fold re-prepares retained commands from
 exact snapshots and does not rerun completed interpretation. A completed transaction adds seven
-frames after admission; this uses the current Program v5, Journal frame v3, and Runtime fold contracts.
+frames after admission; this uses the current Program v6, Journal frame v4, and Runtime fold contracts.
 
 Terminal reporting uses existing checked execution facts and settlement outcomes; there is no
 separate persisted outcome projection. Products own root failure policy. The fixture reports retain

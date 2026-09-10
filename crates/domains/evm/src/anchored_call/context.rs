@@ -287,3 +287,15 @@ impl<C: MfmValueTrait, R: ObservationRecipe<C>> CapabilityInjection<ReadAnchored
             .map_err(|_| ProgramError::InvalidContract)
     }
 }
+
+impl<C: MfmValueTrait> mfm_program::ClassifyError for AnchoredContractCallFailure<C> {
+    fn classify(&self) -> mfm_program::Classification {
+        match self.reason {
+            AnchoredContractCallFailureReason::Rejected
+            | AnchoredContractCallFailureReason::SafeFailure
+            | AnchoredContractCallFailureReason::IntegrityBlocked => {
+                mfm_program::Classification::Permanent
+            }
+        }
+    }
+}

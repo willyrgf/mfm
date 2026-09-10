@@ -167,41 +167,66 @@ pub enum EvmTransactionAdapterContext {
     },
 }
 
-/// Selectable balance recovery assessment; scheduling remains the caller's handler policy.
-pub struct EvmBalanceClassifier;
-impl
-    mfm_program::Classifier<
-        mfm_program::Incident<EvmBalanceFailure, EvmOperationalError, EvmBalanceAdapterContext>,
-    > for EvmBalanceClassifier
-{
-    type Params = mfm_program::NoParams;
-    fn implementation_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.evm.classifier.balance@1")
-            .map_err(|_| mfm_program::ProgramError::InvalidContract)
-    }
-    fn classify(
-        _: &Self::Params,
-        incident: &mfm_program::Incident<
-            EvmBalanceFailure,
-            EvmOperationalError,
-            EvmBalanceAdapterContext,
-        >,
-        _: &mfm_program::RecoveryContext<'_>,
-    ) -> Result<mfm_program::Assessment, mfm_program::StateExecutionError> {
-        use mfm_program::{Assessment, Incident};
-        Ok(match incident {
-            Incident::Adapter {
-                original:
-                    EvmOperationalError::Unavailable
-                    | EvmOperationalError::Timeout
-                    | EvmOperationalError::RateLimited,
-                ..
+impl mfm_program::ClassifyError for EvmOperationalError {
+    fn classify(&self) -> mfm_program::Classification {
+        // Executable Reads using this exact cause contract are duplicate-safe observations.
+        match self {
+            Self::Unavailable | Self::Timeout | Self::RateLimited => {
+                mfm_program::Classification::Retryable
             }
-            | Incident::Domain(EvmBalanceFailure::AnchorChanged { .. }) => Assessment::Recoverable,
-            Incident::Domain(
-                EvmBalanceFailure::SourceUnavailable { .. }
-                | EvmBalanceFailure::IntegrityBlocked { .. },
-            ) => Assessment::Nonrecoverable,
-        })
+        }
+    }
+}
+
+impl mfm_program::ClassifyError for EvmBalanceFailure {
+    fn classify(&self) -> mfm_program::Classification {
+        match self {
+            Self::AnchorChanged { .. } => mfm_program::Classification::InputInvalidated,
+            Self::SourceUnavailable { .. } | Self::IntegrityBlocked { .. } => {
+                mfm_program::Classification::Permanent
+            }
+        }
+    }
+}
+
+impl mfm_program::ClassifyError for EvmTransactionOperationalError {
+    fn classify(&self) -> mfm_program::Classification {
+        match self {
+            // These causes do not establish whether the external operation was acknowledged.
+            Self::Provider { .. } | Self::AuthorityUnavailable => {
+                mfm_program::Classification::OutcomeUnknown
+            }
+            // Signature acquisition precedes retaining and broadcasting prepared wire.
+            Self::SignerUnavailable => mfm_program::Classification::Retryable,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mfm_program::{Classification, ClassifyError};
+
+    #[test]
+    fn operational_semantics_distinguish_observations_from_unknown_transaction_outcomes() {
+        for cause in [
+            EvmOperationalError::Unavailable,
+            EvmOperationalError::Timeout,
+            EvmOperationalError::RateLimited,
+        ] {
+            assert_eq!(cause.classify(), Classification::Retryable);
+            assert_eq!(
+                EvmTransactionOperationalError::Provider { cause }.classify(),
+                Classification::OutcomeUnknown
+            );
+        }
+        assert_eq!(
+            EvmTransactionOperationalError::AuthorityUnavailable.classify(),
+            Classification::OutcomeUnknown
+        );
+        assert_eq!(
+            EvmTransactionOperationalError::SignerUnavailable.classify(),
+            Classification::Retryable
+        );
     }
 }

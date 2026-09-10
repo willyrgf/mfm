@@ -1,8 +1,8 @@
 use super::*;
 use mfm_ids::StableId;
 use mfm_program::{
-    Classifiers, ExecutionPhase, Handlers, Identity, NoContext, NoParams, ProgramError,
-    RecoveryAllowances, StateExecutionError, Stop,
+    Classification, ExecutionPhase, HandlerBinding, Identity, NoContext, NoParams, ProgramError,
+    RecoveryAllowances, StateExecutionError,
 };
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
@@ -33,12 +33,6 @@ struct EvmContext {
 
 #[derive(Debug, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
-struct PortfolioContext {
-    collection: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
 struct Offset {
     value: u64,
 }
@@ -64,86 +58,34 @@ impl ValueMap for MapFailure {
     }
 }
 
-struct MapContext;
-impl ValueMap for MapContext {
-    type Input = EvmContext;
-    type Output = PortfolioContext;
-    type Params = Offset;
-    fn implementation_id() -> mfm_program::Result<StableId> {
-        StableId::new("test.recovery.context-map@1").map_err(|_| ProgramError::InvalidContract)
-    }
-    fn apply(
-        params: &Offset,
-        value: EvmContext,
-    ) -> std::result::Result<PortfolioContext, StateExecutionError> {
-        Ok(PortfolioContext {
-            collection: value
-                .source
-                .checked_add(params.value)
-                .ok_or(StateExecutionError)?,
-        })
+impl ClassifyError for EvmFailure {
+    fn classify(&self) -> Classification {
+        Classification::Retryable
     }
 }
-
-type EvmIncident = Incident<EvmFailure, ProviderError, EvmContext>;
-type PortfolioIncident = Incident<PortfolioFailure, ProviderError, PortfolioContext>;
-
-struct PortfolioClassifier;
-impl Classifier<PortfolioIncident> for PortfolioClassifier {
-    type Params = Offset;
-    fn implementation_id() -> mfm_program::Result<StableId> {
-        StableId::new("test.recovery.portfolio-classifier@1")
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-    fn classify(
-        params: &Offset,
-        incident: &PortfolioIncident,
-        _: &RecoveryContext<'_>,
-    ) -> std::result::Result<Assessment, StateExecutionError> {
-        let collection = match incident {
-            Incident::Domain(value) => value.collection,
-            Incident::Adapter {
-                original: ProviderError::Unavailable,
-                context,
-            } => context.collection,
-        };
-        Ok(if collection == params.value {
-            Assessment::Recoverable
-        } else {
-            Assessment::Nonrecoverable
-        })
-    }
-}
-
-struct EvmClassifier;
-impl Classifier<EvmIncident> for EvmClassifier {
-    type Params = NoParams;
-    fn implementation_id() -> mfm_program::Result<StableId> {
-        StableId::new("test.recovery.evm-classifier@1").map_err(|_| ProgramError::InvalidContract)
-    }
-    fn classify(
-        _: &NoParams,
-        _: &EvmIncident,
-        _: &RecoveryContext<'_>,
-    ) -> std::result::Result<Assessment, StateExecutionError> {
-        Ok(Assessment::Recoverable)
+impl ClassifyError for ProviderError {
+    fn classify(&self) -> Classification {
+        match self {
+            Self::Unavailable => Classification::Retryable,
+        }
     }
 }
 
 struct RetryRead;
-impl<I: IncidentContract> Handler<I> for RetryRead {
+impl Handler for RetryRead {
     type Params = NoParams;
     fn implementation_id() -> mfm_program::Result<StableId> {
         StableId::new("test.recovery.retry-read@1").map_err(|_| ProgramError::InvalidContract)
     }
     fn handle(
         _: &NoParams,
-        _: &I,
-        assessment: Assessment,
+        incident: &IncidentSummary,
         context: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
         Ok(
-            if assessment == Assessment::Recoverable && context.phase() == ExecutionPhase::Read {
+            if incident.classification == Classification::Retryable
+                && context.phase() == ExecutionPhase::Read
+            {
                 RecoveryRequest::RetryState
             } else {
                 RecoveryRequest::Stop
@@ -152,194 +94,70 @@ impl<I: IncidentContract> Handler<I> for RetryRead {
     }
 }
 
-struct ConflictingEvmClassifier;
-impl Classifier<EvmIncident> for ConflictingEvmClassifier {
-    type Params = NoParams;
-
+struct ConfiguredHandler;
+impl Handler for ConfiguredHandler {
+    type Params = Offset;
     fn implementation_id() -> mfm_program::Result<StableId> {
-        EvmClassifier::implementation_id()
+        StableId::new("test.recovery.configured@1").map_err(|_| ProgramError::InvalidContract)
     }
-
-    fn classify(
-        _: &NoParams,
-        _: &EvmIncident,
+    fn handle(
+        params: &Offset,
+        _: &IncidentSummary,
         _: &RecoveryContext<'_>,
-    ) -> std::result::Result<Assessment, StateExecutionError> {
-        Ok(Assessment::Nonrecoverable)
+    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+        Ok(if params.value == 10 {
+            RecoveryRequest::RetryState
+        } else {
+            RecoveryRequest::Stop
+        })
     }
 }
 
 #[test]
-fn recovery_association_qualifies_real_parameters_and_preserves_nonclone_originals() {
+fn handlers_associate_exact_parameters_without_incident_dispatch() {
+    let binding = HandlerBinding::new::<ConfiguredHandler>(Offset { value: 10 }).unwrap();
     let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-    builder
-        .register_classifier::<ProviderError, MapFailure, MapContext, PortfolioClassifier>()
-        .unwrap();
-    builder
-        .register_handler::<PortfolioIncident, RetryRead>()
-        .unwrap();
+    assert!(matches!(
+        builder
+            .finish()
+            .inner
+            .associate_recovery(classify::<EvmFailure, ProviderError>, &binding),
+        Err(RuntimeError::IncompatibleAssembly)
+    ));
+    builder = RuntimeAssemblyBuilder::new().unwrap();
+    builder.register_handler::<ConfiguredHandler>().unwrap();
+    builder.register_handler::<ConfiguredHandler>().unwrap();
     let assembly = builder.finish();
-
-    let mut classifiers = Classifiers::new();
-    classifiers
-        .bind::<ProviderError, MapFailure, MapContext, PortfolioClassifier>(
-            Offset { value: 10 },
-            Offset { value: 10 },
-            Offset { value: 17 },
-        )
-        .unwrap();
-    let mut handlers = Handlers::new();
-    handlers
-        .bind::<PortfolioIncident, RetryRead>(NoParams)
-        .unwrap();
-    let classifier = classifiers
-        .binding(&mfm_program::IncidentAbi::of::<EvmIncident>().unwrap())
-        .unwrap();
-    let handler = handlers.binding(&classifier.abi().mapped()).unwrap();
     let policy = assembly
         .inner
-        .associate_recovery(classifier, handler)
+        .associate_recovery(classify::<EvmFailure, ProviderError>, &binding)
         .unwrap();
-    let context = RecoveryContext::new(ExecutionPhase::Read, RecoveryAllowances::new(2, 1), 3, &[]);
-
-    let original = qualify_hot(EvmFailure { source: 7 }).unwrap();
-    let retained = original.canonical.as_bytes().to_vec();
-    let original_ref = original.value_ref.clone();
-    assert_eq!(
-        policy
-            .request(QualifiedIncident::Domain(original), &context)
-            .unwrap(),
-        (Assessment::Recoverable, RecoveryRequest::RetryState)
-    );
-    // The report path starts from original canonical bytes, independently of consuming policy maps.
-    let codec = assembly
-        .inner
-        .values
-        .get(&nominal_contract_ref::<EvmFailure>().unwrap())
-        .unwrap();
-    let decoded = take::<EvmFailure>(codec.qualify(&original_ref, &retained).unwrap()).unwrap();
-    assert_eq!(decoded.source, 7);
-    assert!(matches!(
-        policy.request(
-            QualifiedIncident::Domain(qualify_hot(EvmFailure { source: u64::MAX }).unwrap()),
-            &context,
-        ),
-        Err(RuntimeError::Internal)
-    ));
-    let original = qualify_hot(ProviderError::Unavailable).unwrap();
-    let bytes = original.canonical.as_bytes().to_vec();
-    assert_eq!(
-        policy
-            .request(
-                QualifiedIncident::Adapter {
-                    original,
-                    context: Box::new(qualify_hot(EvmContext { source: 7 }).unwrap()),
-                },
-                &context
-            )
-            .unwrap(),
-        (Assessment::Recoverable, RecoveryRequest::RetryState)
-    );
-    assert!(matches!(
-        serde_json::from_slice::<ProviderError>(&bytes).unwrap(),
-        ProviderError::Unavailable
-    ));
-    let pending = RecoveryContext::new(
-        ExecutionPhase::EffectPending,
+    let context = RecoveryContext::new(
+        ExecutionPhase::Read,
         RecoveryAllowances::new(2, 1),
         3,
         &[],
+        &[],
     );
-    assert_eq!(
-        policy
-            .request(
-                QualifiedIncident::Adapter {
-                    original: qualify_hot(ProviderError::Unavailable).unwrap(),
-                    context: Box::new(qualify_hot(EvmContext { source: 7 }).unwrap()),
-                },
-                &pending
-            )
-            .unwrap(),
-        (Assessment::Recoverable, RecoveryRequest::Stop)
-    );
-}
-
-#[test]
-fn recovery_association_rejects_missing_and_incompatible_exact_bindings() {
-    let mut classifiers = Classifiers::new();
-    classifiers
-        .bind::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>(
-            NoParams, NoParams, NoParams,
-        )
-        .unwrap();
-    assert!(classifiers
-        .bind::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>(
-            NoParams, NoParams, NoParams
-        )
-        .is_err());
-    let source = mfm_program::IncidentAbi::of::<EvmIncident>().unwrap();
-    let classifier = classifiers.binding(&source).unwrap();
-    assert!(classifiers
-        .binding(&mfm_program::IncidentAbi::of::<PortfolioIncident>().unwrap())
-        .is_err());
-
-    let mut handlers = Handlers::new();
-    handlers.bind::<EvmIncident, Stop>(NoParams).unwrap();
-    handlers.bind::<PortfolioIncident, Stop>(NoParams).unwrap();
-    assert!(handlers.bind::<EvmIncident, RetryRead>(NoParams).is_err());
-    let matching = handlers.binding(&source).unwrap();
-    let mismatched = handlers
-        .binding(&mfm_program::IncidentAbi::of::<PortfolioIncident>().unwrap())
-        .unwrap();
-    let empty = RuntimeAssemblyBuilder::new().unwrap().finish();
-    assert!(matches!(
-        empty.inner.associate_recovery(classifier, matching),
-        Err(RuntimeError::IncompatibleAssembly)
-    ));
-    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-    builder.register_classifier::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>().unwrap();
-    builder.register_classifier::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>().unwrap();
-    builder.register_handler::<EvmIncident, Stop>().unwrap();
-    builder
-        .register_handler::<PortfolioIncident, Stop>()
-        .unwrap();
-    assert!(matches!(
-        builder.register_classifier::<
-            ProviderError,
-            Identity<EvmFailure>,
-            Identity<EvmContext>,
-            ConflictingEvmClassifier,
-        >(),
-        Err(RuntimeError::IncompatibleAssembly)
-    ));
-    let assembly = builder.finish();
-    assert!(matches!(
-        assembly.inner.associate_recovery(classifier, mismatched),
-        Err(RuntimeError::IncompatibleAssembly)
-    ));
-    let policy = assembly
-        .inner
-        .associate_recovery(classifier, matching)
-        .unwrap();
-    let context = RecoveryContext::new(ExecutionPhase::Read, RecoveryAllowances::new(1, 0), 1, &[]);
-    assert_eq!(
-        policy
-            .request(
-                QualifiedIncident::Domain(qualify_hot(EvmFailure { source: 1 }).unwrap()),
-                &context
-            )
-            .unwrap(),
-        (Assessment::Recoverable, RecoveryRequest::Stop)
-    );
-
-    let mut override_handlers = Handlers::new();
-    override_handlers
-        .bind::<EvmIncident, RetryRead>(NoParams)
-        .unwrap();
+    for incident in [
+        QualifiedIncident::Domain(&qualify_hot(EvmFailure { source: 7 }).unwrap()),
+        QualifiedIncident::Adapter {
+            original: &qualify_hot(ProviderError::Unavailable).unwrap(),
+        },
+    ] {
+        assert_eq!(
+            policy.request(incident, &context).unwrap(),
+            RecoveryRequest::RetryState
+        );
+    }
+    let mut wire = serde_json::to_value(&binding).unwrap();
+    wire["params"] =
+        serde_json::to_value(mfm_program::PolicyParams::new(&NoParams).unwrap()).unwrap();
+    let mismatched: HandlerBinding = serde_json::from_value(wire).unwrap();
     assert!(matches!(
         assembly
             .inner
-            .associate_recovery(classifier, override_handlers.binding(&source).unwrap()),
+            .associate_recovery(classify::<EvmFailure, ProviderError>, &mismatched),
         Err(RuntimeError::IncompatibleAssembly)
     ));
 }
@@ -506,17 +324,9 @@ impl mfm_program::Operation for MappedRead {
         &self,
         scope: &mut mfm_program::OperationExpansion<Offset, Offset, PortfolioFailure>,
     ) -> mfm_program::Result<()> {
-        let mut classifiers = Classifiers::new();
-        classifiers.bind::<ProviderError, MapFailure, MapContext, PortfolioClassifier>(
-            Offset {
-                value: self.mapped_offset,
-            },
-            Offset {
-                value: self.mapped_offset,
-            },
-            Offset { value: 17 },
-        )?;
-        scope.classifiers(classifiers)?;
+        scope.handler(HandlerBinding::new::<ConfiguredHandler>(Offset {
+            value: self.mapped_offset,
+        })?)?;
         scope.read::<EvmRead, Observation, MapFailure>(
             &Offset { value: 1 },
             Offset { value: 100 },
@@ -527,7 +337,7 @@ impl mfm_program::Operation for MappedRead {
 }
 
 #[test]
-fn mapped_parameters_change_program_identity_and_survive_cold_association() {
+fn handler_parameters_change_program_identity_and_survive_cold_association() {
     let mut builder = RuntimeAssemblyBuilder::new().unwrap();
     builder.register_read::<EvmRead, Observation>().unwrap();
     builder
@@ -539,18 +349,20 @@ fn mapped_parameters_change_program_identity_and_survive_cold_association() {
             })
         })
         .unwrap();
-    builder
-        .register_classifier::<ProviderError, MapFailure, MapContext, PortfolioClassifier>()
-        .unwrap();
-    builder
-        .register_handler::<PortfolioIncident, Stop>()
-        .unwrap();
+    builder.register_map::<MapFailure>().unwrap();
+    builder.register_handler::<ConfiguredHandler>().unwrap();
     let assembly = builder.finish();
-    let context = RecoveryContext::new(ExecutionPhase::Read, RecoveryAllowances::new(2, 0), 2, &[]);
+    let context = RecoveryContext::new(
+        ExecutionPhase::Read,
+        RecoveryAllowances::new(2, 0),
+        2,
+        &[],
+        &[],
+    );
     let mut previous = None;
     for (mapped_offset, expected) in [
-        (10, Assessment::Recoverable),
-        (11, Assessment::Nonrecoverable),
+        (10, RecoveryRequest::RetryState),
+        (11, RecoveryRequest::Stop),
     ] {
         let program = mfm_program::expand_program(
             mfm_ids::EntryPointId::new("mfm.test/mapped-read@1").unwrap(),
@@ -568,11 +380,11 @@ fn mapped_parameters_change_program_identity_and_survive_cold_association() {
             executable.declarations[0]
                 .recovery
                 .request(
-                    QualifiedIncident::Domain(qualify_hot(EvmFailure { source: 7 }).unwrap()),
+                    QualifiedIncident::Domain(&qualify_hot(EvmFailure { source: 7 }).unwrap()),
                     &context,
                 )
                 .unwrap(),
-            (expected, RecoveryRequest::Stop)
+            expected
         );
         let root = executable.declarations[0]
             .root_map

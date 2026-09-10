@@ -27,12 +27,12 @@ use serde::{Deserialize, Serialize};
 mod authoring;
 mod recovery;
 pub use recovery::{
-    Assessment, Checkpoint, Classifier, ClassifierAbi, ClassifierBinding, Classifiers,
-    ConclusionBound, EffectBounds, ExecutionPhase, FromNever, Handler, HandlerAbi, HandlerBinding,
-    Handlers, HistoryBound, Identity, Incident, IncidentAbi, IncidentContract, MapAbi, MapBinding,
-    NoContext, NoParams, NoRecovery, Occurrence, PolicyParams, ProgramLimits, RecoveryAllowances,
-    RecoveryContext, RecoveryDenial, RecoveryLimit, RecoveryRequest, RecoveryTarget, RecoveryUsage,
-    Stop, StopReason, ValueMap,
+    Checkpoint, Classification, ClassifyError, ConclusionBound, EffectBounds, ExecutionPhase,
+    FromNever, Handler, HandlerAbi, HandlerBinding, HistoryBound, Identity, Incident,
+    IncidentSource, IncidentSummary, MapAbi, MapBinding, NoContext, NoParams, Occurrence,
+    PolicyParams, ProgramLimits, RecoveryAllowances, RecoveryContext, RecoveryDenial,
+    RecoveryLimit, RecoveryRequest, RecoveryTarget, RecoveryUsage, StandardRecovery, Stop,
+    StopReason, ValueMap,
 };
 
 #[cfg(test)]
@@ -65,8 +65,8 @@ pub trait State: Send + Sync + 'static {
     type Input: MfmValue;
     /// Success value.
     type Output: MfmValue;
-    /// Failure value.
-    type Failure: MfmValue;
+    /// Original failure value with intrinsic deterministic recovery semantics.
+    type Failure: ClassifyError;
 
     /// Returns the stable implementation identity.
     fn state_id() -> Result<StableId>;

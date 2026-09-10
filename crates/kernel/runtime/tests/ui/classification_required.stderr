@@ -1,0 +1,39 @@
+error[E0277]: the trait bound `mfm_program::NoParams: ClassifyError` is not satisfied
+  --> tests/ui/classification_required.rs:63:23
+   |
+63 |         .read::<Read, Observation, Identity<Never>>(
+   |                       ^^^^^^^^^^^ the trait `ClassifyError` is not implemented for `mfm_program::NoParams`
+   |
+help: the trait `ClassifyError` is implemented for `mfm_program::Never`
+  --> $WORKSPACE/crates/kernel/program/src/recovery.rs
+   |
+   | impl ClassifyError for Never {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `mfm_program::OperationExpansion::<I, O, F>::read`
+  --> $WORKSPACE/crates/kernel/program/src/authoring.rs
+   |
+   |     pub fn read<S, C, M>(
+   |            ---- required by a bound in this associated function
+...
+   |         C::OperationalError: ClassifyError,
+   |                              ^^^^^^^^^^^^^ required by this bound in `OperationExpansion::<I, O, F>::read`
+
+error[E0277]: the trait bound `mfm_program::NoParams: ClassifyError` is not satisfied
+  --> tests/ui/classification_required.rs:75:32
+   |
+75 |         .register_read::<Read, Observation>()
+   |                                ^^^^^^^^^^^ the trait `ClassifyError` is not implemented for `mfm_program::NoParams`
+   |
+help: the trait `ClassifyError` is implemented for `mfm_program::Never`
+  --> $WORKSPACE/crates/kernel/program/src/recovery.rs
+   |
+   | impl ClassifyError for Never {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `RuntimeAssemblyBuilder::register_read`
+  --> src/assembly.rs
+   |
+   |     pub fn register_read<S, C>(&mut self) -> Result<()>
+   |            ------------- required by a bound in this associated function
+...
+   |         C::OperationalError: mfm_program::ClassifyError,
+   |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `RuntimeAssemblyBuilder::register_read`

@@ -66,7 +66,7 @@ The following are missing capabilities, not current API guarantees:
 
 ## General execution and recovery policy
 
-Runtime now supplies typed classifier/handler selection, bounded retry/checkpoint restart, Effect
+Runtime now supplies intrinsic error classification and common handler selection, bounded retry/checkpoint restart, Effect
 barriers, canonical failure reports, and stopped-invocation observations. The remaining gaps below
 concern configurable product orchestration around that caller-driven contract.
 

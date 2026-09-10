@@ -90,8 +90,11 @@ Checked identity products expose named fields; commands and correlated facts ret
 Transaction factories accept `u128` fees. Plans and complete commands share nested `parameters`
 with `binding`, `value`, `gas_limit`, and checked `fees` (`priority` and `maximum` decimal strings).
 
-`EvmBalanceClassifier` is an explicitly selectable policy for balance incidents. It assesses
-operational provider failures and authenticated `AnchorChanged` evidence as recoverable; other
-balance failures stop. It does not choose retries or install itself inside collection authoring.
+Exact EVM errors implement `ClassifyError`: duplicate-safe Read timeouts, rate limits and unavailable
+observations are Retryable; AnchorChanged is InputInvalidated; authenticated integrity blocks and
+unavailable sources are Permanent. Transaction provider/authority failures remain OutcomeUnknown,
+while signer unavailability before wire retention is Retryable. Authenticated reversion stays a
+Permanent domain settlement failure. Classification does not authorize another command.
+
 Callers own handler selection, checkpoint regions and finite allowances. `AnchorChanged` retains
 the previous and observed anchors and rejects equal anchors during qualification.

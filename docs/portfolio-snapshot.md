@@ -16,8 +16,8 @@ Up to 64 total sources are accepted; 65 are rejected.
 
 The cumulative context retains the complete admitted request, caller continuation, route identity,
 source order, and checked observations. Initial and final anchor checks prevent combining balances
-from different blocks. The selectable EVM classifier recognizes authenticated AnchorChanged and
-reviewed transient operational causes. Shipping snapshot execution selects NoRecovery/Stop with zero
+from different blocks. Intrinsic EVM classification marks AnchorChanged as InputInvalidated and reviewed Read operational
+causes as Retryable. Shipping snapshot execution selects Stop with zero
 recovery allowances; registration alone never enables retries or restarts.
 
 A stopped child failure retains both its original cause and mapped Portfolio root failure in the

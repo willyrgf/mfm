@@ -11,14 +11,15 @@ start(RunId, Program, C0)
   -> Read: prepare intent -> await typed evidence/error -> append fused conclusion and decision
   -> Effect: append exact command/value ref/EffectId -> await Pending or Settled evidence
        -> Pending: append nothing -> return EffectPending
+       -> Operational error: append original/context/Retry-or-Stop -> yield or stop invocation
        -> Settled: bind evidence -> interpret -> append adjacent conclusion and decision
   -> advance, yield committed Retry/Restart, or return terminal success/FailureReport
 ```
 
 Program contains a linear State sequence. Every selected occurrence has a checked State position
 and monotonic visit identity. Success advances; a zero-State Program succeeds at genesis with C0.
-A classifier assesses an original domain failure or typed adapter error/context. Its independently
-selected handler requests Stop, RetryState, or a typed checkpoint restart. Runtime checks finite
+The exact original error implements intrinsic ClassifyError semantics. One selected handler
+consumes its common summary and requests Stop, RetryState, or a typed checkpoint restart. Runtime checks finite
 State/run allowances, active checkpoints, and retained Effect barriers before committing a decision.
 Only Stop applies the declared root failure maps. Accepted recovery yields to the caller.
 
@@ -39,8 +40,9 @@ its deterministic State preparation to compare the exact command and derived ide
 
 Pure evaluation, qualification, and encoding use immediately awaited blocking jobs. Store and adapter
 IO stay on the async driver. Pending Effect settlement never appends a second prepare. An operational
-pending error can stop the invocation while preserving the acknowledged authority and observed view;
-an invariant violation is Internal. These errors do not fabricate a durable conclusion.
+pending error appends its original cause/context and Retry/Stop before acknowledgment, preserving
+command authority and visit. Every failure consumes admitted record capacity, including Stop.
+Exhaustion prevents further provider entry. An invariant violation is Internal and appends nothing.
 Dropping at any await is safe: either no candidate was submitted or one in-flight Store append may
 commit atomically, and a later complete reload determines the result.
 

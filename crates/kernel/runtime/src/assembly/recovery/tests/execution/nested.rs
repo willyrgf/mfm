@@ -26,25 +26,22 @@ impl mfm_program::PureState for IncrementOffset {
 }
 
 struct SelectRegion;
-impl Handler<EvmIncident> for SelectRegion {
-    type Params = NoParams;
+impl Handler for SelectRegion {
+    type Params = Offset;
     fn implementation_id() -> mfm_program::Result<StableId> {
         StableId::new("mfm.test.nested-restart/select-region@1")
             .map_err(|_| ProgramError::InvalidContract)
     }
     fn handle(
-        _: &NoParams,
-        incident: &EvmIncident,
-        _: Assessment,
+        initial: &Offset,
+        _: &IncidentSummary,
         context: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
-        let Incident::Domain(failure) = incident else {
-            return Ok(RecoveryRequest::Stop);
-        };
+        let selected = (initial.value - u64::from(context.remaining().restarts()) + 1) % 2;
         Ok(context
             .eligible_restart_targets()
             .iter()
-            .find(|target| target.position().index() as u64 == failure.source)
+            .find(|target| target.position().index() as u64 == selected)
             .copied()
             .map(RecoveryRequest::Restart)
             .unwrap_or(RecoveryRequest::Stop))
@@ -70,17 +67,13 @@ impl mfm_program::Operation for NestedRegions {
         scope.pure::<IncrementOffset, Identity<EvmFailure>>(NoParams, Occurrence::new(), bound)?;
         let inner = scope.checkpoint::<Offset>()?;
         scope.pure::<IncrementOffset, Identity<EvmFailure>>(NoParams, Occurrence::new(), bound)?;
-        let mut classifiers = Classifiers::new();
-        classifiers
-            .bind::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>(
-                NoParams, NoParams, NoParams,
-            )?;
-        scope.classifiers(classifiers)?;
-        let mut handlers = Handlers::new();
-        handlers.bind::<EvmIncident, SelectRegion>(NoParams)?;
-        handlers.checkpoint::<EvmIncident, Offset>(&outer)?;
-        handlers.checkpoint::<EvmIncident, Offset>(&inner)?;
-        scope.handlers(handlers)?;
+        scope.handler(
+            HandlerBinding::new::<SelectRegion>(Offset {
+                value: u64::from(self.restarts),
+            })?
+            .checkpoint(&outer)?
+            .checkpoint(&inner)?,
+        )?;
         scope.allowances(RecoveryAllowances::new(0, self.restarts))?;
         scope.read::<EvmRead, Observation, Identity<EvmFailure>>(
             &Offset { value: 1 },
@@ -102,10 +95,7 @@ async fn nested_restarts_restore_inputs_without_resetting_local_or_global_allowa
         let mut builder = RuntimeAssemblyBuilder::new().unwrap();
         builder.register_pure::<IncrementOffset>().unwrap();
         builder.register_read::<EvmRead, Observation>().unwrap();
-        builder.register_classifier::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>().unwrap();
-        builder
-            .register_handler::<EvmIncident, SelectRegion>()
-            .unwrap();
+        builder.register_handler::<SelectRegion>().unwrap();
         builder
             .register_adapter::<Observation, _, _>(Offset { value: 1 }, move |_, intent| {
                 let mut inputs = observed.lock().unwrap();

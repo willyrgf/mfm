@@ -1,6 +1,6 @@
 # mfm-runtime
 
-Runtime associates an immutable linear Program with typed States, codecs, root maps, classifiers,
+Runtime associates an immutable linear Program with typed States, codecs, root maps, intrinsic error projections,
 handlers and adapters. `RuntimeAssemblyBuilder::new` installs framework units; explicit registrations
 select exact contracts and parameters. A failed registration does not poison the builder. `finish`
 freezes the assembly. Generic States may share an implementation ID with different exact ABIs;
@@ -15,15 +15,20 @@ commitment and the complete bounded history before genesis or provider entry.
 reconstructs without progression. Pure/Read outcomes and recovery decisions append atomically.
 Operational Read errors retain their original capability error and State-owned context without
 fabricating evidence or domain failure. Accepted retry/restart spends the committed allowance and
-yields at a fresh visit. Classification, handling, mapping or validation failure before append
+yields at a fresh visit. Handling, root mapping or validation failure before append
 leaves the previous head unchanged.
 
-An Effect appends its complete command before adapter entry. Pending settlement yields an
-`EffectPending` view with the exact EffectId and visit; operational failure returns
-`InvocationFailure::RecoveryStopped` with that observed pending authority and typed incident.
-Neither appends a settlement or authorizes a replacement. Explicit resume reconciles the same
-command/identity. Accepted settlement appends the adjacent conclusion. Settled Effects cannot retry
-or restart, and retained prepares prevent checkpoint restart across their position.
+An Effect appends its complete command before adapter entry. A pending response yields the same
+EffectId and visit without a record. Operational failure appends original error, State context and
+Retry/Stop before acknowledgement. Retry spends allowance and yields with the same command; Stop
+returns `InvocationFailure::RecoveryStopped`. Both consume failure capacity. Before adapter entry,
+Runtime checks another admitted failure slot; exhaustion returns `pending_failures` without IO.
+Cold `EffectPending` views expose `latest_failure`, including its committed decision. Explicit
+resume can settle while capacity remains. Settlement ends the prepare/failure*/conclusion lifecycle;
+settled Effects cannot recover and retained prepares prevent restart across their position.
+
+Audit records cover acknowledged qualified outcomes. Cancellation between provider response and
+failure append can leave a physical attempt unrecorded; no outcome is acknowledged from that gap.
 
 Store insertion extends the local fold. A losing append reloads and returns the winner without
 executing its newly selected visit. Ambiguous acknowledgement preserves the Store error source and

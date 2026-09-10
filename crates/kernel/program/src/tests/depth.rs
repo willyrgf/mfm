@@ -42,7 +42,7 @@ impl Nested {
                 &child,
                 NoParams,
                 Occurrence::new(),
-                EffectBounds::new(1024, 1024)?,
+                EffectBounds::new(1024, 1024, 1, 1024)?,
             )
         }
     }
@@ -117,10 +117,7 @@ impl CapabilityInjection<Pass> for NestedEffect {
     ) -> Result<()> {
         setup.suffixes.fetch_add(1, Ordering::SeqCst);
         let checkpoint = scope.checkpoint::<Value>()?;
-        let mut handlers = Handlers::new();
-        handlers.bind::<Cause, Stop>(NoParams)?;
-        handlers.checkpoint::<Cause, Value>(&checkpoint)?;
-        scope.handlers(handlers)?;
+        scope.handler(HandlerBinding::new::<Stop>(NoParams)?.checkpoint(&checkpoint)?)?;
         scope.pure::<Pass, Identity<Never>>(
             NoParams,
             Occurrence::new(),

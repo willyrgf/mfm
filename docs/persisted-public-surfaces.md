@@ -1,16 +1,16 @@
 # Persisted and public surfaces
 
-Program v5 is one strict checked canonical document requiring `domain: "mfm.program.v5"`. It
+Program v6 is one strict checked canonical document requiring `domain: "mfm.program.v6"`. It
 contains the entry point, admitted-context contract and exact initial value ref, root success/failure
 contracts, and an ordered State sequence with selected recovery policies, maps, checkpoints, and
 finite lifecycle bounds. There is no public wire DTO parallel to `Program`.
 
-Journal persists only canonical `mfm.run.frame.v3` frames. Genesis records the exact Program and C0.
+Journal persists only canonical `mfm.run.frame.v4` frames. Genesis records the exact Program and C0.
 Later frames are a fused Pure conclusion, a fused Read intent/evidence/outcome conclusion, an Effect
-prepare, or its immediately adjacent conclusion. Conclusions retain the execution position and visit,
+prepare, a pending operational failure, or settlement after its prepare/failure* prefix. Conclusions retain the execution position and visit,
 original domain failure or typed operational error/context, and the atomic recovery decision. A Stop
-also retains the mapped root failure when applicable. A prepare may be the final record of a complete
-valid prefix. Every referenced object appears exactly once in the frame-local sorted object closure.
+also retains the mapped root failure when applicable. A prepare or pending failure may be the final record of a complete
+valid prefix. Pending failures retain position, original cause/context and Retry/Stop. Every referenced object appears exactly once in the frame-local sorted object closure.
 Recursive heads use `content:sha256-v1` over exact canonical frame bytes.
 
 `EncodedRunFrame` is sealed and exposes Store's read-only run/sequence/predecessor/head/byte
@@ -59,7 +59,7 @@ The exact Program and C0 remain the durable execution admission; RunIndex remain
 
 Public `RunView` contains RunId, durable sequence/head, and one of `Runnable`, `EffectPending`,
 `Succeeded`, or `Failed`. Runnable retains position and Advance/Retry/Restart reason; a pending
-Effect retains position and EffectId. Success exposes the output contract ref, instance ref, and exact
+Effect retains position, EffectId and latest_failure (original error/context and committed decision). Success exposes the output contract ref, instance ref, and exact
 canonical bytes. Failure exposes the content ref and canonical FailureReport, including the original
 failure or operational error/context, Stop reason, position, and recovery usage.
 Client JSON preserves that sum and embeds retained canonical bytes as raw JSON values.

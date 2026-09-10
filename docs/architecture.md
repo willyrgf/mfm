@@ -6,7 +6,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | --- | --- | --- |
 | IDs / Values | checked identities including `EffectId`, `ConfigName` and `DigestBytes`, schema descriptors, canonical typed values, mechanical typed context slots, 32 MiB object bound | execution or IO |
 | Capabilities | Read intent/evidence and Effect command/evidence contracts | State outcomes or retries |
-| Program | typed Operation authoring and root input validation, sole private lowering draft, checked v5 ordered State sequence and exact initial-value commitment, Pure/Read/Effect State contracts, redaction-safe internal callback errors, `Never` | registries, IO, scheduling |
+| Program | typed Operation authoring and root input validation, sole private lowering draft, checked v6 ordered State sequence and exact initial-value commitment, Pure/Read/Effect State contracts, redaction-safe internal callback errors, `Never` | registries, IO, scheduling |
 | Runtime | immutable assembly, Program association, sole fold, typed execution/progression | persisted wire or physical storage |
 | Journal | exact frame encoding and complete-history qualification | domain interpretation or persistence IO |
 | Store / run index ports | object-safe complete load and atomic append; separate mechanical current-head enumeration | Program, State, capability, reducer, config semantics, or run-status derivation |
@@ -108,18 +108,18 @@ State contracts and selected policy/mapping ABIs; Runtime associates the exact t
 The source-authoring sequence is separate from progression:
 
 ```text
-domain Operation -> OperationExpansion -> one private symbolic draft -> immutable Program v5
+domain Operation -> OperationExpansion -> one private symbolic draft -> immutable Program v6
                          |-> typed before/designated/after capability injection
 ```
 
-Operation implementations compose children through `OperationExpansion`. Classifier and handler
-families inherit independently; occurrence overrides select exact typed bindings. Root failure maps
+Operation implementations compose children through `OperationExpansion`. One selected handler binding inherits through nested scopes; occurrence overrides replace its
+parameters and targets together. Error classification belongs to the exact typed error contract. Root failure maps
 replace failure-routing States. Scoped checkpoints lower to permitted declaration boundaries.
 Runtime receives only the completed Program and associated implementations; Journal and Store
 receive neither authoring scopes nor policies to execute. Runtime owns the sole semantic fold,
 including recovery counters, checkpoint retention and irreversible Effect barriers.
 
-EVM owns its original incident components and selectable balance classifier. Portfolio owns its
+EVM owns its original incident components and their intrinsic error classifications. Portfolio owns its
 original public failure and explicit EVM failure map. The shipping Portfolio operation uses the
 framework's stop defaults and zero recovery allowances. A caller selects any different policy;
 collection authoring does not override it implicitly.

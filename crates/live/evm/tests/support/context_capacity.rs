@@ -644,7 +644,7 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
             let admitted = program
                 .history_bound(mfm_program::ConclusionBound::new(frames[0].len() as u64).unwrap())
                 .unwrap();
-            assert_eq!(admitted.frames(), 47);
+            assert_eq!(admitted.frames(), 83);
             assert!(admitted.bytes() <= mfm_journal::MAX_RUN_BYTES);
             assert!(total as u64 <= admitted.bytes());
             assert!(frames
@@ -682,5 +682,11 @@ async fn two_creations_call_observation_and_reports_fit_the_unchanged_capacity_e
             _ => panic!("cold terminal"),
         };
         assert_eq!(cold_value, value);
+    }
+}
+
+impl mfm_program::ClassifyError for CapacityFailure {
+    fn classify(&self) -> mfm_program::Classification {
+        mfm_program::Classification::Permanent
     }
 }

@@ -14,7 +14,7 @@ impl EffectState<Mutation> for Injected {
     fn adapter_context(
         _: &Self::Input,
         _: &Command,
-        _: &NoContext,
+        _: &OperationalFailure,
     ) -> Result<NoContext, mfm_program::StateExecutionError> {
         Ok(NoContext)
     }
@@ -58,7 +58,7 @@ impl CapabilityInjection<Injected> for Mutation {
             setup,
             NoParams,
             Occurrence::new(),
-            EffectBounds::new(65536, 65536)?,
+            EffectBounds::new(65536, 65536, 8, 65536)?,
         )
     }
 
@@ -130,7 +130,7 @@ impl Operation for InjectedProgram {
             &Binding { route: 9 },
             NoParams,
             Occurrence::new(),
-            EffectBounds::new(65536, 65536)?,
+            EffectBounds::new(65536, 65536, 8, 65536)?,
         )
     }
 }
@@ -229,12 +229,12 @@ impl CapabilityInjection<Injected> for Recursive {
             setup,
             NoParams,
             Occurrence::new(),
-            EffectBounds::new(65536, 65536)?,
+            EffectBounds::new(65536, 65536, 8, 65536)?,
         )
     }
 }
 impl EffectCapabilityContract for Recursive {
-    type OperationalError = NoContext;
+    type OperationalError = OperationalFailure;
     type Command = Command;
     type Evidence = EffectEvidence;
     fn contract_id() -> mfm_capabilities::Result<StableId> {
@@ -253,7 +253,7 @@ impl EffectState<Recursive> for Injected {
     fn adapter_context(
         _: &Self::Input,
         _: &Command,
-        _: &NoContext,
+        _: &OperationalFailure,
     ) -> Result<NoContext, mfm_program::StateExecutionError> {
         Ok(NoContext)
     }
@@ -286,7 +286,7 @@ impl Operation for RecursionProgram {
                 &Binding { route: 9 },
                 NoParams,
                 Occurrence::new(),
-                EffectBounds::new(65536, 65536)?
+                EffectBounds::new(65536, 65536, 8, 65536)?
             ),
             Err(ProgramError::Capacity)
         );

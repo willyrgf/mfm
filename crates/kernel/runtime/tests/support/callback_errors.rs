@@ -43,7 +43,7 @@ impl ReadState<Observation> for FailingRead {
     fn adapter_context(
         _: &Self::Input,
         _: &Intent,
-        _: &NoContext,
+        _: &OperationalFailure,
     ) -> Result<NoContext, mfm_program::StateExecutionError> {
         Ok(NoContext)
     }
@@ -62,7 +62,7 @@ impl EffectState<Mutation> for FailingEffect {
     fn adapter_context(
         _: &Self::Input,
         _: &Command,
-        _: &NoContext,
+        _: &OperationalFailure,
     ) -> Result<NoContext, mfm_program::StateExecutionError> {
         Ok(NoContext)
     }
@@ -140,7 +140,7 @@ impl Operation for ErrorProgram {
                 &Binding { route: 8 },
                 NoParams,
                 Occurrence::new(),
-                EffectBounds::new(65536, 65536)?,
+                EffectBounds::new(65536, 65536, 8, 65536)?,
             ),
         }
     }

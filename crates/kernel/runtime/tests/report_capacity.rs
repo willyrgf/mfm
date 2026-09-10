@@ -1,9 +1,9 @@
 use mfm_capabilities::{CapabilityError, EffectCapabilityContract};
 use mfm_ids::{DigestBytes, EffectId, EntryPointId, RunId, StableId};
 use mfm_program::{
-    expand_program, ConclusionBound, EffectBounds, EffectState, Identity, NoContext, NoParams,
-    Occurrence, Operation, OperationExpansion, PreparationError, ProgramLimits,
-    ProposedStateOutcome, PureState, State, StateExecutionError,
+    expand_program, ConclusionBound, EffectBounds, EffectState, Identity, NoParams, Occurrence,
+    Operation, OperationExpansion, PreparationError, ProgramLimits, ProposedStateOutcome,
+    PureState, State, StateExecutionError,
 };
 use mfm_program_derive::MfmValue;
 use mfm_runtime::{
@@ -35,7 +35,7 @@ struct Evidence {
 
 struct Mutation;
 impl EffectCapabilityContract for Mutation {
-    type OperationalError = NoContext;
+    type OperationalError = OperationalFailure;
     type Command = Input;
     type Evidence = Evidence;
     fn contract_id() -> mfm_capabilities::Result<StableId> {
@@ -77,7 +77,7 @@ impl EffectState<Mutation> for Failing {
     fn adapter_context(
         input: &Input,
         _: &Input,
-        _: &NoContext,
+        _: &OperationalFailure,
     ) -> Result<Failure, StateExecutionError> {
         Ok(Failure {
             detail: "x".repeat(input.bytes as usize),
@@ -127,7 +127,7 @@ impl Operation for Plan {
                 &NoParams,
                 NoParams,
                 Occurrence::new(),
-                EffectBounds::new(65536, 40 * 1024 * 1024)?,
+                EffectBounds::new(65536, 40 * 1024 * 1024, 8, 40 * 1024 * 1024)?,
             )
         } else {
             scope.pure::<Failing, Identity<Failure>>(
@@ -241,3 +241,19 @@ async fn inline_report_size_preserves_original_values_and_pending_authority() {
 
 #[path = "support/qualification_capacity.rs"]
 mod qualification_capacity;
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+enum OperationalFailure {
+    Unavailable,
+}
+impl mfm_program::ClassifyError for OperationalFailure {
+    fn classify(&self) -> mfm_program::Classification {
+        mfm_program::Classification::Permanent
+    }
+}
+impl mfm_program::ClassifyError for Failure {
+    fn classify(&self) -> mfm_program::Classification {
+        mfm_program::Classification::Permanent
+    }
+}

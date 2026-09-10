@@ -474,7 +474,8 @@ pub fn fixture_bound<T: MfmValue>(input: &T) -> mfm_program::ConclusionBound {
 
 pub fn transaction_bounds(bound: mfm_program::ConclusionBound) -> mfm_evm::EvmTransactionBounds {
     let effect =
-        mfm_program::EffectBounds::new(bound.max_frame_bytes(), bound.max_frame_bytes()).unwrap();
+        mfm_program::EffectBounds::new(bound.max_frame_bytes(), bound.max_frame_bytes(), 2, 65536)
+            .unwrap();
     mfm_evm::EvmTransactionBounds {
         reservation: effect,
         preparation: effect,
@@ -545,4 +546,10 @@ pub fn root_failure<F: MfmValue>(report: &mfm_runtime::FailureReport) -> F {
         panic!("expected domain failure")
     };
     root.decode::<F>().unwrap()
+}
+
+impl mfm_program::ClassifyError for FixtureFailure {
+    fn classify(&self) -> mfm_program::Classification {
+        mfm_program::Classification::Permanent
+    }
 }

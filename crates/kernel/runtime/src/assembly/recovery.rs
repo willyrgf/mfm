@@ -1,28 +1,16 @@
 use super::*;
 use mfm_program::{
-    Assessment, Classifier, ClassifierAbi, ClassifierBinding, Handler, HandlerAbi, HandlerBinding,
-    Incident, IncidentContract, MapAbi, MapBinding, PolicyParams, RecoveryContext, RecoveryRequest,
-    ValueMap,
+    ClassifyError, Handler, HandlerAbi, HandlerBinding, IncidentSource, IncidentSummary, MapAbi,
+    MapBinding, PolicyParams, RecoveryContext, RecoveryRequest, ValueMap,
 };
 
 #[cfg(test)]
 mod tests;
 
-type ErasedIncident = Box<dyn Any + Send + Sync>;
 type MapCallback = fn(&QualifiedValue, QualifiedValue) -> Result<QualifiedValue>;
-type ClassifyCallback = fn(
-    &QualifiedValue,
-    &QualifiedValue,
-    &QualifiedValue,
-    QualifiedIncident,
-    &RecoveryContext<'_>,
-) -> Result<(Assessment, ErasedIncident)>;
-type HandleCallback = fn(
-    &QualifiedValue,
-    &ErasedIncident,
-    Assessment,
-    &RecoveryContext<'_>,
-) -> Result<RecoveryRequest>;
+pub(super) type ClassifyCallback = fn(&QualifiedIncident<'_>) -> Result<IncidentSummary>;
+type HandleCallback =
+    fn(&QualifiedValue, &IncidentSummary, &RecoveryContext<'_>) -> Result<RecoveryRequest>;
 
 struct Registration<F> {
     implementation_type: TypeId,
@@ -32,24 +20,17 @@ struct Registration<F> {
 #[derive(Default)]
 pub(super) struct Registrations {
     maps: BTreeMap<MapAbi, Registration<MapCallback>>,
-    classifiers: BTreeMap<ClassifierAbi, Registration<ClassifyCallback>>,
     handlers: BTreeMap<HandlerAbi, Registration<HandleCallback>>,
 }
 
-pub(crate) enum QualifiedIncident {
-    Domain(QualifiedValue),
-    Adapter {
-        original: QualifiedValue,
-        context: Box<QualifiedValue>,
-    },
+pub(crate) enum QualifiedIncident<'a> {
+    Domain(&'a QualifiedValue),
+    Adapter { original: &'a QualifiedValue },
 }
 
 pub(crate) struct AssociatedRecovery {
     classify: ClassifyCallback,
     handle: HandleCallback,
-    domain_params: QualifiedValue,
-    context_params: QualifiedValue,
-    classifier_params: QualifiedValue,
     handler_params: QualifiedValue,
 }
 
@@ -73,18 +54,11 @@ impl AssociatedRootMap {
 impl AssociatedRecovery {
     pub(crate) fn request(
         &self,
-        incident: QualifiedIncident,
+        incident: QualifiedIncident<'_>,
         context: &RecoveryContext<'_>,
-    ) -> Result<(Assessment, RecoveryRequest)> {
-        let (assessment, mapped) = (self.classify)(
-            &self.domain_params,
-            &self.context_params,
-            &self.classifier_params,
-            incident,
-            context,
-        )?;
-        let request = (self.handle)(&self.handler_params, &mapped, assessment, context)?;
-        Ok((assessment, request))
+    ) -> Result<RecoveryRequest> {
+        let summary = (self.classify)(&incident)?;
+        (self.handle)(&self.handler_params, &summary, context)
     }
 }
 
@@ -103,41 +77,15 @@ impl RuntimeAssemblyBuilder {
         )
     }
 
-    /// Registers the finite exact source, mapped incident, maps, classifier and parameter ABI.
-    pub fn register_classifier<E, DM, XM, K>(&mut self) -> Result<()>
-    where
-        E: MfmValue,
-        DM: ValueMap,
-        XM: ValueMap,
-        K: Classifier<Incident<DM::Output, E, XM::Output>>,
-    {
-        self.register_map::<DM>()?;
-        self.register_map::<XM>()?;
-        self.ensure_value::<E>()?;
-        self.ensure_value::<K::Params>()?;
-        self.register_handler::<Incident<DM::Output, E, XM::Output>, mfm_program::Stop>()?;
-        let abi =
-            ClassifierAbi::of::<E, DM, XM, K>().map_err(|_| RuntimeError::IncompatibleAssembly)?;
-        insert(
-            &mut self.recovery.classifiers,
-            abi,
-            TypeId::of::<(E, DM, XM, K)>(),
-            classify::<E, DM, XM, K> as ClassifyCallback,
-        )
-    }
-
-    /// Registers one exact incident/handler association and its checked parameter codec.
-    pub fn register_handler<I: IncidentContract, H: Handler<I>>(&mut self) -> Result<()> {
-        self.ensure_value::<I::Domain>()?;
-        self.ensure_value::<I::Error>()?;
-        self.ensure_value::<I::Context>()?;
+    /// Registers one handler implementation and its exact parameter codec.
+    pub fn register_handler<H: Handler>(&mut self) -> Result<()> {
         self.ensure_value::<H::Params>()?;
-        let abi = HandlerAbi::of::<I, H>().map_err(|_| RuntimeError::IncompatibleAssembly)?;
+        let abi = HandlerAbi::of::<H>().map_err(|_| RuntimeError::IncompatibleAssembly)?;
         insert(
             &mut self.recovery.handlers,
             abi,
-            TypeId::of::<(I, H)>(),
-            handle::<I, H> as HandleCallback,
+            TypeId::of::<H>(),
+            handle::<H> as HandleCallback,
         )
     }
 }
@@ -199,18 +147,9 @@ impl AssemblyInner {
 
     pub(crate) fn associate_recovery(
         &self,
-        classifier: &ClassifierBinding,
+        classify: ClassifyCallback,
         handler: &HandlerBinding,
     ) -> Result<AssociatedRecovery> {
-        if &classifier.abi().mapped() != handler.abi().input() {
-            return Err(RuntimeError::IncompatibleAssembly);
-        }
-        let classify = self
-            .recovery
-            .classifiers
-            .get(classifier.abi())
-            .ok_or(RuntimeError::IncompatibleAssembly)?
-            .callback;
         let handle = self
             .recovery
             .handlers
@@ -220,16 +159,6 @@ impl AssemblyInner {
         Ok(AssociatedRecovery {
             classify,
             handle,
-            domain_params: self.policy_params(
-                classifier.domain_params(),
-                classifier.abi().domain_map().params(),
-            )?,
-            context_params: self.policy_params(
-                classifier.context_params(),
-                classifier.abi().context_map().params(),
-            )?,
-            classifier_params: self
-                .policy_params(classifier.params(), classifier.abi().params())?,
             handler_params: self.policy_params(handler.params(), handler.abi().params())?,
         })
     }
@@ -268,44 +197,25 @@ fn map<M: ValueMap>(params: &QualifiedValue, input: QualifiedValue) -> Result<Qu
     qualify_hot(output).map_err(RuntimeError::from)
 }
 
-fn classify<E, DM, XM, K>(
-    domain_params: &QualifiedValue,
-    context_params: &QualifiedValue,
-    params: &QualifiedValue,
-    incident: QualifiedIncident,
-    context: &RecoveryContext<'_>,
-) -> Result<(Assessment, ErasedIncident)>
-where
-    E: MfmValue,
-    DM: ValueMap,
-    XM: ValueMap,
-    K: Classifier<Incident<DM::Output, E, XM::Output>>,
-{
-    let mapped = match incident {
-        QualifiedIncident::Domain(value) => {
-            Incident::Domain(take::<DM::Output>(map::<DM>(domain_params, value)?)?)
-        }
-        QualifiedIncident::Adapter { original, context } => Incident::Adapter {
-            original: take::<E>(original)?,
-            context: take::<XM::Output>(map::<XM>(context_params, *context)?)?,
+pub(super) fn classify<D: ClassifyError, E: ClassifyError>(
+    incident: &QualifiedIncident<'_>,
+) -> Result<IncidentSummary> {
+    Ok(match incident {
+        QualifiedIncident::Domain(value) => IncidentSummary {
+            source: IncidentSource::State,
+            classification: borrow::<D>(value)?.classify(),
         },
-    };
-    let assessment = K::classify(borrow::<K::Params>(params)?, &mapped, context)
-        .map_err(|_| RuntimeError::Internal)?;
-    Ok((assessment, Box::new(mapped)))
+        QualifiedIncident::Adapter { original, .. } => IncidentSummary {
+            source: IncidentSource::Adapter,
+            classification: borrow::<E>(original)?.classify(),
+        },
+    })
 }
 
-fn handle<I: IncidentContract, H: Handler<I>>(
+fn handle<H: Handler>(
     params: &QualifiedValue,
-    incident: &ErasedIncident,
-    assessment: Assessment,
+    incident: &IncidentSummary,
     context: &RecoveryContext<'_>,
 ) -> Result<RecoveryRequest> {
-    H::handle(
-        borrow::<H::Params>(params)?,
-        incident.downcast_ref::<I>().ok_or(RuntimeError::Internal)?,
-        assessment,
-        context,
-    )
-    .map_err(|_| RuntimeError::Internal)
+    H::handle(borrow::<H::Params>(params)?, incident, context).map_err(|_| RuntimeError::Internal)
 }

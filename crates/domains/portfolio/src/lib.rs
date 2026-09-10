@@ -1219,3 +1219,13 @@ fn duplicate_source_ids<'a>(requests: impl Iterator<Item = &'a EvmBalanceRequest
         .flat_map(EvmBalanceRequest::sources)
         .any(|source| !source_ids.insert(source.source_id()))
 }
+
+impl mfm_program::ClassifyError for PortfolioSnapshotFailure {
+    fn classify(&self) -> mfm_program::Classification {
+        match self {
+            Self::InvalidInput | Self::CollectionFailed { .. } | Self::ConsolidationFailed => {
+                mfm_program::Classification::Permanent
+            }
+        }
+    }
+}

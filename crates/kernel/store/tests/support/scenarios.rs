@@ -106,7 +106,7 @@ pub async fn exercise_store(store: &dyn Store, run: &RunId) {
                 )
                 .unwrap(),
                 decision: DomainDecision::Stop {
-                    reason: StopCode::Nonrecoverable,
+                    reason: StopCode::Requested,
                     root: JournalObject::new(
                         &reference("mfm.test.failure", right_bytes),
                         right_bytes,

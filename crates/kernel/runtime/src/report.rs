@@ -88,7 +88,7 @@ impl FailureReport {
             cause: Cause<'a>,
         }
         let wire = Report {
-            domain: "mfm.failure-report.v1",
+            domain: "mfm.failure-report.v2",
             position,
             reason,
             usage: Usage {
@@ -124,7 +124,7 @@ impl FailureReport {
             SchemaKind::PersistedContract,
             None,
             "mfm-failure-report",
-            mfm_ids::SchemaVersion::new("1").map_err(|_| RuntimeError::Internal)?,
+            mfm_ids::SchemaVersion::new("2").map_err(|_| RuntimeError::Internal)?,
             SchemaShape::CanonicalJsonTerminal {
                 profile: CanonicalJsonProfile::GeneralFloatFree,
             },
@@ -170,7 +170,6 @@ impl FailureReport {
 
 pub(crate) fn stop_reason(reason: StopCode) -> StopReason {
     match reason {
-        StopCode::Nonrecoverable => StopReason::Nonrecoverable,
         StopCode::Requested => StopReason::Requested,
         StopCode::StateRetryExhausted => StopReason::Exhausted(RecoveryLimit::StateRetry),
         StopCode::StateRestartExhausted => StopReason::Exhausted(RecoveryLimit::StateRestart),

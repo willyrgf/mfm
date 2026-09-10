@@ -1,51 +1,54 @@
 use super::{scope::ScopeId, *};
 
-/// Framework classification default: automatic recovery is disabled.
-pub struct NoRecovery;
-
-impl<I: IncidentContract> Classifier<I> for NoRecovery {
-    type Params = NoParams;
-    fn implementation_id() -> Result<StableId> {
-        StableId::new("mfm.recovery.no-recovery@1").map_err(|_| ProgramError::InvalidContract)
-    }
-    fn classify(
-        _: &NoParams,
-        _: &I,
-        _: &RecoveryContext<'_>,
-    ) -> std::result::Result<Assessment, StateExecutionError> {
-        Ok(Assessment::Nonrecoverable)
-    }
-}
-
 /// Generic handler that stops automatic recovery without manufacturing a domain failure.
 pub struct Stop;
 
-impl Stop {
-    pub(crate) fn id() -> Result<StableId> {
-        StableId::new("mfm.recovery.stop@1").map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl<I: IncidentContract> Handler<I> for Stop {
+impl Handler for Stop {
     type Params = NoParams;
     fn implementation_id() -> Result<StableId> {
-        Self::id()
+        StableId::new("mfm.recovery.stop@1").map_err(|_| ProgramError::InvalidContract)
     }
     fn handle(
         _: &NoParams,
-        _: &I,
-        _: Assessment,
+        _: &IncidentSummary,
         _: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
         Ok(RecoveryRequest::Stop)
     }
 }
 
+/// Explicitly selected generic recovery policy; the framework default remains Stop.
+pub struct StandardRecovery;
+
+impl Handler for StandardRecovery {
+    type Params = NoParams;
+    fn implementation_id() -> Result<StableId> {
+        StableId::new("mfm.recovery.standard@1").map_err(|_| ProgramError::InvalidContract)
+    }
+    fn handle(
+        _: &NoParams,
+        incident: &IncidentSummary,
+        context: &RecoveryContext<'_>,
+    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+        Ok(match (incident.classification, context.phase()) {
+            (Classification::Retryable, ExecutionPhase::Read | ExecutionPhase::EffectPending) => {
+                RecoveryRequest::RetryState
+            }
+            (Classification::InputInvalidated, ExecutionPhase::Pure | ExecutionPhase::Read) => {
+                context
+                    .single_restart_target()
+                    .map(RecoveryRequest::Restart)
+                    .unwrap_or(RecoveryRequest::Stop)
+            }
+            _ => RecoveryRequest::Stop,
+        })
+    }
+}
+
 /// Independent authoring overrides for one occurrence. Missing settings inherit.
 #[derive(Clone, Debug, Default)]
 pub struct Occurrence {
-    classifiers: Option<Classifiers>,
-    handlers: Option<Handlers>,
+    handler: Option<HandlerBinding>,
     retries: Option<u32>,
     restarts: Option<u32>,
 }
@@ -55,14 +58,9 @@ impl Occurrence {
     pub fn new() -> Self {
         Self::default()
     }
-    /// Replaces only this occurrence's classifier family.
-    pub fn classifiers(mut self, family: Classifiers) -> Self {
-        self.classifiers = Some(family);
-        self
-    }
-    /// Replaces only this occurrence's handler family; installation checks checkpoint ownership.
-    pub fn handlers(mut self, family: Handlers) -> Self {
-        self.handlers = Some(family);
+    /// Replaces the handler, parameters and targets together.
+    pub fn handler(mut self, binding: HandlerBinding) -> Self {
+        self.handler = Some(binding);
         self
     }
     /// Replaces the retry allowance, including explicit zero.
@@ -79,48 +77,31 @@ impl Occurrence {
 
 #[derive(Clone, Default)]
 pub(crate) struct RecoveryDefaults {
-    pub(crate) classifiers: Option<Classifiers>,
-    pub(crate) handlers: Option<Handlers>,
+    pub(crate) handler: Option<HandlerBinding>,
     pub(crate) allowances: RecoveryAllowances,
 }
 
 pub(crate) struct SelectedRecovery {
-    pub(crate) classifier: ClassifierBinding,
     pub(crate) handler: HandlerBinding,
     pub(crate) allowances: RecoveryAllowances,
     pub(crate) checkpoints: Vec<super::scope::ScopedBoundary>,
 }
 
 impl RecoveryDefaults {
-    pub(crate) fn resolve<D: MfmValue, E: MfmValue, X: MfmValue>(
+    pub(crate) fn resolve(
         &self,
         scope: &ScopeId,
         occurrence: &Occurrence,
     ) -> Result<SelectedRecovery> {
-        if let Some(handlers) = &occurrence.handlers {
-            handlers.require_scope(scope)?;
+        if let Some(handler) = &occurrence.handler {
+            handler.require_scope(scope)?;
         }
-        let source = IncidentAbi::of::<Incident<D, E, X>>()?;
-        let classifier = match occurrence
-            .classifiers
-            .as_ref()
-            .or(self.classifiers.as_ref())
-        {
-            Some(family) => family.binding(&source)?.clone(),
-            None => ClassifierBinding::new::<E, Identity<D>, Identity<X>, NoRecovery>(
-                NoParams, NoParams, NoParams,
-            )?,
+        let mut handler = match occurrence.handler.as_ref().or(self.handler.as_ref()) {
+            Some(binding) => binding.clone(),
+            None => HandlerBinding::new::<Stop>(NoParams)?,
         };
-        let mapped = classifier.abi().mapped();
-        let (handler, checkpoints) = match occurrence.handlers.as_ref().or(self.handlers.as_ref()) {
-            Some(family) => {
-                let setting = family.setting(&mapped)?;
-                (setting.binding.clone(), setting.checkpoints.clone())
-            }
-            None => (HandlerBinding::stop(mapped)?, Vec::new()),
-        };
+        let checkpoints = std::mem::take(&mut handler.checkpoints);
         Ok(SelectedRecovery {
-            classifier,
             handler,
             checkpoints,
             allowances: RecoveryAllowances::new(
