@@ -1,8 +1,9 @@
 # RFC: simplify error classification and recovery handlers
 
-Status: proposed. This document records the agreed design direction and sketches its implementation;
-it does not change the current executable or persistence contract. Until implementation lands,
-[docs/design.md](docs/design.md) and [docs/architecture.md](docs/architecture.md) remain authoritative.
+Status: implemented. This document records the cutover rationale and illustrative API sketches.
+[docs/design.md](docs/design.md) and [docs/architecture.md](docs/architecture.md) own the current
+executable and persistence contracts; [recovery validation](docs/recovery-validation.md) maps
+the acceptance criteria to consuming coverage.
 
 ## Summary
 
@@ -19,9 +20,9 @@ available for audit and reporting; classification never substitutes for them.
 There is no additional `RecoveryAdvice` abstraction, no separately selected classifier registry, and
 no handler implementation requirement for every different State incident type.
 
-## Motivation and current design
+## Motivation and superseded design
 
-The current [recovery contracts](crates/kernel/program/src/recovery.rs) already expose static
+Before this cutover, the recovery contracts exposed static
 `Classifier::classify` and `Handler::handle` functions. The complexity lies around those functions:
 
 - Independently inherited `Classifiers` and `Handlers` families select bindings by exact incident ABI.
@@ -31,11 +32,11 @@ The current [recovery contracts](crates/kernel/program/src/recovery.rs) already 
   between separately registered classifier and handler callbacks.
 - Operation authors must account for heterogeneous child incident types in both families.
 
-The current implementation supports independently replacing classification and mapping foreign
+The superseded implementation supported independently replacing classification and mapping foreign
 domain errors into a policy-specific vocabulary. This RFC deliberately replaces that flexibility
 with intrinsic classification of exact error types and independently configurable recovery actions.
 
-The shipping Portfolio currently selects `NoRecovery`/`Stop` with zero allowances. Its default
+Before this cutover, shipping Portfolio selected `NoRecovery`/`Stop` with zero allowances. Its default
 behavior must remain stop with zero allowances after this cutover. Removing `NoRecovery` does not
 silently enable recovery.
 
@@ -84,7 +85,7 @@ implementation.
 
 ## Classification is intrinsic error semantics
 
-All Rust below is an API sketch, not code that compiles against the current repository. Existing
+Rust examples below are illustrative API sketches, with some bodies and integration details omitted. Existing
 checked identifiers, value derives, canonical codecs, fallible constructors and documentation
 requirements still apply. Shortened signatures omit unrelated generic bounds and root failure maps.
 
@@ -348,7 +349,7 @@ impl Handler for StandardRecovery {
 }
 ```
 
-`single_restart_target()` is a proposed accessor over the existing declared/eligible targets. It
+`single_restart_target()` is an accessor over the existing declared/eligible targets. It
 does not pick one merely because only one of several declared targets is currently active. General
 custom handlers retain the existing explicitly bound target list. If a scope needs several
 different semantic refresh regions, use narrower bindings or a reviewed custom policy. Do not add
@@ -484,7 +485,7 @@ That choice does not establish nonacceptance or
 permit a new command. Deliberate explicit resume of a retained Effect likewise remains an existing
 caller-driven protocol operation, not a claim that the previous attempt did nothing.
 
-This RFC changes the current no-append pending failure path. A pending retry commits a failure
+This cutover replaces the former no-append pending failure path. A pending retry commits a failure
 record and spends local/global recovery allowance before yielding. It never re-enters the adapter
 in a loop, changes the State visit, or derives a new EffectId. A pending Stop also commits the
 failure but does not spend recovery allowance. Both consume the separate finite failure-record
@@ -793,7 +794,8 @@ nix develop -c cargo test -p mfm-evm -p mfm-portfolio -p mfm-evm-live --all-targ
 
 The cross-crate contract cutover requires one final `nix run .#ci` on the exact candidate after
 focused failures are resolved. Do not run broad component gates redundantly just before CI.
-This RFC-only change requires local link/command review and `git diff --check`, not Rust gates.
+The earlier RFC-only commits required local link/command review and `git diff --check`; the
+implementation requires the complete verification selection above.
 
 ## Logical commit sequence
 
@@ -827,10 +829,9 @@ validate the cutover. Do not defer a required deletion or audit guarantee to a f
 
 ## Material uncertainties
 
-| Assumption | Why uncertain | Consequence if wrong | Validation |
-| --- | --- | --- | --- |
-| Four common classifications cover each translated recovery decision | Existing custom policies can inspect mapped domain/context payloads | A particular policy may need an additional common distinction | Review case by case during implementation as agreed; add facts only for demonstrated needs, not speculative flexibility |
-| Intrinsic classification can replace independently selectable classification | Repository production defaults do not establish downstream library usage | Downstream callers lose a customization point | Review known consumers and document the intentional breaking API; do not retain a compatibility family |
-| Durable acknowledged failures are the intended audit guarantee | Crash/cancellation can occur between provider IO and post-result append | A requirement to identify every physical call, including interrupted ones, needs an additional pre-call protocol | Validate acceptance tests and product wording against the explicit guarantee; never claim post-result records audit unobserved physical outcomes |
-| Finite failure-record capacity can stop further provider entry while an Effect remains pending | All run history is finitely admitted, but operational reconciliation may take an unpredictable number of calls | Exhaustion leaves unresolved command authority rather than permitting further audited calls | Exercise exhaustion and make the capacity behavior explicit in authoring and invocation docs |
-| Concrete adapters can support the illustrated timeout distinctions | The example server's nonacceptance guarantee is hypothetical, not established for current EVM providers | Misclassification could request unsafe repetition | Qualify actual protocol outcomes with adapter tests; use OutcomeUnknown when guarantees are absent |
+none for the implemented cutover. Known consumers fit the four classifications. Current EVM
+submission errors do not establish server nonacceptance and retain `OutcomeUnknown` where dispatch
+is uncertain. The protocol-specific test uses an explicitly qualified nonacceptance contract.
+The breaking API deliberately removes independently selectable classifiers. Audit guarantees cover
+acknowledged operational results, with finite admitted capacity; they do not claim to identify every
+physical attempt interrupted before its result can be committed.

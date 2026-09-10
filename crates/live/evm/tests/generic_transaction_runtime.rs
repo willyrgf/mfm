@@ -78,7 +78,7 @@ fn plan(binding: EvmTransactionBinding) -> CheckedCreatePlan {
 
 fn bounds() -> mfm_evm::EvmTransactionBounds {
     // These small codec-selection fixtures retain fewer than 64 KiB per complete frame.
-    let effect = EffectBounds::new(65536, 65536).unwrap();
+    let effect = EffectBounds::new(65536, 65536, 2, 65536).unwrap();
     mfm_evm::EvmTransactionBounds {
         reservation: effect,
         preparation: effect,

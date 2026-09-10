@@ -47,8 +47,8 @@ macro_rules! impl_checked_deserialize {
 mod bounds;
 mod recovery;
 pub use recovery::{
-    AnchoredCallAdapterContext, EvmBalanceAdapterContext, EvmBalanceClassifier,
-    EvmOperationalError, EvmTransactionAdapterContext, EvmTransactionOperationalError,
+    AnchoredCallAdapterContext, EvmBalanceAdapterContext, EvmOperationalError,
+    EvmTransactionAdapterContext, EvmTransactionOperationalError,
 };
 mod anchored_call;
 pub mod custody;

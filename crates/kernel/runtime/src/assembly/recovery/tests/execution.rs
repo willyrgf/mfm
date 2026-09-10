@@ -12,15 +12,7 @@ impl mfm_program::Operation for RetryingRead {
         &self,
         scope: &mut mfm_program::OperationExpansion<Offset, Offset, EvmFailure>,
     ) -> mfm_program::Result<()> {
-        let mut classifiers = Classifiers::new();
-        classifiers
-            .bind::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>(
-                NoParams, NoParams, NoParams,
-            )?;
-        scope.classifiers(classifiers)?;
-        let mut handlers = Handlers::new();
-        handlers.bind::<EvmIncident, RetryRead>(NoParams)?;
-        scope.handlers(handlers)?;
+        scope.handler(HandlerBinding::new::<RetryRead>(NoParams)?)?;
         scope.allowances(RecoveryAllowances::new(1, 0))?;
         scope.read::<EvmRead, Observation, Identity<EvmFailure>>(
             &Offset { value: 1 },
@@ -43,10 +35,7 @@ async fn committed_read_recovery_yields_and_reconstructs_without_provider_calls(
         let counter = Arc::clone(&calls);
         let mut builder = RuntimeAssemblyBuilder::new().unwrap();
         builder.register_read::<EvmRead, Observation>().unwrap();
-        builder.register_classifier::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>().unwrap();
-        builder
-            .register_handler::<EvmIncident, RetryRead>()
-            .unwrap();
+        builder.register_handler::<RetryRead>().unwrap();
         builder
             .register_adapter::<Observation, _, _>(Offset { value: 1 }, move |_, intent| {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -274,7 +263,7 @@ impl mfm_program::Operation for PendingSettlement {
             &Offset { value: 1 },
             NoParams,
             mfm_program::Occurrence::new(),
-            mfm_program::EffectBounds::new(65536, 65536)?,
+            mfm_program::EffectBounds::new(65536, 65536, 8, 65536)?,
         )
     }
 }
@@ -330,6 +319,7 @@ async fn stopped_pending_effect_retains_exact_authority_until_explicit_settlemen
     let RunViewState::EffectPending {
         position,
         effect_id,
+        ..
     } = pending.state()
     else {
         panic!("pending authority")
@@ -341,7 +331,7 @@ async fn stopped_pending_effect_retains_exact_authority_until_explicit_settlemen
             incident,
             reason,
         }) => {
-            assert_eq!(reason, StopReason::Nonrecoverable);
+            assert_eq!(reason, StopReason::Requested);
             assert_eq!(
                 incident
                     .state_context
@@ -358,15 +348,15 @@ async fn stopped_pending_effect_retains_exact_authority_until_explicit_settlemen
         }
         _ => panic!("unresolved invocation stop"),
     };
-    assert_eq!(stopped.head_digest(), pending.head_digest());
+    assert_eq!(stopped.head_sequence(), pending.head_sequence() + 1);
     let loaded = runtime.read(&run).await.unwrap();
-    assert_eq!(loaded.head_digest(), pending.head_digest());
+    assert_eq!(loaded.head_digest(), stopped.head_digest());
     assert!(
-        matches!(loaded.state(), RunViewState::EffectPending { effect_id: retained, position: retained_position } if retained == effect_id && retained_position == position)
+        matches!(loaded.state(), RunViewState::EffectPending { effect_id: retained, position: retained_position, .. } if retained == effect_id && retained_position == position)
     );
     assert_eq!(observed_ids.lock().unwrap().len(), 2);
     let settled = runtime.resume(&run).await.unwrap();
-    assert_eq!(settled.head_sequence(), 3);
+    assert_eq!(settled.head_sequence(), 4);
     let RunViewState::Succeeded(output) = settled.state() else {
         panic!("settled success")
     };
@@ -440,22 +430,21 @@ impl mfm_program::CapabilityInjection<EvmRead> for InjectedObservation {
                 &Offset { value: 1 },
                 NoParams,
                 mfm_program::Occurrence::new(),
-                mfm_program::EffectBounds::new(65536, 65536)?,
+                mfm_program::EffectBounds::new(65536, 65536, 8, 65536)?,
             )?;
         }
         Ok(())
     }
 }
 struct RestartFirst;
-impl Handler<EvmIncident> for RestartFirst {
+impl Handler for RestartFirst {
     type Params = NoParams;
     fn implementation_id() -> mfm_program::Result<StableId> {
         StableId::new("mfm.test.restart-first@1").map_err(|_| ProgramError::InvalidContract)
     }
     fn handle(
         _: &NoParams,
-        _: &EvmIncident,
-        _: Assessment,
+        _: &IncidentSummary,
         context: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
         Ok(context
@@ -486,20 +475,11 @@ impl mfm_program::Operation for RestartRegion {
                 &Offset { value: 1 },
                 NoParams,
                 mfm_program::Occurrence::new(),
-                mfm_program::EffectBounds::new(65536, 65536)?,
+                mfm_program::EffectBounds::new(65536, 65536, 8, 65536)?,
             )?;
         }
         let checkpoint = scope.checkpoint::<Offset>()?;
-        let mut classifiers = Classifiers::new();
-        classifiers
-            .bind::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>(
-                NoParams, NoParams, NoParams,
-            )?;
-        scope.classifiers(classifiers)?;
-        let mut handlers = Handlers::new();
-        handlers.bind::<EvmIncident, RestartFirst>(NoParams)?;
-        handlers.checkpoint::<EvmIncident, Offset>(&checkpoint)?;
-        scope.handlers(handlers)?;
+        scope.handler(HandlerBinding::new::<RestartFirst>(NoParams)?.checkpoint(&checkpoint)?)?;
         scope.allowances(RecoveryAllowances::new(0, 1))?;
         scope.read::<EvmRead, InjectedObservation, Identity<EvmFailure>>(
             &Offset {
@@ -531,10 +511,7 @@ async fn injected_effect_blocks_prior_checkpoint_but_preserves_post_effect_resta
         builder
             .register_effect::<EvmSettlement, Settlement>()
             .unwrap();
-        builder.register_classifier::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>().unwrap();
-        builder
-            .register_handler::<EvmIncident, RestartFirst>()
-            .unwrap();
+        builder.register_handler::<RestartFirst>().unwrap();
         builder
             .register_adapter::<InjectedObservation, _, _>(Offset { value: 1 }, |_, intent| {
                 Box::pin(async move {
@@ -622,10 +599,7 @@ async fn ambiguous_recovery_append_stops_with_historical_observation_and_preserv
     let counter = Arc::clone(&calls);
     let mut builder = RuntimeAssemblyBuilder::new().unwrap();
     builder.register_read::<EvmRead, Observation>().unwrap();
-    builder.register_classifier::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>().unwrap();
-    builder
-        .register_handler::<EvmIncident, RetryRead>()
-        .unwrap();
+    builder.register_handler::<RetryRead>().unwrap();
     builder
         .register_adapter::<Observation, _, _>(Offset { value: 1 }, move |_, intent| {
             counter.fetch_add(1, Ordering::SeqCst);
@@ -693,10 +667,7 @@ async fn competing_recovery_appends_return_the_winner_without_executing_its_new_
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let mut builder = RuntimeAssemblyBuilder::new().unwrap();
     builder.register_read::<EvmRead, Observation>().unwrap();
-    builder.register_classifier::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>().unwrap();
-    builder
-        .register_handler::<EvmIncident, RetryRead>()
-        .unwrap();
+    builder.register_handler::<RetryRead>().unwrap();
     builder
         .register_adapter::<Observation, _, _>(Offset { value: 1 }, move |_, intent| {
             let attempt = counter.fetch_add(1, Ordering::SeqCst);
@@ -763,10 +734,7 @@ async fn cancelled_read_preserves_visit_and_spends_no_recovery_allowance() {
     let notify = Arc::clone(&entered);
     let mut builder = RuntimeAssemblyBuilder::new().unwrap();
     builder.register_read::<EvmRead, Observation>().unwrap();
-    builder.register_classifier::<ProviderError, Identity<EvmFailure>, Identity<EvmContext>, EvmClassifier>().unwrap();
-    builder
-        .register_handler::<EvmIncident, RetryRead>()
-        .unwrap();
+    builder.register_handler::<RetryRead>().unwrap();
     builder
         .register_adapter::<Observation, _, _>(Offset { value: 1 }, move |_, intent| {
             let attempt = counter.fetch_add(1, Ordering::SeqCst);

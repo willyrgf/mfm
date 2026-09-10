@@ -87,7 +87,7 @@ fn retarget_frame(bytes: &[u8], run_sequence: u64, previous_head: &ContentDigest
 }
 
 #[test]
-fn effect_sequence_has_provisional_v3_wires_and_recursive_sha256_v1_heads() {
+fn effect_sequence_has_provisional_v4_wires_and_recursive_sha256_v1_heads() {
     let program = br#"{"program":1}"#;
     let context = br#"{"context":2}"#;
     let run = run(1);
@@ -96,7 +96,7 @@ fn effect_sequence_has_provisional_v3_wires_and_recursive_sha256_v1_heads() {
     let genesis = EncodedRunFrame::admission(&run, &program_ref, program, &context_ref, context)
         .expect("genesis");
     let expected = json!({
-        "domain": "mfm.run.frame.v3",
+        "domain": "mfm.run.frame.v4",
         "objects": sorted_objects(vec![
             object_wire(&program_ref, program),
             object_wire(&context_ref, context),
@@ -132,7 +132,7 @@ fn effect_sequence_has_provisional_v3_wires_and_recursive_sha256_v1_heads() {
         )
         .expect("prepare");
     let expected = json!({
-        "domain": "mfm.run.frame.v3",
+        "domain": "mfm.run.frame.v4",
         "objects": [object_wire(&command_ref, command)],
         "previous_head_digest": history.head_digest(),
         "record": {
@@ -170,7 +170,7 @@ fn effect_sequence_has_provisional_v3_wires_and_recursive_sha256_v1_heads() {
         )
         .expect("conclusion");
     let expected = json!({
-        "domain": "mfm.run.frame.v3",
+        "domain": "mfm.run.frame.v4",
         "objects": sorted_objects(vec![
             object_wire(&evidence_ref, evidence),
             object_wire(&outcome_ref, outcome),
@@ -600,7 +600,7 @@ fn strict_wire_and_frame_local_closure_reject_hostile_inputs() {
     mutations.push(
         text.replacen(
             "{\"domain\":",
-            "{\"domain\":\"mfm.run.frame.v3\",\"domain\":",
+            "{\"domain\":\"mfm.run.frame.v4\",\"domain\":",
             1,
         )
         .into_bytes(),
@@ -827,7 +827,7 @@ fn recovery_conclusions_preserve_causes_and_decisions_hot_and_cold() {
                 error: cause,
                 state_context: root,
                 decision: RecoveryDecision::Stop {
-                    reason: StopCode::Nonrecoverable,
+                    reason: StopCode::Requested,
                 },
             },
         )
@@ -846,7 +846,7 @@ fn recovery_conclusions_preserve_causes_and_decisions_hot_and_cold() {
                     state_context,
                     decision:
                         RecoveryDecision::Stop {
-                            reason: StopCode::Nonrecoverable,
+                            reason: StopCode::Requested,
                         },
                 },
             ..
@@ -874,5 +874,66 @@ fn journal_object_constructor_rejects_noncanonical_or_mismatched_bytes() {
             JournalObject::new(&reference, bytes),
             Err(JournalError::InvalidFrame)
         ));
+    }
+}
+
+#[test]
+fn pending_effect_failures_preserve_complete_prefixes_and_end_at_settlement() {
+    use mfm_journal::PendingDecision;
+    let run = run(91);
+    let bytes = b"{}";
+    let reference = object_ref("mfm.test.pending", bytes);
+    let object = JournalObject::new(&reference, bytes).unwrap();
+    let failure_ref = object_ref("mfm.test.failure", b"{\"error\":1}");
+    let failure = JournalObject::new(&failure_ref, b"{\"error\":1}").unwrap();
+    let genesis = EncodedRunFrame::admission(&run, &reference, bytes, &reference, bytes).unwrap();
+    let mut frames = vec![genesis.canonical_bytes().to_vec()];
+    let mut history = JournalHistory::from_genesis(genesis).unwrap();
+    assert!(history
+        .encode_effect_failure(position(), failure, object, PendingDecision::Retry)
+        .is_err());
+    let effect_id = EffectId::from_digest(DigestBytes::from_array([17; 32]));
+    let prepare = history
+        .encode_effect_prepare(position(), &effect_id, object)
+        .unwrap();
+    frames.push(prepare.canonical_bytes().to_vec());
+    history.extend_inserted(prepare).unwrap();
+    for decision in [
+        PendingDecision::Retry,
+        PendingDecision::Stop {
+            reason: StopCode::Requested,
+        },
+    ] {
+        let frame = history
+            .encode_effect_failure(position(), failure, object, decision)
+            .unwrap();
+        frames.push(frame.canonical_bytes().to_vec());
+        history.extend_inserted(frame).unwrap();
+        let cold =
+            JournalHistory::qualify(&run, StoredRunBytes::new(frames.clone()).unwrap()).unwrap();
+        assert_eq!(cold.head_digest(), history.head_digest());
+        assert!(
+            matches!(cold.records().last(), Some(JournalRecord::EffectAdapterFailed {
+            position: recorded, decision: retained, original, state_context,
+        }) if recorded == position() && retained == decision && original == failure && state_context == object)
+        );
+        assert!(history
+            .encode_pure_conclusion(position(), DomainConclusion::Success { output: object })
+            .is_err());
+        assert!(history
+            .encode_effect_prepare(position(), &effect_id, object)
+            .is_err());
+    }
+    let settlement = history
+        .encode_effect_conclusion(object, EffectConclusion::Success { output: object })
+        .unwrap();
+    frames.push(settlement.canonical_bytes().to_vec());
+    history.extend_inserted(settlement).unwrap();
+    assert!(history
+        .encode_effect_failure(position(), failure, object, PendingDecision::Retry)
+        .is_err());
+    for count in 1..=frames.len() {
+        JournalHistory::qualify(&run, StoredRunBytes::new(frames[..count].to_vec()).unwrap())
+            .unwrap();
     }
 }

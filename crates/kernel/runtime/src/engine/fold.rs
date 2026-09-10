@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use mfm_ids::{EffectId, ExecutionPosition, RunId, StatePosition, VisitId};
 use mfm_journal::{
-    DomainConclusion, DomainDecision, EffectConclusion, JournalRecord, ReadConclusion,
-    RecoveryDecision, StopCode,
+    DomainConclusion, DomainDecision, EffectConclusion, JournalRecord, PendingDecision,
+    ReadConclusion, RecoveryDecision, StopCode,
 };
 use mfm_program::{Execution, RecoveryUsage};
 
@@ -31,9 +31,17 @@ pub(super) enum Cursor {
         input: Arc<QualifiedValue>,
         effect_id: EffectId,
         command: Arc<QualifiedValue>,
+        failures: u32,
+        latest_failure: Option<PendingFailure>,
     },
     Succeeded(Arc<QualifiedValue>),
     Failed(Failure),
+}
+
+pub(super) struct PendingFailure {
+    pub(super) original: Arc<QualifiedValue>,
+    pub(super) context: Arc<QualifiedValue>,
+    pub(super) decision: PendingDecision,
 }
 
 pub(super) struct Failure {
@@ -144,6 +152,7 @@ impl FoldState {
         executable: &ExecutableProgram,
         from: StatePosition,
         decision: RecoveryDecision,
+        phase: mfm_program::ExecutionPhase,
     ) -> Result<Option<StopCode>> {
         let declaration = executable
             .program
@@ -156,7 +165,7 @@ impl FoldState {
             RecoveryDecision::Retry => {
                 if matches!(declaration.execution(), Execution::Pure { .. }) {
                     Some(StopCode::PureRetry)
-                } else if matches!(declaration.execution(), Execution::Effect { .. }) {
+                } else if phase == mfm_program::ExecutionPhase::EffectSettled {
                     Some(StopCode::EffectSettled)
                 } else if usage.state_retries >= declaration.allowances().retries() {
                     Some(StopCode::StateRetryExhausted)
@@ -169,9 +178,11 @@ impl FoldState {
                 }
             }
             RecoveryDecision::Restart { checkpoint } => {
-                if matches!(declaration.execution(), Execution::Effect { .. }) {
+                if phase == mfm_program::ExecutionPhase::EffectSettled {
                     Some(StopCode::EffectSettled)
-                } else if self.barrier.is_some_and(|barrier| checkpoint <= barrier) {
+                } else if phase == mfm_program::ExecutionPhase::EffectPending
+                    || self.barrier.is_some_and(|barrier| checkpoint <= barrier)
+                {
                     Some(StopCode::EffectBarrier)
                 } else if !self.eligible(executable, from, checkpoint) {
                     Some(StopCode::CheckpointUnavailable)
@@ -197,7 +208,16 @@ impl FoldState {
         decision: RecoveryDecision,
     ) -> Result<()> {
         if self
-            .recovery_denial(executable, position.state, decision)?
+            .recovery_denial(
+                executable,
+                position.state,
+                decision,
+                match executable.program.declarations()[position.state.index()].execution() {
+                    Execution::Pure { .. } => mfm_program::ExecutionPhase::Pure,
+                    Execution::Read { .. } => mfm_program::ExecutionPhase::Read,
+                    Execution::Effect { .. } => mfm_program::ExecutionPhase::EffectSettled,
+                },
+            )?
             .is_some()
         {
             return Err(RuntimeError::InvalidHistory);
@@ -337,9 +357,7 @@ impl FoldState {
             .ok_or(RuntimeError::InvalidHistory)?;
         let usage = self.usage(position.state)?;
         let valid = match reason {
-            StopCode::Nonrecoverable | StopCode::Requested | StopCode::CheckpointUnavailable => {
-                true
-            }
+            StopCode::Requested | StopCode::CheckpointUnavailable => true,
             StopCode::StateRetryExhausted => {
                 usage.state_retries >= declaration.allowances().retries()
             }
@@ -469,7 +487,99 @@ impl FoldState {
                     input: Arc::clone(input),
                     effect_id: expected,
                     command,
+                    failures: 0,
+                    latest_failure: None,
                 };
+                Ok(())
+            }
+            (
+                Cursor::EffectPending {
+                    position, failures, ..
+                },
+                JournalRecord::EffectAdapterFailed {
+                    position: recorded,
+                    original,
+                    state_context,
+                    decision,
+                },
+            ) if *position == recorded => {
+                let Execution::Effect { bounds, .. } =
+                    executable.program.declarations()[position.state.index()].execution()
+                else {
+                    return Err(RuntimeError::InvalidHistory);
+                };
+                if *failures >= bounds.max_pending_failures() {
+                    return Err(RuntimeError::InvalidHistory);
+                }
+                let ExecutableMode::Effect { incident, .. } =
+                    &executable.declarations[position.state.index()].mode
+                else {
+                    return Err(RuntimeError::InvalidHistory);
+                };
+                let original = Arc::new(qualify_journal_object(&incident.error_codec, original)?);
+                let context = Arc::new(qualify_journal_object(
+                    &incident.context_codec,
+                    state_context,
+                )?);
+                match decision {
+                    PendingDecision::Retry => {
+                        if self
+                            .recovery_denial(
+                                executable,
+                                recorded.state,
+                                RecoveryDecision::Retry,
+                                mfm_program::ExecutionPhase::EffectPending,
+                            )?
+                            .is_some()
+                        {
+                            return Err(RuntimeError::InvalidHistory);
+                        }
+                        let usage = &mut self.usage[recorded.state.index()];
+                        usage.0 = usage.0.checked_add(1).ok_or(RuntimeError::InvalidHistory)?;
+                        self.decisions = self
+                            .decisions
+                            .checked_add(1)
+                            .ok_or(RuntimeError::InvalidHistory)?;
+                    }
+                    PendingDecision::Stop { reason } => {
+                        let valid = match reason {
+                            StopCode::Requested | StopCode::EffectBarrier => true,
+                            StopCode::StateRetryExhausted => {
+                                self.usage(recorded.state)?.state_retries
+                                    >= executable.program.declarations()[recorded.state.index()]
+                                        .allowances()
+                                        .retries()
+                            }
+                            StopCode::RunExhausted => {
+                                self.decisions
+                                    >= executable.program.limits().max_recovery_decisions()
+                            }
+                            StopCode::StateRestartExhausted
+                            | StopCode::PureRetry
+                            | StopCode::CheckpointUnavailable
+                            | StopCode::EffectSettled => false,
+                        };
+                        if !valid {
+                            return Err(RuntimeError::InvalidHistory);
+                        }
+                    }
+                }
+                let Cursor::EffectPending {
+                    failures,
+                    latest_failure,
+                    ..
+                } = &mut self.cursor
+                else {
+                    return Err(RuntimeError::InvalidHistory);
+                };
+                *failures = failures
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidHistory)?;
+                *latest_failure = Some(PendingFailure {
+                    original,
+                    context,
+                    decision,
+                });
                 Ok(())
             }
             (
@@ -478,6 +588,7 @@ impl FoldState {
                     input,
                     effect_id,
                     command,
+                    ..
                 },
                 JournalRecord::EffectConcluded { evidence, outcome },
             ) => {

@@ -295,3 +295,10 @@ impl<C: MfmValueTrait> EvmTransactionFailure<C> {
         self.context
     }
 }
+
+impl<C: MfmValueTrait> mfm_program::ClassifyError for EvmTransactionFailure<C> {
+    fn classify(&self) -> mfm_program::Classification {
+        // Authenticated settlement reversion cannot authorize another transaction.
+        mfm_program::Classification::Permanent
+    }
+}

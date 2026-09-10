@@ -103,3 +103,13 @@ append a terminal conclusion or discard pending Effect authority. Capacity arith
 uses `capacity_arithmetic_overflow` without fabricated measurements. CLI uses exit 2; REST uses
 422 for these stopped invocations. Response payloads retain the shared full inline report; request
 body limits do not impose a response-size limit.
+
+Pending Effect views include `latest_failure`: null before the first audited failure, otherwise
+`error`, `state_context` (qualified value objects) and `decision` (`{"kind":"retry"}` or
+`{"kind":"stop","reason":"requested"}`, with other reviewed stop codes). Every acknowledged
+pending operational outcome advances the durable head. Retry preserves the command/EffectId and
+spends recovery allowance; Stop ends the invocation while explicit progress may resume it.
+The `pending_failures` size resource identifies exhausted admitted audit capacity; it rejects
+further provider entry and retains unresolved command authority. The removed `nonrecoverable`
+stop code is rejected with the superseded wire contracts. Cancellation can interrupt a physical
+attempt before its result is recorded; the audit covers acknowledged qualified failures.

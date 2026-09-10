@@ -1,6 +1,6 @@
 use super::*;
 use mfm_capabilities::{AdapterError, ReadCapabilityContract};
-use mfm_program::{Classifiers, NoRecovery, ReadState, ValueMap};
+use mfm_program::{ReadState, ValueMap};
 
 struct Inflate;
 impl ValueMap for Inflate {
@@ -18,7 +18,7 @@ impl ValueMap for Inflate {
 }
 
 impl ReadCapabilityContract for Mutation {
-    type OperationalError = NoContext;
+    type OperationalError = OperationalFailure;
     type Intent = Input;
     type Evidence = Input;
     fn contract_id() -> mfm_capabilities::Result<StableId> {
@@ -41,7 +41,7 @@ impl ReadState<Mutation> for Failing {
     fn adapter_context(
         input: &Input,
         intent: &Input,
-        error: &NoContext,
+        error: &OperationalFailure,
     ) -> Result<Failure, StateExecutionError> {
         <Self as EffectState<Mutation>>::adapter_context(input, intent, error)
     }
@@ -59,7 +59,6 @@ impl ReadState<Mutation> for Failing {
 #[derive(Clone, Copy)]
 enum Oversized {
     RootMap,
-    PolicyMap,
     ReadContext,
     EffectContext,
 }
@@ -77,17 +76,6 @@ impl Operation for Oversized {
         let bound = ConclusionBound::new(40 * 1024 * 1024)?;
         match self {
             Self::RootMap => scope.pure::<Failing, Inflate>(NoParams, Occurrence::new(), bound),
-            Self::PolicyMap => {
-                let mut classifiers = Classifiers::new();
-                classifiers.bind::<mfm_program::Never, Inflate, Identity<NoContext>, NoRecovery>(
-                    NoParams, NoParams, NoParams,
-                )?;
-                scope.pure::<Failing, Identity<Failure>>(
-                    NoParams,
-                    Occurrence::new().classifiers(classifiers),
-                    bound,
-                )
-            }
             Self::ReadContext => scope.read::<Failing, Mutation, Identity<Failure>>(
                 &NoParams,
                 NoParams,
@@ -103,7 +91,6 @@ impl Operation for Oversized {
 async fn mapped_values_and_adapter_contexts_preserve_size_errors_and_acknowledged_heads() {
     for (index, case) in [
         Oversized::RootMap,
-        Oversized::PolicyMap,
         Oversized::ReadContext,
         Oversized::EffectContext,
     ]
@@ -113,22 +100,19 @@ async fn mapped_values_and_adapter_contexts_preserve_size_errors_and_acknowledge
         let calls = Arc::new(AtomicUsize::new(0));
         let mut builder = RuntimeAssemblyBuilder::new().unwrap();
         match case {
-            Oversized::RootMap | Oversized::PolicyMap => {
-                builder.register_pure::<Failing>().unwrap()
-            }
+            Oversized::RootMap => builder.register_pure::<Failing>().unwrap(),
             Oversized::ReadContext => builder.register_read::<Failing, Mutation>().unwrap(),
             Oversized::EffectContext => builder.register_effect::<Failing, Mutation>().unwrap(),
         }
         builder.register_map::<Inflate>().unwrap();
         builder
-            .register_classifier::<mfm_program::Never, Inflate, Identity<NoContext>, NoRecovery>()
-            .unwrap();
-        builder
             .register_adapter::<Mutation, _, _>(NoParams, {
                 let calls = calls.clone();
                 move |_, _| {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    Box::pin(async { Err(AdapterError::Operational(NoContext)) })
+                    Box::pin(async {
+                        Err(AdapterError::Operational(OperationalFailure::Unavailable))
+                    })
                 }
             })
             .unwrap();
@@ -137,7 +121,9 @@ async fn mapped_values_and_adapter_contexts_preserve_size_errors_and_acknowledge
                 let calls = calls.clone();
                 move |_, _, _| {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    Box::pin(async { Err(AdapterError::Operational(NoContext)) })
+                    Box::pin(async {
+                        Err(AdapterError::Operational(OperationalFailure::Unavailable))
+                    })
                 }
             })
             .unwrap();

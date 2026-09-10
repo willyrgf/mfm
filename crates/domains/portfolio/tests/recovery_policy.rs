@@ -15,45 +15,26 @@ use std::{
 };
 
 type Context = EvmBalanceContext<NoContext>;
-type EvmIncident = Incident<EvmBalanceFailure, EvmOperationalError, EvmBalanceAdapterContext>;
-type PortfolioIncident = Incident<PortfolioSnapshotFailure, EvmOperationalError, NoContext>;
-
-struct IgnoreContext;
-impl ValueMap for IgnoreContext {
-    type Input = EvmBalanceAdapterContext;
-    type Output = NoContext;
-    type Params = NoParams;
-    fn implementation_id() -> mfm_program::Result<StableId> {
-        Ok(StableId::new("mfm.test.portfolio.ignore-context@1").unwrap())
-    }
-    fn apply(_: &NoParams, _: Self::Input) -> std::result::Result<NoContext, StateExecutionError> {
-        Ok(NoContext)
-    }
-}
 struct RetryRead;
-impl Handler<EvmIncident> for RetryRead {
+impl Handler for RetryRead {
     type Params = NoParams;
     fn implementation_id() -> mfm_program::Result<StableId> {
         Ok(StableId::new("mfm.test.portfolio.retry-read@1").unwrap())
     }
     fn handle(
         _: &NoParams,
-        incident: &EvmIncident,
-        _: Assessment,
+        incident: &IncidentSummary,
         _: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
-        Ok(match incident {
-            Incident::Adapter {
-                original: EvmOperationalError::Timeout,
-                ..
-            } => RecoveryRequest::RetryState,
+        Ok(match incident.classification {
+            Classification::Retryable => RecoveryRequest::RetryState,
             _ => RecoveryRequest::Stop,
         })
     }
 }
 struct Child {
     target: EvmPhysicalTarget,
-    classify: bool,
+    replace_handler: bool,
     retry: bool,
     bound: ConclusionBound,
 }
@@ -68,15 +49,11 @@ impl Operation for Child {
         &self,
         body: &mut OperationExpansion<Context, Context, EvmBalanceFailure>,
     ) -> mfm_program::Result<()> {
-        if self.classify {
-            let mut family = Classifiers::new();
-            family.bind::<EvmOperationalError, Identity<EvmBalanceFailure>, Identity<EvmBalanceAdapterContext>, EvmBalanceClassifier>(NoParams, NoParams, NoParams)?;
-            body.classifiers(family)?;
+        if self.replace_handler {
+            body.handler(HandlerBinding::new::<Stop>(NoParams)?)?;
         }
         let first = if self.retry {
-            let mut handlers = Handlers::new();
-            handlers.bind::<EvmIncident, RetryRead>(NoParams)?;
-            Occurrence::new().handlers(handlers)
+            Occurrence::new().handler(HandlerBinding::new::<RetryRead>(NoParams)?)
         } else {
             Occurrence::new()
         };
@@ -95,6 +72,7 @@ impl Operation for Child {
 struct Parent {
     child: Child,
     direct: bool,
+    retry_default: bool,
 }
 impl Operation for Parent {
     type Input = Context;
@@ -107,15 +85,11 @@ impl Operation for Parent {
         &self,
         body: &mut OperationExpansion<Context, Context, PortfolioSnapshotFailure>,
     ) -> mfm_program::Result<()> {
-        let mut classifiers = Classifiers::new();
-        classifiers.bind::<EvmOperationalError, MapEvmBalanceFailure, IgnoreContext, NoRecovery>(
-            NoParams, NoParams, NoParams,
-        )?;
-        body.classifiers(classifiers)?;
-        let mut handlers = Handlers::new();
-        handlers.bind::<PortfolioIncident, Stop>(NoParams)?;
-        handlers.bind::<EvmIncident, Stop>(NoParams)?;
-        body.handlers(handlers)?;
+        body.handler(if self.retry_default {
+            HandlerBinding::new::<RetryRead>(NoParams)?
+        } else {
+            HandlerBinding::new::<Stop>(NoParams)?
+        })?;
         body.allowances(RecoveryAllowances::new(1, 0))?;
         if self.direct {
             body.read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead, MapEvmBalanceFailure>(
@@ -166,9 +140,10 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
         .unwrap();
         let parent = Parent {
             direct: scenario == 0,
+            retry_default: matches!(scenario, 1 | 2),
             child: Child {
                 target: target.clone(),
-                classify: scenario >= 2,
+                replace_handler: scenario == 1,
                 retry: scenario == 3,
                 bound,
             },
@@ -181,21 +156,15 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
         )
         .unwrap();
         let mut builder = RuntimeAssemblyBuilder::new().unwrap();
+        builder.register_map::<MapEvmBalanceFailure>().unwrap();
         builder
             .register_read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead>()
             .unwrap();
         builder
             .register_read::<ReadInitialAnchor<NoContext>, EvmAnchorRead>()
             .unwrap();
-        builder.register_classifier::<EvmOperationalError, MapEvmBalanceFailure, IgnoreContext, NoRecovery>().unwrap();
-        builder.register_classifier::<EvmOperationalError, Identity<EvmBalanceFailure>, Identity<EvmBalanceAdapterContext>, EvmBalanceClassifier>().unwrap();
-        builder
-            .register_handler::<PortfolioIncident, Stop>()
-            .unwrap();
-        builder.register_handler::<EvmIncident, Stop>().unwrap();
-        builder
-            .register_handler::<EvmIncident, RetryRead>()
-            .unwrap();
+        builder.register_handler::<Stop>().unwrap();
+        builder.register_handler::<RetryRead>().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let counted = calls.clone();
         builder
@@ -206,7 +175,7 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
                     Box::pin(async move {
                         if scenario == 0 {
                             Ok(EvmReadEvidence::rejected(reference.clone()))
-                        } else if scenario == 3 && call == 1 {
+                        } else if scenario >= 2 && call == 1 {
                             Ok(EvmReadEvidence::returned(
                                 reference.clone(),
                                 EvmReadValue::ChainId(intent.chain_id()),
@@ -226,7 +195,7 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
         let runtime = Runtime::new(builder.finish(), Arc::new(mfm_store::MemoryStore::new()));
         let run = RunId::from_digest(DigestBytes::from_array([scenario + 1; 32]));
         let first = runtime.start(run.clone(), program, input).await.unwrap();
-        let terminal = if scenario == 3 {
+        let terminal = if scenario >= 2 {
             assert!(matches!(
                 first.state(),
                 RunViewState::Runnable {
@@ -245,8 +214,8 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
         };
         assert_eq!(
             report.reason(),
-            &if scenario < 2 {
-                StopReason::Nonrecoverable
+            &if scenario == 2 {
+                StopReason::Exhausted(RecoveryLimit::Run)
             } else {
                 StopReason::Requested
             }
@@ -286,25 +255,24 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
         assert_eq!(cold.canonical_bytes(), report.canonical_bytes());
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            if scenario == 3 { 2 } else { 1 }
+            if scenario >= 2 { 2 } else { 1 }
         );
     }
 }
 
 struct RestartCollection;
-impl Handler<EvmIncident> for RestartCollection {
+impl Handler for RestartCollection {
     type Params = NoParams;
     fn implementation_id() -> mfm_program::Result<StableId> {
         Ok(StableId::new("mfm.test.portfolio.restart-collection@1").unwrap())
     }
     fn handle(
         _: &NoParams,
-        incident: &EvmIncident,
-        _: Assessment,
+        incident: &IncidentSummary,
         context: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
-        Ok(match incident {
-            Incident::Domain(EvmBalanceFailure::AnchorChanged { .. }) => context
+        Ok(match incident.classification {
+            Classification::InputInvalidated => context
                 .eligible_restart_targets()
                 .first()
                 .copied()
@@ -327,17 +295,7 @@ impl Operation for RecoveringCollection {
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
         let checkpoint = body.checkpoint::<Context>()?;
-        let mut classifiers = Classifiers::new();
-        classifiers.bind::<EvmOperationalError, Identity<EvmBalanceFailure>, Identity<EvmBalanceAdapterContext>, EvmBalanceClassifier>(NoParams, NoParams, NoParams)?;
-        classifiers.bind::<Never, MapEvmBalanceFailure, Identity<NoContext>, NoRecovery>(
-            NoParams, NoParams, NoParams,
-        )?;
-        body.classifiers(classifiers)?;
-        let mut handlers = Handlers::new();
-        handlers.bind::<EvmIncident, RestartCollection>(NoParams)?;
-        handlers.checkpoint::<EvmIncident, Context>(&checkpoint)?;
-        handlers.bind::<Incident<PortfolioSnapshotFailure, Never, NoContext>, Stop>(NoParams)?;
-        body.handlers(handlers)?;
+        body.handler(HandlerBinding::new::<RestartCollection>(NoParams)?.checkpoint(&checkpoint)?)?;
         body.allowances(RecoveryAllowances::new(0, 1))?;
         body.operation::<CollectEvmBalances<NoContext>, MapEvmBalanceFailure>(&self.0, NoParams)
     }
@@ -394,6 +352,7 @@ async fn changed_anchor_restarts_the_real_collection_and_preserves_its_acknowled
         )
         .unwrap();
         let mut builder = RuntimeAssemblyBuilder::new().unwrap();
+        builder.register_map::<MapEvmBalanceFailure>().unwrap();
         builder
             .register_read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead>()
             .unwrap();
@@ -409,16 +368,8 @@ async fn changed_anchor_restarts_the_real_collection_and_preserves_its_acknowled
         builder
             .register_pure::<ConsolidateBalanceCollection<NoContext>>()
             .unwrap();
-        builder.register_classifier::<EvmOperationalError, Identity<EvmBalanceFailure>, Identity<EvmBalanceAdapterContext>, EvmBalanceClassifier>().unwrap();
-        builder
-            .register_classifier::<Never, MapEvmBalanceFailure, Identity<NoContext>, NoRecovery>()
-            .unwrap();
-        builder
-            .register_handler::<EvmIncident, RestartCollection>()
-            .unwrap();
-        builder
-            .register_handler::<Incident<PortfolioSnapshotFailure, Never, NoContext>, Stop>()
-            .unwrap();
+        builder.register_handler::<RestartCollection>().unwrap();
+        builder.register_handler::<Stop>().unwrap();
         let anchor_calls = Arc::new(AtomicUsize::new(0));
         let counted = anchor_calls.clone();
         builder

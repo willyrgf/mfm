@@ -74,7 +74,7 @@ automatic retry. `read_run`, `progress_run` and `start_run` preserve that distin
 - `failed`: canonical report reference and raw report containing original cause, applicable root
   mapping, stop reason, execution position and committed recovery usage.
 
-The shipping Portfolio uses NoRecovery/Stop with zero allowances. Operational Read failure is a
+The shipping Portfolio uses Stop with zero allowances. Operational Read failure is a
 durable failed result; it cannot be resumed into a fresh attempt. Cancellation before a conclusion
 retains a runnable prefix. Retained revisions are checked on start/list; deleting a revision does
 not revoke an admitted run. No provider details or locators enter client models.

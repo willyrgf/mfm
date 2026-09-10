@@ -12,12 +12,52 @@ pub(crate) mod scope;
 pub use scope::Checkpoint;
 pub(crate) mod bounds;
 pub(crate) mod defaults;
-pub use bindings::{
-    ClassifierAbi, ClassifierBinding, Classifiers, HandlerAbi, HandlerBinding, Handlers,
-    IncidentAbi, MapAbi, MapBinding, PolicyParams,
-};
+pub use bindings::{HandlerAbi, HandlerBinding, MapAbi, MapBinding, PolicyParams};
 pub use bounds::{ConclusionBound, EffectBounds, HistoryBound};
-pub use defaults::{NoRecovery, Occurrence, Stop};
+pub use defaults::{Occurrence, StandardRecovery, Stop};
+
+/// Intrinsic recovery semantics of an exact error contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Classification {
+    /// Repeating unchanged intent or command is supported by this cause's semantics.
+    Retryable,
+    /// The outcome is unresolved and supplies no basis for automatic repetition.
+    OutcomeUnknown,
+    /// Recovery requires refreshing an input.
+    InputInvalidated,
+    /// Generic recovery actions cannot repair this cause.
+    Permanent,
+}
+
+/// Pure, deterministic projection of the original typed cause.
+pub trait ClassifyError: MfmValue {
+    /// Returns intrinsic failure semantics without IO or mutation.
+    fn classify(&self) -> Classification;
+}
+
+impl ClassifyError for Never {
+    fn classify(&self) -> Classification {
+        match *self {}
+    }
+}
+
+/// Execution boundary that produced the original cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncidentSource {
+    /// Deterministic State failure.
+    State,
+    /// Operational adapter failure.
+    Adapter,
+}
+
+/// Common handler input; original causes remain in the execution and reporting path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncidentSummary {
+    /// Boundary that produced the cause.
+    pub source: IncidentSource,
+    /// Intrinsic semantics projected from that cause.
+    pub classification: Classification,
+}
 
 /// Original domain failure or an operational adapter error with State-owned context.
 pub enum Incident<D, E, X> {
@@ -32,34 +72,20 @@ pub enum Incident<D, E, X> {
     },
 }
 
-mod private {
-    pub trait Sealed {}
-}
-
-/// Closed structural incident ABI with independently typed components.
-pub trait IncidentContract: private::Sealed + Send + Sync + 'static {
-    /// State domain failure contract.
-    type Domain: MfmValue;
-    /// Capability operational error contract.
-    type Error: MfmValue;
-    /// State adapter context contract.
-    type Context: MfmValue;
-}
-
-impl<D: MfmValue, E: MfmValue, X: MfmValue> private::Sealed for Incident<D, E, X> {}
-impl<D: MfmValue, E: MfmValue, X: MfmValue> IncidentContract for Incident<D, E, X> {
-    type Domain = D;
-    type Error = E;
-    type Context = X;
-}
-
-/// Deterministic assessment, separate from the handler's requested action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Assessment {
-    /// Automatic recovery may be useful.
-    Recoverable,
-    /// The incident should terminate automatic recovery.
-    Nonrecoverable,
+impl<D: ClassifyError, E: ClassifyError, X> Incident<D, E, X> {
+    /// Projects the original cause without converting or replacing it.
+    pub fn summary(&self) -> IncidentSummary {
+        match self {
+            Self::Domain(error) => IncidentSummary {
+                source: IncidentSource::State,
+                classification: error.classify(),
+            },
+            Self::Adapter { original, .. } => IncidentSummary {
+                source: IncidentSource::Adapter,
+                classification: original.classify(),
+            },
+        }
+    }
 }
 
 /// Authoritative execution phase supplied to policy callbacks by Runtime.
@@ -127,8 +153,6 @@ pub enum RecoveryDenial {
 /// Reviewed reason automatic recovery stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-    /// The classifier marked the cause nonrecoverable.
-    Nonrecoverable,
     /// The handler requested Stop.
     Requested,
     /// A committed-decision allowance was exhausted.
@@ -199,6 +223,7 @@ pub struct RecoveryContext<'a> {
     phase: ExecutionPhase,
     remaining: RecoveryAllowances,
     remaining_run_decisions: u32,
+    declared: &'a [RecoveryTarget],
     eligible: &'a [RecoveryTarget],
 }
 
@@ -208,12 +233,14 @@ impl<'a> RecoveryContext<'a> {
         phase: ExecutionPhase,
         remaining: RecoveryAllowances,
         remaining_run_decisions: u32,
+        declared: &'a [RecoveryTarget],
         eligible: &'a [RecoveryTarget],
     ) -> Self {
         Self {
             phase,
             remaining,
             remaining_run_decisions,
+            declared,
             eligible,
         }
     }
@@ -233,42 +260,40 @@ impl<'a> RecoveryContext<'a> {
         self.remaining_run_decisions
     }
 
+    /// Returns the sole declared target only when that target is currently eligible.
+    pub fn single_restart_target(&self) -> Option<RecoveryTarget> {
+        match self.declared {
+            [target] if self.eligible.contains(target) => Some(*target),
+            _ => None,
+        }
+    }
+
+    /// Returns all explicitly bound targets in declaration order.
+    pub const fn declared_restart_targets(&self) -> &[RecoveryTarget] {
+        self.declared
+    }
+
     /// Returns currently active permitted targets in declaration order.
     pub const fn eligible_restart_targets(&self) -> &[RecoveryTarget] {
         self.eligible
     }
 }
 
-/// Deterministic typed incident classification.
-pub trait Classifier<I: IncidentContract>: Send + Sync + 'static {
+/// Static recovery selection over common intrinsic error semantics.
+pub trait Handler: Send + Sync + 'static {
     /// Immutable checked configuration bound into Program identity.
     type Params: MfmValue;
     /// Returns this implementation's stable identity.
     fn implementation_id() -> Result<StableId>;
-    /// Assesses an incident without performing IO or changing its original cause.
-    fn classify(
-        params: &Self::Params,
-        incident: &I,
-        context: &RecoveryContext<'_>,
-    ) -> std::result::Result<Assessment, StateExecutionError>;
-}
-
-/// Deterministic typed recovery selection, independently configurable from classification.
-pub trait Handler<I: IncidentContract>: Send + Sync + 'static {
-    /// Immutable checked configuration bound into Program identity.
-    type Params: MfmValue;
-    /// Returns this implementation's stable identity.
-    fn implementation_id() -> Result<StableId>;
-    /// Proposes an action; Runtime validates every proposal against committed history.
+    /// Proposes an action; Runtime validates it against phase and committed history.
     fn handle(
         params: &Self::Params,
-        incident: &I,
-        assessment: Assessment,
+        incident: &IncidentSummary,
         context: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError>;
 }
 
-/// Explicit typed consuming conversion for policy context or root domain failure.
+/// Explicit typed consuming conversion for root domain failure.
 pub trait ValueMap: Send + Sync + 'static {
     /// Exact input contract.
     type Input: MfmValue;

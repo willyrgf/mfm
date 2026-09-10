@@ -1,6 +1,6 @@
 # mfm-program
 
-Program owns the immutable `mfm-program-document@5` sequence with the `mfm.program.v5` domain.
+Program owns the immutable `mfm-program-document@6` sequence with the `mfm.program.v6` domain.
 An Operation performs deterministic source authoring; its input check and expansion commit the
 exact initial value, State contracts, resolved policies, root failure maps, checkpoints and finite
 bounds. Runtime associates typed implementations and owns execution and recovery. Old graph bytes
@@ -60,11 +60,14 @@ let program = expand_program(
 assert_eq!(program.declarations().len(), 2);
 ```
 
-Classifiers select recoverability; handlers request retry, restart or Stop. They do not authorize
-execution. Independent scoped classifier/handler families and occurrence overrides resolve during
-expansion, with exact typed parameters and explicit domain/context maps. Framework defaults are
-NoRecovery and Stop with zero allowances. Explicit ValueMaps compose each original domain failure
-into the root contract; `FromNever` represents the uninhabited path.
+`ClassifyError` projects exact typed causes into four intrinsic semantics: Retryable,
+OutcomeUnknown, InputInvalidated and Permanent. One static `Handler` consumes the common summary;
+Runtime alone authorizes and schedules recovery. `HandlerBinding::new::<H>(params)` is inherited
+from the nearest explicit Operation setting; `Occurrence::handler` replaces it for one occurrence.
+Parameters and checkpoint targets replace together. Allowance overrides remain independent.
+Framework defaults are Stop and zero allowances; StandardRecovery requires explicit selection.
+Explicit ValueMaps retain the separate original-to-root failure contract; `FromNever` represents
+an uninhabited root path.
 
 Checkpoint tokens belong to their authoring scope. Installed inherited handler bindings retain
 that owner; direct parent/sibling token capture in another scope is rejected. Final lowering resolves
@@ -83,8 +86,11 @@ payload. A rejected expansion returns Capacity without leaking prefix, checkpoin
 suffix declarations. This bounds framework composition; trusted Rust callbacks must not recurse
 outside OperationExpansion or assume arbitrary stack allocation is sandboxed.
 
-Each Pure/Read conclusion has a complete frame bound; Effects separately bound prepare and
-conclusion. For global recovery limit G, Program conservatively reserves genesis plus G+1 full
+Each Pure/Read conclusion has a complete frame bound. EffectBounds::new accepts prepare bytes,
+conclusion bytes, positive max_pending_failures and positive failure_frame_bytes. Every pending
+operational failure consumes a slot, including Stop; exhaustion prevents adapter entry and can
+leave unresolved authority. The lifecycle reserves 2 + max_pending_failures frames and the
+corresponding complete prepare/failure/settlement bytes. For global recovery limit G, Program conservatively reserves genesis plus G+1 full
 sequence segments. Bounds include retained objects, original/root failures and envelopes. Journal
 owns format ceilings and Runtime checks concrete admission before genesis or adapter IO. Recovery
 allowances and frame bounds are immutable Program data.

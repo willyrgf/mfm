@@ -172,9 +172,10 @@ fn validate_admission_bound(program: &Program, genesis_bytes: usize) -> Result<(
     for declaration in program.declarations() {
         let maximum = match declaration.execution() {
             Execution::Pure { bound } | Execution::Read { bound, .. } => bound.max_frame_bytes(),
-            Execution::Effect { bounds, .. } => {
-                bounds.prepare_bytes().max(bounds.conclusion_bytes())
-            }
+            Execution::Effect { bounds, .. } => bounds
+                .prepare_bytes()
+                .max(bounds.conclusion_bytes())
+                .max(bounds.failure_frame_bytes()),
         };
         crate::check_size(
             crate::SizeResource::Frame,
@@ -390,10 +391,10 @@ fn decide(
     accumulator: &Accumulator,
     position: ExecutionPosition,
     phase: mfm_program::ExecutionPhase,
-    incident: crate::assembly::recovery::QualifiedIncident,
+    incident: crate::assembly::recovery::QualifiedIncident<'_>,
 ) -> Result<mfm_journal::RecoveryDecision> {
     use mfm_journal::{RecoveryDecision, StopCode};
-    use mfm_program::{Assessment, RecoveryAllowances, RecoveryContext, RecoveryRequest};
+    use mfm_program::{RecoveryAllowances, RecoveryContext, RecoveryRequest};
     let declaration = &accumulator.executable.program.declarations()[position.state.index()];
     let usage = accumulator.state.usage(position.state)?;
     let eligible: Vec<_> = declaration
@@ -427,16 +428,12 @@ fn decide(
             .max_recovery_decisions()
             .checked_sub(usage.run_decisions)
             .ok_or(RuntimeError::Internal)?,
+        declaration.recovery_targets(),
         &eligible,
     );
-    let (assessment, request) = accumulator.executable.declarations[position.state.index()]
+    let request = accumulator.executable.declarations[position.state.index()]
         .recovery
         .request(incident, &context)?;
-    if assessment == Assessment::Nonrecoverable {
-        return Ok(RecoveryDecision::Stop {
-            reason: StopCode::Nonrecoverable,
-        });
-    }
     let decision = match request {
         RecoveryRequest::Stop => RecoveryDecision::Stop {
             reason: StopCode::Requested,
@@ -446,19 +443,12 @@ fn decide(
             checkpoint: target.position(),
         },
     };
-    if phase == mfm_program::ExecutionPhase::EffectPending {
-        return Ok(match decision {
-            RecoveryDecision::Restart { .. } => RecoveryDecision::Stop {
-                reason: StopCode::EffectBarrier,
-            },
-            decision => decision,
-        });
-    }
     Ok(
         match accumulator.state.recovery_denial(
             &accumulator.executable,
             position.state,
             decision,
+            phase,
         )? {
             Some(reason) => RecoveryDecision::Stop { reason },
             None => decision,
@@ -472,7 +462,7 @@ fn conclude<O: MfmValue, F: MfmValue>(
     phase: mfm_program::ExecutionPhase,
     proposed: ProposedStateOutcome<O, F>,
 ) -> Result<mfm_journal::DomainConclusion<QualifiedValue>> {
-    use mfm_journal::{DomainConclusion, DomainDecision, RecoveryDecision, StopCode};
+    use mfm_journal::{DomainConclusion, DomainDecision, RecoveryDecision};
     match proposed {
         ProposedStateOutcome::Success { output } => Ok(DomainConclusion::Success {
             output: qualify_hot(output).map_err(RuntimeError::from)?,
@@ -480,18 +470,8 @@ fn conclude<O: MfmValue, F: MfmValue>(
         ProposedStateOutcome::Failure { failure } => {
             let original = qualify_hot(failure).map_err(RuntimeError::from)?;
             let selected = &accumulator.executable.declarations[position.state.index()];
-            let incident = crate::assembly::recovery::QualifiedIncident::Domain(copy_value(
-                &original,
-                &selected.failure_codec,
-            )?);
-            let mut decision = decide(accumulator, position, phase, incident)?;
-            if phase == mfm_program::ExecutionPhase::EffectSettled
-                && !matches!(decision, RecoveryDecision::Stop { .. })
-            {
-                decision = RecoveryDecision::Stop {
-                    reason: StopCode::EffectSettled,
-                };
-            }
+            let incident = crate::assembly::recovery::QualifiedIncident::Domain(&original);
+            let decision = decide(accumulator, position, phase, incident)?;
             let decision = match decision {
                 RecoveryDecision::Retry => DomainDecision::Retry,
                 RecoveryDecision::Restart { checkpoint } => DomainDecision::Restart { checkpoint },
@@ -621,10 +601,7 @@ pub(crate) async fn start_read<S: ReadState<C>, C: ReadCapabilityContract>(
                     &accumulator,
                     position,
                     mfm_program::ExecutionPhase::Read,
-                    crate::assembly::recovery::QualifiedIncident::Adapter {
-                        original: copy_value(&error, &incident.error_codec)?,
-                        context: Box::new(copy_value(&state_context, &incident.context_codec)?),
-                    },
+                    crate::assembly::recovery::QualifiedIncident::Adapter { original: &error },
                 )?;
                 accumulator
                     .history
@@ -689,10 +666,22 @@ pub(crate) async fn start_pending_effect<S: EffectState<C>, C: EffectCapabilityC
         input,
         effect_id,
         command,
+        failures,
+        ..
     } = &accumulator.state.cursor
     else {
         return Err(RuntimeError::Internal);
     };
+    let mfm_program::Execution::Effect { bounds, .. } =
+        accumulator.executable.program.declarations()[position.state.index()].execution()
+    else {
+        return Err(RuntimeError::Internal);
+    };
+    crate::check_size(
+        crate::SizeResource::PendingFailures,
+        u64::from(*failures) + 1,
+        u64::from(bounds.max_pending_failures()),
+    )?;
     let (position, input, command, effect_id) = (
         *position,
         Arc::clone(input),
@@ -705,7 +694,7 @@ pub(crate) async fn start_pending_effect<S: EffectState<C>, C: EffectCapabilityC
         Ok(EffectAdapterOutcome::Settled(qualify)) => qualify,
         Err(AdapterError::Invariant(_)) => return Err(RuntimeError::Internal),
         Err(AdapterError::Operational(qualify)) => {
-            return run_blocking(move || {
+            let prepared = run_blocking(move || {
                 let error = qualify().map_err(RuntimeError::from)?;
                 let ExecutableMode::Effect { incident, .. } =
                     &accumulator.executable.declarations[position.state.index()].mode
@@ -717,29 +706,30 @@ pub(crate) async fn start_pending_effect<S: EffectState<C>, C: EffectCapabilityC
                     &accumulator,
                     position,
                     mfm_program::ExecutionPhase::EffectPending,
-                    crate::assembly::recovery::QualifiedIncident::Adapter {
-                        original: copy_value(&error, &incident.error_codec)?,
-                        context: Box::new(copy_value(&state_context, &incident.context_codec)?),
-                    },
+                    crate::assembly::recovery::QualifiedIncident::Adapter { original: &error },
                 )?;
-                match decision {
-                    mfm_journal::RecoveryDecision::Retry => {
-                        Ok(DriverDisposition::Yield(accumulator))
-                    }
+                let decision = match decision {
+                    mfm_journal::RecoveryDecision::Retry => mfm_journal::PendingDecision::Retry,
                     mfm_journal::RecoveryDecision::Stop { reason } => {
-                        Ok(DriverDisposition::Stopped {
-                            accumulator,
-                            incident: Box::new(crate::AdapterIncidentView {
-                                error: retained_view(&error),
-                                state_context: retained_view(&state_context),
-                            }),
-                            reason,
-                        })
+                        mfm_journal::PendingDecision::Stop { reason }
                     }
-                    mfm_journal::RecoveryDecision::Restart { .. } => Err(RuntimeError::Internal),
-                }
+                    mfm_journal::RecoveryDecision::Restart { .. } => {
+                        return Err(RuntimeError::Internal)
+                    }
+                };
+                let frame = accumulator
+                    .history
+                    .encode_effect_failure(
+                        position,
+                        object(&error)?,
+                        object(&state_context)?,
+                        decision,
+                    )
+                    .map_err(map_local_journal_error)?;
+                prepare_append(accumulator, frame)
             })
-            .await;
+            .await?;
+            return finish_append(store, prepared).await;
         }
     };
     let prepared = run_blocking(move || {
@@ -794,7 +784,11 @@ struct PreparedAppend {
     frame: EncodedRunFrame,
 }
 
-fn current_frame_bound(executable: &ExecutableProgram, state: &FoldState) -> Result<u64> {
+fn current_frame_bound(
+    executable: &ExecutableProgram,
+    state: &FoldState,
+    record: &JournalRecord<'_>,
+) -> Result<u64> {
     use mfm_program::Execution;
     let (position, pending) = match &state.cursor {
         Cursor::Runnable { position, .. } => (*position, false),
@@ -804,7 +798,13 @@ fn current_frame_bound(executable: &ExecutableProgram, state: &FoldState) -> Res
     Ok(
         match executable.program.declarations()[position.state.index()].execution() {
             Execution::Pure { bound } | Execution::Read { bound, .. } => bound.max_frame_bytes(),
-            Execution::Effect { bounds, .. } if pending => bounds.conclusion_bytes(),
+            Execution::Effect { bounds, .. } if pending => {
+                if matches!(record, JournalRecord::EffectAdapterFailed { .. }) {
+                    bounds.failure_frame_bytes()
+                } else {
+                    bounds.conclusion_bytes()
+                }
+            }
             Execution::Effect { bounds, .. } => bounds.prepare_bytes(),
         },
     )
@@ -814,7 +814,7 @@ fn prepare_append(mut accumulator: Accumulator, frame: EncodedRunFrame) -> Resul
     crate::check_size(
         crate::SizeResource::DeclaredFrame,
         frame.canonical_bytes().len() as u64,
-        current_frame_bound(&accumulator.executable, &accumulator.state)?,
+        current_frame_bound(&accumulator.executable, &accumulator.state, &frame.record())?,
     )?;
     accumulator
         .state
@@ -847,10 +847,37 @@ async fn finish_append(
                     mut accumulator,
                     frame,
                 } = prepared;
+                let pending_failure =
+                    matches!(frame.record(), JournalRecord::EffectAdapterFailed { .. });
                 accumulator
                     .history
                     .extend_inserted(frame)
                     .map_err(map_local_journal_error)?;
+                if pending_failure {
+                    let Cursor::EffectPending {
+                        latest_failure: Some(failure),
+                        ..
+                    } = &accumulator.state.cursor
+                    else {
+                        return Err(RuntimeError::Internal);
+                    };
+                    return match failure.decision {
+                        mfm_journal::PendingDecision::Retry => {
+                            Ok(DriverDisposition::Yield(accumulator))
+                        }
+                        mfm_journal::PendingDecision::Stop { reason } => {
+                            let incident = Box::new(crate::AdapterIncidentView {
+                                error: retained_view(&failure.original),
+                                state_context: retained_view(&failure.context),
+                            });
+                            Ok(DriverDisposition::Stopped {
+                                accumulator,
+                                incident,
+                                reason,
+                            })
+                        }
+                    };
+                }
                 if matches!(
                     accumulator.state.cursor,
                     Cursor::Runnable {
@@ -961,7 +988,7 @@ fn fold(executable: ExecutableProgram, history: JournalHistory) -> Result<Accumu
     let mut state = FoldState::initial(&executable, c0)?;
     let run_id = history.run_id().clone();
     for (record, bytes) in history.records().zip(history.frame_lengths()).skip(1) {
-        if bytes as u64 > current_frame_bound(&executable, &state)? {
+        if bytes as u64 > current_frame_bound(&executable, &state, &record)? {
             return Err(RuntimeError::InvalidHistory);
         }
         state.apply(&executable, &run_id, record)?;
@@ -1002,10 +1029,20 @@ fn view(accumulator: &Accumulator) -> Result<RunView> {
         Cursor::EffectPending {
             position,
             effect_id,
+            latest_failure,
             ..
         } => RunViewState::EffectPending {
             position: *position,
             effect_id: effect_id.clone(),
+            latest_failure: latest_failure.as_ref().map(|failure| {
+                Box::new(crate::PendingFailureView {
+                    incident: crate::AdapterIncidentView {
+                        error: retained_view(&failure.original),
+                        state_context: retained_view(&failure.context),
+                    },
+                    decision: failure.decision,
+                })
+            }),
         },
         Cursor::Succeeded(value) => RunViewState::Succeeded(retained_view(value)),
         Cursor::Failed(failure) => {

@@ -8,6 +8,7 @@
 mod assembly;
 mod engine;
 mod report;
+pub use mfm_journal::PendingDecision;
 pub use report::{AdapterIncidentView, FailureCauseView, FailureReport, InvocationFailure};
 
 use std::sync::Arc;
@@ -72,6 +73,8 @@ impl From<mfm_values::ValueError> for RuntimeError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SizeResource {
+    /// Admitted pending-Effect operational failure records.
+    PendingFailures,
     /// One canonical typed value.
     CanonicalObject,
     /// One complete Journal frame.
@@ -91,6 +94,7 @@ pub enum SizeResource {
 impl std::fmt::Display for SizeResource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::PendingFailures => "pending_failures",
             Self::CanonicalObject => "canonical_object",
             Self::Frame => "frame",
             Self::FrameEnvelope => "frame_envelope",
@@ -138,6 +142,14 @@ pub enum EffectAdapterOutcome<E> {
     Settled(E),
 }
 
+/// Latest audited pending-Effect failure, reconstructed without policy callbacks.
+pub struct PendingFailureView {
+    /// Original error and State-owned context.
+    pub incident: AdapterIncidentView,
+    /// Committed decision retaining command authority.
+    pub decision: mfm_journal::PendingDecision,
+}
+
 /// Durable public state of a run.
 pub enum RunViewState {
     /// The selected State is waiting for caller-driven progression.
@@ -153,6 +165,8 @@ pub enum RunViewState {
         position: ExecutionPosition,
         /// Exact retained Effect identity.
         effect_id: EffectId,
+        /// Most recent acknowledged operational failure and invocation decision.
+        latest_failure: Option<Box<PendingFailureView>>,
     },
     /// The Program reached its declared root success.
     Succeeded(ValueView),

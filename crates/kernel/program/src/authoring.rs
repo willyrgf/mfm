@@ -92,15 +92,10 @@ impl<I: MfmValue, O: MfmValue, F: MfmValue> OperationExpansion<I, O, F> {
     fn finish(&self) -> Result<()> {
         self.draft.require_current(&nominal_contract_ref::<O>()?)
     }
-    /// Installs the nearest explicit classifier family, without changing handler defaults.
-    pub fn classifiers(&mut self, family: Classifiers) -> Result<()> {
-        self.recovery_defaults.classifiers = Some(family);
-        Ok(())
-    }
-    /// Installs a handler family after checking every attached checkpoint's ownership.
-    pub fn handlers(&mut self, family: Handlers) -> Result<()> {
-        family.require_scope(&self.draft.scope)?;
-        self.recovery_defaults.handlers = Some(family);
+    /// Installs the nearest handler binding after checking checkpoint ownership.
+    pub fn handler(&mut self, binding: HandlerBinding) -> Result<()> {
+        binding.require_scope(&self.draft.scope)?;
+        self.recovery_defaults.handler = Some(binding);
         Ok(())
     }
     /// Sets local committed-decision allowances; descendants may override them independently.
@@ -129,9 +124,7 @@ impl<I: MfmValue, O: MfmValue, F: MfmValue> OperationExpansion<I, O, F> {
         S: PureState,
         M: ValueMap<Input = S::Failure, Output = F>,
     {
-        let selected = self
-            .recovery_defaults
-            .resolve::<S::Failure, Never, NoContext>(&self.draft.scope, &policy)?;
+        let selected = self.recovery_defaults.resolve(&self.draft.scope, &policy)?;
         self.draft.append::<S>(
             Execution::Pure { bound },
             selected,
@@ -169,15 +162,11 @@ impl<I: MfmValue, O: MfmValue, F: MfmValue> OperationExpansion<I, O, F> {
     where
         C: ReadCapabilityContract + CapabilityInjection<S>,
         S: ReadState<C>,
+        C::OperationalError: ClassifyError,
         M: ValueMap<Input = C::ExpandedFailure, Output = F>,
     {
         let depth = self.child_depth()?;
-        let selected = self
-            .recovery_defaults
-            .resolve::<S::Failure, C::OperationalError, S::AdapterContext>(
-                &self.draft.scope,
-                &policy,
-            )?;
+        let selected = self.recovery_defaults.resolve(&self.draft.scope, &policy)?;
         let binding_ref = C::original_binding_ref(setup)?;
         let execution = Execution::Read {
             capability_contract_ref: capability_contract_ref::<C>()?,
@@ -209,15 +198,11 @@ impl<I: MfmValue, O: MfmValue, F: MfmValue> OperationExpansion<I, O, F> {
     where
         C: EffectCapabilityContract + CapabilityInjection<S>,
         S: EffectState<C>,
+        C::OperationalError: ClassifyError,
         M: ValueMap<Input = C::ExpandedFailure, Output = F>,
     {
         let depth = self.child_depth()?;
-        let selected = self
-            .recovery_defaults
-            .resolve::<S::Failure, C::OperationalError, S::AdapterContext>(
-                &self.draft.scope,
-                &policy,
-            )?;
+        let selected = self.recovery_defaults.resolve(&self.draft.scope, &policy)?;
         let binding_ref = C::original_binding_ref(setup)?;
         let execution = Execution::Effect {
             capability_contract_ref: effect_capability_contract_ref::<C>()?,
@@ -363,7 +348,6 @@ impl ExpansionDraft {
                 output_contract_ref: nominal_contract_ref::<S::Output>()?,
                 failure_contract_ref: nominal_contract_ref::<S::Failure>()?,
                 execution,
-                classifier: selected.classifier,
                 handler: selected.handler,
                 root_maps,
                 recovery_targets: Vec::new(),

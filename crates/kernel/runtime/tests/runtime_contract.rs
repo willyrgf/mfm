@@ -265,7 +265,7 @@ struct Binding {
 struct Observation;
 
 impl ReadCapabilityContract for Observation {
-    type OperationalError = NoContext;
+    type OperationalError = OperationalFailure;
     type Intent = Intent;
     type Evidence = Evidence;
 
@@ -307,7 +307,7 @@ impl ReadState<Observation> for Observe {
     fn adapter_context(
         _: &Self::Input,
         _: &Intent,
-        _: &NoContext,
+        _: &OperationalFailure,
     ) -> Result<NoContext, mfm_program::StateExecutionError> {
         Ok(NoContext)
     }
@@ -388,7 +388,7 @@ struct EffectEvidence {
 struct Mutation;
 
 impl EffectCapabilityContract for Mutation {
-    type OperationalError = NoContext;
+    type OperationalError = OperationalFailure;
     type Command = Command;
     type Evidence = EffectEvidence;
 
@@ -410,7 +410,7 @@ impl EffectCapabilityContract for Mutation {
 struct ConflictingReadCapability;
 
 impl ReadCapabilityContract for ConflictingReadCapability {
-    type OperationalError = NoContext;
+    type OperationalError = OperationalFailure;
     type Intent = Command;
     type Evidence = EffectEvidence;
 
@@ -448,7 +448,7 @@ impl EffectState<Mutation> for Mutate {
     fn adapter_context(
         _: &Self::Input,
         _: &Command,
-        _: &NoContext,
+        _: &OperationalFailure,
     ) -> Result<NoContext, mfm_program::StateExecutionError> {
         Ok(NoContext)
     }
@@ -510,7 +510,7 @@ impl Operation for EffectProgram {
             &Binding { route: 8 },
             NoParams,
             Occurrence::new(),
-            EffectBounds::new(65536, 65536)?,
+            EffectBounds::new(65536, 65536, 8, 65536)?,
         )
     }
 }
@@ -1544,7 +1544,7 @@ async fn effect_not_inserted_returns_the_winner_without_entering_its_new_visit()
 }
 
 #[tokio::test]
-async fn every_adapter_failure_leaves_one_pending_prepare() {
+async fn operational_failures_are_audited_while_internal_failures_preserve_prepare() {
     #[derive(Clone, Copy)]
     enum FailureMode {
         Unavailable,
@@ -1572,9 +1572,9 @@ async fn every_adapter_failure_leaves_one_pending_prepare() {
                 move |_effect_id, _command_value_ref, _command| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     match mode {
-                        FailureMode::Unavailable => {
-                            Box::pin(async { Err(AdapterError::Operational(NoContext)) })
-                        }
+                        FailureMode::Unavailable => Box::pin(async {
+                            Err(AdapterError::Operational(OperationalFailure::Unavailable))
+                        }),
                         FailureMode::Internal => {
                             Box::pin(async { Err(AdapterError::Invariant(AdapterInvariantError)) })
                         }
@@ -1616,7 +1616,14 @@ async fn every_adapter_failure_leaves_one_pending_prepare() {
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let pending = runtime.read(&run_id).await.expect("pending view");
-        assert_eq!(pending.head_sequence(), 2);
+        assert_eq!(
+            pending.head_sequence(),
+            if matches!(mode, FailureMode::Unavailable) {
+                3
+            } else {
+                2
+            }
+        );
         assert!(matches!(
             pending.state(),
             RunViewState::EffectPending { .. }
@@ -1640,7 +1647,7 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
                     .lock()
                     .expect("pending effect ids")
                     .push(effect_id.clone());
-                Box::pin(async { Err(AdapterError::Operational(NoContext)) })
+                Box::pin(async { Err(AdapterError::Operational(OperationalFailure::Unavailable)) })
             }
         })
         .expect("adapter");
@@ -1663,7 +1670,7 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
         Err(InvocationFailure::RecoveryStopped { .. })
     ));
     let pending_frames = pending_store.snapshot();
-    assert_eq!(pending_frames.len(), 2);
+    assert_eq!(pending_frames.len(), 3);
     let retained_effect_id = pending_effect_ids
         .lock()
         .expect("pending effect ids")
@@ -1674,7 +1681,7 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
     let read_calls = Arc::new(AtomicUsize::new(0));
     let read_runtime = retained_effect_reader(pending_frames.clone(), Arc::clone(&read_calls));
     let pending = read_runtime.read(&run_id).await.expect("pending view");
-    assert_eq!(pending.head_sequence(), 2);
+    assert_eq!(pending.head_sequence(), 3);
     assert!(matches!(
         pending.state(),
         RunViewState::EffectPending { .. }
@@ -1850,7 +1857,7 @@ async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
         .expect("Effect State");
     unavailable_builder
         .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, |_, _, _| {
-            Box::pin(async { Err(AdapterError::Operational(NoContext)) })
+            Box::pin(async { Err(AdapterError::Operational(OperationalFailure::Unavailable)) })
         })
         .expect("adapter");
     let unavailable = Runtime::new(unavailable_builder.finish(), store.clone());
@@ -1911,7 +1918,7 @@ async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
     };
     let left = left.await.expect("left task").expect("left resume");
     let right = right.await.expect("right task").expect("right resume");
-    assert_eq!(left.head_sequence(), 3);
+    assert_eq!(left.head_sequence(), 4);
     assert_eq!(right.head_digest(), left.head_digest());
     let ids = ids.lock().expect("ids");
     assert_eq!(ids.len(), 2);
@@ -1988,3 +1995,19 @@ mod callback_errors;
 #[path = "support/scripted_store.rs"]
 mod scripted_store;
 use scripted_store::{AppendAction, ScriptedStore};
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+enum OperationalFailure {
+    Unavailable,
+}
+impl mfm_program::ClassifyError for OperationalFailure {
+    fn classify(&self) -> mfm_program::Classification {
+        mfm_program::Classification::Permanent
+    }
+}
+impl mfm_program::ClassifyError for Number {
+    fn classify(&self) -> mfm_program::Classification {
+        mfm_program::Classification::Permanent
+    }
+}

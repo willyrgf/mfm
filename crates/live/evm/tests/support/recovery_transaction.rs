@@ -84,16 +84,25 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
     // The frame envelope allowance includes repeated content references and recovery wire.
     let envelope = 16_384;
     let bounds = EvmTransactionBounds {
-        reservation: EffectBounds::new(command_bytes + envelope, context_bytes + 4096 + envelope)
-            .unwrap(),
+        reservation: EffectBounds::new(
+            command_bytes + envelope,
+            context_bytes + 4096 + envelope,
+            2,
+            65536,
+        )
+        .unwrap(),
         preparation: EffectBounds::new(
             command_bytes + 4096 + envelope,
             context_bytes + 4096 + envelope,
+            2,
+            65536,
         )
         .unwrap(),
         execution: EffectBounds::new(
             command_bytes + 4096 + envelope,
             context_bytes + 4096 + envelope,
+            2,
+            65536,
         )
         .unwrap(),
         // Account for both original and mapped root failure even though Identity may deduplicate.
@@ -215,7 +224,7 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
             Err(InvocationFailure::RecoveryStopped {
                 observed, incident, ..
             }) if scenario == 2 => {
-                assert_eq!(observed.head_sequence(), 6);
+                assert_eq!(observed.head_sequence(), 7);
                 assert!(matches!(
                     incident
                         .state_context
@@ -229,10 +238,12 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
                     RunViewState::EffectPending {
                         position: hot_position,
                         effect_id: hot_id,
+                        ..
                     },
                     RunViewState::EffectPending {
                         position: cold_position,
                         effect_id: cold_id,
+                        ..
                     },
                 ) = (observed.state(), cold.state())
                 else {
@@ -245,7 +256,7 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
             }
             other => panic!("unexpected transaction result: {}", other.is_ok()),
         };
-        assert_eq!(hot.head_sequence(), 8);
+        assert_eq!(hot.head_sequence(), if scenario == 2 { 9 } else { 8 });
         assert!(matches!(
             (scenario, hot.state()),
             (1, RunViewState::Failed(_)) | (0 | 2, RunViewState::Succeeded(_))
@@ -259,7 +270,7 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
         let cost = program
             .history_bound(ConclusionBound::new(frame_lengths[0] as u64).unwrap())
             .unwrap();
-        assert_eq!(cost.frames(), 15);
+        assert_eq!(cost.frames(), 27);
         assert!(cost.bytes() <= mfm_journal::MAX_RUN_BYTES);
         assert!(history.total_bytes() <= cost.bytes());
         eprintln!(

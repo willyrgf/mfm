@@ -699,7 +699,7 @@ async fn client_models_distinguish_durable_provider_failure_from_unknown_invocat
         .unwrap();
     let model = serde_json::to_value(SerializableRunView::new(started.run())).unwrap();
     assert_eq!(model["state"]["kind"], "failed");
-    assert_eq!(model["state"]["report"]["reason"], "nonrecoverable");
+    assert_eq!(model["state"]["report"]["reason"], "requested");
     assert_eq!(model["state"]["report"]["cause"]["kind"], "adapter");
     assert_eq!(
         model["state"]["report"]["cause"]["error"]["canonical"],

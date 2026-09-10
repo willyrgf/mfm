@@ -31,6 +31,7 @@ enum State<'a> {
     EffectPending {
         position: &'a ExecutionPosition,
         effect_id: &'a EffectId,
+        latest_failure: Option<PendingFailure<'a>>,
     },
     Succeeded {
         #[serde(flatten)]
@@ -40,6 +41,13 @@ enum State<'a> {
         value_ref: &'a ContentRef,
         report: &'a RawValue,
     },
+}
+
+#[derive(Serialize)]
+struct PendingFailure<'a> {
+    error: Object<'a>,
+    state_context: Object<'a>,
+    decision: mfm_runtime::PendingDecision,
 }
 
 #[derive(Serialize)]
@@ -81,9 +89,21 @@ impl Serialize for SerializableRunView<'_> {
             RunViewState::EffectPending {
                 position,
                 effect_id,
+                latest_failure,
             } => State::EffectPending {
                 position,
                 effect_id,
+                latest_failure: latest_failure
+                    .as_ref()
+                    .map(|failure| {
+                        Ok::<_, serde_json::Error>(PendingFailure {
+                            error: Object::new(&failure.incident.error)?,
+                            state_context: Object::new(&failure.incident.state_context)?,
+                            decision: failure.decision,
+                        })
+                    })
+                    .transpose()
+                    .map_err(S::Error::custom)?,
             },
             RunViewState::Succeeded(value) => State::Succeeded {
                 value: Object::new(value).map_err(S::Error::custom)?,
@@ -163,7 +183,6 @@ impl Serialize for Invocation<'_> {
 fn stop_reason(reason: mfm_program::StopReason) -> &'static str {
     use mfm_program::{RecoveryDenial, RecoveryLimit, StopReason};
     match reason {
-        StopReason::Nonrecoverable => "nonrecoverable",
         StopReason::Requested => "requested",
         StopReason::Exhausted(RecoveryLimit::StateRetry) => "state_retry_exhausted",
         StopReason::Exhausted(RecoveryLimit::StateRestart) => "state_restart_exhausted",

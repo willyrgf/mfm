@@ -42,7 +42,7 @@ pub enum Execution {
         context_contract_ref: ContentRef,
         /// Pre-bound mutating route.
         binding_ref: ContentRef,
-        /// Complete prepare and conclusion maxima.
+        /// Complete prepare, pending failure and settlement bounds.
         bounds: EffectBounds,
     },
 }
@@ -60,7 +60,6 @@ pub(crate) struct StateData {
     pub(crate) output_contract_ref: ContentRef,
     pub(crate) failure_contract_ref: ContentRef,
     pub(crate) execution: Execution,
-    pub(crate) classifier: ClassifierBinding,
     pub(crate) handler: HandlerBinding,
     pub(crate) root_maps: Vec<MapBinding>,
     #[serde(deserialize_with = "decode_targets")]
@@ -87,10 +86,6 @@ impl StateDeclaration {
     /// Complete execution-mode association.
     pub const fn execution(&self) -> &Execution {
         &self.0.execution
-    }
-    /// Selected classifier and mapping parameters.
-    pub const fn classifier(&self) -> &ClassifierBinding {
-        &self.0.classifier
     }
     /// Independently selected handler and parameters.
     pub const fn handler(&self) -> &HandlerBinding {
@@ -138,7 +133,7 @@ impl Program {
             return Err(ProgramError::InvalidContract);
         }
         let wire = ProgramWire {
-            domain: "mfm.program.v5".into(),
+            domain: "mfm.program.v6".into(),
             entry_point_id: entry_point_id.clone(),
             admitted_context_contract_ref: admitted.clone(),
             initial_value_ref: initial_value_ref.clone(),
@@ -157,7 +152,7 @@ impl Program {
             SchemaKind::PersistedContract,
             None,
             "mfm-program-document",
-            SchemaVersion::new("5").map_err(|_| ProgramError::InvalidContract)?,
+            SchemaVersion::new("6").map_err(|_| ProgramError::InvalidContract)?,
             SchemaShape::CanonicalJsonTerminal {
                 profile: CanonicalJsonProfile::GeneralFloatFree,
             },
@@ -192,7 +187,7 @@ impl Program {
             .map_err(|_| ProgramError::Canonical)?;
         let wire: ProgramWire =
             serde_json::from_slice(bytes).map_err(|_| ProgramError::Canonical)?;
-        if wire.domain != "mfm.program.v5" {
+        if wire.domain != "mfm.program.v6" {
             return Err(ProgramError::Canonical);
         }
         let program = Self::new(
@@ -268,7 +263,6 @@ fn validate(
         return Err(ProgramError::Capacity);
     }
     let never = nominal_contract_ref::<Never>()?;
-    let no_context = nominal_contract_ref::<NoContext>()?;
     if admitted == &never || success == &never {
         return Err(ProgramError::InvalidContract);
     }
@@ -281,39 +275,8 @@ fn validate(
     }
     let mut current = admitted;
     for (index, state) in states.iter().enumerate() {
-        let classifier = state.classifier.abi();
-        let source = classifier.source();
         if &state.input_contract_ref != current
             || state.output_contract_ref == never
-            || source.domain() != &state.failure_contract_ref
-            || &classifier.mapped() != state.handler.abi().input()
-        {
-            return Err(ProgramError::InvalidContract);
-        }
-        let (error, context) = match &state.execution {
-            Execution::Pure { .. } => (&never, &no_context),
-            Execution::Read {
-                error_contract_ref,
-                context_contract_ref,
-                ..
-            }
-            | Execution::Effect {
-                error_contract_ref,
-                context_contract_ref,
-                ..
-            } => (error_contract_ref, context_contract_ref),
-        };
-        if source.error() != error
-            || source.context() != context
-            || !state.classifier.params().matches(classifier.params())
-            || !state
-                .classifier
-                .domain_params()
-                .matches(classifier.domain_map().params())
-            || !state
-                .classifier
-                .context_params()
-                .matches(classifier.context_map().params())
             || !state.handler.params().matches(state.handler.abi().params())
         {
             return Err(ProgramError::InvalidContract);

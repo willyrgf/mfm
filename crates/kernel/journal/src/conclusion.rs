@@ -5,8 +5,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopCode {
-    /// Classifier rejected recovery.
-    Nonrecoverable,
     /// Handler selected Stop.
     Requested,
     /// Per-State retry budget exhausted.
@@ -39,6 +37,19 @@ pub enum RecoveryDecision {
     /// Terminal Read execution failure.
     Stop {
         /// Reviewed stop code.
+        reason: StopCode,
+    },
+}
+
+/// Audited pending-Effect decision; command authority is retained and restart is impossible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PendingDecision {
+    /// Spend recovery allowance and yield with the unchanged command.
+    Retry,
+    /// End this invocation while retaining pending command authority.
+    Stop {
+        /// Reviewed stop reason.
         reason: StopCode,
     },
 }
