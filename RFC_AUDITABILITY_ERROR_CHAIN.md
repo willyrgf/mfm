@@ -1,18 +1,19 @@
 # RFC: commit complete runtime state and preserve causal errors
 
-Status: revised proposal following the architecture review. This document consolidates the agreed
-simplification; it does not claim that the stopped implementation satisfies it. Implementation is
-reviewed against `15829d89` (`preserve rpc and evm error provenance`), which already contains the
-RPC/EVM capture cutover. The large uncommitted expansion is not the implementation foundation.
-Its focused test counts, descriptor sizes, and completion claims are not acceptance evidence for
-this target. Do not land or extend its machinery merely because it already exists.
+Status: target design approved for engineer handoff; implementation is not complete. Implement
+from current HEAD. At handoff, the working tree is clean and `15829d89..HEAD` changes only this RFC.
+Use `15829d89` (`preserve rpc and evm error provenance`) as the production-code review baseline;
+it already contains the RPC/EVM capture cutover. No rollback is needed. The stopped expansion
+was removed from the worktree and archived separately for consultation only. Its test counts,
+descriptor sizes, and completion claims are not acceptance evidence for this target.
 
 The [adapter error audit](docs/adapter-error-audit.md) remains the first-loss inventory.
 [Design](docs/design.md), [architecture](docs/architecture.md), [code quality](docs/code-quality.md),
 and [AGENTS.md](AGENTS.md) govern the repository. This RFC is a proposed replacement contract;
 implementation must update the authoritative documents, producers, consumers, and tests in the
-same coherent cutover. Existing worktree documentation of the stopped design is not evidence that
-that design should be retained. Remaining decisions are explicit in section 18.
+same coherent cutover. Existing authoritative documents describe the baseline implementation;
+update their superseded contracts during implementation. Remaining validation items are explicit
+in section 18.
 
 ## 1. Summary
 
@@ -561,7 +562,8 @@ not proof that external events occurred or recomputation of completed business r
 | Before outcome | Runnable input or acknowledged pending command | Only phase-permitted execution; an uncommitted physical attempt may have occurred. |
 | Success outcome | Output and next position, or terminal success | Next State only. |
 | Domain/operational failure | Original error, input, phase, awaiting recovery | Evaluate unresolved recovery without rerunning the failed State/provider. |
-| Recovery decision | Decision, updated counters, and resulting continuation | Follow committed continuation; do not ask the handler to replace it. |
+| Recovery decision other than unresolved pending-Effect Stop | Decision, updated counters, and resulting continuation | Follow committed continuation; terminal Stop performs no further work. Do not ask the handler to replace the decision. |
+| Operational Stop with an unresolved pending Effect | Original failure, Stop decision, retained command and EffectId | End this invocation. Explicit resume may reconcile that same command; Stop does not settle or cancel it, authorize a replacement, or release an automatic retry. |
 | Recovery fault, including a committed task fault | Original outcome/context and actual evaluation fault | Return the recorded fault; no classification, handler, or mapper reevaluation. |
 | Internal outcome | Cause, context, and actual phase | Return the recorded fault; no State/preparation/adapter retry or handler. |
 | Internal interpretation outcome with committed settlement | Input, command/EffectId, accepted evidence, and fault | Return the recorded fault; no interpretation or Effect adapter reentry. |
@@ -836,11 +838,49 @@ Rust LOC change, and remaining public types/callbacks/change sites. No numerical
 claimed here. Tests and documentation must not be removed merely to improve the metric. Reject a
 layer whose only justification is supporting another unneeded layer.
 
+
+### 12.1 Early sizing fixtures and report
+
+Use the existing consuming fixtures as seeds, with synthetic public data and fake adapters:
+
+| Fixture | Required samples |
+| --- | --- |
+| Portfolio snapshot (`crates/app/tests/portfolio_runtime.rs`) | Existing fixture and variants with 1, 16, and 64 balance sources; measure accumulated context, an operational failure, and its recovery commit. Record actual active checkpoint counts. |
+| Anchored contract-call Read (`crates/domains/evm/src/anchored_call/context.rs`) | Success and provider failure using the same input/intent; include accepted evidence and the retained original in recovery. |
+| Transaction Effect (`crates/live/evm/tests/generic_transaction_runtime.rs`) | Both generic context shapes; preparation, pending failure, operational Stop, successful settlement, and settlement with an interpretation fault. |
+| Checkpoint duplication stress | Three legal synthetic Programs with (active checkpoints, target canonical context size) of (1, 1 KiB), (4, 64 KiB), and (16, 1 MiB). Use distinct checkpoint values with mostly equal fields, plus an identical-value control, to expose whole-object sharing limits. Report actual encoded sizes. |
+
+For each sample report exact descriptor bytes, current/checkpoint value bytes, audit-fact bytes,
+unique frame-local object count, complete canonical frame bytes, and complete history bytes/frame
+count. Identify shared objects so component totals are not confused with complete frame size.
+Include an actual candidate exceeding the frame ceiling and a valid-prefix extension exceeding a
+run ceiling; record the rejection and unchanged acknowledged head. These are actual-limit tests,
+not estimates of all possible execution paths.
+
+Measure full-prefix qualification and transition verification separately from Store loading, using
+valid histories targeting 1, 100, and 1,000 frames, plus the largest tested valid prefix within the
+existing ceilings. If a target cannot fit, report the first limiting resource and the largest
+measured valid prefix rather than omit the sample. Use enough semantic recovery allowance for the
+fixture; do not weaken transition rules to manufacture long histories. Report exact frame/byte
+counts, elapsed verification time, build profile, hardware, and the measurement command. Use the
+same fixtures/environment for a baseline comparison where the old and new contracts both apply;
+report median and range from five measured runs after one warm-up.
+
+Deliver this table with the early encoding/deletion diff, before broad consumer migration. Exact
+shipping fixture sizes are measured results, not assumed budgets. There is no established latency
+SLO in this RFC: report absolute times and comparable baseline ratios, and explicitly flag any
+shipping fixture rejected by size or slower than baseline for review. Do not call cost acceptable
+without the measurements, invent a passing threshold, silently raise limits, or add storage layers
+to hide an unfavorable result. This bounded experiment is implementation evidence, not a new
+benchmark framework or a requirement to finish persistence before handoff.
+
 ## 13. Logical commits and complete cutovers
 
-Start review from `15829d89`. Preserve stopped work separately if needed for reference; this RFC
-does not authorize destructive checkout operations or adoption of that expansion. Do not implement
-on top of its decoder-error/capture machinery as a shortcut.
+Implement from current HEAD, retaining the committed RFC revisions. Use `15829d89` as the
+production-code review baseline; the intervening commits change only this RFC at handoff. The
+worktree is clean and the stopped expansion is already archived outside it. No reset, rollback,
+or restoration of that expansion is required. Consult the archive only for individually reviewed
+ideas or test cases; do not restore its decoder-error/capture machinery as a shortcut.
 
 1. **Owner capture cutovers:** finish PostgreSQL/custody and signer/local-IO families in dependency
    order, each with all affected port consumers, redacted surface conversions, schemas, bounds,
@@ -975,8 +1015,8 @@ remain unchanged. Clone and codec::from remain optional implementation ideas, no
 | Assumption or unresolved choice | Why uncertain | Consequence if wrong | Validation / resolution |
 | --- | --- | --- | --- |
 | Active declaration-checkpoint semantics satisfy recovery to an earlier point | Informal wording could mean any historical visit | Arbitrary visit targeting would change Program targets and persisted checkpoint selection | Retain the existing semantics in this RFC; require a separate explicit target change before adding arbitrary historical selection. |
-| Complete Runtime states and audit facts fit current ceilings for intended workloads | Full checkpoint contexts and repeated originals may greatly exceed prior outcome-only frames | Actual commits could be rejected even when admission succeeded | Measure representative large snapshots, local sharing, complete descriptors, and actual history bytes before implementation expansion; resolve unacceptable sizes explicitly without omitted state or unreviewed limit increases. |
-| Direct state restoration and adjacent checks simplify implementation at acceptable cost | The complete persisted shape and verification cost have not been measured | Serialization/checking could add complexity or excessive load cost despite removing reconstruction | Review the concrete deletion/replacement diff and measure maximum-history verification; no constant-time or fixed LOC claim. |
+| Complete Runtime states and audit facts fit current ceilings for intended workloads | Full checkpoint contexts and repeated originals may greatly exceed prior outcome-only frames | Actual commits could be rejected even when admission succeeded | Run section 12.1's named fixtures and report before implementation expansion; resolve unacceptable sizes explicitly without omitted state or unreviewed limit increases. |
+| Direct state restoration and adjacent checks simplify implementation at acceptable cost | The complete persisted shape and verification cost have not been measured | Serialization/checking could add complexity or excessive load cost despite removing reconstruction | Review the concrete deletion/replacement diff and section 12.1's timed prefixes and baseline comparison; no constant-time, latency-SLO, or fixed LOC claim. |
 | A live ownership change is useful and compatible, if proposed | Consuming generic inputs and custom value semantics need checking | Added Clone bounds could exclude valid inputs or conceal mutation | Do not require the change for this RFC; separately compile consumers and test retained-original semantics without weakening candidate validation. |
 | Reviewed external capture covers exposed evidence | Clients may hide attempts or only expose opaque sources | Some causal detail remains unavailable | Inject distinguishable nested causes at each owner and assert explicit omissions; never fabricate hidden evidence. |
 
