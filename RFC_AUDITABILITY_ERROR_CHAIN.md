@@ -333,7 +333,7 @@ generic framework or a second DTO with independent conversion rules.
 | Per-State retry/restart usage and global decision usage | Preserve current allowances across restart. |
 | Effect barrier/restrictions | Preserve irreversible execution constraints. |
 | Pending command and EffectId | Reconcile the exact acknowledged operation. |
-| Accepted settlement evidence while interpretation remains | Continue interpretation without another Effect adapter call. |
+| Accepted settlement evidence and interpretation result in the applicable phase | Retain the actual observation, including when an interpretation fault stops progress; never revive settled command authority. |
 | Unresolved original failure and relevant recovery decision/fault | Resume the correct phase without recreating completed execution or policy work. |
 | Terminal output or root failure | Observe terminal state directly. |
 
@@ -350,6 +350,46 @@ is not required to avoid repeating data across commits. Add no cross-frame objec
 Recovery context is a borrowed view of the one Runtime state and admitted Program. Do not maintain
 another independently supplied recovery snapshot. Persist usage and checkpoint data in Runtime
 state; derive remaining allowances and eligibility from those fields and the static Program.
+
+#### Shape sketch: continuation and commit
+
+The following Rust-like notation describes logical fields, not a compiling API or required new
+public types. Payload names stand for the concrete, phase-specific data already required above;
+they do not introduce a generic error bag, snapshot registry, or independently maintained DTO.
+Qualified values use existing ownership and frame-local references. Journal still owns their
+exact record wire; Runtime owns the continuation meaning.
+
+```rust
+struct RuntimeState {
+    checkpoints: ActiveCheckpoints, // complete inputs, not history lookup instructions
+    usage: RecoveryUsage,           // semantic counters only
+    effect_barrier: EffectBarrier,
+    continuation: Continuation,
+}
+
+enum Continuation {
+    Runnable(RunnableState),             // position, visit, complete input
+    EffectPending(PendingEffectState),    // input, exact command, EffectId, latest decision
+    AwaitingRecovery(FailedExecution),    // original typed failure and execution facts
+    Faulted(CommittedFault),              // phase-specific cause and retained operands
+    Succeeded(Output),
+    Failed(RootFailure),
+}
+
+// Logical fields of an ordinary Journal commit, not a second Runtime snapshot type.
+struct Commit {
+    facts: OperationFacts, // concrete alternatives from the table in section 6.2
+    state: RuntimeState,  // the same continuation representation used in memory
+}
+```
+
+PendingEffectState retains an operational Stop without becoming terminal. CommittedFault uses
+concrete alternatives for preparation, execution, recovery, and settlement interpretation; each
+carries its actual operands and typed cause. A settlement-interpretation fault retains accepted
+evidence and command identity, but enables no further interpretation or provider call. Do not
+implement these alternatives as a bag of optional fields or independently supplied state copies.
+The existing envelope supplies run/head identities. Admission additionally carries Program and
+initial context; immutable Program data need not be copied into every Commit.
 
 ### 6.2 Audit facts accompany the resulting state
 
@@ -471,9 +511,19 @@ reconciliation/ambiguity semantics; never claim every physical attempt was recor
 Use one pure Runtime operation to determine the successor from the acknowledged predecessor and
 completed execution/recovery facts:
 
-```text
-transition(previous Runtime state, recorded operation facts) -> next Runtime state
+```rust
+// Illustrative internal signature; names/ownership are implementation choices.
+fn transition(
+    program: &ExecutableProgram, // associated admitted Program, policies, and declarations
+    previous: &RuntimeState,
+    facts: &OperationFacts,
+) -> Result<RuntimeState, TransitionError>;
 ```
+
+TransitionError is a native reviewed failure, not a registered Program value. Borrowed inputs
+make the key constraint visible: failure must leave the acknowledged predecessor and original
+facts available. This signature does not require Clone, a new qualified-state wrapper, or a
+public transition trait.
 
 It owns position/visit changes, checkpoint updates, recovery authorization/usage, phase changes,
 and preservation of Effect authority. It rejects audit input/original/command copies inconsistent
@@ -513,10 +563,13 @@ Store still returns one complete prefix. Before exposing a qualified observation
 5. Restore the final **stored** Runtime state directly, then expose its view or resume its phase.
 
 ```text
-expected S2 = transition(stored S1, facts recorded with S2)
+live candidate = transition(associated Program, acknowledged S1, returned facts)
+encode and check that candidate and its facts before append
+
+expected S2 = transition(associated Program, stored S1, facts recorded with S2)
 require canonical(expected S2) == canonical(stored S2)
 
-expected S3 = transition(stored S2, facts recorded with S3)
+expected S3 = transition(associated Program, stored S2, facts recorded with S3)
 require canonical(expected S3) == canonical(stored S3)
 
 restore stored S3
@@ -666,23 +719,50 @@ through that same unavailable Store.
 
 ### 10.2 Recording example
 
-Suppose a Read returns a reviewed RPC timeout. Runtime retains the native outcome while encoding
-and candidate validation run. The following is control-flow pseudocode for the existing append
-path, not a new public API or required type hierarchy:
+Suppose a Read returns a reviewed RPC timeout. This is control-flow pseudocode inside the existing
+prepare_append / finish_append path, not a new commit facade or mandatory signatures. Ordinary
+ownership retains the acknowledged state and native original outside fallible callback/encoding
+work; exact Rust borrowing, sharing, and invocation-error variant names remain implementation
+choices. No generic custody wrapper or Clone bound is implied.
 
 ```text
-original = retain(returned outcome)
-try construct, encode, and validate candidate while original remains retained
-    failure -> return original + recording cause; no append
-try append candidate at acknowledged head
-    inserted -> adopt candidate; recovery may now start
-    not inserted -> return rejected original/candidate and separate winning observation
-    Store error -> return original/candidate + Store cause with exact acknowledgement status
+original = returned operation facts, including its native typed result
+
+prepare_append:
+    candidate_state = transition(program, acknowledged.state, original)
+    encode candidate_state and original into the ordinary Journal record
+    checked-decode exact bytes; check values, evidence, transition, and actual sizes
+    on any failure:
+        return available original + acknowledged state + native recording cause
+        append nothing
+    retain original, candidate_state, and encoded frame until append is resolved
+
+finish_append:
+    match store.append_run(encoded frame):
+        Ok(AppendResult::Inserted):
+            adopt the qualified candidate at its known inserted head
+            only now dispatch its continuation, including recovery if awaiting it
+        Ok(AppendResult::NotInserted):
+            retain rejected original/candidate and last acknowledged state
+            load and qualify competing history separately
+            return competing observation, or its load/qualification cause
+            do not silently rebase this candidate or repeat provider work
+        Err(definite Store failure):
+            return original/candidate + Store cause + definite noninsertion
+        Err(indeterminate Store acknowledgement):
+            return original/candidate + Store cause + uncertain acknowledgement
+            dispatch nothing until reconciliation establishes the actual history
 ```
 
-If the timeout exceeds its declared bound, the invocation retains the timeout and measured size
-rejection. If append times out ambiguously, it retains the candidate and Store cause. Neither case
-calls the handler or attempts to record a smaller substitute error.
+Store's Inserted/NotInserted outcomes are existing API names. Definite and indeterminate failures
+above are semantic cases, not new Store variants or a second status independently supplied by the
+caller. Preserve the native Store cause and its acknowledgement meaning through the invocation
+boundary. Reconciliation must establish whether this exact candidate committed; a valid unrelated
+head is insufficient. No failure branch writes a smaller substitute error or invokes recovery.
+
+If the timeout's actual encoded candidate exceeds a retained size ceiling, the invocation keeps
+the available timeout and measured size rejection. If append times out ambiguously, it keeps the
+candidate and Store cause. Neither case establishes that the timeout was durably recorded.
 
 ### 10.3 Recovery faults are ordinary recovery results
 
@@ -748,6 +828,50 @@ once. Keep classification, command identity, duplicate-safe Read rules, response
 and transaction reconciliation unchanged. A server error or timeout does not prove nonacceptance.
 Update owner schemas and actual-limit consuming tests together; retain the existing development
 funding helper's safe capture without adding a production adapter solely for that test.
+
+#### Example: HTTP 502 through commit and classification
+
+The adapter-side call below uses existing helpers in `crates/live/evm/src/json_rpc.rs`. Assume the
+received status has been checked as HTTP 502. The status-rejection path has no native client error
+source; it retains the response observation without inventing transport ancestry.
+
+```rust
+return Err(provider_failure(
+    method,
+    RpcStage::Status,
+    ProviderFailureKind::HttpStatus,
+    Some(ResponseContext::new(status, None)),
+    None, // no reqwest error was returned for this HTTP response
+    vec![withheld_body(response.content_length())],
+));
+```
+
+The existing helper captures response/body omission facts and returns
+AdapterError::Operational(EvmOperationalError::new(EvmOperationalKind::Unavailable, source)).
+Here source is ProviderFailure with method, stage, failure kind, and DiagnosticEvidence.
+HTTP 502 survives as a numeric response status; the body is withheld, the RPC code is absent,
+and no source layers are fabricated. If a native source exists on another path, capture its
+reviewed exposed chain before consuming it. Error::source() alone does not serialize that chain.
+
+The target Runtime workflow is:
+
+```text
+adapter returns the native EvmOperationalError
+Runtime retains input + intent + error
+transition produces AwaitingRecovery with those original facts
+prepare_append / finish_append commit and adopt that outcome on known insertion
+Runtime borrows the retained EvmOperationalError and calls its existing classify()
+handler recommends an action; Runtime authorizes it
+commit the recovery result and resulting continuation before dispatch
+```
+
+The existing domain-owned implementation in `crates/domains/evm/src/recovery.rs` projects
+Unavailable, Timeout, and RateLimited to Classification::Retryable for duplicate-safe Reads.
+The adapter's typed kind already exists before commit; it is not the recovery evaluation.
+Runtime schedules the classify() call after acknowledgement. Neither the kind nor classification
+replaces ProviderFailure or diagnostics. A Read adapter failure remains an adapter outcome rather
+than being fabricated as a State-domain failure; the same commit-before-classification rule applies
+to actual typed domain failures. Effect policy keeps its separate command-authority rules.
 
 ### 11.2 PostgreSQL Store, configuration, index, custody, and gates
 
