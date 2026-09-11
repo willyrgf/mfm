@@ -1,4 +1,4 @@
-# RFC: preserve causal errors and reconstruct recovery from committed history
+# RFC: commit complete runtime state and preserve causal errors
 
 Status: revised proposal following the architecture review. This document consolidates the agreed
 simplification; it does not claim that the stopped implementation satisfies it. Implementation is
@@ -16,52 +16,64 @@ that design should be retained. Remaining decisions are explicit in section 18.
 
 ## 1. Summary
 
-Commit new execution facts and decisions. Reconstruct execution context from the authoritative
-append-only history. Preserve the complete available reviewed causal chain; classification,
-recovery requests, and public rendering are projections, not replacements for the original error.
+Persist the complete Runtime continuation state and the completed operation's audit facts at each
+commit. Runtime uses the same logical state in memory and persistence; there is no second snapshot
+model beside an authoritative event-replay model. Repeated context and checkpoint data are accepted
+for self-contained auditability and direct restoration. Secrets and executable service objects
+remain outside the persisted representation.
 
-A State is a deterministic associated implementation operating on typed input. Its executable
-object is not a persistence snapshot. Context is already ordinary immutable value data inside
-State inputs and outputs. Genesis retains the complete initial context, successful outcomes retain
-complete outputs, and the existing fold reconstructs the input at each active checkpoint. Required
-input fields cannot be omitted, but the same input need not be committed again beside each outcome.
-
-Use the existing concrete Journal records, qualified values, sole semantic fold, and common
-`prepare_append` / `finish_append` path as the starting point. Separate outcome from recovery:
+Remove FoldState and the accumulating history-to-state reconstruction path. Keep exactly one pure
+Runtime transition implementation, used to construct live candidate states and to verify adjacent
+stored states. Historical checking remains mandatory: complete snapshots eliminate reconstruction
+replay, not the requirement to reject illegal recorded transitions.
 
 ```text
-execute -> commit outcome
-    success -> next State
-    domain/operational failure -> classify -> handler request -> Runtime authorization
-        -> commit recovery decision or fault -> authorized transition or end invocation
-    internal failure -> end invocation with its actual execution phase retained
+live execution:
+    acknowledged state + completed operation facts
+        -> Runtime transition -> candidate state
+        -> validate and encode commit -> Store -> PostgreSQL
+        -> known insertion -> adopt candidate and dispatch its permitted next work
+
+loading:
+    Store complete prefix -> Journal byte/chain qualification
+        -> qualify genesis and verify each adjacent stored state transition
+        -> restore the final stored state directly -> inspect or resume
 ```
 
-If an outcome cannot be constructed, qualified, or encoded, stop and return the available original
-and recording cause. Do not construct a substitute audit record. A Store failure also ends that
-recording attempt, with definite rejection and ambiguous acknowledgement kept distinct.
+Execution outcome commits before classification, handler invocation, or root mapping. Recovery
+commits the returned request, authorized decision or fault, and resulting Runtime state before
+any recovery action. Pure candidate construction may precede append; candidate adoption and
+external work require known insertion. Store stays mechanical and Journal owns the exact wire,
+not another execution layer.
 
-No new state/context snapshot API, generic commit facade, partial-capture framework, decoder-error
-registry, independent audit store, or cross-frame object resolver is required by this design.
+Preserve the complete available reviewed causal chain. Classification, recovery requests, and
+public rendering are projections, not replacements for the original error. If construction,
+qualification, or encoding fails, return the available original and recording cause without a
+substitute record. Store rejection and ambiguous acknowledgement also retain their exact status.
+No generic snapshot registry, commit facade, partial-capture framework, decoder-error registry,
+independent audit store, or cross-frame object resolver is introduced.
 
 ## 2. Decisions established in discussion
 
 | Question | Selected contract |
 | --- | --- |
-| What must recovery restore? | The selected execution position, its complete typed input/context, original failure, and actual phase, from the acknowledged prefix. |
-| Must the whole State object be stored? | No. Runtime associates the executable implementation; history retains its required data. |
-| Must the whole context be copied at every outcome? | No. Genesis and complete predecessor outputs already retain it. The fold reconstructs it without executing completed States. |
-| What is a restart target? | An eligible active declaration checkpoint, with its retained input; not an arbitrary historical visit. |
-| Does restart roll back the machine? | No. It appends a new visit and preserves current history, usage, and Effect constraints. |
-| What does the handler do? | Recommends Stop, Retry, or Restart at a permitted target. Runtime authorizes and the transition applies the committed decision. |
-| When does recovery run? | After the original outcome is known to be committed. Its decision commits before any recovery action. |
-| How are internal outcomes treated? | Valid typed internal outcomes are durable at an admitted cursor, subject to qualification/capacity; they grant no handler permission. Preflight mismatches cause no provider call/append; post-response local binding rejection also forbids append without claiming IO did not occur. |
-| How is persistence selected? | Existing concrete record and value types declare required facts. A new `codec::from` projection API is not mandated. |
-| What do codecs enforce? | Exact type/schema and canonical value admission. Candidate qualification and the sole fold remain before append. |
+| What is persisted at each commit? | Complete Runtime continuation state plus the completed operation's input/context, result, evidence, and recovery facts as applicable. |
+| Must the executable State object be stored? | No. Runtime associates implementations; state/context here means their serializable execution and continuation data. |
+| Is repeated context/checkpoint data acceptable? | Yes. Every commit carries the data needed for direct restoration and its own audit explanation. |
+| Is persistence a separate snapshot cache? | No. The persisted Runtime state is the current representation, not a second independently maintained model. |
+| Is a fold retained? | No accumulating reconstruction fold. One Runtime transition implementation also checks adjacent stored states. |
+| When is history checked? | On cold inspection/resume and any loaded competing/reconciled history, before exposing qualified state or executing further work. |
+| Is every append followed by a full history check? | No. Live construction uses the already acknowledged predecessor; known insertion permits adoption of that checked candidate. |
+| Is only the latest row trusted on load? | No. Store still loads a complete prefix and Runtime independently checks historical transitions. |
+| What is a restart target? | An eligible active declaration checkpoint with its persisted input; not an arbitrary historical visit. |
+| Does restart roll back the machine? | No. It appends a new visit and preserves current history, usage, and Effect restrictions. |
+| What does the handler do? | Recommends Stop, Retry, or Restart. Runtime authorizes, constructs the candidate transition, commits, and only then dispatches. |
+| How are internal outcomes treated? | Valid typed internal outcomes commit with their actual phase and no handler permission. Preflight mismatch causes no provider call/append; post-response local binding rejection also forbids append without claiming IO did not occur. |
+| What do codecs enforce? | Exact type/schema, canonical value admission, and faithful wire representation. Runtime owns transition legitimacy. |
 | Are decoder errors Program values? | No. Checked decoding retains native constructor causes; no decoder-error codec or identity is registered. |
-| Is Clone required? | Not by this RFC. Native copying is a separate ownership choice, never a replacement for candidate validation. |
-| What if recording fails? | Return the original when available, candidate when produced, and causal recording result. No substitute record or recursive append. |
-| Is bounded/redacted capture lossless? | No. Account explicitly for withheld, opaque, unavailable, and bound-limited evidence. |
+| Is Clone or codec::from required? | No. These are ownership/projection implementation choices, not replacements for complete persistence or candidate validation. |
+| What if recording fails? | Return available original/candidate and causal recording result. No substitute record, recursive append, or speculative action. |
+| Is bounded/redacted capture lossless? | No. Account for withheld, opaque, unavailable, and bound-limited evidence. |
 
 ## 3. Baseline facts and actual gaps
 
@@ -69,9 +81,12 @@ At `15829d89`, `JournalRecord::RunAdmitted` retains Program and initial context.
 `FoldState::succeed` passes each retained output to the next State; `enter` retains active checkpoint
 inputs; `recover` restores the selected input while charging current usage and creating a fresh
 visit. Transaction States use `ContextSlot::replace` to preserve unchanged context siblings.
-These mechanisms already reconstruct the data needed for current restart semantics.
+These mechanisms define the transition rules to retain, but reconstruction from accumulated events
+is superseded by directly persisted Runtime state. Baseline FoldState contains cursor, checkpoint
+inputs, per-State usage, global decisions, and Effect barrier. Those are continuation facts to
+persist, not incidental bookkeeping that can be omitted when removing the fold.
 
-The gaps are narrower:
+The causal/lifecycle gaps are:
 
 1. `engine.rs::conclude` and `decide` perform policy/root mapping before outcome append; their
    failure can prevent the original cause from becoming durable.
@@ -297,61 +312,77 @@ of client downcasters. The diagnostics crate imports no client libraries. Never 
 infer their category, and never walk an unbounded discarded suffix to count it. Retain the existing
 checked capture implementation and its consuming tests instead of introducing another capture API.
 
-## 6. What history must retain
+## 6. Complete commits and direct restoration
 
-### 6.1 New facts at each boundary
+### 6.1 One persisted Runtime state
 
-| Boundary | New facts to commit | Already retained or reconstructed |
-| --- | --- | --- |
-| Admission | Program and complete initial context | Program pins implementations, policy parameters, targets, and bounds. |
-| Pure success | Execution position and complete output | Active input from the preceding prefix. |
-| Pure domain/internal failure | Position and original typed error | Active input/context. |
-| Read preparation failure | Position, preparation stage, typed internal cause | Input; no valid intent is invented. |
-| Read adapter failure | Exact intent and original typed error | Input and any contextual fields derived from input/intent. |
-| Read evidence accepted | Intent, accepted evidence, and interpretation result, including internal failure | Input. |
-| Effect preparation | Exact command, position, and derived EffectId, before adapter entry | Input. |
-| Pending Effect failure | Original cause and originating stage/phase | Acknowledged command, EffectId, and input. |
-| Accepted Effect settlement | Accepted evidence and interpretation result, including internal failure | Acknowledged command, EffectId, and input. |
-| Recovery evaluation | Connection to unresolved outcome, completed classification/request where available, and authorized decision or typed evaluation fault | Input, phase, allowances, checkpoints, and eligible targets from Program and prefix. |
-| Terminal root mapping | Mapped root, or failing mapper step with its input and typed cause | Original error remains in its execution record. |
+The Runtime state used for continuation is itself persisted. Its concrete phase alternatives carry
+only the fields valid for that phase, but a commit must not rely on replay to recover missing
+continuation data. The name RuntimeState below describes that one representation, not a mandated
+generic framework or a second DTO with independent conversion rules.
 
-Use concrete phase alternatives: preparation failure has no fabricated intent; adapter failure has
-no fabricated accepted evidence; interpretation failure retains the accepted evidence. Position,
-sequence, predecessor, and run identity remain checked frame/fold facts, not competing copies in
-owner payloads. An outcome frame and its complete local objects append atomically.
+| Runtime state fact | Why it must be present without reconstruction replay |
+| --- | --- |
+| Current State position, visit, and phase | Select the permitted next operation. |
+| Complete current input/context | Execute or interpret directly. |
+| Active checkpoint positions and their complete input/contexts | Restore a selected checkpoint without rebuilding earlier outputs. |
+| Per-State retry/restart usage and global decision usage | Preserve current allowances across restart. |
+| Effect barrier/restrictions | Preserve irreversible execution constraints. |
+| Pending command and EffectId | Reconcile the exact acknowledged operation. |
+| Accepted settlement evidence while interpretation remains | Continue interpretation without another Effect adapter call. |
+| Unresolved original failure and relevant recovery decision/fault | Resume the correct phase without recreating completed execution or policy work. |
+| Applicable pending-failure/reentry capacity usage | Check admitted storage allowance before further work. |
+| Terminal output or root failure | Observe terminal state directly. |
 
-The recovery result is associated with the currently unresolved outcome by record structure and
-the sole fold. A fault followed by explicit reevaluation, if enabled, remains associated with that
-same outcome. Do not copy the original error merely to establish this relationship. Any object
-references actually included in a frame retain the existing exact frame-local closure rules; this
-adds no lookup of arbitrary objects in earlier frames.
+Program and complete initial context remain in admission. Every commit is bound to that admitted
+Program through the checked run/frame identity; it need not copy immutable Program policy, limits,
+and implementation descriptors. Load admission once and associate its exact implementations.
+A single final row without admission is not the loading contract.
 
-### 6.2 Context is reconstructed, not supplied again
+Run identity, sequence, predecessor, and head remain checked envelope facts, not conflicting copies
+inside Runtime state. Concrete persisted values keep exact contracts and existing frame-local
+object closure. Equal objects may be shared within a frame under that existing mechanism; sharing
+is not required to avoid repeating data across commits. Add no cross-frame object resolver.
 
-```text
-genesis(C0)
-A succeeds(C1)
-B succeeds(C2)
-C fails(E)
-recovery selects checkpoint B
-new visit to B starts with C1
-```
+Recovery context is a borrowed view of the one Runtime state and admitted Program. Do not maintain
+another independently supplied recovery snapshot. Persist usage and checkpoint data in Runtime
+state; derive remaining allowances and eligibility from those fields and the static Program.
 
-The prefix already contains C1. The fold rebuilds its active checkpoint inputs from genesis,
-successful outputs, and committed transitions. It does not rerun A to reconstruct C1. Restart
-retains the current recovery usage and Effect barriers; neither history nor counters roll back.
-Checkpoint selection retains the baseline's active declaration semantics, not an arbitrary old
-visit selected by frame number.
+### 6.2 Audit facts accompany the resulting state
 
-Recovery context is a view derived from the immutable Program and acknowledged prefix. Do not
-persist another authoritative snapshot of allowances, usage, eligible targets, or checkpoint maps.
-A returned handler request and the authorized decision are distinct facts: a denied Restart may
-produce Stop, so retain the request rather than inferring it from the final action.
+The next continuation may have different input from the operation just completed. Preserve that
+operation's facts so the commit explains itself without searching earlier outcome records. These
+are distinct semantic roles, not competing copies of one authority. Runtime constructs them from
+the retained execution and checks their relationship through its single transition implementation.
 
-Do not omit required fields from State inputs or successful outputs to save bytes. Their exact
-contracts must suffice for later preparation, interpretation, and checkpoint restoration. Additional
-facts genuinely produced by execution belong in the existing owner's result/evidence contract.
-Transient locals that neither affect reconstruction nor add required causal evidence stay transient.
+| Commit boundary | Completed operation's audit facts, alongside complete resulting Runtime state |
+| --- | --- |
+| Admission | Program and complete initial context; initial Runtime state must agree with them. |
+| Pure success/failure | Executed position, complete input/context, and output or original typed domain/internal error. |
+| Read preparation failure | Position, input/context, preparation stage, and typed internal cause; no invented intent. |
+| Read adapter failure | Position, input/context, exact intent, and original typed error. |
+| Read evidence accepted | Position, input/context, intent, accepted evidence, and interpretation result including internal failure. |
+| Effect preparation | Position, input/context, exact command, and derived EffectId, before adapter entry. |
+| Pending Effect failure | Input/context, command/EffectId, original cause, and stage/phase. |
+| Accepted Effect settlement | Input/context, command/EffectId, accepted evidence, and interpretation result including internal failure. |
+| Recovery evaluation | Original failure and its originating execution context/facts, connection to that outcome, completed classification/request, authorization, and decision or typed fault. |
+| Terminal root mapping | Original recovery facts and mapped root, or failing mapper step with its input and typed cause. |
+
+Required input/output fields cannot be skipped to reduce storage. Preserve the unresolved original
+and its context in recovery commits even when they were already stored. A link to the original
+outcome identifies provenance; it is not a substitute for the committed causal data. Where audit
+and continuation refer to the same value, use their actual shared owner/object rather than accept
+independently supplied mismatching copies. The complete commit appends atomically.
+
+For example, after A succeeds with C1, the persisted continuation may point to B with input C1,
+while the same commit's audit facts retain A's input C0 and its result C1. After a restart to B,
+Runtime uses the checkpoint input already present in its state, preserves current counters and
+Effect barriers, and commits the new visit plus the recovery facts. It never restores budgets or
+history to their earlier values. Active declaration-checkpoint semantics remain unchanged.
+
+Executable State objects, callbacks, adapters, connections, signer handles, credentials, and
+unneeded transient locals remain excluded. This complete-state contract does not revive the
+stopped implementation's generic execution wrappers, recursive error schemas, or partial recorder.
 
 ### 6.3 Remove redundant contextualization, retain its checks
 
@@ -360,7 +391,7 @@ derives collection/source ordinals from input and copies intent; anchored-call c
 intent; transaction context derives from command. Those facts need no second reporting object.
 
 Remove the mandatory fallible contextualizer callback, associated context-only ABI entries, and
-redundant wrappers once their facts are available from the reconstructed input and recorded objects.
+redundant wrappers once their facts are available from the complete committed input and objects.
 Keep command/input and evidence-binding validation at its owning boundary. A contextualizer that
 contains a unique fact requires an explicit producer-owned field, not silent removal. Do not add
 an equivalent postcommit callback or registry under another name.
@@ -369,7 +400,7 @@ an equivalent postcommit callback or registry under another name.
 
 ### 7.1 Handler recommendations are not transitions
 
-The handler receives Classification directly and Runtime's derived recovery context. It recommends
+The handler receives Classification directly and a recovery-context view of Runtime state. It recommends
 the existing Stop, RetryState, or Restart(target) request. Runtime alone checks allowances,
 eligibility, and Effect barriers. Existing Operation defaults, occurrence overrides, intrinsic
 classification semantics, and root-map selection remain intact.
@@ -385,16 +416,19 @@ Remove decisions and terminal root mapping from execution conclusions. A success
 in its one append. A domain/operational failure enters AwaitingRecovery after its outcome commits.
 The driver then performs classification, handler invocation, authorization, and any terminal root
 mapping; the resulting decision or fault uses the same append path. Only an acknowledged decision
-can authorize a new visit, restart, or stop. A competing/ambiguous decision cannot release an action.
+can release execution under a new visit, restart, or stop. A competing/ambiguous decision cannot
+release an action.
 
-Extend existing concrete Journal alternatives, assembly associations, and the sole semantic fold.
-Do not introduce independently identified generic ExecutionData/context values around objects the
-Journal already retains. The existing State outcome API is not replaced merely to standardize a
-Rust spelling such as nested Result. Wire changes must follow the required outcome alternatives.
+Replace the outcome-replay representation with complete Runtime state and concrete audit facts.
+Remove FoldState and history accumulation; retain its required rules in one Runtime transition
+implementation. Do not keep both replay and snapshot restoration or introduce a generic snapshot
+registry. The existing State outcome API is not replaced merely to standardize a Rust spelling
+such as nested Result. Wire changes follow the required state and audit alternatives.
 
 Keep `prepare_append` / `finish_append` as the common mechanism, fixing custody and acknowledgement
-handling there as needed. Candidate validation must not mutate the caller's acknowledged snapshot.
-Do not add a generic commit facade over this path or a second transition implementation.
+handling there as needed. Pure transition construction and encoding must not mutate the caller's
+acknowledged state. Adopt and dispatch the candidate only after known insertion. Do not add a
+generic commit facade over this path or a second transition implementation.
 
 ### 7.3 Internal outcomes and Effects
 
@@ -420,31 +454,117 @@ Settlement observed only in memory is not durable settlement. A crash or failed 
 its record commits leaves the preceding pending command authoritative. Preserve existing
 reconciliation/ambiguity semantics; never claim every physical attempt was recorded.
 
-## 8. Reconstruction and interruption table
+## 8. Historical checking and interruption workflow
 
-| Last acknowledged boundary | Reconstructed facts | Permitted next work |
+### 8.1 One transition implementation, two uses
+
+Use one pure Runtime operation to determine the successor from the acknowledged predecessor and
+completed execution/recovery facts:
+
+```text
+transition(previous Runtime state, recorded operation facts) -> next Runtime state
+```
+
+It owns position/visit changes, checkpoint updates, recovery authorization/usage, phase changes,
+and preservation of Effect authority. It rejects audit input/original/command copies inconsistent
+with the predecessor. It consumes recorded results; it does not execute State
+business logic, classifiers, handlers, root maps, or providers. Live execution produces those
+facts before invoking the transition operation. Expected denial and actual returned request remain
+distinct recorded facts that the transition checks against the preceding state and Program.
+
+During live execution:
+
+1. Retain the acknowledged state and the operation's returned facts.
+2. Use the transition implementation to construct a separate candidate state.
+3. Encode and qualify the exact candidate bytes through checked decoding, value/evidence checks,
+   and the existing frame contracts. Verify they represent the constructed successor and matching
+   audit facts, including input/original/command copies that agree with the acknowledged
+   predecessor. Reuse the same value and transition checks; do not validate only the native value
+   and assume its serializer preserved the contract.
+4. Append at the acknowledged head through Store.
+5. On known insertion, adopt that qualified candidate and dispatch its permitted work. On rejection or
+   ambiguity, retain custody/status and reconcile without speculative adoption.
+
+No full-history reread/check is required after each known inserted live append. The predecessor is
+already acknowledged and qualified. Snapshot construction does not weaken existing candidate value
+checks or grant authority before Store acknowledgement.
+
+### 8.2 Loading checks stored transitions, then restores the stored state
+
+Store still returns one complete prefix. Before exposing a qualified observation or entering work:
+
+1. Journal qualifies canonical frames, sequence, predecessor links, hashes, and exact local objects.
+2. Runtime associates the admitted Program and qualifies the stored values. Construct the expected
+   initial state from Program/initial context and compare it with the persisted genesis state.
+3. For each adjacent pair, use the **stored predecessor** and the successor commit's recorded audit
+   facts as input to the same transition implementation. Compare the resulting state's exact
+   canonical representation with the **stored successor**. Reject mismatches with reviewed causes.
+4. Preserve independent value/evidence checks and final pending-command verification.
+5. Restore the final **stored** Runtime state directly, then expose its view or resume its phase.
+
+```text
+expected S2 = transition(stored S1, facts recorded with S2)
+require canonical(expected S2) == canonical(stored S2)
+
+expected S3 = transition(stored S2, facts recorded with S3)
+require canonical(expected S3) == canonical(stored S3)
+
+restore stored S3
+```
+
+Each check starts from its persisted predecessor, not the calculated successor of the prior check.
+The temporary expected state is verification evidence, not an accumulating reconstruction model.
+Do not implement another snapshot-transition validator with a second copy of the rules.
+
+A valid hash/schema does not establish transition legitimacy. For example, if stored S1 has one
+retry used and the recorded action is Retry, a stored S2 claiming zero retries is well-typed but
+invalid: the transition requires two. Apply the same principle to checkpoint input substitution,
+illegal visits, removed Effect barriers, and a settled Effect becoming transmissible again.
+Preserve rejection coverage such as the baseline tests
+`cold_fold_validates_pending_failure_position_and_stop_reasons` and
+`retained_effect_facts_are_validated_without_adapter_io`; their fold names are not a reason to
+keep the old implementation.
+
+### 8.3 When historical checking runs
+
+Run full-prefix qualification and adjacent-state checks whenever persisted history is loaded for
+inspection, resume, a competing admission/append, or reconciliation of an uncertain append. Complete
+the checks before returning that history as qualified or performing recovery/provider work.
+If loading or verification fails, retain the rejected candidate/original and load/verification
+cause without inventing a winning observation. Reconciliation must match the actual candidate
+before making a known-insertion claim; loading some valid head alone is insufficient.
+
+This still scans historical transitions. It is not constant-time or latest-row-only loading.
+The contract does not trust a last snapshot merely because Runtime should have validated its writer.
+No signatures, trusted checkpoint service, or database-side transition logic are introduced to
+replace independent history checks. Store's complete-prefix contract remains unchanged.
+
+Cold checking never executes classifiers, handlers, root maps, or completed State interpretation.
+Retain pure evidence-binding checks and the baseline's final pending-Effect preparation verification
+(formerly `FoldState::validate_pending`) as ordinary Runtime checks after deleting the fold.
+Runtime association must match exact selected contracts. These checks establish legal consistency,
+not proof that external events occurred or recomputation of completed business results.
+
+### 8.4 Last acknowledged state and permitted continuation
+
+| Last acknowledged boundary | Facts restored from the stored state/commit | Permitted next work |
 | --- | --- | --- |
 | Before outcome | Runnable input or acknowledged pending command | Only phase-permitted execution; an uncommitted physical attempt may have occurred. |
 | Success outcome | Output and next position, or terminal success | Next State only. |
-| Domain/operational failure | Original error, input, phase, awaiting recovery | Evaluate unresolved recovery without rerunning the failed State/provider to recreate the error. |
-| Recovery decision | Decision, counters, and resulting cursor | Follow committed continuation; do not ask the handler to replace it. |
-| Recovery fault | Original outcome and evaluation fault | End invocation; later explicit reevaluation requires the finite contract in section 12. |
-| Internal outcome | Cause and actual phase | No handler; only explicitly permitted phase-preserving reentry. |
-| Internal interpretation outcome with committed settlement | Input, command/EffectId, and accepted evidence | If reentry is enabled, deterministic interpretation only; no Effect adapter call. |
-| Outcome construction/qualification/encoding failure | No newly acknowledged outcome | Return available original plus recording cause; no substitute record. |
-| Ambiguous append | Last acknowledged observation and uncertain candidate | Reconcile through existing exact-head semantics before dispatch. |
-
-Cold observation never executes classifiers, handlers, root maps, or completed State interpretation.
-Retain existing pure evidence checks and the baseline's final pending-Effect preparation check
-(`FoldState::validate_pending`); deleting contextualizers must not remove that verification exception.
-Runtime association must match the Program's exact selected contracts before any unresolved work.
-No historical decision is replaced by an updated or newly selected policy.
+| Domain/operational failure | Original error, input, phase, awaiting recovery | Evaluate unresolved recovery without rerunning the failed State/provider. |
+| Recovery decision | Decision, updated counters, and resulting continuation | Follow committed continuation; do not ask the handler to replace it. |
+| Recovery fault | Original outcome/context and evaluation fault | End invocation; later explicit reevaluation requires the finite contract in section 12. |
+| Internal outcome | Cause, context, and actual phase | No handler; only explicitly permitted phase-preserving reentry. |
+| Internal interpretation outcome with committed settlement | Input, command/EffectId, and accepted evidence | If reentry is enabled, interpretation only; no Effect adapter call. |
+| Construction/qualification/encoding failure | No newly acknowledged state | Return available original plus recording cause; no substitute record. |
+| Ambiguous append | Last acknowledged state and uncertain candidate | Validate reconciled history and candidate acknowledgement before dispatch. |
 
 ## 9. Checked values, codecs, and native decoder errors
 
 Persistence selection and value validation are separate. Existing concrete record types declare
 which facts are retained. Canonical encoding, exact schema/reference checks, checked owner
-construction, and the sole fold validate their representation and legal transition before append.
+construction, and the single Runtime transition implementation validate representation and legal
+succession before append.
 Keep these candidate checks and cold qualification. Type declarations cannot by themselves prove
 that an arbitrary custom serializer retained every meaningful field; consuming round-trip tests
 must establish the reviewed value contract. Do not silently weaken validation to avoid an error path.
@@ -473,7 +593,8 @@ Decoding to obtain an owned callback argument is not persistence validation. Nat
 consuming State/map input may remove that copy round trip, but is not required by this RFC. Do not
 add a global MfmValue: Clone bound, clone-codec registry, or borrowing rewrite. Any narrow ownership
 change must prove immutable value semantics and preserve retained originals; it must not remove
-candidate/fold validation. No new projection API or qualified-record layer is mandated here.
+candidate/transition validation. A separate codec::from API or qualified-record layer is not
+mandated; persisted Runtime state is the one continuation representation.
 
 ## 10. Recording failures and concrete recovery faults
 
@@ -526,10 +647,12 @@ calls the handler or attempts to record a smaller substitute error.
 
 ### 10.3 Recovery faults are ordinary recovery results
 
+The examples below accompany the complete resulting Runtime state specified in section 6.
 After a failed outcome commits at H, a handler failure can produce this concrete recovery result:
 
 ```text
 original outcome: H
+original error and execution context/facts: retained in this commit
 classification: completed classification
 result: handler failed { exact typed handler error }
 ```
@@ -540,6 +663,7 @@ If terminal root mapping fails, retain:
 
 ```text
 original outcome: H
+original error and execution context/facts: retained in this commit
 classification: completed classification
 request: Stop
 authorization: Stop { reason: Requested }
@@ -621,13 +745,14 @@ composition/recovery path. Failure to render an error must not replace its prima
 
 ## 12. Capacity and implementation complexity
 
-Add the recovery result's maximum frame cost to the existing complete lifecycle admission
-calculation. Include concrete outcome/internal alternatives, evidence, diagnostics, mapped roots,
-and all frame-local objects. A zero-retry failure must still have room for its first Stop result.
+Revise complete lifecycle admission for full Runtime-state commits. Count complete current and
+active-checkpoint contexts, usage/phase/authority fields, original failure/context retained across
+recovery commits, outcome/internal alternatives, evidence, diagnostics, mapped roots, audit facts,
+and all frame-local objects. Repeated data is an accepted cost, not a reason to omit required state. A zero-retry failure must still have room for its first Stop result.
 A prepared Effect must retain enough admitted capacity to complete its allowed lifecycle.
 
 Any repeated explicit internal reentry or recovery-fault reevaluation needs a finite admission
-bound, an exact charging event in the sole fold, and checks before work begins. Storage allowance
+bound, an exact charging event in the single Runtime transition, and checks before work begins. Storage allowance
 must not grant semantic retry/restart permission. Pending without a record spends no new history
 slot; committed decisions cannot spend their allowance twice after reconciliation.
 
@@ -638,9 +763,11 @@ unbounded reevaluation or disable existing pending-Effect recovery. Reuse existi
 arithmetic where they express the selected guarantee without adding another reservation framework.
 
 Keep existing object/descriptor/frame/run ceilings and checked overflow rejection. Measure complete
-shipping schemas and maximum workloads. Do not import descriptor graphs or raise limits to fit
-unnecessary execution/context/error wrappers. A concrete retained schema that cannot fit requires
-an owner-level simplification or an explicit design decision, not omitted evidence.
+shipping schemas, full checkpoint sets, and maximum commit workloads. Measure load-time transition
+verification cost as well as frame/run bytes; direct restoration still checks the complete history.
+Do not import descriptor graphs or silently raise limits to fit a snapshot. A concrete retained
+schema that cannot fit requires an owner-level simplification or an explicit design decision, not
+omitted evidence.
 
 Every nontrivial implementation report must identify removed code, necessary additions, production
 Rust LOC change, and remaining public types/callbacks/change sites. No numerical LOC forecast is
@@ -661,10 +788,13 @@ on top of its decoder-error/capture machinery as a shortcut.
    conversions, with native field companions and source-preserving admission/candidate errors.
    Update every affected consumer in the same commit; no decoder-error identities or temporary
    error registry. Keep this separate only if it leaves a coherent usable boundary.
-3. **One lifecycle cutover:** split concrete outcome/recovery records, add awaiting-recovery and
-   phase-specific internal outcomes, move policy evaluation after commit, and update the existing
-   fold/append path, exact associations, bounds, views, clients, and docs together. Remove fused
-   decision/context machinery in the same change. Resolve section 18's affected decisions first.
+3. **One persistence/lifecycle cutover:** persist complete Runtime state and concrete audit facts,
+   remove FoldState/accumulating replay, and implement the single transition used for live
+   construction and adjacent-history checking. Split outcome/recovery commits, add awaiting-recovery
+   and phase-specific internal states, and move policy evaluation after outcome acknowledgement.
+   Update the existing append path, associations, bounds, views, clients, docs, and tests together;
+   remove fused decisions, reconstruction paths, and superseded context machinery in the same
+   change. Resolve section 18's affected decisions first.
 4. **Completion audit:** reconcile all first-loss rows with consuming evidence and run selected
    integration verification. This step is not permission to defer each prior boundary's tests,
    leave consumers unported, or accumulate a noncompiling workspace.
@@ -677,7 +807,10 @@ identifiers follow the implemented contract, not the abandoned Program v7/Journa
 
 Store remains mechanical complete-prefix load and atomic exact-head append. Journal record changes
 do not imply a new audit table or PostgreSQL migration. Update design, architecture, transport
-contracts, and audit inventory with implementation. Retain AGENTS.md's local-mismatch rule.
+contracts, and audit inventory with implementation. Replace AGENTS.md/design/architecture claims
+of a sole semantic fold with one Runtime transition and independent adjacent-history verification;
+retain their source-preservation, Store-boundary, and local-mismatch rules. This proposal does not
+claim the current source implementation already follows the revised architecture.
 
 ## 14. Acceptance criteria and verification
 
@@ -689,9 +822,9 @@ contracts, and audit inventory with implementation. Retain AGENTS.md's local-mis
 | A4 | SQLx/gate/decode/COMMIT failures preserve reviewed facts, same-connection gate refusal, and exact acknowledgement semantics. |
 | A5 | Signing/channel/task/crypto/local-IO causes remain distinct; synthetic secrets are absent from persisted data, formatting, and responses. |
 | A6 | Diagnostic constructors/decoders enforce source order, opaque intermediate ancestry, field compatibility, and independent byte/layer/fact/omission limits. |
-| A7 | Success commits before successor entry; original failure commits before classification, handler, and root mapping; recovery decision commits before transition. |
+| A7 | Success commits before successor entry; original failure commits before classification/handler/map; recovery candidate may be constructed before append, but adoption/dispatch require known insertion. |
 | A8 | Handler/map faults retain the committed original, completed evaluation facts, exact failed step/input/cause, and do not recursively invoke policy. |
-| A9 | Every section 8 prefix reconstructs the same observation; cold inspection executes no recovery/completed-interpretation callbacks and preserves pending-command validation. |
+| A9 | Every section 8 prefix restores the final stored state after genesis/adjacent checks; cold inspection executes no recovery/completed-interpretation callbacks and preserves pending-command verification. |
 | A10 | Encoding failure, definite append failure, conflict, and ambiguity retain originals/causes and truthful status; no substitute append or speculative action. |
 | A11 | Capacity covers first recovery results, permitted finite reentries, and prepared settlement; overflow/exhaustion is checked before affected work. |
 | A12 | Unqualifiable originals and unencodable recovery faults end recording without fallback records; task failure does not claim an unreturned native value survived. |
@@ -700,17 +833,20 @@ contracts, and audit inventory with implementation. Retain AGENTS.md's local-mis
 | A15 | Every inventory first-loss row maps to its replacement and consuming test; hidden upstream evidence is marked unavailable, not fixed. |
 | A16 | Committed settlement plus interpretation failure retains evidence and permits no Effect adapter reentry; in-memory-only settlement makes no durability claim. |
 | A17 | Reconciliation cannot spend a decision twice or replace it through a second policy evaluation; losing candidate evidence is preserved even if reload fails. |
-| A18 | Existing concrete records/common append path handle success/internal/domain/operational outcomes without a new generic snapshot or commit framework. |
+| A18 | One actual Runtime state is persisted with audit facts through the common append path; no FoldState accumulator, parallel reconstruction model, generic snapshot registry, or second transition implementation remains. |
 | A19 | Exact value contracts preserve required input/output fields, result tags, causes, and phase through canonical round trips; native errors retain reviewed constructor facts. |
-| A20 | Candidate validation and local closure remain atomic; invalid contract, phase, binding, or position cannot authorize append/IO, and stale heads cannot be adopted. |
+| A20 | Exact encoded candidates pass checked decoding/evidence/frame qualification and match constructed state and predecessor audit facts before append; invalid contract/phase/binding/position or stale head cannot be adopted. |
 | A21 | Direct-classification handlers preserve defaults/overrides, request versus authorization, and existing target restrictions. |
 | A22 | Every deleted contextualizer's facts are retained or derived from existing authoritative input/intent/command; its consistency checks remain enforced. |
-| A23 | Checkpoint restart restores the exact active input with a fresh visit and current usage/barriers; no repeated input snapshot or arbitrary historical-visit feature. |
+| A23 | Checkpoint restart directly uses its persisted complete input with a fresh visit and current usage/barriers; adjacent verification rejects checkpoint substitution, counter reset, and removed Effect authority. |
 | A24 | Preparation failure, pending failure, and accepted-evidence interpretation failure have legal distinct representations without fabricated defaults. |
-| A25 | Shipping accumulated-context workloads reconstruct complete inputs from history, fit exact bounds, and introduce no mandatory Clone or projection API. |
+| A25 | Maximum complete current/checkpoint contexts and repeated audit originals fit measured frame/run bounds; full-prefix verification cost is reported, with no mandatory Clone/projection API. |
 | A26 | Distinct owner internal causes survive ordinary outcome commit/cold observation without classification; preflight mismatch causes no provider call/append, and post-response local binding rejection retains facts without append or a false no-IO claim. |
 | A27 | No decoder-error Program values, direct/terminal error codecs, recursive companion identities, or constructor-error association remain. |
-| A28 | Valid recovery faults use existing exact owner associations and local objects; unqualifiable faults retain invocation causes without a dynamic error/schema capture framework. |
+| A28 | Valid recovery faults retain original/context plus exact owner facts and local objects; unqualifiable faults retain invocation causes without a dynamic error/schema capture framework. |
+| A29 | Structurally valid stored snapshots with wrong visit, impossible stop reason, reset usage, substituted checkpoint context, or revived Effect authority fail historical verification before observation/IO. |
+| A30 | Live construction and adjacent checking call the same transition implementation; each history check starts from its stored predecessor and direct restoration adopts the final stored state. |
+| A31 | Loaded inspection/resume/conflict/ambiguity histories are fully checked; known inserted live append does not reread the whole history, and reconciliation cannot claim insertion from an unrelated valid head. |
 
 Use boundary-focused consuming tests and synthetic/fake-server evidence, not a parallel model of
 the pipeline or real secret-bearing diagnostic dumps. Retain hostile-input tests for the actual
@@ -727,17 +863,18 @@ This RFC-only revision requires link/contract review and `git diff --check`, not
 | Baseline or stopped machinery | Target |
 | --- | --- |
 | Lossy adapter/port/application conversions | Typed owner causes with reviewed nested diagnostics and unchanged public projections. |
-| Fused failure/decision branches in Journal conclusions and engine conclude/decide | Concrete outcome first, then recovery result; same fold and append path. |
+| Fused failure/decision branches in Journal conclusions and engine conclude/decide | Outcome commit, then recovery commit, each retaining complete Runtime state and audit facts through the common append path. |
 | Unit PreparationError / StateExecutionError / AdapterInvariantError | Exact owner internal causes with phase-specific outcome rules; no global domain-error bag. |
 | IncidentSummary and summary-only source plumbing | Direct Classification from the retained original, plus derived recovery context. |
 | adapter_context, redundant AdapterContext values, and context-only registration | Existing input/intent/command facts; preserve unique facts and all consistency checks. |
-| Independently associated ExecutionData/context wrappers and PersistedRecoveryContext snapshots | Concrete Journal objects and reconstruction through the existing prefix fold. |
+| FoldState and engine history-to-accumulator replay | Persist actual Runtime state; retain transition rules once and check adjacent stored states without accumulation. |
+| Separate live-state/snapshot models and independently supplied PersistedRecoveryContext | One complete Runtime state; recovery context borrows it and Program. |
 | New generic commit facade over prepare_append/finish_append | Extend the existing append path and preserve originals/acknowledgement there. |
 | DecodePersisted::Error: MfmValue and derive-generated error identities | Native checked-construction errors and, where useful, native field companions. |
 | ValueCodec decoder-error registration and terminal codecs | Existing value codecs with native source-preserving failure returns. |
 | DecoderTarget/owner-closure machinery solely for decoder-error claims and frozen giant identities | Delete with its dedicated schemas/fixtures; preserve ordinary object/schema/binding validation. |
 | Generic capture/progress roles, CaptureFailed and partial fallback recording | Concrete ordinary outcome/fault variants; stop failed recording with invocation custody. |
-| Repeated recovery/context/budget snapshots and unconditional X/Y defaults | Derived authoritative facts and an explicitly settled finite reentry contract. |
+| Rejection of repeated context/checkpoint data and unconditional X/Y defaults | Complete persisted continuation including counters/checkpoints; exact reentry allowances remain explicitly unsettled. |
 | Superseded tests/docs promising these mechanisms | Replace with retained-behavior boundary evidence in the same cutover. |
 
 Keep intrinsic classifiers, static handlers, root mapping, active checkpoints, exact schemas and
@@ -750,30 +887,31 @@ implementation replaced it. Every replacement must remove a required source-loss
 ## 16. Completion evidence
 
 The implementation is complete only when the consuming workspace is integrated, the inventory and
-A1-A28 are reconciled, required verification passes on the exact candidate, and the final report
+A1-A31 are reconciled, required verification passes on the exact candidate, and the final report
 identifies remaining upstream limits and actual production LOC change. Do not use old focused test
 counts, partially migrated clients, or large-but-admissible descriptors as evidence of completion.
 
-## 17. Agreed changes from the superseded proposal
+## 17. Agreed changes from superseded proposals
 
-This is the single revised target, not a second implementation option. The preceding sections
-replace the former full execution/context snapshot contract, independent recovery-context schema,
-generic commit facade, decoder-error Program identity/closure, and partial fallback recorder.
+This is one revised target. It replaces both the stopped generic snapshot/capture design and the
+subsequent proposal to reconstruct context from outcome history. Complete state/context commits
+and duplication are now deliberate requirements for auditability and direct restoration.
 
-The revised target preserves candidate validation, causal capture, commit-before-recovery, and
-phase-specific internal outcomes. It derives past execution input from already committed values
-and keeps current transition authority. Selective codec projection and Clone were discussed as
-implementation ideas, not accepted persistence requirements. No new snapshot, copy, or schema
-framework may be justified by treating those exploratory ideas as a mandate.
+Remove the fold as a reconstruction component, not Runtime's transition rules or independent
+history checks. One persisted Runtime state and one transition implementation replace replay and
+separate state models. Journal encoding and Store append remain mechanical; no generic snapshot,
+proof, or commit framework is added. Native decoder errors and the no-substitute recording rule
+remain unchanged. Clone and codec::from remain optional implementation ideas, not mandates.
 
 ## 18. Material uncertainties
 
 | Assumption or unresolved choice | Why uncertain | Consequence if wrong | Validation / resolution |
 | --- | --- | --- | --- |
-| Active declaration-checkpoint semantics satisfy recovery to an earlier point | Informal wording could mean any historical visit | Arbitrary visit targeting would change Program targets and fold retention | Retain the existing semantics in this RFC; require a separate explicit target change before adding arbitrary historical selection. |
+| Active declaration-checkpoint semantics satisfy recovery to an earlier point | Informal wording could mean any historical visit | Arbitrary visit targeting would change Program targets and persisted checkpoint selection | Retain the existing semantics in this RFC; require a separate explicit target change before adding arbitrary historical selection. |
 | Explicit internal reentry and recovery-fault reevaluation have a finite useful contract | Exact enabled phases, limits, and charging events were not settled in the review | Repeated records could exceed admitted capacity or incorrectly release Effect authority | Finalize one transition table and checked capacity equation before implementing reentry; preserve existing pending-Effect semantics and test zero/exhausted limits and settlement reservation. |
 | Every contextualizer's facts derive from existing authoritative values | Only representative balance, anchored-call, and transaction consumers were inspected | Deleting an uninspected unique field could remove causal/recovery information | Inventory every implementation; move any unique fact to its actual producer before deleting the callback. |
-| Current consuming schemas fit after the smaller cutover | Exact error growth and full workload bounds have not been measured | Supported Programs could fail admission | Measure actual complete descriptors/frames against unchanged ceilings before expanding implementation; simplify the responsible owner instead of importing the stopped graph machinery. |
+| Complete Runtime states and audit facts fit current ceilings | Full checkpoint contexts and repeated originals may greatly exceed prior outcome-only frames | Supported Programs could fail admission | Measure representative maximum snapshots, local sharing, complete descriptors, and lifecycle/run bytes before implementation expansion; resolve overflow explicitly without omitted state or unreviewed limit increases. |
+| Direct state restoration and adjacent checks simplify implementation at acceptable cost | The complete persisted shape and verification cost have not been measured | Serialization/checking could add complexity or excessive load cost despite removing reconstruction | Review the concrete deletion/replacement diff and measure maximum-history verification; no constant-time or fixed LOC claim. |
 | A live ownership change is useful and compatible, if proposed | Consuming generic inputs and custom value semantics need checking | Added Clone bounds could exclude valid inputs or conceal mutation | Do not require the change for this RFC; separately compile consumers and test retained-original semantics without weakening candidate validation. |
 | Reviewed external capture covers exposed evidence | Clients may hide attempts or only expose opaque sources | Some causal detail remains unavailable | Inject distinguishable nested causes at each owner and assert explicit omissions; never fabricate hidden evidence. |
 
