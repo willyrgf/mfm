@@ -71,6 +71,7 @@ independent audit store, or cross-frame object resolver is introduced.
 | How are internal outcomes treated? | Valid typed internal outcomes commit with their actual phase and no handler permission. Preflight mismatch causes no provider call/append; post-response local binding rejection also forbids append without claiming IO did not occur. |
 | What do codecs enforce? | Exact type/schema, canonical value admission, and faithful wire representation. Runtime owns transition legitimacy. |
 | Are decoder errors Program values? | No. Checked decoding retains native constructor causes; no decoder-error codec or identity is registered. |
+| Does admission reserve future history capacity? | No. Check actual values, frames, and accumulated history against existing ceilings; do not estimate or reserve a complete execution lifecycle. |
 | Is Clone or codec::from required? | No. These are ownership/projection implementation choices, not replacements for complete persistence or candidate validation. |
 | What if recording fails? | Return available original/candidate and causal recording result. No substitute record, recursive append, or speculative action. |
 | Is bounded/redacted capture lossless? | No. Account for withheld, opaque, unavailable, and bound-limited evidence. |
@@ -331,7 +332,6 @@ generic framework or a second DTO with independent conversion rules.
 | Pending command and EffectId | Reconcile the exact acknowledged operation. |
 | Accepted settlement evidence while interpretation remains | Continue interpretation without another Effect adapter call. |
 | Unresolved original failure and relevant recovery decision/fault | Resume the correct phase without recreating completed execution or policy work. |
-| Applicable pending-failure/reentry capacity usage | Check admitted storage allowance before further work. |
 | Terminal output or root failure | Observe terminal state directly. |
 
 Program and complete initial context remain in admission. Every commit is bound to that admitted
@@ -553,7 +553,7 @@ not proof that external events occurred or recomputation of completed business r
 | Success outcome | Output and next position, or terminal success | Next State only. |
 | Domain/operational failure | Original error, input, phase, awaiting recovery | Evaluate unresolved recovery without rerunning the failed State/provider. |
 | Recovery decision | Decision, updated counters, and resulting continuation | Follow committed continuation; do not ask the handler to replace it. |
-| Recovery fault | Original outcome/context and evaluation fault | End invocation; later explicit reevaluation requires the finite contract in section 12. |
+| Recovery fault | Original outcome/context and evaluation fault | End invocation; later explicit reevaluation requires the phase contract in section 18. |
 | Internal outcome | Cause, context, and actual phase | No handler; only explicitly permitted phase-preserving reentry. |
 | Internal interpretation outcome with committed settlement | Input, command/EffectId, and accepted evidence | If reentry is enabled, interpretation only; no Effect adapter call. |
 | Construction/qualification/encoding failure | No newly acknowledged state | Return available original plus recording cause; no substitute record. |
@@ -705,7 +705,7 @@ unit transport mappings, repeated provider schemas, or duplicate funding RPC imp
 Preserve provider, custody, and signer causes through transaction wrapping, adding operation context
 once. Keep classification, command identity, duplicate-safe Read rules, response/deadline bounds,
 and transaction reconciliation unchanged. A server error or timeout does not prove nonacceptance.
-Update owner schemas and complete consuming bounds together; retain the existing development
+Update owner schemas and actual-limit consuming tests together; retain the existing development
 funding helper's safe capture without adding a production adapter solely for that test.
 
 ### 11.2 PostgreSQL Store, configuration, index, custody, and gates
@@ -743,31 +743,51 @@ Public code/status/exit policy remains a projection of the retained error. Updat
 detail and recording status within the existing surfaces; add no diagnostics endpoint or alternate
 composition/recovery path. Failure to render an error must not replace its primary cause.
 
-## 12. Capacity and implementation complexity
+## 12. Actual size limits, without future-capacity admission
 
-Revise complete lifecycle admission for full Runtime-state commits. Count complete current and
-active-checkpoint contexts, usage/phase/authority fields, original failure/context retained across
-recovery commits, outcome/internal alternatives, evidence, diagnostics, mapped roots, audit facts,
-and all frame-local objects. Repeated data is an accepted cost, not a reason to omit required state. A zero-retry failure must still have room for its first Stop result.
-A prepared Effect must retain enough admitted capacity to complete its allowed lifecycle.
+Remove prospective whole-run capacity admission. Admission qualifies the actual Program, initial
+context, and genesis; it does not promise that every possible future outcome, recovery decision,
+or Effect settlement will fit. Effect preparation acknowledges command authority, not a storage
+reservation. The extra snapshot and recovery records need no replacement lifecycle equation.
 
-Any repeated explicit internal reentry or recovery-fault reevaluation needs a finite admission
-bound, an exact charging event in the single Runtime transition, and checks before work begins. Storage allowance
-must not grant semantic retry/restart permission. Pending without a record spends no new history
-slot; committed decisions cannot spend their allowance twice after reconciliation.
+Keep existing object/descriptor/frame/run ceilings and checked overflow rejection at their owning
+boundaries. Qualify each actual complete candidate, including its local object closure, and check
+the resulting history's actual frame count and bytes before append. Store remains mechanical;
+no quota table, reservation service, or second capacity model is added. Preserve bounded diagnostic
+capture and semantic retry/restart/global-decision limits: these constrain evidence and permitted
+execution, respectively, rather than predict future storage consumption.
 
-The earlier X/Y fields, defaults of eight, formula, and generic capacity type hierarchy are not
-accepted requirements. Section 18 records the remaining reentry decision. Settle its transition
-table and checked capacity equation before implementing that boundary; do not silently enable
-unbounded reevaluation or disable existing pending-Effect recovery. Reuse existing limits and
-arithmetic where they express the selected guarantee without adding another reservation framework.
+Delete ConclusionBound, EffectBounds, HistoryBound, LifecycleBound, Program::history_bound,
+Runtime::validate_admission_bound, current_frame_bound, and the associated authoring arguments,
+Execution fields, declared-frame checks, wire/schema fields, exports, fixtures, and documentation.
+Delete max_pending_failures, failure_frame_bytes, the capacity-only pending-failure counter and
+PendingFailures size disposition. Remove shipping-domain bound calculators that exist solely to
+supply these declarations. Retain actual wire/schema/value checks and any independently required
+protocol response bounds. Remove tests of the deleted estimates and quotas; retain hostile-input,
+actual-limit, command-authority, and semantic-recovery coverage in their consuming boundaries.
 
-Keep existing object/descriptor/frame/run ceilings and checked overflow rejection. Measure complete
-shipping schemas, full checkpoint sets, and maximum commit workloads. Measure load-time transition
-verification cost as well as frame/run bytes; direct restoration still checks the complete history.
-Do not import descriptor graphs or silently raise limits to fit a snapshot. A concrete retained
-schema that cannot fit requires an owner-level simplification or an explicit design decision, not
-omitted evidence.
+If an outcome or recovery candidate exceeds an actual limit, use section 10's recording stop rule:
+retain the available original and size cause, append nothing, and preserve the last acknowledged
+state. A failure may have committed while its recovery decision cannot fit. An Effect may have
+settled externally while its settlement record cannot fit; the acknowledged pending command stays
+authoritative and the invocation must not claim durable settlement. Do not truncate the required
+record, manufacture a smaller failure, create replacement command authority, or roll back history.
+This is an explicit removal of advance history-capacity assurance, not a claim that exhaustion is
+impossible. The old calculation did not reserve physical database capacity or guarantee Store
+availability either.
+
+Explicit resume of an unresolved pending Effect retains the same command and EffectId under the
+existing authority protocol, without a capacity-only failure quota. It may encounter the same
+recording limit again; progress is not guaranteed. Removing a storage quota does not authorize an
+automatic retry loop or decide which internal/recovery-fault phases permit explicit reentry.
+Section 18 retains that semantic decision. Pending without a record consumes no history bytes or
+frame; reconciliation must still avoid charging a semantic recovery decision twice.
+
+Measure complete shipping schemas, full checkpoint contexts, and representative large actual
+commits against current ceilings. Report actual-limit rejection and full-prefix verification cost;
+do not require proof that every possible future history fits. Resolve any unacceptable snapshot
+size through owner-level simplification or an explicit design decision, never omitted evidence or
+an unreviewed limit increase.
 
 Every nontrivial implementation report must identify removed code, necessary additions, production
 Rust LOC change, and remaining public types/callbacks/change sites. No numerical LOC forecast is
@@ -792,9 +812,9 @@ on top of its decoder-error/capture machinery as a shortcut.
    remove FoldState/accumulating replay, and implement the single transition used for live
    construction and adjacent-history checking. Split outcome/recovery commits, add awaiting-recovery
    and phase-specific internal states, and move policy evaluation after outcome acknowledgement.
-   Update the existing append path, associations, bounds, views, clients, docs, and tests together;
-   remove fused decisions, reconstruction paths, and superseded context machinery in the same
-   change. Resolve section 18's affected decisions first.
+   Update the existing append path, associations, actual-limit checks, views, clients, docs, and
+   tests together; remove prospective lifecycle admission and capacity-only quotas from all
+   producers and consumers, alongside fused decisions, reconstruction, and redundant contexts. Resolve section 18's affected decisions first.
 4. **Completion audit:** reconcile all first-loss rows with consuming evidence and run selected
    integration verification. This step is not permission to defer each prior boundary's tests,
    leave consumers unported, or accumulate a noncompiling workspace.
@@ -826,7 +846,7 @@ claim the current source implementation already follows the revised architecture
 | A8 | Handler/map faults retain the committed original, completed evaluation facts, exact failed step/input/cause, and do not recursively invoke policy. |
 | A9 | Every section 8 prefix restores the final stored state after genesis/adjacent checks; cold inspection executes no recovery/completed-interpretation callbacks and preserves pending-command verification. |
 | A10 | Encoding failure, definite append failure, conflict, and ambiguity retain originals/causes and truthful status; no substitute append or speculative action. |
-| A11 | Capacity covers first recovery results, permitted finite reentries, and prepared settlement; overflow/exhaustion is checked before affected work. |
+| A11 | Admission performs no future-lifecycle reservation; actual candidate/history limits and checked overflow reject before append. Test failure committed but recovery unable to fit, and externally settled Effect whose record cannot fit, preserving originals, nonacknowledgement, and command authority. |
 | A12 | Unqualifiable originals and unencodable recovery faults end recording without fallback records; task failure does not claim an unreturned native value survived. |
 | A13 | Pre-admission, invalid-history, unavailable-Store, interruption, and postcommit delivery failures obey section 10.4. |
 | A14 | Existing CLI/REST/library public dispositions remain projections with permitted causal/recording detail; no alternate audit surface. |
@@ -840,7 +860,7 @@ claim the current source implementation already follows the revised architecture
 | A22 | Every deleted contextualizer's facts are retained or derived from existing authoritative input/intent/command; its consistency checks remain enforced. |
 | A23 | Checkpoint restart directly uses its persisted complete input with a fresh visit and current usage/barriers; adjacent verification rejects checkpoint substitution, counter reset, and removed Effect authority. |
 | A24 | Preparation failure, pending failure, and accepted-evidence interpretation failure have legal distinct representations without fabricated defaults. |
-| A25 | Maximum complete current/checkpoint contexts and repeated audit originals fit measured frame/run bounds; full-prefix verification cost is reported, with no mandatory Clone/projection API. |
+| A25 | Representative large complete current/checkpoint contexts and repeated originals are measured against actual frame/run ceilings; oversize rejection and full-prefix verification cost are reported, with no future-history fit promise or mandatory Clone/projection API. |
 | A26 | Distinct owner internal causes survive ordinary outcome commit/cold observation without classification; preflight mismatch causes no provider call/append, and post-response local binding rejection retains facts without append or a false no-IO claim. |
 | A27 | No decoder-error Program values, direct/terminal error codecs, recursive companion identities, or constructor-error association remain. |
 | A28 | Valid recovery faults retain original/context plus exact owner facts and local objects; unqualifiable faults retain invocation causes without a dynamic error/schema capture framework. |
@@ -874,7 +894,8 @@ This RFC-only revision requires link/contract review and `git diff --check`, not
 | ValueCodec decoder-error registration and terminal codecs | Existing value codecs with native source-preserving failure returns. |
 | DecoderTarget/owner-closure machinery solely for decoder-error claims and frozen giant identities | Delete with its dedicated schemas/fixtures; preserve ordinary object/schema/binding validation. |
 | Generic capture/progress roles, CaptureFailed and partial fallback recording | Concrete ordinary outcome/fault variants; stop failed recording with invocation custody. |
-| Rejection of repeated context/checkpoint data and unconditional X/Y defaults | Complete persisted continuation including counters/checkpoints; exact reentry allowances remain explicitly unsettled. |
+| Prospective lifecycle bounds, declared-frame budgets, pending-failure quotas, and X/Y capacity defaults | Delete their APIs, calculations, fields, checks, and dedicated fixtures; retain actual size ceilings and semantic recovery limits. |
+| Rejection of repeated context/checkpoint data | Complete persisted continuation including semantic usage and checkpoints, with actual candidate checks. |
 | Superseded tests/docs promising these mechanisms | Replace with retained-behavior boundary evidence in the same cutover. |
 
 Keep intrinsic classifiers, static handlers, root mapping, active checkpoints, exact schemas and
@@ -908,13 +929,13 @@ remain unchanged. Clone and codec::from remain optional implementation ideas, no
 | Assumption or unresolved choice | Why uncertain | Consequence if wrong | Validation / resolution |
 | --- | --- | --- | --- |
 | Active declaration-checkpoint semantics satisfy recovery to an earlier point | Informal wording could mean any historical visit | Arbitrary visit targeting would change Program targets and persisted checkpoint selection | Retain the existing semantics in this RFC; require a separate explicit target change before adding arbitrary historical selection. |
-| Explicit internal reentry and recovery-fault reevaluation have a finite useful contract | Exact enabled phases, limits, and charging events were not settled in the review | Repeated records could exceed admitted capacity or incorrectly release Effect authority | Finalize one transition table and checked capacity equation before implementing reentry; preserve existing pending-Effect semantics and test zero/exhausted limits and settlement reservation. |
+| Explicit internal reentry and recovery-fault reevaluation have a useful semantic contract | Exact enabled phases and resumed steps were not settled in the review | Reentry could repeat completed policy work or incorrectly release Effect authority | Finalize one phase/action table before implementing reentry; preserve pending-command authority and semantic recovery limits. Add no storage quota or future-capacity equation. |
 | Every contextualizer's facts derive from existing authoritative values | Only representative balance, anchored-call, and transaction consumers were inspected | Deleting an uninspected unique field could remove causal/recovery information | Inventory every implementation; move any unique fact to its actual producer before deleting the callback. |
-| Complete Runtime states and audit facts fit current ceilings | Full checkpoint contexts and repeated originals may greatly exceed prior outcome-only frames | Supported Programs could fail admission | Measure representative maximum snapshots, local sharing, complete descriptors, and lifecycle/run bytes before implementation expansion; resolve overflow explicitly without omitted state or unreviewed limit increases. |
+| Complete Runtime states and audit facts fit current ceilings for intended workloads | Full checkpoint contexts and repeated originals may greatly exceed prior outcome-only frames | Actual commits could be rejected even when admission succeeded | Measure representative large snapshots, local sharing, complete descriptors, and actual history bytes before implementation expansion; resolve unacceptable sizes explicitly without omitted state or unreviewed limit increases. |
 | Direct state restoration and adjacent checks simplify implementation at acceptable cost | The complete persisted shape and verification cost have not been measured | Serialization/checking could add complexity or excessive load cost despite removing reconstruction | Review the concrete deletion/replacement diff and measure maximum-history verification; no constant-time or fixed LOC claim. |
 | A live ownership change is useful and compatible, if proposed | Consuming generic inputs and custom value semantics need checking | Added Clone bounds could exclude valid inputs or conceal mutation | Do not require the change for this RFC; separately compile consumers and test retained-original semantics without weakening candidate validation. |
 | Reviewed external capture covers exposed evidence | Clients may hide attempts or only expose opaque sources | Some causal detail remains unavailable | Inject distinguishable nested causes at each owner and assert explicit omissions; never fabricate hidden evidence. |
 
-No fixed LOC forecast or claim of a closed architecture is made while the reentry contract remains
+No fixed LOC forecast or claim of a closed architecture is made while the semantic reentry contract remains
 unsettled. Resolve affected architecture choices through the repository's architect rule before
 implementation; difficulty is not permission to recreate the rejected machinery.
