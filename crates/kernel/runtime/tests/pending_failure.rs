@@ -57,14 +57,6 @@ impl State for Execute {
     }
 }
 impl EffectState<Submit> for Execute {
-    type AdapterContext = Number;
-    fn adapter_context(
-        input: &Number,
-        _: &Number,
-        _: &Cause,
-    ) -> std::result::Result<Number, StateExecutionError> {
-        Ok(Number { value: input.value })
-    }
     fn prepare(input: &Number) -> std::result::Result<Number, PreparationError> {
         Ok(Number { value: input.value })
     }
@@ -98,10 +90,10 @@ impl Handler for RetryUnknown {
     }
     fn handle(
         _: &NoParams,
-        incident: &IncidentSummary,
+        classification: Classification,
         _: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
-        assert_eq!(incident.classification, Classification::OutcomeUnknown);
+        assert_eq!(classification, Classification::OutcomeUnknown);
         Ok(RecoveryRequest::RetryState)
     }
 }

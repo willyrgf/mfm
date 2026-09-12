@@ -16,9 +16,9 @@ use mfm_journal::{
     EffectConclusion, EncodedRunFrame, JournalHistory, JournalObject, StoredRunBytes,
 };
 use mfm_program::{
-    expand_program, CapabilityInjection, EffectState, FromNever, Identity, Never, NoContext,
-    NoParams, Occurrence, Operation, OperationExpansion, PreparationError, ProgramError,
-    ProgramLimits, ProposedStateOutcome, PureState, ReadState, State,
+    expand_program, CapabilityInjection, EffectState, FromNever, Identity, Never, NoParams,
+    Occurrence, Operation, OperationExpansion, PreparationError, ProgramError, ProgramLimits,
+    ProposedStateOutcome, PureState, ReadState, State,
 };
 use mfm_program_derive::MfmValue;
 use mfm_runtime::{
@@ -294,14 +294,6 @@ impl State for Observe {
 }
 
 impl ReadState<Observation> for Observe {
-    type AdapterContext = NoContext;
-    fn adapter_context(
-        _: &Self::Input,
-        _: &Intent,
-        _: &OperationalFailure,
-    ) -> Result<NoContext, mfm_program::StateExecutionError> {
-        Ok(NoContext)
-    }
     fn prepare(input: &Self::Input) -> Result<Intent, PreparationError> {
         Ok(Intent { value: input.value })
     }
@@ -434,14 +426,6 @@ impl State for Mutate {
 }
 
 impl EffectState<Mutation> for Mutate {
-    type AdapterContext = NoContext;
-    fn adapter_context(
-        _: &Self::Input,
-        _: &Command,
-        _: &OperationalFailure,
-    ) -> Result<NoContext, mfm_program::StateExecutionError> {
-        Ok(NoContext)
-    }
     fn prepare(input: &Self::Input) -> Result<Command, PreparationError> {
         if input.value == PREPARATION_FAILURE_SENTINEL {
             return Err(PreparationError);

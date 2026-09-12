@@ -1,16 +1,18 @@
 # Persisted and public surfaces
 
-Program v7 is one strict checked canonical document requiring `domain: "mfm.program.v7"`. It
+Program v8 is one strict checked canonical document requiring `domain: "mfm.program.v8"`. It
 contains the entry point, admitted-context contract and exact initial value ref, root success/failure
 contracts, and an ordered State sequence with selected recovery policies, maps, checkpoints, and
 finite semantic recovery allowances. There is no public wire DTO parallel to `Program`.
 
-Journal persists only canonical `mfm.run.frame.v4` frames. Genesis records the exact Program and C0.
-Later frames are a fused Pure conclusion, a fused Read intent/evidence/outcome conclusion, an Effect
-prepare, a pending operational failure, or settlement after its prepare/failure* prefix. Conclusions retain the execution position and visit,
-original domain failure or typed operational error/context, and the atomic recovery decision. A Stop
-also retains the mapped root failure when applicable. A prepare or pending failure may be the final record of a complete
-valid prefix. Pending failures retain position, original cause/context and Retry/Stop. Every referenced object appears exactly once in the frame-local sorted object closure.
+Journal persists only canonical `mfm.run.frame.v5` frames. Genesis records the exact Program and C0.
+Later frames are a fused Pure conclusion, a fused Read conclusion, an Effect prepare, a pending
+operational failure, or settlement after its prepare/failure* prefix. Conclusions retain position,
+visit, original cause and the atomic recovery decision. Read operational failures retain the complete
+executed input and exact intent. Pending failures retain the complete input, with command and EffectId
+owned by the governing prepare. A domain Stop also retains its mapped root failure. A prepare or
+pending failure may end a valid prefix. Each referenced object appears exactly once in the sorted
+frame-local object closure.
 Recursive heads use `content:sha256-v1` over exact canonical frame bytes.
 
 `EncodedRunFrame` is sealed and exposes Store's read-only run/sequence/predecessor/head/byte
@@ -58,13 +60,16 @@ RunId, terminal head, and exact output ref. Application verifies that linkage be
 The exact Program and C0 remain the durable execution admission; RunIndex remains mechanical.
 
 Public `RunView` contains RunId, durable sequence/head, and one of `Runnable`, `EffectPending`,
-`Succeeded`, or `Failed`. Runnable retains position and Advance/Retry/Restart reason; a pending
-Effect retains position, EffectId and latest_failure (original error/context and committed decision). Success exposes the output contract ref, instance ref, and exact
-canonical bytes. Failure exposes the content ref and canonical FailureReport, including the original
-failure or operational error/context, Stop reason, position, and recovery usage.
+`Succeeded`, or `Failed`. Runnable retains position and Advance/Retry/Restart reason. Pending Effect
+views retain position, EffectId and `latest_failure`: the original error, complete input, command,
+EffectId and committed decision. Success exposes output contract/ref and exact canonical bytes.
+Failure exposes the content ref and canonical `mfm.failure-report.v3` report, including the original
+domain failure and mapped root, or the original Read error with complete input and intent, plus Stop
+reason, position and recovery usage. Adapter causes identify their `mode` as `read` or `effect`.
 Client JSON preserves that sum and embeds retained canonical bytes as raw JSON values.
 An invocation failure is separate from durable run failure: execution errors retain the last observed
-view when available, while pending recovery errors retain the observed view and typed error/context.
+view when available; pending recovery errors retain the observed view, original error, complete input,
+command and EffectId.
 
 Signing public keys, digests, compact signatures, recovery IDs, private scalars, owner channels,
 and signer handles are transient and have no persisted serde surface. EVM binds durable authority

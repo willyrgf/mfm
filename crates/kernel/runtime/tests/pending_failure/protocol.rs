@@ -34,14 +34,6 @@ impl EffectCapabilityContract for QualifiedSubmit {
     }
 }
 impl EffectState<QualifiedSubmit> for Execute {
-    type AdapterContext = Number;
-    fn adapter_context(
-        input: &Number,
-        _: &Number,
-        _: &NonAcceptance,
-    ) -> std::result::Result<Number, StateExecutionError> {
-        Ok(Number { value: input.value })
-    }
     fn prepare(input: &Number) -> std::result::Result<Number, PreparationError> {
         Ok(Number { value: input.value })
     }
@@ -75,11 +67,11 @@ impl Handler for CountedStandard {
     }
     fn handle(
         params: &NoParams,
-        summary: &IncidentSummary,
+        classification: Classification,
         context: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
         POLICY_CALLS.fetch_add(1, Ordering::SeqCst);
-        StandardRecovery::handle(params, summary, context)
+        StandardRecovery::handle(params, classification, context)
     }
 }
 struct ProtocolFlow;
@@ -167,7 +159,7 @@ async fn qualified_nonacceptance_retries_and_cold_history_never_reclassifies() {
     };
     assert_eq!(failure.decision, PendingDecision::Retry);
     assert!(matches!(
-        failure.incident.error.decode::<NonAcceptance>().unwrap(),
+        failure.incident.error().decode::<NonAcceptance>().unwrap(),
         NonAcceptance::ServerTimeoutBeforeAcceptance { request_id: 17 }
     ));
     let cold = Runtime::new(build(), store);

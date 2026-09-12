@@ -1,3 +1,4 @@
+use mfm_program::ClassifyError;
 mod fold;
 use fold::{Cursor, FoldState};
 use std::sync::Arc;
@@ -355,7 +356,7 @@ fn decide(
     accumulator: &Accumulator,
     position: ExecutionPosition,
     phase: mfm_program::ExecutionPhase,
-    incident: crate::assembly::recovery::QualifiedIncident<'_>,
+    classification: mfm_program::Classification,
 ) -> Result<mfm_journal::RecoveryDecision> {
     use mfm_journal::{RecoveryDecision, StopCode};
     use mfm_program::{RecoveryAllowances, RecoveryContext, RecoveryRequest};
@@ -397,7 +398,7 @@ fn decide(
     );
     let request = accumulator.executable.declarations[position.state.index()]
         .recovery
-        .request(incident, &context)?;
+        .request(classification, &context)?;
     let decision = match request {
         RecoveryRequest::Stop => RecoveryDecision::Stop {
             reason: StopCode::Requested,
@@ -420,7 +421,7 @@ fn decide(
     )
 }
 
-fn conclude<O: MfmValue, F: MfmValue>(
+fn conclude<O: MfmValue, F: ClassifyError>(
     accumulator: &Accumulator,
     position: ExecutionPosition,
     phase: mfm_program::ExecutionPhase,
@@ -434,8 +435,12 @@ fn conclude<O: MfmValue, F: MfmValue>(
         ProposedStateOutcome::Failure { failure } => {
             let original = qualify_hot(failure).map_err(RuntimeError::from)?;
             let selected = &accumulator.executable.declarations[position.state.index()];
-            let incident = crate::assembly::recovery::QualifiedIncident::Domain(&original);
-            let decision = decide(accumulator, position, phase, incident)?;
+            let classification = original
+                .typed
+                .downcast_ref::<F>()
+                .ok_or(RuntimeError::Internal)?
+                .classify();
+            let decision = decide(accumulator, position, phase, classification)?;
             let decision = match decision {
                 RecoveryDecision::Retry => DomainDecision::Retry,
                 RecoveryDecision::Restart { checkpoint } => DomainDecision::Restart { checkpoint },
@@ -502,7 +507,10 @@ pub(crate) async fn start_pure<S: PureState>(
 pub(crate) async fn start_read<S: ReadState<C>, C: ReadCapabilityContract>(
     context: DriverContext<'_>,
     adapter: Arc<ErasedReadAdapterCallback>,
-) -> Result<DriverDisposition> {
+) -> Result<DriverDisposition>
+where
+    C::OperationalError: ClassifyError,
+{
     let DriverContext { store, accumulator } = context;
     let (accumulator, position, input, intent) = run_blocking(move || {
         let (position, input) = current(&accumulator)?;
@@ -555,17 +563,16 @@ pub(crate) async fn start_read<S: ReadState<C>, C: ReadCapabilityContract>(
             }
             Err(AdapterError::Operational(qualify)) => {
                 let error = qualify().map_err(RuntimeError::from)?;
-                let ExecutableMode::Read { incident, .. } =
-                    &accumulator.executable.declarations[position.state.index()].mode
-                else {
-                    return Err(RuntimeError::Internal);
-                };
-                let state_context = (incident.context)(&input, &intent, &error)?;
+                let classification = error
+                    .typed
+                    .downcast_ref::<C::OperationalError>()
+                    .ok_or(RuntimeError::Internal)?
+                    .classify();
                 let decision = decide(
                     &accumulator,
                     position,
                     mfm_program::ExecutionPhase::Read,
-                    crate::assembly::recovery::QualifiedIncident::Adapter { original: &error },
+                    classification,
                 )?;
                 accumulator
                     .history
@@ -574,7 +581,7 @@ pub(crate) async fn start_read<S: ReadState<C>, C: ReadCapabilityContract>(
                         object(&intent)?,
                         mfm_journal::ReadConclusion::AdapterFailed {
                             error: object(&error)?,
-                            state_context: object(&state_context)?,
+                            input: object(&input)?,
                             decision,
                         },
                     )
@@ -623,7 +630,10 @@ pub(crate) async fn start_effect<S: EffectState<C>, C: EffectCapabilityContract>
 pub(crate) async fn start_pending_effect<S: EffectState<C>, C: EffectCapabilityContract>(
     context: DriverContext<'_>,
     adapter: Arc<ErasedEffectAdapterCallback>,
-) -> Result<DriverDisposition> {
+) -> Result<DriverDisposition>
+where
+    C::OperationalError: ClassifyError,
+{
     let DriverContext { store, accumulator } = context;
     let Cursor::EffectPending {
         position,
@@ -649,17 +659,16 @@ pub(crate) async fn start_pending_effect<S: EffectState<C>, C: EffectCapabilityC
         Err(AdapterError::Operational(qualify)) => {
             let prepared = run_blocking(move || {
                 let error = qualify().map_err(RuntimeError::from)?;
-                let ExecutableMode::Effect { incident, .. } =
-                    &accumulator.executable.declarations[position.state.index()].mode
-                else {
-                    return Err(RuntimeError::Internal);
-                };
-                let state_context = (incident.context)(&input, &command, &error)?;
+                let classification = error
+                    .typed
+                    .downcast_ref::<C::OperationalError>()
+                    .ok_or(RuntimeError::Internal)?
+                    .classify();
                 let decision = decide(
                     &accumulator,
                     position,
                     mfm_program::ExecutionPhase::EffectPending,
-                    crate::assembly::recovery::QualifiedIncident::Adapter { original: &error },
+                    classification,
                 )?;
                 let decision = match decision {
                     mfm_journal::RecoveryDecision::Retry => mfm_journal::PendingDecision::Retry,
@@ -672,12 +681,7 @@ pub(crate) async fn start_pending_effect<S: EffectState<C>, C: EffectCapabilityC
                 };
                 let frame = accumulator
                     .history
-                    .encode_effect_failure(
-                        position,
-                        object(&error)?,
-                        object(&state_context)?,
-                        decision,
-                    )
+                    .encode_effect_failure(position, object(&error)?, object(&input)?, decision)
                     .map_err(map_local_journal_error)?;
                 prepare_append(accumulator, frame)
             })
@@ -778,6 +782,9 @@ async fn finish_append(
                 if pending_failure {
                     let Cursor::EffectPending {
                         latest_failure: Some(failure),
+                        input,
+                        command,
+                        effect_id,
                         ..
                     } = &accumulator.state.cursor
                     else {
@@ -788,9 +795,11 @@ async fn finish_append(
                             Ok(DriverDisposition::Yield(accumulator))
                         }
                         mfm_journal::PendingDecision::Stop { reason } => {
-                            let incident = Box::new(crate::AdapterIncidentView {
+                            let incident = Box::new(crate::AdapterIncidentView::Effect {
                                 error: retained_view(&failure.original),
-                                state_context: retained_view(&failure.context),
+                                input: retained_view(input),
+                                command: retained_view(command),
+                                effect_id: effect_id.clone(),
                             });
                             Ok(DriverDisposition::Stopped {
                                 accumulator,
@@ -941,15 +950,19 @@ fn view(accumulator: &Accumulator) -> Result<RunView> {
             position,
             effect_id,
             latest_failure,
+            input,
+            command,
             ..
         } => RunViewState::EffectPending {
             position: *position,
             effect_id: effect_id.clone(),
             latest_failure: latest_failure.as_ref().map(|failure| {
                 Box::new(crate::PendingFailureView {
-                    incident: crate::AdapterIncidentView {
+                    incident: crate::AdapterIncidentView::Effect {
                         error: retained_view(&failure.original),
-                        state_context: retained_view(&failure.context),
+                        input: retained_view(input),
+                        command: retained_view(command),
+                        effect_id: effect_id.clone(),
                     },
                     decision: failure.decision,
                 })
@@ -976,12 +989,15 @@ fn failure_report(state: &FoldState, failure: &fold::Failure) -> Result<crate::F
             original: retained_view(original),
             root: retained_view(root),
         },
-        fold::FailureCause::Adapter { error, context } => {
-            crate::FailureCauseView::Adapter(crate::AdapterIncidentView {
-                error: retained_view(error),
-                state_context: retained_view(context),
-            })
-        }
+        fold::FailureCause::Adapter {
+            error,
+            input,
+            intent,
+        } => crate::FailureCauseView::Adapter(crate::AdapterIncidentView::Read {
+            error: retained_view(error),
+            input: retained_view(input),
+            intent: retained_view(intent),
+        }),
     };
     crate::FailureReport::new(
         failure.position,

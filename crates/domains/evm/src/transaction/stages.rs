@@ -367,22 +367,6 @@ impl<C: MfmValueTrait, R: TransactionRecipe<C>> State for ProjectEvmTransactionO
 impl<C: MfmValueTrait, R: TransactionRecipe<C>> EffectState<EvmNonceReservationEffect>
     for ReserveEvmNonce<C, R>
 {
-    type AdapterContext = crate::EvmTransactionAdapterContext;
-    fn adapter_context(
-        input: &Self::Input,
-        command: &Eip1559TransactionCommand,
-        _: &crate::EvmTransactionOperationalError,
-    ) -> Result<Self::AdapterContext, StateExecutionError> {
-        if &<Self as EffectState<EvmNonceReservationEffect>>::prepare(input)
-            .map_err(|_| StateExecutionError)?
-            != command
-        {
-            return Err(StateExecutionError);
-        }
-        Ok(crate::EvmTransactionAdapterContext::Reservation {
-            binding: command.binding().clone(),
-        })
-    }
     fn prepare(input: &C) -> Result<Eip1559TransactionCommand, PreparationError> {
         let command = R::command(input);
         if !R::Success::accepts(&command) {
@@ -414,22 +398,6 @@ where
         With<PreparedTransactionFacts> = PreparedContext<C, R>,
     >,
 {
-    type AdapterContext = crate::EvmTransactionAdapterContext;
-    fn adapter_context(
-        input: &Self::Input,
-        command: &ReservedEvmTransaction,
-        _: &crate::EvmTransactionOperationalError,
-    ) -> Result<Self::AdapterContext, StateExecutionError> {
-        if &<Self as EffectState<EvmTransactionPreparationEffect>>::prepare(input)
-            .map_err(|_| StateExecutionError)?
-            != command
-        {
-            return Err(StateExecutionError);
-        }
-        Ok(crate::EvmTransactionAdapterContext::Preparation {
-            reservation: command.reservation().clone(),
-        })
-    }
     fn prepare(input: &Self::Input) -> Result<ReservedEvmTransaction, PreparationError> {
         Ok(<R::Slot as ContextSlot<Self::Input>>::get(input).clone())
     }
@@ -455,23 +423,6 @@ where
         With<ExecutedTransactionFacts> = ExecutedContext<C, R>,
     >,
 {
-    type AdapterContext = crate::EvmTransactionAdapterContext;
-    fn adapter_context(
-        input: &Self::Input,
-        command: &PreparedEvmTransaction,
-        _: &crate::EvmTransactionOperationalError,
-    ) -> Result<Self::AdapterContext, StateExecutionError> {
-        if &<Self as EffectState<EvmTransactionEffect>>::prepare(input)
-            .map_err(|_| StateExecutionError)?
-            != command
-        {
-            return Err(StateExecutionError);
-        }
-        Ok(crate::EvmTransactionAdapterContext::Execution {
-            reservation: command.reserved().reservation().clone(),
-            transaction_hash: command.transaction_hash().clone(),
-        })
-    }
     fn prepare(input: &Self::Input) -> Result<PreparedEvmTransaction, PreparationError> {
         Ok(<R::Slot as ContextSlot<Self::Input>>::get(input).execution_command())
     }

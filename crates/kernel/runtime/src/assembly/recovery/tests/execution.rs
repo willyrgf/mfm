@@ -123,17 +123,10 @@ async fn committed_read_recovery_yields_and_reconstructs_without_provider_calls(
             }
             (true, FailureCauseView::Adapter(incident)) => {
                 assert!(matches!(
-                    incident.error.decode::<ProviderError>().unwrap(),
+                    incident.error().decode::<ProviderError>().unwrap(),
                     ProviderError::Unavailable
                 ));
-                assert_eq!(
-                    incident
-                        .state_context
-                        .decode::<EvmContext>()
-                        .unwrap()
-                        .source,
-                    7
-                );
+                assert_eq!(incident.input().decode::<Offset>().unwrap().value, 7);
             }
             _ => panic!("cause alternative changed"),
         }
@@ -180,18 +173,8 @@ impl mfm_capabilities::EffectCapabilityContract for Settlement {
     }
 }
 impl mfm_program::EffectState<Settlement> for EvmSettlement {
-    type AdapterContext = EvmContext;
     fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_program::PreparationError> {
         Ok(Offset { value: input.value })
-    }
-    fn adapter_context(
-        input: &Offset,
-        _: &Offset,
-        _: &ProviderError,
-    ) -> std::result::Result<EvmContext, StateExecutionError> {
-        Ok(EvmContext {
-            source: input.value,
-        })
     }
     fn interpret(
         input: Offset,
@@ -302,16 +285,9 @@ async fn stopped_pending_effect_retains_exact_authority_until_explicit_settlemen
             reason,
         }) => {
             assert_eq!(reason, StopReason::Requested);
-            assert_eq!(
-                incident
-                    .state_context
-                    .decode::<EvmContext>()
-                    .unwrap()
-                    .source,
-                9
-            );
+            assert_eq!(incident.input().decode::<Offset>().unwrap().value, 9);
             assert!(matches!(
-                incident.error.decode::<ProviderError>().unwrap(),
+                incident.error().decode::<ProviderError>().unwrap(),
                 ProviderError::Unavailable
             ));
             observed
@@ -356,7 +332,6 @@ impl mfm_capabilities::ReadCapabilityContract for InjectedObservation {
     }
 }
 impl mfm_program::ReadState<InjectedObservation> for EvmRead {
-    type AdapterContext = EvmContext;
     fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_program::PreparationError> {
         <Self as mfm_program::ReadState<Observation>>::prepare(input)
     }
@@ -368,13 +343,6 @@ impl mfm_program::ReadState<InjectedObservation> for EvmRead {
         StateExecutionError,
     > {
         <Self as mfm_program::ReadState<Observation>>::interpret(input, evidence)
-    }
-    fn adapter_context(
-        input: &Offset,
-        intent: &Offset,
-        error: &ProviderError,
-    ) -> std::result::Result<EvmContext, StateExecutionError> {
-        <Self as mfm_program::ReadState<Observation>>::adapter_context(input, intent, error)
     }
 }
 impl mfm_program::CapabilityInjection<EvmRead> for InjectedObservation {
@@ -413,7 +381,7 @@ impl Handler for RestartFirst {
     }
     fn handle(
         _: &NoParams,
-        _: &IncidentSummary,
+        _: Classification,
         context: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
         Ok(context

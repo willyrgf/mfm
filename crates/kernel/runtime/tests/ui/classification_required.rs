@@ -26,14 +26,6 @@ impl State for Read {
     }
 }
 impl ReadState<Observation> for Read {
-    type AdapterContext = NoContext;
-    fn adapter_context(
-        _: &NoParams,
-        _: &NoParams,
-        _: &NoParams,
-    ) -> std::result::Result<NoContext, StateExecutionError> {
-        Ok(NoContext)
-    }
     fn prepare(_: &NoParams) -> std::result::Result<NoParams, PreparationError> {
         Ok(NoParams)
     }

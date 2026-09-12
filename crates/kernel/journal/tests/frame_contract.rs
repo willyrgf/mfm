@@ -87,7 +87,7 @@ fn retarget_frame(bytes: &[u8], run_sequence: u64, previous_head: &ContentDigest
 }
 
 #[test]
-fn effect_sequence_has_provisional_v4_wires_and_recursive_sha256_v1_heads() {
+fn effect_sequence_has_provisional_v5_wires_and_recursive_sha256_v1_heads() {
     let program = br#"{"program":1}"#;
     let context = br#"{"context":2}"#;
     let run = run(1);
@@ -96,7 +96,7 @@ fn effect_sequence_has_provisional_v4_wires_and_recursive_sha256_v1_heads() {
     let genesis = EncodedRunFrame::admission(&run, &program_ref, program, &context_ref, context)
         .expect("genesis");
     let expected = json!({
-        "domain": "mfm.run.frame.v4",
+        "domain": "mfm.run.frame.v5",
         "objects": sorted_objects(vec![
             object_wire(&program_ref, program),
             object_wire(&context_ref, context),
@@ -132,7 +132,7 @@ fn effect_sequence_has_provisional_v4_wires_and_recursive_sha256_v1_heads() {
         )
         .expect("prepare");
     let expected = json!({
-        "domain": "mfm.run.frame.v4",
+        "domain": "mfm.run.frame.v5",
         "objects": [object_wire(&command_ref, command)],
         "previous_head_digest": history.head_digest(),
         "record": {
@@ -170,7 +170,7 @@ fn effect_sequence_has_provisional_v4_wires_and_recursive_sha256_v1_heads() {
         )
         .expect("conclusion");
     let expected = json!({
-        "domain": "mfm.run.frame.v4",
+        "domain": "mfm.run.frame.v5",
         "objects": sorted_objects(vec![
             object_wire(&evidence_ref, evidence),
             object_wire(&outcome_ref, outcome),
@@ -600,7 +600,7 @@ fn strict_wire_and_frame_local_closure_reject_hostile_inputs() {
     mutations.push(
         text.replacen(
             "{\"domain\":",
-            "{\"domain\":\"mfm.run.frame.v4\",\"domain\":",
+            "{\"domain\":\"mfm.run.frame.v5\",\"domain\":",
             1,
         )
         .into_bytes(),
@@ -825,7 +825,7 @@ fn recovery_conclusions_preserve_causes_and_decisions_hot_and_cold() {
             root,
             ReadConclusion::AdapterFailed {
                 error: cause,
-                state_context: root,
+                input: root,
                 decision: RecoveryDecision::Stop {
                     reason: StopCode::Requested,
                 },
@@ -843,7 +843,7 @@ fn recovery_conclusions_preserve_causes_and_decisions_hot_and_cold() {
             outcome:
                 ReadConclusion::AdapterFailed {
                     error,
-                    state_context,
+                    input,
                     decision:
                         RecoveryDecision::Stop {
                             reason: StopCode::Requested,
@@ -855,7 +855,7 @@ fn recovery_conclusions_preserve_causes_and_decisions_hot_and_cold() {
             panic!("operational stop")
         };
         assert_eq!(error.canonical_bytes(), b"1");
-        assert_eq!(state_context.canonical_bytes(), b"2");
+        assert_eq!(input.canonical_bytes(), b"2");
     }
     wire["record"]["outcome"]["decision"]["root"] = json!(root_ref);
     *bytes.last_mut().unwrap() = canonical(&wire);
@@ -914,8 +914,8 @@ fn pending_effect_failures_preserve_complete_prefixes_and_end_at_settlement() {
         assert_eq!(cold.head_digest(), history.head_digest());
         assert!(
             matches!(cold.records().last(), Some(JournalRecord::EffectAdapterFailed {
-            position: recorded, decision: retained, original, state_context,
-        }) if recorded == position() && retained == decision && original == failure && state_context == object)
+            position: recorded, decision: retained, original, input,
+        }) if recorded == position() && retained == decision && original == failure && input == object)
         );
         assert!(history
             .encode_pure_conclusion(position(), DomainConclusion::Success { output: object })

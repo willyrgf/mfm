@@ -10,7 +10,7 @@ impl Handler for Stop {
     }
     fn handle(
         _: &NoParams,
-        _: &IncidentSummary,
+        _: Classification,
         _: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
         Ok(RecoveryRequest::Stop)
@@ -27,10 +27,10 @@ impl Handler for StandardRecovery {
     }
     fn handle(
         _: &NoParams,
-        incident: &IncidentSummary,
+        classification: Classification,
         context: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
-        Ok(match (incident.classification, context.phase()) {
+        Ok(match (classification, context.phase()) {
             (Classification::Retryable, ExecutionPhase::Read | ExecutionPhase::EffectPending) => {
                 RecoveryRequest::RetryState
             }

@@ -39,7 +39,6 @@ pub(super) enum Cursor {
 
 pub(super) struct PendingFailure {
     pub(super) original: Arc<QualifiedValue>,
-    pub(super) context: Arc<QualifiedValue>,
     pub(super) decision: PendingDecision,
 }
 
@@ -56,7 +55,8 @@ pub(super) enum FailureCause {
     },
     Adapter {
         error: Arc<QualifiedValue>,
-        context: Arc<QualifiedValue>,
+        input: Arc<QualifiedValue>,
+        intent: Arc<QualifiedValue>,
     },
 }
 
@@ -443,7 +443,7 @@ impl FoldState {
                     intent_codec,
                     evidence_codec,
                     validate_retained,
-                    incident,
+                    error_codec,
                     ..
                 } = &executable.declarations[position.state.index()].mode
                 else {
@@ -459,20 +459,23 @@ impl FoldState {
                     }
                     ReadConclusion::AdapterFailed {
                         error,
-                        state_context,
+                        input: recorded_input,
                         decision,
                     } => {
-                        let error = Arc::new(qualify_journal_object(&incident.error_codec, error)?);
-                        let context = Arc::new(qualify_journal_object(
-                            &incident.context_codec,
-                            state_context,
-                        )?);
+                        let error = Arc::new(qualify_journal_object(error_codec, error)?);
+                        if recorded_input.content_ref() != &input.value_ref {
+                            return Err(RuntimeError::InvalidHistory);
+                        }
                         match decision {
                             RecoveryDecision::Stop { reason } => self.stop(
                                 executable,
                                 recorded,
                                 reason,
-                                FailureCause::Adapter { error, context },
+                                FailureCause::Adapter {
+                                    error,
+                                    input,
+                                    intent: Arc::new(intent),
+                                },
                             ),
                             decision => self.recover(executable, recorded, input, decision),
                         }
@@ -515,24 +518,25 @@ impl FoldState {
                 Ok(())
             }
             (
-                Cursor::EffectPending { position, .. },
+                Cursor::EffectPending {
+                    position, input, ..
+                },
                 JournalRecord::EffectAdapterFailed {
                     position: recorded,
                     original,
-                    state_context,
+                    input: recorded_input,
                     decision,
                 },
             ) if *position == recorded => {
-                let ExecutableMode::Effect { incident, .. } =
+                let ExecutableMode::Effect { error_codec, .. } =
                     &executable.declarations[position.state.index()].mode
                 else {
                     return Err(RuntimeError::InvalidHistory);
                 };
-                let original = Arc::new(qualify_journal_object(&incident.error_codec, original)?);
-                let context = Arc::new(qualify_journal_object(
-                    &incident.context_codec,
-                    state_context,
-                )?);
+                let original = Arc::new(qualify_journal_object(error_codec, original)?);
+                if recorded_input.content_ref() != &input.value_ref {
+                    return Err(RuntimeError::InvalidHistory);
+                }
                 match decision {
                     PendingDecision::Retry => {
                         if self
@@ -563,11 +567,7 @@ impl FoldState {
                 let Cursor::EffectPending { latest_failure, .. } = &mut self.cursor else {
                     return Err(RuntimeError::InvalidHistory);
                 };
-                *latest_failure = Some(PendingFailure {
-                    original,
-                    context,
-                    decision,
-                });
+                *latest_failure = Some(PendingFailure { original, decision });
                 Ok(())
             }
             (

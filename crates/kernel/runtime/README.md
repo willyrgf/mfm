@@ -13,13 +13,13 @@ commitment before genesis or provider entry; actual candidates and Store appends
 
 `start` admits and progresses, `resume` explicitly progresses an existing run, and `read`
 reconstructs without progression. Pure/Read outcomes and recovery decisions append atomically.
-Operational Read errors retain their original capability error and State-owned context without
+Operational Read errors retain their original capability error and complete executed input without
 fabricating evidence or domain failure. Accepted retry/restart spends the committed allowance and
 yields at a fresh visit. Handling, root mapping or validation failure before append
 leaves the previous head unchanged.
 
 An Effect appends its complete command before adapter entry. A pending response yields the same
-EffectId and visit without a record. Operational failure appends original error, State context and
+EffectId and visit without a record. Operational failure appends original error, complete executed input and
 Retry/Stop before acknowledgement. Retry spends allowance and yields with the same command; Stop
 returns `InvocationFailure::RecoveryStopped`. There is no separate pending-failure quota.
 Cold `EffectPending` views expose `latest_failure`, including its committed decision. Explicit
@@ -34,8 +34,8 @@ executing its newly selected visit. Ambiguous acknowledgement preserves the Stor
 last observed qualified head; that observation does not assert the current state. Cancellation
 before append spends no recovery allowance and there is no background completion or retry loop.
 
-Cold reconstruction never reruns completed State interpretations, classifiers, handlers, context
-builders or maps, and performs no provider/signer IO. It re-prepares only the final unresolved
+Cold reconstruction never reruns completed State interpretations, classifiers, handlers or maps,
+and performs no provider/signer IO. It re-prepares only the final unresolved
 Effect to qualify its exact retained command before reconciliation. Completed outcomes and policy
 decisions are authoritative retained facts, subject to structural and Runtime safety qualification.
 

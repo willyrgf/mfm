@@ -31,14 +31,6 @@ impl State for Execute {
     }
 }
 impl EffectState<Submission> for Execute {
-    type AdapterContext = NoContext;
-    fn adapter_context(
-        _: &NoParams,
-        _: &NoParams,
-        _: &EvmTransactionOperationalError,
-    ) -> std::result::Result<NoContext, StateExecutionError> {
-        Ok(NoContext)
-    }
     fn prepare(_: &NoParams) -> std::result::Result<NoParams, PreparationError> {
         Ok(NoParams)
     }
@@ -149,12 +141,28 @@ async fn pending_json_retains_the_committed_original_cause_and_decision() {
     };
     assert_eq!(
         model["state"]["latest_failure"]["error"]["value_ref"],
-        serde_json::to_value(failure.incident.error.value_ref()).unwrap()
+        serde_json::to_value(failure.incident.error().value_ref()).unwrap()
     );
     assert_eq!(
-        model["state"]["latest_failure"]["state_context"]["value_ref"],
-        serde_json::to_value(failure.incident.state_context.value_ref()).unwrap()
+        model["state"]["latest_failure"]["input"]["value_ref"],
+        serde_json::to_value(failure.incident.input().value_ref()).unwrap()
     );
+    assert_eq!(model["state"]["latest_failure"]["mode"], "effect");
+    assert_eq!(
+        model["state"]["latest_failure"]["input"]["value"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        model["state"]["latest_failure"]["command"]["value"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        model["state"]["latest_failure"]["effect_id"],
+        model["state"]["effect_id"]
+    );
+    assert!(model["state"]["latest_failure"]
+        .get("state_context")
+        .is_none());
     let cold = runtime.read(&run).await.unwrap();
     assert_eq!(
         serde_json::to_value(mfm_app::SerializableRunView::new(&cold)).unwrap(),

@@ -1,3 +1,7 @@
+#[derive(Debug, serde::Serialize, serde::Deserialize, mfm_program_derive::MfmValue)]
+#[serde(deny_unknown_fields)]
+struct TestError {}
+
 use crate::*;
 use mfm_program_derive::MfmValue;
 
@@ -90,7 +94,7 @@ fn emitted_linear_program_binds_recovery_and_relocates_inherited_checkpoints() {
     let cold = Program::decode_canonical(program.canonical_bytes()).unwrap();
     assert_eq!(cold, program);
     let wire: serde_json::Value = serde_json::from_slice(program.canonical_bytes()).unwrap();
-    assert_eq!(wire["domain"], "mfm.program.v7");
+    assert_eq!(wire["domain"], "mfm.program.v8");
     assert_eq!(
         wire["declarations"][0]["execution"],
         serde_json::json!({"kind": "pure"})
@@ -169,7 +173,7 @@ struct Effect;
 impl EffectCapabilityContract for Effect {
     type Command = Value;
     type Evidence = Value;
-    type OperationalError = NoContext;
+    type OperationalError = TestError;
     fn contract_id() -> mfm_capabilities::Result<StableId> {
         StableId::new("mfm.test.effect@1")
             .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
@@ -179,14 +183,6 @@ impl EffectCapabilityContract for Effect {
     }
 }
 impl EffectState<Effect> for Pass {
-    type AdapterContext = NoContext;
-    fn adapter_context(
-        _: &Value,
-        _: &Value,
-        _: &NoContext,
-    ) -> std::result::Result<NoContext, StateExecutionError> {
-        Ok(NoContext)
-    }
     fn prepare(input: &Value) -> std::result::Result<Value, PreparationError> {
         Ok(Value {
             number: input.number,
@@ -272,7 +268,7 @@ fn capability_identity_distinguishes_operational_contracts_and_modes() {
             Ok(())
         }
     }
-    let first = capability_contract_ref::<Observation<NoContext>>().unwrap();
+    let first = capability_contract_ref::<Observation<TestError>>().unwrap();
     let changed_error = capability_contract_ref::<Observation<Value>>().unwrap();
     let effect = effect_capability_contract_ref::<Effect>().unwrap();
     assert_ne!(first, changed_error);
@@ -335,7 +331,7 @@ fn root_planning_checks_input_agreement_and_commits_exact_initial_value() {
 #[path = "tests/depth.rs"]
 mod depth;
 
-impl ClassifyError for NoContext {
+impl ClassifyError for TestError {
     fn classify(&self) -> Classification {
         Classification::Permanent
     }
@@ -387,16 +383,12 @@ fn standard_recovery_uses_phase_and_exactly_one_declared_eligible_target() {
                     }
                     _ => RecoveryRequest::Stop,
                 };
-                let incident = IncidentSummary {
-                    source: IncidentSource::Adapter,
-                    classification,
-                };
                 assert_eq!(
-                    StandardRecovery::handle(&NoParams, &incident, &context).unwrap(),
+                    StandardRecovery::handle(&NoParams, classification, &context).unwrap(),
                     expected
                 );
                 assert_eq!(
-                    Stop::handle(&NoParams, &incident, &context).unwrap(),
+                    Stop::handle(&NoParams, classification, &context).unwrap(),
                     RecoveryRequest::Stop
                 );
             }
@@ -425,7 +417,7 @@ fn program_rejects_superseded_recovery_descriptors_and_wrong_handler_parameters(
             2 => wire["declarations"][0]["handler"]["abi"]["input"] = serde_json::json!({}),
             3 => {
                 wire["declarations"][0]["handler"]["params"] =
-                    serde_json::to_value(PolicyParams::new(&NoContext).unwrap()).unwrap()
+                    serde_json::to_value(PolicyParams::new(&TestError {}).unwrap()).unwrap()
             }
             _ => unreachable!(),
         }
@@ -448,7 +440,7 @@ fn nested_handler_replacement_keeps_parameters_targets_and_zero_allowances_scope
         }
         fn handle(
             _: &Value,
-            _: &IncidentSummary,
+            _: Classification,
             _: &RecoveryContext<'_>,
         ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
             Ok(RecoveryRequest::Stop)

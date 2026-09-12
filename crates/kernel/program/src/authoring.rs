@@ -167,7 +167,7 @@ impl<I: MfmValue, O: MfmValue, F: MfmValue> OperationExpansion<I, O, F> {
             intent_contract_ref: nominal_contract_ref::<C::Intent>()?,
             evidence_contract_ref: nominal_contract_ref::<C::Evidence>()?,
             error_contract_ref: nominal_contract_ref::<C::OperationalError>()?,
-            context_contract_ref: nominal_contract_ref::<S::AdapterContext>()?,
+
             binding_ref,
         };
         self.capability::<S, C, M>(
@@ -201,7 +201,7 @@ impl<I: MfmValue, O: MfmValue, F: MfmValue> OperationExpansion<I, O, F> {
             command_contract_ref: nominal_contract_ref::<C::Command>()?,
             evidence_contract_ref: nominal_contract_ref::<C::Evidence>()?,
             error_contract_ref: nominal_contract_ref::<C::OperationalError>()?,
-            context_contract_ref: nominal_contract_ref::<S::AdapterContext>()?,
+
             binding_ref,
         };
         self.capability::<S, C, M>(

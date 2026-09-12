@@ -714,7 +714,7 @@ async fn client_models_distinguish_durable_provider_failure_from_unknown_invocat
         }})
     );
     assert_eq!(
-        model["state"]["report"]["cause"]["state_context"]["canonical"]["source_ordinal"],
+        model["state"]["report"]["cause"]["input"]["canonical"]["metadata"]["collection_ordinal"],
         0
     );
     assert!(model["state"]["report"]["cause"].get("root").is_none());

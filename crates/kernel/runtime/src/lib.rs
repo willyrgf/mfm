@@ -138,7 +138,7 @@ pub enum EffectAdapterOutcome<E> {
 
 /// Latest audited pending-Effect failure, reconstructed without policy callbacks.
 pub struct PendingFailureView {
-    /// Original error and State-owned context.
+    /// Original error, complete input, and retained command facts.
     pub incident: AdapterIncidentView,
     /// Committed decision retaining command authority.
     pub decision: mfm_journal::PendingDecision,

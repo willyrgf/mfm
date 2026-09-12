@@ -39,24 +39,6 @@ impl ClassifyError for Never {
     }
 }
 
-/// Execution boundary that produced the original cause.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IncidentSource {
-    /// Deterministic State failure.
-    State,
-    /// Operational adapter failure.
-    Adapter,
-}
-
-/// Common handler input; original causes remain in the execution and reporting path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IncidentSummary {
-    /// Boundary that produced the cause.
-    pub source: IncidentSource,
-    /// Intrinsic semantics projected from that cause.
-    pub classification: Classification,
-}
-
 /// Authoritative execution phase supplied to policy callbacks by Runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionPhase {
@@ -257,7 +239,7 @@ pub trait Handler: Send + Sync + 'static {
     /// Proposes an action; Runtime validates it against phase and committed history.
     fn handle(
         params: &Self::Params,
-        incident: &IncidentSummary,
+        classification: Classification,
         context: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError>;
 }
@@ -309,48 +291,30 @@ impl<T: MfmValue> ValueMap for FromNever<T> {
     }
 }
 
-macro_rules! framework_unit {
-    ($name:ident, $label:literal, $doc:literal) => {
-        #[doc = $doc]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-        pub struct $name;
+/// Checked unit configuration for parameterless policies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NoParams;
 
-        impl MfmValue for $name {
-            fn semantic_id() -> mfm_values::Result<mfm_ids::SemanticTypeId> {
-                mfm_ids::SemanticTypeId::new(
-                    "mfm.kernel",
-                    $label,
-                    "1",
-                    mfm_ids::DigestAlgorithm::Sha256JcsV1,
-                    mfm_canonical::raw_content_digest(
-                        concat!("mfm.recovery.", $label, ".v1").as_bytes(),
-                    )
-                    .digest()
-                    .clone(),
-                )
-                .map_err(|_| mfm_values::ValueError::InvalidSchemaIdentity)
-            }
-
-            fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
-                mfm_values::framework_value_descriptor(
-                    "mfm-program",
-                    Self::semantic_id()?,
-                    concat!("mfm.kernel.", $label),
-                    mfm_values::SchemaShape::Unit,
-                    concat!("mfm_program::", stringify!($name)),
-                )
-            }
-        }
-    };
+impl MfmValue for NoParams {
+    fn semantic_id() -> mfm_values::Result<mfm_ids::SemanticTypeId> {
+        mfm_ids::SemanticTypeId::new(
+            "mfm.kernel",
+            "no-params",
+            "1",
+            mfm_ids::DigestAlgorithm::Sha256JcsV1,
+            mfm_canonical::raw_content_digest(b"mfm.recovery.no-params.v1")
+                .digest()
+                .clone(),
+        )
+        .map_err(|_| mfm_values::ValueError::InvalidSchemaIdentity)
+    }
+    fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+        mfm_values::framework_value_descriptor(
+            "mfm-program",
+            Self::semantic_id()?,
+            "mfm.kernel.no-params",
+            mfm_values::SchemaShape::Unit,
+            "mfm_program::NoParams",
+        )
+    }
 }
-
-framework_unit!(
-    NoParams,
-    "no-params",
-    "Checked unit configuration for parameterless policies."
-);
-framework_unit!(
-    NoContext,
-    "no-context",
-    "Checked unit context for Pure incidents."
-);

@@ -28,10 +28,9 @@ mod authoring;
 mod recovery;
 pub use recovery::{
     Checkpoint, Classification, ClassifyError, ExecutionPhase, FromNever, Handler, HandlerAbi,
-    HandlerBinding, Identity, IncidentSource, IncidentSummary, MapAbi, MapBinding, NoContext,
-    NoParams, Occurrence, PolicyParams, ProgramLimits, RecoveryAllowances, RecoveryContext,
-    RecoveryDenial, RecoveryLimit, RecoveryRequest, RecoveryTarget, RecoveryUsage,
-    StandardRecovery, Stop, StopReason, ValueMap,
+    HandlerBinding, Identity, MapAbi, MapBinding, NoParams, Occurrence, PolicyParams,
+    ProgramLimits, RecoveryAllowances, RecoveryContext, RecoveryDenial, RecoveryLimit,
+    RecoveryRequest, RecoveryTarget, RecoveryUsage, StandardRecovery, Stop, StopReason, ValueMap,
 };
 
 #[cfg(test)]
@@ -99,14 +98,6 @@ pub trait ReadState<C>: State
 where
     C: ReadCapabilityContract,
 {
-    /// Deterministic context for this State's operational adapter incidents.
-    type AdapterContext: MfmValue;
-    /// Explains a capability failure without replacing its original cause.
-    fn adapter_context(
-        input: &Self::Input,
-        intent: &C::Intent,
-        error: &C::OperationalError,
-    ) -> std::result::Result<Self::AdapterContext, StateExecutionError>;
     /// Prepares the exact adapter intent.
     fn prepare(input: &Self::Input) -> std::result::Result<C::Intent, PreparationError>;
 
@@ -122,14 +113,6 @@ pub trait EffectState<C>: State
 where
     C: EffectCapabilityContract,
 {
-    /// Deterministic context for unresolved Effect adapter incidents.
-    type AdapterContext: MfmValue;
-    /// Explains the retained command's adapter failure without settling the Effect.
-    fn adapter_context(
-        input: &Self::Input,
-        command: &C::Command,
-        error: &C::OperationalError,
-    ) -> std::result::Result<Self::AdapterContext, StateExecutionError>;
     /// Prepares the exact adapter command.
     fn prepare(input: &Self::Input) -> std::result::Result<C::Command, PreparationError>;
 

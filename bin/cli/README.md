@@ -109,7 +109,7 @@ uses `capacity_arithmetic_overflow` without fabricated measurements. CLI uses ex
 body limits do not impose a response-size limit.
 
 Pending Effect views include `latest_failure`: null before the first audited failure, otherwise
-`error`, `state_context` (qualified value objects) and `decision` (`{"kind":"retry"}` or
+`mode: "effect"`, qualified `error`, complete `input`, retained `command`, `effect_id`, and `decision` (`{"kind":"retry"}` or
 `{"kind":"stop","reason":"requested"}`, with other reviewed stop codes). Every acknowledged
 pending operational outcome advances the durable head. Retry preserves the command/EffectId and
 spends recovery allowance; Stop ends the invocation while explicit progress may resume it.

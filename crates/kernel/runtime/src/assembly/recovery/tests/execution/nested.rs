@@ -34,7 +34,7 @@ impl Handler for SelectRegion {
     }
     fn handle(
         initial: &Offset,
-        _: &IncidentSummary,
+        _: Classification,
         context: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
         let selected = (initial.value - u64::from(context.remaining().restarts()) + 1) % 2;

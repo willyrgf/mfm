@@ -19,14 +19,6 @@ impl PureState for FailureState {
     }
 }
 impl EffectState<Submit> for FailureState {
-    type AdapterContext = Number;
-    fn adapter_context(
-        input: &Number,
-        _: &Number,
-        _: &Cause,
-    ) -> std::result::Result<Number, StateExecutionError> {
-        Ok(Number { value: input.value })
-    }
     fn prepare(input: &Number) -> std::result::Result<Number, PreparationError> {
         Ok(Number { value: input.value })
     }
@@ -60,7 +52,7 @@ impl Handler for RestartDeclared {
     }
     fn handle(
         _: &NoParams,
-        _: &IncidentSummary,
+        _: Classification,
         context: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
         context

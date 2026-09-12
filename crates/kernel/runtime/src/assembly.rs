@@ -161,70 +161,7 @@ type ReadValidator = fn(&QualifiedValue, &QualifiedValue) -> Result<()>;
 type EffectPrepareValidator = fn(&QualifiedValue, &QualifiedValue) -> Result<()>;
 type EffectEvidenceValidator = fn(&EffectId, &QualifiedValue, &QualifiedValue) -> Result<()>;
 
-type AdapterContextCallback =
-    fn(&QualifiedValue, &QualifiedValue, &QualifiedValue) -> Result<QualifiedValue>;
-
-pub(crate) struct AdapterIncidentContract {
-    pub(crate) error_codec: Arc<ValueCodec>,
-    pub(crate) context_codec: Arc<ValueCodec>,
-    pub(crate) context: AdapterContextCallback,
-}
-
-impl AdapterIncidentContract {
-    fn matches(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.error_codec, &other.error_codec)
-            && Arc::ptr_eq(&self.context_codec, &other.context_codec)
-    }
-}
-
-fn read_context<S: ReadState<C>, C: ReadCapabilityContract>(
-    input: &QualifiedValue,
-    intent: &QualifiedValue,
-    error: &QualifiedValue,
-) -> Result<QualifiedValue> {
-    let context = S::adapter_context(
-        input
-            .typed
-            .downcast_ref::<S::Input>()
-            .ok_or(RuntimeError::Internal)?,
-        intent
-            .typed
-            .downcast_ref::<C::Intent>()
-            .ok_or(RuntimeError::Internal)?,
-        error
-            .typed
-            .downcast_ref::<C::OperationalError>()
-            .ok_or(RuntimeError::Internal)?,
-    )
-    .map_err(|_| RuntimeError::Internal)?;
-    qualify_hot(context).map_err(RuntimeError::from)
-}
-
-fn effect_context<S: EffectState<C>, C: EffectCapabilityContract>(
-    input: &QualifiedValue,
-    command: &QualifiedValue,
-    error: &QualifiedValue,
-) -> Result<QualifiedValue> {
-    let context = S::adapter_context(
-        input
-            .typed
-            .downcast_ref::<S::Input>()
-            .ok_or(RuntimeError::Internal)?,
-        command
-            .typed
-            .downcast_ref::<C::Command>()
-            .ok_or(RuntimeError::Internal)?,
-        error
-            .typed
-            .downcast_ref::<C::OperationalError>()
-            .ok_or(RuntimeError::Internal)?,
-    )
-    .map_err(|_| RuntimeError::Internal)?;
-    qualify_hot(context).map_err(RuntimeError::from)
-}
-
 struct RegisteredState {
-    classify: recovery::ClassifyCallback,
     signature: StateSignature,
     mode: RegisteredMode,
 }
@@ -234,13 +171,13 @@ enum RegisteredMode {
         start: StateStart,
     },
     Read {
-        incident: Arc<AdapterIncidentContract>,
+        error_codec: Arc<ValueCodec>,
         capability_contract_ref: ContentRef,
         start: ReadStart,
         validate_retained: ReadValidator,
     },
     Effect {
-        incident: Arc<AdapterIncidentContract>,
+        error_codec: Arc<ValueCodec>,
         capability_contract_ref: ContentRef,
         prepare: StateStart,
         start_pending: EffectPendingStart,
@@ -258,28 +195,28 @@ impl RegisteredState {
             (RegisteredMode::Pure { .. }, RegisteredMode::Pure { .. }) => true,
             (
                 RegisteredMode::Read {
-                    incident,
+                    error_codec,
                     capability_contract_ref,
                     ..
                 },
                 RegisteredMode::Read {
-                    incident: other_incident,
+                    error_codec: other_error_codec,
                     capability_contract_ref: other,
                     ..
                 },
-            ) => capability_contract_ref == other && incident.matches(other_incident),
+            ) => capability_contract_ref == other && Arc::ptr_eq(error_codec, other_error_codec),
             (
                 RegisteredMode::Effect {
-                    incident,
+                    error_codec,
                     capability_contract_ref,
                     ..
                 },
                 RegisteredMode::Effect {
-                    incident: other_incident,
+                    error_codec: other_error_codec,
                     capability_contract_ref: other,
                     ..
                 },
-            ) => capability_contract_ref == other && incident.matches(other_incident),
+            ) => capability_contract_ref == other && Arc::ptr_eq(error_codec, other_error_codec),
             _ => false,
         }
     }
@@ -298,6 +235,7 @@ fn start_read<'a, S, C>(
 where
     S: ReadState<C>,
     C: ReadCapabilityContract,
+    C::OperationalError: mfm_program::ClassifyError,
 {
     Box::pin(engine::start_read::<S, C>(context, adapter))
 }
@@ -333,6 +271,7 @@ fn start_pending_effect<'a, S, C>(
 where
     S: EffectState<C>,
     C: EffectCapabilityContract,
+    C::OperationalError: mfm_program::ClassifyError,
 {
     Box::pin(engine::start_pending_effect::<S, C>(context, adapter))
 }
@@ -546,7 +485,6 @@ impl RuntimeAssemblyBuilder {
         let failure = self.ensure_value::<S::Failure>()?;
         self.register_map::<mfm_program::Identity<S::Failure>>()?;
         self.register_state(RegisteredState {
-            classify: recovery::classify::<S::Failure, Never>,
             signature: state_signature::<S>(&input, &output, &failure)?,
             mode: RegisteredMode::Pure {
                 start: start_pure::<S>,
@@ -566,16 +504,11 @@ impl RuntimeAssemblyBuilder {
         let failure = self.ensure_value::<S::Failure>()?;
         self.register_map::<mfm_program::Identity<S::Failure>>()?;
         let capability_contract_ref = self.ensure_read_capability::<C>()?;
-        let incident = Arc::new(AdapterIncidentContract {
-            error_codec: self.ensure_value::<C::OperationalError>()?,
-            context_codec: self.ensure_value::<S::AdapterContext>()?,
-            context: read_context::<S, C>,
-        });
+        let error_codec = self.ensure_value::<C::OperationalError>()?;
         self.register_state(RegisteredState {
-            classify: recovery::classify::<S::Failure, C::OperationalError>,
             signature: state_signature::<S>(&input, &output, &failure)?,
             mode: RegisteredMode::Read {
-                incident,
+                error_codec,
                 capability_contract_ref,
                 start: start_read::<S, C>,
                 validate_retained: validate_read::<C>,
@@ -595,16 +528,11 @@ impl RuntimeAssemblyBuilder {
         let failure = self.ensure_value::<S::Failure>()?;
         self.register_map::<mfm_program::Identity<S::Failure>>()?;
         let capability_contract_ref = self.ensure_effect_capability::<C>()?;
-        let incident = Arc::new(AdapterIncidentContract {
-            error_codec: self.ensure_value::<C::OperationalError>()?,
-            context_codec: self.ensure_value::<S::AdapterContext>()?,
-            context: effect_context::<S, C>,
-        });
+        let error_codec = self.ensure_value::<C::OperationalError>()?;
         self.register_state(RegisteredState {
-            classify: recovery::classify::<S::Failure, C::OperationalError>,
             signature: state_signature::<S>(&input, &output, &failure)?,
             mode: RegisteredMode::Effect {
-                incident,
+                error_codec,
                 capability_contract_ref,
                 prepare: prepare_effect::<S, C>,
                 start_pending: start_pending_effect::<S, C>,
@@ -901,7 +829,6 @@ impl RuntimeAssembly {
                 }
                 Execution::Read {
                     error_contract_ref,
-                    context_contract_ref,
                     capability_contract_ref,
                     intent_contract_ref,
                     evidence_contract_ref,
@@ -909,7 +836,7 @@ impl RuntimeAssembly {
                     ..
                 } => {
                     let RegisteredMode::Read {
-                        incident,
+                        error_codec,
                         capability_contract_ref: registered_capability_contract_ref,
                         start,
                         validate_retained,
@@ -929,8 +856,7 @@ impl RuntimeAssembly {
                     else {
                         return Err(RuntimeError::IncompatibleAssembly);
                     };
-                    if error_contract_ref != &incident.error_codec.contract_ref
-                        || context_contract_ref != &incident.context_codec.contract_ref
+                    if error_contract_ref != &error_codec.contract_ref
                         || capability_contract_ref != registered_capability_contract_ref
                         || intent_contract_ref != &intent_codec.contract_ref
                         || evidence_contract_ref != &evidence_codec.contract_ref
@@ -941,7 +867,7 @@ impl RuntimeAssembly {
                         .get(binding_ref)
                         .ok_or(RuntimeError::IncompatibleAssembly)?;
                     ExecutableMode::Read {
-                        incident: Arc::clone(incident),
+                        error_codec: Arc::clone(error_codec),
                         start: *start,
                         validate_retained: *validate_retained,
                         adapter: Arc::clone(adapter),
@@ -951,7 +877,6 @@ impl RuntimeAssembly {
                 }
                 Execution::Effect {
                     error_contract_ref,
-                    context_contract_ref,
                     capability_contract_ref,
                     command_contract_ref,
                     evidence_contract_ref,
@@ -959,7 +884,7 @@ impl RuntimeAssembly {
                     ..
                 } => {
                     let RegisteredMode::Effect {
-                        incident,
+                        error_codec,
                         capability_contract_ref: registered_capability_contract_ref,
                         prepare,
                         start_pending,
@@ -981,8 +906,7 @@ impl RuntimeAssembly {
                     else {
                         return Err(RuntimeError::IncompatibleAssembly);
                     };
-                    if error_contract_ref != &incident.error_codec.contract_ref
-                        || context_contract_ref != &incident.context_codec.contract_ref
+                    if error_contract_ref != &error_codec.contract_ref
                         || capability_contract_ref != registered_capability_contract_ref
                         || command_contract_ref != &command_codec.contract_ref
                         || evidence_contract_ref != &evidence_codec.contract_ref
@@ -993,7 +917,7 @@ impl RuntimeAssembly {
                         .get(binding_ref)
                         .ok_or(RuntimeError::IncompatibleAssembly)?;
                     ExecutableMode::Effect {
-                        incident: Arc::clone(incident),
+                        error_codec: Arc::clone(error_codec),
                         prepare: *prepare,
                         start_pending: *start_pending,
                         validate_prepare: *validate_prepare,
@@ -1009,9 +933,7 @@ impl RuntimeAssembly {
                 output_codec,
                 failure_codec,
                 mode,
-                recovery: self
-                    .inner
-                    .associate_recovery(registered.classify, state.handler())?,
+                recovery: self.inner.associate_recovery(state.handler())?,
                 root_map: self.inner.associate_root_map(
                     state.failure_contract_ref(),
                     program.root_failure_contract_ref(),
@@ -1070,7 +992,7 @@ pub(crate) enum ExecutableMode {
         start: StateStart,
     },
     Read {
-        incident: Arc<AdapterIncidentContract>,
+        error_codec: Arc<ValueCodec>,
         start: ReadStart,
         validate_retained: ReadValidator,
         adapter: Arc<ErasedReadAdapterCallback>,
@@ -1078,7 +1000,7 @@ pub(crate) enum ExecutableMode {
         evidence_codec: Arc<ValueCodec>,
     },
     Effect {
-        incident: Arc<AdapterIncidentContract>,
+        error_codec: Arc<ValueCodec>,
         prepare: StateStart,
         start_pending: EffectPendingStart,
         validate_prepare: EffectPrepareValidator,

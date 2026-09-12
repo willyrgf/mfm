@@ -63,7 +63,7 @@ observation, or null when none was obtained. That observation is not a claim abo
 `RequestError` owns reviewed codes and messages. `SerializableClientError::for_run` renders the
 shared invocation/recovery detail. An execution-stopped invocation includes its RunId and optional
 last observation; stopped Effect recovery includes the observed pending Effect, original reviewed
-operational cause, State-owned context and stop reason. It does not assert settlement or request
+operational cause, complete executed input and stop reason. It does not assert settlement or request
 automatic retry. `read_run`, `progress_run` and `start_run` preserve that distinction.
 
 `SerializableRunView` renders the current durable state as:
