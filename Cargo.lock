@@ -2169,8 +2169,14 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "mfm-app",
+ "mfm-canonical",
+ "mfm-diagnostics",
  "mfm-ids",
+ "mfm-journal",
+ "mfm-program",
  "mfm-runtime",
+ "mfm-store",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
@@ -2219,6 +2225,7 @@ version = "0.1.0"
 dependencies = [
  "mfm-ids",
  "mfm-values",
+ "serde",
  "thiserror",
 ]
 
@@ -2385,18 +2392,22 @@ dependencies = [
  "clap",
  "libc",
  "mfm-app",
+ "mfm-canonical",
  "mfm-capabilities",
  "mfm-config",
  "mfm-evm",
  "mfm-evm-live",
  "mfm-ids",
+ "mfm-journal",
  "mfm-runtime",
  "mfm-store",
+ "mfm-values",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tower",
 ]
 

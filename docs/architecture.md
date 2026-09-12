@@ -8,9 +8,9 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 | IDs / Values | checked identities including `EffectId`, `ConfigName` and `DigestBytes`, schema descriptors, canonical typed values, mechanical typed context slots, 32 MiB object bound | execution or IO |
 | Capabilities | Read intent/evidence and Effect command/evidence contracts | State outcomes or retries |
 | Program | typed Operation authoring and root input validation, sole private lowering draft, checked v8 ordered State sequence and exact initial-value commitment, Pure/Read/Effect State contracts, redaction-safe internal callback errors, `Never` | registries, IO, scheduling |
-| Runtime | immutable assembly, Program association, sole fold, typed execution/progression | persisted wire or physical storage |
-| Journal | exact frame encoding and complete-history qualification | domain interpretation or persistence IO |
-| Store / run index ports | object-safe complete load and atomic append; separate mechanical current-head enumeration | Program, State, capability, reducer, config semantics, or run-status derivation |
+| Runtime | immutable assembly, Program association, complete current continuation and operation facts, local safety checks and typed progression | physical storage or Journal envelope wire |
+| Journal | exact opaque canonical frame encoding and decoding | Program/lifecycle semantics or persistence IO |
+| Store / run index ports | object-safe admission/latest/optional-probe load and atomic append; separate mechanical current-head enumeration | Program, State, capability, reducer, config semantics, or run-status derivation |
 | Config repository port | immutable named revisions, exact import/load/delete, and complete listing | config-wire parsing, Program semantics, merging, defaults, or revocation |
 | Signing | checked transient secp256k1 key/digest/signature contracts, public recovery, key- and purpose-bound signer port | persisted identity, secret custody, EVM encoding, provider IO |
 | Keystore | bounded thread-affine secp256k1 custody and key- and purpose-bound signer handles | Program, Runtime, EVM, persistence, free-form signing |
@@ -27,11 +27,11 @@ implementation/input/output/failure ABI selects a State registration. Neither lo
 semantic identity. Program association converts each registered mode into one mode-specific
 executable carrying only its valid functions, codecs, validators, and exact callback. Read
 callbacks and hot/cold binding receive the qualified intent value ref; Effect callbacks receive the
-qualified command value ref. Fold state retains declaration identity and qualified values only;
-the fold performs no public registry lookup and exposes no erased value workflow. Association marks
+qualified command value ref. Current state retains checked declaration identity and canonical Objects; typed native values are
+materialized at selected callbacks and are not cached in the continuation. Association marks
 checkpoint boundaries once in the private executable State; entering a State does not rescan the
-Program. Canonical byte wrappers share immutable storage, and RunView borrows that ownership
-through a shared qualified admission value rather than copying the admitted input per transition.
+Program. Canonical byte wrappers and Object content identities share immutable storage. RunView
+shares the admitted Object, so transitions do not copy its complete input or content identity.
 
 Application's private compiled State table couples each State's domain-owned inspection metadata to
 the same monomorphized Runtime registration function used by live composition. The component
@@ -41,20 +41,20 @@ Operations without expanding a Program. Runtime owns no descriptions or Operatio
 The progression sequence is:
 
 ```text
-caller -> Application -> Runtime -> Journal frame -> Store append
-                                  -> Pure State
-                                  -> Read adapter -> provider
-                                  -> Effect prepare -> Store append -> Effect adapter
-                                                     -> Effect conclusion -> Store append
-Store load -> Journal qualify -> Runtime fold -> RunView
+caller -> Application -> Runtime current transition -> Journal opaque frame -> Store append
+                         -> Pure State or Read adapter
+                         -> original failure append -> recovery callback -> recovery append
+                         -> Effect prepare append -> Effect adapter
+                         -> settlement append -> deterministic interpretation
+Store admission/latest/probe snapshot -> Runtime local validation -> RunView
 ```
 
-Journal uses one privately constructed `EncodedRunFrame` for locally encoded and decoded frames.
-`StoredRunBytes` proves only transfer-length bounds; `JournalHistory` validates the complete frame
-chain, exact encoding, object hashes and closure, sequence, and structural adjacency before Runtime
-interprets it. These checks reject inconsistent bytes; they do not repair or normalize them. An
-encoded frame alone does not prove succession to a particular history, so inserted-frame extension
-still checks the expected predecessor and sequence.
+Journal's privately constructed `EncodedRunFrame` proves exact canonical envelope bytes and hash,
+not a lifecycle or complete-history qualification. Runtime owns `RunCommit`, its complete `RunState`,
+and operation facts. Values Object owns the exact value ref and canonical bytes. Store owns the
+head and bounded selected rows in `LoadedRun`; it does not decode Program or reconstruct state.
+Runtime validates selected rows and current facts without folding earlier frames. Every physical
+append still enforces exact predecessor, sequence and all-or-nothing immutable insertion.
 
 Concrete storage backends may implement both `Store` and the separate `RunIndex`, but Runtime
 receives only `dyn Store`. Config custody and run enumeration therefore cannot widen Runtime's
@@ -69,7 +69,7 @@ pool gated only for Store, RunIndex, and config custody. Optional
 owns only its epoch marker and append-only reservation and exact prepared-wire
 facts; the reservation contains the complete nonce domain. It does not own commands,
 transaction action semantics, provider
-truth, signing, broadcast, Runtime folding, or Program association. PostgreSQL uses stock SQLx
+truth, signing, broadcast, Runtime progression, or Program association. PostgreSQL uses stock SQLx
 directly.
 Administrative database authority exists only in short-lived provisioning paths and is never
 retained by Application. Production CLI provisioning installs only the base persistence surfaces.
@@ -96,7 +96,8 @@ Application state, and the deployment-free compiled-component inspection renderi
 liveness, bounded HTTP admission, and an unauthenticated Unix socket; it exposes neither schema,
 developer inspection, nor secret administration. Both accept an optional identity and use the same
 Application client primitive to generate one before their one use-case call. REST returns HTTP 200
-for a durably failed run, while the CLI uses exit 1 for Runnable, EffectPending, or Failed. These are named transport
+for a durably failed run, while the CLI uses exit 1 for Runnable, EffectPending, AwaitingRecovery,
+AwaitingInterpretation, or Failed. These are named transport
 asymmetries, not second use-case implementations.
 
 Program authoring and wire decoding share one private State data representation. Whole-sequence
@@ -117,8 +118,8 @@ Operation implementations compose children through `OperationExpansion`. One sel
 parameters and targets together. Error classification belongs to the exact typed error contract. Root failure maps
 replace failure-routing States. Scoped checkpoints lower to permitted declaration boundaries.
 Runtime receives only the completed Program and associated implementations; Journal and Store
-receive neither authoring scopes nor policies to execute. Runtime owns the sole semantic fold,
-including recovery counters, checkpoint retention and irreversible Effect barriers.
+receive neither authoring scopes nor policies to execute. Runtime owns continuation transitions
+and local validation, including recovery usage, checkpoint retention and irreversible Effect barriers.
 
 EVM owns its original incident components and their intrinsic error classifications. Portfolio owns its
 original public failure and explicit EVM failure map. The shipping Portfolio operation uses the
@@ -129,14 +130,14 @@ Pure work and byte-heavy validation run in immediately awaited pure blocking job
 derivation belongs to Runtime and binds RunId, Program ref, execution position (State and visit), and exact command
 ref. Connections, transactions, Store mutation, and provider IO remain async and outside those
 jobs. Dropping an operation is safe: no candidate exists yet, or the one in-flight append commits
-atomically and the next complete reload resolves it.
+atomically and a later selected-row snapshot observes its outcome without claiming that the interrupted caller
+received an acknowledgement.
 
 EVM owns one shared checked address, hash, and U256 vocabulary across existing balance Reads and
 transaction contracts. Capability injection expands the generic
 `ExecuteEvmTransaction<C, R>` into reservation and preparation Effects, the designated execution
 Effect, and a Pure outcome projection. Domain-owned `mfm_evm::custody` defines atomic reservation
-and exact-byte retention; PostgreSQL implements that port mechanically. Journal alone retains
-settlement. Runtime schedules the expanded sequence with no EVM or signer knowledge. EVM owns checked plans, cumulative transaction/observation facts, and slot-selected creation,
+and exact-byte retention; PostgreSQL implements that port mechanically. Runtime retains accepted settlement in the Journal payload before interpretation. Runtime schedules the expanded sequence with no EVM or signer knowledge. EVM owns checked plans, cumulative transaction/observation facts, and slot-selected creation,
 creation-dependent call, ordinary call, and anchored observation recipes. Products select context
 field names and recipe connections, and own ABI decoding and terminal report/failure policy.
 `EvmTransaction<C, R>` is the reusable domain Operation; live EVM owns its pure four-State

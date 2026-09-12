@@ -10,14 +10,13 @@ impl State for Injected {
     }
 }
 impl EffectState<Mutation> for Injected {
-    fn prepare(input: &Number) -> Result<Command, PreparationError> {
+    fn prepare(input: &Number) -> Result<Command, NativeCause> {
         Ok(Command { value: input.value })
     }
     fn interpret(
         input: Number,
         _: &EffectEvidence,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, mfm_program::StateExecutionError>
-    {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, NativeCause> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -63,8 +62,7 @@ impl State for Project {
 impl PureState for Project {
     fn evaluate(
         input: Number,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Number>, mfm_program::StateExecutionError>
-    {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Number>, NativeCause> {
         if input.value == 2 {
             Ok(ProposedStateOutcome::Failure { failure: input })
         } else {
@@ -174,7 +172,7 @@ async fn injected_effects_resume_and_projection_failure_retains_the_root_mapping
     };
     assert_eq!(original.decode::<Number>().unwrap().value, 2);
     assert_eq!(root.decode::<Number>().unwrap().value, 2);
-    assert_eq!(finished.head_sequence(), 8);
+    assert_eq!(finished.head_sequence(), 11);
     assert_eq!(
         runtime.read(&run_id).await.unwrap().head_digest(),
         finished.head_digest()
@@ -212,19 +210,18 @@ impl EffectCapabilityContract for Recursive {
         id: &EffectId,
         command: &Command,
         evidence: &EffectEvidence,
-    ) -> mfm_capabilities::Result<()> {
+    ) -> Result<(), NativeCause> {
         Mutation::bind_evidence(id, command, evidence)
     }
 }
 impl EffectState<Recursive> for Injected {
-    fn prepare(input: &Number) -> Result<Command, PreparationError> {
+    fn prepare(input: &Number) -> Result<Command, NativeCause> {
         <Self as EffectState<Mutation>>::prepare(input)
     }
     fn interpret(
         input: Number,
         evidence: &EffectEvidence,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, mfm_program::StateExecutionError>
-    {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, NativeCause> {
         <Self as EffectState<Mutation>>::interpret(input, evidence)
     }
 }

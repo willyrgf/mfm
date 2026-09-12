@@ -67,7 +67,9 @@ or duplicate fields, and uses the shared 1–200 page bound with default 50.
 
 Ordinary routed errors are exactly `{"code":"...","message":"..."}` with the shared stable
 Application error serializer, except that a start request after identity selection also carries its
-`run_id`. Ambiguous run appends add the shared tagged `recovery` object and `last_observed` (possibly null).
+`run_id`. Ambiguous run appends add the shared tagged `recovery` object and complete `invocation`, whose
+`last_observed` may be null. They retain HTTP 503. This attempt's known noninsertion uses
+`run_append_not_inserted` and HTTP 409 even if a later probe fails for a different reason.
 Other stopped Runtime calls add a tagged `invocation` containing their RunId and last observation,
 or the unresolved Effect observation, typed operational cause, complete input and retained command facts and stop reason. These
 are request failures, not newly appended terminal run states. Stopped recovery returns 503;
@@ -78,7 +80,8 @@ successful HTTP request with status 200 and tagged `state.kind:"failed"`.
 
 The CLI-only `postgres init` retains schema authority outside the daemon. Both client surfaces may
 generate a RunId before their one Application call. HTTP status represents request success, while
-CLI exit 1 represents a runnable, Effect-pending or durably failed run. Runnable views carry
+CLI exit 1 represents a runnable, Effect-pending, awaiting-recovery, awaiting-interpretation or
+durably failed run. REST returns 200 for each successfully observed phase. Runnable views carry
 position/visit and tagged reason; pending views carry the exact EffectId. Failed views embed the
 canonical `report` and its reference, while successful views embed the canonical `value`.
 Provider failures in those reports retain reviewed method, stage, status/code, source facts and
@@ -99,18 +102,33 @@ Repeated publication has no discovery IO. New dependent admission verifies retai
 matching start recovery and ordinary read/progress survive configuration deletion.
 
 Size-limit invocation failures use `size_limit_exceeded` and include
-`invocation.size_limit` with `resource`, `actual`, and `limit` (bytes, or frames for
-`frame_count`). The last observation remains historical; oversized inline reports do not
+`invocation.size_limit` with `kind`, `resource`, and `limit` (bytes, or frames for
+`frame_count`). A measured violation carries `actual`; a serializer stopped at its ceiling carries
+`observed_at_least` because the unvisited suffix has no measured size. The last observation remains historical; oversized inline reports do not
 append a terminal conclusion or discard pending Effect authority. Capacity arithmetic overflow
 uses `capacity_arithmetic_overflow` without fabricated measurements. CLI uses exit 2; REST uses
 422 for these stopped invocations. Response payloads retain the shared full inline report; request
 body limits do not impose a response-size limit.
 
 Pending Effect views include `latest_failure`: null before the first audited failure, otherwise
-`mode: "effect"`, qualified `error`, complete `input`, retained `command`, `effect_id`, and `decision` (`{"kind":"retry"}` or
-`{"kind":"stop","reason":"requested"}`, with other reviewed stop codes). Every acknowledged
+`mode: "effect"`, qualified `error`, complete `input`, retained `command`, `effect_id`, and `decision` (`"retry"` or
+`{"stop":{"reason":"requested"}}`, with other reviewed stop codes). Every acknowledged
 pending operational outcome advances the durable head. Retry preserves the command/EffectId and
 spends recovery allowance; Stop ends the invocation while explicit progress may resume it.
 There is no separate pending-failure quota; actual frame and run limits govern recording.
 Cancellation can interrupt a physical
 attempt before its result is recorded; the audit covers acknowledged qualified failures.
+
+
+Run responses are prepared and encoded before handoff to Axum. Preparation failure uses the shared
+[App incomplete report](../../crates/app/README.md#report-preparation-failures), retaining the original
+request status and recovery identity. Failure to render an otherwise successful observation returns
+500, or 422 for an actual representation limit. `last_observed` identifies a historical observation;
+only explicit insertion evidence is labelled `acknowledged`, including when projection failed after
+insertion. The incomplete body lists omitted fields and retains separate reporting causes natively.
+
+If encoding that prepared incomplete body also fails, the response body yields the retained native
+failure. There is no further JSON fallback. The handler establishes preparation and handoff only;
+neither returned status nor a prepared body proves socket completion or peer receipt. The direct
+`tokio-stream` dependency adapts this terminal native failure into Axum's body error channel without
+an additional error endpoint or a custom streaming protocol.

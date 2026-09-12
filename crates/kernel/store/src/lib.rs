@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
 //! Mechanical append-only storage for sealed Journal frames.
 //!
-//! Store owns physical atomicity and complete-prefix snapshots. Journal alone
-//! qualifies the returned bytes; Store has no Program or domain semantics.
+//! Store owns physical atomicity and bounded admission/latest snapshots. Journal decodes
+//! returned envelopes; Store has no Program or domain semantics.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -12,8 +12,7 @@ use std::sync::Arc;
 
 use mfm_ids::{ContentDigest, RunId};
 use mfm_journal::{
-    frame_head_digest, EncodedRunFrame, StoredRunBytes, MAX_FRAME_BYTES, MAX_RUN_BYTES,
-    MAX_RUN_FRAMES,
+    frame_head_digest, EncodedRunFrame, MAX_FRAME_BYTES, MAX_RUN_BYTES, MAX_RUN_FRAMES,
 };
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -54,7 +53,7 @@ impl Default for RunPageLimit {
 }
 
 /// Error returned when one run-head projection is structurally invalid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, thiserror::Error)]
 #[error("run summary is invalid")]
 pub struct RunSummaryError;
 
@@ -180,7 +179,8 @@ pub enum AppendResult {
 }
 
 /// Redaction-safe Store failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
 pub enum StoreError {
     /// The insertion candidate exceeded a fixed format capacity.
     #[error("frame {0}")]
@@ -205,19 +205,68 @@ pub enum StoreError {
     Indeterminate,
 }
 
+/// Bounded rows and mechanical metadata from one consistent Store snapshot.
+pub struct LoadedRun {
+    head: RunSummary,
+    admission: Arc<[u8]>,
+    latest: Arc<[u8]>,
+    probe: Option<Arc<[u8]>>,
+}
+
+impl LoadedRun {
+    /// Checks transfer sizes and metadata; the Store owns row presence and snapshot consistency.
+    pub fn new(
+        head: RunSummary,
+        admission: Arc<[u8]>,
+        latest: Arc<[u8]>,
+        probe: Option<Arc<[u8]>>,
+    ) -> Result<Self, StoreError> {
+        if head.head_sequence() > MAX_RUN_FRAMES
+            || head.total_bytes() > MAX_RUN_BYTES
+            || [&admission, &latest]
+                .into_iter()
+                .chain(probe.iter())
+                .any(|bytes| {
+                    bytes.is_empty()
+                        || bytes.len() > MAX_FRAME_BYTES
+                        || bytes.len() as u64 > head.total_bytes()
+                })
+        {
+            return Err(StoreError::CorruptPhysicalState);
+        }
+        Ok(Self {
+            head,
+            admission,
+            latest,
+            probe,
+        })
+    }
+    /// Returns the physical head and cumulative accounting.
+    pub const fn head(&self) -> &RunSummary {
+        &self.head
+    }
+    /// Returns the admission row, sharing bytes with other selections of that row.
+    pub const fn admission(&self) -> &Arc<[u8]> {
+        &self.admission
+    }
+    /// Returns the latest row.
+    pub const fn latest(&self) -> &Arc<[u8]> {
+        &self.latest
+    }
+    /// Returns the requested sequence row when present at the snapshot.
+    pub const fn probe(&self) -> Option<&Arc<[u8]>> {
+        self.probe.as_ref()
+    }
+}
+
 /// Object-safe mechanical Store contract.
 pub trait Store: Send + Sync {
-    /// Loads one atomically captured complete prefix, or absence.
+    /// Loads admission and latest from one snapshot, with an optional sequence probe.
     fn load_run<'a>(
         &'a self,
         run_id: &'a RunId,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
-                + Send
-                + 'a,
-        >,
-    >;
+        probe_sequence: Option<u64>,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<Option<LoadedRun>, StoreError>> + Send + 'a>>;
 
     /// Atomically appends one sealed frame.
     fn append_run<'a>(
@@ -237,7 +286,7 @@ struct MemoryRun {
 }
 
 struct StoredFrame {
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     head_digest: ContentDigest,
 }
 
@@ -278,15 +327,14 @@ impl Store for MemoryStore {
     fn load_run<'a>(
         &'a self,
         run_id: &'a RunId,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
-                + Send
-                + 'a,
-        >,
-    > {
+        probe_sequence: Option<u64>,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<Option<LoadedRun>, StoreError>> + Send + 'a>>
+    {
         Box::pin(async move {
             require_runtime()?;
+            if probe_sequence.is_some_and(|sequence| sequence == 0 || sequence > MAX_RUN_FRAMES) {
+                return Err(StoreError::CorruptPhysicalState);
+            }
             let run = {
                 let runs = self.runs.lock().await;
                 runs.get(run_id).cloned()
@@ -294,16 +342,65 @@ impl Store for MemoryStore {
             let Some(run) = run else {
                 return Ok(None);
             };
-            let (head, frames) = {
-                let run = run.lock_owned().await;
-                if run.head.is_none() && run.frames.is_empty() {
-                    return Ok(None);
-                }
-                let head = run.head.clone();
-                let frames = cooperative_frame_snapshot(&run.frames).await?;
-                (head, frames)
+            let run = run.lock().await;
+            let Some(head) = &run.head else {
+                return if run.frames.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(StoreError::CorruptPhysicalState)
+                };
             };
-            run_pure_blocking(move || validate_and_copy_snapshot(head, frames)).await
+            if head.sequence == 0 || usize::try_from(head.sequence).ok() != Some(run.frames.len()) {
+                return Err(StoreError::CorruptPhysicalState);
+            }
+            let admission = run.frames.first().ok_or(StoreError::CorruptPhysicalState)?;
+            let latest = run.frames.last().ok_or(StoreError::CorruptPhysicalState)?;
+            let probe = probe_sequence.and_then(|sequence| {
+                usize::try_from(sequence - 1)
+                    .ok()
+                    .and_then(|index| run.frames.get(index))
+            });
+            if probe_sequence.is_some_and(|sequence| sequence <= head.sequence) && probe.is_none() {
+                return Err(StoreError::CorruptPhysicalState);
+            }
+            let summary = RunSummary::new(
+                run_id.clone(),
+                head.sequence,
+                latest.head_digest.clone(),
+                head.total_bytes,
+            )
+            .map_err(|_| StoreError::CorruptPhysicalState)?;
+            let admission = Arc::clone(admission);
+            let latest = Arc::clone(latest);
+            let probe = probe.cloned();
+            drop(run);
+            run_pure_blocking(move || {
+                let selected = [Some(&admission), Some(&latest), probe.as_ref()];
+                for (index, frame) in selected.iter().enumerate() {
+                    let Some(frame) = frame else { continue };
+                    if selected[..index]
+                        .iter()
+                        .flatten()
+                        .any(|previous| Arc::ptr_eq(previous, frame))
+                    {
+                        continue;
+                    }
+                    if frame.bytes.is_empty()
+                        || frame.bytes.len() > MAX_FRAME_BYTES
+                        || frame_head_digest(&frame.bytes) != frame.head_digest
+                    {
+                        return Err(StoreError::CorruptPhysicalState);
+                    }
+                }
+                LoadedRun::new(
+                    summary,
+                    Arc::clone(&admission.bytes),
+                    Arc::clone(&latest.bytes),
+                    probe.map(|frame| Arc::clone(&frame.bytes)),
+                )
+                .map(Some)
+            })
+            .await
         })
     }
 
@@ -454,7 +551,9 @@ fn plan_append(
         candidate.sequence,
     )?;
     if let Some(existing) = target {
-        if existing.bytes == candidate.bytes && existing.head_digest == candidate.head_digest {
+        if existing.bytes.as_ref() == candidate.bytes.as_slice()
+            && existing.head_digest == candidate.head_digest
+        {
             return Ok(AppendPlan::NotInserted);
         }
     }
@@ -498,7 +597,7 @@ fn plan_append(
         .ok_or(StoreError::ArithmeticOverflow)?;
     Ok(AppendPlan::Insert {
         stored: StoredFrame {
-            bytes: candidate.bytes,
+            bytes: candidate.bytes.into(),
             head_digest: candidate.head_digest,
         },
         head: Head {
@@ -547,69 +646,6 @@ fn validate_append_observation(
     Ok(())
 }
 
-fn validate_physical(
-    head: &Option<Head>,
-    frames: &[Arc<StoredFrame>],
-) -> std::result::Result<(), StoreError> {
-    let Some(head) = head else {
-        return frames
-            .is_empty()
-            .then_some(())
-            .ok_or(StoreError::CorruptPhysicalState);
-    };
-    if head.sequence == 0
-        || head.sequence > MAX_RUN_FRAMES
-        || usize::try_from(head.sequence).ok() != Some(frames.len())
-        || head.total_bytes > MAX_RUN_BYTES
-        || frames.is_empty()
-    {
-        return Err(StoreError::CorruptPhysicalState);
-    }
-    let mut total = 0_u64;
-    for frame in frames {
-        if frame.bytes.is_empty()
-            || frame.bytes.len() > MAX_FRAME_BYTES
-            || frame_head_digest(&frame.bytes) != frame.head_digest
-        {
-            return Err(StoreError::CorruptPhysicalState);
-        }
-        total = total
-            .checked_add(
-                u64::try_from(frame.bytes.len()).map_err(|_| StoreError::CorruptPhysicalState)?,
-            )
-            .ok_or(StoreError::CorruptPhysicalState)?;
-    }
-    if total != head.total_bytes {
-        return Err(StoreError::CorruptPhysicalState);
-    }
-    Ok(())
-}
-
-fn validate_and_copy_snapshot(
-    head: Option<Head>,
-    frames: Vec<Arc<StoredFrame>>,
-) -> std::result::Result<Option<StoredRunBytes>, StoreError> {
-    validate_physical(&head, &frames)?;
-    if head.is_none() {
-        return Ok(None);
-    }
-    let mut copied = Vec::new();
-    copied
-        .try_reserve_exact(frames.len())
-        .map_err(|_| StoreError::Unavailable)?;
-    for frame in frames {
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(frame.bytes.len())
-            .map_err(|_| StoreError::Unavailable)?;
-        bytes.extend_from_slice(&frame.bytes);
-        copied.push(bytes);
-    }
-    StoredRunBytes::new(copied)
-        .map(Some)
-        .map_err(|_| StoreError::CorruptPhysicalState)
-}
-
 async fn own_candidate_bytes(source: &[u8]) -> std::result::Result<Vec<u8>, StoreError> {
     let length = source.len();
     let mut owned = run_pure_blocking(move || {
@@ -626,25 +662,6 @@ async fn own_candidate_bytes(source: &[u8]) -> std::result::Result<Vec<u8>, Stor
         tokio::task::yield_now().await;
     }
     Ok(owned)
-}
-
-async fn cooperative_frame_snapshot(
-    source: &[Arc<StoredFrame>],
-) -> std::result::Result<Vec<Arc<StoredFrame>>, StoreError> {
-    let length = source.len();
-    let mut snapshot = run_pure_blocking(move || {
-        let mut frames = Vec::new();
-        frames
-            .try_reserve_exact(length)
-            .map_err(|_| StoreError::Unavailable)?;
-        Ok(frames)
-    })
-    .await?;
-    for chunk in source.chunks(1_024) {
-        snapshot.extend(chunk.iter().cloned());
-        tokio::task::yield_now().await;
-    }
-    Ok(snapshot)
 }
 
 async fn run_pure_blocking<T, F>(job: F) -> std::result::Result<T, StoreError>

@@ -35,6 +35,11 @@ pub use mfm_canonical::limits::{
     MAX_ARRAY_ITEMS, MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES, MAX_OBJECT_ENTRIES, MAX_STRING_UTF8_BYTES,
 };
 
+mod native;
+pub use native::NativeCause;
+mod object;
+pub use object::{Object, ObjectSeed};
+
 mod context;
 pub use self::context::ContextSlot;
 
@@ -90,14 +95,20 @@ pub const MAX_SCHEMA_DEPTH: usize = MAX_CANONICAL_JSON_DEPTH - 3;
 pub type Result<T> = std::result::Result<T, ValueError>;
 
 /// Error returned by value descriptor helpers.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum ValueError {
     /// Descriptor construction failed.
     #[error("descriptor error: {0}")]
     Descriptor(String),
     /// Identity parsing failed.
     #[error("identity error: {0}")]
-    Identity(String),
+    Identity(#[source] mfm_ids::IdentityError),
+    /// A checked string primitive rejected its identity grammar.
+    #[error("checked identity is invalid")]
+    CheckedIdentity(#[source] mfm_ids::CheckedStringError),
+    /// Canonical grammar qualification retained its actual source.
+    #[error("value canonicalization failed")]
+    Canonical(#[source] mfm_canonical::CanonicalError),
     /// A schema identity was not exact canonical descriptor material.
     #[error("invalid schema identity")]
     InvalidSchemaIdentity,
@@ -161,6 +172,12 @@ fn looks_like_mnemonic_phrase(input: &str) -> bool {
 
 /// Values that may cross typed state boundaries.
 pub trait MfmValue: Serialize + DeserializeOwned + Send + Sync + 'static {
+    /// Materializes the native owner, retaining reviewed construction failures.
+    fn decode_native(bytes: &[u8]) -> std::result::Result<Self, NativeCause> {
+        serde_json::from_slice(bytes)
+            .map_err(|source| NativeCause::from_error(mfm_canonical::JsonError::new(source)))
+    }
+
     /// Returns the schema descriptor for this value type.
     fn schema_descriptor() -> Result<SchemaDescriptor>;
 
@@ -181,10 +198,10 @@ pub fn canonicalize_mfm_value<T: MfmValue>(
     }
     let schema_id = descriptor.schema_id()?;
 
-    let json = serde_json::to_string(value).map_err(|_| ValueError::SchemaShapeMismatch)?;
+    let json = mfm_canonical::to_json_bounded(value, MAX_RUN_OBJECT_CANONICAL_BYTES)
+        .map_err(ValueError::Canonical)?;
     SizeLimitExceeded::check(json.len() as u64, MAX_RUN_OBJECT_CANONICAL_BYTES as u64)?;
-    let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
-        .map_err(|_| ValueError::SchemaShapeMismatch)?;
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json).map_err(ValueError::Canonical)?;
     SizeLimitExceeded::check(
         canonical.as_bytes().len() as u64,
         MAX_RUN_OBJECT_CANONICAL_BYTES as u64,
@@ -196,7 +213,7 @@ pub fn canonicalize_mfm_value<T: MfmValue>(
         schema_id,
         ContentDigest::from_digest(DigestAlgorithm::Sha256V1, canonical.digest_bytes()),
     )
-    .map_err(|error| ValueError::Identity(error.to_string()))?;
+    .map_err(ValueError::Identity)?;
     Ok((canonical, content_ref))
 }
 
@@ -453,7 +470,7 @@ impl SchemaIdentity {
             DigestAlgorithm::Sha256JcsV1,
             digest,
         )
-        .map_err(|error| ValueError::Identity(error.to_string()))
+        .map_err(ValueError::Identity)
     }
 
     /// Verifies exact canonical value bytes against this identity's complete closed shape.
@@ -2563,7 +2580,7 @@ pub fn framework_value_descriptor(
 }
 
 fn schema_version(value: &str) -> Result<SchemaVersion> {
-    SchemaVersion::new(value).map_err(|error| ValueError::Identity(error.to_string()))
+    SchemaVersion::new(value).map_err(ValueError::Identity)
 }
 
 fn reject_duplicate_names<'a>(
@@ -2615,8 +2632,8 @@ mod secret_marker_tests {
         let effect = EffectId::from_digest(DigestBytes::from_array([8; 32]));
         assert_eq!(StringGrammar::EffectId.as_str(), "effect_id");
         assert_eq!(
-            parse_string_grammar("effect_id"),
-            Ok(StringGrammar::EffectId)
+            parse_string_grammar("effect_id").unwrap(),
+            StringGrammar::EffectId
         );
         assert!(grammar_admits(StringGrammar::EffectId, effect.as_str()));
         assert!(!grammar_admits(

@@ -1,5 +1,6 @@
 use mfm_ids::RunId;
-use mfm_journal::{EncodedRunFrame, StoredRunBytes};
+use mfm_journal::EncodedRunFrame;
+use mfm_store::LoadedRun;
 use mfm_store::{AppendResult, MemoryStore, Store, StoreError};
 use std::{collections::VecDeque, future::Future, pin::Pin};
 
@@ -47,14 +48,10 @@ impl Store for ScriptedStore {
     fn load_run<'a>(
         &'a self,
         run_id: &'a RunId,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        self.inner.load_run(run_id)
+        probe_sequence: Option<u64>,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<Option<LoadedRun>, StoreError>> + Send + 'a>>
+    {
+        self.inner.load_run(run_id, probe_sequence)
     }
 
     fn append_run<'a>(

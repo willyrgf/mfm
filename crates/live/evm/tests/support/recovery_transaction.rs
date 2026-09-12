@@ -166,7 +166,7 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
             Err(InvocationFailure::RecoveryStopped {
                 observed, incident, ..
             }) if scenario == 2 => {
-                assert_eq!(observed.head_sequence(), 7);
+                assert_eq!(observed.head_sequence(), 10);
                 let mfm_runtime::AdapterIncidentView::Effect {
                     input,
                     command,
@@ -211,22 +211,23 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
             }
             other => panic!("unexpected transaction result: {}", other.is_ok()),
         };
-        assert_eq!(hot.head_sequence(), if scenario == 2 { 9 } else { 8 });
+        assert_eq!(
+            hot.head_sequence(),
+            if scenario == 2 {
+                13
+            } else if scenario == 1 {
+                12
+            } else {
+                11
+            }
+        );
         assert!(matches!(
             (scenario, hot.state()),
             (1, RunViewState::Failed(_)) | (0 | 2, RunViewState::Succeeded(_))
         ));
-        let history = mfm_journal::JournalHistory::qualify(
-            &run,
-            store.load_run(&run).await.unwrap().unwrap(),
-        )
-        .unwrap();
-        let frame_lengths = history.frame_lengths().collect::<Vec<_>>();
-        assert!(history.total_bytes() <= mfm_journal::MAX_RUN_BYTES);
-        eprintln!(
-            "scenario {scenario}: frames {frame_lengths:?}; actual {} bytes",
-            history.total_bytes(),
-        );
+        let loaded = store.load_run(&run, None).await.unwrap().unwrap();
+        assert_eq!(loaded.head().head_sequence(), hot.head_sequence());
+        assert!(loaded.head().total_bytes() <= mfm_journal::MAX_RUN_BYTES);
         let cold = runtime.read(&run).await.unwrap();
         assert_eq!(cold.head_digest(), hot.head_digest());
         match (hot.state(), cold.state()) {

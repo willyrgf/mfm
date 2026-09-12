@@ -153,7 +153,7 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                     #ident { #(#siblings),* }
                 }
                 fn slot_id() -> ::mfm_values::Result<::mfm_ids::StableId> {
-                    ::mfm_ids::StableId::new(#slot_id).map_err(|_| ::mfm_values::ValueError::Identity("invalid context slot identity".to_owned()))
+                    ::mfm_ids::StableId::new(#slot_id).map_err(::mfm_values::ValueError::CheckedIdentity)
                 }
             }
         });

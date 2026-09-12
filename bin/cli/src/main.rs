@@ -1,6 +1,5 @@
 //! MFM command-line rendering of the typed Application client surface.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -8,13 +7,16 @@ use clap::{Parser, Subcommand, ValueEnum};
 use mfm_app::{
     generate_run_id, provision_postgres, Application, ComponentSummary, ConfigDigest,
     ConfigDocument, ConfigDocumentError, ConfigName, ConfigSelection, Deployment, EnvironmentName,
-    ItemList, RequestError, RunIdGenerationError, RunPageLimit, RunRecovery, RunRequestError,
-    SerializableClientError, SerializableRunView, StartRunResult, MAX_CONFIG_DOCUMENT_BYTES,
+    ItemList, RequestError, RunIdGenerationError, RunPageLimit, RunRequestError,
+    MAX_CONFIG_DOCUMENT_BYTES,
 };
 use mfm_ids::RunId;
 use mfm_runtime::{RunView, RunViewState};
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
+
+mod reporting;
+use reporting::{emit_error, emit_run_view, emit_start_result, write_json_stdout, write_stdout};
 
 #[derive(Parser)]
 #[command(name = "mfm", version, about = "MFM client CLI")]
@@ -176,12 +178,13 @@ enum CliError {
     Request(RequestError),
     RunRequest(Box<RunRequestError>),
     RunIdGeneration(RunIdGenerationError),
-    Output,
+    Output(mfm_values::NativeCause),
+    Reporting(Box<dyn std::error::Error + Send + Sync>),
     Usage,
 }
 
 impl CliError {
-    const fn code(&self) -> &'static str {
+    fn code(&self) -> &'static str {
         match self {
             Self::Composition(_) => "composition_failed",
             Self::ConfigName => "invalid_config_name",
@@ -193,7 +196,7 @@ impl CliError {
             Self::Request(error) => error.code(),
             Self::RunRequest(error) => error.code(),
             Self::RunIdGeneration(error) => error.code(),
-            Self::Output => "output_failed",
+            Self::Output(_) | Self::Reporting(_) => "output_failed",
             Self::Usage => "invalid_usage",
         }
     }
@@ -210,15 +213,8 @@ impl CliError {
             Self::Request(error) => error.to_string(),
             Self::RunRequest(error) => error.to_string(),
             Self::RunIdGeneration(error) => error.to_string(),
-            Self::Output => "output could not be written".to_owned(),
+            Self::Output(_) | Self::Reporting(_) => "output could not be written".to_owned(),
             Self::Usage => "command usage is invalid".to_owned(),
-        }
-    }
-
-    const fn recovery(&self) -> Option<&RunRecovery> {
-        match self {
-            Self::RunRequest(error) => error.recovery(),
-            _ => None,
         }
     }
 }
@@ -247,10 +243,9 @@ async fn main() -> ExitCode {
     let output = cli.output;
     match run(cli).await {
         Ok(code) => code,
+        Err(CliError::Reporting(_failure)) => ExitCode::from(2),
         Err(error) => {
-            if emit_error(output, &error).is_err() {
-                return ExitCode::from(2);
-            }
+            let _delivery = emit_error(output, error);
             ExitCode::from(2)
         }
     }
@@ -364,19 +359,19 @@ async fn run_run(
             };
             let application = open(deployment).await?;
             let result = application.start_run(run_id, &selection).await?;
-            emit_start_result(output, &result)
+            emit_start_result(output, result)
         }
         RunCommand::Progress { run_id } => {
             let run_id = RunId::parse(run_id).map_err(|_| CliError::RunId)?;
             let application = open(deployment).await?;
             let view = application.progress_run(&run_id).await?;
-            emit_run_view(output, &view)
+            emit_run_view(output, view)
         }
         RunCommand::Show { run_id } => {
             let run_id = RunId::parse(run_id).map_err(|_| CliError::RunId)?;
             let application = open(deployment).await?;
             let view = application.read_run(&run_id).await?;
-            emit_run_view(output, &view)
+            emit_run_view(output, view)
         }
         RunCommand::List { after, limit } => {
             let after = after
@@ -489,33 +484,6 @@ fn emit_empty(output: OutputFormat) -> Result<ExitCode, CliError> {
     }
 }
 
-fn emit_start_result(output: OutputFormat, result: &StartRunResult) -> Result<ExitCode, CliError> {
-    match output {
-        OutputFormat::Json => emit_json_with_run_status(result, result.run()),
-        OutputFormat::Text => {
-            let mut text = render_config_summary(result.config());
-            text.push_str(&render_run_view(result.run()));
-            write_stdout(text.as_bytes())?;
-            Ok(run_exit(result.run()))
-        }
-    }
-}
-
-fn emit_run_view(output: OutputFormat, view: &RunView) -> Result<ExitCode, CliError> {
-    match output {
-        OutputFormat::Json => emit_json_with_run_status(&SerializableRunView::new(view), view),
-        OutputFormat::Text => {
-            write_stdout(render_run_view(view).as_bytes())?;
-            Ok(run_exit(view))
-        }
-    }
-}
-
-fn emit_json_with_run_status(value: &impl Serialize, view: &RunView) -> Result<ExitCode, CliError> {
-    write_json_stdout(value)?;
-    Ok(run_exit(view))
-}
-
 fn emit_serializable(
     output: OutputFormat,
     value: &impl Serialize,
@@ -535,71 +503,6 @@ fn emit_json(value: &impl Serialize) -> Result<ExitCode, CliError> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn write_json_stdout(value: &impl Serialize) -> Result<(), CliError> {
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
-    serde_json::to_writer(&mut stdout, value).map_err(|_| CliError::Output)?;
-    stdout.write_all(b"\n").map_err(|_| CliError::Output)?;
-    stdout.flush().map_err(|_| CliError::Output)
-}
-
-fn write_stdout(bytes: &[u8]) -> Result<(), CliError> {
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
-    stdout.write_all(bytes).map_err(|_| CliError::Output)?;
-    stdout.flush().map_err(|_| CliError::Output)
-}
-
-fn emit_error(output: OutputFormat, error: &CliError) -> Result<(), ()> {
-    let stderr = std::io::stderr();
-    let mut stderr = stderr.lock();
-    match output {
-        OutputFormat::Text => {
-            writeln!(stderr, "error: {}", error.message()).map_err(|_| ())?;
-            if let Some(recovery) = error.recovery() {
-                render_recovery_text(&mut stderr, recovery)?;
-            }
-            if let CliError::RunRequest(error) = error {
-                let message = error.to_string();
-                let detail =
-                    serde_json::to_value(SerializableClientError::for_run(error, &message))
-                        .map_err(|_| ())?;
-                for field in ["invocation", "last_observed"] {
-                    if let Some(value) = detail.get(field) {
-                        writeln!(stderr, "{field}={value}").map_err(|_| ())?;
-                    }
-                }
-            }
-        }
-        OutputFormat::Json => {
-            let message = error.message();
-            let value = match error {
-                CliError::RunRequest(error) => SerializableClientError::for_run(error, &message),
-                _ => SerializableClientError::new(error.code(), &message),
-            };
-            serde_json::to_writer(&mut stderr, &value).map_err(|_| ())?;
-            stderr.write_all(b"\n").map_err(|_| ())?;
-        }
-    }
-    stderr.flush().map_err(|_| ())
-}
-
-fn render_recovery_text(writer: &mut impl Write, recovery: &RunRecovery) -> Result<(), ()> {
-    match recovery {
-        RunRecovery::Start { run_id, config } => {
-            writeln!(writer, "recovery.kind=start").map_err(|_| ())?;
-            writeln!(writer, "recovery.run_id={run_id}").map_err(|_| ())?;
-            writeln!(writer, "recovery.config_name={}", config.name()).map_err(|_| ())?;
-            writeln!(writer, "recovery.config_digest={}", config.digest()).map_err(|_| ())?;
-            writeln!(writer, "recovery.entry_point={}", config.entry_point()).map_err(|_| ())
-        }
-        RunRecovery::Progress { run_id } => {
-            writeln!(writer, "recovery.kind=progress").map_err(|_| ())?;
-            writeln!(writer, "recovery.run_id={run_id}").map_err(|_| ())
-        }
-    }
-}
-
 fn render_config_summary(config: &mfm_app::ConfigSummary) -> String {
     format!(
         "config_name={}\nconfig_digest={}\nentry_point={}\n",
@@ -609,43 +512,13 @@ fn render_config_summary(config: &mfm_app::ConfigSummary) -> String {
     )
 }
 
-fn render_run_view(view: &RunView) -> String {
-    let mut rendered = format!(
-        "run_id={}\nhead_sequence={}\nhead_digest={}\nstate={}\n",
-        view.run_id(),
-        view.head_sequence(),
-        view.head_digest(),
-        match view.state() {
-            RunViewState::Runnable { .. } => "runnable",
-            RunViewState::EffectPending { .. } => "effect_pending",
-            RunViewState::Succeeded(_) => "succeeded",
-            RunViewState::Failed(_) => "failed",
-        }
-    );
-    let model = serde_json::to_value(SerializableRunView::new(view));
-    if let Ok(model) = model {
-        for field in [
-            "position",
-            "reason",
-            "effect_id",
-            "contract_ref",
-            "value_ref",
-            "value",
-            "report",
-        ] {
-            if let Some(value) = model["state"].get(field) {
-                rendered.push_str(&format!("{field}={value}\n"));
-            }
-        }
-    }
-    rendered
-}
-
 fn run_exit(view: &RunView) -> ExitCode {
     match view.state() {
         RunViewState::Succeeded(_) => ExitCode::SUCCESS,
         RunViewState::Runnable { .. }
         | RunViewState::EffectPending { .. }
+        | RunViewState::AwaitingRecovery { .. }
+        | RunViewState::AwaitingInterpretation { .. }
         | RunViewState::Failed(_) => ExitCode::from(1),
     }
 }

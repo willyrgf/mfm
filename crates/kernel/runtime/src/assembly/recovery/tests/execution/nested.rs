@@ -16,10 +16,14 @@ impl mfm_program::State for IncrementOffset {
 impl mfm_program::PureState for IncrementOffset {
     fn evaluate(
         input: Offset,
-    ) -> std::result::Result<ProposedStateOutcome<Offset, EvmFailure>, StateExecutionError> {
+    ) -> std::result::Result<ProposedStateOutcome<Offset, EvmFailure>, mfm_values::NativeCause>
+    {
         Ok(ProposedStateOutcome::Success {
             output: Offset {
-                value: input.value.checked_add(1).ok_or(StateExecutionError)?,
+                value: input
+                    .value
+                    .checked_add(1)
+                    .ok_or_else(|| RuntimeError::ArithmeticOverflow.into_native())?,
             },
         })
     }
@@ -36,7 +40,7 @@ impl Handler for SelectRegion {
         initial: &Offset,
         _: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
         let selected = (initial.value - u64::from(context.remaining().restarts()) + 1) % 2;
         Ok(context
             .eligible_restart_targets()
@@ -116,7 +120,7 @@ async fn nested_restarts_restore_inputs_without_resetting_local_or_global_allowa
             .start(run.clone(), program, Offset { value: 7 })
             .await
             .unwrap();
-        for (decision, (checkpoint, visit, head)) in [(1, 3, 4), (0, 5, 6), (1, 8, 9)]
+        for (decision, (checkpoint, visit, head)) in [(1, 3, 5), (0, 5, 8), (1, 8, 12)]
             .into_iter()
             .take(committed)
             .enumerate()

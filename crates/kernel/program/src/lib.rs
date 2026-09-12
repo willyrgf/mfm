@@ -44,7 +44,8 @@ const MAX_STATES: usize = 65_535;
 pub type Result<T> = std::result::Result<T, ProgramError>;
 
 /// Redaction-safe Program failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
 pub enum ProgramError {
     /// Canonical bytes were malformed, noncanonical, or used an unknown wire.
     #[error("program canonical bytes are invalid")]
@@ -90,7 +91,10 @@ pub trait PureState: State {
     /// Evaluates one complete input.
     fn evaluate(
         input: Self::Input,
-    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, StateExecutionError>;
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_values::NativeCause,
+    >;
 }
 
 /// Deterministic State behavior driven by typed Read evidence.
@@ -99,13 +103,16 @@ where
     C: ReadCapabilityContract,
 {
     /// Prepares the exact adapter intent.
-    fn prepare(input: &Self::Input) -> std::result::Result<C::Intent, PreparationError>;
+    fn prepare(input: &Self::Input) -> std::result::Result<C::Intent, mfm_values::NativeCause>;
 
     /// Interprets accepted evidence.
     fn interpret(
         input: Self::Input,
         evidence: &C::Evidence,
-    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, StateExecutionError>;
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_values::NativeCause,
+    >;
 }
 
 /// Deterministic State behavior driven by typed Effect evidence.
@@ -114,26 +121,17 @@ where
     C: EffectCapabilityContract,
 {
     /// Prepares the exact adapter command.
-    fn prepare(input: &Self::Input) -> std::result::Result<C::Command, PreparationError>;
+    fn prepare(input: &Self::Input) -> std::result::Result<C::Command, mfm_values::NativeCause>;
 
     /// Interprets accepted evidence.
     fn interpret(
         input: Self::Input,
         evidence: &C::Evidence,
-    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, StateExecutionError>;
+    ) -> std::result::Result<
+        ProposedStateOutcome<Self::Output, Self::Failure>,
+        mfm_values::NativeCause,
+    >;
 }
-
-/// Redaction-safe failure of trusted deterministic capability preparation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("capability preparation failed")]
-pub struct PreparationError;
-
-/// Redaction-safe failure of trusted deterministic State execution.
-///
-/// This is an internal implementation error, not a durable domain outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("state execution failed")]
-pub struct StateExecutionError;
 
 /// Uninhabited failure value owned by the framework.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,7 +181,7 @@ impl MfmValue for Never {
                 0x91, 0xa3, 0x68, 0x35,
             ]),
         )
-        .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+        .map_err(mfm_values::ValueError::Identity)
     }
 }
 

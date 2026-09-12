@@ -1,6 +1,6 @@
 # Recovery validation
 
-[Design](design.md) owns the current Program v8, Journal frame v5 and Runtime contracts.
+[Design](design.md) owns the current Program v8, Journal frame v6 and Runtime contracts.
 [The RFC](../RFC_SIMPLIFY_CLASSIFICATION_HANDLER.md) records rationale and checked consuming examples.
 Superseded Program/output schemas are rejected; retained histories and revisions are never rewritten.
 
@@ -19,7 +19,8 @@ does not establish this cutover's correctness. See [build and verification](buil
 | Intrinsic classification, common handler association, root maps, retry/restart, independent budgets and Effect barriers | [Runtime recovery](../crates/kernel/runtime/src/assembly/recovery/tests.rs), [nested recovery](../crates/kernel/runtime/src/assembly/recovery/tests/execution/nested.rs) |
 | Pending failure Retry/Stop audit, retained command, cold latest failure and ambiguous acknowledgement | [Pending failures](../crates/kernel/runtime/tests/pending_failure.rs) |
 | Cancellation, ambiguous acknowledgement, pending identity and hot/cold equivalence | [Runtime contracts](../crates/kernel/runtime/tests/runtime_contract.rs), [transaction recovery](../crates/live/evm/tests/support/recovery_transaction.rs) |
-| Qualified hashes, previous-head linkage, object closure, adjacency and fixed capacities | [Journal contracts](../crates/kernel/journal/tests/frame_contract.rs), [Store scenarios](../crates/kernel/store/tests/support/scenarios.rs) |
+| Exact frame hashes and headers, atomic append and actual limits | [Journal contracts](../crates/kernel/journal/tests/frame_contract.rs), [Store scenarios](../crates/kernel/store/tests/support/scenarios.rs) |
+| Exhausted frame count after original failure or external settlement | [Runtime capacity](../crates/kernel/runtime/tests/current_state/capacity.rs) preserves the exact acknowledged head and original/pending authority |
 | Exact object/report limit enforcement | [Values](../crates/kernel/values/tests/value_contract.rs), [reports](../crates/kernel/runtime/src/report/tests.rs) |
 | Real policy inheritance and acknowledged-prefix preservation | [Portfolio policies](../crates/domains/portfolio/tests/recovery_policy.rs) |
 | Route-aware planning, checked full-width snapshots and compiled product execution | [Planning](../crates/domains/portfolio/tests/planning_contract.rs), [snapshot extremes](../crates/domains/portfolio/src/snapshot_extremes.rs), [App consuming scenarios](../crates/app/tests/support/portfolio_contract.rs) |
@@ -37,9 +38,9 @@ does not establish this cutover's correctness. See [build and verification](buil
 | 7–8, 12 | [Pending audit scenarios](../crates/kernel/runtime/tests/pending_failure/audit.rs) cover Retry/Stop, retained authority, explicit resume, cancellation before/after insertion, ambiguous acknowledgements and competing causes. [Protocol reconstruction](../crates/kernel/runtime/tests/pending_failure/protocol.rs) proves cold pending and completed histories do not invoke classification or handlers. |
 | 9 | [Exact handler association](../crates/kernel/runtime/src/assembly/recovery/tests.rs) rejects implementation/parameter mismatches and checks parameter-sensitive Program identity. [Program contracts](../crates/kernel/program/src/tests.rs) reject superseded descriptors and distinguish exact operational error contracts. Revised classification semantics require revision of that exact error identity, as specified in [design](design.md). |
 | 10 | The prospective capacity contract is superseded: [pending audit](../crates/kernel/runtime/tests/pending_failure/audit.rs) preserves reconciliation after recovery exhaustion without a failure quota. [Journal](../crates/kernel/journal/src/lib.rs) and [Store](../crates/kernel/store/src/lib.rs) retain actual size/count and arithmetic rejection; [report tests](../crates/kernel/runtime/src/report/tests.rs) retain the actual terminal-report ceiling. |
-| 11 | [Journal frames](../crates/kernel/journal/tests/frame_contract.rs) qualify prepare/failure*/settlement, complete prefixes and distinct original/context closure. [Pending audit](../crates/kernel/runtime/tests/pending_failure/audit.rs) rejects position mismatch; [public pending view](../crates/app/tests/pending_view.rs) checks hot/cold latest failure equality. |
+| 11 | [Journal frames](../crates/kernel/journal/tests/frame_contract.rs) check opaque canonical envelopes; [current-state validation](../crates/kernel/runtime/tests/current_state/validation.rs) checks Runtime payload relationships. [Pending audit](../crates/kernel/runtime/tests/pending_failure/audit.rs) rejects position mismatch; [public pending view](../crates/app/tests/pending_view.rs) checks hot/cold latest failure equality. |
 
-Raw transfer bytes remain untrusted until Journal qualification and Runtime semantic validation.
+Selected row bytes remain untrusted until exact Journal decoding and Runtime current-state validation.
 Inline original/mapped report duplication is intentional. A combined report can exceed 32 MiB even
 when its causes fit individually; the size error preserves the acknowledged head and pending Effect
 authority. Admission makes no future capacity promise. See [design](design.md).

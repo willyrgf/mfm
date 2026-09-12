@@ -233,12 +233,12 @@ fn conversions_and_calldata_are_exact() {
     assert!(abi_word(&format!("0x{}", "00".repeat(33))).is_err());
 
     assert_eq!(
-        block_tag(&EvmU256::new("17").expect("block number")),
-        Ok("0x11".to_owned())
+        block_tag(&EvmU256::new("17").expect("block number")).unwrap(),
+        "0x11"
     );
     assert_eq!(
-        block_tag(&EvmU256::new("0").expect("block number")),
-        Ok("0x0".to_owned())
+        block_tag(&EvmU256::new("0").expect("block number")).unwrap(),
+        "0x0"
     );
 
     assert_eq!(
@@ -713,8 +713,9 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         pending_stub
             .provider()
             .pending_nonce(&mfm_evm::EvmAddress::new(HOLDER).expect("sender"))
-            .await,
-        Ok(7)
+            .await
+            .unwrap(),
+        7
     );
     assert_eq!(
         pending_stub.observed_requests()[0]["params"],
@@ -727,8 +728,8 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
         transaction_hash
     )]);
     assert_eq!(
-        submit_stub.provider().submit_raw(&raw).await,
-        Ok(transaction_hash.clone())
+        submit_stub.provider().submit_raw(&raw).await.unwrap(),
+        transaction_hash.clone()
     );
     assert_eq!(
         submit_stub.observed_requests()[0]["params"],
@@ -762,7 +763,7 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
             .receipt(&transaction_hash)
             .await;
         if body.contains("result") {
-            assert_eq!(result, Ok(None));
+            assert_eq!(result.unwrap(), None);
         } else {
             assert!(matches!(
                 result,
@@ -947,8 +948,9 @@ async fn nullable_rpc_results_require_the_result_field() {
         Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":null}"#.into()])
             .provider()
             .receipt(&hash)
-            .await,
-        Ok(None)
+            .await
+            .unwrap(),
+        None
     );
 }
 

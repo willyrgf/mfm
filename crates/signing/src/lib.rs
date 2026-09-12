@@ -24,6 +24,22 @@ pub enum SigningError {
     #[error("signing operation failed")]
     Failed,
 }
+impl serde::Serialize for SigningError {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut value = serializer.serialize_struct("SigningError", 2)?;
+        let kind = match self {
+            Self::Invalid => "invalid",
+            Self::Failed => "failed",
+        };
+        value.serialize_field("kind", kind)?;
+        value.serialize_field("upstream_detail", "unavailable_at_existing_owner_boundary")?;
+        value.end()
+    }
+}
 
 /// Exact 32-byte prehashed signing digest.
 #[derive(Clone, Copy, PartialEq, Eq)]

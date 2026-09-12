@@ -180,8 +180,8 @@ async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_col
         panic!("first transaction did not succeed")
     };
     assert_eq!(
-        first_hot_value.contract_ref(),
-        &mfm_program::nominal_contract_ref::<CompletedContext<FirstInitial, FirstRecipe>>()
+        first_hot_value.contract_ref().unwrap(),
+        mfm_program::nominal_contract_ref::<CompletedContext<FirstInitial, FirstRecipe>>()
             .expect("first completion contract")
     );
 
@@ -230,8 +230,8 @@ async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_col
         panic!("second transaction did not succeed")
     };
     assert_eq!(
-        second_hot_value.contract_ref(),
-        &mfm_program::nominal_contract_ref::<CompletedContext<SecondInitial, SecondRecipe>>()
+        second_hot_value.contract_ref().unwrap(),
+        mfm_program::nominal_contract_ref::<CompletedContext<SecondInitial, SecondRecipe>>()
             .expect("second completion contract")
     );
     assert_ne!(

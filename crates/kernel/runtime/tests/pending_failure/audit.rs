@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_authority() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(scripted_store::ScriptedStore::recording());
     let calls = Arc::new(Mutex::new(Vec::new()));
     let build = || {
         let mut builder = RuntimeAssemblyBuilder::new().unwrap();
@@ -40,7 +40,7 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
         .start(run.clone(), program, Number { value: 9 })
         .await
         .unwrap();
-    assert_eq!(first.head_sequence(), 3);
+    assert_eq!(first.head_sequence(), 4);
     let RunViewState::EffectPending {
         position,
         effect_id,
@@ -49,7 +49,7 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
     else {
         panic!("pending retry")
     };
-    assert_eq!(failure.decision, PendingDecision::Retry);
+    assert_eq!(failure.decision, RecoveryDecision::Retry);
     assert!(matches!(
         failure.incident.error().decode::<Cause>().unwrap(),
         Cause::Timeout { deadline_ms: 5000 }
@@ -69,7 +69,7 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
         panic!("stopped")
     };
     assert_eq!(reason, StopReason::Exhausted(RecoveryLimit::StateRetry));
-    assert_eq!(observed.head_sequence(), 4);
+    assert_eq!(observed.head_sequence(), 6);
     let RunViewState::EffectPending {
         position: stopped_position,
         effect_id: stopped_effect,
@@ -82,8 +82,8 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
     assert_eq!(stopped_effect, effect_id);
     assert_eq!(
         failure.decision,
-        PendingDecision::Stop {
-            reason: StopCode::StateRetryExhausted
+        RecoveryDecision::Stop {
+            reason: StopReason::Exhausted(RecoveryLimit::StateRetry)
         }
     );
     let InvocationFailure::RecoveryStopped {
@@ -92,7 +92,7 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
     else {
         panic!("unresolved command remains available after exhausted recovery")
     };
-    assert_eq!(repeated.head_sequence(), 5);
+    assert_eq!(repeated.head_sequence(), 8);
     {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 3);
@@ -100,15 +100,7 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
     }
     let retained = cold.read(&run).await.unwrap();
     assert_eq!(retained.head_digest(), repeated.head_digest());
-    let history =
-        JournalHistory::qualify(&run, store.load_run(&run).await.unwrap().unwrap()).unwrap();
-    assert_eq!(
-        history
-            .records()
-            .filter(|record| matches!(record, JournalRecord::EffectAdapterFailed { .. }))
-            .count(),
-        3
-    );
+    assert_eq!(original_count(&store.snapshot()), 3);
 }
 
 #[tokio::test]
@@ -165,7 +157,7 @@ async fn standard_unknown_stop_is_durable_and_explicit_resume_can_settle() {
         panic!("standard stop")
     };
     assert_eq!(reason, StopReason::Requested);
-    assert_eq!(observed.head_sequence(), 3);
+    assert_eq!(observed.head_sequence(), 4);
     let cold = Runtime::new(build(), store.clone());
     let retained = cold.read(&run).await.unwrap();
     assert_eq!(retained.head_digest(), observed.head_digest());
@@ -178,8 +170,8 @@ async fn standard_unknown_stop_is_durable_and_explicit_resume_can_settle() {
     };
     assert_eq!(
         failure.decision,
-        PendingDecision::Stop {
-            reason: StopCode::Requested
+        RecoveryDecision::Stop {
+            reason: StopReason::Requested
         }
     );
     assert!(matches!(
@@ -188,7 +180,7 @@ async fn standard_unknown_stop_is_durable_and_explicit_resume_can_settle() {
     ));
     assert_eq!(calls.lock().unwrap().len(), 1);
     let settled = cold.resume(&run).await.unwrap();
-    assert_eq!(settled.head_sequence(), 4);
+    assert_eq!(settled.head_sequence(), 6);
     assert!(
         matches!(settled.state(), RunViewState::Succeeded(value) if value.decode::<Number>().unwrap().value == 9)
     );
@@ -246,21 +238,33 @@ async fn ambiguous_failure_appends_acknowledge_neither_an_uncommitted_cause_nor_
                 assert_eq!(winner.head_sequence(), 3);
                 assert!(matches!(
                     winner.state(),
-                    RunViewState::EffectPending {
-                        latest_failure: Some(_),
-                        ..
-                    }
+                    RunViewState::AwaitingRecovery { .. }
                 ));
             }
             _ => {
                 let InvocationFailure::Execution {
-                    error: RuntimeError::Store(mfm_store::StoreError::Indeterminate),
+                    error: RuntimeError::Recording { failure, .. },
                     last_observed: Some(observed),
                     ..
                 } = result.err().unwrap()
                 else {
                     panic!("indeterminate failure append")
                 };
+                let mfm_runtime::RecordingFailure::Append {
+                    original: Some(original),
+                    candidate,
+                    outcome: mfm_runtime::AppendFailure::Store(mfm_store::StoreError::Indeterminate),
+                    observation: None,
+                    reload_cause: None,
+                } = failure.as_ref()
+                else {
+                    panic!("original and ambiguous candidate custody")
+                };
+                assert!(matches!(
+                    original.downcast_ref::<Cause>(),
+                    Some(Cause::Timeout { deadline_ms: 5000 })
+                ));
+                assert_eq!(candidate.run_sequence(), 3);
                 assert_eq!(observed.head_sequence(), 2);
                 assert!(matches!(
                     observed.state(),
@@ -274,15 +278,29 @@ async fn ambiguous_failure_appends_acknowledge_neither_an_uncommitted_cause_nor_
         let cold = runtime.read(&run).await.unwrap();
         assert_eq!(cold.head_sequence(), if committed { 3 } else { 2 });
         assert_eq!(calls.lock().unwrap().len(), 1);
-        let RunViewState::EffectPending {
-            effect_id,
-            latest_failure,
-            ..
-        } = cold.state()
-        else {
-            panic!("retained command")
+        let effect_id = if committed {
+            let RunViewState::AwaitingRecovery {
+                failure: mfm_runtime::Failure::PendingEffect { effect, original },
+            } = cold.state()
+            else {
+                panic!("committed original awaits policy")
+            };
+            assert!(matches!(
+                original.decode::<Cause>().unwrap(),
+                Cause::Timeout { deadline_ms: 5000 }
+            ));
+            effect.effect_id()
+        } else {
+            let RunViewState::EffectPending {
+                effect_id,
+                latest_failure: None,
+                ..
+            } = cold.state()
+            else {
+                panic!("unrecorded attempt retains command")
+            };
+            effect_id
         };
-        assert_eq!(latest_failure.is_some(), committed);
         assert_eq!(effect_id, &calls.lock().unwrap()[0].0);
         let stored = store.snapshot();
         assert_eq!(stored.len(), if committed { 3 } else { 2 });
@@ -299,18 +317,19 @@ impl Store for PausedFailureStore {
     fn load_run<'a>(
         &'a self,
         run: &'a RunId,
+        probe_sequence: Option<u64>,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
                     Output = std::result::Result<
-                        Option<mfm_journal::StoredRunBytes>,
+                        Option<mfm_store::LoadedRun>,
                         mfm_store::StoreError,
                     >,
                 > + Send
                 + 'a,
         >,
     > {
-        self.inner.load_run(run)
+        self.inner.load_run(run, probe_sequence)
     }
     fn append_run<'a>(
         &'a self,
@@ -392,15 +411,29 @@ async fn cancellation_at_failure_append_exposes_only_the_complete_committed_pref
         let cold = Runtime::new(build(), store.clone());
         let retained = cold.read(&run).await.unwrap();
         assert_eq!(retained.head_sequence(), if retain { 3 } else { 2 });
-        let RunViewState::EffectPending {
-            effect_id,
-            latest_failure,
-            ..
-        } = retained.state()
-        else {
-            panic!("pending")
+        let effect_id = if retain {
+            let RunViewState::AwaitingRecovery {
+                failure: mfm_runtime::Failure::PendingEffect { effect, original },
+            } = retained.state()
+            else {
+                panic!("committed original")
+            };
+            assert!(matches!(
+                original.decode::<Cause>().unwrap(),
+                Cause::Timeout { deadline_ms: 5000 }
+            ));
+            effect.effect_id()
+        } else {
+            let RunViewState::EffectPending {
+                effect_id,
+                latest_failure: None,
+                ..
+            } = retained.state()
+            else {
+                panic!("unchanged prepare")
+            };
+            effect_id
         };
-        assert_eq!(latest_failure.is_some(), retain);
         assert_eq!(calls.lock().unwrap().len(), 1);
         assert_eq!(effect_id, &calls.lock().unwrap()[0].0);
         let InvocationFailure::RecoveryStopped { observed, .. } =
@@ -408,32 +441,75 @@ async fn cancellation_at_failure_append_exposes_only_the_complete_committed_pref
         else {
             panic!("acknowledged resumed failure")
         };
-        assert_eq!(observed.head_sequence(), retained.head_sequence() + 1);
+        assert_eq!(observed.head_sequence(), 4);
         let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0], calls[1]);
+        assert_eq!(calls.len(), if retain { 1 } else { 2 });
+        assert!(calls.iter().all(|call| call == &calls[0]));
     }
 }
 
 #[tokio::test]
-async fn cold_fold_validates_pending_failure_position_and_stop_reasons() {
+async fn current_record_validates_pending_failure_position_input_request_and_stop_reason() {
     for (wrong_visit, reported_input, reason, run_limit, valid) in [
-        (false, 8, StopCode::Requested, 0, false),
-        (true, 9, StopCode::Requested, 0, false),
-        (false, 9, StopCode::Requested, 0, true),
-        (false, 9, StopCode::EffectBarrier, 0, true),
-        (false, 9, StopCode::StateRetryExhausted, 0, true),
-        (false, 9, StopCode::RunExhausted, 0, true),
-        (false, 9, StopCode::RunExhausted, 1, false),
-        (false, 9, StopCode::StateRestartExhausted, 0, false),
-        (false, 9, StopCode::PureRetry, 0, false),
-        (false, 9, StopCode::CheckpointUnavailable, 0, false),
-        (false, 9, StopCode::EffectSettled, 0, false),
+        (false, 8, StopReason::Requested, 0, false),
+        (true, 9, StopReason::Requested, 0, false),
+        (false, 9, StopReason::Requested, 0, true),
+        (
+            false,
+            9,
+            StopReason::Disallowed(RecoveryDenial::EffectBarrier),
+            0,
+            true,
+        ),
+        (
+            false,
+            9,
+            StopReason::Exhausted(RecoveryLimit::StateRetry),
+            0,
+            true,
+        ),
+        (false, 9, StopReason::Exhausted(RecoveryLimit::Run), 0, true),
+        (
+            false,
+            9,
+            StopReason::Exhausted(RecoveryLimit::Run),
+            1,
+            false,
+        ),
+        (
+            false,
+            9,
+            StopReason::Exhausted(RecoveryLimit::StateRestart),
+            0,
+            false,
+        ),
+        (
+            false,
+            9,
+            StopReason::Disallowed(RecoveryDenial::PureRetry),
+            0,
+            false,
+        ),
+        (
+            false,
+            9,
+            StopReason::Disallowed(RecoveryDenial::CheckpointUnavailable),
+            0,
+            false,
+        ),
+        (
+            false,
+            9,
+            StopReason::Disallowed(RecoveryDenial::EffectSettled),
+            0,
+            false,
+        ),
     ] {
         let store = Arc::new(MemoryStore::new());
         let mut builder = RuntimeAssemblyBuilder::new().unwrap();
         builder.register_effect::<Execute, Submit>().unwrap();
         builder.register_handler::<StandardRecovery>().unwrap();
+        builder.register_handler::<RetryUnknown>().unwrap();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = Arc::clone(&calls);
         builder
@@ -444,40 +520,71 @@ async fn cold_fold_validates_pending_failure_position_and_stop_reasons() {
             .unwrap();
         let runtime = Runtime::new(builder.finish(), store.clone());
         let run = RunId::from_digest(DigestBytes::from_array([92; 32]));
-        let program = expand_program(
-            EntryPointId::new("mfm.test/mismatched-failure@1").unwrap(),
-            &StopFlow,
-            &Number { value: 9 },
-            ProgramLimits::new(run_limit),
-        )
+        let entry = EntryPointId::new("mfm.test/mismatched-failure@1").unwrap();
+        let program = if reason == StopReason::Exhausted(RecoveryLimit::Run) {
+            expand_program(
+                entry,
+                &Flow,
+                &Number { value: 9 },
+                ProgramLimits::new(run_limit),
+            )
+        } else {
+            expand_program(
+                entry,
+                &StopFlow,
+                &Number { value: 9 },
+                ProgramLimits::new(run_limit),
+            )
+        }
         .unwrap();
         let pending = runtime
             .start(run.clone(), program, Number { value: 9 })
             .await
             .unwrap();
-        let RunViewState::EffectPending { position, .. } = pending.state() else {
-            panic!("prepared")
-        };
-        let mut wrong = *position;
+        let loaded = store.load_run(&run, None).await.unwrap().unwrap();
+        let latest = decode_frame(loaded.latest()).unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(latest.payload().as_bytes()).unwrap();
+        let mut effect = payload["state"]["phase"]["effect_pending"].clone();
         if wrong_visit {
-            wrong.visit = wrong.visit.checked_next().unwrap();
+            effect["call"]["position"]["visit"] = 1.into();
         }
-        let (error, error_ref) =
-            mfm_values::canonicalize_mfm_value(&Cause::Timeout { deadline_ms: 5000 }).unwrap();
-        let (context, context_ref) = mfm_values::canonicalize_mfm_value(&Number {
-            value: reported_input,
-        })
+        effect["call"]["input"] = serde_json::to_value(
+            mfm_values::Object::from_value(&Number {
+                value: reported_input,
+            })
+            .unwrap(),
+        )
         .unwrap();
-        let history =
-            JournalHistory::qualify(&run, store.load_run(&run).await.unwrap().unwrap()).unwrap();
-        let frame = history
-            .encode_effect_failure(
-                wrong,
-                mfm_journal::JournalObject::new(&error_ref, error.as_bytes()).unwrap(),
-                mfm_journal::JournalObject::new(&context_ref, context.as_bytes()).unwrap(),
-                PendingDecision::Stop { reason },
+        let original =
+            mfm_values::Object::from_value(&Cause::Timeout { deadline_ms: 5000 }).unwrap();
+        let request = match reason {
+            StopReason::Requested => RecoveryRequest::Stop,
+            StopReason::Disallowed(
+                RecoveryDenial::EffectBarrier | RecoveryDenial::CheckpointUnavailable,
             )
-            .unwrap();
+            | StopReason::Exhausted(RecoveryLimit::StateRestart) => {
+                serde_json::from_str(r#"{"restart":0}"#).unwrap()
+            }
+            _ => RecoveryRequest::RetryState,
+        };
+        payload["facts"] = serde_json::json!({"recovered": {
+            "failure": {"pending_effect": {"effect": effect, "original": original}},
+            "classification": Classification::OutcomeUnknown,
+            "request": request,
+            "decision": RecoveryDecision::Stop { reason },
+        }});
+        let payload = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+            &serde_json::to_string(&payload).unwrap(),
+        )
+        .unwrap();
+        let frame = seal_frame(
+            &run,
+            pending.head_sequence() + 1,
+            Some(pending.head_digest()),
+            &payload,
+        )
+        .unwrap();
         assert_eq!(
             store.append_run(&frame).await.unwrap(),
             mfm_store::AppendResult::Inserted
@@ -487,16 +594,10 @@ async fn cold_fold_validates_pending_failure_position_and_stop_reasons() {
             assert!(
                 matches!(observed.unwrap().state(), RunViewState::EffectPending {
                     latest_failure: Some(failure), ..
-                } if failure.decision == PendingDecision::Stop { reason })
+                } if failure.decision == RecoveryDecision::Stop { reason })
             );
         } else {
-            assert!(matches!(
-                observed,
-                Err(InvocationFailure::Execution {
-                    error: RuntimeError::InvalidHistory,
-                    ..
-                })
-            ));
+            assert!(observed.is_err());
         }
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
@@ -504,7 +605,7 @@ async fn cold_fold_validates_pending_failure_position_and_stop_reasons() {
 
 #[tokio::test]
 async fn competing_pending_failures_report_only_the_winning_exact_head_candidate() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(scripted_store::ScriptedStore::recording());
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut builder = RuntimeAssemblyBuilder::new().unwrap();
@@ -551,6 +652,7 @@ async fn competing_pending_failures_report_only_the_winning_exact_head_candidate
         tokio::spawn(async move { runtime.resume(&run).await })
     };
     let mut stopped = 0;
+    let mut excluded = 0;
     let mut observed = Vec::new();
     for result in [left.await.unwrap(), right.await.unwrap()] {
         let view = match result {
@@ -572,21 +674,53 @@ async fn competing_pending_failures_report_only_the_winning_exact_head_candidate
                 );
                 observed
             }
+            Err(InvocationFailure::Execution {
+                error: RuntimeError::Recording { failure, .. },
+                last_observed: Some(view),
+                ..
+            }) => {
+                let mfm_runtime::RecordingFailure::Append {
+                    original: Some(original),
+                    candidate,
+                    outcome: mfm_runtime::AppendFailure::NotInserted,
+                    observation: Some((head, mfm_runtime::CandidatePresence::Excluded)),
+                    reload_cause: None,
+                } = failure.as_ref()
+                else {
+                    panic!("excluded candidate retains original")
+                };
+                assert!(matches!(
+                    original.downcast_ref::<Cause>(),
+                    Some(Cause::Timeout {
+                        deadline_ms: 5001 | 5002
+                    })
+                ));
+                assert_eq!(candidate.run_sequence(), 3);
+                assert_eq!(head.head_sequence(), view.head_sequence());
+                excluded += 1;
+                view
+            }
             Err(_) => panic!("unexpected execution failure"),
         };
-        assert_eq!(view.head_sequence(), 3);
+        assert!(matches!(view.head_sequence(), 3 | 4));
         observed.push(view);
     }
     assert_eq!(stopped, 1);
-    assert_eq!(observed[0].head_digest(), observed[1].head_digest());
-    let history =
-        JournalHistory::qualify(&run, store.load_run(&run).await.unwrap().unwrap()).unwrap();
-    assert_eq!(
-        history
-            .records()
-            .filter(|record| matches!(record, JournalRecord::EffectAdapterFailed { .. }))
-            .count(),
-        1
-    );
+    assert_eq!(excluded, 1);
+    assert!(observed.iter().any(|view| view.head_sequence() == 4));
+    assert_eq!(runtime.read(&run).await.unwrap().head_sequence(), 4);
+    assert_eq!(original_count(&store.snapshot()), 1);
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+fn original_count(frames: &[Vec<u8>]) -> usize {
+    frames
+        .iter()
+        .filter(|bytes| {
+            let frame = decode_frame(bytes).unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_slice(frame.payload().as_bytes()).unwrap();
+            payload["facts"].get("failed").is_some()
+        })
+        .count()
 }

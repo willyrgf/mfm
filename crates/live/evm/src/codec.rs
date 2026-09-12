@@ -18,6 +18,21 @@ pub enum EvmCodecError {
     #[error("EVM codec input is invalid")]
     Invalid,
 }
+impl serde::Serialize for EvmCodecError {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut value = serializer.serialize_struct("EvmCodecError", 2)?;
+        let kind = match self {
+            Self::Invalid => "invalid",
+        };
+        value.serialize_field("kind", kind)?;
+        value.serialize_field("upstream_detail", "unavailable_at_existing_owner_boundary")?;
+        value.end()
+    }
+}
 
 /// Derives the Ethereum address of one checked uncompressed secp256k1 public key.
 pub fn ethereum_address(key: &Secp256k1PublicKey) -> EvmAddress {

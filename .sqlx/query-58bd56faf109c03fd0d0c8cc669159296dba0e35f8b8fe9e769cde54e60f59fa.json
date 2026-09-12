@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT run_id, head_sequence, total_bytes FROM ONLY public.mfm_run_heads WHERE run_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "run_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "mfm_run_heads",
+            "name": "run_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "head_sequence",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "mfm_run_heads",
+            "name": "head_sequence"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "total_bytes",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "mfm_run_heads",
+            "name": "total_bytes"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "58bd56faf109c03fd0d0c8cc669159296dba0e35f8b8fe9e769cde54e60f59fa"
+}

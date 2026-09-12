@@ -10,7 +10,7 @@ use mfm_app::{
     SerializableRunView, MAX_EVM_BINDINGS,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::{AdapterError, AdapterInvariantError};
+use mfm_capabilities::AdapterError;
 use mfm_config::{
     ConfigDigest, ConfigFuture, ConfigImportResult, ConfigRepository, ConfigRepositoryError,
     ConfigRevision, MemoryConfigRepository, MAX_CONFIG_DOCUMENT_BYTES,
@@ -68,8 +68,9 @@ impl EvmReadProvider for Provider {
             }
             let value = match intent.subject() {
                 EvmReadSubject::ChainIdentity => EvmReadValue::ChainId(
-                    NonZeroU64::new(self.chain_id)
-                        .ok_or(AdapterError::Invariant(AdapterInvariantError))?,
+                    NonZeroU64::new(self.chain_id).ok_or(AdapterError::Invariant(
+                        mfm_values::NativeCause::from_error(mfm_evm::EvmDomainError::InvalidValue),
+                    ))?,
                 ),
                 EvmReadSubject::InitialAnchor | EvmReadSubject::ConfirmAnchor { .. } => {
                     EvmReadValue::Anchor(EvmBlockAnchor {
@@ -96,7 +97,11 @@ impl EvmReadProvider for Provider {
         _intent_value_ref: &'a ContentRef,
         _intent: &'a AnchoredContractCallIntent,
     ) -> ProviderFuture<'a, AnchoredContractCallEvidence> {
-        Box::pin(async { Err(AdapterError::Invariant(AdapterInvariantError)) })
+        Box::pin(async {
+            Err(AdapterError::Invariant(
+                mfm_values::NativeCause::from_error(mfm_evm::EvmDomainError::InvalidValue),
+            ))
+        })
     }
 }
 
@@ -263,14 +268,10 @@ impl Store for FaultStore {
     fn load_run<'a>(
         &'a self,
         run_id: &'a RunId,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Option<mfm_journal::StoredRunBytes>, StoreError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        self.inner.load_run(run_id)
+        probe_sequence: Option<u64>,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<mfm_store::LoadedRun>, StoreError>> + Send + 'a>>
+    {
+        self.inner.load_run(run_id, probe_sequence)
     }
 
     fn append_run<'a>(
@@ -448,7 +449,8 @@ async fn stored_config_lifecycle_uses_exact_revisions_and_preserves_admitted_run
     assert!(matches!(started.run().state(), RunViewState::Succeeded(_)));
     assert_eq!(first.calls.load(Ordering::SeqCst), 4);
     assert_eq!(second.calls.load(Ordering::SeqCst), 4);
-    let rendered = serde_json::to_value(SerializableRunView::new(started.run())).expect("JSON");
+    let rendered =
+        serde_json::to_value(SerializableRunView::new(started.run()).unwrap()).expect("JSON");
     assert_eq!(rendered["state"]["kind"], "succeeded");
     assert_eq!(
         rendered["state"]["value"]["snapshot"]["collections"]
@@ -623,12 +625,14 @@ async fn ambiguous_run_appends_carry_exact_start_and_progress_recovery_sums() {
         panic!("start append must be ambiguous");
     };
     assert_eq!(error.code(), "run_append_indeterminate");
-    let serialized = serde_json::to_value(mfm_app::SerializableClientError::for_run(
-        &error,
-        &error.to_string(),
-    ))
+    let serialized = serde_json::to_value(
+        mfm_app::SerializableClientError::for_run(&error, &error.to_string()).unwrap(),
+    )
     .unwrap();
-    assert_eq!(serialized["last_observed"], serde_json::Value::Null);
+    assert_eq!(
+        serialized["invocation"]["last_observed"],
+        serde_json::Value::Null
+    );
     assert!(matches!(
         error.recovery(),
         Some(RunRecovery::Start { run_id: retained, config })
@@ -669,13 +673,18 @@ async fn ambiguous_run_appends_carry_exact_start_and_progress_recovery_sums() {
         error.recovery(),
         Some(RunRecovery::Progress { run_id: retained }) if retained == &run_id(41)
     ));
-    let serialized = serde_json::to_value(mfm_app::SerializableClientError::for_run(
-        &error,
-        &error.to_string(),
-    ))
+    let serialized = serde_json::to_value(
+        mfm_app::SerializableClientError::for_run(&error, &error.to_string()).unwrap(),
+    )
     .unwrap();
-    assert_eq!(serialized["last_observed"]["head_sequence"], 3);
-    assert_eq!(serialized["last_observed"]["state"]["kind"], "runnable");
+    assert_eq!(
+        serialized["invocation"]["last_observed"]["head_sequence"],
+        3
+    );
+    assert_eq!(
+        serialized["invocation"]["last_observed"]["state"]["kind"],
+        "runnable"
+    );
 }
 
 #[tokio::test]
@@ -701,7 +710,7 @@ async fn client_models_distinguish_durable_provider_failure_from_unknown_invocat
         .start_run(run_id(70), &selection(&imported))
         .await
         .unwrap();
-    let model = serde_json::to_value(SerializableRunView::new(started.run())).unwrap();
+    let model = serde_json::to_value(SerializableRunView::new(started.run()).unwrap()).unwrap();
     assert_eq!(model["state"]["kind"], "failed");
     assert_eq!(model["state"]["report"]["reason"], "requested");
     assert_eq!(model["state"]["report"]["cause"]["kind"], "adapter");
@@ -720,20 +729,19 @@ async fn client_models_distinguish_durable_provider_failure_from_unknown_invocat
     assert!(model["state"]["report"]["cause"].get("root").is_none());
     let cold = app.read_run(&run_id(70)).await.unwrap();
     assert_eq!(
-        serde_json::to_value(SerializableRunView::new(&cold)).unwrap(),
+        serde_json::to_value(SerializableRunView::new(&cold).unwrap()).unwrap(),
         model
     );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     let error = app.read_run(&run_id(71)).await.err().unwrap();
-    let error_model = serde_json::to_value(mfm_app::SerializableClientError::for_run(
-        &error,
-        &error.to_string(),
-    ))
+    let error_model = serde_json::to_value(
+        mfm_app::SerializableClientError::for_run(&error, &error.to_string()).unwrap(),
+    )
     .unwrap();
     assert_eq!(error_model["code"], "run_absent");
     assert_eq!(
         error_model["invocation"],
-        serde_json::json!({"kind":"execution_stopped", "run_id":run_id(71), "last_observed":null})
+        serde_json::json!({"kind":"execution_stopped", "run_id":run_id(71), "last_observed":null,"cause":"absent"})
     );
 }
 
@@ -742,3 +750,6 @@ mod enrichment;
 
 #[path = "support/portfolio_contract.rs"]
 mod portfolio_contract;
+
+#[path = "support/native_constructor.rs"]
+mod native_constructor;

@@ -49,13 +49,10 @@ pub type Result<T> = std::result::Result<T, CanonicalError>;
 /// Maximum nested array/object depth accepted by canonical JSON ingress.
 pub use limits::MAX_CANONICAL_JSON_DEPTH;
 
-/// Error returned when canonical JSON, decimal, or byte grammar validation
-/// fails.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{message}")]
-pub struct CanonicalError {
-    message: String,
-}
+mod bounded;
+pub use bounded::to_json_bounded;
+mod error;
+pub use error::{CanonicalError, JsonError};
 
 /// Computes the raw `sha256-v1` content digest of exact retained bytes.
 ///
@@ -113,19 +110,6 @@ impl fmt::Debug for RawContentDigestHasher {
         formatter
             .debug_struct("RawContentDigestHasher")
             .finish_non_exhaustive()
-    }
-}
-
-impl CanonicalError {
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-
-    /// Returns a stable human-readable diagnostic.
-    pub fn message(&self) -> &str {
-        &self.message
     }
 }
 
@@ -212,7 +196,7 @@ impl PlainCanonicalJsonBytes {
                 deserializer.end()?;
                 Ok(value)
             })
-            .map_err(|error| CanonicalError::new(format!("invalid canonical JSON: {error}")))?;
+            .map_err(CanonicalError::json)?;
         let canonical = Self::from_value(&value);
         if canonical.bytes.len() > limits::MAX_CANONICAL_JSON_BYTES {
             return Err(CanonicalError::new("canonical JSON exceeds its byte bound"));
@@ -222,9 +206,7 @@ impl PlainCanonicalJsonBytes {
 
     /// Validates that the supplied plain JSON bytes are already canonical.
     pub fn from_canonical_json_slice(bytes: &[u8]) -> Result<Self> {
-        let input = std::str::from_utf8(bytes).map_err(|error| {
-            CanonicalError::new(format!("canonical JSON must be UTF-8: {error}"))
-        })?;
+        let input = std::str::from_utf8(bytes).map_err(CanonicalError::utf8)?;
         let canonical = Self::from_json_str(input)?;
         if canonical.as_bytes() != bytes {
             return Err(CanonicalError::new(

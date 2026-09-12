@@ -65,11 +65,12 @@ the architect rule above.
   the same change.
 - `docs/architecture.md` owns taxonomy and placement:
   - Program is an immutable, content-addressed linear State sequence;
-  - Runtime associates the Program with typed implementations and owns the sole semantic fold;
+  - Runtime associates the Program with typed implementations and owns the current continuation,
+    transitions, and local safety checks;
   - State implementations are deterministic and perform no ambient IO;
   - Read adapters bind typed intent to explicit observational capabilities;
-  - Journal owns the exact append-only frame wire and history qualification;
-  - Store owns mechanical complete-prefix load and atomic exact-head append only;
+  - Journal owns the exact opaque append-only frame wire;
+  - Store owns mechanical admission/latest/optional-probe load and atomic exact-head append only;
   - transports and signers remain reusable platform primitives; and
   - binaries parse/render their supported transport surface only.
 - Run histories are append-only; every append is all-or-nothing and prior frames never mutate.
@@ -106,11 +107,11 @@ composition. Follow the pinned Nixfied adopter guide for framework changes.
 
 ## Surface-specific rules
 
-- Program/Runtime: keep sequence association and recovery scheduling deterministic; test hot/cold equivalence,
+- Program/Runtime: keep sequence association, current-state validation and recovery scheduling deterministic; test hot/cold equivalence,
   cancellation safety, typed error mapping, and semantic changes.
 - Journal/Store: keep exact wire qualification in Journal and physical atomicity in Store. Store must
   not acquire Program, domain, capability, or reducer semantics.
-- PostgreSQL: preserve one repeatable-read complete load snapshot and one advisory-locked,
+- PostgreSQL: preserve one repeatable-read admission/latest/probe snapshot and one advisory-locked,
   synchronous-commit append transaction. Ambiguous COMMIT acknowledgement is `Indeterminate`.
 - Adapters: only duplicate-safe Reads are supported. Local mismatch is `Internal` with no provider
   call or append; only authenticated external evidence can durably represent an integrity block.

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT run_id, run_sequence, frame_bytes, head_digest FROM ONLY public.mfm_run_frames WHERE run_id = $1 ORDER BY run_sequence",
+  "query": "SELECT run_id, run_sequence, frame_bytes, head_digest FROM ONLY public.mfm_run_frames WHERE run_id = $1 AND run_sequence IN (1, $2, $3) ORDER BY run_sequence",
   "describe": {
     "columns": [
       {
@@ -50,7 +50,9 @@
     ],
     "parameters": {
       "Left": [
-        "Text"
+        "Text",
+        "Int8",
+        "Int8"
       ]
     },
     "nullable": [
@@ -60,5 +62,5 @@
       false
     ]
   },
-  "hash": "67430496334634ac692492462706fc1bb58c3c096c26839ce5cb8fbc6e7ede23"
+  "hash": "58f1fa328468c81947996c838c77a1dd593e1990a4bec7601a74b4cd5996a793"
 }

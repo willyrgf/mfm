@@ -23,13 +23,13 @@ impl StatePosition {
     }
 }
 
-/// Monotonic run-wide execution identity. Effect prepare and conclusion share a visit.
+/// Monotonic run-wide execution identity. Effect preparation and settlement share a visit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct VisitId(u64);
 
 impl VisitId {
-    /// Constructs a visit counter; history qualification checks its progression.
+    /// Constructs a visit counter; Runtime checks its current-record relationships.
     pub const fn new(value: u64) -> Self {
         Self(value)
     }

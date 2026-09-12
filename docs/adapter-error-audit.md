@@ -1,22 +1,24 @@
 # Adapter error-chain audit
 
-Reviewed: 2026-09-10, following the intrinsic-classification and pending-Effect audit cutover
-`e71d744f`. This is a source review and remediation inventory, not a claim that the gaps below have
-been fixed. The review also inspected the current shared working tree; unrelated Runtime edits
-were left untouched. Adapter source anchors below identify the reviewed conversion points.
+This inventory follows the current-state auditability cutover. It distinguishes the completed
+core boundaries below from source-owner gaps still assigned to RFC section 12, step 4. It does
+not claim that preserving an error received by Runtime repairs a cause discarded upstream.
 
 ## Result
 
-The repository does not yet preserve the whole causal error chain across every adapter.
-The RPC/EVM cutover now retains reviewed provider evidence through the existing admitted failure
-path. SQLx, signer, custody and application boundaries still have the gaps below, and Runtime's
-execution/context and recovery commit cutover remains outstanding. Adding durable pending failure frames fixed
-one persistence gap; it could not recover evidence discarded before Runtime entry.
+Runtime commits declared originals before recovery and accepted Effect settlement before
+interpretation. Native callback, checked Object admission, recording, and reporting failures
+retain reviewed causes through Application and the run transport surfaces. Journal seals opaque
+frames and Store loads admission/latest/optional-probe snapshots; neither reconstructs run semantics.
 
-The new repository requirement is in [AGENTS.md](../AGENTS.md) and
-[code quality](code-quality.md#error-provenance-and-auditability). Preserve causal provenance across
-every boundary; classification and public rendering must be projections. Preserve secret-free
-contracts and explicitly identify any missing evidence instead of calling partial capture complete.
+The repository still has first-loss gaps in PostgreSQL, signer/keystore, upstream transaction
+custody, memory/task, bootstrap, and non-run transport paths. Their concrete owner closure remains
+required. Core acceptance and its limits are recorded in the
+[core evidence](measurements/auditability-core-acceptance.md).
+
+The requirements are in [AGENTS.md](../AGENTS.md) and
+[code quality](code-quality.md#error-provenance-and-auditability). Classification and public codes
+are projections, while unavailable, withheld, or bounded evidence must be explicit.
 
 ## Scope and method
 
@@ -68,8 +70,8 @@ freezes exact error identities and checks a near-budget diagnostic plus full-wid
 Client sources without reviewed downcasts remain opaque while accessible deeper sources are kept.
 Raw URL, body, RPC message/data and client formatting are withheld. Complete means the exposed
 source chain ended, not that hidden client attempts or raw diagnostic custody were recovered.
-Classification is unchanged; timeouts do not establish nonacceptance. The cold Read test proves
-retention through the current committed path, not the RFC's pending commit-before-handler cutover.
+Classification is unchanged; timeouts do not establish nonacceptance. Cold Read tests retain the admitted provider carrier. The separate Runtime recovery tests prove
+that the original commits before classification or handler entry.
 
 ### 2. Read registration bridges preserve the cause they receive
 
@@ -78,10 +80,9 @@ Source: [live EVM registration](../crates/live/evm/src/lib.rs), `read` and `read
 The chain/anchor/balance and anchored-call bridges pass provider errors through without replacing
 them. They now carry the provider's reviewed causal value without a second persistence object.
 
-Wrong local route, chain or capability family returns a unit `AdapterInvariantError`. That correctly
-stays Internal and prevents provider entry; it still lacks causal diagnostic detail under the new
-rule. Retain reviewed mismatch/stage facts in an internal diagnostic path without manufacturing
-authenticated integrity evidence or a recoverable provider error.
+Wrong local route, chain or capability family returns a native `AdapterFailure` with reviewed
+expected/observed binding or subject facts. It stays Internal and prevents provider entry, without
+manufacturing authenticated integrity evidence or a recoverable provider error.
 
 ### 3. Transaction adapters preserve provider categories but erase other layers
 
@@ -97,8 +98,9 @@ Source: [transaction.rs](../crates/live/evm/src/transaction.rs), `reserve_nonce`
   Invalid/Failed distinction and source provenance.
 - Submitted-hash and canonical-block mismatches now retain the checked expected/observed values
   in the provider carrier while remaining Unavailable/OutcomeUnknown.
-- Codec validation and blocking task join errors become unit invariants. Preserve their internal
-  causal category and stage; do not copy arbitrary panic payloads or relabel them operational.
+- Codec, checked receipt/binding, and reached blocking-task failures now use native `AdapterFailure`
+  with reviewed causes or task outcomes. The upstream signer/authority source losses remain; this
+  local cutover does not recover them or authorize retaining panic payloads.
 
 Remediation: preserve nested provider/custody/signer causes with the transaction stage added once
 at this boundary. Keep the same prepared command/EffectId, no renonce or replacement command, and
@@ -202,7 +204,7 @@ in-memory configuration backend has no network/client error chain to preserve; o
 unchanged outcomes are not dropped errors.
 
 Remediation: retain actual available memory/task causes and local stage without fabricating an
-RPC/SQL chain. Preserve mechanical complete-prefix and atomic append responsibilities. A source
+RPC/SQL chain. Preserve mechanical admission/latest/optional-probe loading and atomic append responsibilities. A source
 API that exposes no details should be represented honestly as such.
 
 ### 10. Adjacent bootstrap and transport conversions lose additional provenance
@@ -214,9 +216,12 @@ and [REST server](../bin/rest-api/src/server.rs).
 
 Deployment file-open, read, UTF-8, TOML and task failures share one code. Composition then flattens
 locator/provider/Postgres errors again. Config and index translation keep only client-facing
-categories. CLI read/write errors and REST listener errors discard OS causes; request rejection
+categories. CLI input and REST listener errors discard OS causes; request rejection
 rendering intentionally returns reviewed messages without an independent causal audit path.
-Entropy failure loses the underlying OS/library category too.
+Entropy failure loses the underlying OS/library category too. Run-response preparation, encoding,
+and CLI write/flush failures now retain their original invocation and separate reporting cause.
+REST retains response-construction failures through its body handoff; this is not proof of delivery
+through a socket or an independent durable audit sink.
 
 Remediation: retain causal invocation diagnostics while keeping the current redacted user-facing
 codes. File paths, environment values, configuration snippets and request bodies need explicit
@@ -232,21 +237,32 @@ Sources: [capability errors](../crates/kernel/capabilities/src/lib.rs),
 [engine](../crates/kernel/runtime/src/engine.rs), [reports](../crates/kernel/runtime/src/report.rs),
 [Journal](../crates/kernel/journal/src/lib.rs), [public view](../crates/app/src/run_view.rs).
 
-Read and pending Effect operational records retain the qualified original cause and complete executed input.
-`RuntimeError::Store(#[from] StoreError)` preserves the supplied Store error, and
-`RunRequestError::Invocation(#[source] InvocationFailure)` keeps its typed wrapper. These are useful
-preservation paths, but their sources are often already coarse values.
+Read, State-domain and pending Effect failures commit their original and complete operation facts
+as AwaitingRecovery before classification, policy or mapping. Recovery is a separate commit.
+Accepted Effect settlement commits as AwaitingInterpretation before deterministic interpretation.
+Cold reads inspect those current facts without replaying earlier callbacks or operation frames.
 
-`AdapterError<E>` hides operational payloads in Display/Debug. Its conditional `Error`
-implementation now exposes nested sources when `E: Error`; ordinary typed payload access remains
-available without that bound. This preserves non-Error `MfmValue` capability contracts rather than
-requiring unsafe formatting or claiming every value implements `Error`. The capability boundary
-tests cover both unformattable non-Error payloads and nested standard sources.
+`AdapterError<E>` retains either the typed operational value or `NativeCause`. Native causes hold
+actual reviewed owners with fallible bounded projection; non-Error `MfmValue` originals do not
+need a new persisted decoder-error identity. Runtime adds the actual operation and stage. Values'
+`ObjectSeed` retains checked admission causes separately from wire errors, and private Runtime
+seeds construct the existing payload types directly. Journal retains canonical/JSON causes while
+owning only its exact opaque envelope.
 
-Runtime maps internal preparation, callback, codec and task failures to reviewed internal codes.
-Retain those distinctions in an appropriate internal causal representation; do not reclassify
-them as operational to force them into existing failure frames. Journal corruption errors also
-need internal provenance without echoing untrusted stored bytes.
+A failed failure-encoding task leaves the original in its async owner's custody. Recording failure
+retains that original, the separate recording cause, and the exact sealed candidate when available.
+A Store error causes no probe or fallback append. NotInserted permits one exact snapshot probe;
+its physical finding is independent of later restoration or projection failure. Known insertion
+followed by projection failure retains the acknowledged head separately from an older observation.
+Values catches an unwinding native projection callback and returns a reviewed projection failure
+with an explicit withheld panic-payload marker. The borrowed original remains in custody and the
+failed projector is not retried. This does not suppress process panic hooks or catch aborts.
+
+Application preserves this custody through AppendIndeterminate and incomplete transport reporting.
+Run reports omit only explicitly accounted-for details; preparation or delivery failure does not
+replace the primary invocation. None of these paths restores layers already erased by the remaining
+PostgreSQL, signer, or other source owners. The
+[core evidence](measurements/auditability-core-acceptance.md) identifies the consuming regressions.
 
 ### 12. Development-only funding shares the reviewed RPC boundary
 
@@ -294,8 +310,8 @@ Complete boundary cutovers should replace/delete:
 Change exact schema/implementation identities when error contracts or classification semantics
 change, update all consumers and docs in each coherent cutover, and reject superseded formats.
 Do not add migrations, compatibility wrappers, or blanket suppression exceptions. Report LOC
-removed from lossy plumbing separately from necessary audit additions. The rule/report commit is
-documentation-only; it does not alter current public or persistence contracts.
+removed from lossy plumbing separately from necessary audit additions. The core cutover changes the current persistence and reporting contracts; it retains no previous
+wire reader or historical qualification API.
 
 ## Required evidence for remediation
 
@@ -316,8 +332,8 @@ documentation-only; it does not alter current public or persistence contracts.
 
 Use [build and verification](build-and-verification.md) for scope-selected tests. Runtime/domain
 or persistence changes require focused consuming tests and one final CI on the exact candidate;
-keystore changes require strengthened tests explicitly. This review and rule update require local
-link review and `git diff --check`; no Rust behavior changes or external IO tests are performed.
+keystore changes require strengthened tests explicitly. The core evidence records focused and
+managed checks; final CI remains required on the complete owner implementation.
 
 ## Material uncertainties
 

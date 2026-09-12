@@ -4,6 +4,7 @@ struct TestError {}
 
 use crate::*;
 use mfm_program_derive::MfmValue;
+use mfm_values::NativeCause;
 
 #[derive(Debug, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -23,7 +24,7 @@ impl State for Pass {
 impl PureState for Pass {
     fn evaluate(
         input: Value,
-    ) -> std::result::Result<ProposedStateOutcome<Value, Never>, StateExecutionError> {
+    ) -> std::result::Result<ProposedStateOutcome<Value, Never>, NativeCause> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -178,12 +179,16 @@ impl EffectCapabilityContract for Effect {
         StableId::new("mfm.test.effect@1")
             .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
     }
-    fn bind_evidence(_: &mfm_ids::EffectId, _: &Value, _: &Value) -> mfm_capabilities::Result<()> {
+    fn bind_evidence(
+        _: &mfm_ids::EffectId,
+        _: &Value,
+        _: &Value,
+    ) -> std::result::Result<(), NativeCause> {
         Ok(())
     }
 }
 impl EffectState<Effect> for Pass {
-    fn prepare(input: &Value) -> std::result::Result<Value, PreparationError> {
+    fn prepare(input: &Value) -> std::result::Result<Value, NativeCause> {
         Ok(Value {
             number: input.number,
         })
@@ -191,7 +196,7 @@ impl EffectState<Effect> for Pass {
     fn interpret(
         input: Value,
         _: &Value,
-    ) -> std::result::Result<ProposedStateOutcome<Value, Never>, StateExecutionError> {
+    ) -> std::result::Result<ProposedStateOutcome<Value, Never>, NativeCause> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -264,7 +269,11 @@ fn capability_identity_distinguishes_operational_contracts_and_modes() {
         fn contract_id() -> mfm_capabilities::Result<StableId> {
             Effect::contract_id()
         }
-        fn bind_evidence(_: &ContentRef, _: &Value, _: &Value) -> mfm_capabilities::Result<()> {
+        fn bind_evidence(
+            _: &ContentRef,
+            _: &Value,
+            _: &Value,
+        ) -> std::result::Result<(), NativeCause> {
             Ok(())
         }
     }
@@ -442,7 +451,7 @@ fn nested_handler_replacement_keeps_parameters_targets_and_zero_allowances_scope
             _: &Value,
             _: Classification,
             _: &RecoveryContext<'_>,
-        ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+        ) -> std::result::Result<RecoveryRequest, NativeCause> {
             Ok(RecoveryRequest::Stop)
         }
     }

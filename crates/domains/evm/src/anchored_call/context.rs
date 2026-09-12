@@ -1,9 +1,6 @@
 use super::*;
 use crate::{Called, CompletedTransactionFacts};
-use mfm_program::{
-    CapabilityInjection, PreparationError, ProgramError, ProposedStateOutcome, ReadState, State,
-    StateExecutionError,
-};
+use mfm_program::{CapabilityInjection, ProgramError, ProposedStateOutcome, ReadState, State};
 use mfm_values::{canonicalize_mfm_value, ContextSlot, MfmValue as MfmValueTrait};
 use std::marker::PhantomData;
 
@@ -153,7 +150,7 @@ pub trait ObservationRecipe<C: MfmValueTrait>: Send + Sync + 'static {
     /// Ordered destination then source slot identities.
     fn source_ids() -> mfm_values::Result<Vec<StableId>>;
     /// Constructs the intent, rejecting local cross-field mismatches before provider entry.
-    fn intent(context: &C) -> Result<AnchoredContractCallIntent, PreparationError>;
+    fn intent(context: &C) -> Result<AnchoredContractCallIntent, mfm_values::NativeCause>;
 }
 
 /// Observes a completed ordinary call at its retained target and exact receipt anchor.
@@ -171,13 +168,17 @@ where
     fn source_ids() -> mfm_values::Result<Vec<StableId>> {
         Ok(vec![O::slot_id()?, T::slot_id()?])
     }
-    fn intent(context: &C) -> Result<AnchoredContractCallIntent, PreparationError> {
+    fn intent(context: &C) -> Result<AnchoredContractCallIntent, mfm_values::NativeCause> {
         let plan = O::get(context);
         let call = T::get(context);
         let route = &call.command().binding().route;
-        let reference = route.binding_ref().map_err(|_| PreparationError)?;
+        let reference = route
+            .binding_ref()
+            .map_err(mfm_values::NativeCause::from_error)?;
         if &reference != plan.route_ref() || route.chain_instance.chain_id != plan.chain_id() {
-            return Err(PreparationError);
+            return Err(mfm_values::NativeCause::from_error(
+                crate::EvmDomainError::InvalidValue,
+            ));
         }
         Ok(plan.intent_for(
             call.outcome().target().clone(),
@@ -239,16 +240,16 @@ impl<C: MfmValueTrait, R: ObservationRecipe<C>> State for ReadAnchoredContractCa
 impl<C: MfmValueTrait, R: ObservationRecipe<C>> ReadState<EvmAnchoredContractCallRead>
     for ReadAnchoredContractCall<C, R>
 {
-    fn prepare(input: &C) -> Result<AnchoredContractCallIntent, PreparationError> {
+    fn prepare(input: &C) -> Result<AnchoredContractCallIntent, mfm_values::NativeCause> {
         R::intent(input)
     }
     fn interpret(
         input: C,
         evidence: &AnchoredContractCallEvidence,
-    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, StateExecutionError> {
-        let intent = R::intent(&input).map_err(|_| StateExecutionError)?;
+    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::NativeCause> {
+        let intent = R::intent(&input)?;
         let facts = AnchoredObservationFacts::new(intent, evidence.clone())
-            .map_err(|_| StateExecutionError)?;
+            .map_err(mfm_values::NativeCause::from_error)?;
         let reason = facts.failure_reason();
         let context = R::Slot::replace(input, facts);
         Ok(match reason {

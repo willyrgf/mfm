@@ -39,6 +39,19 @@ pub struct IdentityError {
     message: String,
 }
 
+impl serde::Serialize for IdentityError {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut wire = serializer.serialize_struct("IdentityError", 2)?;
+        wire.serialize_field("message", "withheld")?;
+        wire.serialize_field("message_bytes", &self.message.len())?;
+        wire.end()
+    }
+}
+
 impl IdentityError {
     fn new(message: impl Into<String>) -> Self {
         Self {

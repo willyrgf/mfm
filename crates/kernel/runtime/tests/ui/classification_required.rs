@@ -2,6 +2,7 @@ use mfm_capabilities::ReadCapabilityContract;
 use mfm_ids::{ContentRef, StableId};
 use mfm_program::*;
 use mfm_runtime::RuntimeAssemblyBuilder;
+use mfm_values::NativeCause;
 
 struct Observation;
 impl ReadCapabilityContract for Observation {
@@ -12,7 +13,7 @@ impl ReadCapabilityContract for Observation {
         StableId::new("mfm.test.unclassified@1")
             .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
     }
-    fn bind_evidence(_: &ContentRef, _: &NoParams, _: &NoParams) -> mfm_capabilities::Result<()> {
+    fn bind_evidence(_: &ContentRef, _: &NoParams, _: &NoParams) -> std::result::Result<(), NativeCause> {
         Ok(())
     }
 }
@@ -26,13 +27,13 @@ impl State for Read {
     }
 }
 impl ReadState<Observation> for Read {
-    fn prepare(_: &NoParams) -> std::result::Result<NoParams, PreparationError> {
+    fn prepare(_: &NoParams) -> std::result::Result<NoParams, NativeCause> {
         Ok(NoParams)
     }
     fn interpret(
         input: NoParams,
         _: &NoParams,
-    ) -> std::result::Result<ProposedStateOutcome<NoParams, Never>, StateExecutionError> {
+    ) -> std::result::Result<ProposedStateOutcome<NoParams, Never>, NativeCause> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }

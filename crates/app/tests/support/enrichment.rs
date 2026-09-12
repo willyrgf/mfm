@@ -58,7 +58,7 @@ async fn enrichment_publication_and_matching_admission_survive_configuration_del
                 config,
                 run_id: retained_id,
             },
-        last_observed,
+        invocation: mfm_runtime::InvocationFailure::Execution { last_observed, .. },
     } = resumed_start
     else {
         panic!("start recovery envelope");

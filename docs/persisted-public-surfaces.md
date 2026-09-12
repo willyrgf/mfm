@@ -5,20 +5,19 @@ contains the entry point, admitted-context contract and exact initial value ref,
 contracts, and an ordered State sequence with selected recovery policies, maps, checkpoints, and
 finite semantic recovery allowances. There is no public wire DTO parallel to `Program`.
 
-Journal persists only canonical `mfm.run.frame.v5` frames. Genesis records the exact Program and C0.
-Later frames are a fused Pure conclusion, a fused Read conclusion, an Effect prepare, a pending
-operational failure, or settlement after its prepare/failure* prefix. Conclusions retain position,
-visit, original cause and the atomic recovery decision. Read operational failures retain the complete
-executed input and exact intent. Pending failures retain the complete input, with command and EffectId
-owned by the governing prepare. A domain Stop also retains its mapped root failure. A prepare or
-pending failure may end a valid prefix. Each referenced object appears exactly once in the sorted
-frame-local object closure.
-Recursive heads use `content:sha256-v1` over exact canonical frame bytes.
+Journal persists only canonical `mfm.run.frame.v6` envelopes with RunId, sequence, predecessor
+and opaque canonical payload. Recursive heads use `content:sha256-v1` over exact frame bytes.
+Runtime's payload is `RunCommit { program_ref, state, facts }`. Complete state contains the phase,
+active checkpoint inputs, per-State retry/restart usage and Effect barrier. Admission facts retain
+Program and C0; later facts record success, original failure, Effect preparation, accepted
+settlement, or recovery classification/request/decision. Original failure precedes recovery, and
+accepted settlement precedes interpretation, in separate atomic frames.
 
-`EncodedRunFrame` is sealed and exposes Store's read-only run/sequence/predecessor/head/byte
-projections. `StoredRunBytes` is opaque unqualified transfer. `JournalHistory` is the sole qualified
-complete prefix and exposes only borrowed semantic records/objects required by Runtime. No raw frame
-parser, open Journal DTO, portable codec, or independent semantic record hash is public.
+Values Object contains exactly its value ref and raw canonical value. There is no frame-local object
+table, cross-frame object reference resolution, duplicated stored contract ref, or native cache.
+`EncodedRunFrame` exposes checked mechanical headers and exact bytes. Store's `LoadedRun` supplies
+head, admission/latest and optional candidate-probe rows from one snapshot. Runtime validates the
+current payload and Program binding without reconstructing a complete historical prefix.
 
 Store persists immutable frame bytes and one current head only. PostgreSQL owns exactly
 `mfm_store_schema`, `mfm_run_frames`, and `mfm_run_heads`; the static schema contract is
@@ -34,7 +33,7 @@ The sibling RunIndex port beside Store
 defines a mechanical run summary containing only RunId, head sequence/digest, and cumulative bytes.
 Run listing uses the last returned RunId directly as its exclusive ascending keyset continuation;
 pages are not snapshots across requests. Config interpretation belongs to Application, and run
-status remains a Runtime fold.
+status remains a Runtime current-state projection.
 
 PostgreSQL configuration custody owns exactly `mfm_config_schema` and `config_revisions` under
 `mfm.config-postgres.v2`. PostgreSQL EVM transaction authority owns exactly
@@ -60,10 +59,12 @@ RunId, terminal head, and exact output ref. Application verifies that linkage be
 The exact Program and C0 remain the durable execution admission; RunIndex remains mechanical.
 
 Public `RunView` contains RunId, durable sequence/head, and one of `Runnable`, `EffectPending`,
-`Succeeded`, or `Failed`. Runnable retains position and Advance/Retry/Restart reason. Pending Effect
+`AwaitingRecovery`, `AwaitingInterpretation`, `Succeeded`, or `Failed`. Runnable retains position and Advance/Retry/Restart reason. Pending Effect
 views retain position, EffectId and `latest_failure`: the original error, complete input, command,
-EffectId and committed decision. Success exposes output contract/ref and exact canonical bytes.
-Failure exposes the content ref and canonical `mfm.failure-report.v3` report, including the original
+EffectId and committed decision. AwaitingRecovery exposes the original and complete executed facts;
+AwaitingInterpretation exposes complete command authority and accepted evidence. Success exposes
+output contract/ref and exact canonical bytes.
+Failure exposes the content ref and canonical `mfm.failure-report.v4` report, including the original
 domain failure and mapped root, or the original Read error with complete input and intent, plus Stop
 reason, position and recovery usage. Adapter causes identify their `mode` as `read` or `effect`.
 Client JSON preserves that sum and embeds retained canonical bytes as raw JSON values.
@@ -92,10 +93,20 @@ exact anchor, chain ID, operation ID, and transaction-route ref; returned eviden
 anchor and bounded return bytes. Transient signing digests/signatures and raw-transaction custody
 never enter these values.
 
-Ambiguous start/progress acknowledgement carries exact recovery identity and the last observed
-view, or null if none was observed. Other invocation errors expose their reviewed execution or
+Ambiguous start/progress acknowledgement carries exact recovery identity and the complete
+invocation. Its last observed view may be absent and does not claim the current acknowledged head.
+Recording failures retain candidate bytes natively and expose only candidate identity in JSON.
+Explicit insertion followed by projection failure retains its acknowledged mechanical head separately. Other invocation errors expose their reviewed execution or
 recovery detail. Both client transports use the same Application-owned error serializer and recovery envelopes
 frozen under `docs/contracts/client-surface/`; an identified REST start error may additionally carry
 the already selected RunId.
 Public surfaces never contain credentials, private keys, raw provider material, or unreviewed error
 details.
+
+
+Prepared App serializers retain fallible native projection outside Serde. Incomplete reports keep
+primary error codes and recovery identity, compact historical head evidence, explicit acknowledgement
+when available, and named omissions for projection, encoding, delivery or actual-bound failure.
+Native custody is local to the invocation and is not a persisted fault record or delivery proof.
+See [App reporting](../crates/app/README.md#report-preparation-failures) for the shared wire and
+[CLI](../bin/cli/README.md) / [REST](../bin/rest-api/README.md) for write and handoff semantics.

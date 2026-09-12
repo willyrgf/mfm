@@ -28,6 +28,24 @@ pub enum EvidenceError {
     #[error("diagnostic bound exceeded")]
     BoundExceeded,
 }
+impl serde::Serialize for EvidenceError {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut value = serializer.serialize_struct("EvidenceError", 2)?;
+        let kind = match self {
+            Self::InvalidValue => "invalid_value",
+            Self::InvalidFacts => "invalid_facts",
+            Self::InvalidLocation => "invalid_location",
+            Self::BoundExceeded => "bound_exceeded",
+        };
+        value.serialize_field("kind", kind)?;
+        value.serialize_field("upstream_detail", "unavailable_at_existing_owner_boundary")?;
+        value.end()
+    }
+}
 
 /// HTTP response status received from the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, PersistedSchema)]

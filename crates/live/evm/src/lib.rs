@@ -11,7 +11,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use mfm_capabilities::{AdapterError, AdapterInvariantError};
+use crate::error::{invariant, AdapterFailure};
+use mfm_capabilities::AdapterError;
+mod error;
 use mfm_evm::EvmOperationalError;
 use mfm_evm::{
     AnchoredContractCallEvidence, AnchoredContractCallIntent, EvmAnchorRead,
@@ -76,9 +78,14 @@ pub fn register_evm_reads(
         ($capability:ty, $family:ident, $target:expr, $provider:expr) => {{
             let binding = $target;
             let callback_target = binding.clone();
-            let callback_ref = binding
-                .binding_ref()
-                .map_err(|_| mfm_runtime::RuntimeError::Internal)?;
+            let callback_ref =
+                binding
+                    .binding_ref()
+                    .map_err(|source| mfm_runtime::RuntimeError::Native {
+                        operation: mfm_runtime::Operation::Admission,
+                        stage: mfm_runtime::Stage::Execute,
+                        cause: mfm_values::NativeCause::from_error(source),
+                    })?;
             let callback_provider = $provider;
             builder.register_adapter::<$capability, EvmPhysicalTarget, _>(
                 binding,
@@ -120,7 +127,11 @@ pub fn register_evm_anchored_contract_calls(
     let callback_route = route.clone();
     let callback_ref = route
         .binding_ref()
-        .map_err(|_| mfm_runtime::RuntimeError::Internal)?;
+        .map_err(|source| mfm_runtime::RuntimeError::Native {
+            operation: mfm_runtime::Operation::Admission,
+            stage: mfm_runtime::Stage::Execute,
+            cause: mfm_values::NativeCause::from_error(source),
+        })?;
     builder.register_adapter::<EvmAnchoredContractCallRead, EvmTransactionRoute, _>(
         route,
         move |intent_value_ref, intent| {
@@ -149,7 +160,12 @@ async fn read_anchored(
     intent: &AnchoredContractCallIntent,
 ) -> std::result::Result<AnchoredContractCallEvidence, AdapterError<EvmOperationalError>> {
     if intent.chain_id() != route.chain_instance.chain_id || intent.route_ref() != binding_ref {
-        return Err(AdapterError::Invariant(AdapterInvariantError));
+        return Err(invariant(AdapterFailure::ReadBinding {
+            expected_route: binding_ref.clone(),
+            observed_route: intent.route_ref().clone(),
+            expected_chain: route.chain_instance.chain_id.get(),
+            observed_chain: intent.chain_id().get(),
+        }));
     }
     provider
         .observe_anchored_call(intent_value_ref, intent)
@@ -164,11 +180,19 @@ async fn read(
     intent_value_ref: &ContentRef,
     intent: &EvmReadIntent,
 ) -> std::result::Result<EvmReadEvidence, AdapterError<EvmOperationalError>> {
-    if intent.chain_id() != target.chain_id
-        || intent.route_ref() != binding_ref
-        || !registration.accepts(intent.subject())
-    {
-        return Err(AdapterError::Invariant(AdapterInvariantError));
+    if intent.chain_id() != target.chain_id || intent.route_ref() != binding_ref {
+        return Err(invariant(AdapterFailure::ReadBinding {
+            expected_route: binding_ref.clone(),
+            observed_route: intent.route_ref().clone(),
+            expected_chain: target.chain_id.get(),
+            observed_chain: intent.chain_id().get(),
+        }));
+    }
+    if !registration.accepts(intent.subject()) {
+        return Err(invariant(AdapterFailure::ReadSubject {
+            expected: registration,
+            observed: intent.subject().clone(),
+        }));
     }
     provider.observe(intent_value_ref, intent).await
 }
@@ -213,7 +237,7 @@ mod tests {
             Box::pin(async move {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 let result = AnchoredContractCallResult::new(intent.anchor().clone(), vec![])
-                    .map_err(|_| AdapterError::Invariant(AdapterInvariantError))?;
+                    .map_err(invariant)?;
                 Ok(AnchoredContractCallEvidence::returned(
                     intent_value_ref.clone(),
                     result,
@@ -313,46 +337,55 @@ mod tests {
         let provider = Provider {
             calls: AtomicUsize::new(0),
         };
-        let intent_value_ref = registered.endpoint_ref.clone();
-
-        let wrong_chain = target(2, 2);
-        assert_eq!(
-            read(
-                &registered,
-                &registered.binding_ref().unwrap(),
-                &provider,
+        for (other, family, expected_kind) in [
+            (
+                target(2, 2),
                 ReadCapabilityFamily::ChainIdentity,
-                &intent_value_ref,
-                &intent(&wrong_chain),
-            )
-            .await,
-            Err(AdapterError::Invariant(AdapterInvariantError))
-        );
-        let wrong_route = target(1, 3);
-        assert_eq!(
-            read(
-                &registered,
-                &registered.binding_ref().unwrap(),
-                &provider,
+                "read_binding",
+            ),
+            (
+                target(1, 3),
                 ReadCapabilityFamily::ChainIdentity,
-                &intent_value_ref,
-                &intent(&wrong_route),
-            )
-            .await,
-            Err(AdapterError::Invariant(AdapterInvariantError))
-        );
-        assert_eq!(
-            read(
-                &registered,
-                &registered.binding_ref().unwrap(),
-                &provider,
+                "read_binding",
+            ),
+            (
+                registered.clone(),
                 ReadCapabilityFamily::Balance,
-                &intent_value_ref,
-                &intent(&registered),
+                "read_subject",
+            ),
+        ] {
+            let error = read(
+                &registered,
+                &registered.binding_ref().unwrap(),
+                &provider,
+                family,
+                &registered.endpoint_ref,
+                &intent(&other),
             )
-            .await,
-            Err(AdapterError::Invariant(AdapterInvariantError))
-        );
+            .await
+            .unwrap_err();
+            let AdapterError::Invariant(cause) = error else {
+                panic!("local invariant")
+            };
+            assert!(
+                serde_json::from_str::<serde_json::Value>(cause.project().unwrap().get())
+                    .unwrap()
+                    .get(expected_kind)
+                    .is_some()
+            );
+            if let Some(AdapterFailure::ReadBinding {
+                expected_chain,
+                observed_chain,
+                expected_route,
+                observed_route,
+            }) = cause.downcast_ref::<AdapterFailure>()
+            {
+                assert_eq!(*expected_chain, registered.chain_id.get());
+                assert_eq!(*observed_chain, other.chain_id.get());
+                assert_eq!(expected_route, &registered.binding_ref().unwrap());
+                assert_eq!(observed_route, &other.binding_ref().unwrap());
+            }
+        }
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     }
 
@@ -370,10 +403,10 @@ mod tests {
         let mut first = RuntimeAssemblyBuilder::new().expect("builder");
         register_evm_reads(&mut first, target.clone(), first_provider).expect("three callbacks");
         assert_eq!(target.binding_ref().expect("stable binding"), binding);
-        assert_eq!(
+        assert!(matches!(
             register_evm_reads(&mut first, target.clone(), second_provider.clone()),
             Err(mfm_runtime::RuntimeError::IncompatibleAssembly)
-        );
+        ));
 
         let mut replacement = RuntimeAssemblyBuilder::new().expect("builder");
         register_evm_reads(&mut replacement, target.clone(), second_provider)
@@ -393,17 +426,22 @@ mod tests {
         let wrong = route(&target(1, 3));
         let intent = anchored_intent(&wrong);
         let intent_value_ref = physical.endpoint_ref.clone();
-        assert_eq!(
-            read_anchored(
-                &registered_route,
-                &registered_route.binding_ref().unwrap(),
-                provider.as_ref(),
-                &intent_value_ref,
-                &intent,
-            )
-            .await,
-            Err(AdapterError::Invariant(AdapterInvariantError))
-        );
+        let error = read_anchored(
+            &registered_route,
+            &registered_route.binding_ref().unwrap(),
+            provider.as_ref(),
+            &intent_value_ref,
+            &intent,
+        )
+        .await
+        .unwrap_err();
+        let AdapterError::Invariant(cause) = error else {
+            panic!("local anchored binding")
+        };
+        assert!(matches!(
+            cause.downcast_ref::<AdapterFailure>(),
+            Some(AdapterFailure::ReadBinding { .. })
+        ));
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 
         let provider: Arc<dyn EvmReadProvider> = provider;
@@ -414,10 +452,10 @@ mod tests {
             Arc::clone(&provider),
         )
         .expect("anchored callback");
-        assert_eq!(
+        assert!(matches!(
             register_evm_anchored_contract_calls(&mut builder, registered_route, provider),
             Err(mfm_runtime::RuntimeError::IncompatibleAssembly)
-        );
+        ));
         builder.finish();
     }
 }

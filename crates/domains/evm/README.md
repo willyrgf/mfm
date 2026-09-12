@@ -19,14 +19,14 @@ accumulates the exact command and reservation, full preparation evidence, full s
 sealed `Created` or `Called` projection. `ReservedEvmTransaction` and `PreparedEvmTransaction`
 remain live capability command descriptors. Cumulative fact constructors and decoding preserve
 command/reference, nonce-domain, settlement-nonce/hash/action, and projection agreement. Runtime
-and Journal establish the provenance of Effect identities. Only authenticated reversion reaches
-the typed failure carrying the executed context; internal mismatches return `StateExecutionError`.
+establishes the provenance of Effect identities. Only authenticated reversion reaches
+the typed failure carrying the executed context; internal mismatches retain native causes.
 Executable identity commits to stage, implementation version, explicit recipe identity, ordered
 slot identities, and outcome mode. Changing a selected same-typed source changes identity.
 
 `custody` owns the reusable asynchronous nonce-reservation and opaque signed-byte retention port.
 The live adapter supplies signer/provider IO and PostgreSQL supplies atomic persistence. Custody
-returns immutable first prepared winners; Journal alone retains transaction settlement. The reserve
+returns immutable first prepared winners; Runtime commits transaction settlement before interpretation. The reserve
 State EffectId identifies custody throughout the sequence. Raw signed bytes have no serde or debug
 surface. No State performs IO, and Runtime has no EVM-specific logic.
 
@@ -94,3 +94,9 @@ Permanent domain settlement failure. Classification does not authorize another c
 
 Callers own handler selection, checkpoint regions and finite allowances. `AnchorChanged` retains
 the previous and observed anchors and rejects equal anchors during qualification.
+
+Balance metadata has one checked correlation constructor. `EvmBalanceContext::new` and its native
+Runtime decoder retain constructor errors with their metadata location and reviewed cause. Empty
+and overlong correlations remain distinct; rejected text is withheld. Ordinary Serde and native
+decoding share construction, while the native route avoids Serde's custom-error conversion.
+Other checked value families still use their existing decoder boundaries pending their owner cutovers.
