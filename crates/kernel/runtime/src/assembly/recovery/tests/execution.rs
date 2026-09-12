@@ -18,7 +18,6 @@ impl mfm_program::Operation for RetryingRead {
             &Offset { value: 1 },
             NoParams,
             mfm_program::Occurrence::new(),
-            mfm_program::ConclusionBound::new(65536)?,
         )
     }
 }
@@ -56,40 +55,12 @@ async fn committed_read_recovery_yields_and_reconstructs_without_provider_calls(
             EntryPointId::new("mfm.test/retry@1").unwrap(),
             &RetryingRead,
             &Offset { value: 7 },
-            ProgramLimits::new(1),
+            ProgramLimits::new(u32::MAX),
         )
         .unwrap();
         let run = RunId::from_digest(DigestBytes::from_array(
             [if operational { 42 } else { 41 }; 32],
         ));
-        let oversized = mfm_program::expand_program(
-            EntryPointId::new("mfm.test/retry@1").unwrap(),
-            &RetryingRead,
-            &Offset { value: 7 },
-            ProgramLimits::new(u32::MAX),
-        )
-        .unwrap();
-        assert!(matches!(
-            runtime
-                .start(run.clone(), oversized, Offset { value: 7 })
-                .await,
-            Err(crate::InvocationFailure::Execution {
-                error: RuntimeError::SizeLimit {
-                    resource: crate::SizeResource::FrameCount,
-                    ..
-                },
-                last_observed: None,
-                ..
-            })
-        ));
-        assert!(matches!(
-            runtime.read(&run).await,
-            Err(crate::InvocationFailure::Execution {
-                error: RuntimeError::Absent,
-                ..
-            })
-        ));
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(matches!(
             runtime
                 .start(run.clone(), program.clone(), Offset { value: 8 })
@@ -263,7 +234,6 @@ impl mfm_program::Operation for PendingSettlement {
             &Offset { value: 1 },
             NoParams,
             mfm_program::Occurrence::new(),
-            mfm_program::EffectBounds::new(65536, 65536, 8, 65536)?,
         )
     }
 }
@@ -430,7 +400,6 @@ impl mfm_program::CapabilityInjection<EvmRead> for InjectedObservation {
                 &Offset { value: 1 },
                 NoParams,
                 mfm_program::Occurrence::new(),
-                mfm_program::EffectBounds::new(65536, 65536, 8, 65536)?,
             )?;
         }
         Ok(())
@@ -475,7 +444,6 @@ impl mfm_program::Operation for RestartRegion {
                 &Offset { value: 1 },
                 NoParams,
                 mfm_program::Occurrence::new(),
-                mfm_program::EffectBounds::new(65536, 65536, 8, 65536)?,
             )?;
         }
         let checkpoint = scope.checkpoint::<Offset>()?;
@@ -487,7 +455,6 @@ impl mfm_program::Operation for RestartRegion {
             },
             NoParams,
             mfm_program::Occurrence::new(),
-            mfm_program::ConclusionBound::new(65536)?,
         )
     }
 }

@@ -1004,15 +1004,13 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
         EvmChainIdentityRead,
     };
     use mfm_program::{
-        ConclusionBound, Identity, NoContext, NoParams, Occurrence, Operation, OperationExpansion,
-        ProgramLimits,
+        Identity, NoContext, NoParams, Occurrence, Operation, OperationExpansion, ProgramLimits,
     };
     use mfm_runtime::{FailureCauseView, RunViewState, Runtime, RuntimeAssemblyBuilder};
     use std::sync::Arc;
 
     struct ReadChain {
         target: EvmPhysicalTarget,
-        bound: ConclusionBound,
     }
     impl Operation for ReadChain {
         type Input = EvmBalanceContext<NoContext>;
@@ -1026,7 +1024,7 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
             body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
         ) -> mfm_program::Result<()> {
             body.read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead, Identity<EvmBalanceFailure>>(
-                &self.target.binding_ref().unwrap(), NoParams, Occurrence::new(), self.bound)
+                &self.target.binding_ref().unwrap(), NoParams, Occurrence::new())
         }
     }
     let mut retained = Vec::new();
@@ -1052,7 +1050,6 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
             18,
         )
         .unwrap();
-        let bound = request.conclusion_bound(2, 2048).unwrap();
         let input = EvmBalanceContext::new(
             request,
             NoContext,
@@ -1065,7 +1062,6 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
             mfm_ids::EntryPointId::new("mfm.test.evm/causal-read@1").unwrap(),
             &ReadChain {
                 target: target.clone(),
-                bound,
             },
             &input,
             ProgramLimits::new(0),

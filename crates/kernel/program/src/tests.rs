@@ -37,11 +37,7 @@ impl Operation for Child<'_> {
         if let Some(token) = self.capture {
             scope.handler(HandlerBinding::new::<Stop>(NoParams)?.checkpoint(token)?)?;
         }
-        scope.pure::<Pass, Identity<Never>>(
-            NoParams,
-            Occurrence::new(),
-            ConclusionBound::new(1024)?,
-        )
+        scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new())
     }
 }
 struct Parent {
@@ -56,11 +52,7 @@ impl Operation for Parent {
         Ok(())
     }
     fn expand(&self, scope: &mut OperationExpansion<Value, Value, Never>) -> Result<()> {
-        scope.pure::<Pass, Identity<Never>>(
-            NoParams,
-            Occurrence::new(),
-            ConclusionBound::new(1024)?,
-        )?;
+        scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new())?;
         let token = scope.checkpoint::<Value>()?;
         scope.handler(HandlerBinding::new::<Stop>(NoParams)?.checkpoint(&token)?)?;
         scope.allowances(RecoveryAllowances::new(self.retries, 1))?;
@@ -97,6 +89,28 @@ fn emitted_linear_program_binds_recovery_and_relocates_inherited_checkpoints() {
     );
     let cold = Program::decode_canonical(program.canonical_bytes()).unwrap();
     assert_eq!(cold, program);
+    let wire: serde_json::Value = serde_json::from_slice(program.canonical_bytes()).unwrap();
+    assert_eq!(wire["domain"], "mfm.program.v7");
+    assert_eq!(
+        wire["declarations"][0]["execution"],
+        serde_json::json!({"kind": "pure"})
+    );
+    for (field, value) in [
+        ("bound", serde_json::json!(1024)),
+        (
+            "bounds",
+            serde_json::json!({"prepare": 1024, "conclusion": 1024}),
+        ),
+    ] {
+        let mut retired = wire.clone();
+        retired["declarations"][0]["execution"][field] = value;
+        let encoded = PlainCanonicalJsonBytes::from_json_str(&retired.to_string()).unwrap();
+        assert!(Program::decode_canonical(encoded.as_bytes()).is_err());
+    }
+    let mut retired = wire;
+    retired["domain"] = serde_json::json!("mfm.program.v6");
+    let encoded = PlainCanonicalJsonBytes::from_json_str(&retired.to_string()).unwrap();
+    assert!(Program::decode_canonical(encoded.as_bytes()).is_err());
     let changed = expand_program(
         entry.clone(),
         &Parent {
@@ -120,11 +134,6 @@ fn emitted_linear_program_binds_recovery_and_relocates_inherited_checkpoints() {
         ),
         Err(ProgramError::InvalidContract)
     ));
-    let cost = program
-        .history_bound(ConclusionBound::new(100).unwrap())
-        .unwrap();
-    assert_eq!(cost.frames(), 7);
-    assert_eq!(cost.bytes(), 6244);
     let mut tampered: serde_json::Value =
         serde_json::from_slice(program.canonical_bytes()).unwrap();
     tampered["declarations"][1]["recovery_targets"] = serde_json::json!([2]);
@@ -203,12 +212,12 @@ impl CapabilityInjection<Pass> for Effect {
         nominal_contract_ref::<Value>()
     }
     fn write_before(_: &(), scope: &mut OperationExpansion<Value, Value, Never>) -> Result<()> {
-        scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new(), ConclusionBound::new(100)?)
+        scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new())
     }
     fn write_after(_: &(), scope: &mut OperationExpansion<Value, Value, Never>) -> Result<()> {
         let token = scope.checkpoint::<Value>()?;
         scope.handler(HandlerBinding::new::<Stop>(NoParams)?.checkpoint(&token)?)?;
-        scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new(), ConclusionBound::new(100)?)
+        scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new())
     }
 }
 struct Inject;
@@ -220,17 +229,8 @@ impl Operation for Inject {
         Ok(())
     }
     fn expand(&self, scope: &mut OperationExpansion<Value, Value, Never>) -> Result<()> {
-        scope.pure::<Pass, Identity<Never>>(
-            NoParams,
-            Occurrence::new(),
-            ConclusionBound::new(100)?,
-        )?;
-        scope.effect::<Pass, Effect, Identity<Never>>(
-            &(),
-            NoParams,
-            Occurrence::new(),
-            EffectBounds::new(200, 300, 2, 150)?,
-        )
+        scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new())?;
+        scope.effect::<Pass, Effect, Identity<Never>>(&(), NoParams, Occurrence::new())
     }
 }
 #[test]
@@ -256,11 +256,6 @@ fn injection_lowers_the_designated_effect_and_the_post_effect_checkpoint() {
         Program::decode_canonical(program.canonical_bytes()).unwrap(),
         program
     );
-    let cost = program
-        .history_bound(ConclusionBound::new(100).unwrap())
-        .unwrap();
-    assert_eq!(cost.frames(), 15);
-    assert_eq!(cost.bytes(), 2300);
 }
 
 #[test]
@@ -301,11 +296,7 @@ fn root_planning_checks_input_agreement_and_commits_exact_initial_value() {
             }
         }
         fn expand(&self, scope: &mut OperationExpansion<Value, Value, Never>) -> Result<()> {
-            scope.pure::<Pass, Identity<Never>>(
-                NoParams,
-                Occurrence::new(),
-                ConclusionBound::new(1024)?,
-            )
+            scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new())
         }
     }
     let entry = EntryPointId::new("mfm.test/planned@1").unwrap();
@@ -472,20 +463,18 @@ fn nested_handler_replacement_keeps_parameters_targets_and_zero_allowances_scope
             Ok(())
         }
         fn expand(&self, scope: &mut OperationExpansion<Value, Value, Never>) -> Result<()> {
-            let bound = ConclusionBound::new(1024)?;
-            scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new(), bound)?;
+            scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new())?;
             let checkpoint = scope.checkpoint::<Value>()?;
             scope.handler(
                 HandlerBinding::new::<Policy>(Value { number: 2 })?.checkpoint(&checkpoint)?,
             )?;
-            scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new(), bound)?;
+            scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new())?;
             scope.pure::<Pass, Identity<Never>>(
                 NoParams,
                 Occurrence::new()
                     .handler(HandlerBinding::new::<Stop>(NoParams)?)
                     .retries(0)
                     .restarts(0),
-                bound,
             )
         }
     }
@@ -503,10 +492,9 @@ fn nested_handler_replacement_keeps_parameters_targets_and_zero_allowances_scope
                 HandlerBinding::new::<Policy>(Value { number: 1 })?.checkpoint(&checkpoint)?,
             )?;
             scope.allowances(RecoveryAllowances::new(3, 2))?;
-            let bound = ConclusionBound::new(1024)?;
-            scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new(), bound)?;
+            scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new())?;
             scope.operation::<NestedPolicy, Identity<Never>>(&NestedPolicy, NoParams)?;
-            scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new(), bound)
+            scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new())
         }
     }
     let program = expand_program(

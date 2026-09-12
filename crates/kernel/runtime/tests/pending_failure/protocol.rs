@@ -100,7 +100,6 @@ impl Operation for ProtocolFlow {
             &Number { value: 1 },
             NoParams,
             Occurrence::new(),
-            EffectBounds::new(65536, 65536, 2, 65536)?,
         )
     }
 }

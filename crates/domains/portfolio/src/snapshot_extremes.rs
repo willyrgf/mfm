@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn calculated_root_bound_covers_completed_prefix_and_snapshot_with_maximum_public_fields() {
+fn maximum_public_fields_preserve_completed_prefix_and_snapshot() {
     let target = EvmPhysicalTarget {
         chain_id: NonZeroU64::new(u64::MAX).unwrap(),
         endpoint_ref: mfm_evm::EvmEndpoint::new("\"".repeat(256))
@@ -44,7 +44,6 @@ fn calculated_root_bound_covers_completed_prefix_and_snapshot_with_maximum_publi
             None,
         )
         .unwrap();
-        let (bound, _) = conclusion_bounds(&input).unwrap();
         // Use full-width EVM amounts and the broader public Portfolio anchor contract.
         // The sum of 64 U256 values remains within the 80-digit checked total.
         let completed = input
@@ -75,14 +74,14 @@ fn calculated_root_bound_covers_completed_prefix_and_snapshot_with_maximum_publi
             })
             .collect();
         let continuation = PortfolioContinuation::new(input, completed).unwrap();
-        assert!(bytes(&continuation).unwrap() <= bound.max_frame_bytes());
+        mfm_values::canonicalize_mfm_value(&continuation).unwrap();
         let encoded = serde_json::to_vec(&continuation).unwrap();
         let ProposedStateOutcome::Success { output: resolved } =
             ResolvePortfolioAssets::evaluate(serde_json::from_slice(&encoded).unwrap()).unwrap()
         else {
             panic!("bounded native/token candidates must resolve")
         };
-        assert!(bytes(&resolved).unwrap() <= bound.max_frame_bytes());
+        mfm_values::canonicalize_mfm_value(&resolved).unwrap();
         assert!(
             serde_json::to_vec(&resolved.into_snapshot_config().0)
                 .unwrap()
@@ -94,7 +93,7 @@ fn calculated_root_bound_covers_completed_prefix_and_snapshot_with_maximum_publi
         else {
             panic!("bounded complete Portfolio must consolidate")
         };
-        assert!(bytes(&output).unwrap() <= bound.max_frame_bytes());
+        mfm_values::canonicalize_mfm_value(&output).unwrap();
         assert_eq!(output.snapshot.collections.len(), collection_count);
     }
 }

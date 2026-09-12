@@ -21,11 +21,7 @@ impl Nested {
     fn emit(&self, scope: &mut OperationExpansion<Value, Value, Never>) -> Result<()> {
         self.entered.fetch_add(1, Ordering::SeqCst);
         // A rejected subtree must not leak this successfully authored prefix into its parent.
-        scope.pure::<Pass, Identity<Never>>(
-            NoParams,
-            Occurrence::new(),
-            ConclusionBound::new(1024)?,
-        )?;
+        scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new())?;
         if self.remaining == 1 {
             return Ok(());
         }
@@ -38,12 +34,7 @@ impl Nested {
         {
             scope.operation::<Self, Identity<Never>>(&child, NoParams)
         } else {
-            scope.effect::<Pass, NestedEffect, Identity<Never>>(
-                &child,
-                NoParams,
-                Occurrence::new(),
-                EffectBounds::new(1024, 1024, 1, 1024)?,
-            )
+            scope.effect::<Pass, NestedEffect, Identity<Never>>(&child, NoParams, Occurrence::new())
         }
     }
 }
@@ -118,11 +109,7 @@ impl CapabilityInjection<Pass> for NestedEffect {
         setup.suffixes.fetch_add(1, Ordering::SeqCst);
         let checkpoint = scope.checkpoint::<Value>()?;
         scope.handler(HandlerBinding::new::<Stop>(NoParams)?.checkpoint(&checkpoint)?)?;
-        scope.pure::<Pass, Identity<Never>>(
-            NoParams,
-            Occurrence::new(),
-            ConclusionBound::new(1024)?,
-        )
+        scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new())
     }
 }
 struct Catch(Nested);
@@ -138,11 +125,7 @@ impl Operation for Catch {
             scope.operation::<Nested, Identity<Never>>(&self.0, NoParams),
             Err(ProgramError::Capacity)
         );
-        scope.pure::<Pass, Identity<Never>>(
-            NoParams,
-            Occurrence::new(),
-            ConclusionBound::new(1024)?,
-        )
+        scope.pure::<Pass, Identity<Never>>(NoParams, Occurrence::new())
     }
 }
 

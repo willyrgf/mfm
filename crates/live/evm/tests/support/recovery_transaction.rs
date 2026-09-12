@@ -1,7 +1,7 @@
 use mfm_capabilities::AdapterError;
 use mfm_evm::*;
 use mfm_ids::{DigestBytes, EntryPointId, RunId};
-use mfm_program::{ConclusionBound, EffectBounds, ProgramLimits};
+use mfm_program::ProgramLimits;
 use mfm_program_derive::{MfmContext, MfmValue};
 use mfm_runtime::{
     EffectAdapterOutcome, InvocationFailure, RunViewState, Runtime, RuntimeAssemblyBuilder,
@@ -67,50 +67,9 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
         )
         .unwrap(),
     };
-    let input_bytes = mfm_values::canonicalize_mfm_value(&input)
-        .unwrap()
-        .0
-        .as_bytes()
-        .len() as u64;
-    let command_bytes = mfm_values::canonicalize_mfm_value(&input.transaction.command())
-        .unwrap()
-        .0
-        .as_bytes()
-        .len() as u64;
-    // Retained reservation, preparation and settlement add only fixed-width identifiers,
-    // quantities and closed outcome fields. 16 KiB covers these complete facts and keys;
-    // adding the command again conservatively avoids assuming a serialized slot subtraction.
-    let context_bytes = input_bytes + command_bytes + 16_384;
-    // The frame envelope allowance includes repeated content references and recovery wire.
-    let envelope = 16_384;
-    let bounds = EvmTransactionBounds {
-        reservation: EffectBounds::new(
-            command_bytes + envelope,
-            context_bytes + 4096 + envelope,
-            2,
-            65536,
-        )
-        .unwrap(),
-        preparation: EffectBounds::new(
-            command_bytes + 4096 + envelope,
-            context_bytes + 4096 + envelope,
-            2,
-            65536,
-        )
-        .unwrap(),
-        execution: EffectBounds::new(
-            command_bytes + 4096 + envelope,
-            context_bytes + 4096 + envelope,
-            2,
-            65536,
-        )
-        .unwrap(),
-        // Account for both original and mapped root failure even though Identity may deduplicate.
-        projection: ConclusionBound::new(2 * context_bytes + envelope).unwrap(),
-    };
     let program = mfm_program::expand_program(
         EntryPointId::new("mfm.test/recovery-transaction@1").unwrap(),
-        &EvmTransaction::<Input, Recipe>::new(binding.clone(), bounds),
+        &EvmTransaction::<Input, Recipe>::new(binding.clone()),
         &input,
         ProgramLimits::new(1),
     )
@@ -199,28 +158,6 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
         let store = Arc::new(mfm_store::MemoryStore::new());
         let runtime = Runtime::new(builder.finish(), store.clone());
         let run = RunId::from_digest(DigestBytes::from_array([scenario + 1; 32]));
-        if scenario == 0 {
-            let oversized = mfm_program::expand_program(
-                EntryPointId::new("mfm.test/recovery-transaction@1").unwrap(),
-                &EvmTransaction::<Input, Recipe>::new(binding.clone(), bounds),
-                &input,
-                ProgramLimits::new(u32::MAX),
-            )
-            .unwrap();
-            assert!(matches!(
-                runtime.start(run.clone(), oversized, input.clone()).await,
-                Err(InvocationFailure::Execution {
-                    error: mfm_runtime::RuntimeError::SizeLimit {
-                        resource: mfm_runtime::SizeResource::FrameCount,
-                        ..
-                    },
-                    last_observed: None,
-                    ..
-                })
-            ));
-            assert!(store.load_run(&run).await.unwrap().is_none());
-            assert_eq!(attempts.load(Ordering::SeqCst), 0);
-        }
         let hot = match runtime
             .start(run.clone(), program.clone(), input.clone())
             .await
@@ -272,16 +209,10 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
         )
         .unwrap();
         let frame_lengths = history.frame_lengths().collect::<Vec<_>>();
-        let cost = program
-            .history_bound(ConclusionBound::new(frame_lengths[0] as u64).unwrap())
-            .unwrap();
-        assert_eq!(cost.frames(), 27);
-        assert!(cost.bytes() <= mfm_journal::MAX_RUN_BYTES);
-        assert!(history.total_bytes() <= cost.bytes());
+        assert!(history.total_bytes() <= mfm_journal::MAX_RUN_BYTES);
         eprintln!(
-            "scenario {scenario}: frames {frame_lengths:?}; actual {} bytes, admitted {} bytes",
+            "scenario {scenario}: frames {frame_lengths:?}; actual {} bytes",
             history.total_bytes(),
-            cost.bytes()
         );
         let cold = runtime.read(&run).await.unwrap();
         assert_eq!(cold.head_digest(), hot.head_digest());

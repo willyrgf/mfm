@@ -159,47 +159,11 @@ fn prepare_admission<T: MfmValue>(
         c0.canonical.as_bytes(),
     )
     .map_err(map_local_journal_error)?;
-    validate_admission_bound(&executable.program, genesis.canonical_bytes().len())?;
     Ok(PreparedAdmission {
         executable,
         c0,
         genesis,
     })
-}
-
-fn validate_admission_bound(program: &Program, genesis_bytes: usize) -> Result<()> {
-    use mfm_program::{ConclusionBound, Execution};
-    for declaration in program.declarations() {
-        let maximum = match declaration.execution() {
-            Execution::Pure { bound } | Execution::Read { bound, .. } => bound.max_frame_bytes(),
-            Execution::Effect { bounds, .. } => bounds
-                .prepare_bytes()
-                .max(bounds.conclusion_bytes())
-                .max(bounds.failure_frame_bytes()),
-        };
-        crate::check_size(
-            crate::SizeResource::Frame,
-            maximum,
-            mfm_journal::MAX_FRAME_BYTES as u64,
-        )?;
-    }
-    let bound = program
-        .history_bound(
-            ConclusionBound::new(genesis_bytes as u64)
-                .map_err(|_| RuntimeError::ArithmeticOverflow)?,
-        )
-        .map_err(|_| RuntimeError::ArithmeticOverflow)?;
-    crate::check_size(
-        crate::SizeResource::FrameCount,
-        bound.frames(),
-        mfm_journal::MAX_RUN_FRAMES,
-    )?;
-    crate::check_size(
-        crate::SizeResource::HistoryBytes,
-        bound.bytes(),
-        mfm_journal::MAX_RUN_BYTES,
-    )?;
-    Ok(())
 }
 
 fn accumulator_from_inserted_genesis(
@@ -666,22 +630,11 @@ pub(crate) async fn start_pending_effect<S: EffectState<C>, C: EffectCapabilityC
         input,
         effect_id,
         command,
-        failures,
         ..
     } = &accumulator.state.cursor
     else {
         return Err(RuntimeError::Internal);
     };
-    let mfm_program::Execution::Effect { bounds, .. } =
-        accumulator.executable.program.declarations()[position.state.index()].execution()
-    else {
-        return Err(RuntimeError::Internal);
-    };
-    crate::check_size(
-        crate::SizeResource::PendingFailures,
-        u64::from(*failures) + 1,
-        u64::from(bounds.max_pending_failures()),
-    )?;
     let (position, input, command, effect_id) = (
         *position,
         Arc::clone(input),
@@ -784,38 +737,7 @@ struct PreparedAppend {
     frame: EncodedRunFrame,
 }
 
-fn current_frame_bound(
-    executable: &ExecutableProgram,
-    state: &FoldState,
-    record: &JournalRecord<'_>,
-) -> Result<u64> {
-    use mfm_program::Execution;
-    let (position, pending) = match &state.cursor {
-        Cursor::Runnable { position, .. } => (*position, false),
-        Cursor::EffectPending { position, .. } => (*position, true),
-        _ => return Err(RuntimeError::InvalidHistory),
-    };
-    Ok(
-        match executable.program.declarations()[position.state.index()].execution() {
-            Execution::Pure { bound } | Execution::Read { bound, .. } => bound.max_frame_bytes(),
-            Execution::Effect { bounds, .. } if pending => {
-                if matches!(record, JournalRecord::EffectAdapterFailed { .. }) {
-                    bounds.failure_frame_bytes()
-                } else {
-                    bounds.conclusion_bytes()
-                }
-            }
-            Execution::Effect { bounds, .. } => bounds.prepare_bytes(),
-        },
-    )
-}
-
 fn prepare_append(mut accumulator: Accumulator, frame: EncodedRunFrame) -> Result<PreparedAppend> {
-    crate::check_size(
-        crate::SizeResource::DeclaredFrame,
-        frame.canonical_bytes().len() as u64,
-        current_frame_bound(&accumulator.executable, &accumulator.state, &frame.record())?,
-    )?;
     accumulator
         .state
         .apply(
@@ -976,21 +898,10 @@ fn fold(executable: ExecutableProgram, history: JournalHistory) -> Result<Accumu
         }
         _ => return Err(RuntimeError::InvalidHistory),
     };
-    validate_admission_bound(
-        &executable.program,
-        history
-            .frame_lengths()
-            .next()
-            .ok_or(RuntimeError::InvalidHistory)?,
-    )
-    .map_err(|_| RuntimeError::InvalidHistory)?;
     let admitted_context = Arc::new(retained_view(&c0));
     let mut state = FoldState::initial(&executable, c0)?;
     let run_id = history.run_id().clone();
-    for (record, bytes) in history.records().zip(history.frame_lengths()).skip(1) {
-        if bytes as u64 > current_frame_bound(&executable, &state, &record)? {
-            return Err(RuntimeError::InvalidHistory);
-        }
+    for record in history.records().skip(1) {
         state.apply(&executable, &run_id, record)?;
     }
     state.validate_pending(&executable)?;

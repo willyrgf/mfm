@@ -37,7 +37,7 @@ pub trait Operation: Sized {
     ) -> Result<()>;
 }
 
-/// Expands one immutable linear Program, including selected recovery and complete size bounds.
+/// Expands one immutable linear Program, including selected recovery.
 pub fn expand_program<O: Operation>(
     entry: EntryPointId,
     root: &O,
@@ -113,20 +113,15 @@ impl<I: MfmValue, O: MfmValue, F: MfmValue> OperationExpansion<I, O, F> {
             input,
         ))
     }
-    /// Appends one Pure State with an explicit root map, policy overrides, and conclusion bound.
-    pub fn pure<S, M>(
-        &mut self,
-        root_map: M::Params,
-        policy: Occurrence,
-        bound: ConclusionBound,
-    ) -> Result<()>
+    /// Appends one Pure State with an explicit root map and policy overrides.
+    pub fn pure<S, M>(&mut self, root_map: M::Params, policy: Occurrence) -> Result<()>
     where
         S: PureState,
         M: ValueMap<Input = S::Failure, Output = F>,
     {
         let selected = self.recovery_defaults.resolve(&self.draft.scope, &policy)?;
         self.draft.append::<S>(
-            Execution::Pure { bound },
+            Execution::Pure {},
             selected,
             vec![MapBinding::new::<M>(&root_map)?],
         )
@@ -157,7 +152,6 @@ impl<I: MfmValue, O: MfmValue, F: MfmValue> OperationExpansion<I, O, F> {
         setup: &C::Setup,
         root_map: M::Params,
         policy: Occurrence,
-        bound: ConclusionBound,
     ) -> Result<()>
     where
         C: ReadCapabilityContract + CapabilityInjection<S>,
@@ -175,7 +169,6 @@ impl<I: MfmValue, O: MfmValue, F: MfmValue> OperationExpansion<I, O, F> {
             error_contract_ref: nominal_contract_ref::<C::OperationalError>()?,
             context_contract_ref: nominal_contract_ref::<S::AdapterContext>()?,
             binding_ref,
-            bound,
         };
         self.capability::<S, C, M>(
             setup,
@@ -187,13 +180,12 @@ impl<I: MfmValue, O: MfmValue, F: MfmValue> OperationExpansion<I, O, F> {
             }),
         )
     }
-    /// Appends an exact Effect pair with separate preparation and conclusion bounds.
+    /// Appends an exact Effect pair with retained command authority.
     pub fn effect<S, C, M>(
         &mut self,
         setup: &C::Setup,
         root_map: M::Params,
         policy: Occurrence,
-        bounds: EffectBounds,
     ) -> Result<()>
     where
         C: EffectCapabilityContract + CapabilityInjection<S>,
@@ -211,7 +203,6 @@ impl<I: MfmValue, O: MfmValue, F: MfmValue> OperationExpansion<I, O, F> {
             error_contract_ref: nominal_contract_ref::<C::OperationalError>()?,
             context_contract_ref: nominal_contract_ref::<S::AdapterContext>()?,
             binding_ref,
-            bounds,
         };
         self.capability::<S, C, M>(
             setup,

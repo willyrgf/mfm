@@ -111,7 +111,6 @@ Pending Effect views include `latest_failure`: null before the first audited fai
 `{"kind":"stop","reason":"requested"}`, with other reviewed stop codes). Every acknowledged
 pending operational outcome advances the durable head. Retry preserves the command/EffectId and
 spends recovery allowance; Stop ends the invocation while explicit progress may resume it.
-The `pending_failures` size resource identifies exhausted admitted audit capacity; it rejects
-further provider entry and retains unresolved command authority. The removed `nonrecoverable`
-stop code is rejected with the superseded wire contracts. Cancellation can interrupt a physical
+There is no separate pending-failure quota; actual frame and run limits govern recording.
+Cancellation can interrupt a physical
 attempt before its result is recorded; the audit covers acknowledged qualified failures.

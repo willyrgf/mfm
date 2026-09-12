@@ -36,7 +36,6 @@ struct Child {
     target: EvmPhysicalTarget,
     replace_handler: bool,
     retry: bool,
-    bound: ConclusionBound,
 }
 impl Operation for Child {
     type Input = Context;
@@ -57,7 +56,7 @@ impl Operation for Child {
         } else {
             Occurrence::new()
         };
-        body.read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead, Identity<EvmBalanceFailure>>(&self.target.binding_ref().map_err(|_| ProgramError::InvalidContract)?, NoParams, first, self.bound)?;
+        body.read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead, Identity<EvmBalanceFailure>>(&self.target.binding_ref().map_err(|_| ProgramError::InvalidContract)?, NoParams, first)?;
         body.read::<ReadInitialAnchor<NoContext>, EvmAnchorRead, Identity<EvmBalanceFailure>>(
             &self
                 .target
@@ -65,7 +64,6 @@ impl Operation for Child {
                 .map_err(|_| ProgramError::InvalidContract)?,
             NoParams,
             Occurrence::new(),
-            self.bound,
         )
     }
 }
@@ -100,7 +98,6 @@ impl Operation for Parent {
                     .map_err(|_| ProgramError::InvalidContract)?,
                 NoParams,
                 Occurrence::new(),
-                self.child.bound,
             )
         } else {
             body.operation::<Child, MapEvmBalanceFailure>(&self.child, NoParams)
@@ -129,7 +126,6 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
             18,
         )
         .unwrap();
-        let bound = request.conclusion_bound(2, 2048).unwrap();
         let input = Context::new(
             request,
             NoContext,
@@ -145,7 +141,6 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
                 target: target.clone(),
                 replace_handler: scenario == 1,
                 retry: scenario == 3,
-                bound,
             },
         };
         let program = expand_program(
@@ -345,12 +340,7 @@ async fn changed_anchor_restarts_the_real_collection_and_preserves_its_acknowled
         )
         .unwrap();
         let operation = RecoveringCollection(
-            CollectEvmBalances::new(
-                target.binding_ref().unwrap(),
-                request.clone(),
-                request.conclusion_bound(2, 2048).unwrap(),
-            )
-            .unwrap(),
+            CollectEvmBalances::new(target.binding_ref().unwrap(), request.clone()).unwrap(),
         );
         let program = expand_program(
             EntryPointId::new("mfm.test.portfolio/restart@1").unwrap(),

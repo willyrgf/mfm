@@ -3,13 +3,13 @@
 MFM durably proves caller-driven execution of an immutable typed Program. Program contains an
 ordered sequence of State declarations with exact input, output and original failure contracts,
 selected recovery policies and parameters, explicit root failure maps, scoped checkpoint positions,
-finite recovery allowances, and complete frame bounds. Success advances linearly; recovery is a
-Runtime transition. `Never` remains the uninhabited failure contract.
+and finite recovery allowances. Success advances linearly; recovery is a Runtime transition.
+`Never` remains the uninhabited failure contract.
 
 Source code authors the sequence through a deterministic `Operation`. Its required `validate_input`
 check establishes agreement between root planning assumptions and the initial value before expansion.
 `expand_program(entry, operation, input, limits)` qualifies that input and commits its exact value
-reference into Program v6. Runtime rejects input substitution before genesis or provider entry;
+reference into Program v7. Runtime rejects input substitution before genesis or provider entry;
 cold reconstruction checks genesis against the same commitment. Parent planning and deterministic
 States establish future child input agreement. No authoring callback enters Runtime. Multiple RunIds
 may reuse the same exact Program/input pair.
@@ -21,7 +21,7 @@ and injection setup remain authoring-only. Program retains one selected handler 
 its exact parameter contract and qualified immutable parameters, checked target list, and allowances.
 Selection is occurrence override, nearest explicit enclosing Operation, then framework Stop.
 Replacement changes parameters and targets together; allowances inherit independently, including
-explicit zero. Program v6 rejects superseded descriptors.
+explicit zero. Program v7 rejects superseded descriptors.
 
 Changes to intrinsic classification semantics require revision of the exact error contract identity.
 Errors implement the pure `ClassifyError` projection into `Retryable`, `OutcomeUnknown`,
@@ -100,8 +100,8 @@ only after known insertion. `Pending` returns the unchanged view without a recor
 failure atomically appends `EffectAdapterFailed` with matching execution position, original cause,
 State context and a `PendingDecision` of Retry or Stop. Retry spends local/global allowance and
 yields; exhausted allowance records Stop. Stop ends the invocation with `RecoveryStopped`. Both
-retain position, visit, command and EffectId, and both count against finite failure-record capacity.
-Explicit resume reconciles that same command while capacity remains. Accepted settlement appends
+retain position, visit, command and EffectId, without a separate failure-record quota.
+Explicit resume reconciles that same command. Accepted settlement appends
 its conclusion; settled Effects cannot retry or restart. Zero-State Programs terminate at genesis.
 
 Journal owns the `mfm.run.frame.v4` canonical wire, recursive exact-byte SHA-256 heads, exact
@@ -117,15 +117,10 @@ protocol. Cancellation or crash between provider IO and append can leave an unre
 attempt. The audit guarantee covers acknowledged qualified failures, not every physical invocation.
 
 The fixed limits are 32 MiB per canonical run object, 65,536 non-payload envelope bytes, 134,283,264
-bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. Each Effect requires positive
-`max_pending_failures` and `failure_frame_bytes`, alongside prepare/conclusion bounds. Its lifecycle
-cost is `2 + max_pending_failures` frames and `prepare + max_pending_failures * failure_frame_bytes
-+ conclusion` bytes. For global recovery limit G, admission reserves genesis plus G+1 copies of the
-complete sequence using checked arithmetic. All bounds include object closure and envelope bytes.
-Before every pending adapter entry Runtime checks room for another failure, preserving the reserved
-settlement capacity. Exhaustion returns the `pending_failures` size error before IO and can leave
-an unresolved command. Callers must author adequate immutable finite bounds; resume cannot enlarge
-them, delete history, or abandon remote authority.
+bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. Admission does not reserve
+future lifecycle capacity. Journal checks actual object, metadata and complete-frame sizes, and Store checks actual accumulated count and bytes with checked arithmetic.
+Recovery allowances govern semantic decisions only. An actual result can exceed a limit after IO;
+a rejected append leaves the acknowledged head and unresolved command authority unchanged.
 
 Hot advancement, pre-append validation and cold reconstruction use the sole semantic fold.
 Pre-append validation constructs terminal reports before acknowledgement. Public observations share
@@ -146,8 +141,8 @@ Portfolio admission retains checked `ConfigName` and `DigestBytes` identities. T
 grammars delegate to IDs; raw strings are checked at ingress, not re-parsed by Application.
 
 Inline failure reports retain original and mapped payloads even when identical. Each report is
-limited to 32 MiB independently of its individually qualified cause values. Admission bounds Journal
-lifecycles, not the size of every combined report. Report overflow returns `size_limit_exceeded`
+limited to 32 MiB independently of its individually qualified cause values. Admission reserves
+neither future frames nor combined reports. Report overflow returns `size_limit_exceeded`
 before the terminal append, preserving the acknowledged Runnable or EffectPending head and any
 pending command authority; repeated explicit progress can encounter the same limit. No report is
 persisted separately. Size errors identify the resource, actual size and limit without payload
@@ -193,7 +188,7 @@ Executable identity hashes a canonical domain-separated descriptor containing im
 version, stage, explicit recipe identity, ordered selected slots, and outcome mode. Exact value
 schemas remain additional ABI association keys. Cold fold re-prepares retained commands from
 exact snapshots and does not rerun completed interpretation. A completed transaction adds seven
-frames after admission; this uses the current Program v6, Journal frame v4, and Runtime fold contracts.
+frames after admission; this uses the current Program v7, Journal frame v4, and Runtime fold contracts.
 
 Terminal reporting uses existing checked execution facts and settlement outcomes; there is no
 separate persisted outcome projection. Products own root failure policy. The fixture reports retain

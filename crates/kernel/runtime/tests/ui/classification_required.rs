@@ -63,9 +63,7 @@ fn author(scope: &mut OperationExpansion<NoParams, NoParams, Never>) {
         .read::<Read, Observation, Identity<Never>>(
             &NoParams,
             NoParams,
-            Occurrence::new(),
-            ConclusionBound::new(1024).unwrap(),
-        )
+            Occurrence::new())
         .unwrap();
 }
 fn main() {

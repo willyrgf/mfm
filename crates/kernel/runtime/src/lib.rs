@@ -41,7 +41,7 @@ pub enum RuntimeError {
     /// Static assembly and Program associations are incomplete or inconsistent.
     #[error("runtime assembly is incompatible")]
     IncompatibleAssembly,
-    /// A measured size or declared admission bound exceeded its limit.
+    /// A measured size exceeded its limit.
     #[error("{resource} {size}")]
     SizeLimit {
         /// Resource whose inclusive limit was exceeded.
@@ -73,8 +73,6 @@ impl From<mfm_values::ValueError> for RuntimeError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SizeResource {
-    /// Admitted pending-Effect operational failure records.
-    PendingFailures,
     /// One canonical typed value.
     CanonicalObject,
     /// One complete Journal frame.
@@ -85,8 +83,6 @@ pub enum SizeResource {
     HistoryBytes,
     /// The complete run's frame count.
     FrameCount,
-    /// The executing declaration's admitted frame bound.
-    DeclaredFrame,
     /// The derived inline terminal failure report.
     FailureReport,
 }
@@ -94,13 +90,11 @@ pub enum SizeResource {
 impl std::fmt::Display for SizeResource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::PendingFailures => "pending_failures",
             Self::CanonicalObject => "canonical_object",
             Self::Frame => "frame",
             Self::FrameEnvelope => "frame_envelope",
             Self::HistoryBytes => "history_bytes",
             Self::FrameCount => "frame_count",
-            Self::DeclaredFrame => "declared_frame",
             Self::FailureReport => "failure_report",
         })
     }

@@ -448,35 +448,8 @@ impl<I: MfmValue, F: MfmValue + TryFrom<I>> mfm_program::ValueMap for MapFailure
     }
 }
 
-pub fn fixture_bound<T: MfmValue>(input: &T) -> mfm_program::ConclusionBound {
-    let input_bytes = mfm_values::canonicalize_mfm_value(input)
-        .unwrap()
-        .0
-        .as_bytes()
-        .len() as u64;
-    // The workflows retain at most three transactions and one anchored observation.
-    // Four copies cover original context, mapped failure plans/progress and observation
-    // evidence. Each copy reserves the maximum base64 return and 64 KiB for bounded
-    // transaction facts, references, outcome fields and the complete frame envelope.
-    let returned = 4 * (mfm_evm::MAX_EVM_CALL_RETURN_BYTES as u64).div_ceil(3);
-    mfm_program::ConclusionBound::new(4 * (input_bytes + returned + 65_536)).unwrap()
-}
-
-pub fn transaction_bounds(bound: mfm_program::ConclusionBound) -> mfm_evm::EvmTransactionBounds {
-    let effect =
-        mfm_program::EffectBounds::new(bound.max_frame_bytes(), bound.max_frame_bytes(), 2, 65536)
-            .unwrap();
-    mfm_evm::EvmTransactionBounds {
-        reservation: effect,
-        preparation: effect,
-        execution: effect,
-        projection: bound,
-    }
-}
-
 pub struct EffectFixtureOperation {
     pub binding: EvmTransactionBinding,
-    pub bound: mfm_program::ConclusionBound,
 }
 impl Operation for EffectFixtureOperation {
     type Input = Initial;
@@ -502,22 +475,20 @@ impl Operation for EffectFixtureOperation {
         body: &mut OperationExpansion<Initial, FixtureReport, FixtureFailure>,
     ) -> mfm_program::Result<()> {
         use mfm_program::{Identity, NoParams, Occurrence};
-        let bounds = transaction_bounds(self.bound);
         body.operation::<Deploy, MapFailure<DeployFailure>>(
-            &Deploy::new(self.binding.clone(), bounds),
+            &Deploy::new(self.binding.clone()),
             NoParams,
         )?;
         body.operation::<Configure, MapFailure<ConfigureFailure>>(
-            &Configure::new(self.binding.clone(), bounds),
+            &Configure::new(self.binding.clone()),
             NoParams,
         )?;
         body.read::<Observe, EvmAnchoredContractCallRead, MapFailure<ObserveFailure>>(
             &self.binding.route,
             NoParams,
             Occurrence::new(),
-            self.bound,
         )?;
-        body.pure::<DecodeValue, Identity<FixtureFailure>>(NoParams, Occurrence::new(), self.bound)
+        body.pure::<DecodeValue, Identity<FixtureFailure>>(NoParams, Occurrence::new())
     }
 }
 

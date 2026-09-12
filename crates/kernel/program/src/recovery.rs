@@ -10,10 +10,8 @@ use crate::{Never, ProgramError, Result, StateExecutionError};
 mod bindings;
 pub(crate) mod scope;
 pub use scope::Checkpoint;
-pub(crate) mod bounds;
 pub(crate) mod defaults;
 pub use bindings::{HandlerAbi, HandlerBinding, MapAbi, MapBinding, PolicyParams};
-pub use bounds::{ConclusionBound, EffectBounds, HistoryBound};
 pub use defaults::{Occurrence, StandardRecovery, Stop};
 
 /// Intrinsic recovery semantics of an exact error contract.

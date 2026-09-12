@@ -8,7 +8,7 @@ use mfm_evm_live::register_evm_transaction_states;
 use mfm_ids::{
     ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, EntryPointId, RunId, SchemaId,
 };
-use mfm_program::{expand_program, ConclusionBound, EffectBounds, ProgramLimits};
+use mfm_program::{expand_program, ProgramLimits};
 use mfm_program_derive::{MfmContext, MfmValue};
 use mfm_runtime::{EffectAdapterOutcome, RunViewState, Runtime, RuntimeAssemblyBuilder};
 use mfm_store::MemoryStore;
@@ -74,17 +74,6 @@ fn plan(binding: EvmTransactionBinding) -> CheckedCreatePlan {
         2_u128,
     )
     .unwrap()
-}
-
-fn bounds() -> mfm_evm::EvmTransactionBounds {
-    // These small codec-selection fixtures retain fewer than 64 KiB per complete frame.
-    let effect = EffectBounds::new(65536, 65536, 2, 65536).unwrap();
-    mfm_evm::EvmTransactionBounds {
-        reservation: effect,
-        preparation: effect,
-        execution: effect,
-        projection: ConclusionBound::new(65536).unwrap(),
-    }
 }
 
 fn runtime(binding: &EvmTransactionBinding, store: Arc<MemoryStore>) -> Runtime {
@@ -178,7 +167,7 @@ async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_col
             expand_program(
                 EntryPointId::new("mfm.test.evm-live/first-generic-transaction@1")
                     .expect("first entry point"),
-                &EvmTransaction::<FirstInitial, FirstRecipe>::new(binding.clone(), bounds()),
+                &EvmTransaction::<FirstInitial, FirstRecipe>::new(binding.clone()),
                 &first_input,
                 ProgramLimits::new(0),
             )
@@ -228,7 +217,7 @@ async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_col
             expand_program(
                 EntryPointId::new("mfm.test.evm-live/second-generic-transaction@1")
                     .expect("second entry point"),
-                &EvmTransaction::<SecondInitial, SecondRecipe>::new(binding.clone(), bounds()),
+                &EvmTransaction::<SecondInitial, SecondRecipe>::new(binding.clone()),
                 &second_input,
                 ProgramLimits::new(0),
             )
@@ -310,7 +299,7 @@ fn an_incompatible_recipe_mode_is_rejected_before_program_admission() {
     assert!(matches!(
         expand_program(
             EntryPointId::new("mfm.test/wrong-mode@1").unwrap(),
-            &EvmTransaction::<FirstInitial, WrongMode>::new(binding(), bounds()),
+            &EvmTransaction::<FirstInitial, WrongMode>::new(binding()),
             &input,
             ProgramLimits::new(0),
         ),
@@ -439,7 +428,7 @@ async fn selecting_another_same_typed_source_requires_its_own_assembly_before_io
     let id = RunId::from_digest(DigestBytes::from_array([51; 32]));
     let program = expand_program(
         EntryPointId::new("mfm.test/selected-source@1").unwrap(),
-        &EvmTransaction::<Sources, FromB>::new(binding(), bounds()),
+        &EvmTransaction::<Sources, FromB>::new(binding()),
         &input,
         ProgramLimits::new(0),
     )

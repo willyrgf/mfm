@@ -9,7 +9,7 @@ value semantic IDs never substitute for exact schema/Rust-type/descriptor agreem
 The sole semantic fold drives admission, hot pre-append validation, local advancement and cold
 reconstruction. It derives position/visit, active checkpoint input, recovery usage and Effect
 barriers from retained history. Program commits the exact initial value. Admission checks that
-commitment and the complete bounded history before genesis or provider entry.
+commitment before genesis or provider entry; actual candidates and Store appends enforce size limits.
 
 `start` admits and progresses, `resume` explicitly progresses an existing run, and `read`
 reconstructs without progression. Pure/Read outcomes and recovery decisions append atomically.
@@ -21,10 +21,9 @@ leaves the previous head unchanged.
 An Effect appends its complete command before adapter entry. A pending response yields the same
 EffectId and visit without a record. Operational failure appends original error, State context and
 Retry/Stop before acknowledgement. Retry spends allowance and yields with the same command; Stop
-returns `InvocationFailure::RecoveryStopped`. Both consume failure capacity. Before adapter entry,
-Runtime checks another admitted failure slot; exhaustion returns `pending_failures` without IO.
+returns `InvocationFailure::RecoveryStopped`. There is no separate pending-failure quota.
 Cold `EffectPending` views expose `latest_failure`, including its committed decision. Explicit
-resume can settle while capacity remains. Settlement ends the prepare/failure*/conclusion lifecycle;
+resume reconciles the same command after Stop. Settlement ends the prepare/failure*/conclusion lifecycle;
 settled Effects cannot recover and retained prepares prevent restart across their position.
 
 Audit records cover acknowledged qualified outcomes. Cancellation between provider response and

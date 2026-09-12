@@ -1,15 +1,15 @@
 # mfm-program
 
-Program owns the immutable `mfm-program-document@6` sequence with the `mfm.program.v6` domain.
+Program owns the immutable `mfm-program-document@7` sequence with the `mfm.program.v7` domain.
 An Operation performs deterministic source authoring; its input check and expansion commit the
 exact initial value, State contracts, resolved policies, root failure maps, checkpoints and finite
-bounds. Runtime associates typed implementations and owns execution and recovery. Old graph bytes
+recovery allowances. Runtime associates typed implementations and owns execution and recovery. Old graph bytes
 are rejected.
 
 ```rust
 use mfm_ids::{EntryPointId, StableId};
 use mfm_program::{
-    expand_program, ConclusionBound, Identity, Never, NoParams, Occurrence, Operation,
+    expand_program, Identity, Never, NoParams, Occurrence, Operation,
     OperationExpansion, ProgramError, ProgramLimits, ProposedStateOutcome, PureState, State,
     StateExecutionError,
 };
@@ -45,9 +45,8 @@ impl Operation for IncrementTwice {
         Ok(())
     }
     fn expand(&self, body: &mut OperationExpansion<Count, Count, Never>) -> mfm_program::Result<()> {
-        let bound = ConclusionBound::new(4096)?;
-        body.pure::<Increment, Identity<Never>>(NoParams, Occurrence::new(), bound)?;
-        body.pure::<Increment, Identity<Never>>(NoParams, Occurrence::new(), bound)
+        body.pure::<Increment, Identity<Never>>(NoParams, Occurrence::new())?;
+        body.pure::<Increment, Identity<Never>>(NoParams, Occurrence::new())
     }
 }
 let input = Count { value: 10 };
@@ -86,11 +85,7 @@ payload. A rejected expansion returns Capacity without leaking prefix, checkpoin
 suffix declarations. This bounds framework composition; trusted Rust callbacks must not recurse
 outside OperationExpansion or assume arbitrary stack allocation is sandboxed.
 
-Each Pure/Read conclusion has a complete frame bound. EffectBounds::new accepts prepare bytes,
-conclusion bytes, positive max_pending_failures and positive failure_frame_bytes. Every pending
-operational failure consumes a slot, including Stop; exhaustion prevents adapter entry and can
-leave unresolved authority. The lifecycle reserves 2 + max_pending_failures frames and the
-corresponding complete prepare/failure/settlement bytes. For global recovery limit G, Program conservatively reserves genesis plus G+1 full
-sequence segments. Bounds include retained objects, original/root failures and envelopes. Journal
-owns format ceilings and Runtime checks concrete admission before genesis or adapter IO. Recovery
-allowances and frame bounds are immutable Program data.
+Recovery allowances are immutable semantic limits. Admission does not reserve future frames or
+bytes. Journal checks actual objects and complete frames; Store checks the actual accumulated
+run size and frame count atomically. A later result may exceed a limit after work has occurred;
+that failure preserves the acknowledged head and any unresolved Effect command authority.
