@@ -10,21 +10,15 @@ use mfm_values::MfmValue;
 /// Result type for capability contract operations.
 pub type Result<T> = std::result::Result<T, CapabilityError>;
 
-/// A trusted adapter invariant failed; this carries no provider or secret detail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("adapter invariant failed")]
-pub struct AdapterInvariantError;
-
 /// A capability-owned operational cause or an unrecoverable local invariant failure.
 ///
 /// Typed payloads require no `Error` bound. When the operational type implements `Error`,
 /// standard source traversal exposes it without invoking its formatting implementation.
-#[derive(PartialEq, Eq)]
 pub enum AdapterError<E> {
-    /// Reviewed typed operational cause, eligible for State contextualization.
+    /// Reviewed typed operational cause, retained before recovery policy.
     Operational(E),
     /// Trusted local failure, outside classifier and handler recovery.
-    Invariant(AdapterInvariantError),
+    Invariant(mfm_values::NativeCause),
 }
 
 impl<E> std::fmt::Debug for AdapterError<E> {
@@ -55,7 +49,8 @@ impl<E: std::error::Error + 'static> std::error::Error for AdapterError<E> {
 }
 
 /// Redaction-safe capability contract error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
 pub enum CapabilityError {
     /// A static capability identity is invalid.
     #[error("capability contract is invalid")]
@@ -82,7 +77,7 @@ pub trait ReadCapabilityContract: Send + Sync + 'static {
         intent_value_ref: &ContentRef,
         intent: &Self::Intent,
         evidence: &Self::Evidence,
-    ) -> Result<()>;
+    ) -> std::result::Result<(), mfm_values::NativeCause>;
 }
 
 /// One mutating capability with a closed command/evidence contract.
@@ -102,7 +97,7 @@ pub trait EffectCapabilityContract: Send + Sync + 'static {
         effect_id: &EffectId,
         command: &Self::Command,
         evidence: &Self::Evidence,
-    ) -> Result<()>;
+    ) -> std::result::Result<(), mfm_values::NativeCause>;
 }
 
 #[cfg(test)]
@@ -134,7 +129,9 @@ mod tests {
         let operational = AdapterError::Operational(Unformattable);
         assert_eq!(format!("{operational:?}"), "Operational(<redacted>)");
         assert_eq!(operational.to_string(), "adapter operational failure");
-        let invariant: AdapterError<Unformattable> = AdapterError::Invariant(AdapterInvariantError);
+        let invariant: AdapterError<Unformattable> = AdapterError::Invariant(
+            mfm_values::NativeCause::from_error(CapabilityError::EvidenceBinding),
+        );
         assert_eq!(invariant.to_string(), "adapter invariant failed");
     }
 }

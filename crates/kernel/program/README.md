@@ -11,14 +11,17 @@ use mfm_ids::{EntryPointId, StableId};
 use mfm_program::{
     expand_program, Identity, Never, NoParams, Occurrence, Operation,
     OperationExpansion, ProgramError, ProgramLimits, ProposedStateOutcome, PureState, State,
-    StateExecutionError,
 };
 use mfm_program_derive::MfmValue;
+use mfm_values::NativeCause;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 struct Count { value: u64 }
+#[derive(Debug, Serialize, thiserror::Error)]
+#[error("increment exceeds u64 range")]
+struct IncrementOverflow { input: u64 }
 struct Increment;
 impl State for Increment {
     type Input = Count;
@@ -29,9 +32,13 @@ impl State for Increment {
     }
 }
 impl PureState for Increment {
-    fn evaluate(input: Count) -> Result<ProposedStateOutcome<Count, Never>, StateExecutionError> {
+    fn evaluate(input: Count) -> Result<ProposedStateOutcome<Count, Never>, NativeCause> {
         Ok(ProposedStateOutcome::Success {
-            output: Count { value: input.value.checked_add(1).ok_or(StateExecutionError)? },
+            output: Count {
+                value: input.value.checked_add(1).ok_or_else(|| {
+                    NativeCause::from_error(IncrementOverflow { input: input.value })
+                })?,
+            },
         })
     }
 }
@@ -71,7 +78,7 @@ an uninhabited root path.
 Checkpoint tokens belong to their authoring scope. Installed inherited handler bindings retain
 that owner; direct parent/sibling token capture in another scope is rejected. Final lowering resolves
 permitted tokens to typed sequence boundaries. Runtime qualifies activation, restored inputs,
-visits, budgets and Effect barriers from retained history.
+visits, budgets and Effect barriers from the retained current continuation.
 
 Capability injection authors before/after scopes around one designated Read or Effect. The
 expanded failure contract and designated failure conversion are explicit; suffixes are successful
@@ -86,6 +93,7 @@ suffix declarations. This bounds framework composition; trusted Rust callbacks m
 outside OperationExpansion or assume arbitrary stack allocation is sandboxed.
 
 Recovery allowances are immutable semantic limits. Admission does not reserve future frames or
-bytes. Journal checks actual objects and complete frames; Store checks the actual accumulated
+bytes. Values checks actual objects, Runtime checks non-payload metadata, Journal checks complete
+frames, and Store checks the actual accumulated
 run size and frame count atomically. A later result may exceed a limit after work has occurred;
 that failure preserves the acknowledged head and any unresolved Effect command authority.

@@ -3,8 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc as StdArc, Barrier};
 use std::task::{Context, Poll, Waker};
 
-use mfm_canonical::raw_content_digest;
-use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
+use mfm_ids::{DigestAlgorithm, DigestBytes};
 
 use super::*;
 
@@ -15,31 +14,9 @@ fn run(byte: u8) -> RunId {
     RunId::from_digest(DigestBytes::from_array([byte; 32]))
 }
 
-fn reference(name: &str, bytes: &[u8]) -> ContentRef {
-    ContentRef::new(
-        SchemaId::new(
-            name,
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([0; 32]),
-        )
-        .expect("schema"),
-        raw_content_digest(bytes),
-    )
-    .expect("reference")
-}
-
 fn genesis(run: &RunId) -> EncodedRunFrame {
-    let program = b"{}";
-    let context = b"[]";
-    EncodedRunFrame::admission(
-        run,
-        &reference("mfm.test.program", program),
-        program,
-        &reference("mfm.test.context", context),
-        context,
-    )
-    .expect("genesis")
+    let payload = mfm_canonical::PlainCanonicalJsonBytes::from_json_str("[]").unwrap();
+    mfm_journal::seal_frame(run, 1, None, &payload).unwrap()
 }
 
 async fn install_run(store: &MemoryStore, run_id: &RunId, run: MemoryRun) {
@@ -73,7 +50,12 @@ async fn memory_runs_the_shared_hostile_conformance_matrix() {
     let absent = MemoryStore::new();
     observed.push((
         Case::Absence,
-        if absent.load_run(&run(40)).await.expect("absent").is_none() {
+        if absent
+            .load_run(&run(40), None)
+            .await
+            .expect("absent")
+            .is_none()
+        {
             Observation::None
         } else {
             panic!("absent Memory run returned a transfer")
@@ -88,7 +70,7 @@ async fn memory_runs_the_shared_hostile_conformance_matrix() {
         &orphan_id,
         MemoryRun {
             frames: vec![Arc::new(StoredFrame {
-                bytes: orphan.canonical_bytes().to_vec(),
+                bytes: Arc::from(orphan.canonical_bytes()),
                 head_digest: orphan.head_digest().clone(),
             })],
             head: None,
@@ -97,7 +79,7 @@ async fn memory_runs_the_shared_hostile_conformance_matrix() {
     .await;
     observed.push((
         Case::AbsentHeadOrphan,
-        observe(orphan_store.load_run(&orphan_id).await),
+        observe(orphan_store.load_run(&orphan_id, None).await),
     ));
 
     let target_store = MemoryStore::new();
@@ -110,7 +92,7 @@ async fn memory_runs_the_shared_hostile_conformance_matrix() {
         &target_id,
         MemoryRun {
             frames: vec![Arc::new(StoredFrame {
-                bytes: target_bytes,
+                bytes: target_bytes.into(),
                 head_digest: target.head_digest().clone(),
             })],
             head: Some(Head {
@@ -133,7 +115,7 @@ async fn memory_runs_the_shared_hostile_conformance_matrix() {
         &head_id,
         MemoryRun {
             frames: vec![Arc::new(StoredFrame {
-                bytes: head_frame.canonical_bytes().to_vec(),
+                bytes: Arc::from(head_frame.canonical_bytes()),
                 head_digest: head_frame.head_digest().clone(),
             })],
             head: Some(Head {
@@ -145,7 +127,7 @@ async fn memory_runs_the_shared_hostile_conformance_matrix() {
     .await;
     observed.push((
         Case::CorruptHead,
-        observe(head_store.load_run(&head_id).await),
+        observe(head_store.load_run(&head_id, None).await),
     ));
 
     for (case, byte, corrupt_bytes, corrupt_digest, total_delta) in [
@@ -170,23 +152,27 @@ async fn memory_runs_the_shared_hostile_conformance_matrix() {
             &run_id,
             MemoryRun {
                 frames: vec![Arc::new(StoredFrame {
-                    bytes,
+                    bytes: bytes.into(),
                     head_digest: digest,
                 })],
                 head: Some(Head {
                     sequence: 1,
-                    total_bytes: frame.canonical_bytes().len() as u64 + total_delta,
+                    total_bytes: if total_delta == 0 {
+                        frame.canonical_bytes().len() as u64
+                    } else {
+                        1
+                    },
                 }),
             },
         )
         .await;
-        observed.push((case, observe(store.load_run(&run_id).await)));
+        observed.push((case, observe(store.load_run(&run_id, None).await)));
     }
 
     let capacity_id = run(47);
     let capacity_frame = genesis(&capacity_id);
     let stored = Arc::new(StoredFrame {
-        bytes: capacity_frame.canonical_bytes().to_vec(),
+        bytes: Arc::from(capacity_frame.canonical_bytes()),
         head_digest: capacity_frame.head_digest().clone(),
     });
     observed.push((
@@ -250,7 +236,7 @@ async fn memory_runs_the_shared_hostile_conformance_matrix() {
         observe(publish_insert(
             &mut publication,
             StoredFrame {
-                bytes: capacity_frame.canonical_bytes().to_vec(),
+                bytes: Arc::from(capacity_frame.canonical_bytes()),
                 head_digest: capacity_frame.head_digest().clone(),
             },
             Head {
@@ -302,7 +288,7 @@ fn absent_and_private_empty_loads_are_unavailable_without_tokio() {
         )])),
     };
     for (store, run_id) in [(&absent, run(29)), (&empty, empty_id)] {
-        let mut future = store.load_run(&run_id);
+        let mut future = store.load_run(&run_id, None);
         let mut context = Context::from_waker(Waker::noop());
         assert!(matches!(
             future.as_mut().poll(&mut context),

@@ -297,7 +297,10 @@ async fn drive_to_success<F: mfm_values::MfmValue + std::fmt::Debug>(
                             view.head_sequence()
                         );
                     }
-                    RunViewState::Runnable { .. } | RunViewState::EffectPending { .. } => {
+                    RunViewState::Runnable { .. }
+                    | RunViewState::EffectPending { .. }
+                    | RunViewState::AwaitingRecovery { .. }
+                    | RunViewState::AwaitingInterpretation { .. } => {
                         last_progress = format!("runnable at frame {}", view.head_sequence());
                         eprintln!("{last_progress}");
                     }

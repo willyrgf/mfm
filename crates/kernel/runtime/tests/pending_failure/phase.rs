@@ -12,20 +12,20 @@ impl State for FailureState {
 impl PureState for FailureState {
     fn evaluate(
         _: Number,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Cause>, StateExecutionError> {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Cause>, NativeCause> {
         Ok(ProposedStateOutcome::Failure {
             failure: Cause::Timeout { deadline_ms: 5000 },
         })
     }
 }
 impl EffectState<Submit> for FailureState {
-    fn prepare(input: &Number) -> std::result::Result<Number, PreparationError> {
+    fn prepare(input: &Number) -> std::result::Result<Number, NativeCause> {
         Ok(Number { value: input.value })
     }
     fn interpret(
         input: Number,
         _: &Number,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Cause>, StateExecutionError> {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Cause>, NativeCause> {
         Self::evaluate(input)
     }
 }
@@ -54,13 +54,13 @@ impl Handler for RestartDeclared {
         _: &NoParams,
         _: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+    ) -> std::result::Result<RecoveryRequest, NativeCause> {
         context
             .declared_restart_targets()
             .first()
             .copied()
             .map(RecoveryRequest::Restart)
-            .ok_or(StateExecutionError)
+            .ok_or_else(|| NativeCause::from_error(ProgramError::InvalidContract))
     }
 }
 struct PhaseOperation {

@@ -11,6 +11,12 @@ One-field `#[serde(transparent)]` wrappers inherit the checked shape of `String`
 `CanonicalBytes`, `NonZeroU64`, and supported ordered maps. Wrappers with explicit
 `serde(try_from = "String", into = "String")` conversion describe a canonical string wire.
 
+A checked owner can select `#[mfm(decode_native = "Self::decode_checked")]` on `MfmValue`.
+The derive emits only an override of the existing `decode_native(&[u8])` method. That function
+returns `Result<Self, mfm_values::NativeCause>` and shares the owner's checked construction with
+ordinary deserialization, preserving typed constructor causes at Runtime entry. This attribute
+does not change schema identity and is not supported by `PersistedSchema`.
+
 `MfmContext` requires `#[context(namespace = "...")]` on a named struct. Each replaceable field
 is a distinct bare type parameter used exactly once. Bounds, defaults, where clauses, lifetime and
 const parameters, nested parameter occurrences, and opaque type macros are unsupported. It emits

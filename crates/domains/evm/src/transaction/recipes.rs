@@ -91,8 +91,7 @@ where
 }
 
 pub(crate) fn recipe_id(id: &str) -> mfm_values::Result<StableId> {
-    StableId::new(id)
-        .map_err(|_| mfm_values::ValueError::Identity("invalid EVM recipe identity".to_owned()))
+    StableId::new(id).map_err(mfm_values::ValueError::CheckedIdentity)
 }
 
 pub(crate) fn executable_id(

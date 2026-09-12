@@ -17,7 +17,11 @@ impl EffectCapabilityContract for Submission {
         StableId::new("mfm.test.transport-submit@1")
             .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
     }
-    fn bind_evidence(_: &EffectId, _: &NoParams, _: &NoParams) -> mfm_capabilities::Result<()> {
+    fn bind_evidence(
+        _: &EffectId,
+        _: &NoParams,
+        _: &NoParams,
+    ) -> std::result::Result<(), mfm_values::NativeCause> {
         Ok(())
     }
 }
@@ -31,13 +35,13 @@ impl State for Execute {
     }
 }
 impl EffectState<Submission> for Execute {
-    fn prepare(_: &NoParams) -> std::result::Result<NoParams, PreparationError> {
+    fn prepare(_: &NoParams) -> std::result::Result<NoParams, mfm_values::NativeCause> {
         Ok(NoParams)
     }
     fn interpret(
         input: NoParams,
         _: &NoParams,
-    ) -> std::result::Result<ProposedStateOutcome<NoParams, Never>, StateExecutionError> {
+    ) -> std::result::Result<ProposedStateOutcome<NoParams, Never>, mfm_values::NativeCause> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -109,15 +113,16 @@ async fn pending_json_retains_the_committed_original_cause_and_decision() {
     )
     .unwrap();
     let pending = runtime.start(run.clone(), program, NoParams).await.unwrap();
-    let before = serde_json::to_value(mfm_app::SerializableRunView::new(&pending)).unwrap();
+    let before =
+        serde_json::to_value(mfm_app::SerializableRunView::new(&pending).unwrap()).unwrap();
     assert_eq!(before["state"]["kind"], "effect_pending");
     assert_eq!(before["state"]["latest_failure"], serde_json::Value::Null);
     let error = runtime.resume(&run).await.err().unwrap();
     let InvocationFailure::RecoveryStopped { observed, .. } = &error else {
         panic!("audited stop")
     };
-    let model = serde_json::to_value(mfm_app::SerializableRunView::new(observed)).unwrap();
-    assert_eq!(model["head_sequence"], 3);
+    let model = serde_json::to_value(mfm_app::SerializableRunView::new(observed).unwrap()).unwrap();
+    assert_eq!(model["head_sequence"], 4);
     assert_eq!(
         model["state"]["latest_failure"]["error"]["value"],
         serde_json::json!({"kind":"provider","operation":"submit","cause":{
@@ -130,7 +135,7 @@ async fn pending_json_retains_the_committed_original_cause_and_decision() {
     );
     assert_eq!(
         model["state"]["latest_failure"]["decision"],
-        serde_json::json!({"kind":"stop","reason":"requested"})
+        serde_json::json!({"stop":{"reason":"requested"}})
     );
     let RunViewState::EffectPending {
         latest_failure: Some(failure),
@@ -165,14 +170,13 @@ async fn pending_json_retains_the_committed_original_cause_and_decision() {
         .is_none());
     let cold = runtime.read(&run).await.unwrap();
     assert_eq!(
-        serde_json::to_value(mfm_app::SerializableRunView::new(&cold)).unwrap(),
+        serde_json::to_value(mfm_app::SerializableRunView::new(&cold).unwrap()).unwrap(),
         model
     );
     let error = mfm_app::RunRequestError::Invocation(error);
-    let envelope = serde_json::to_value(mfm_app::SerializableClientError::for_run(
-        &error,
-        &error.to_string(),
-    ))
+    let envelope = serde_json::to_value(
+        mfm_app::SerializableClientError::for_run(&error, &error.to_string()).unwrap(),
+    )
     .unwrap();
     assert_eq!(envelope["invocation"]["observed"], model);
     assert_eq!(

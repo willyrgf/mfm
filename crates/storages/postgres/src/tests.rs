@@ -13,10 +13,8 @@ use mfm_evm::custody::{
 };
 use mfm_evm::{EvmAddress, EvmAuthorityEpoch, EvmChainInstance, EvmHash};
 use mfm_ids::ConfigName;
-use mfm_ids::{
-    ContentRef, DigestAlgorithm, DigestBytes, ExecutionPosition, SchemaId, StatePosition, VisitId,
-};
-use mfm_journal::{DomainConclusion, JournalHistory, JournalObject};
+use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
+use mfm_journal::seal_frame;
 use mfm_store::{AppendResult, RunIndex, RunPageLimit};
 use sqlx::postgres::PgSslMode;
 use sqlx::{Connection, Executor};
@@ -70,32 +68,13 @@ fn reference(name: &str, bytes: &[u8]) -> ContentRef {
 }
 
 fn genesis(run_id: &RunId) -> EncodedRunFrame {
-    let program = b"{}";
-    let context = br#"{"value":1}"#;
-    EncodedRunFrame::admission(
-        run_id,
-        &reference("mfm.test.program", program),
-        program,
-        &reference("mfm.test.context", context),
-        context,
-    )
-    .expect("genesis")
+    store_scenarios::genesis(run_id, br#"{"value":1}"#)
 }
 
 fn successor(run_id: &RunId) -> EncodedRunFrame {
-    let history = JournalHistory::from_genesis(genesis(run_id)).expect("history");
-    let output = br#"{"value":2}"#;
-    history
-        .encode_pure_conclusion(
-            ExecutionPosition {
-                state: StatePosition::new(0).unwrap(),
-                visit: VisitId::new(0),
-            },
-            DomainConclusion::Success {
-                output: JournalObject::new(&reference("mfm.test.output", output), output).unwrap(),
-            },
-        )
-        .expect("successor")
+    let first = genesis(run_id);
+    let payload = PlainCanonicalJsonBytes::from_json_str(r#"{"value":2}"#).unwrap();
+    seal_frame(run_id, 2, Some(first.head_digest()), &payload).unwrap()
 }
 
 fn observe_store<T>(result: Result<T, StoreError>) -> store_hostile::Observation {
@@ -275,6 +254,7 @@ async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresBackend>) {
             load_run(
                 &store.pool,
                 &run_id,
+                None,
                 LoadProbe::SnapshotPause { entered, release },
             )
             .await
@@ -294,29 +274,14 @@ async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresBackend>) {
         .expect("snapshot join")
         .expect("snapshot load")
         .expect("snapshot present");
-    assert_eq!(
-        JournalHistory::qualify(&snapshot_id, raced)
-            .expect("snapshot history")
-            .head_sequence(),
-        1
-    );
+    assert_eq!(raced.head().head_sequence(), 1);
 
     let large_id = run_id(31);
     let mut large_context = Vec::with_capacity(4 * 1024 * 1024 + 2);
     large_context.push(b'"');
     large_context.resize(4 * 1024 * 1024 + 1, b'a');
     large_context.push(b'"');
-    let large = {
-        let program = b"{}";
-        EncodedRunFrame::admission(
-            &large_id,
-            &reference("mfm.test.program", program),
-            program,
-            &reference("mfm.test.context", &large_context),
-            &large_context,
-        )
-        .expect("large genesis")
-    };
+    let large = store_scenarios::genesis(&large_id, &large_context);
     assert_eq!(
         store.append_run(&large).await.expect("large append"),
         AppendResult::Inserted
@@ -333,6 +298,7 @@ async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresBackend>) {
             load_run(
                 &store.pool,
                 &run_id,
+                None,
                 LoadProbe::BlockingPause { entered, release },
             )
             .await
@@ -362,12 +328,7 @@ async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresBackend>) {
     heartbeat_done.store(true, Ordering::SeqCst);
     heartbeat.await.expect("heartbeat join");
     assert!(heartbeat_count.load(Ordering::SeqCst) > 0);
-    assert_eq!(
-        JournalHistory::qualify(&large_id, retained)
-            .expect("large history")
-            .head_sequence(),
-        1
-    );
+    assert_eq!(retained.head().head_sequence(), 1);
 }
 
 async fn assert_commit_and_hostile_contract(
@@ -380,7 +341,7 @@ async fn assert_commit_and_hostile_contract(
     observed.push((
         Case::Absence,
         if store
-            .load_run(&run_id(40))
+            .load_run(&run_id(40), None)
             .await
             .expect("absent load")
             .is_none()
@@ -446,7 +407,7 @@ async fn assert_commit_and_hostile_contract(
         }
         assert_eq!(
             store
-                .load_run(&fault_id)
+                .load_run(&fault_id, None)
                 .await
                 .expect("resolve fault")
                 .is_some(),
@@ -480,7 +441,7 @@ async fn assert_commit_and_hostile_contract(
     .expect("insert orphan frame");
     observed.push((
         Case::AbsentHeadOrphan,
-        observe_store(store.load_run(&orphan_id).await),
+        observe_store(store.load_run(&orphan_id, None).await),
     ));
 
     for (byte, mutation, case) in [
@@ -496,7 +457,7 @@ async fn assert_commit_and_hostile_contract(
         ),
         (
             49,
-            "UPDATE public.mfm_run_heads SET total_bytes = total_bytes + 1 WHERE run_id = $1",
+            "UPDATE public.mfm_run_heads SET total_bytes = 1 WHERE run_id = $1",
             Case::CorruptTotal,
         ),
     ] {
@@ -510,7 +471,7 @@ async fn assert_commit_and_hostile_contract(
             .execute(&mut *connection)
             .await
             .expect("mutate retained row");
-        observed.push((case, observe_store(store.load_run(&corrupt_id).await)));
+        observed.push((case, observe_store(store.load_run(&corrupt_id, None).await)));
     }
 
     let target_id = run_id(50);
@@ -548,7 +509,7 @@ async fn assert_commit_and_hostile_contract(
         .expect("remove head frame");
     observed.push((
         Case::CorruptHead,
-        observe_store(store.load_run(&broken_head_id).await),
+        observe_store(store.load_run(&broken_head_id, None).await),
     ));
     connection
         .execute(
@@ -1756,7 +1717,7 @@ async fn inherited_rows_are_outside_physical_table_custody() {
         .await
         .unwrap();
     for handle in [&backend, &reopened] {
-        assert!(handle.load_run(&run).await.unwrap().is_some());
+        assert!(handle.load_run(&run, None).await.unwrap().is_some());
         assert_eq!(
             handle.append_run(&genesis(&run)).await.unwrap(),
             AppendResult::NotInserted
@@ -1811,7 +1772,11 @@ async fn inherited_rows_are_outside_physical_table_custody() {
         .execute(&mut connection)
         .await
         .unwrap();
-    assert!(backend.load_run(&run_id(202)).await.unwrap().is_none());
+    assert!(backend
+        .load_run(&run_id(202), None)
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(
         backend.append_run(&genesis(&run_id(202))).await.unwrap(),
         AppendResult::Inserted

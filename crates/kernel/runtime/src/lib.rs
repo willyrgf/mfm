@@ -1,19 +1,27 @@
 #![warn(missing_docs)]
 //! Immutable typed Runtime assembly and caller-driven run progression.
 //!
-//! Runtime is the sole semantic fold owner. Store supplies complete opaque
-//! prefixes, Journal qualifies them, and the associated mode-specific
+//! Runtime owns the current continuation and its local validation. Store supplies
+//! admission/latest rows, Journal decodes their opaque envelopes, and the associated
 //! executable runs only the currently selected State.
 
 mod assembly;
 mod engine;
+mod error;
 mod report;
-pub use mfm_journal::PendingDecision;
+mod state;
+pub use error::{
+    AppendFailure, CandidatePresence, Operation, RecordingFailure, Stage, TaskFailure,
+};
+pub use mfm_values::Object;
 pub use report::{AdapterIncidentView, FailureCauseView, FailureReport, InvocationFailure};
+pub use state::{
+    Call, DomainFailure, EffectCall, Failure, ReadFailure, RecoveryDecision, Settlement, StateCall,
+};
 
 use std::sync::Arc;
 
-use mfm_ids::{ContentDigest, ContentRef, EffectId, ExecutionPosition, RunId, StatePosition};
+use mfm_ids::{ContentDigest, EffectId, ExecutionPosition, RunId, StatePosition};
 use mfm_program::Program;
 use mfm_store::Store;
 use mfm_values::MfmValue;
@@ -24,7 +32,7 @@ pub use assembly::{RuntimeAssembly, RuntimeAssemblyBuilder};
 pub type Result<T> = std::result::Result<T, RuntimeError>;
 
 /// Redaction-safe Runtime failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     /// The requested run does not exist.
     #[error("run is absent")]
@@ -52,20 +60,60 @@ pub enum RuntimeError {
     /// Capacity arithmetic could not represent the result.
     #[error("capacity arithmetic overflow")]
     ArithmeticOverflow,
-    /// A trusted local invariant failed.
-    #[error("runtime internal failure")]
-    Internal,
+    /// A reviewed native failure at its actual operation/stage.
+    #[error("runtime operation failed")]
+    Native {
+        /// Originating operation.
+        operation: Operation,
+        /// Actual stage within that operation.
+        stage: Stage,
+        /// Complete available reviewed native custody.
+        #[source]
+        cause: mfm_values::NativeCause,
+    },
+    /// A returned original and candidate remain in invocation custody.
+    #[error("runtime recording failed")]
+    Recording {
+        /// Originating operation.
+        operation: Operation,
+        /// Available recording facts.
+        #[source]
+        failure: Box<RecordingFailure>,
+    },
+    /// Insertion was acknowledged but the resulting view could not be projected.
+    #[error("acknowledged state projection failed")]
+    Projection {
+        /// Acknowledged mechanical head, even if the last renderable view is older.
+        acknowledged: Box<mfm_store::RunSummary>,
+        /// Actual projection failure.
+        #[source]
+        cause: mfm_values::NativeCause,
+    },
 }
 
+impl RuntimeError {
+    pub(crate) fn native(operation: Operation, cause: mfm_values::NativeCause) -> Self {
+        Self::Native {
+            operation,
+            stage: Stage::Execute,
+            cause,
+        }
+    }
+    pub(crate) fn at(operation: Operation, stage: Stage, cause: mfm_values::NativeCause) -> Self {
+        Self::Native {
+            operation,
+            stage,
+            cause,
+        }
+    }
+}
 impl From<mfm_values::ValueError> for RuntimeError {
     fn from(error: mfm_values::ValueError) -> Self {
-        match error {
-            mfm_values::ValueError::SizeLimit(size) => Self::SizeLimit {
-                resource: SizeResource::CanonicalObject,
-                size,
-            },
-            _ => Self::Internal,
-        }
+        Self::at(
+            Operation::Record,
+            Stage::Encode,
+            mfm_values::NativeCause::from_error(error),
+        )
     }
 }
 
@@ -100,22 +148,125 @@ impl std::fmt::Display for SizeResource {
     }
 }
 
+/// Borrowed-cause projection of a measured size or an early serialization stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(untagged)]
+pub enum SizeViolation {
+    /// The complete representation was measured.
+    Measured {
+        /// Resource whose ceiling was exceeded.
+        resource: SizeResource,
+        /// Complete measured size.
+        actual: u64,
+        /// Inclusive byte or count ceiling.
+        limit: u64,
+    },
+    /// Serialization stopped before the complete size was known.
+    SerializationBound {
+        /// Resource being serialized.
+        resource: SizeResource,
+        /// Lower bound observed when accumulation stopped.
+        observed_at_least: u64,
+        /// Inclusive byte ceiling.
+        limit: u64,
+    },
+}
+impl SizeViolation {
+    fn measured(resource: SizeResource, size: mfm_values::SizeLimitExceeded) -> Self {
+        Self::Measured {
+            resource,
+            actual: size.actual(),
+            limit: size.limit(),
+        }
+    }
+}
 impl RuntimeError {
-    /// Returns exact safe size diagnostics, including mechanical Store failures.
-    pub const fn size_limit(self) -> Option<(SizeResource, mfm_values::SizeLimitExceeded)> {
+    /// Projects size evidence from the primary failure without consuming its cause chain.
+    /// A reconciliation error does not replace the original append disposition.
+    pub fn size_limit(&self) -> Option<SizeViolation> {
         match self {
-            Self::SizeLimit { resource, size } => Some((resource, size)),
-            Self::Store(mfm_store::StoreError::FrameSize(size)) => {
-                Some((SizeResource::Frame, size))
-            }
-            Self::Store(mfm_store::StoreError::HistorySize(size)) => {
-                Some((SizeResource::HistoryBytes, size))
-            }
-            Self::Store(mfm_store::StoreError::FrameCount(size)) => {
-                Some((SizeResource::FrameCount, size))
-            }
+            Self::SizeLimit { resource, size } => Some(SizeViolation::measured(*resource, *size)),
+            Self::Store(error) => store_size(error),
+            Self::Native {
+                operation, cause, ..
+            } => cause_size(
+                cause,
+                if matches!(operation, Operation::Project) {
+                    SizeResource::FailureReport
+                } else {
+                    SizeResource::Frame
+                },
+            ),
+            Self::Projection { cause, .. } => cause_size(cause, SizeResource::FailureReport),
+            Self::Recording { failure, .. } => match failure.as_ref() {
+                RecordingFailure::BeforeAppend { cause, .. } => {
+                    cause_size(cause, SizeResource::Frame)
+                }
+                RecordingFailure::Append {
+                    outcome: AppendFailure::Store(error),
+                    ..
+                } => store_size(error),
+                RecordingFailure::Append {
+                    outcome: AppendFailure::NotInserted,
+                    ..
+                } => None,
+            },
             _ => None,
         }
+    }
+}
+fn store_size(error: &mfm_store::StoreError) -> Option<SizeViolation> {
+    use mfm_store::StoreError;
+    let (resource, size) = match error {
+        StoreError::FrameSize(size) => (SizeResource::Frame, size),
+        StoreError::HistorySize(size) => (SizeResource::HistoryBytes, size),
+        StoreError::FrameCount(size) => (SizeResource::FrameCount, size),
+        _ => return None,
+    };
+    Some(SizeViolation::measured(resource, *size))
+}
+fn cause_size(
+    cause: &mfm_values::NativeCause,
+    mut resource: SizeResource,
+) -> Option<SizeViolation> {
+    let mut current: &(dyn std::error::Error + 'static) = cause;
+    loop {
+        if let Some(error) = current.downcast_ref::<RuntimeError>() {
+            return error.size_limit();
+        }
+        if let Some(error) = current.downcast_ref::<mfm_store::StoreError>() {
+            return store_size(error);
+        }
+        if let Some(error) = current.downcast_ref::<mfm_values::ValueError>() {
+            resource = SizeResource::CanonicalObject;
+            if let mfm_values::ValueError::SizeLimit(size) = error {
+                return Some(SizeViolation::measured(resource, *size));
+            }
+        }
+        if let Some(error) = current.downcast_ref::<mfm_journal::JournalError>() {
+            resource = SizeResource::Frame;
+            match error {
+                mfm_journal::JournalError::FrameSize(size) => {
+                    return Some(SizeViolation::measured(resource, *size))
+                }
+                mfm_journal::JournalError::FrameCount(size) => {
+                    return Some(SizeViolation::measured(SizeResource::FrameCount, *size))
+                }
+                _ => {}
+            }
+        }
+        if let Some(error) = current.downcast_ref::<mfm_canonical::CanonicalError>() {
+            return error
+                .serialization_bound()
+                .map(
+                    |(limit, observed_at_least)| SizeViolation::SerializationBound {
+                        resource,
+                        observed_at_least: observed_at_least as u64,
+                        limit: limit as u64,
+                    },
+                );
+        }
+        current = current.source()?;
     }
 }
 
@@ -141,7 +292,7 @@ pub struct PendingFailureView {
     /// Original error, complete input, and retained command facts.
     pub incident: AdapterIncidentView,
     /// Committed decision retaining command authority.
-    pub decision: mfm_journal::PendingDecision,
+    pub decision: RecoveryDecision,
 }
 
 /// Durable public state of a run.
@@ -162,8 +313,18 @@ pub enum RunViewState {
         /// Most recent acknowledged operational failure and invocation decision.
         latest_failure: Option<Box<PendingFailureView>>,
     },
+    /// A declared original is durable and awaits recovery evaluation.
+    AwaitingRecovery {
+        /// Complete original operation facts, without an uncommitted decision.
+        failure: Failure,
+    },
+    /// Accepted settlement is durable and awaits deterministic interpretation.
+    AwaitingInterpretation {
+        /// Complete command authority and accepted evidence.
+        settlement: Settlement,
+    },
     /// The Program reached its declared root success.
-    Succeeded(ValueView),
+    Succeeded(Object),
     /// The Program reached its declared root failure.
     Failed(FailureReport),
 }
@@ -182,51 +343,13 @@ pub enum RunnableReason {
     },
 }
 
-/// Qualified canonical value with an exact typed contract.
-pub struct ValueView {
-    contract_ref: ContentRef,
-    value_ref: ContentRef,
-    canonical: mfm_canonical::PlainCanonicalJsonBytes,
-}
-
-impl ValueView {
-    /// Decodes the requested exact schema contract, rejecting structurally similar other types.
-    pub fn decode<T: MfmValue>(&self) -> mfm_values::Result<T> {
-        let expected = mfm_program::nominal_contract_ref::<T>()
-            .map_err(|_| mfm_values::ValueError::InvalidSchemaIdentity)?;
-        if expected != self.contract_ref {
-            return Err(mfm_values::ValueError::SchemaShapeMismatch);
-        }
-        T::schema_descriptor()?
-            .identity()
-            .validate_canonical_value(self.canonical_bytes())?;
-        serde_json::from_slice(self.canonical_bytes())
-            .map_err(|_| mfm_values::ValueError::SchemaShapeMismatch)
-    }
-
-    /// Returns the nominal typed contract.
-    pub const fn contract_ref(&self) -> &ContentRef {
-        &self.contract_ref
-    }
-
-    /// Returns the exact retained instance reference.
-    pub const fn value_ref(&self) -> &ContentRef {
-        &self.value_ref
-    }
-
-    /// Returns exact canonical retained bytes.
-    pub fn canonical_bytes(&self) -> &[u8] {
-        self.canonical.as_bytes()
-    }
-}
-
 /// Snapshot of one real qualified durable run head.
 pub struct RunView {
     run_id: RunId,
     head_sequence: u64,
     head_digest: ContentDigest,
     state: RunViewState,
-    admitted_context: Arc<ValueView>,
+    admitted_context: Arc<Object>,
     entry_point: mfm_ids::EntryPointId,
 }
 
@@ -236,8 +359,8 @@ impl RunView {
         &self.entry_point
     }
 
-    /// Returns the exact genesis input already qualified by this view's Runtime fold.
-    pub fn admitted_context(&self) -> &ValueView {
+    /// Returns the exact input qualified from this run's admission.
+    pub fn admitted_context(&self) -> &Object {
         &self.admitted_context
     }
 
@@ -301,7 +424,7 @@ impl Runtime {
         .await
     }
 
-    /// Loads and folds an existing run without executing a State or adapter.
+    /// Loads and validates the current record without executing a State or adapter.
     pub async fn read(&self, run_id: &RunId) -> std::result::Result<RunView, InvocationFailure> {
         engine::read(
             self.assembly.handle(),

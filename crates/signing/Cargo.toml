@@ -14,7 +14,7 @@ layer = "signing"
 k256 = { workspace = true }
 mfm-ids = { path = "../kernel/ids" }
 thiserror = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
-serde = { workspace = true }
 static_assertions = "1.1"

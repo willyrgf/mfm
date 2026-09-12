@@ -269,7 +269,7 @@ pub trait CanonicalJsonPersistedSchema: PersistedSchema + Serialize + Deserializ
                 sha256_digest_bytes(canonical.as_bytes()),
             ),
         )
-        .map_err(|error| ValueError::Identity(error.to_string()))
+        .map_err(ValueError::Identity)
     }
 }
 
@@ -307,7 +307,7 @@ pub trait CanonicalJsonLinesPersistedSchema: PersistedSchema {
             SchemaKind::PersistedContract,
             Self::STREAM_SCHEMA_NAME,
             mfm_ids::SchemaVersion::new(Self::STREAM_SCHEMA_VERSION)
-                .map_err(|error| ValueError::Identity(error.to_string()))?,
+                .map_err(ValueError::Identity)?,
             Self::schema_identity()?.canonical_json_shape()?.clone(),
             CanonicalJsonLinesBounds {
                 minimum_records: Self::MINIMUM_RECORDS,

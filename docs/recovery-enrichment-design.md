@@ -49,7 +49,7 @@ checked bytes, without string-prefix reconstruction. The
 persisted raw ContentDigest grammar remains unchanged; the revision is never retagged or rehashed.
 
 Matching start recovery reads the requested dependent RunId before loading configuration. Expose
-the qualified genesis input through the existing RunView as a ValueView accessor. For a retained
+the qualified genesis input through the existing RunView as an Object accessor. For a retained
 run, decode its admission identity and require the same selection/entry point; otherwise return a
 stable conflict. For an absent run, load the selected config and validate its linkage before start.
 An unavailable/uncertain read stops admission. Normal read/progress after admission never reloads

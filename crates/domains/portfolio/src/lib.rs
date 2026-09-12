@@ -615,25 +615,34 @@ fn initialize_portfolio(
     }
 }
 
-fn enter_portfolio_collection(
-    input: PortfolioContinuation,
-) -> ProposedStateOutcome<EvmBalanceContext<PortfolioContinuation>, PortfolioSnapshotFailure> {
-    let Some(ordinal) = input.next_collection_ordinal() else {
-        return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed);
-    };
-    let demand = match input.input.collection(ordinal as usize).cloned() {
-        Some(demand) => demand,
-        None => return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed),
-    };
-    match EvmBalanceContext::new(
-        demand.request,
-        input,
-        ordinal,
-        demand.correlation,
-        demand.route_ref,
-    ) {
-        Ok(output) => portfolio_success(output),
-        Err(_) => portfolio_failure(PortfolioSnapshotFailure::InvalidInput),
+impl PureState for EnterPortfolioCollection {
+    fn evaluate(
+        input: PortfolioContinuation,
+    ) -> Result<
+        ProposedStateOutcome<EvmBalanceContext<PortfolioContinuation>, PortfolioSnapshotFailure>,
+        mfm_values::NativeCause,
+    > {
+        let Some(ordinal) = input.next_collection_ordinal() else {
+            return Ok(portfolio_failure(
+                PortfolioSnapshotFailure::ConsolidationFailed,
+            ));
+        };
+        let demand = match input.input.collection(ordinal as usize).cloned() {
+            Some(demand) => demand,
+            None => {
+                return Ok(portfolio_failure(
+                    PortfolioSnapshotFailure::ConsolidationFailed,
+                ))
+            }
+        };
+        EvmBalanceContext::new(
+            demand.request,
+            input,
+            ordinal,
+            demand.correlation,
+            demand.route_ref,
+        )
+        .map(portfolio_success)
     }
 }
 
@@ -705,7 +714,7 @@ impl mfm_program::ValueMap for MapEvmBalanceFailure {
     fn apply(
         _: &Self::Params,
         input: EvmBalanceFailure,
-    ) -> Result<PortfolioSnapshotFailure, mfm_program::StateExecutionError> {
+    ) -> Result<PortfolioSnapshotFailure, mfm_values::NativeCause> {
         Ok(map_evm_balance_failure(input))
     }
 }
@@ -795,7 +804,7 @@ macro_rules! impl_portfolio_pure {
                 input: Self::Input,
             ) -> std::result::Result<
                 ProposedStateOutcome<Self::Output, Self::Failure>,
-                mfm_program::StateExecutionError,
+                mfm_values::NativeCause,
             > {
                 Ok($evaluate(input))
             }
@@ -804,7 +813,6 @@ macro_rules! impl_portfolio_pure {
 }
 
 impl_portfolio_pure!(InitializePortfolio, initialize_portfolio);
-impl_portfolio_pure!(EnterPortfolioCollection, enter_portfolio_collection);
 impl_portfolio_pure!(ResumePortfolioCollection, resume_portfolio_collection);
 
 impl_portfolio_pure!(ConsolidatePortfolio, consolidate_portfolio);

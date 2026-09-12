@@ -12,6 +12,7 @@ pub(super) struct ContainerAttrs {
     pub(super) serde_transparent: bool,
     pub(super) serde_try_from: Option<String>,
     pub(super) serde_into: Option<String>,
+    pub(super) decode_native: Option<syn::Path>,
 }
 
 impl ContainerAttrs {
@@ -28,6 +29,7 @@ impl ContainerAttrs {
             serde_transparent: false,
             serde_try_from: None,
             serde_into: None,
+            decode_native: None,
         };
 
         for attr in attrs {
@@ -41,6 +43,8 @@ impl ContainerAttrs {
                         output.version = meta.value()?.parse::<LitStr>()?.value();
                     } else if meta.path.is_ident("schema") {
                         output.schema_name = meta.value()?.parse::<LitStr>()?.value();
+                    } else if meta.path.is_ident("decode_native") {
+                        output.decode_native = Some(meta.value()?.parse::<LitStr>()?.parse()?);
                     } else {
                         return Err(meta.error("unsupported #[mfm(...)] container attribute"));
                     }

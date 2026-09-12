@@ -1,5 +1,4 @@
 use super::*;
-use mfm_program::StateExecutionError;
 
 /// Reservation and the complete accepted preparation evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -124,7 +123,7 @@ pub trait TransactionSuccessMode: sealed::Sealed + MfmValueTrait + Clone + Eq {
     /// Whether the complete command has the selected action.
     fn accepts(command: &Eip1559TransactionCommand) -> bool;
     /// Projects matching successful evidence; a mismatch is an internal implementation error.
-    fn project(executed: &ExecutedTransactionFacts) -> Result<Self, StateExecutionError>;
+    fn project(executed: &ExecutedTransactionFacts) -> Result<Self, mfm_values::NativeCause>;
 }
 
 /// Checked required address from a successful creation.
@@ -153,12 +152,14 @@ impl TransactionSuccessMode for Created {
     fn accepts(command: &Eip1559TransactionCommand) -> bool {
         command.to().is_none()
     }
-    fn project(executed: &ExecutedTransactionFacts) -> Result<Self, StateExecutionError> {
+    fn project(executed: &ExecutedTransactionFacts) -> Result<Self, mfm_values::NativeCause> {
         match (executed.command().to(), executed.settlement().outcome()) {
             (None, EvmTransactionOutcome::Created { created_address }) => Ok(Self {
                 created_address: created_address.clone(),
             }),
-            _ => Err(StateExecutionError),
+            _ => Err(mfm_values::NativeCause::from_error(
+                crate::EvmDomainError::InvalidValue,
+            )),
         }
     }
 }
@@ -189,12 +190,14 @@ impl TransactionSuccessMode for Called {
     fn accepts(command: &Eip1559TransactionCommand) -> bool {
         command.to().is_some()
     }
-    fn project(executed: &ExecutedTransactionFacts) -> Result<Self, StateExecutionError> {
+    fn project(executed: &ExecutedTransactionFacts) -> Result<Self, mfm_values::NativeCause> {
         match (executed.command().to(), executed.settlement().outcome()) {
             (Some(target), EvmTransactionOutcome::Called) => Ok(Self {
                 target: target.clone(),
             }),
-            _ => Err(StateExecutionError),
+            _ => Err(mfm_values::NativeCause::from_error(
+                crate::EvmDomainError::InvalidValue,
+            )),
         }
     }
 }
@@ -214,7 +217,7 @@ pub struct CompletedTransactionFacts<S: TransactionSuccessMode> {
 }
 impl<S: TransactionSuccessMode> CompletedTransactionFacts<S> {
     /// Projects only a matching successful settlement into a completed fact type.
-    pub fn new(executed: ExecutedTransactionFacts) -> Result<Self, StateExecutionError> {
+    pub fn new(executed: ExecutedTransactionFacts) -> Result<Self, mfm_values::NativeCause> {
         let outcome = S::project(&executed)?;
         Ok(Self { executed, outcome })
     }

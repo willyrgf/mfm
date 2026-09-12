@@ -1,8 +1,8 @@
 use super::*;
 use mfm_capabilities::{CapabilityError, EffectCapabilityContract};
 use mfm_program::{
-    CapabilityInjection, EffectState, Never, Operation, OperationExpansion, PreparationError,
-    ProgramError, ProposedStateOutcome, PureState, State, StateExecutionError,
+    CapabilityInjection, EffectState, Never, Operation, OperationExpansion, ProgramError,
+    ProposedStateOutcome, PureState, State,
 };
 use mfm_values::ContextSlot;
 use std::marker::PhantomData;
@@ -234,17 +234,17 @@ impl EffectCapabilityContract for EvmNonceReservationEffect {
         effect_id: &EffectId,
         command: &Self::Command,
         evidence: &Self::Evidence,
-    ) -> mfm_capabilities::Result<()> {
+    ) -> Result<(), mfm_values::NativeCause> {
         let matches = {
             let (_, reference) =
-                canonicalize_mfm_value(command).map_err(|_| CapabilityError::EvidenceBinding)?;
+                canonicalize_mfm_value(command).map_err(mfm_values::NativeCause::from_error)?;
             evidence.effect_id() == effect_id
                 && evidence.command_value_ref() == &reference
                 && evidence.domain() == &NonceDomain::from_binding(command.binding())
         };
         matches
             .then_some(())
-            .ok_or(CapabilityError::EvidenceBinding)
+            .ok_or_else(|| mfm_values::NativeCause::from_error(CapabilityError::EvidenceBinding))
     }
 }
 
@@ -262,14 +262,14 @@ impl EffectCapabilityContract for EvmTransactionPreparationEffect {
         effect_id: &EffectId,
         command: &Self::Command,
         evidence: &Self::Evidence,
-    ) -> mfm_capabilities::Result<()> {
+    ) -> Result<(), mfm_values::NativeCause> {
         let matches = {
             let _ = command;
             (&evidence.effect_id) == effect_id
         };
         matches
             .then_some(())
-            .ok_or(CapabilityError::EvidenceBinding)
+            .ok_or_else(|| mfm_values::NativeCause::from_error(CapabilityError::EvidenceBinding))
     }
 }
 
@@ -287,7 +287,7 @@ impl EffectCapabilityContract for EvmTransactionEffect {
         effect_id: &EffectId,
         command: &Self::Command,
         evidence: &Self::Evidence,
-    ) -> mfm_capabilities::Result<()> {
+    ) -> Result<(), mfm_values::NativeCause> {
         let matches = {
             evidence.effect_id() == effect_id
                 && evidence.nonce() == command.reserved().reservation().nonce()
@@ -296,7 +296,7 @@ impl EffectCapabilityContract for EvmTransactionEffect {
         };
         matches
             .then_some(())
-            .ok_or(CapabilityError::EvidenceBinding)
+            .ok_or_else(|| mfm_values::NativeCause::from_error(CapabilityError::EvidenceBinding))
     }
 }
 
@@ -367,23 +367,27 @@ impl<C: MfmValueTrait, R: TransactionRecipe<C>> State for ProjectEvmTransactionO
 impl<C: MfmValueTrait, R: TransactionRecipe<C>> EffectState<EvmNonceReservationEffect>
     for ReserveEvmNonce<C, R>
 {
-    fn prepare(input: &C) -> Result<Eip1559TransactionCommand, PreparationError> {
+    fn prepare(input: &C) -> Result<Eip1559TransactionCommand, mfm_values::NativeCause> {
         let command = R::command(input);
         if !R::Success::accepts(&command) {
-            return Err(PreparationError);
+            return Err(mfm_values::NativeCause::from_error(
+                crate::EvmDomainError::InvalidValue,
+            ));
         }
         Ok(command)
     }
     fn interpret(
         input: C,
         evidence: &Reservation,
-    ) -> Result<ProposedStateOutcome<Self::Output, Never>, StateExecutionError> {
+    ) -> Result<ProposedStateOutcome<Self::Output, Never>, mfm_values::NativeCause> {
         let command = R::command(&input);
         if !R::Success::accepts(&command) {
-            return Err(StateExecutionError);
+            return Err(mfm_values::NativeCause::from_error(
+                crate::EvmDomainError::InvalidValue,
+            ));
         }
         let facts = ReservedEvmTransaction::new(command, evidence.clone())
-            .map_err(|_| StateExecutionError)?;
+            .map_err(mfm_values::NativeCause::from_error)?;
         Ok(ProposedStateOutcome::Success {
             output: <R::Slot as ContextSlot<C>>::replace(input, facts),
         })
@@ -398,13 +402,13 @@ where
         With<PreparedTransactionFacts> = PreparedContext<C, R>,
     >,
 {
-    fn prepare(input: &Self::Input) -> Result<ReservedEvmTransaction, PreparationError> {
+    fn prepare(input: &Self::Input) -> Result<ReservedEvmTransaction, mfm_values::NativeCause> {
         Ok(<R::Slot as ContextSlot<Self::Input>>::get(input).clone())
     }
     fn interpret(
         input: Self::Input,
         evidence: &PreparedEvmTransactionEvidence,
-    ) -> Result<ProposedStateOutcome<Self::Output, Never>, StateExecutionError> {
+    ) -> Result<ProposedStateOutcome<Self::Output, Never>, mfm_values::NativeCause> {
         let facts = PreparedTransactionFacts::new(
             <R::Slot as ContextSlot<Self::Input>>::get(&input).clone(),
             evidence.clone(),
@@ -423,18 +427,18 @@ where
         With<ExecutedTransactionFacts> = ExecutedContext<C, R>,
     >,
 {
-    fn prepare(input: &Self::Input) -> Result<PreparedEvmTransaction, PreparationError> {
+    fn prepare(input: &Self::Input) -> Result<PreparedEvmTransaction, mfm_values::NativeCause> {
         Ok(<R::Slot as ContextSlot<Self::Input>>::get(input).execution_command())
     }
     fn interpret(
         input: Self::Input,
         evidence: &EvmTransactionSettlement,
-    ) -> Result<ProposedStateOutcome<Self::Output, Never>, StateExecutionError> {
+    ) -> Result<ProposedStateOutcome<Self::Output, Never>, mfm_values::NativeCause> {
         let facts = ExecutedTransactionFacts::new(
             <R::Slot as ContextSlot<Self::Input>>::get(&input).clone(),
             evidence.clone(),
         )
-        .map_err(|_| StateExecutionError)?;
+        .map_err(mfm_values::NativeCause::from_error)?;
         Ok(ProposedStateOutcome::Success {
             output: <R::Slot as ContextSlot<Self::Input>>::replace(input, facts),
         })
@@ -450,10 +454,12 @@ where
 {
     fn evaluate(
         input: Self::Input,
-    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, StateExecutionError> {
+    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::NativeCause> {
         let facts = <R::Slot as ContextSlot<Self::Input>>::get(&input);
         if !R::Success::accepts(facts.command()) {
-            return Err(StateExecutionError);
+            return Err(mfm_values::NativeCause::from_error(
+                crate::EvmDomainError::InvalidValue,
+            ));
         }
         if matches!(
             facts.settlement().outcome(),

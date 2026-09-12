@@ -29,7 +29,7 @@ impl Handler for RetryRead {
         _: &NoParams,
         classification: Classification,
         _: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
         Ok(match classification {
             Classification::Retryable => RecoveryRequest::RetryState,
             _ => RecoveryRequest::Stop,
@@ -210,7 +210,7 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
                     ..
                 }
             ));
-            assert_eq!(first.head_sequence(), 2);
+            assert_eq!(first.head_sequence(), 3);
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             runtime.resume(&run).await.unwrap()
         } else {
@@ -274,7 +274,7 @@ impl Handler for RestartCollection {
         _: &NoParams,
         classification: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
         Ok(match classification {
             Classification::InputInvalidated => context
                 .eligible_restart_targets()
@@ -425,11 +425,7 @@ async fn changed_anchor_restarts_the_real_collection_and_preserves_its_acknowled
                 ..
             }
         ));
-        let prefix = mfm_journal::JournalHistory::qualify(
-            &run,
-            store.load_run(&run).await.unwrap().unwrap(),
-        )
-        .unwrap();
+        let prefix = store.load_run(&run, None).await.unwrap().unwrap();
         let cold = runtime.read(&run).await.unwrap();
         assert_eq!(cold.head_digest(), yielded.head_digest());
         assert_eq!(anchor_calls.load(Ordering::SeqCst), changed_call + 1);
@@ -445,23 +441,26 @@ async fn changed_anchor_restarts_the_real_collection_and_preserves_its_acknowled
         assert_eq!(hash, EvmHash::from_bytes([8; 32]).to_string());
         assert_eq!(balances.len(), 2);
         assert_eq!(total, "400");
-        let history = mfm_journal::JournalHistory::qualify(
-            &run,
-            store.load_run(&run).await.unwrap().unwrap(),
-        )
-        .unwrap();
+        let retained = store
+            .load_run(&run, Some(prefix.head().head_sequence()))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(terminal.head_sequence(), yielded.head_sequence() + 9);
-        use mfm_journal::{DomainConclusion, DomainDecision, JournalRecord, ReadConclusion};
-        let prefix_len = prefix.records().len();
-        assert!(history.records().len() >= prefix_len);
-        assert!(prefix.records().eq(history.records().take(prefix_len)));
-        assert!(prefix.records().any(|record| matches!(record,
-            JournalRecord::ReadConcluded { outcome: ReadConclusion::Observed {
-                outcome: DomainConclusion::Failure { original, decision: DomainDecision::Restart { .. } }, ..
-            }, .. } if matches!(serde_json::from_slice::<EvmBalanceFailure>(original.canonical_bytes()).unwrap(),
-                EvmBalanceFailure::AnchorChanged { previous, observed, .. }
-                if previous.number == EvmU256::from_u64(7) && observed.number == EvmU256::from_u64(8))
-        )));
+        assert_eq!(retained.admission(), prefix.admission());
+        assert_eq!(retained.probe().unwrap(), prefix.latest());
+        let frame = mfm_journal::decode_frame(prefix.latest()).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_slice(frame.payload().as_bytes()).unwrap();
+        let original = serde::de::DeserializeSeed::deserialize(
+            mfm_values::ObjectSeed,
+            payload["facts"]["recovered"]["failure"]["domain"]["original"].clone(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(original.decode::<EvmBalanceFailure>().unwrap(),
+            EvmBalanceFailure::AnchorChanged { previous, observed, .. }
+                if previous.number == EvmU256::from_u64(7) && observed.number == EvmU256::from_u64(8)));
         let cold = runtime.read(&run).await.unwrap();
         let RunViewState::Succeeded(cold_value) = cold.state() else {
             panic!("cold completion")

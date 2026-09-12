@@ -66,7 +66,10 @@ async fn committed_read_recovery_yields_and_reconstructs_without_provider_calls(
                 .start(run.clone(), program.clone(), Offset { value: 8 })
                 .await,
             Err(crate::InvocationFailure::Execution {
-                error: RuntimeError::Internal,
+                error: RuntimeError::Native {
+                    operation: crate::Operation::Admission,
+                    ..
+                },
                 last_observed: None,
                 ..
             })
@@ -83,7 +86,7 @@ async fn committed_read_recovery_yields_and_reconstructs_without_provider_calls(
             .start(run.clone(), program, Offset { value: 7 })
             .await
             .unwrap();
-        assert_eq!(yielded.head_sequence(), 2);
+        assert_eq!(yielded.head_sequence(), 3);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let RunViewState::Runnable {
             position,
@@ -105,7 +108,7 @@ async fn committed_read_recovery_yields_and_reconstructs_without_provider_calls(
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let terminal = runtime.resume(&run).await.unwrap();
-        assert_eq!(terminal.head_sequence(), 3);
+        assert_eq!(terminal.head_sequence(), 5);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         let RunViewState::Failed(report) = terminal.state() else {
             panic!("exhausted retry")
@@ -164,16 +167,18 @@ impl mfm_capabilities::EffectCapabilityContract for Settlement {
         _: &mfm_ids::EffectId,
         command: &Offset,
         evidence: &Offset,
-    ) -> mfm_capabilities::Result<()> {
+    ) -> std::result::Result<(), mfm_values::NativeCause> {
         if command.value == evidence.value {
             Ok(())
         } else {
-            Err(mfm_capabilities::CapabilityError::EvidenceBinding)
+            Err(mfm_values::NativeCause::from_error(
+                mfm_capabilities::CapabilityError::EvidenceBinding,
+            ))
         }
     }
 }
 impl mfm_program::EffectState<Settlement> for EvmSettlement {
-    fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_program::PreparationError> {
+    fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_values::NativeCause> {
         Ok(Offset { value: input.value })
     }
     fn interpret(
@@ -181,7 +186,7 @@ impl mfm_program::EffectState<Settlement> for EvmSettlement {
         _: &Offset,
     ) -> std::result::Result<
         mfm_program::ProposedStateOutcome<Offset, EvmFailure>,
-        StateExecutionError,
+        mfm_values::NativeCause,
     > {
         Ok(mfm_program::ProposedStateOutcome::Success { output: input })
     }
@@ -294,7 +299,7 @@ async fn stopped_pending_effect_retains_exact_authority_until_explicit_settlemen
         }
         _ => panic!("unresolved invocation stop"),
     };
-    assert_eq!(stopped.head_sequence(), pending.head_sequence() + 1);
+    assert_eq!(stopped.head_sequence(), pending.head_sequence() + 2);
     let loaded = runtime.read(&run).await.unwrap();
     assert_eq!(loaded.head_digest(), stopped.head_digest());
     assert!(
@@ -302,7 +307,7 @@ async fn stopped_pending_effect_retains_exact_authority_until_explicit_settlemen
     );
     assert_eq!(observed_ids.lock().unwrap().len(), 2);
     let settled = runtime.resume(&run).await.unwrap();
-    assert_eq!(settled.head_sequence(), 4);
+    assert_eq!(settled.head_sequence(), 6);
     let RunViewState::Succeeded(output) = settled.state() else {
         panic!("settled success")
     };
@@ -327,12 +332,12 @@ impl mfm_capabilities::ReadCapabilityContract for InjectedObservation {
         reference: &ContentRef,
         intent: &Offset,
         evidence: &Offset,
-    ) -> mfm_capabilities::Result<()> {
+    ) -> std::result::Result<(), mfm_values::NativeCause> {
         Observation::bind_evidence(reference, intent, evidence)
     }
 }
 impl mfm_program::ReadState<InjectedObservation> for EvmRead {
-    fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_program::PreparationError> {
+    fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_values::NativeCause> {
         <Self as mfm_program::ReadState<Observation>>::prepare(input)
     }
     fn interpret(
@@ -340,7 +345,7 @@ impl mfm_program::ReadState<InjectedObservation> for EvmRead {
         evidence: &Offset,
     ) -> std::result::Result<
         mfm_program::ProposedStateOutcome<Offset, EvmFailure>,
-        StateExecutionError,
+        mfm_values::NativeCause,
     > {
         <Self as mfm_program::ReadState<Observation>>::interpret(input, evidence)
     }
@@ -383,7 +388,7 @@ impl Handler for RestartFirst {
         _: &NoParams,
         _: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
         Ok(context
             .eligible_restart_targets()
             .first()
@@ -546,7 +551,7 @@ async fn ambiguous_recovery_append_stops_with_historical_observation_and_preserv
         })
         .unwrap();
     let store = Arc::new(ScriptedStore::new([(
-        2,
+        3,
         AppendAction::RetainThenIndeterminate,
     )]));
     let runtime = Runtime::new(builder.finish(), store);
@@ -565,17 +570,26 @@ async fn ambiguous_recovery_append_stops_with_historical_observation_and_preserv
         .expect("ambiguous acknowledgement");
     let InvocationFailure::Execution {
         run_id,
-        error: RuntimeError::Store(mfm_store::StoreError::Indeterminate),
+        error: RuntimeError::Recording { failure, .. },
         last_observed: Some(observed),
     } = failure
     else {
         panic!("source-preserving historical observation")
     };
+    assert!(matches!(
+        failure.as_ref(),
+        crate::RecordingFailure::Append {
+            outcome: crate::AppendFailure::Store(mfm_store::StoreError::Indeterminate),
+            observation: None,
+            reload_cause: None,
+            ..
+        }
+    ));
     assert_eq!(run_id, run);
-    assert_eq!(observed.head_sequence(), 1);
+    assert_eq!(observed.head_sequence(), 2);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let recovered = runtime.read(&run).await.unwrap();
-    assert_eq!(recovered.head_sequence(), 2);
+    assert_eq!(recovered.head_sequence(), 3);
     assert!(matches!(
         recovered.state(),
         RunViewState::Runnable {
@@ -585,13 +599,13 @@ async fn ambiguous_recovery_append_stops_with_historical_observation_and_preserv
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let terminal = runtime.resume(&run).await.unwrap();
-    assert_eq!(terminal.head_sequence(), 3);
+    assert_eq!(terminal.head_sequence(), 5);
     assert!(matches!(terminal.state(), RunViewState::Failed(_)));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
-async fn competing_recovery_appends_return_the_winner_without_executing_its_new_visit() {
+async fn competing_original_appends_yield_a_checked_observation_without_executing_the_retry() {
     use crate::{RunViewState, Runtime};
     use mfm_ids::{DigestBytes, EntryPointId, RunId};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -640,21 +654,26 @@ async fn competing_recovery_appends_return_the_winner_without_executing_its_new_
     entered.notified().await;
     let second = runtime.resume(&run).await.unwrap();
     let first = first.await.unwrap().unwrap();
-    assert_eq!(first.head_sequence(), 2);
-    assert_eq!(second.head_digest(), first.head_digest());
+    assert!(first.head_sequence() == 3 || second.head_sequence() == 3);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     for view in [first, second] {
-        let RunViewState::Runnable {
-            position,
-            reason: crate::RunnableReason::Retry,
-        } = view.state()
-        else {
-            panic!("winning recovery decision")
-        };
-        assert_eq!(position.visit.value(), 1);
+        match view.state() {
+            RunViewState::Runnable {
+                position,
+                reason: crate::RunnableReason::Retry,
+            } => {
+                assert_eq!(view.head_sequence(), 3);
+                assert_eq!(position.visit.value(), 1);
+            }
+            RunViewState::AwaitingRecovery { failure } => {
+                assert_eq!(view.head_sequence(), 2);
+                assert_eq!(failure.original().decode::<EvmFailure>().unwrap().source, 7);
+            }
+            _ => panic!("original or recovered winner; no retry execution"),
+        }
     }
     let cold = runtime.read(&run).await.unwrap();
-    assert_eq!(cold.head_sequence(), 2);
+    assert_eq!(cold.head_sequence(), 3);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
@@ -717,7 +736,7 @@ async fn cancelled_read_preserves_visit_and_spends_no_recovery_allowance() {
     };
     assert_eq!(position.visit.value(), 0);
     let retry = runtime.resume(&run).await.unwrap();
-    assert_eq!(retry.head_sequence(), 2);
+    assert_eq!(retry.head_sequence(), 3);
     let RunViewState::Runnable {
         position,
         reason: RunnableReason::Retry,

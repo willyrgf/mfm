@@ -10,16 +10,11 @@ struct TextFailure {
 }
 
 fn cause(bytes: usize) -> FailureCauseView {
-    fn value(bytes: usize) -> ValueView {
-        let (canonical, value_ref) = mfm_values::canonicalize_mfm_value(&TextFailure {
+    fn value(bytes: usize) -> Object {
+        Object::from_value(&TextFailure {
             detail: "x".repeat(bytes),
         })
-        .unwrap();
-        ValueView {
-            contract_ref: mfm_program::nominal_contract_ref::<TextFailure>().unwrap(),
-            value_ref,
-            canonical,
-        }
+        .unwrap()
     }
     FailureCauseView::Domain {
         original: value(0),
@@ -38,20 +33,25 @@ fn exact_inline_report_limit_and_one_more_byte_are_distinguished() {
         state_restarts: 0,
         run_decisions: 0,
     };
-    let overhead = FailureReport::new(position, StopCode::Requested, usage, cause(0))
+    let overhead = FailureReport::new(position, StopReason::Requested, usage, cause(0))
         .unwrap()
         .canonical_bytes()
         .len();
     let payload = 33_554_432 - overhead;
-    let report = FailureReport::new(position, StopCode::Requested, usage, cause(payload)).unwrap();
+    let report =
+        FailureReport::new(position, StopReason::Requested, usage, cause(payload)).unwrap();
     assert_eq!(report.canonical_bytes().len(), 33_554_432);
     drop(report);
-    let error = match FailureReport::new(position, StopCode::Requested, usage, cause(payload + 1)) {
+    let error = match FailureReport::new(position, StopReason::Requested, usage, cause(payload + 1))
+    {
         Err(error) => error,
         Ok(_) => panic!("oversized report accepted"),
     };
-    let (resource, size) = error.size_limit().unwrap();
-    assert_eq!(resource, crate::SizeResource::FailureReport);
-    assert_eq!(size.actual(), 33_554_433);
-    assert_eq!(size.limit(), 33_554_432);
+    assert!(
+        matches!(error.size_limit().unwrap(), crate::SizeViolation::SerializationBound {
+        resource: crate::SizeResource::FailureReport,
+        observed_at_least,
+        limit: 33_554_432,
+    } if observed_at_least > 33_554_432)
+    );
 }

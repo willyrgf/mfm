@@ -4,7 +4,8 @@ use super::*;
 pub type CheckedStringResult<T> = std::result::Result<T, CheckedStringError>;
 
 /// Stable reason returned when a checked string primitive rejects input.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CheckedStringErrorReason {
     /// The value was empty.
     Empty,
@@ -44,7 +45,7 @@ pub enum CheckedStringErrorReason {
 }
 
 /// Error returned when a checked string primitive violates its grammar.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize)]
 #[error("{grammar} failed validation: {reason}")]
 pub struct CheckedStringError {
     grammar: &'static str,

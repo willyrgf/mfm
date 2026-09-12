@@ -13,8 +13,8 @@ use std::num::NonZeroU64;
 use mfm_capabilities::ReadCapabilityContract;
 use mfm_ids::{ContentRef, StableId};
 use mfm_program::{
-    CapabilityInjection, Operation, OperationExpansion, PreparationError, ProgramError,
-    ProposedStateOutcome, PureState, ReadState, State,
+    CapabilityInjection, Operation, OperationExpansion, ProgramError, ProposedStateOutcome,
+    PureState, ReadState, State,
 };
 use mfm_program_derive::MfmValue;
 use mfm_values::{string_contains_secret_marker, MfmValue as MfmValueTrait};
@@ -277,37 +277,7 @@ struct EvmBalanceResultMetadata {
     route_ref: ContentRef,
 }
 
-impl_checked_deserialize!(EvmBalanceResultMetadata {
-    collection_ordinal: u32,
-    correlation: String,
-    route_ref: ContentRef,
-});
-
-impl EvmBalanceResultMetadata {
-    fn new(
-        collection_ordinal: u32,
-        correlation: String,
-        route_ref: ContentRef,
-    ) -> Result<Self, EvmDomainError> {
-        if !valid_public_text(&correlation, 256) {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(Self {
-            collection_ordinal,
-            correlation,
-            route_ref,
-        })
-    }
-
-    fn validate(&self) -> Result<(), EvmDomainError> {
-        Self::new(
-            self.collection_ordinal,
-            self.correlation.clone(),
-            self.route_ref.clone(),
-        )
-        .map(|_| ())
-    }
-}
+mod balance_decode;
 
 /// Committed public block anchor of one bounded EVM observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -361,45 +331,13 @@ enum EvmBalanceWork {
         deserialize = "K: serde::de::DeserializeOwned"
     )
 )]
+#[mfm(decode_native = "Self::decode_checked")]
 pub struct EvmBalanceContext<K: MfmValueTrait> {
     request: EvmBalanceRequest,
     caller_continuation: K,
     metadata: EvmBalanceResultMetadata,
     completed: Vec<EvmBalanceResult>,
     work: EvmBalanceWork,
-}
-
-impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmBalanceContext<K> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(
-            deny_unknown_fields,
-            bound(deserialize = "K: serde::de::DeserializeOwned")
-        )]
-        struct Wire<K> {
-            request: EvmBalanceRequest,
-            caller_continuation: K,
-            metadata: EvmBalanceResultMetadata,
-            completed: Vec<EvmBalanceResult>,
-            work: EvmBalanceWork,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let context = Self {
-            request: wire.request,
-            caller_continuation: wire.caller_continuation,
-            metadata: wire.metadata,
-            completed: wire.completed,
-            work: wire.work,
-        };
-        context
-            .validate()
-            .map(|_| context)
-            .map_err(de::Error::custom)
-    }
 }
 
 impl<K: MfmValueTrait> EvmBalanceContext<K> {
@@ -410,12 +348,12 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
         collection_ordinal: u32,
         correlation: String,
         route_ref: ContentRef,
-    ) -> Result<Self, EvmDomainError> {
+    ) -> Result<Self, mfm_values::NativeCause> {
         request
             .sources
             .first()
-            .ok_or(EvmDomainError::InvalidValue)?;
-        let metadata = EvmBalanceResultMetadata::new(collection_ordinal, correlation, route_ref)?;
+            .ok_or_else(|| mfm_values::NativeCause::from_error(EvmDomainError::InvalidValue))?;
+        let metadata = balance_decode::metadata(collection_ordinal, correlation, route_ref)?;
         let context = Self {
             request,
             caller_continuation,
@@ -423,7 +361,9 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
             completed: Vec::new(),
             work: EvmBalanceWork::CheckChainIdentity,
         };
-        context.validate()?;
+        context
+            .validate()
+            .map_err(mfm_values::NativeCause::from_error)?;
         Ok(context)
     }
 
@@ -435,7 +375,6 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
 
     fn validate(&self) -> Result<(), EvmDomainError> {
         self.request.validate()?;
-        self.metadata.validate()?;
         if self.completed.len() > self.request.sources.len()
             || self
                 .completed
@@ -1156,7 +1095,8 @@ impl EvmReadEvidence {
 }
 
 /// Groups the subject variants one Read capability admits.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReadCapabilityFamily {
     /// Chain identity observations.
     ChainIdentity,
@@ -1210,7 +1150,7 @@ macro_rules! impl_read_capability {
                 intent_value_ref: &ContentRef,
                 intent: &Self::Intent,
                 evidence: &Self::Evidence,
-            ) -> mfm_capabilities::Result<()> {
+            ) -> Result<(), mfm_values::NativeCause> {
                 (evidence.intent_value_ref() == intent_value_ref)
                     .then_some(())
                     .ok_or(EvmDomainError::EvidenceBinding)
@@ -1221,7 +1161,7 @@ macro_rules! impl_read_capability {
                             .ok_or(EvmDomainError::EvidenceBinding)
                     })
                     .and_then(|_| evidence.validate_for(intent))
-                    .map_err(|_| mfm_capabilities::CapabilityError::EvidenceBinding)
+                    .map_err(mfm_values::NativeCause::from_error)
             }
         }
     };
@@ -1917,9 +1857,9 @@ macro_rules! impl_balance_access {
                 input: &Self::Input,
             ) -> std::result::Result<
                 <$capability as ReadCapabilityContract>::Intent,
-                PreparationError,
+                mfm_values::NativeCause,
             > {
-                $prepare(input).map_err(|_| PreparationError)
+                $prepare(input).map_err(mfm_values::NativeCause::from_error)
             }
 
             fn interpret(
@@ -1927,7 +1867,7 @@ macro_rules! impl_balance_access {
                 evidence: &<$capability as ReadCapabilityContract>::Evidence,
             ) -> std::result::Result<
                 ProposedStateOutcome<Self::Output, Self::Failure>,
-                mfm_program::StateExecutionError,
+                mfm_values::NativeCause,
             > {
                 Ok($interpret(input, evidence))
             }
@@ -1976,7 +1916,7 @@ impl<K: MfmValueTrait> PureState for ConsolidateBalanceCollection<K> {
         input: Self::Input,
     ) -> std::result::Result<
         ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
+        mfm_values::NativeCause,
     > {
         Ok(consolidate_balance_collection(input))
     }

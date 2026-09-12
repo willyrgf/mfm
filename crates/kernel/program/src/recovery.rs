@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use mfm_ids::{StableId, StatePosition};
 use mfm_values::MfmValue;
 
-use crate::{Never, ProgramError, Result, StateExecutionError};
+use crate::{Never, ProgramError, Result};
 
 mod bindings;
 pub(crate) mod scope;
@@ -15,7 +15,8 @@ pub use bindings::{HandlerAbi, HandlerBinding, MapAbi, MapBinding, PolicyParams}
 pub use defaults::{Occurrence, StandardRecovery, Stop};
 
 /// Intrinsic recovery semantics of an exact error contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Classification {
     /// Repeating unchanged intent or command is supported by this cause's semantics.
     Retryable,
@@ -53,7 +54,7 @@ pub enum ExecutionPhase {
 }
 
 /// One checked authoring target; it grants no history or append authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct RecoveryTarget {
     pub(crate) position: StatePosition,
@@ -67,7 +68,8 @@ impl RecoveryTarget {
 }
 
 /// Requested action, which Runtime must independently authorize.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RecoveryRequest {
     /// Retry this State with its unchanged input.
     RetryState,
@@ -78,7 +80,8 @@ pub enum RecoveryRequest {
 }
 
 /// Exhausted committed-decision allowance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RecoveryLimit {
     /// This declaration exhausted its retry allowance.
     StateRetry,
@@ -89,7 +92,8 @@ pub enum RecoveryLimit {
 }
 
 /// Safety rule that disallowed a requested recovery action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RecoveryDenial {
     /// Deterministic Pure execution cannot retry identical input.
     PureRetry,
@@ -102,7 +106,8 @@ pub enum RecoveryDenial {
 }
 
 /// Reviewed reason automatic recovery stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StopReason {
     /// The handler requested Stop.
     Requested,
@@ -121,7 +126,7 @@ pub struct RecoveryAllowances {
 }
 
 impl RecoveryAllowances {
-    /// Constructs finite per-occurrence allowances. Admission checks their complete history cost.
+    /// Constructs finite per-occurrence allowances. Only committed grants spend these allowances.
     pub const fn new(retries: u32, restarts: u32) -> Self {
         Self { retries, restarts }
     }
@@ -145,7 +150,7 @@ pub struct ProgramLimits {
 }
 
 impl ProgramLimits {
-    /// Constructs a finite global allowance. Admission checks the expanded sequence cost.
+    /// Constructs a finite global allowance. The current state derives usage from per-State counters.
     pub const fn new(max_recovery_decisions: u32) -> Self {
         Self {
             max_recovery_decisions,
@@ -241,7 +246,7 @@ pub trait Handler: Send + Sync + 'static {
         params: &Self::Params,
         classification: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, StateExecutionError>;
+    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause>;
 }
 
 /// Explicit typed consuming conversion for root domain failure.
@@ -258,7 +263,7 @@ pub trait ValueMap: Send + Sync + 'static {
     fn apply(
         params: &Self::Params,
         value: Self::Input,
-    ) -> std::result::Result<Self::Output, StateExecutionError>;
+    ) -> std::result::Result<Self::Output, mfm_values::NativeCause>;
 }
 
 /// Identity conversion without requiring values to implement Clone.
@@ -271,7 +276,7 @@ impl<T: MfmValue> ValueMap for Identity<T> {
     fn implementation_id() -> Result<StableId> {
         StableId::new("mfm.recovery.identity@1").map_err(|_| ProgramError::InvalidContract)
     }
-    fn apply(_: &NoParams, value: T) -> std::result::Result<T, StateExecutionError> {
+    fn apply(_: &NoParams, value: T) -> std::result::Result<T, mfm_values::NativeCause> {
         Ok(value)
     }
 }
@@ -286,7 +291,7 @@ impl<T: MfmValue> ValueMap for FromNever<T> {
     fn implementation_id() -> Result<StableId> {
         StableId::new("mfm.recovery.from-never@1").map_err(|_| ProgramError::InvalidContract)
     }
-    fn apply(_: &NoParams, value: Never) -> std::result::Result<T, StateExecutionError> {
+    fn apply(_: &NoParams, value: Never) -> std::result::Result<T, mfm_values::NativeCause> {
         match value {}
     }
 }
@@ -302,9 +307,7 @@ impl MfmValue for NoParams {
             "no-params",
             "1",
             mfm_ids::DigestAlgorithm::Sha256JcsV1,
-            mfm_canonical::raw_content_digest(b"mfm.recovery.no-params.v1")
-                .digest()
-                .clone(),
+            *mfm_canonical::raw_content_digest(b"mfm.recovery.no-params.v1").digest(),
         )
         .map_err(|_| mfm_values::ValueError::InvalidSchemaIdentity)
     }

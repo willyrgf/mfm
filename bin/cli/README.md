@@ -58,6 +58,9 @@ fallback. Explicit RunIds bypass generation and support deterministic retries.
 `config_digest`, and `entry_point`. Start prints those fields before the run fields. Successful run
 text includes `contract_ref`, `value_ref`, and exact canonical `value`. Failed runs include
 `value_ref` and the canonical `report`; runnable/pending views expose position, reason or EffectId.
+Awaiting-recovery views include the original failure and complete executed input and intent/command
+facts. Awaiting-interpretation views include the retained command and accepted settlement evidence.
+Text renders all state fields from the prepared shared model, preserving raw canonical JSON.
 
 `--output json` is the stable automation surface shared with REST. It preserves the documented
 Application models: generic item lists, config revision summaries, start results, mechanical run
@@ -69,8 +72,10 @@ Component inspection JSON is an `ItemList` whose items contain `kind`, `id`, and
 Text renders the same three fields for each component.
 
 Ordinary JSON errors are exactly `{"code":"...","message":"..."}`. The Application-owned client
-error serializer adds `recovery` plus `last_observed` for an ambiguous append, or the tagged
-`invocation` detail for an execution-stopped call or stopped pending-Effect recovery. A null
+error serializer adds `recovery` and the complete tagged `invocation` for an ambiguous append,
+or `invocation` alone for an execution-stopped call or stopped pending-Effect recovery.
+Ambiguous appends retain `run_append_indeterminate`; known noninsertion uses
+`run_append_not_inserted` even when a later probe has a different failure. A null
 last observation means no qualified head is known. Text prints the same recovery identity and
 invocation details after `error: <message>`. These errors do not claim a durable terminal state. Locator
 values, URLs, credentials, config bodies, and raw provider messages/bodies are never rendered.
@@ -82,7 +87,7 @@ explicit omissions from bounded diagnostic capture.
 | Code | Meaning |
 | --- | --- |
 | 0 | A non-run command succeeded, or a run view is `succeeded`. |
-| 1 | A run view is `runnable`, `effect_pending` or durably `failed`. |
+| 1 | A run view is `runnable`, `effect_pending`, `awaiting_recovery`, `awaiting_interpretation` or durably `failed`. |
 | 2 | A call failed: usage, input, composition, entropy, request, stopped invocation or output failure; any last observed view is historical. |
 
 The old `init`, `snapshot`, and `show --config` grammar and combined configuration file do not
@@ -101,18 +106,35 @@ a snapshot revision. Repetition returns the same revision without discovery. Sta
 RunId with the same selection works after config deletion; a different revision conflicts.
 
 Size-limit invocation failures use `size_limit_exceeded` and include
-`invocation.size_limit` with `resource`, `actual`, and `limit` (bytes, or frames for
-`frame_count`). The last observation remains historical; oversized inline reports do not
+`invocation.size_limit` with `kind`, `resource`, and `limit` (bytes, or frames for
+`frame_count`). Measured violations carry `actual`; a serializer stopped at its ceiling carries
+`observed_at_least` without claiming a measured final size. The last observation remains historical; oversized inline reports do not
 append a terminal conclusion or discard pending Effect authority. Capacity arithmetic overflow
 uses `capacity_arithmetic_overflow` without fabricated measurements. CLI uses exit 2; REST uses
 422 for these stopped invocations. Response payloads retain the shared full inline report; request
 body limits do not impose a response-size limit.
 
 Pending Effect views include `latest_failure`: null before the first audited failure, otherwise
-`mode: "effect"`, qualified `error`, complete `input`, retained `command`, `effect_id`, and `decision` (`{"kind":"retry"}` or
-`{"kind":"stop","reason":"requested"}`, with other reviewed stop codes). Every acknowledged
+`mode: "effect"`, qualified `error`, complete `input`, retained `command`, `effect_id`, and `decision` (`"retry"` or
+`{"stop":{"reason":"requested"}}`, with other reviewed stop codes). Every acknowledged
 pending operational outcome advances the durable head. Retry preserves the command/EffectId and
 spends recovery allowance; Stop ends the invocation while explicit progress may resume it.
 There is no separate pending-failure quota; actual frame and run limits govern recording.
 Cancellation can interrupt a physical
 attempt before its result is recorded; the audit covers acknowledged qualified failures.
+
+
+Run emitters retain the existing result through output preparation, write and flush. Preparation or
+stdout delivery failure uses the shared [App incomplete report](../../crates/app/README.md#report-preparation-failures)
+on stderr and exit 2. It preserves the original request category and recovery identity, labels an
+observed head `last_observed`, and carries `acknowledged` only for explicit Runtime insertion
+evidence. The report records its failed stage and omitted detail. Text prints the same detail as
+JSON fields after the error message, including the complete `recovery` object.
+
+The output owner captures reviewed OS category/code and bounded exposed source facts, with arbitrary
+messages and custom source details withheld. It never retains a rejected buffer as diagnostic input.
+A partial write and a failed flush remain distinct. If stderr delivery or encoding the incomplete
+report fails, the CLI retains that failure and its original until termination and attempts no further
+report. Successful write and flush establish completion of those local operations only; they do not
+prove reader consumption. None of these output failures creates a Journal record or proves delivery
+of the original report.

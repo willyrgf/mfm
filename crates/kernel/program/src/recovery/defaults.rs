@@ -12,7 +12,7 @@ impl Handler for Stop {
         _: &NoParams,
         _: Classification,
         _: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
         Ok(RecoveryRequest::Stop)
     }
 }
@@ -29,7 +29,7 @@ impl Handler for StandardRecovery {
         _: &NoParams,
         classification: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
         Ok(match (classification, context.phase()) {
             (Classification::Retryable, ExecutionPhase::Read | ExecutionPhase::EffectPending) => {
                 RecoveryRequest::RetryState

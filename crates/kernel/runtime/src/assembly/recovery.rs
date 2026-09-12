@@ -7,9 +7,8 @@ use mfm_program::{
 #[cfg(test)]
 mod tests;
 
-type MapCallback = fn(&QualifiedValue, QualifiedValue) -> Result<QualifiedValue>;
-type HandleCallback =
-    fn(&QualifiedValue, Classification, &RecoveryContext<'_>) -> Result<RecoveryRequest>;
+type MapCallback = fn(&Object, Object) -> Result<Object>;
+type HandleCallback = fn(&Object, Classification, &RecoveryContext<'_>) -> Result<RecoveryRequest>;
 
 struct Registration<F> {
     implementation_type: TypeId,
@@ -24,18 +23,28 @@ pub(super) struct Registrations {
 
 pub(crate) struct AssociatedRecovery {
     handle: HandleCallback,
-    handler_params: QualifiedValue,
+    handler_params: Object,
 }
 
 pub(crate) struct AssociatedRootMap {
     input: ContentRef,
-    steps: Vec<(MapCallback, QualifiedValue)>,
+    steps: Vec<(MapCallback, Object)>,
 }
 
 impl AssociatedRootMap {
-    pub(crate) fn apply(&self, mut original: QualifiedValue) -> Result<QualifiedValue> {
-        if original.contract_ref != self.input {
-            return Err(RuntimeError::Internal);
+    pub(crate) fn apply(&self, mut original: Object) -> Result<Object> {
+        if original.contract_ref().map_err(|source| {
+            RuntimeError::at(
+                crate::Operation::RootMap,
+                crate::Stage::Decode,
+                mfm_values::NativeCause::from_error(source),
+            )
+        })? != self.input
+        {
+            return Err(RuntimeError::native(
+                crate::Operation::RootMap,
+                mfm_values::NativeCause::from_error(crate::state::StateInvariant::Contract),
+            ));
         }
         for (callback, params) in &self.steps {
             original = callback(params, original)?;
@@ -60,7 +69,13 @@ impl RuntimeAssemblyBuilder {
         self.ensure_value::<M::Input>()?;
         self.ensure_value::<M::Output>()?;
         self.ensure_value::<M::Params>()?;
-        let abi = MapAbi::of::<M>().map_err(|_| RuntimeError::IncompatibleAssembly)?;
+        let abi = MapAbi::of::<M>().map_err(|source| {
+            RuntimeError::at(
+                crate::Operation::Admission,
+                crate::Stage::Execute,
+                mfm_values::NativeCause::from_error(source),
+            )
+        })?;
         insert(
             &mut self.recovery.maps,
             abi,
@@ -72,7 +87,13 @@ impl RuntimeAssemblyBuilder {
     /// Registers one handler implementation and its exact parameter codec.
     pub fn register_handler<H: Handler>(&mut self) -> Result<()> {
         self.ensure_value::<H::Params>()?;
-        let abi = HandlerAbi::of::<H>().map_err(|_| RuntimeError::IncompatibleAssembly)?;
+        let abi = HandlerAbi::of::<H>().map_err(|source| {
+            RuntimeError::at(
+                crate::Operation::Admission,
+                crate::Stage::Execute,
+                mfm_values::NativeCause::from_error(source),
+            )
+        })?;
         insert(
             &mut self.recovery.handlers,
             abi,
@@ -153,45 +174,49 @@ impl AssemblyInner {
         })
     }
 
-    fn policy_params(
-        &self,
-        params: &PolicyParams,
-        expected: &ContentRef,
-    ) -> Result<QualifiedValue> {
-        self.values
+    fn policy_params(&self, params: &PolicyParams, expected: &ContentRef) -> Result<Object> {
+        let contract = self
+            .values
             .get(expected)
-            .ok_or(RuntimeError::IncompatibleAssembly)?
-            .qualify(params.value_ref(), params.canonical_bytes())
-            .map_err(|_| RuntimeError::IncompatibleAssembly)
+            .ok_or(RuntimeError::IncompatibleAssembly)?;
+        let object = Object::from_canonical(params.value_ref().clone(), params.canonical_bytes())
+            .map_err(|source| {
+            RuntimeError::at(
+                crate::Operation::Admission,
+                crate::Stage::Decode,
+                mfm_values::NativeCause::from_error(source),
+            )
+        })?;
+        contract.admit(&object)?;
+        Ok(object)
     }
 }
 
-fn take<T: MfmValue>(value: QualifiedValue) -> Result<T> {
-    value
-        .typed
-        .downcast::<T>()
-        .map(|value| *value)
-        .map_err(|_| RuntimeError::Internal)
+fn map<M: ValueMap>(params: &Object, input: Object) -> Result<Object> {
+    let params = params.decode::<M::Params>().map_err(|cause| {
+        RuntimeError::at(crate::Operation::RootMap, crate::Stage::Decode, cause)
+    })?;
+    let input = input.decode::<M::Input>().map_err(|cause| {
+        RuntimeError::at(crate::Operation::RootMap, crate::Stage::Decode, cause)
+    })?;
+    let output = M::apply(&params, input)
+        .map_err(|cause| RuntimeError::native(crate::Operation::RootMap, cause))?;
+    Object::from_value(&output).map_err(|source| {
+        RuntimeError::at(
+            crate::Operation::RootMap,
+            crate::Stage::Encode,
+            mfm_values::NativeCause::from_error(source),
+        )
+    })
 }
-
-fn borrow<T: MfmValue>(value: &QualifiedValue) -> Result<&T> {
-    value
-        .typed
-        .downcast_ref::<T>()
-        .ok_or(RuntimeError::Internal)
-}
-
-fn map<M: ValueMap>(params: &QualifiedValue, input: QualifiedValue) -> Result<QualifiedValue> {
-    let output = M::apply(borrow::<M::Params>(params)?, take::<M::Input>(input)?)
-        .map_err(|_| RuntimeError::Internal)?;
-    qualify_hot(output).map_err(RuntimeError::from)
-}
-
 fn handle<H: Handler>(
-    params: &QualifiedValue,
+    params: &Object,
     classification: Classification,
     context: &RecoveryContext<'_>,
 ) -> Result<RecoveryRequest> {
-    H::handle(borrow::<H::Params>(params)?, classification, context)
-        .map_err(|_| RuntimeError::Internal)
+    let params = params.decode::<H::Params>().map_err(|cause| {
+        RuntimeError::at(crate::Operation::Recovery, crate::Stage::Decode, cause)
+    })?;
+    H::handle(&params, classification, context)
+        .map_err(|cause| RuntimeError::native(crate::Operation::Recovery, cause))
 }

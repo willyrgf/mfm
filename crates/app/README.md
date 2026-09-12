@@ -57,26 +57,35 @@ primitive obtains exactly 32 bytes of OS cryptographic entropy and applies
 `mfm.run-id.random.v1`; an entropy failure is the stable `RunIdGenerationError`.
 `StartRunResult` reports the actual selected config revision. `RunRequestError` distinguishes
 pre-execution request errors, ambiguous appends with exact `RunRecovery::Start`/`Progress` identity,
-and stopped Runtime invocations. Ambiguous appends also retain the last completely qualified
-observation, or null when none was obtained. That observation is not a claim about the current head.
+and stopped Runtime invocations. Ambiguous appends retain the complete `InvocationFailure`, including the original cause and exact
+candidate in native custody. JSON carries `recovery` and `invocation`; its optional `last_observed`
+is historical. Explicitly acknowledged insertion is separate evidence and may be newer than that view.
 
-`RequestError` owns reviewed codes and messages. `SerializableClientError::for_run` renders the
-shared invocation/recovery detail. An execution-stopped invocation includes its RunId and optional
+`RequestError` owns reviewed codes and messages. `SerializableClientError::for_run` fallibly prepares
+the shared invocation/recovery detail, preserving a typed projection failure for its caller. An execution-stopped invocation includes its RunId and optional
 last observation; stopped Effect recovery includes the observed pending Effect, original reviewed
 operational cause, complete executed input and stop reason. It does not assert settlement or request
 automatic retry. `read_run`, `progress_run` and `start_run` preserve that distinction.
 
-`SerializableRunView` renders the current durable state as:
+`SerializableRunView::new` fallibly prepares the current durable state. `StartRunResult::serializable`
+uses the same preparation inside its selected-config envelope. Prepared models implement Serialize;
+the retained native values do not invoke fallible projectors through Serde. State alternatives are:
 
 - `runnable`: execution position/visit and tagged advance, retry or restart reason;
-- `effect_pending`: execution position/visit and exact retained EffectId;
+- `effect_pending`: execution position/visit, exact retained EffectId and latest committed operational
+  failure with its complete input/command and recovery decision;
+- `awaiting_recovery`: execution position and original failure, with complete Pure input, Read
+  input/intent, or Effect input/command/EffectId, plus returned evidence when applicable;
+- `awaiting_interpretation`: execution position, EffectId and complete input/command/settlement
+  evidence, without claiming interpretation has succeeded;
 - `succeeded`: exact contract/value references and raw canonical value;
 - `failed`: canonical report reference and raw report containing original cause, applicable root
   mapping, stop reason, execution position and committed recovery usage.
 
 The shipping Portfolio uses Stop with zero allowances. Operational Read failure is a
-durable failed result; it cannot be resumed into a fresh attempt. Cancellation before a conclusion
-retains a runnable prefix. Retained revisions are checked on start/list; deleting a revision does
+durable failed result after a separate original-failure commit and recovery decision; it cannot be
+resumed into a fresh attempt. Interruption after the original commit leaves `awaiting_recovery`.
+An accepted Effect settlement is committed before interpretation and can leave `awaiting_interpretation`. Retained revisions are checked on start/list; deleting a revision does
 not revoke an admitted run. Provider failures retain reviewed method, stage, status/code, source
 facts and explicit capture omissions in canonical reports. Raw provider messages/bodies and
 locators remain excluded from client models.
@@ -104,9 +113,34 @@ RunId and checks that identity; matching recovery survives config deletion, whil
 Read/progress never reload configuration or enrichment history.
 
 Size-limit invocation failures use `size_limit_exceeded` and include
-`invocation.size_limit` with `resource`, `actual`, and `limit` (bytes, or frames for
-`frame_count`). The last observation remains historical; oversized inline reports do not
+`invocation.size_limit` with `kind`, `resource`, and `limit` (bytes, or frames for
+`frame_count`). Measured violations carry `actual`; a serializer stopped at its ceiling carries
+`observed_at_least`, never a fabricated final size. The last observation remains historical; oversized inline reports do not
 append a terminal conclusion or discard pending Effect authority. Capacity arithmetic overflow
 uses `capacity_arithmetic_overflow` without fabricated measurements. CLI uses exit 2; REST uses
 422 for these stopped invocations. Response payloads retain the shared full inline report; request
 body limits do not impose a response-size limit.
+
+
+## Report preparation failures
+
+`ReportFailure<T>` retains the existing `RunRequestError`, `RunView` or `StartRunResult` together
+with the reporting stage (`prepare`, `encode`, or transport-observed `deliver`), original reporting cause, and any separate failure
+of that cause's projection. Its prepared `IncompleteReport` contains `code`, `message`, available
+`run_id` and recovery identity, compact `last_observed` head evidence, and explicit
+`report_failure.omissions`. Only an explicit Runtime projection failure supplies `acknowledged`;
+reading or adopting a head does not prove this invocation inserted it. Original candidate bytes stay
+in native custody and never enter this JSON surface.
+
+An incomplete error report keeps the original error category. A successful observation that cannot
+be rendered uses `report_render_failed`. Omission fields name the unavailable detail and distinguish
+`projection_failed`, `encoding_failed`, `delivery_failed`, and `bound_reached`; the last carries
+the actual limit and either a measured size or an observed lower bound. A failed secondary projector is retained and never retried. Encoding
+the incomplete report uses only prepared fields and cannot invoke that projector again.
+
+This custody is local to the invocation. It does not append an internal fault, establish durable
+failure auditing through a failed Store, or establish delivery. Native projections and individual
+values retain the 32 MiB Values ceiling; the derived FailureReport retains its own 32 MiB ceiling.
+`encode_response` encodes prepared transport fields without a new whole-response quota. Transports
+own write/flush failures and response handoff; they must retain the reporting failure if that final
+encoding also fails, without recursively attempting another JSON report.

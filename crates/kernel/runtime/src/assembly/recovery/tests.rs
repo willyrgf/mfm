@@ -2,7 +2,7 @@ use super::*;
 use mfm_ids::StableId;
 use mfm_program::{
     Classification, ClassifyError, ExecutionPhase, HandlerBinding, Identity, NoParams,
-    ProgramError, RecoveryAllowances, StateExecutionError,
+    ProgramError, RecoveryAllowances,
 };
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
@@ -42,12 +42,12 @@ impl ValueMap for MapFailure {
     fn apply(
         params: &Offset,
         value: EvmFailure,
-    ) -> std::result::Result<PortfolioFailure, StateExecutionError> {
+    ) -> std::result::Result<PortfolioFailure, mfm_values::NativeCause> {
         Ok(PortfolioFailure {
             collection: value
                 .source
                 .checked_add(params.value)
-                .ok_or(StateExecutionError)?,
+                .ok_or_else(|| RuntimeError::ArithmeticOverflow.into_native())?,
         })
     }
 }
@@ -75,7 +75,7 @@ impl Handler for RetryRead {
         _: &NoParams,
         classification: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
         Ok(
             if classification == Classification::Retryable
                 && context.phase() == ExecutionPhase::Read
@@ -98,7 +98,7 @@ impl Handler for ConfiguredHandler {
         params: &Offset,
         _: Classification,
         _: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
         Ok(if params.value == 10 {
             RecoveryRequest::RetryState
         } else {
@@ -137,7 +137,7 @@ fn handlers_associate_exact_parameters_without_incident_dispatch() {
     let mismatched: HandlerBinding = serde_json::from_value(wire).unwrap();
     assert!(matches!(
         assembly.inner.associate_recovery(&mismatched),
-        Err(RuntimeError::IncompatibleAssembly)
+        Err(RuntimeError::Native { .. })
     ));
 }
 
@@ -160,16 +160,16 @@ fn recovery_root_mapping_associates_an_exact_ordered_path_from_the_original() {
         .associate_root_map(&input, &output, &path)
         .unwrap();
     let value = root
-        .apply(qualify_hot(EvmFailure { source: 7 }).unwrap())
+        .apply(mfm_values::Object::from_value(&EvmFailure { source: 7 }).unwrap())
         .unwrap();
-    assert_eq!(take::<PortfolioFailure>(value).unwrap().collection, 107);
+    assert_eq!(value.decode::<PortfolioFailure>().unwrap().collection, 107);
     assert!(matches!(
-        root.apply(qualify_hot(EvmFailure { source: u64::MAX }).unwrap()),
-        Err(RuntimeError::Internal)
+        root.apply(mfm_values::Object::from_value(&EvmFailure { source: u64::MAX }).unwrap()),
+        Err(RuntimeError::Native { .. })
     ));
     assert!(matches!(
-        root.apply(qualify_hot(PortfolioFailure { collection: 7 }).unwrap()),
-        Err(RuntimeError::Internal)
+        root.apply(mfm_values::Object::from_value(&PortfolioFailure { collection: 7 }).unwrap()),
+        Err(RuntimeError::Native { .. })
     ));
     assert!(matches!(
         assembly.inner.associate_root_map(&input, &output, &[]),
@@ -200,13 +200,12 @@ fn recovery_root_mapping_associates_an_exact_ordered_path_from_the_original() {
         .associate_root_map(&input, &input, &[])
         .unwrap();
     assert_eq!(
-        take::<EvmFailure>(
-            identity
-                .apply(qualify_hot(EvmFailure { source: 7 }).unwrap())
-                .unwrap()
-        )
-        .unwrap()
-        .source,
+        identity
+            .apply(mfm_values::Object::from_value(&EvmFailure { source: 7 }).unwrap())
+            .unwrap()
+            .decode::<EvmFailure>()
+            .unwrap()
+            .source,
         7
     );
 }
@@ -220,7 +219,11 @@ impl mfm_capabilities::ReadCapabilityContract for Observation {
         StableId::new("mfm.test.recovery-observation@1")
             .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
     }
-    fn bind_evidence(_: &ContentRef, _: &Offset, _: &Offset) -> mfm_capabilities::Result<()> {
+    fn bind_evidence(
+        _: &ContentRef,
+        _: &Offset,
+        _: &Offset,
+    ) -> std::result::Result<(), mfm_values::NativeCause> {
         Ok(())
     }
 }
@@ -234,7 +237,7 @@ impl mfm_program::State for EvmRead {
     }
 }
 impl mfm_program::ReadState<Observation> for EvmRead {
-    fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_program::PreparationError> {
+    fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_values::NativeCause> {
         Ok(Offset { value: input.value })
     }
     fn interpret(
@@ -242,7 +245,7 @@ impl mfm_program::ReadState<Observation> for EvmRead {
         evidence: &Offset,
     ) -> std::result::Result<
         mfm_program::ProposedStateOutcome<Offset, EvmFailure>,
-        StateExecutionError,
+        mfm_values::NativeCause,
     > {
         Ok(mfm_program::ProposedStateOutcome::Failure {
             failure: EvmFailure {
@@ -341,9 +344,9 @@ fn handler_parameters_change_program_identity_and_survive_cold_association() {
         );
         let root = executable.declarations[0]
             .root_map
-            .apply(qualify_hot(EvmFailure { source: 7 }).unwrap())
+            .apply(mfm_values::Object::from_value(&EvmFailure { source: 7 }).unwrap())
             .unwrap();
-        assert_eq!(take::<PortfolioFailure>(root).unwrap().collection, 107);
+        assert_eq!(root.decode::<PortfolioFailure>().unwrap().collection, 107);
     }
 }
 

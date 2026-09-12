@@ -1,13 +1,14 @@
 use mfm_capabilities::{AdapterError, EffectCapabilityContract};
 use mfm_ids::{ContentRef, DigestBytes, EffectId, EntryPointId, RunId, StableId};
-use mfm_journal::{JournalHistory, JournalRecord, PendingDecision, StopCode};
+use mfm_journal::{decode_frame, seal_frame};
 use mfm_program::*;
 use mfm_program_derive::MfmValue;
 use mfm_runtime::{
-    EffectAdapterOutcome, InvocationFailure, RunViewState, Runtime, RuntimeAssemblyBuilder,
-    RuntimeError,
+    EffectAdapterOutcome, InvocationFailure, RecoveryDecision, RunViewState, Runtime,
+    RuntimeAssemblyBuilder, RuntimeError,
 };
 use mfm_store::{MemoryStore, Store};
+use mfm_values::NativeCause;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -39,11 +40,13 @@ impl EffectCapabilityContract for Submit {
         _: &EffectId,
         command: &Number,
         evidence: &Number,
-    ) -> mfm_capabilities::Result<()> {
+    ) -> std::result::Result<(), NativeCause> {
         if command.value == evidence.value {
             Ok(())
         } else {
-            Err(mfm_capabilities::CapabilityError::EvidenceBinding)
+            Err(NativeCause::from_error(
+                mfm_capabilities::CapabilityError::EvidenceBinding,
+            ))
         }
     }
 }
@@ -57,13 +60,13 @@ impl State for Execute {
     }
 }
 impl EffectState<Submit> for Execute {
-    fn prepare(input: &Number) -> std::result::Result<Number, PreparationError> {
+    fn prepare(input: &Number) -> std::result::Result<Number, NativeCause> {
         Ok(Number { value: input.value })
     }
     fn interpret(
         input: Number,
         _: &Number,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, StateExecutionError> {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, NativeCause> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -92,7 +95,7 @@ impl Handler for RetryUnknown {
         _: &NoParams,
         classification: Classification,
         _: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+    ) -> std::result::Result<RecoveryRequest, NativeCause> {
         assert_eq!(classification, Classification::OutcomeUnknown);
         Ok(RecoveryRequest::RetryState)
     }

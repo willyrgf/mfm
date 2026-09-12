@@ -29,18 +29,18 @@ impl EffectCapabilityContract for QualifiedSubmit {
         id: &EffectId,
         command: &Number,
         evidence: &Number,
-    ) -> mfm_capabilities::Result<()> {
+    ) -> std::result::Result<(), NativeCause> {
         Submit::bind_evidence(id, command, evidence)
     }
 }
 impl EffectState<QualifiedSubmit> for Execute {
-    fn prepare(input: &Number) -> std::result::Result<Number, PreparationError> {
+    fn prepare(input: &Number) -> std::result::Result<Number, NativeCause> {
         Ok(Number { value: input.value })
     }
     fn interpret(
         input: Number,
         _: &Number,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, StateExecutionError> {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, NativeCause> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -69,7 +69,7 @@ impl Handler for CountedStandard {
         params: &NoParams,
         classification: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
+    ) -> std::result::Result<RecoveryRequest, NativeCause> {
         POLICY_CALLS.fetch_add(1, Ordering::SeqCst);
         StandardRecovery::handle(params, classification, context)
     }
@@ -157,7 +157,7 @@ async fn qualified_nonacceptance_retries_and_cold_history_never_reclassifies() {
     else {
         panic!("audited retry")
     };
-    assert_eq!(failure.decision, PendingDecision::Retry);
+    assert_eq!(failure.decision, RecoveryDecision::Retry);
     assert!(matches!(
         failure.incident.error().decode::<NonAcceptance>().unwrap(),
         NonAcceptance::ServerTimeoutBeforeAcceptance { request_id: 17 }

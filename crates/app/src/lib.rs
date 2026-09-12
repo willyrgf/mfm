@@ -25,7 +25,11 @@ use serde::{Deserialize, Serialize, Serializer};
 mod config;
 mod deployment;
 mod inspection;
+mod reporting;
+#[cfg(test)]
+mod reporting_tests;
 mod run_view;
+pub use reporting::{encode_response, IncompleteReport, ReportFailure, ReportStage};
 pub use run_view::SerializableRunView;
 
 pub use config::{
@@ -219,6 +223,9 @@ pub enum RequestError {
     /// Admission differs from retained genesis.
     #[error("run admission conflicts with retained history")]
     RunAdmissionConflict,
+    /// This physical append inserted nothing and could not return a qualified candidate view.
+    #[error("run append was not inserted")]
+    RunAppendNotInserted,
     /// Retained run history is invalid.
     #[error("retained run history is invalid")]
     InvalidRunHistory,
@@ -256,6 +263,7 @@ impl RequestError {
             Self::InvalidRetainedConfig => "invalid_retained_config",
             Self::RunAbsent => "run_absent",
             Self::RunAdmissionConflict => "run_admission_conflict",
+            Self::RunAppendNotInserted => "run_append_not_inserted",
             Self::InvalidRunHistory => "invalid_run_history",
             Self::IncompatibleAssembly => "incompatible_assembly",
             Self::SizeLimitExceeded => "size_limit_exceeded",
@@ -318,15 +326,14 @@ pub struct SerializableClientError<'a> {
     detail: ClientErrorDetail<'a>,
 }
 
-#[derive(Clone, Copy)]
 enum ClientErrorDetail<'a> {
     None,
     RunId(&'a RunId),
     Recovery {
         recovery: &'a RunRecovery,
-        last_observed: Option<&'a RunView>,
+        invocation: run_view::Invocation<'a>,
     },
-    Invocation(&'a InvocationFailure),
+    Invocation(run_view::Invocation<'a>),
 }
 
 impl<'a> SerializableClientError<'a> {
@@ -349,22 +356,27 @@ impl<'a> SerializableClientError<'a> {
     }
 
     /// Renders a run-call failure with its last observed head and any recovery identity.
-    pub fn for_run(error: &'a RunRequestError, message: &'a str) -> Self {
-        Self {
+    pub fn for_run(
+        error: &'a RunRequestError,
+        message: &'a str,
+    ) -> Result<Self, mfm_values::NativeCause> {
+        Ok(Self {
             code: error.code(),
             message,
             detail: match error {
                 RunRequestError::Request(_) => ClientErrorDetail::None,
                 RunRequestError::AppendIndeterminate {
                     recovery,
-                    last_observed,
+                    invocation,
                 } => ClientErrorDetail::Recovery {
                     recovery,
-                    last_observed: last_observed.as_ref(),
+                    invocation: run_view::Invocation::new(invocation)?,
                 },
-                RunRequestError::Invocation(failure) => ClientErrorDetail::Invocation(failure),
+                RunRequestError::Invocation(failure) => {
+                    ClientErrorDetail::Invocation(run_view::Invocation::new(failure)?)
+                }
             },
-        }
+        })
     }
 }
 
@@ -375,7 +387,7 @@ impl Serialize for SerializableClientError<'_> {
     {
         let mut state = serializer.serialize_struct(
             "ClientError",
-            2 + match self.detail {
+            2 + match &self.detail {
                 ClientErrorDetail::None => 0,
                 ClientErrorDetail::Recovery { .. } => 2,
                 _ => 1,
@@ -383,21 +395,18 @@ impl Serialize for SerializableClientError<'_> {
         )?;
         state.serialize_field("code", self.code)?;
         state.serialize_field("message", self.message)?;
-        match self.detail {
+        match &self.detail {
             ClientErrorDetail::None => {}
             ClientErrorDetail::RunId(run_id) => state.serialize_field("run_id", run_id)?,
             ClientErrorDetail::Recovery {
                 recovery,
-                last_observed,
+                invocation,
             } => {
                 state.serialize_field("recovery", recovery)?;
-                state.serialize_field(
-                    "last_observed",
-                    &last_observed.map(SerializableRunView::new),
-                )?;
+                state.serialize_field("invocation", invocation)?;
             }
             ClientErrorDetail::Invocation(failure) => {
-                state.serialize_field("invocation", &run_view::Invocation(failure))?
+                state.serialize_field("invocation", failure)?
             }
         }
         state.end()
@@ -418,8 +427,9 @@ pub enum RunRequestError {
     AppendIndeterminate {
         /// Checked public recovery identity.
         recovery: RunRecovery,
-        /// Last completely qualified observation; it is not a claim about the current head.
-        last_observed: Option<RunView>,
+        /// Complete invocation custody, including its original and exact candidate when available.
+        #[source]
+        invocation: InvocationFailure,
     },
     /// A call stopped without claiming a durable terminal outcome.
     #[error("{0}")]
@@ -437,37 +447,42 @@ impl fmt::Debug for RunRequestError {
 
 impl RunRequestError {
     fn from_invocation(error: InvocationFailure, recovery: RunRecovery) -> Self {
-        match error {
+        let indeterminate = matches!(
+            &error,
             InvocationFailure::Execution {
-                error: RuntimeError::Store(mfm_store::StoreError::Indeterminate),
-                last_observed,
-                ..
-            } => Self::AppendIndeterminate {
+                error: RuntimeError::Recording { failure, .. }, ..
+            } if matches!(failure.as_ref(), mfm_runtime::RecordingFailure::Append {
+                outcome: mfm_runtime::AppendFailure::Store(mfm_store::StoreError::Indeterminate), ..
+            })
+        );
+        if indeterminate {
+            Self::AppendIndeterminate {
                 recovery,
-                last_observed,
-            },
-            error => Self::Invocation(error),
+                invocation: error,
+            }
+        } else {
+            Self::Invocation(error)
         }
     }
 
     /// Returns the stable machine-readable error code.
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
             Self::Request(error) => error.code(),
             Self::AppendIndeterminate { .. } => "run_append_indeterminate",
             Self::Invocation(InvocationFailure::Execution { error, .. }) => {
-                map_runtime_error(*error).code()
+                map_runtime_error(error).code()
             }
             Self::Invocation(InvocationFailure::RecoveryStopped { .. }) => "recovery_stopped",
         }
     }
 
     /// Returns the reviewed request category when the invocation has an execution fault.
-    pub const fn request_error(&self) -> Option<RequestError> {
+    pub fn request_error(&self) -> Option<RequestError> {
         match self {
             Self::Request(error) => Some(*error),
             Self::Invocation(InvocationFailure::Execution { error, .. }) => {
-                Some(map_runtime_error(*error))
+                Some(map_runtime_error(error))
             }
             Self::AppendIndeterminate { .. }
             | Self::Invocation(InvocationFailure::RecoveryStopped { .. }) => None,
@@ -523,15 +538,18 @@ impl StartRunResult {
     }
 }
 
-impl Serialize for StartRunResult {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("StartRunResult", 2)?;
-        state.serialize_field("config", &self.config)?;
-        state.serialize_field("run", &SerializableRunView::new(&self.run))?;
-        state.end()
+impl StartRunResult {
+    /// Prepares the selected revision and its qualified run view for transport serialization.
+    pub fn serializable(&self) -> Result<impl Serialize + '_, mfm_values::NativeCause> {
+        #[derive(Serialize)]
+        struct Prepared<'a> {
+            config: &'a ConfigSummary,
+            run: SerializableRunView<'a>,
+        }
+        Ok(Prepared {
+            config: &self.config,
+            run: SerializableRunView::new(&self.run)?,
+        })
     }
 }
 
@@ -914,24 +932,41 @@ const fn map_run_index_error(error: RunIndexError) -> RequestError {
     }
 }
 
-const fn map_runtime_error(error: RuntimeError) -> RequestError {
+fn map_runtime_error(error: &RuntimeError) -> RequestError {
+    if error.size_limit().is_some() {
+        return RequestError::SizeLimitExceeded;
+    }
     match error {
         RuntimeError::Absent => RequestError::RunAbsent,
         RuntimeError::AdmissionConflict => RequestError::RunAdmissionConflict,
-        RuntimeError::Store(error) => match error {
-            mfm_store::StoreError::Unavailable => RequestError::DependencyUnavailable,
-            mfm_store::StoreError::FrameSize(_)
-            | mfm_store::StoreError::HistorySize(_)
-            | mfm_store::StoreError::FrameCount(_) => RequestError::SizeLimitExceeded,
-            mfm_store::StoreError::ArithmeticOverflow => RequestError::CapacityArithmeticOverflow,
-            mfm_store::StoreError::CorruptPhysicalState => RequestError::InvalidRunHistory,
-            mfm_store::StoreError::Indeterminate => RequestError::Internal,
-        },
+        RuntimeError::Store(error) => map_store_error(error),
         RuntimeError::InvalidHistory => RequestError::InvalidRunHistory,
         RuntimeError::IncompatibleAssembly => RequestError::IncompatibleAssembly,
         RuntimeError::SizeLimit { .. } => RequestError::SizeLimitExceeded,
         RuntimeError::ArithmeticOverflow => RequestError::CapacityArithmeticOverflow,
-        RuntimeError::Internal => RequestError::Internal,
+        RuntimeError::Recording { failure, .. } => match failure.as_ref() {
+            mfm_runtime::RecordingFailure::BeforeAppend { cause, .. } => cause
+                .downcast_ref::<RuntimeError>()
+                .map(map_runtime_error)
+                .unwrap_or(RequestError::Internal),
+            mfm_runtime::RecordingFailure::Append { outcome, .. } => match outcome {
+                mfm_runtime::AppendFailure::NotInserted => RequestError::RunAppendNotInserted,
+                mfm_runtime::AppendFailure::Store(source) => map_store_error(source),
+            },
+        },
+        RuntimeError::Native { .. } | RuntimeError::Projection { .. } => RequestError::Internal,
+    }
+}
+
+fn map_store_error(error: &mfm_store::StoreError) -> RequestError {
+    match error {
+        mfm_store::StoreError::Unavailable => RequestError::DependencyUnavailable,
+        mfm_store::StoreError::FrameSize(_)
+        | mfm_store::StoreError::HistorySize(_)
+        | mfm_store::StoreError::FrameCount(_) => RequestError::SizeLimitExceeded,
+        mfm_store::StoreError::ArithmeticOverflow => RequestError::CapacityArithmeticOverflow,
+        mfm_store::StoreError::CorruptPhysicalState => RequestError::InvalidRunHistory,
+        mfm_store::StoreError::Indeterminate => RequestError::Internal,
     }
 }
 
@@ -1006,7 +1041,9 @@ mod tests {
             run_id: run_id.clone(),
             config: document.summary(ConfigName::new("daily").expect("config name")),
         };
-        let progress = RunRecovery::Progress { run_id };
+        let progress = RunRecovery::Progress {
+            run_id: run_id.clone(),
+        };
         for (recovery, fixture) in [
             (
                 &start,
@@ -1018,13 +1055,40 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                serde_json::to_value(SerializableClientError::for_run(
-                    &RunRequestError::AppendIndeterminate {
-                        recovery: recovery.clone(),
-                        last_observed: None
-                    },
-                    "run append outcome is indeterminate",
-                ))
+                serde_json::to_value(
+                    SerializableClientError::for_run(
+                        &RunRequestError::AppendIndeterminate {
+                            recovery: recovery.clone(),
+                            invocation: InvocationFailure::Execution {
+                                run_id: run_id.clone(),
+                                last_observed: None,
+                                error: RuntimeError::Recording {
+                                    operation: mfm_runtime::Operation::Record,
+                                    failure: Box::new(mfm_runtime::RecordingFailure::Append {
+                                        original: None,
+                                        candidate: mfm_journal::seal_frame(
+                                            &run_id,
+                                            1,
+                                            None,
+                                            &mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+                                                "{}"
+                                            )
+                                            .unwrap()
+                                        )
+                                        .unwrap(),
+                                        outcome: mfm_runtime::AppendFailure::Store(
+                                            mfm_store::StoreError::Indeterminate
+                                        ),
+                                        observation: None,
+                                        reload_cause: None,
+                                    }),
+                                },
+                            }
+                        },
+                        "run append outcome is indeterminate",
+                    )
+                    .unwrap()
+                )
                 .expect("recovery error JSON"),
                 serde_json::from_str::<serde_json::Value>(fixture).expect("recovery fixture")
             );
@@ -1221,7 +1285,8 @@ mod tests {
         assert_eq!(failure.code(), "size_limit_exceeded");
         let message = failure.to_string();
         let wire =
-            serde_json::to_value(SerializableClientError::for_run(&failure, &message)).unwrap();
+            serde_json::to_value(SerializableClientError::for_run(&failure, &message).unwrap())
+                .unwrap();
         assert_eq!(
             wire["invocation"]["size_limit"],
             serde_json::json!({

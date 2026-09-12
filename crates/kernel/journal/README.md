@@ -1,31 +1,16 @@
 # mfm-journal
 
-Journal owns the exact `mfm.run.frame.v5` canonical encoder and qualifier. Frames contain admission,
-fused Pure/Read conclusions, or an Effect prepare, zero or more operational failure records, and
-settlement conclusion. Every frame has
-an exact sorted local object closure and a recursive head over its exact bytes. Old frame domains
-are rejected; histories are never rewritten or migrated in place.
+Journal seals and decodes the exact `mfm.run.frame.v6` canonical envelope. Its fields are `domain`,
+`run_id`, `run_sequence`, `previous_head_digest`, and the caller's opaque `payload`. The head is
+SHA-256 over the exact canonical frame bytes. Sealing and decoding check local header fields and
+canonical syntax; old domains, unknown envelope fields, and noncanonical bytes are rejected.
 
-Pure/Read domain conclusions distinguish success from original failure plus retry, restart target,
-or stop with mapped root failure. A Read retains its exact intent and either bound evidence/domain
-outcome or the original operational error, complete executed input and recovery disposition. There is
-no fabricated evidence or independent report frame. Effect prepare retains execution position,
-EffectId and complete command. Its conclusion retains evidence and success or terminal failure;
-its shape cannot encode retry/restart. EffectAdapterFailed retains execution position, original
-cause, complete executed input and PendingDecision (Retry or Stop; never Restart). Prepare and each failure
-may end a complete prefix. No unrelated record intervenes and failures cannot follow settlement.
+`EncodedRunFrame` exposes immutable checked header fields, exact bytes, and the canonical payload.
+Journal has no object table, lifecycle records, Effect pairing state, or history reconstruction.
+Runtime owns the current-state payload, typed value admission, operation facts, and recovery rules.
+Store owns bounded snapshot loading and atomic exact-head append.
 
-`EncodedRunFrame` is sealed, `StoredRunBytes` is an opaque complete transfer, and `JournalHistory`
-provides qualified borrowed records/objects, exact head, frame lengths and cumulative bytes.
-Journal checks canonical bytes, references, closure, capacities and Effect adjacency. Runtime owns
-Program association, EffectId derivation, State/visit agreement, policy safety, checkpoint activation,
-budgets and barriers. Store owns physical complete-prefix loading and atomic exact-head append.
-
-Format ceilings are 32 MiB per canonical object, 65,536 non-payload envelope bytes, 134,283,264 bytes
-per frame, 65,536 frames and 512 MiB cumulative frame bytes. These are fixed format bounds.
-Program supplies a conservative declared history budget and Runtime validates it at admission.
-
-The frame ceiling covers four maximum-sized objects (Read intent, evidence, original failure and
-mapped failure) plus metadata. All payloads belong to the same atomic frame; they are not separate
-appends. The generic canonical parser has a larger syntax ceiling. PostgreSQL provisioning uses
-run-history baseline v2 for this capacity contract and rejects the old baseline.
+The existing format ceilings remain: 134,283,264 complete frame bytes, 65,536 frames, and 512 MiB
+cumulative frame bytes. Runtime checks its 65,536-byte non-payload metadata ceiling against actual
+encoded frames. Values owns the 32 MiB canonical object ceiling. Store enforces cumulative append
+limits using maintained physical accounting. No prospective history reservation is required.

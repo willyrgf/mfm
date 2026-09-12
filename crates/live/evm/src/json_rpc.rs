@@ -6,8 +6,9 @@
 use std::num::NonZeroU64;
 use std::time::Duration;
 
+use crate::error::{invariant, AdapterFailure};
 use alloy_primitives::{hex, Address, U256};
-use mfm_capabilities::{AdapterError, AdapterInvariantError};
+use mfm_capabilities::AdapterError;
 use mfm_diagnostics::{
     CaptureOmission, HttpStatusCode, ObservedSize, OmissionReason, OmittedField, ResponseContext,
 };
@@ -206,8 +207,13 @@ impl JsonRpcEvmProvider {
             .send()
             .await
             .map_err(|error| client_failure(method, RpcStage::Send, None, &error))?;
-        let status = HttpStatusCode::new(response.status().as_u16())
-            .map_err(|_| AdapterError::Invariant(AdapterInvariantError))?;
+        let status_code = response.status().as_u16();
+        let status = HttpStatusCode::new(status_code).map_err(|source| {
+            invariant(AdapterFailure::HttpStatus {
+                status: status_code,
+                source,
+            })
+        })?;
         if !response.status().is_success() {
             return Err(provider_failure(
                 method,
@@ -300,9 +306,11 @@ impl JsonRpcEvmProvider {
         field: RpcField,
         check: impl FnOnce(AbiWord) -> Result<U, RpcRejection>,
     ) -> Result<Option<U>, AdapterError<EvmOperationalError>> {
-        let token = source
-            .token()
-            .ok_or(AdapterError::Invariant(AdapterInvariantError))?;
+        let token = source.token().ok_or_else(|| {
+            invariant(AdapterFailure::MissingToken {
+                balance_source: source.clone(),
+            })
+        })?;
         let tag = block_tag(&anchor.number)?;
         let call = RpcCall { to: token, data };
         self.rpc::<_, RpcDataText>(EvmRpcMethod::Call, &(call, tag))
@@ -447,8 +455,15 @@ impl JsonRpcEvmProvider {
                 intent_value_ref.clone(),
             ));
         }
-        let result = AnchoredContractCallResult::new(confirmed_anchor, return_bytes)
-            .map_err(|_| AdapterError::Invariant(AdapterInvariantError))?;
+        let return_len = return_bytes.len();
+        let result = AnchoredContractCallResult::new(confirmed_anchor.clone(), return_bytes)
+            .map_err(|source| {
+                invariant(AdapterFailure::AnchoredResult {
+                    anchor: confirmed_anchor,
+                    return_bytes: return_len,
+                    source,
+                })
+            })?;
         Ok(AnchoredContractCallEvidence::returned(
             intent_value_ref.clone(),
             result,
@@ -945,7 +960,7 @@ fn block_tag(number: &EvmU256) -> Result<String, AdapterError<EvmOperationalErro
         .as_str()
         .parse::<U256>()
         .map(|number| format!("{number:#x}"))
-        .map_err(|_| AdapterError::Invariant(AdapterInvariantError))
+        .map_err(|source| invariant(AdapterFailure::BlockTag { source }))
 }
 
 // Called only after checking the closed lowercase hexadecimal alphabet.

@@ -1,50 +1,63 @@
 # mfm-runtime
 
-Runtime associates an immutable linear Program with typed States, codecs, root maps, intrinsic error projections,
-handlers and adapters. `RuntimeAssemblyBuilder::new` installs framework units; explicit registrations
-select exact contracts and parameters. A failed registration does not poison the builder. `finish`
-freezes the assembly. Generic States may share an implementation ID with different exact ABIs;
-value semantic IDs never substitute for exact schema/Rust-type/descriptor agreement.
+Runtime associates an immutable linear Program with typed States, value codecs, root maps,
+classifiers, handlers and adapters. `RuntimeAssemblyBuilder::new` installs framework units;
+explicit registrations select exact contracts and parameters. A failed registration does not
+poison the builder. `finish` freezes the assembly. Generic States may share an implementation ID
+with different exact ABIs; semantic IDs never substitute for exact schema/Rust-type agreement.
 
-The sole semantic fold drives admission, hot pre-append validation, local advancement and cold
-reconstruction. It derives position/visit, active checkpoint input, recovery usage and Effect
-barriers from retained history. Program commits the exact initial value. Admission checks that
-commitment before genesis or provider entry; actual candidates and Store appends enforce size limits.
+Every opaque Journal payload is a Runtime-owned `RunCommit`: the admitted Program ref, complete
+current `RunState`, and facts of the committed operation. State contains its current phase, active
+checkpoint inputs, per-State recovery usage and irreversible Effect barrier. Objects retain exact
+canonical bytes and value refs, without native caches or a frame-local object table. Program commits
+the exact initial value, checked before admission or provider entry.
 
-`start` admits and progresses, `resume` explicitly progresses an existing run, and `read`
-reconstructs without progression. Pure/Read outcomes and recovery decisions append atomically.
-Operational Read errors retain their original capability error and complete executed input without
-fabricating evidence or domain failure. Accepted retry/restart spends the committed allowance and
-yields at a fresh visit. Handling, root mapping or validation failure before append
-leaves the previous head unchanged.
+`start` admits and progresses, `resume` explicitly progresses an existing run, and `read` observes
+without progression. Cold restore loads admission/latest and any requested candidate probe from
+one Store snapshot. Runtime checks selected headers, current phase/fact agreement, contracts,
+positions, allowances, checkpoints and Effect authority. It does not fold old frames or reconstruct
+historical counter increments. Immutable acknowledged history remains a required Store contract.
+Private Serde seeds construct the current payload types directly and preserve checked Object
+admission causes under `restore`/`decode`. Wire failures retain their parser cause. After a native
+admission failure, visitors consume remaining containers without constructing unused Objects;
+later structural rejections do not replace that cause, while parser failures remain wire errors.
 
-An Effect appends its complete command before adapter entry. A pending response yields the same
-EffectId and visit without a record. Operational failure appends original error, complete executed input and
-Retry/Stop before acknowledgement. Retry spends allowance and yields with the same command; Stop
-returns `InvocationFailure::RecoveryStopped`. There is no separate pending-failure quota.
-Cold `EffectPending` views expose `latest_failure`, including its committed decision. Explicit
-resume reconciles the same command after Stop. Settlement ends the prepare/failure*/conclusion lifecycle;
-settled Effects cannot recover and retained prepares prevent restart across their position.
+A declared failure commits its original and complete executed facts as `AwaitingRecovery` before
+classification, policy or root mapping. A separate recovery commit records classification, request
+and authorized decision. Accepted retry/restart spends allowance and yields. Restart restores an
+active checkpoint and prunes later snapshots without resetting usage. Policy or mapping failure
+leaves the committed original available to a later invocation.
 
-Audit records cover acknowledged qualified outcomes. Cancellation between provider response and
-failure append can leave a physical attempt unrecorded; no outcome is acknowledged from that gap.
+An Effect commits its complete input, command and EffectId before adapter entry. Pending returns
+the unchanged view. Operational failure first commits its original, then a recovery decision
+returns to EffectPending with the same authority. Retry spends allowance and yields; Stop returns
+`InvocationFailure::RecoveryStopped`, while explicit resume may reconcile that command. There is no
+pending-failure quota. Accepted evidence is bound and committed before interpretation as
+`AwaitingInterpretation`; resuming this phase performs no adapter IO. Settled Effects cannot recover,
+and Effect barriers prevent restart across their position.
 
-Store insertion extends the local fold. A losing append reloads and returns the winner without
-executing its newly selected visit. Ambiguous acknowledgement preserves the Store error source and
-last observed qualified head; that observation does not assert the current state. Cancellation
-before append spends no recovery allowance and there is no background completion or retry loop.
+Known insertion adopts the candidate continuation locally. NotInserted performs one exact candidate
+probe, yielding a checked observation only when the candidate is present. Exclusion or absence
+remains this attempt's noninsertion. Presence is retained independently if subsequent projection
+fails. Store errors return immediately without probing; ambiguous acknowledgement remains
+Indeterminate. Recording errors retain the available original, separate recording cause and exact
+candidate once sealed. A projection failure after known insertion additionally retains its
+acknowledged head, separately from any older last-observed view.
 
-Cold reconstruction never reruns completed State interpretations, classifiers, handlers or maps,
-and performs no provider/signer IO. It re-prepares only the final unresolved
-Effect to qualify its exact retained command before reconciliation. Completed outcomes and policy
-decisions are authoritative retained facts, subject to structural and Runtime safety qualification.
+Audit records cover acknowledged originals. Cancellation between provider response and failure
+append can leave a physical attempt unrecorded. There is no fallback record through a failed Store,
+background completion loop, or prospective capacity promise. Actual object, metadata, frame, run
+and derived-report limits apply at their owning boundaries.
 
-RunView distinguishes runnable (position and advance/retry/restart reason), Effect-pending,
-succeeded ValueView and failed FailureReport. Reports are content-addressed canonical values derived
-from retained original/root causes, reason, position and usage; they are not independent Journal
-frames. Typed decoding rechecks the exact value contract. InvocationFailure separately represents
-an interrupted call, possibly with unknown durable state. Application owns transport rendering.
+RunView distinguishes Runnable, EffectPending, AwaitingRecovery, AwaitingInterpretation, Succeeded
+Object and Failed FailureReport. Pending views expose their latest committed original and decision.
+FailureReport is a content-addressed canonical projection of original/root causes, reason, position
+and usage, bounded to 32 MiB before terminal append and never separately persisted. Internal native
+errors remain invocation data, with their originating operation/stage and fallible bounded
+projection. Application owns the prepared transport models and incomplete-report omissions.
 
-Heavy qualification, callback evaluation and report construction run in immediately awaited pure
-blocking work. Store and adapter IO stay in the async driver. Public callbacks receive exact intent
-or command instance references, never codec contract references in their place.
+Typed constructors materialize at selected callbacks. Before reconciling an unresolved Effect,
+Runtime re-prepares and compares the exact command and identity. Reading completed work does not
+rerun interpretations, classification, policy, mapping, provider or signer IO. Heavy validation,
+callback work and encoding use immediately awaited pure blocking jobs; Store and adapter IO remain
+in the async driver. Read/Effect callbacks receive exact intent/command instance refs.

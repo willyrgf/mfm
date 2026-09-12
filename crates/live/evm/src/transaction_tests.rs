@@ -422,9 +422,7 @@ impl EvmTransactionProvider for ScriptedProvider {
                 .pop_front()
             {
                 Some(Ok(Some(hash))) => Ok(hash),
-                Some(Ok(None)) | None => {
-                    evm_keccak256(&raw).map_err(|_| AdapterError::Invariant(AdapterInvariantError))
-                }
+                Some(Ok(None)) | None => evm_keccak256(&raw).map_err(invariant),
                 Some(Err(error)) => Err(error),
             }
         })
@@ -497,10 +495,10 @@ async fn transaction_registration_uses_the_complete_binding_as_its_only_key() {
         Arc::clone(&provider),
     )
     .expect("transaction callback");
-    assert_eq!(
+    assert!(matches!(
         register_evm_transaction_adapters(&mut builder, binding, signer, authority, provider),
         Err(mfm_runtime::RuntimeError::IncompatibleAssembly)
-    );
+    ));
     builder.finish();
 }
 
@@ -796,12 +794,17 @@ async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_by
             result,
             provider.canonical.clone(),
         ))));
-        assert_eq!(
-            execute_transaction(&binding, &authority, &provider, &id, &prepared)
-                .await
-                .err(),
-            Some(AdapterError::Invariant(AdapterInvariantError))
-        );
+        let error = execute_transaction(&binding, &authority, &provider, &id, &prepared)
+            .await
+            .err()
+            .unwrap();
+        let AdapterError::Invariant(cause) = error else {
+            panic!("receipt invariant")
+        };
+        assert!(matches!(
+            cause.downcast_ref::<AdapterFailure>(),
+            Some(AdapterFailure::ReceiptShape { .. } | AdapterFailure::CreatedAddress { .. })
+        ));
     }
     provider.push_receipt(Ok(Some(ProviderReceipt::new(
         prepared.transaction_hash().clone(),
@@ -892,11 +895,15 @@ async fn incorrect_signatures_and_corrupt_retained_wire_fail_before_provider_ent
             .await
             .unwrap(),
     };
-    assert_eq!(
-        prepare_transaction(&binding, &authority, &wrong, &id, &reserved)
-            .await
-            .err(),
-        Some(AdapterError::Invariant(AdapterInvariantError))
+    let error = prepare_transaction(&binding, &authority, &wrong, &id, &reserved)
+        .await
+        .err()
+        .unwrap();
+    let AdapterError::Invariant(cause) = error else {
+        panic!("signer invariant")
+    };
+    assert!(
+        matches!(cause.downcast_ref::<AdapterFailure>(),Some(AdapterFailure::RecoveredSender { expected,.. }) if expected==&binding.sender)
     );
     assert!(authority.state().unwrap().prepared.is_none());
     let evidence =
@@ -907,12 +914,19 @@ async fn incorrect_signatures_and_corrupt_retained_wire_fail_before_provider_ent
         ExactRawTransaction::new(vec![2, 0xc0]).unwrap(),
     ));
     let operations = provider.operations();
-    assert_eq!(
-        execute_transaction(&binding, &authority, &provider, &id, &prepared)
-            .await
-            .err(),
-        Some(AdapterError::Invariant(AdapterInvariantError))
-    );
+    let error = execute_transaction(&binding, &authority, &provider, &id, &prepared)
+        .await
+        .err()
+        .unwrap();
+    let AdapterError::Invariant(cause) = error else {
+        panic!("codec invariant")
+    };
+    assert!(matches!(
+        cause.downcast_ref::<AdapterFailure>(),
+        Some(AdapterFailure::QualifyPrepared(
+            crate::codec::EvmCodecError::Invalid
+        ))
+    ));
     assert_eq!(provider.operations(), operations);
 }
 
@@ -925,14 +939,15 @@ impl mfm_store::Store for FaultStore {
     fn load_run<'a>(
         &'a self,
         id: &'a RunId,
+        probe: Option<u64>,
     ) -> Pin<
         Box<
-            dyn Future<Output = Result<Option<mfm_journal::StoredRunBytes>, mfm_store::StoreError>>
+            dyn Future<Output = Result<Option<mfm_store::LoadedRun>, mfm_store::StoreError>>
                 + Send
                 + 'a,
         >,
     > {
-        self.inner.load_run(id)
+        self.inner.load_run(id, probe)
     }
     fn append_run<'a>(
         &'a self,
@@ -965,7 +980,7 @@ impl mfm_store::Store for FaultStore {
 #[tokio::test]
 async fn every_transaction_journal_boundary_recovers_after_ambiguous_append() {
     for commit in [false, true] {
-        for sequence in 2..=8 {
+        for sequence in 2..=11 {
             let (_owner, signer, binding, command, _) = fixture().await;
             let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
             let provider = Arc::new(ScriptedProvider::new(1337));
@@ -1024,14 +1039,22 @@ async fn every_transaction_journal_boundary_recovers_after_ambiguous_append() {
                     }
                     Ok(view) => assert!(matches!(view.state(), RunViewState::EffectPending { .. })),
                     Err(mfm_runtime::InvocationFailure::Execution {
-                        error: RuntimeError::Store(mfm_store::StoreError::Indeterminate),
+                        error: RuntimeError::Recording { failure, .. },
                         ..
-                    }) => {}
+                    }) if matches!(
+                        failure.as_ref(),
+                        mfm_runtime::RecordingFailure::Append {
+                            outcome: mfm_runtime::AppendFailure::Store(
+                                mfm_store::StoreError::Indeterminate
+                            ),
+                            ..
+                        }
+                    ) => {}
                     Err(error) => panic!("unexpected recovery result: {error:?}"),
                 }
             }
             let completed = completed.expect("bounded cold recovery");
-            assert_eq!(completed.head_sequence(), 8);
+            assert_eq!(completed.head_sequence(), 11);
             assert_eq!(store.fail_sequence.load(Ordering::SeqCst), 0);
             assert_eq!(authority.state().unwrap().reservation.nonce(), 7);
         }

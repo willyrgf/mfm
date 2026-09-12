@@ -1,33 +1,32 @@
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_ids::{ContentRef, EffectId, ExecutionPosition, RunId};
-use mfm_journal::StopCode;
-use mfm_program::{RecoveryDenial, RecoveryLimit, RecoveryUsage, StopReason};
+use mfm_program::{RecoveryUsage, StopReason};
 use mfm_values::{
     CanonicalJsonProfile, SchemaIdentity, SchemaKind, SchemaShape, MAX_RUN_OBJECT_CANONICAL_BYTES,
 };
 use serde::Serialize;
 
-use crate::{Result, RunView, RuntimeError, ValueView};
+use crate::{Object, Result, RunView, RuntimeError};
 
 /// Qualified operational cause and the complete facts of its adapter invocation.
 pub enum AdapterIncidentView {
     /// A duplicate-safe observation that failed operationally.
     Read {
         /// Original operational error.
-        error: ValueView,
+        error: Object,
         /// Complete executed State input.
-        input: ValueView,
+        input: Object,
         /// Exact prepared observational intent.
-        intent: ValueView,
+        intent: Object,
     },
     /// An unresolved Effect invocation; these facts do not imply settlement.
     Effect {
         /// Original operational error.
-        error: ValueView,
+        error: Object,
         /// Complete executed State input.
-        input: ValueView,
+        input: Object,
         /// Retained command, unchanged by this failure.
-        command: ValueView,
+        command: Object,
         /// Existing command authority.
         effect_id: EffectId,
     },
@@ -35,13 +34,13 @@ pub enum AdapterIncidentView {
 
 impl AdapterIncidentView {
     /// Returns the original operational error.
-    pub const fn error(&self) -> &ValueView {
+    pub const fn error(&self) -> &Object {
         match self {
             Self::Read { error, .. } | Self::Effect { error, .. } => error,
         }
     }
     /// Returns the complete executed State input.
-    pub const fn input(&self) -> &ValueView {
+    pub const fn input(&self) -> &Object {
         match self {
             Self::Read { input, .. } | Self::Effect { input, .. } => input,
         }
@@ -53,9 +52,9 @@ pub enum FailureCauseView {
     /// A deterministic State domain failure.
     Domain {
         /// Unmodified State failure.
-        original: ValueView,
+        original: Object,
         /// Independently mapped root failure.
-        root: ValueView,
+        root: Object,
     },
     /// A Read execution failure with its original invocation facts.
     Adapter(AdapterIncidentView),
@@ -74,44 +73,48 @@ pub struct FailureReport {
 impl FailureReport {
     pub(crate) fn new(
         position: ExecutionPosition,
-        reason: StopCode,
+        reason: StopReason,
         usage: RecoveryUsage,
         cause: FailureCauseView,
     ) -> Result<Self> {
         #[derive(Serialize)]
-        struct Object<'a> {
-            contract_ref: &'a ContentRef,
+        struct WireObject<'a> {
+            contract_ref: ContentRef,
             value_ref: &'a ContentRef,
             canonical: &'a serde_json::value::RawValue,
         }
-        fn object(value: &ValueView) -> Result<Object<'_>> {
-            Ok(Object {
-                contract_ref: value.contract_ref(),
+        fn object(value: &Object) -> Result<WireObject<'_>> {
+            Ok(WireObject {
+                contract_ref: value.contract_ref().map_err(RuntimeError::from)?,
                 value_ref: value.value_ref(),
-                canonical: serde_json::from_slice(value.canonical_bytes())
-                    .map_err(|_| RuntimeError::Internal)?,
+                canonical: serde_json::from_slice(value.canonical_bytes()).map_err(|source| {
+                    RuntimeError::native(
+                        crate::Operation::Project,
+                        mfm_values::NativeCause::from_error(mfm_canonical::JsonError::new(source)),
+                    )
+                })?,
             })
         }
         #[derive(Serialize)]
         #[serde(tag = "kind", rename_all = "snake_case")]
         enum Cause<'a> {
             Domain {
-                original: Object<'a>,
-                root: Object<'a>,
+                original: WireObject<'a>,
+                root: WireObject<'a>,
             },
             #[serde(rename = "adapter")]
             Read {
                 mode: &'static str,
-                error: Object<'a>,
-                input: Object<'a>,
-                intent: Object<'a>,
+                error: WireObject<'a>,
+                input: WireObject<'a>,
+                intent: WireObject<'a>,
             },
             #[serde(rename = "adapter")]
             Effect {
                 mode: &'static str,
-                error: Object<'a>,
-                input: Object<'a>,
-                command: Object<'a>,
+                error: WireObject<'a>,
+                input: WireObject<'a>,
+                command: WireObject<'a>,
                 effect_id: &'a EffectId,
             },
         }
@@ -125,12 +128,12 @@ impl FailureReport {
         struct Report<'a> {
             domain: &'static str,
             position: ExecutionPosition,
-            reason: StopCode,
+            reason: StopReason,
             usage: Usage,
             cause: Cause<'a>,
         }
         let wire = Report {
-            domain: "mfm.failure-report.v3",
+            domain: "mfm.failure-report.v4",
             position,
             reason,
             usage: Usage {
@@ -167,35 +170,63 @@ impl FailureReport {
                 },
             },
         };
-        let json = serde_json::to_string(&wire).map_err(|_| RuntimeError::Internal)?;
+        let json = mfm_canonical::to_json_bounded(&wire, MAX_RUN_OBJECT_CANONICAL_BYTES).map_err(
+            |source| {
+                RuntimeError::at(
+                    crate::Operation::Project,
+                    crate::Stage::Encode,
+                    mfm_values::NativeCause::from_error(source),
+                )
+            },
+        )?;
         // Original and mapped failures intentionally remain inline, including identity maps.
         // Individually admissible values may exceed the report limit when combined. Reject
-        // before the terminal append: the acknowledged Runnable/EffectPending head and any
-        // pending Effect authority remain intact. Admission does not guarantee report fit.
+        // before the terminal append: the original remains AwaitingRecovery at its acknowledged
+        // head. Admission does not guarantee report fit.
         // Every embedded value is already canonical, so serialization preserves its byte size.
         crate::check_size(
             crate::SizeResource::FailureReport,
             json.len() as u64,
             MAX_RUN_OBJECT_CANONICAL_BYTES as u64,
         )?;
-        let canonical =
-            PlainCanonicalJsonBytes::from_json_str(&json).map_err(|_| RuntimeError::Internal)?;
+        let canonical = PlainCanonicalJsonBytes::from_json_str(&json).map_err(|source| {
+            RuntimeError::native(
+                crate::Operation::Project,
+                mfm_values::NativeCause::from_error(source),
+            )
+        })?;
         let schema = SchemaIdentity::new(
             SchemaKind::PersistedContract,
             None,
             "mfm-failure-report",
-            mfm_ids::SchemaVersion::new("3").map_err(|_| RuntimeError::Internal)?,
+            mfm_ids::SchemaVersion::new("4").map_err(|source| {
+                RuntimeError::native(
+                    crate::Operation::Project,
+                    mfm_values::NativeCause::from_error(source),
+                )
+            })?,
             SchemaShape::CanonicalJsonTerminal {
                 profile: CanonicalJsonProfile::GeneralFloatFree,
             },
         )
         .and_then(|identity| identity.schema_id())
-        .map_err(|_| RuntimeError::Internal)?;
-        let value_ref = ContentRef::new(schema, raw_content_digest(canonical.as_bytes()))
-            .map_err(|_| RuntimeError::Internal)?;
+        .map_err(|source| {
+            RuntimeError::native(
+                crate::Operation::Project,
+                mfm_values::NativeCause::from_error(source),
+            )
+        })?;
+        let value_ref = ContentRef::new(schema, raw_content_digest(canonical.as_bytes())).map_err(
+            |source| {
+                RuntimeError::native(
+                    crate::Operation::Project,
+                    mfm_values::NativeCause::from_error(source),
+                )
+            },
+        )?;
         Ok(Self {
             position,
-            reason: stop_reason(reason),
+            reason,
             usage,
             cause: Box::new(cause),
             value_ref,
@@ -225,21 +256,6 @@ impl FailureReport {
     /// Returns the complete canonical report.
     pub fn canonical_bytes(&self) -> &[u8] {
         self.canonical.as_bytes()
-    }
-}
-
-pub(crate) fn stop_reason(reason: StopCode) -> StopReason {
-    match reason {
-        StopCode::Requested => StopReason::Requested,
-        StopCode::StateRetryExhausted => StopReason::Exhausted(RecoveryLimit::StateRetry),
-        StopCode::StateRestartExhausted => StopReason::Exhausted(RecoveryLimit::StateRestart),
-        StopCode::RunExhausted => StopReason::Exhausted(RecoveryLimit::Run),
-        StopCode::PureRetry => StopReason::Disallowed(RecoveryDenial::PureRetry),
-        StopCode::CheckpointUnavailable => {
-            StopReason::Disallowed(RecoveryDenial::CheckpointUnavailable)
-        }
-        StopCode::EffectBarrier => StopReason::Disallowed(RecoveryDenial::EffectBarrier),
-        StopCode::EffectSettled => StopReason::Disallowed(RecoveryDenial::EffectSettled),
     }
 }
 

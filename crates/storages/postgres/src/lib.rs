@@ -5,6 +5,7 @@
 //! required by the authority it exposes.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use mfm_canonical::sha256_digest_bytes;
@@ -15,10 +16,12 @@ use mfm_evm::EvmAuthorityEpoch;
 use mfm_ids::ConfigName;
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId};
 use mfm_journal::{
-    frame_head_digest, EncodedRunFrame, StoredRunBytes, MAX_FRAME_BYTES, MAX_RUN_BYTES,
-    MAX_RUN_FRAMES,
+    frame_head_digest, EncodedRunFrame, MAX_FRAME_BYTES, MAX_RUN_BYTES, MAX_RUN_FRAMES,
 };
-use mfm_store::{AppendResult, RunIndex, RunIndexError, RunPage, RunPageLimit, Store, StoreError};
+use mfm_store::{
+    AppendResult, LoadedRun, RunIndex, RunIndexError, RunPage, RunPageLimit, RunSummary, Store,
+    StoreError,
+};
 use sqlx::postgres::{PgArguments, PgPoolOptions, PgRow};
 use sqlx::{Connection, PgConnection, PgPool, Row};
 
@@ -153,14 +156,11 @@ impl Store for PostgresBackend {
     fn load_run<'a>(
         &'a self,
         run_id: &'a RunId,
+        probe_sequence: Option<u64>,
     ) -> std::pin::Pin<
-        Box<
-            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn Future<Output = std::result::Result<Option<LoadedRun>, StoreError>> + Send + 'a>,
     > {
-        Box::pin(async move { load_run(&self.pool, run_id, LoadProbe::None).await })
+        Box::pin(async move { load_run(&self.pool, run_id, probe_sequence, LoadProbe::None).await })
     }
 
     fn append_run<'a>(
@@ -435,8 +435,12 @@ fn is_undefined_schema_object(error: &sqlx::Error) -> bool {
 async fn load_run(
     pool: &PgPool,
     run_id: &RunId,
+    probe_sequence: Option<u64>,
     probe: LoadProbe,
-) -> std::result::Result<Option<StoredRunBytes>, StoreError> {
+) -> std::result::Result<Option<LoadedRun>, StoreError> {
+    if probe_sequence.is_some_and(|sequence| sequence == 0 || sequence > MAX_RUN_FRAMES) {
+        return Err(StoreError::CorruptPhysicalState);
+    }
     #[cfg(not(test))]
     let _ = probe;
     let mut transaction = pool.begin().await.map_err(|_| StoreError::Unavailable)?;
@@ -449,10 +453,8 @@ async fn load_run(
     let head = sqlx::Executor::fetch_optional(
         &mut *transaction,
         sqlx::query!(
-            "SELECT h.run_id, h.head_sequence, h.total_bytes, f.frame_bytes, \
-             f.head_digest FROM ONLY public.mfm_run_heads h LEFT JOIN ONLY \
-             public.mfm_run_frames f ON f.run_id = h.run_id AND f.run_sequence = \
-             h.head_sequence WHERE h.run_id = $1",
+            "SELECT run_id, head_sequence, total_bytes FROM ONLY public.mfm_run_heads \
+             WHERE run_id = $1",
             run_id.as_str(),
         ),
     )
@@ -485,42 +487,26 @@ async fn load_run(
         release.notified().await;
     }
 
+    let head_run_id: &str = head
+        .try_get("run_id")
+        .map_err(|_| StoreError::CorruptPhysicalState)?;
+    if head_run_id != run_id.as_str() {
+        return Err(StoreError::CorruptPhysicalState);
+    }
     let head_sequence: i64 = head
         .try_get("head_sequence")
         .map_err(|_| StoreError::CorruptPhysicalState)?;
     let total_bytes: i64 = head
         .try_get("total_bytes")
         .map_err(|_| StoreError::CorruptPhysicalState)?;
-    if total_bytes <= 0
+    if head_sequence <= 0
+        || u64::try_from(head_sequence)
+            .ok()
+            .is_none_or(|value| value > MAX_RUN_FRAMES)
+        || total_bytes <= 0
         || u64::try_from(total_bytes)
             .ok()
             .is_none_or(|v| v > MAX_RUN_BYTES)
-    {
-        let _ = transaction.rollback().await;
-        return Err(StoreError::CorruptPhysicalState);
-    }
-    let aggregate: (i64, Option<i64>, Option<i64>, Option<i64>) = sqlx::query!(
-        "SELECT count(*)::bigint AS \"count!\", min(run_sequence) AS \
-         \"first_sequence?\", max(run_sequence) AS \"last_sequence?\", \
-         sum(octet_length(frame_bytes))::bigint AS \"total_bytes?\" FROM ONLY \
-         public.mfm_run_frames WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_one(&mut *transaction)
-    .await
-    .map(|rows| {
-        (
-            rows.count,
-            rows.first_sequence,
-            rows.last_sequence,
-            rows.total_bytes,
-        )
-    })
-    .map_err(|_| StoreError::Unavailable)?;
-    if aggregate.0 != head_sequence
-        || aggregate.1 != Some(1)
-        || aggregate.2 != Some(head_sequence)
-        || aggregate.3 != Some(total_bytes)
     {
         let _ = transaction.rollback().await;
         return Err(StoreError::CorruptPhysicalState);
@@ -529,13 +515,16 @@ async fn load_run(
         &mut *transaction,
         sqlx::query!(
             "SELECT run_id, run_sequence, frame_bytes, head_digest FROM ONLY \
-         public.mfm_run_frames WHERE run_id = $1 ORDER BY run_sequence",
+         public.mfm_run_frames WHERE run_id = $1 AND run_sequence IN (1, $2, $3) \
+         ORDER BY run_sequence",
             run_id.as_str(),
+            head_sequence,
+            probe_sequence.map(|sequence| sequence as i64),
         ),
     )
     .await
     .map_err(|_| StoreError::Unavailable)?;
-    let expected_run_id = run_id.as_str().to_owned();
+    let expected_run_id = run_id.clone();
     #[cfg(test)]
     let blocking_probe = match &probe {
         LoadProbe::BlockingPause { entered, release } => Some((
@@ -554,7 +543,13 @@ async fn load_run(
                 std::thread::yield_now();
             }
         }
-        validate_load_rows(expected_run_id, head_sequence, total_bytes, rows)
+        validate_load_rows(
+            expected_run_id,
+            head_sequence as u64,
+            total_bytes as u64,
+            probe_sequence,
+            rows,
+        )
     })
     .await?;
     transaction
@@ -565,20 +560,17 @@ async fn load_run(
 }
 
 fn validate_load_rows(
-    expected_run_id: String,
-    head_sequence: i64,
-    total_bytes: i64,
+    expected_run_id: RunId,
+    head_sequence: u64,
+    total_bytes: u64,
+    probe_sequence: Option<u64>,
     rows: Vec<PgRow>,
-) -> std::result::Result<StoredRunBytes, StoreError> {
-    if usize::try_from(head_sequence).ok() != Some(rows.len()) {
-        return Err(StoreError::CorruptPhysicalState);
-    }
-    let mut frames = Vec::new();
-    frames
-        .try_reserve_exact(rows.len())
-        .map_err(|_| StoreError::Unavailable)?;
-    let mut total = 0_u64;
-    for (offset, row) in rows.into_iter().enumerate() {
+) -> std::result::Result<LoadedRun, StoreError> {
+    let mut admission = None;
+    let mut latest = None;
+    let mut probe = None;
+    let mut latest_digest = None;
+    for row in rows {
         let row_run_id: &str = row
             .try_get("run_id")
             .map_err(|_| StoreError::CorruptPhysicalState)?;
@@ -591,30 +583,44 @@ fn validate_load_rows(
         let stored_digest: &str = row
             .try_get("head_digest")
             .map_err(|_| StoreError::CorruptPhysicalState)?;
-        let expected_sequence =
-            i64::try_from(offset + 1).map_err(|_| StoreError::CorruptPhysicalState)?;
-        if row_run_id != expected_run_id
-            || sequence != expected_sequence
+        let digest = frame_head_digest(bytes);
+        let sequence = u64::try_from(sequence).map_err(|_| StoreError::CorruptPhysicalState)?;
+        if row_run_id != expected_run_id.as_str()
+            || !(sequence == 1 || sequence == head_sequence || Some(sequence) == probe_sequence)
             || bytes.is_empty()
             || bytes.len() > MAX_FRAME_BYTES
-            || frame_head_digest(bytes).as_str() != stored_digest
+            || digest.as_str() != stored_digest
         {
             return Err(StoreError::CorruptPhysicalState);
         }
-        total = total
-            .checked_add(u64::try_from(bytes.len()).map_err(|_| StoreError::CorruptPhysicalState)?)
-            .ok_or(StoreError::CorruptPhysicalState)?;
-        let mut copied = Vec::new();
-        copied
-            .try_reserve_exact(bytes.len())
-            .map_err(|_| StoreError::Unavailable)?;
-        copied.extend_from_slice(bytes);
-        frames.push(copied);
+        let bytes: Arc<[u8]> = Arc::from(bytes);
+        if sequence == 1 {
+            admission = Some(Arc::clone(&bytes));
+        }
+        if sequence == head_sequence {
+            latest = Some(Arc::clone(&bytes));
+            latest_digest = Some(digest);
+        }
+        if Some(sequence) == probe_sequence {
+            probe = Some(bytes);
+        }
     }
-    if total != u64::try_from(total_bytes).map_err(|_| StoreError::CorruptPhysicalState)? {
+    if probe_sequence.is_some_and(|sequence| sequence <= head_sequence) && probe.is_none() {
         return Err(StoreError::CorruptPhysicalState);
     }
-    StoredRunBytes::new(frames).map_err(|_| StoreError::CorruptPhysicalState)
+    let head = RunSummary::new(
+        expected_run_id,
+        head_sequence,
+        latest_digest.ok_or(StoreError::CorruptPhysicalState)?,
+        total_bytes,
+    )
+    .map_err(|_| StoreError::CorruptPhysicalState)?;
+    LoadedRun::new(
+        head,
+        admission.ok_or(StoreError::CorruptPhysicalState)?,
+        latest.ok_or(StoreError::CorruptPhysicalState)?,
+        probe,
+    )
 }
 
 async fn append_run(
