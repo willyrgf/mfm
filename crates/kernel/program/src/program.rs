@@ -1,16 +1,12 @@
 use super::*;
-use crate::recovery::bounds::LifecycleBound;
 use mfm_ids::StatePosition;
 
-/// One execution mode with its complete capability ABI and lifecycle bound.
+/// One execution mode with its complete capability ABI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Execution {
     /// Deterministic execution with one complete conclusion.
-    Pure {
-        /// Complete maximum conclusion bytes.
-        bound: ConclusionBound,
-    },
+    Pure {},
     /// Duplicate-safe observation with one fused conclusion.
     Read {
         /// Exact capability implementation contract.
@@ -25,8 +21,6 @@ pub enum Execution {
         context_contract_ref: ContentRef,
         /// Pre-bound observational route.
         binding_ref: ContentRef,
-        /// Complete maximum conclusion bytes across all alternatives.
-        bound: ConclusionBound,
     },
     /// Retained command authority followed by settlement.
     Effect {
@@ -42,8 +36,6 @@ pub enum Execution {
         context_contract_ref: ContentRef,
         /// Pre-bound mutating route.
         binding_ref: ContentRef,
-        /// Complete prepare, pending failure and settlement bounds.
-        bounds: EffectBounds,
     },
 }
 
@@ -133,7 +125,7 @@ impl Program {
             return Err(ProgramError::InvalidContract);
         }
         let wire = ProgramWire {
-            domain: "mfm.program.v6".into(),
+            domain: "mfm.program.v7".into(),
             entry_point_id: entry_point_id.clone(),
             admitted_context_contract_ref: admitted.clone(),
             initial_value_ref: initial_value_ref.clone(),
@@ -152,7 +144,7 @@ impl Program {
             SchemaKind::PersistedContract,
             None,
             "mfm-program-document",
-            SchemaVersion::new("6").map_err(|_| ProgramError::InvalidContract)?,
+            SchemaVersion::new("7").map_err(|_| ProgramError::InvalidContract)?,
             SchemaShape::CanonicalJsonTerminal {
                 profile: CanonicalJsonProfile::GeneralFloatFree,
             },
@@ -187,7 +179,7 @@ impl Program {
             .map_err(|_| ProgramError::Canonical)?;
         let wire: ProgramWire =
             serde_json::from_slice(bytes).map_err(|_| ProgramError::Canonical)?;
-        if wire.domain != "mfm.program.v6" {
+        if wire.domain != "mfm.program.v7" {
             return Err(ProgramError::Canonical);
         }
         let program = Self::new(
@@ -228,28 +220,13 @@ impl Program {
     pub const fn limits(&self) -> ProgramLimits {
         self.limits
     }
-    /// Complete canonical definition, including policies, parameters, checkpoints, and bounds.
+    /// Complete canonical definition, including policies, parameters, and checkpoints.
     pub fn canonical_bytes(&self) -> &[u8] {
         self.canonical_bytes.as_bytes()
     }
     /// Exact content identity.
     pub const fn content_ref(&self) -> &ContentRef {
         &self.content_ref
-    }
-    /// Computes conservative complete-history costs; Runtime compares these with Journal ceilings.
-    pub fn history_bound(&self, genesis: ConclusionBound) -> Result<HistoryBound> {
-        HistoryBound::calculate(
-            genesis,
-            self.limits,
-            self.declarations
-                .iter()
-                .map(|state| match state.0.execution {
-                    Execution::Pure { bound } | Execution::Read { bound, .. } => {
-                        LifecycleBound::Conclusion(bound)
-                    }
-                    Execution::Effect { bounds, .. } => LifecycleBound::Effect(bounds),
-                }),
-        )
     }
 }
 

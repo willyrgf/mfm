@@ -31,7 +31,6 @@ pub(super) enum Cursor {
         input: Arc<QualifiedValue>,
         effect_id: EffectId,
         command: Arc<QualifiedValue>,
-        failures: u32,
         latest_failure: Option<PendingFailure>,
     },
     Succeeded(Arc<QualifiedValue>),
@@ -511,15 +510,12 @@ impl FoldState {
                     input: Arc::clone(input),
                     effect_id: expected,
                     command,
-                    failures: 0,
                     latest_failure: None,
                 };
                 Ok(())
             }
             (
-                Cursor::EffectPending {
-                    position, failures, ..
-                },
+                Cursor::EffectPending { position, .. },
                 JournalRecord::EffectAdapterFailed {
                     position: recorded,
                     original,
@@ -527,14 +523,6 @@ impl FoldState {
                     decision,
                 },
             ) if *position == recorded => {
-                let Execution::Effect { bounds, .. } =
-                    executable.program.declarations()[position.state.index()].execution()
-                else {
-                    return Err(RuntimeError::InvalidHistory);
-                };
-                if *failures >= bounds.max_pending_failures() {
-                    return Err(RuntimeError::InvalidHistory);
-                }
                 let ExecutableMode::Effect { incident, .. } =
                     &executable.declarations[position.state.index()].mode
                 else {
@@ -572,17 +560,9 @@ impl FoldState {
                         ExecutionPhase::EffectPending,
                     )?,
                 }
-                let Cursor::EffectPending {
-                    failures,
-                    latest_failure,
-                    ..
-                } = &mut self.cursor
-                else {
+                let Cursor::EffectPending { latest_failure, .. } = &mut self.cursor else {
                     return Err(RuntimeError::InvalidHistory);
                 };
-                *failures = failures
-                    .checked_add(1)
-                    .ok_or(RuntimeError::InvalidHistory)?;
                 *latest_failure = Some(PendingFailure {
                     original,
                     context,

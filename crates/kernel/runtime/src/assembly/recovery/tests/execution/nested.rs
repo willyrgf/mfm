@@ -62,11 +62,10 @@ impl mfm_program::Operation for NestedRegions {
         &self,
         scope: &mut mfm_program::OperationExpansion<Offset, Offset, EvmFailure>,
     ) -> mfm_program::Result<()> {
-        let bound = mfm_program::ConclusionBound::new(65536)?;
         let outer = scope.checkpoint::<Offset>()?;
-        scope.pure::<IncrementOffset, Identity<EvmFailure>>(NoParams, Occurrence::new(), bound)?;
+        scope.pure::<IncrementOffset, Identity<EvmFailure>>(NoParams, Occurrence::new())?;
         let inner = scope.checkpoint::<Offset>()?;
-        scope.pure::<IncrementOffset, Identity<EvmFailure>>(NoParams, Occurrence::new(), bound)?;
+        scope.pure::<IncrementOffset, Identity<EvmFailure>>(NoParams, Occurrence::new())?;
         scope.handler(
             HandlerBinding::new::<SelectRegion>(Offset {
                 value: u64::from(self.restarts),
@@ -79,7 +78,6 @@ impl mfm_program::Operation for NestedRegions {
             &Offset { value: 1 },
             NoParams,
             Occurrence::new(),
-            bound,
         )
     }
 }

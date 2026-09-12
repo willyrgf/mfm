@@ -48,29 +48,15 @@ impl CapabilityInjection<Injected> for Mutation {
         body: &mut OperationExpansion<Number, Number, Number>,
     ) -> mfm_program::Result<()> {
         body.operation::<IncrementProgram, FromNever<Number>>(&IncrementProgram, NoParams)?;
-        body.read::<Observe, Observation, Identity<Number>>(
-            setup,
-            NoParams,
-            Occurrence::new(),
-            ConclusionBound::new(65536)?,
-        )?;
-        body.effect::<Mutate, Mutation, Identity<Number>>(
-            setup,
-            NoParams,
-            Occurrence::new(),
-            EffectBounds::new(65536, 65536, 8, 65536)?,
-        )
+        body.read::<Observe, Observation, Identity<Number>>(setup, NoParams, Occurrence::new())?;
+        body.effect::<Mutate, Mutation, Identity<Number>>(setup, NoParams, Occurrence::new())
     }
 
     fn write_after(
         _: &Binding,
         body: &mut OperationExpansion<Number, Number, Number>,
     ) -> mfm_program::Result<()> {
-        body.pure::<Project, Identity<Number>>(
-            NoParams,
-            Occurrence::new(),
-            ConclusionBound::new(65536)?,
-        )
+        body.pure::<Project, Identity<Number>>(NoParams, Occurrence::new())
     }
 }
 struct Project;
@@ -107,11 +93,7 @@ impl Operation for IncrementProgram {
         &self,
         body: &mut OperationExpansion<Number, Number, Never>,
     ) -> mfm_program::Result<()> {
-        body.pure::<Increment, Identity<Never>>(
-            NoParams,
-            Occurrence::new(),
-            ConclusionBound::new(65536)?,
-        )
+        body.pure::<Increment, Identity<Never>>(NoParams, Occurrence::new())
     }
 }
 struct InjectedProgram;
@@ -130,7 +112,6 @@ impl Operation for InjectedProgram {
             &Binding { route: 9 },
             NoParams,
             Occurrence::new(),
-            EffectBounds::new(65536, 65536, 8, 65536)?,
         )
     }
 }
@@ -225,12 +206,7 @@ impl CapabilityInjection<Injected> for Recursive {
         setup: &Binding,
         body: &mut OperationExpansion<Number, Number, Number>,
     ) -> mfm_program::Result<()> {
-        body.effect::<Injected, Recursive, Identity<Number>>(
-            setup,
-            NoParams,
-            Occurrence::new(),
-            EffectBounds::new(65536, 65536, 8, 65536)?,
-        )
+        body.effect::<Injected, Recursive, Identity<Number>>(setup, NoParams, Occurrence::new())
     }
 }
 impl EffectCapabilityContract for Recursive {
@@ -285,16 +261,11 @@ impl Operation for RecursionProgram {
             body.effect::<Injected, Recursive, Identity<Number>>(
                 &Binding { route: 9 },
                 NoParams,
-                Occurrence::new(),
-                EffectBounds::new(65536, 65536, 8, 65536)?
+                Occurrence::new()
             ),
             Err(ProgramError::Capacity)
         );
-        body.pure::<Increment, FromNever<Number>>(
-            NoParams,
-            Occurrence::new(),
-            ConclusionBound::new(65536)?,
-        )
+        body.pure::<Increment, FromNever<Number>>(NoParams, Occurrence::new())
     }
 }
 #[test]

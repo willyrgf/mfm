@@ -555,27 +555,6 @@ impl<C: MfmValueTrait, R: TransactionRecipe<C>> CapabilityInjection<PrepareEvmTr
     }
 }
 
-/// Complete caller-specific closure bounds for the four injected transaction States.
-#[derive(Debug, Clone, Copy)]
-pub struct EvmTransactionBounds {
-    /// Nonce reservation command and conclusion maxima.
-    pub reservation: mfm_program::EffectBounds,
-    /// Wire preparation command and conclusion maxima.
-    pub preparation: mfm_program::EffectBounds,
-    /// Transaction execution command and conclusion maxima.
-    pub execution: mfm_program::EffectBounds,
-    /// Projection success or original/root failure closure maximum.
-    pub projection: mfm_program::ConclusionBound,
-}
-
-/// Immutable authoring setup for transaction injection; no execution handles are retained.
-pub struct EvmTransactionSetup {
-    /// Checked public adapter binding.
-    pub binding: EvmTransactionBinding,
-    /// Complete bounds derived for the concrete recipe and caller context.
-    pub bounds: EvmTransactionBounds,
-}
-
 impl<C: MfmValueTrait, R: TransactionRecipe<C>> CapabilityInjection<ExecuteEvmTransaction<C, R>>
     for EvmTransactionEffect
 where
@@ -583,7 +562,7 @@ where
     ProjectEvmTransactionOutcome<C, R>:
         PureState<Failure = EvmTransactionFailure<ExecutedContext<C, R>>>,
 {
-    type Setup = EvmTransactionSetup;
+    type Setup = EvmTransactionBinding;
     type ExpandedInput = C;
     type ExpandedOutput = CompletedContext<C, R>;
     type ExpandedFailure = EvmTransactionFailure<ExecutedContext<C, R>>;
@@ -593,7 +572,6 @@ where
     }
     fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         setup
-            .binding
             .binding_ref()
             .map_err(|_| ProgramError::InvalidContract)
     }
@@ -605,31 +583,31 @@ where
             Self::ExpandedFailure,
         >,
     ) -> mfm_program::Result<()> {
-        expansion.effect::<ReserveEvmNonce<C, R>, EvmNonceReservationEffect, mfm_program::FromNever<Self::ExpandedFailure>>(&setup.binding, mfm_program::NoParams, mfm_program::Occurrence::new(), setup.bounds.reservation)?;
-        expansion.effect::<PrepareEvmTransaction<C, R>, EvmTransactionPreparationEffect, mfm_program::FromNever<Self::ExpandedFailure>>(&setup.binding, mfm_program::NoParams, mfm_program::Occurrence::new(), setup.bounds.preparation)
+        expansion.effect::<ReserveEvmNonce<C, R>, EvmNonceReservationEffect, mfm_program::FromNever<Self::ExpandedFailure>>(setup, mfm_program::NoParams, mfm_program::Occurrence::new())?;
+        expansion.effect::<PrepareEvmTransaction<C, R>, EvmTransactionPreparationEffect, mfm_program::FromNever<Self::ExpandedFailure>>(setup, mfm_program::NoParams, mfm_program::Occurrence::new())
     }
     fn write_after(
-        setup: &Self::Setup,
+        _setup: &Self::Setup,
         expansion: &mut OperationExpansion<
             <ExecuteEvmTransaction<C, R> as State>::Output,
             Self::ExpandedOutput,
             Self::ExpandedFailure,
         >,
     ) -> mfm_program::Result<()> {
-        expansion.pure::<ProjectEvmTransactionOutcome<C, R>, mfm_program::Identity<Self::ExpandedFailure>>(mfm_program::NoParams, mfm_program::Occurrence::new(), setup.bounds.projection)
+        expansion.pure::<ProjectEvmTransactionOutcome<C, R>, mfm_program::Identity<Self::ExpandedFailure>>(mfm_program::NoParams, mfm_program::Occurrence::new())
     }
 }
 
 /// Public one-transaction authoring entry point; injection installs all four durable States.
 pub struct EvmTransaction<C, R> {
-    setup: EvmTransactionSetup,
+    binding: EvmTransactionBinding,
     context: PhantomData<fn() -> (C, R)>,
 }
 impl<C, R> EvmTransaction<C, R> {
     /// Selects the explicit adapter binding for this authored transaction.
-    pub const fn new(binding: EvmTransactionBinding, bounds: EvmTransactionBounds) -> Self {
+    pub const fn new(binding: EvmTransactionBinding) -> Self {
         Self {
-            setup: EvmTransactionSetup { binding, bounds },
+            binding,
             context: PhantomData,
         }
     }
@@ -639,7 +617,7 @@ where
     ExecuteEvmTransaction<C, R>: EffectState<EvmTransactionEffect>,
     EvmTransactionEffect: CapabilityInjection<
         ExecuteEvmTransaction<C, R>,
-        Setup = EvmTransactionSetup,
+        Setup = EvmTransactionBinding,
         ExpandedInput = C,
         ExpandedOutput = CompletedContext<C, R>,
         ExpandedFailure = EvmTransactionFailure<ExecutedContext<C, R>>,
@@ -650,7 +628,7 @@ where
     type Failure = EvmTransactionFailure<ExecutedContext<C, R>>;
     fn validate_input(&self, input: &C) -> mfm_program::Result<()> {
         let command = R::command(input);
-        if command.binding() != &self.setup.binding || !R::Success::accepts(&command) {
+        if command.binding() != &self.binding || !R::Success::accepts(&command) {
             return Err(ProgramError::InvalidContract);
         }
         Ok(())
@@ -659,6 +637,6 @@ where
         &self,
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
-        body.effect::<ExecuteEvmTransaction<C, R>, EvmTransactionEffect, mfm_program::Identity<Self::Failure>>(&self.setup, mfm_program::NoParams, mfm_program::Occurrence::new(), self.setup.bounds.execution)
+        body.effect::<ExecuteEvmTransaction<C, R>, EvmTransactionEffect, mfm_program::Identity<Self::Failure>>(&self.binding, mfm_program::NoParams, mfm_program::Occurrence::new())
     }
 }

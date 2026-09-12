@@ -6,7 +6,7 @@ infallible exact byte access; their strict string wires remain lowercase `0x` he
 `EvmU256` owns canonical decimal EVM words, while canonical base64 values retain
 `CanonicalBytes` directly and chain IDs and gas limits retain `NonZeroU64`.
 
-`EvmTransaction<C, R>::new(binding, bounds)` authors one transaction using a static `TransactionRecipe<C>`.
+`EvmTransaction<C, R>::new(binding)` authors one transaction using a static `TransactionRecipe<C>`.
 Capability injection expands its `ExecuteEvmTransaction<C, R>` into reservation, preparation,
 execution, and Pure outcome projection. `CreateAt<Slot>`, `CallCreatedAt<CallSlot, DeploymentSlot>`,
 and `CallAt<Slot>` construct commands from checked plans and the selected successful creation.
@@ -44,17 +44,14 @@ constructs intent during prepare and retains the exact intent and accepted evide
 integrity-blocked evidence. The live provider algorithm remains outside this crate.
 
 Six balance Read States and one consolidation Pure State implement the cumulative balance contract.
-`CollectEvmBalances<K>::new(binding, request, conclusion_bound)` authors native/token State sequences
+`CollectEvmBalances<K>::new(binding, request)` authors native/token State sequences
 from the complete checked request. Root validation compares the request, route and initial work state
 with the supplied input before Program construction. There is no runtime selector State or Match
 payload. Initial-anchor interpretation advances the ordinary data stage using the checked active
 source; the work cursor derives that source from the completed prefix.
 
-Concrete planners supply complete conclusion bounds covering the reachable caller continuation and
-mapped root failure. Transaction bounds separately cover reservation, preparation, execution and
-projection, including each Effect's prepare/conclusion closure. These authoring bounds enter Program;
-Runtime enforces them before admission and when concluding a State. Supplying a bound is not evidence
-that a concrete workload fits: maximal reachable fixtures must validate the planner's calculation.
+Planning retains semantic recovery allowances only. Actual values, complete frames and accumulated
+run sizes are checked by their owning boundaries; domain planners provide no lifecycle estimate.
 
 Operational failures use bounded typed causes. Balance contexts retain source/collection ordinals and
 the exact intent; anchored-call contexts retain route, anchor and target without calldata. Transaction

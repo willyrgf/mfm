@@ -331,7 +331,6 @@ impl mfm_program::Operation for MappedRead {
             &Offset { value: 1 },
             Offset { value: 100 },
             mfm_program::Occurrence::new(),
-            mfm_program::ConclusionBound::new(4096)?,
         )
     }
 }

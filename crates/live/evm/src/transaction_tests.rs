@@ -535,19 +535,10 @@ fn runtime(
     Runtime::new(builder.finish(), store)
 }
 fn program(input: &InitialContext) -> mfm_program::Program {
-    let frame_bytes = 4 * canonicalize_mfm_value(input).unwrap().0.as_bytes().len() as u64 + 16_384;
-    let effect = mfm_program::EffectBounds::new(frame_bytes, frame_bytes, 8, frame_bytes).unwrap();
-    let bounds = mfm_evm::EvmTransactionBounds {
-        reservation: effect,
-        preparation: effect,
-        execution: effect,
-        projection: mfm_program::ConclusionBound::new(frame_bytes).unwrap(),
-    };
     expand_program(
         EntryPointId::new("mfm.test/transaction@1").unwrap(),
         &EvmTransaction::<InitialContext, RecoveryRecipe>::new(
             input.transaction.command().binding().clone(),
-            bounds,
         ),
         input,
         mfm_program::ProgramLimits::new(0),

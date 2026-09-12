@@ -125,22 +125,16 @@ impl Operation for ErrorProgram {
         body: &mut OperationExpansion<Number, Number, Number>,
     ) -> mfm_program::Result<()> {
         match self {
-            Self::Pure => body.pure::<FailingPure, Identity<Number>>(
-                NoParams,
-                Occurrence::new(),
-                ConclusionBound::new(65536)?,
-            ),
+            Self::Pure => body.pure::<FailingPure, Identity<Number>>(NoParams, Occurrence::new()),
             Self::Read => body.read::<FailingRead, Observation, Identity<Number>>(
                 &Binding { route: 7 },
                 NoParams,
                 Occurrence::new(),
-                ConclusionBound::new(65536)?,
             ),
             Self::Effect => body.effect::<FailingEffect, Mutation, Identity<Number>>(
                 &Binding { route: 8 },
                 NoParams,
                 Occurrence::new(),
-                EffectBounds::new(65536, 65536, 8, 65536)?,
             ),
         }
     }

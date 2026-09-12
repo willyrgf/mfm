@@ -1,9 +1,9 @@
 # Persisted and public surfaces
 
-Program v6 is one strict checked canonical document requiring `domain: "mfm.program.v6"`. It
+Program v7 is one strict checked canonical document requiring `domain: "mfm.program.v7"`. It
 contains the entry point, admitted-context contract and exact initial value ref, root success/failure
 contracts, and an ordered State sequence with selected recovery policies, maps, checkpoints, and
-finite lifecycle bounds. There is no public wire DTO parallel to `Program`.
+finite semantic recovery allowances. There is no public wire DTO parallel to `Program`.
 
 Journal persists only canonical `mfm.run.frame.v4` frames. Genesis records the exact Program and C0.
 Later frames are a fused Pure conclusion, a fused Read intent/evidence/outcome conclusion, an Effect

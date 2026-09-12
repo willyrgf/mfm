@@ -16,10 +16,9 @@ use mfm_journal::{
     EffectConclusion, EncodedRunFrame, JournalHistory, JournalObject, StoredRunBytes,
 };
 use mfm_program::{
-    expand_program, CapabilityInjection, ConclusionBound, EffectBounds, EffectState, FromNever,
-    Identity, Never, NoContext, NoParams, Occurrence, Operation, OperationExpansion,
-    PreparationError, ProgramError, ProgramLimits, ProposedStateOutcome, PureState, ReadState,
-    State,
+    expand_program, CapabilityInjection, EffectState, FromNever, Identity, Never, NoContext,
+    NoParams, Occurrence, Operation, OperationExpansion, PreparationError, ProgramError,
+    ProgramLimits, ProposedStateOutcome, PureState, ReadState, State,
 };
 use mfm_program_derive::MfmValue;
 use mfm_runtime::{
@@ -165,11 +164,7 @@ impl<K: MfmValueTrait> Operation for GenericProgram<K> {
         &self,
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
-        body.pure::<GenericState<K>, Identity<Never>>(
-            NoParams,
-            Occurrence::new(),
-            ConclusionBound::new(65536)?,
-        )
+        body.pure::<GenericState<K>, Identity<Never>>(NoParams, Occurrence::new())
     }
 }
 
@@ -215,11 +210,7 @@ impl Operation for PureProgram {
         &self,
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
-        body.pure::<Increment, Identity<Never>>(
-            NoParams,
-            Occurrence::new(),
-            ConclusionBound::new(65536)?,
-        )
+        body.pure::<Increment, Identity<Never>>(NoParams, Occurrence::new())
     }
 }
 
@@ -366,7 +357,6 @@ impl Operation for ReadProgram {
             &Binding { route: 7 },
             NoParams,
             Occurrence::new(),
-            ConclusionBound::new(65536)?,
         )
     }
 }
@@ -510,7 +500,6 @@ impl Operation for EffectProgram {
             &Binding { route: 8 },
             NoParams,
             Occurrence::new(),
-            EffectBounds::new(65536, 65536, 8, 65536)?,
         )
     }
 }
@@ -753,7 +742,7 @@ async fn missing_effect_adapter_is_rejected_before_store_io() {
 }
 
 #[tokio::test]
-async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
+async fn pure_and_zero_state_programs_restore_without_reserving_future_recovery_capacity() {
     let store = Arc::new(MemoryStore::new());
     let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder.register_pure::<Increment>().expect("Pure State");
@@ -763,7 +752,7 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
         EntryPointId::new("mfm.test.runtime/pure@1").expect("entry point"),
         &PureProgram,
         &Number { value: 4 },
-        ProgramLimits::new(0),
+        ProgramLimits::new(u32::MAX),
     )
     .expect("Program");
 

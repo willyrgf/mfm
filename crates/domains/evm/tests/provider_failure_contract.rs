@@ -3,7 +3,7 @@ use mfm_evm::*;
 use mfm_values::{canonicalize_mfm_value, MfmValue};
 
 #[test]
-fn causal_contracts_fit_their_exact_descriptors_and_declared_error_allowance() {
+fn causal_contracts_preserve_bounded_evidence_through_exact_descriptors() {
     #[derive(Debug)]
     struct Cycle;
     impl std::fmt::Display for Cycle {
@@ -82,7 +82,6 @@ fn causal_contracts_fit_their_exact_descriptors_and_declared_error_allowance() {
         cause: EvmOperationalError::new(EvmOperationalKind::Unavailable, source),
     };
     let bytes = canonicalize_mfm_value(&error).unwrap().0;
-    assert!(bytes.as_bytes().len() <= 10240);
     assert_eq!(
         serde_json::from_slice::<EvmTransactionOperationalError>(bytes.as_bytes()).unwrap(),
         error

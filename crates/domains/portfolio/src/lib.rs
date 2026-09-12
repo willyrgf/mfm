@@ -5,7 +5,6 @@
 //! collection is expanded into an ordinary sequential child State; there is no runtime collection
 //! loop, output map, parallel branch, or multi-result join.
 
-mod bounds;
 pub use enrichment::{
     plan_enrichment, EnrichmentProvenance, PortfolioAdmission, PortfolioEnrichmentOutput,
     ResolvePortfolioAssets, PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID,
@@ -1087,16 +1086,13 @@ where
         config.quotes.clone(),
         admission,
     )?;
-    let (conclusion_bound, child_bounds) = bounds::conclusion_bounds(&input)?;
     let checked_collections = input
         .collections
         .iter()
-        .zip(child_bounds)
-        .map(|(demand, bound)| {
+        .map(|demand| {
             CollectEvmBalances::<PortfolioContinuation>::new(
                 demand.route_ref.clone(),
                 demand.request.clone(),
-                bound,
             )
             .map_err(|_| PortfolioError::Program)
         })
@@ -1104,7 +1100,6 @@ where
     let root = PortfolioOperation::<S> {
         terminal: std::marker::PhantomData,
         checked_collections,
-        conclusion_bound,
     };
     let program = expand_program(entry, &root, &input, mfm_program::ProgramLimits::new(0))
         .map_err(|_| PortfolioError::Program)?;
@@ -1114,7 +1109,6 @@ where
 struct PortfolioOperation<S> {
     terminal: std::marker::PhantomData<fn() -> S>,
     checked_collections: Vec<CollectEvmBalances<PortfolioContinuation>>,
-    conclusion_bound: mfm_program::ConclusionBound,
 }
 
 impl<S> Operation for PortfolioOperation<S>
@@ -1145,16 +1139,11 @@ where
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
         use mfm_program::{Identity, NoParams, Occurrence};
-        body.pure::<InitializePortfolio, Identity<Self::Failure>>(
-            NoParams,
-            Occurrence::new(),
-            self.conclusion_bound,
-        )?;
+        body.pure::<InitializePortfolio, Identity<Self::Failure>>(NoParams, Occurrence::new())?;
         for child in &self.checked_collections {
             body.pure::<EnterPortfolioCollection, Identity<Self::Failure>>(
                 NoParams,
                 Occurrence::new(),
-                self.conclusion_bound,
             )?;
             body.operation::<CollectEvmBalances<PortfolioContinuation>, MapEvmBalanceFailure>(
                 child, NoParams,
@@ -1162,10 +1151,9 @@ where
             body.pure::<ResumePortfolioCollection, Identity<Self::Failure>>(
                 NoParams,
                 Occurrence::new(),
-                self.conclusion_bound,
             )?;
         }
-        body.pure::<S, Identity<Self::Failure>>(NoParams, Occurrence::new(), self.conclusion_bound)
+        body.pure::<S, Identity<Self::Failure>>(NoParams, Occurrence::new())
     }
 }
 
@@ -1229,3 +1217,6 @@ impl mfm_program::ClassifyError for PortfolioSnapshotFailure {
         }
     }
 }
+
+#[cfg(test)]
+mod snapshot_extremes;

@@ -5,7 +5,7 @@ use mfm_program::*;
 use mfm_program_derive::MfmValue;
 use mfm_runtime::{
     EffectAdapterOutcome, InvocationFailure, RunViewState, Runtime, RuntimeAssemblyBuilder,
-    RuntimeError, SizeResource,
+    RuntimeError,
 };
 use mfm_store::{MemoryStore, Store};
 use serde::{Deserialize, Serialize};
@@ -123,7 +123,6 @@ impl Operation for Flow {
             &Number { value: 1 },
             NoParams,
             Occurrence::new(),
-            EffectBounds::new(65536, 65536, 2, 65536)?,
         )
     }
 }
@@ -145,7 +144,6 @@ impl Operation for StopFlow {
             &Number { value: 1 },
             NoParams,
             Occurrence::new(),
-            EffectBounds::new(65536, 65536, 2, 65536)?,
         )
     }
 }

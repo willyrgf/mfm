@@ -8,7 +8,7 @@ struct Caller {
 }
 
 #[test]
-fn balance_context_bound_covers_full_width_observation_and_consolidation() {
+fn full_width_observation_and_consolidation_preserve_checked_values() {
     let maximum = EvmU256::new(
         "115792089237316195423570985008687907853269984665640564039457584007913129639935",
     )
@@ -37,15 +37,6 @@ fn balance_context_bound_covers_full_width_observation_and_consolidation() {
         let caller = Caller {
             accumulated: "\"".repeat(65536),
         };
-        let context_bound = request
-            .maximum_context_bytes(
-                mfm_values::canonicalize_mfm_value(&caller)
-                    .expect("caller qualification")
-                    .0
-                    .as_bytes()
-                    .len() as u64,
-            )
-            .unwrap();
         let mut input = EvmBalanceContext::new(
             request.clone(),
             caller,
@@ -70,7 +61,6 @@ fn balance_context_bound_covers_full_width_observation_and_consolidation() {
             raw_balance: maximum.clone(),
         };
         input.validate().unwrap();
-        assert!(bytes(&input).unwrap() <= context_bound);
         let intent =
             <ConfirmBalanceAnchor<Caller> as ReadState<EvmAnchorRead>>::prepare(&input).unwrap();
         let (_, intent_ref) = mfm_values::canonicalize_mfm_value(&intent).unwrap();
@@ -98,7 +88,6 @@ fn balance_context_bound_covers_full_width_observation_and_consolidation() {
                 ..
             }
         ));
-        assert!(bytes(&failure).unwrap() <= 512);
         let mut invalid = serde_json::to_value(&failure).unwrap();
         invalid["value"]["observed"] = invalid["value"]["previous"].clone();
         assert!(serde_json::from_value::<EvmBalanceFailure>(invalid).is_err());
@@ -109,16 +98,11 @@ fn balance_context_bound_covers_full_width_observation_and_consolidation() {
         else {
             panic!("maximum valid observation must succeed")
         };
-        assert!(bytes(&output).unwrap() <= context_bound);
         let ProposedStateOutcome::Success { output } =
             ConsolidateBalanceCollection::<Caller>::evaluate(output).unwrap()
         else {
             panic!("maximum valid collection must consolidate")
         };
-        let actual = bytes(&output).unwrap();
-        assert!(
-            actual <= context_bound,
-            "{token_count} tokens: {actual} > {context_bound}"
-        );
+        mfm_values::canonicalize_mfm_value(&output).unwrap();
     }
 }

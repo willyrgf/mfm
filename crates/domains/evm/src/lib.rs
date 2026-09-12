@@ -44,7 +44,6 @@ macro_rules! impl_checked_deserialize {
     };
 }
 
-mod bounds;
 mod provider_failure;
 pub use provider_failure::*;
 mod recovery;
@@ -66,13 +65,13 @@ pub use transaction::{
     CallAt, CallCreatedAt, Called, CheckedCallPlan, CheckedCreatePlan, CheckedTargetCallPlan,
     CompletedContext, CompletedTransactionFacts, CreateAt, Created, Eip1559TransactionCommand,
     EvmAddress, EvmAuthorityEpoch, EvmChainInstance, EvmHash, EvmNonceReservationEffect,
-    EvmTransaction, EvmTransactionBinding, EvmTransactionBounds, EvmTransactionEffect,
-    EvmTransactionFailure, EvmTransactionOutcome, EvmTransactionPreparationEffect,
-    EvmTransactionReceipt, EvmTransactionRoute, EvmTransactionSettlement, EvmTransactionSetup,
-    EvmU256, ExecuteEvmTransaction, ExecutedContext, ExecutedTransactionFacts, NonceDomain,
-    PrepareEvmTransaction, PreparedContext, PreparedEvmTransaction, PreparedEvmTransactionEvidence,
-    PreparedTransactionFacts, ProjectEvmTransactionOutcome, Replaced, Reservation, ReserveEvmNonce,
-    ReservedContext, ReservedEvmTransaction, TransactionRecipe, TransactionSuccessMode,
+    EvmTransaction, EvmTransactionBinding, EvmTransactionEffect, EvmTransactionFailure,
+    EvmTransactionOutcome, EvmTransactionPreparationEffect, EvmTransactionReceipt,
+    EvmTransactionRoute, EvmTransactionSettlement, EvmU256, ExecuteEvmTransaction, ExecutedContext,
+    ExecutedTransactionFacts, NonceDomain, PrepareEvmTransaction, PreparedContext,
+    PreparedEvmTransaction, PreparedEvmTransactionEvidence, PreparedTransactionFacts,
+    ProjectEvmTransactionOutcome, Replaced, Reservation, ReserveEvmNonce, ReservedContext,
+    ReservedEvmTransaction, TransactionRecipe, TransactionSuccessMode,
     EVM_TRANSACTION_EFFECT_CAPABILITY_ID, MAX_EVM_CALLDATA_BYTES, MAX_EVM_INITCODE_BYTES,
 };
 
@@ -2043,7 +2042,6 @@ fn advance_balance_context<K: MfmValueTrait>(
 pub struct CollectEvmBalances<K: MfmValueTrait> {
     binding_ref: ContentRef,
     request: EvmBalanceRequest,
-    conclusion_bound: mfm_program::ConclusionBound,
     marker: PhantomData<fn() -> K>,
 }
 
@@ -2053,18 +2051,15 @@ impl<K: MfmValueTrait> CollectEvmBalances<K> {
     /// Human-readable product inspection description.
     pub const DESCRIPTION: &'static str = "Authors one checked EVM balance collection.";
 
-    /// Constructs a checked sequence with the caller's complete continuation/root closure bound.
-    /// The bound must cover every reachable conclusion, including mapped root failures.
+    /// Constructs a sequence with the checked request and adapter binding.
     pub fn new(
         binding_ref: ContentRef,
         request: EvmBalanceRequest,
-        conclusion_bound: mfm_program::ConclusionBound,
     ) -> Result<Self, EvmDomainError> {
         request.validate()?;
         Ok(Self {
             binding_ref,
             request,
-            conclusion_bound,
             marker: PhantomData,
         })
     }
@@ -2101,46 +2096,39 @@ impl<K: MfmValueTrait> Operation for CollectEvmBalances<K> {
                 &self.binding_ref,
                 NoParams,
                 Occurrence::new(),
-                self.conclusion_bound,
             )?;
             body.read::<ReadInitialAnchor<K>, EvmAnchorRead, Identity<EvmBalanceFailure>>(
                 &self.binding_ref,
                 NoParams,
                 Occurrence::new(),
-                self.conclusion_bound,
             )?;
             if source.token.is_some() {
                 body.read::<ReadTokenDecimals<K>, EvmBalanceRead, Identity<EvmBalanceFailure>>(
                     &self.binding_ref,
                     NoParams,
                     Occurrence::new(),
-                    self.conclusion_bound,
                 )?;
                 body.read::<ReadTokenBalance<K>, EvmBalanceRead, Identity<EvmBalanceFailure>>(
                     &self.binding_ref,
                     NoParams,
                     Occurrence::new(),
-                    self.conclusion_bound,
                 )?;
             } else {
                 body.read::<ReadNativeBalance<K>, EvmBalanceRead, Identity<EvmBalanceFailure>>(
                     &self.binding_ref,
                     NoParams,
                     Occurrence::new(),
-                    self.conclusion_bound,
                 )?;
             }
             body.read::<ConfirmBalanceAnchor<K>, EvmAnchorRead, Identity<EvmBalanceFailure>>(
                 &self.binding_ref,
                 NoParams,
                 Occurrence::new(),
-                self.conclusion_bound,
             )?;
         }
         body.pure::<ConsolidateBalanceCollection<K>, Identity<EvmBalanceFailure>>(
             NoParams,
             Occurrence::new(),
-            self.conclusion_bound,
         )
     }
 }
@@ -2463,12 +2451,7 @@ mod tests {
             })
             .collect();
         let request = EvmBalanceRequest::new(sources, 18).unwrap();
-        let operation = CollectEvmBalances::<Continuation>::new(
-            route(),
-            request.clone(),
-            mfm_program::ConclusionBound::new(65536).unwrap(),
-        )
-        .unwrap();
+        let operation = CollectEvmBalances::<Continuation>::new(route(), request.clone()).unwrap();
         let mut input = EvmBalanceContext::new(
             request,
             Continuation { value: 1 },
@@ -2520,3 +2503,6 @@ mod tests {
         .is_err());
     }
 }
+
+#[cfg(test)]
+mod balance_extremes;

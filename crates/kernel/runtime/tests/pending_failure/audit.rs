@@ -91,24 +91,20 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
             reason: StopCode::StateRetryExhausted
         }
     );
-    let error = cold.resume(&run).await.err().unwrap();
-    assert!(matches!(
-        error,
-        InvocationFailure::Execution {
-            error: RuntimeError::SizeLimit {
-                resource: SizeResource::PendingFailures,
-                ..
-            },
-            ..
-        }
-    ));
-    assert_eq!(calls.lock().unwrap().len(), 2);
+    let InvocationFailure::RecoveryStopped {
+        observed: repeated, ..
+    } = cold.resume(&run).await.err().unwrap()
+    else {
+        panic!("unresolved command remains available after exhausted recovery")
+    };
+    assert_eq!(repeated.head_sequence(), 5);
     {
         let calls = calls.lock().unwrap();
-        assert_eq!(calls[0], calls[1]);
+        assert_eq!(calls.len(), 3);
+        assert!(calls.iter().all(|call| call == &calls[0]));
     }
     let retained = cold.read(&run).await.unwrap();
-    assert_eq!(retained.head_digest(), observed.head_digest());
+    assert_eq!(retained.head_digest(), repeated.head_digest());
     let history =
         JournalHistory::qualify(&run, store.load_run(&run).await.unwrap().unwrap()).unwrap();
     assert_eq!(
@@ -116,7 +112,7 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
             .records()
             .filter(|record| matches!(record, JournalRecord::EffectAdapterFailed { .. }))
             .count(),
-        2
+        3
     );
 }
 
@@ -595,94 +591,4 @@ async fn competing_pending_failures_report_only_the_winning_exact_head_candidate
         1
     );
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
-}
-
-#[tokio::test]
-async fn undersized_failure_frame_rejects_acknowledgement_and_preserves_settlement_authority() {
-    struct Undersized;
-    impl Operation for Undersized {
-        type Input = Number;
-        type Output = Number;
-        type Failure = Never;
-        fn validate_input(&self, _: &Number) -> mfm_program::Result<()> {
-            Ok(())
-        }
-        fn expand(
-            &self,
-            scope: &mut OperationExpansion<Number, Number, Never>,
-        ) -> mfm_program::Result<()> {
-            scope.effect::<Execute, Submit, Identity<Never>>(
-                &Number { value: 1 },
-                NoParams,
-                Occurrence::new(),
-                EffectBounds::new(65536, 65536, 1, 1)?,
-            )
-        }
-    }
-    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-    builder.register_effect::<Execute, Submit>().unwrap();
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let seen = Arc::clone(&calls);
-    builder
-        .register_effect_adapter::<Submit, _, _>(
-            Number { value: 1 },
-            move |id, reference, command| {
-                let attempt = {
-                    let mut seen = seen.lock().unwrap();
-                    seen.push((id.clone(), reference.clone(), command.value));
-                    seen.len()
-                };
-                Box::pin(async move {
-                    if attempt == 1 {
-                        Err(AdapterError::Operational(Cause::Timeout {
-                            deadline_ms: 5000,
-                        }))
-                    } else {
-                        Ok(EffectAdapterOutcome::Settled(Number {
-                            value: command.value,
-                        }))
-                    }
-                })
-            },
-        )
-        .unwrap();
-    let runtime = Runtime::new(builder.finish(), Arc::new(MemoryStore::new()));
-    let run = RunId::from_digest(DigestBytes::from_array([97; 32]));
-    let program = expand_program(
-        EntryPointId::new("mfm.test/failure-bound@1").unwrap(),
-        &Undersized,
-        &Number { value: 9 },
-        ProgramLimits::new(0),
-    )
-    .unwrap();
-    let error = runtime
-        .start(run.clone(), program, Number { value: 9 })
-        .await
-        .err()
-        .unwrap();
-    assert!(matches!(
-        error,
-        InvocationFailure::Execution {
-            error: RuntimeError::SizeLimit {
-                resource: SizeResource::DeclaredFrame,
-                ..
-            },
-            ..
-        }
-    ));
-    let cold = runtime.read(&run).await.unwrap();
-    assert_eq!(cold.head_sequence(), 2);
-    assert!(matches!(
-        cold.state(),
-        RunViewState::EffectPending {
-            latest_failure: None,
-            ..
-        }
-    ));
-    let settled = runtime.resume(&run).await.unwrap();
-    assert_eq!(settled.head_sequence(), 3);
-    assert!(matches!(settled.state(), RunViewState::Succeeded(_)));
-    let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0], calls[1]);
 }

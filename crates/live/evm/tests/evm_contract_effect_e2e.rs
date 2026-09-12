@@ -413,7 +413,6 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         EntryPointId::new("mfm.test.evm-effect/run@1").expect("entry point"),
         &EffectFixtureOperation {
             binding: binding.clone(),
-            bound: fixture_bound(&input),
         },
         &input,
         mfm_program::ProgramLimits::new(1),
@@ -548,10 +547,7 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     };
     let fresh_program = expand_program(
         EntryPointId::new("mfm.test.evm-effect/wallet-call@1").unwrap(),
-        &WalletTransaction::new(
-            binding.clone(),
-            transaction_bounds(fixture_bound(&fresh_input)),
-        ),
+        &WalletTransaction::new(binding.clone()),
         &fresh_input,
         mfm_program::ProgramLimits::new(1),
     )

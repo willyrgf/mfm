@@ -76,12 +76,7 @@ impl Operation for Plan {
         &self,
         scope: &mut OperationExpansion<NoParams, NoParams, Never>,
     ) -> mfm_program::Result<()> {
-        scope.effect::<Execute, Submission, Identity<Never>>(
-            &NoParams,
-            NoParams,
-            Occurrence::new(),
-            EffectBounds::new(65536, 65536, 1, 65536)?,
-        )
+        scope.effect::<Execute, Submission, Identity<Never>>(&NoParams, NoParams, Occurrence::new())
     }
 }
 
