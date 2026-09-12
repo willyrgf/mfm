@@ -232,7 +232,7 @@ Sources: [capability errors](../crates/kernel/capabilities/src/lib.rs),
 [engine](../crates/kernel/runtime/src/engine.rs), [reports](../crates/kernel/runtime/src/report.rs),
 [Journal](../crates/kernel/journal/src/lib.rs), [public view](../crates/app/src/run_view.rs).
 
-Read and pending Effect operational records retain the qualified original cause and State context.
+Read and pending Effect operational records retain the qualified original cause and complete executed input.
 `RuntimeError::Store(#[from] StoreError)` preserves the supplied Store error, and
 `RunRequestError::Invocation(#[source] InvocationFailure)` keeps its typed wrapper. These are useful
 preservation paths, but their sources are often already coarse values.

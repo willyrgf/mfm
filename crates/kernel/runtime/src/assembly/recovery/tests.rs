@@ -1,8 +1,8 @@
 use super::*;
 use mfm_ids::StableId;
 use mfm_program::{
-    Classification, ExecutionPhase, HandlerBinding, Identity, NoContext, NoParams, ProgramError,
-    RecoveryAllowances, StateExecutionError,
+    Classification, ClassifyError, ExecutionPhase, HandlerBinding, Identity, NoParams,
+    ProgramError, RecoveryAllowances, StateExecutionError,
 };
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
@@ -23,12 +23,6 @@ struct PortfolioFailure {
 #[serde(rename_all = "snake_case")]
 enum ProviderError {
     Unavailable,
-}
-
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-struct EvmContext {
-    source: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, MfmValue)]
@@ -79,11 +73,11 @@ impl Handler for RetryRead {
     }
     fn handle(
         _: &NoParams,
-        incident: &IncidentSummary,
+        classification: Classification,
         context: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
         Ok(
-            if incident.classification == Classification::Retryable
+            if classification == Classification::Retryable
                 && context.phase() == ExecutionPhase::Read
             {
                 RecoveryRequest::RetryState
@@ -102,7 +96,7 @@ impl Handler for ConfiguredHandler {
     }
     fn handle(
         params: &Offset,
-        _: &IncidentSummary,
+        _: Classification,
         _: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
         Ok(if params.value == 10 {
@@ -118,20 +112,14 @@ fn handlers_associate_exact_parameters_without_incident_dispatch() {
     let binding = HandlerBinding::new::<ConfiguredHandler>(Offset { value: 10 }).unwrap();
     let mut builder = RuntimeAssemblyBuilder::new().unwrap();
     assert!(matches!(
-        builder
-            .finish()
-            .inner
-            .associate_recovery(classify::<EvmFailure, ProviderError>, &binding),
+        builder.finish().inner.associate_recovery(&binding),
         Err(RuntimeError::IncompatibleAssembly)
     ));
     builder = RuntimeAssemblyBuilder::new().unwrap();
     builder.register_handler::<ConfiguredHandler>().unwrap();
     builder.register_handler::<ConfiguredHandler>().unwrap();
     let assembly = builder.finish();
-    let policy = assembly
-        .inner
-        .associate_recovery(classify::<EvmFailure, ProviderError>, &binding)
-        .unwrap();
+    let policy = assembly.inner.associate_recovery(&binding).unwrap();
     let context = RecoveryContext::new(
         ExecutionPhase::Read,
         RecoveryAllowances::new(2, 1),
@@ -139,39 +127,18 @@ fn handlers_associate_exact_parameters_without_incident_dispatch() {
         &[],
         &[],
     );
-    for incident in [
-        QualifiedIncident::Domain(&qualify_hot(EvmFailure { source: 7 }).unwrap()),
-        QualifiedIncident::Adapter {
-            original: &qualify_hot(ProviderError::Unavailable).unwrap(),
-        },
-    ] {
-        assert_eq!(
-            policy.request(incident, &context).unwrap(),
-            RecoveryRequest::RetryState
-        );
-    }
+    assert_eq!(
+        policy.request(Classification::Retryable, &context).unwrap(),
+        RecoveryRequest::RetryState
+    );
     let mut wire = serde_json::to_value(&binding).unwrap();
     wire["params"] =
         serde_json::to_value(mfm_program::PolicyParams::new(&NoParams).unwrap()).unwrap();
     let mismatched: HandlerBinding = serde_json::from_value(wire).unwrap();
     assert!(matches!(
-        assembly
-            .inner
-            .associate_recovery(classify::<EvmFailure, ProviderError>, &mismatched),
+        assembly.inner.associate_recovery(&mismatched),
         Err(RuntimeError::IncompatibleAssembly)
     ));
-}
-
-#[test]
-fn recovery_framework_units_have_distinct_exact_contracts() {
-    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-    builder.register_value::<NoParams>().unwrap();
-    builder.register_value::<NoContext>().unwrap();
-    assert_ne!(
-        nominal_contract_ref::<NoParams>().unwrap(),
-        nominal_contract_ref::<NoContext>().unwrap()
-    );
-    assert_eq!(qualify_hot(NoParams).unwrap().canonical.as_bytes(), b"null");
 }
 
 #[test]
@@ -267,7 +234,6 @@ impl mfm_program::State for EvmRead {
     }
 }
 impl mfm_program::ReadState<Observation> for EvmRead {
-    type AdapterContext = EvmContext;
     fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_program::PreparationError> {
         Ok(Offset { value: input.value })
     }
@@ -282,15 +248,6 @@ impl mfm_program::ReadState<Observation> for EvmRead {
             failure: EvmFailure {
                 source: evidence.value,
             },
-        })
-    }
-    fn adapter_context(
-        input: &Offset,
-        _: &Offset,
-        _: &ProviderError,
-    ) -> std::result::Result<EvmContext, StateExecutionError> {
-        Ok(EvmContext {
-            source: input.value,
         })
     }
 }
@@ -378,10 +335,7 @@ fn handler_parameters_change_program_identity_and_survive_cold_association() {
         assert_eq!(
             executable.declarations[0]
                 .recovery
-                .request(
-                    QualifiedIncident::Domain(&qualify_hot(EvmFailure { source: 7 }).unwrap()),
-                    &context,
-                )
+                .request(Classification::Retryable, &context,)
                 .unwrap(),
             expected
         );

@@ -9,7 +9,7 @@ and finite recovery allowances. Success advances linearly; recovery is a Runtime
 Source code authors the sequence through a deterministic `Operation`. Its required `validate_input`
 check establishes agreement between root planning assumptions and the initial value before expansion.
 `expand_program(entry, operation, input, limits)` qualifies that input and commits its exact value
-reference into Program v7. Runtime rejects input substitution before genesis or provider entry;
+reference into Program v8. Runtime rejects input substitution before genesis or provider entry;
 cold reconstruction checks genesis against the same commitment. Parent planning and deterministic
 States establish future child input agreement. No authoring callback enters Runtime. Multiple RunIds
 may reuse the same exact Program/input pair.
@@ -21,13 +21,13 @@ and injection setup remain authoring-only. Program retains one selected handler 
 its exact parameter contract and qualified immutable parameters, checked target list, and allowances.
 Selection is occurrence override, nearest explicit enclosing Operation, then framework Stop.
 Replacement changes parameters and targets together; allowances inherit independently, including
-explicit zero. Program v7 rejects superseded descriptors.
+explicit zero. Program v8 rejects superseded descriptors.
 
 Changes to intrinsic classification semantics require revision of the exact error contract identity.
 Errors implement the pure `ClassifyError` projection into `Retryable`, `OutcomeUnknown`,
-`InputInvalidated` or `Permanent`. Runtime statically associates these projections with typed State
-registration. A common `IncidentSummary` carries source and classification to one static handler;
-original causes and State context remain separately retained. There is no classifier registry,
+`InputInvalidated` or `Permanent`. Typed Runtime runners classify each retained original cause directly. One static handler receives
+that `Classification` and the derived `RecoveryContext`; original causes, complete executed inputs
+and exact requests remain separately retained. There is no classifier registry,
 policy-facing mapped incident, or classifier veto. Runtime alone authorizes the handler request.
 `StandardRecovery` retries Retryable Reads/pending Effects and restarts invalidated Pure/Read input
 only with exactly one declared target that is eligible; all other combinations stop. Custom handlers
@@ -89,7 +89,7 @@ skip the after hook, which is a success continuation. Every suffix is checked be
 
 Runtime admits `(RunId, Program, C0)`, appends genesis, folds the qualified history, and executes only
 the selected declaration. Pure and Read append one fused conclusion; a Read frame contains intent,
-accepted evidence and domain outcome, or the original operational error and State-owned context.
+accepted evidence and domain outcome, or the original operational error and complete executed input.
 The same frame commits any retry, restart or terminal stop. Accepted recovery spends local/global
 allowance, advances the visit identity and yields; cold reconstruction restores that exact decision
 without invoking a classifier, handler or adapter. Checkpoints retain their active typed input and
@@ -98,17 +98,17 @@ restart drops later checkpoint snapshots. An acknowledged Effect prevents restar
 Effect execution first appends the complete command and derived `EffectId`, and enters the adapter
 only after known insertion. `Pending` returns the unchanged view without a record. Operational
 failure atomically appends `EffectAdapterFailed` with matching execution position, original cause,
-State context and a `PendingDecision` of Retry or Stop. Retry spends local/global allowance and
+complete executed input and a `PendingDecision` of Retry or Stop. Retry spends local/global allowance and
 yields; exhausted allowance records Stop. Stop ends the invocation with `RecoveryStopped`. Both
 retain position, visit, command and EffectId, without a separate failure-record quota.
 Explicit resume reconciles that same command. Accepted settlement appends
 its conclusion; settled Effects cannot retry or restart. Zero-State Programs terminate at genesis.
 
-Journal owns the `mfm.run.frame.v4` canonical wire, recursive exact-byte SHA-256 heads, exact
+Journal owns the `mfm.run.frame.v5` canonical wire, recursive exact-byte SHA-256 heads, exact
 frame-local object closure and `EffectPrepared -> EffectAdapterFailed* -> EffectConcluded`
 adjacency. A complete prefix may end after prepare or any failure. Runtime's sole fold validates
 positions, decisions, counters and retained command authority. Cold pending views expose the latest
-original error/context and decision without invoking classification or handlers. Earlier failures
+original error, complete input, command, EffectId and decision without invoking classification or handlers. Earlier failures
 remain in Journal. Store atomically inserts a sealed frame at the exact head or writes nothing.
 
 No operational result is acknowledged before known failure insertion. A losing candidate returns
@@ -188,7 +188,7 @@ Executable identity hashes a canonical domain-separated descriptor containing im
 version, stage, explicit recipe identity, ordered selected slots, and outcome mode. Exact value
 schemas remain additional ABI association keys. Cold fold re-prepares retained commands from
 exact snapshots and does not rerun completed interpretation. A completed transaction adds seven
-frames after admission; this uses the current Program v7, Journal frame v4, and Runtime fold contracts.
+frames after admission; this uses the current Program v8, Journal frame v5, and Runtime fold contracts.
 
 Terminal reporting uses existing checked execution facts and settlement outcomes; there is no
 separate persisted outcome projection. Products own root failure policy. The fixture reports retain

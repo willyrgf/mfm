@@ -1,3 +1,7 @@
+#[derive(Debug, serde::Serialize, serde::Deserialize, mfm_program_derive::MfmValue)]
+#[serde(deny_unknown_fields)]
+struct EmptyContext {}
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::num::NonZeroU64;
@@ -1004,7 +1008,7 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
         EvmChainIdentityRead,
     };
     use mfm_program::{
-        Identity, NoContext, NoParams, Occurrence, Operation, OperationExpansion, ProgramLimits,
+        Identity, NoParams, Occurrence, Operation, OperationExpansion, ProgramLimits,
     };
     use mfm_runtime::{FailureCauseView, RunViewState, Runtime, RuntimeAssemblyBuilder};
     use std::sync::Arc;
@@ -1013,7 +1017,7 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
         target: EvmPhysicalTarget,
     }
     impl Operation for ReadChain {
-        type Input = EvmBalanceContext<NoContext>;
+        type Input = EvmBalanceContext<EmptyContext>;
         type Output = Self::Input;
         type Failure = EvmBalanceFailure;
         fn validate_input(&self, _: &Self::Input) -> mfm_program::Result<()> {
@@ -1023,7 +1027,7 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
             &self,
             body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
         ) -> mfm_program::Result<()> {
-            body.read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead, Identity<EvmBalanceFailure>>(
+            body.read::<CheckChainIdentity<EmptyContext>, EvmChainIdentityRead, Identity<EvmBalanceFailure>>(
                 &self.target.binding_ref().unwrap(), NoParams, Occurrence::new())
         }
     }
@@ -1052,7 +1056,7 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
         .unwrap();
         let input = EvmBalanceContext::new(
             request,
-            NoContext,
+            EmptyContext {},
             0,
             "collection".into(),
             target.binding_ref().unwrap(),
@@ -1069,7 +1073,7 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
         .unwrap();
         let mut builder = RuntimeAssemblyBuilder::new().unwrap();
         builder
-            .register_read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead>()
+            .register_read::<CheckChainIdentity<EmptyContext>, EvmChainIdentityRead>()
             .unwrap();
         crate::register_evm_reads(&mut builder, target, Arc::new(stub.provider())).unwrap();
         let runtime = Runtime::new(builder.finish(), Arc::new(mfm_store::MemoryStore::new()));
@@ -1086,7 +1090,7 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
             let FailureCauseView::Adapter(incident) = report.cause() else {
                 panic!("provider cause");
             };
-            let error = incident.error.decode::<EvmOperationalError>().unwrap();
+            let error = incident.error().decode::<EvmOperationalError>().unwrap();
             assert_eq!(
                 mfm_program::ClassifyError::classify(&error),
                 mfm_program::Classification::Retryable

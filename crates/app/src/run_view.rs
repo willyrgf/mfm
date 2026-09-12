@@ -45,9 +45,52 @@ enum State<'a> {
 
 #[derive(Serialize)]
 struct PendingFailure<'a> {
-    error: Object<'a>,
-    state_context: Object<'a>,
+    #[serde(flatten)]
+    incident: Incident<'a>,
     decision: mfm_runtime::PendingDecision,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum Incident<'a> {
+    Read {
+        error: Object<'a>,
+        input: Object<'a>,
+        intent: Object<'a>,
+    },
+    Effect {
+        error: Object<'a>,
+        input: Object<'a>,
+        command: Object<'a>,
+        effect_id: &'a EffectId,
+    },
+}
+impl<'a> Incident<'a> {
+    fn new(incident: &'a mfm_runtime::AdapterIncidentView) -> Result<Self, serde_json::Error> {
+        use mfm_runtime::AdapterIncidentView;
+        Ok(match incident {
+            AdapterIncidentView::Read {
+                error,
+                input,
+                intent,
+            } => Self::Read {
+                error: Object::new(error)?,
+                input: Object::new(input)?,
+                intent: Object::new(intent)?,
+            },
+            AdapterIncidentView::Effect {
+                error,
+                input,
+                command,
+                effect_id,
+            } => Self::Effect {
+                error: Object::new(error)?,
+                input: Object::new(input)?,
+                command: Object::new(command)?,
+                effect_id,
+            },
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -97,8 +140,7 @@ impl Serialize for SerializableRunView<'_> {
                     .as_ref()
                     .map(|failure| {
                         Ok::<_, serde_json::Error>(PendingFailure {
-                            error: Object::new(&failure.incident.error)?,
-                            state_context: Object::new(&failure.incident.state_context)?,
+                            incident: Incident::new(&failure.incident)?,
                             decision: failure.decision,
                         })
                     })
@@ -147,8 +189,8 @@ impl Serialize for Invocation<'_> {
             RecoveryStopped {
                 observed: SerializableRunView<'a>,
                 reason: &'static str,
-                error: Object<'a>,
-                state_context: Object<'a>,
+                #[serde(flatten)]
+                incident: Incident<'a>,
             },
         }
         match self.0 {
@@ -172,8 +214,7 @@ impl Serialize for Invocation<'_> {
             } => Wire::RecoveryStopped {
                 observed: SerializableRunView::new(observed),
                 reason: stop_reason(*reason),
-                error: Object::new(&incident.error).map_err(S::Error::custom)?,
-                state_context: Object::new(&incident.state_context).map_err(S::Error::custom)?,
+                incident: Incident::new(incident).map_err(S::Error::custom)?,
             },
         }
         .serialize(serializer)

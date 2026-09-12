@@ -51,16 +51,11 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
     };
     assert_eq!(failure.decision, PendingDecision::Retry);
     assert!(matches!(
-        failure.incident.error.decode::<Cause>().unwrap(),
+        failure.incident.error().decode::<Cause>().unwrap(),
         Cause::Timeout { deadline_ms: 5000 }
     ));
     assert_eq!(
-        failure
-            .incident
-            .state_context
-            .decode::<Number>()
-            .unwrap()
-            .value,
+        failure.incident.input().decode::<Number>().unwrap().value,
         9
     );
     let cold = Runtime::new(build(), store.clone());
@@ -188,7 +183,7 @@ async fn standard_unknown_stop_is_durable_and_explicit_resume_can_settle() {
         }
     );
     assert!(matches!(
-        failure.incident.error.decode::<Cause>().unwrap(),
+        failure.incident.error().decode::<Cause>().unwrap(),
         Cause::Timeout { deadline_ms: 5000 }
     ));
     assert_eq!(calls.lock().unwrap().len(), 1);
@@ -422,17 +417,18 @@ async fn cancellation_at_failure_append_exposes_only_the_complete_committed_pref
 
 #[tokio::test]
 async fn cold_fold_validates_pending_failure_position_and_stop_reasons() {
-    for (wrong_visit, reason, run_limit, valid) in [
-        (true, StopCode::Requested, 0, false),
-        (false, StopCode::Requested, 0, true),
-        (false, StopCode::EffectBarrier, 0, true),
-        (false, StopCode::StateRetryExhausted, 0, true),
-        (false, StopCode::RunExhausted, 0, true),
-        (false, StopCode::RunExhausted, 1, false),
-        (false, StopCode::StateRestartExhausted, 0, false),
-        (false, StopCode::PureRetry, 0, false),
-        (false, StopCode::CheckpointUnavailable, 0, false),
-        (false, StopCode::EffectSettled, 0, false),
+    for (wrong_visit, reported_input, reason, run_limit, valid) in [
+        (false, 8, StopCode::Requested, 0, false),
+        (true, 9, StopCode::Requested, 0, false),
+        (false, 9, StopCode::Requested, 0, true),
+        (false, 9, StopCode::EffectBarrier, 0, true),
+        (false, 9, StopCode::StateRetryExhausted, 0, true),
+        (false, 9, StopCode::RunExhausted, 0, true),
+        (false, 9, StopCode::RunExhausted, 1, false),
+        (false, 9, StopCode::StateRestartExhausted, 0, false),
+        (false, 9, StopCode::PureRetry, 0, false),
+        (false, 9, StopCode::CheckpointUnavailable, 0, false),
+        (false, 9, StopCode::EffectSettled, 0, false),
     ] {
         let store = Arc::new(MemoryStore::new());
         let mut builder = RuntimeAssemblyBuilder::new().unwrap();
@@ -468,8 +464,10 @@ async fn cold_fold_validates_pending_failure_position_and_stop_reasons() {
         }
         let (error, error_ref) =
             mfm_values::canonicalize_mfm_value(&Cause::Timeout { deadline_ms: 5000 }).unwrap();
-        let (context, context_ref) =
-            mfm_values::canonicalize_mfm_value(&Number { value: 9 }).unwrap();
+        let (context, context_ref) = mfm_values::canonicalize_mfm_value(&Number {
+            value: reported_input,
+        })
+        .unwrap();
         let history =
             JournalHistory::qualify(&run, store.load_run(&run).await.unwrap().unwrap()).unwrap();
         let frame = history
@@ -569,8 +567,8 @@ async fn competing_pending_failures_report_only_the_winning_exact_head_candidate
                     panic!("audited failure")
                 };
                 assert_eq!(
-                    incident.error.value_ref(),
-                    failure.incident.error.value_ref()
+                    incident.error().value_ref(),
+                    failure.incident.error().value_ref()
                 );
                 observed
             }

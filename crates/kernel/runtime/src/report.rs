@@ -1,5 +1,5 @@
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
-use mfm_ids::{ContentRef, ExecutionPosition, RunId};
+use mfm_ids::{ContentRef, EffectId, ExecutionPosition, RunId};
 use mfm_journal::StopCode;
 use mfm_program::{RecoveryDenial, RecoveryLimit, RecoveryUsage, StopReason};
 use mfm_values::{
@@ -9,12 +9,43 @@ use serde::Serialize;
 
 use crate::{Result, RunView, RuntimeError, ValueView};
 
-/// Qualified capability cause and State-owned meaning; neither implies settlement.
-pub struct AdapterIncidentView {
-    /// Original operational error.
-    pub error: ValueView,
-    /// State-owned context for that exact error.
-    pub state_context: ValueView,
+/// Qualified operational cause and the complete facts of its adapter invocation.
+pub enum AdapterIncidentView {
+    /// A duplicate-safe observation that failed operationally.
+    Read {
+        /// Original operational error.
+        error: ValueView,
+        /// Complete executed State input.
+        input: ValueView,
+        /// Exact prepared observational intent.
+        intent: ValueView,
+    },
+    /// An unresolved Effect invocation; these facts do not imply settlement.
+    Effect {
+        /// Original operational error.
+        error: ValueView,
+        /// Complete executed State input.
+        input: ValueView,
+        /// Retained command, unchanged by this failure.
+        command: ValueView,
+        /// Existing command authority.
+        effect_id: EffectId,
+    },
+}
+
+impl AdapterIncidentView {
+    /// Returns the original operational error.
+    pub const fn error(&self) -> &ValueView {
+        match self {
+            Self::Read { error, .. } | Self::Effect { error, .. } => error,
+        }
+    }
+    /// Returns the complete executed State input.
+    pub const fn input(&self) -> &ValueView {
+        match self {
+            Self::Read { input, .. } | Self::Effect { input, .. } => input,
+        }
+    }
 }
 
 /// Original retained cause and, for domain failures, its mapped root value.
@@ -26,7 +57,7 @@ pub enum FailureCauseView {
         /// Independently mapped root failure.
         root: ValueView,
     },
-    /// A contextualized Read execution failure.
+    /// A Read execution failure with its original invocation facts.
     Adapter(AdapterIncidentView),
 }
 
@@ -68,9 +99,20 @@ impl FailureReport {
                 original: Object<'a>,
                 root: Object<'a>,
             },
-            Adapter {
+            #[serde(rename = "adapter")]
+            Read {
+                mode: &'static str,
                 error: Object<'a>,
-                state_context: Object<'a>,
+                input: Object<'a>,
+                intent: Object<'a>,
+            },
+            #[serde(rename = "adapter")]
+            Effect {
+                mode: &'static str,
+                error: Object<'a>,
+                input: Object<'a>,
+                command: Object<'a>,
+                effect_id: &'a EffectId,
             },
         }
         #[derive(Serialize)]
@@ -88,7 +130,7 @@ impl FailureReport {
             cause: Cause<'a>,
         }
         let wire = Report {
-            domain: "mfm.failure-report.v2",
+            domain: "mfm.failure-report.v3",
             position,
             reason,
             usage: Usage {
@@ -101,9 +143,27 @@ impl FailureReport {
                     original: object(original)?,
                     root: object(root)?,
                 },
-                FailureCauseView::Adapter(incident) => Cause::Adapter {
-                    error: object(&incident.error)?,
-                    state_context: object(&incident.state_context)?,
+                FailureCauseView::Adapter(AdapterIncidentView::Read {
+                    error,
+                    input,
+                    intent,
+                }) => Cause::Read {
+                    mode: "read",
+                    error: object(error)?,
+                    input: object(input)?,
+                    intent: object(intent)?,
+                },
+                FailureCauseView::Adapter(AdapterIncidentView::Effect {
+                    error,
+                    input,
+                    command,
+                    effect_id,
+                }) => Cause::Effect {
+                    mode: "effect",
+                    error: object(error)?,
+                    input: object(input)?,
+                    command: object(command)?,
+                    effect_id,
                 },
             },
         };
@@ -124,7 +184,7 @@ impl FailureReport {
             SchemaKind::PersistedContract,
             None,
             "mfm-failure-report",
-            mfm_ids::SchemaVersion::new("2").map_err(|_| RuntimeError::Internal)?,
+            mfm_ids::SchemaVersion::new("3").map_err(|_| RuntimeError::Internal)?,
             SchemaShape::CanonicalJsonTerminal {
                 profile: CanonicalJsonProfile::GeneralFloatFree,
             },

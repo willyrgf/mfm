@@ -39,14 +39,6 @@ impl PureState for FailingPure {
     }
 }
 impl ReadState<Observation> for FailingRead {
-    type AdapterContext = NoContext;
-    fn adapter_context(
-        _: &Self::Input,
-        _: &Intent,
-        _: &OperationalFailure,
-    ) -> Result<NoContext, mfm_program::StateExecutionError> {
-        Ok(NoContext)
-    }
     fn prepare(input: &Number) -> Result<Intent, PreparationError> {
         Ok(Intent { value: input.value })
     }
@@ -58,14 +50,6 @@ impl ReadState<Observation> for FailingRead {
     }
 }
 impl EffectState<Mutation> for FailingEffect {
-    type AdapterContext = NoContext;
-    fn adapter_context(
-        _: &Self::Input,
-        _: &Command,
-        _: &OperationalFailure,
-    ) -> Result<NoContext, mfm_program::StateExecutionError> {
-        Ok(NoContext)
-    }
     fn prepare(input: &Number) -> Result<Command, PreparationError> {
         Ok(Command { value: input.value })
     }

@@ -17,8 +17,6 @@ pub enum Execution {
         evidence_contract_ref: ContentRef,
         /// Exact operational error schema.
         error_contract_ref: ContentRef,
-        /// Exact State adapter context schema.
-        context_contract_ref: ContentRef,
         /// Pre-bound observational route.
         binding_ref: ContentRef,
     },
@@ -32,8 +30,6 @@ pub enum Execution {
         evidence_contract_ref: ContentRef,
         /// Exact operational error schema.
         error_contract_ref: ContentRef,
-        /// Exact State adapter context schema.
-        context_contract_ref: ContentRef,
         /// Pre-bound mutating route.
         binding_ref: ContentRef,
     },
@@ -125,7 +121,7 @@ impl Program {
             return Err(ProgramError::InvalidContract);
         }
         let wire = ProgramWire {
-            domain: "mfm.program.v7".into(),
+            domain: "mfm.program.v8".into(),
             entry_point_id: entry_point_id.clone(),
             admitted_context_contract_ref: admitted.clone(),
             initial_value_ref: initial_value_ref.clone(),
@@ -144,7 +140,7 @@ impl Program {
             SchemaKind::PersistedContract,
             None,
             "mfm-program-document",
-            SchemaVersion::new("7").map_err(|_| ProgramError::InvalidContract)?,
+            SchemaVersion::new("8").map_err(|_| ProgramError::InvalidContract)?,
             SchemaShape::CanonicalJsonTerminal {
                 profile: CanonicalJsonProfile::GeneralFloatFree,
             },
@@ -179,7 +175,7 @@ impl Program {
             .map_err(|_| ProgramError::Canonical)?;
         let wire: ProgramWire =
             serde_json::from_slice(bytes).map_err(|_| ProgramError::Canonical)?;
-        if wire.domain != "mfm.program.v7" {
+        if wire.domain != "mfm.program.v8" {
             return Err(ProgramError::Canonical);
         }
         let program = Self::new(

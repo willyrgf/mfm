@@ -53,7 +53,7 @@ struct NestedEffect;
 impl EffectCapabilityContract for NestedEffect {
     type Command = Value;
     type Evidence = Value;
-    type OperationalError = NoContext;
+    type OperationalError = TestError;
     fn contract_id() -> mfm_capabilities::Result<StableId> {
         Effect::contract_id()
     }
@@ -66,14 +66,6 @@ impl EffectCapabilityContract for NestedEffect {
     }
 }
 impl EffectState<NestedEffect> for Pass {
-    type AdapterContext = NoContext;
-    fn adapter_context(
-        _: &Value,
-        _: &Value,
-        _: &NoContext,
-    ) -> std::result::Result<NoContext, StateExecutionError> {
-        Ok(NoContext)
-    }
     fn prepare(input: &Value) -> std::result::Result<Value, PreparationError> {
         <Self as EffectState<Effect>>::prepare(input)
     }

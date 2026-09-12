@@ -107,8 +107,8 @@ pub enum ReadConclusion<T> {
     AdapterFailed {
         /// Unmodified capability error object.
         error: T,
-        /// State-owned contextualization object.
-        state_context: T,
+        /// Complete executed State input.
+        input: T,
         /// Recorded recovery or terminal execution-failure decision.
         decision: RecoveryDecision,
     },
@@ -163,11 +163,11 @@ impl<T> ReadConclusion<T> {
             },
             Self::AdapterFailed {
                 error,
-                state_context,
+                input,
                 decision,
             } => ReadConclusion::AdapterFailed {
                 error: f(error),
-                state_context: f(state_context),
+                input: f(input),
                 decision: *decision,
             },
         }

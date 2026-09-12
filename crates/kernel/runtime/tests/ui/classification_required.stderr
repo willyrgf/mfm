@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `mfm_program::NoParams: ClassifyError` is not satisfied
-  --> tests/ui/classification_required.rs:63:23
+  --> tests/ui/classification_required.rs:55:23
    |
-63 |         .read::<Read, Observation, Identity<Never>>(
+55 |         .read::<Read, Observation, Identity<Never>>(
    |                       ^^^^^^^^^^^ the trait `ClassifyError` is not implemented for `mfm_program::NoParams`
    |
 help: the trait `ClassifyError` is implemented for `mfm_program::Never`
@@ -19,9 +19,9 @@ note: required by a bound in `mfm_program::OperationExpansion::<I, O, F>::read`
    |                              ^^^^^^^^^^^^^ required by this bound in `OperationExpansion::<I, O, F>::read`
 
 error[E0277]: the trait bound `mfm_program::NoParams: ClassifyError` is not satisfied
-  --> tests/ui/classification_required.rs:73:32
+  --> tests/ui/classification_required.rs:65:32
    |
-73 |         .register_read::<Read, Observation>()
+65 |         .register_read::<Read, Observation>()
    |                                ^^^^^^^^^^^ the trait `ClassifyError` is not implemented for `mfm_program::NoParams`
    |
 help: the trait `ClassifyError` is implemented for `mfm_program::Never`

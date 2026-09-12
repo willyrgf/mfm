@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
 //! Exact canonical run frames and qualified append-only history.
 //!
-//! Journal owns the one RunFrameV3 encoder and qualifier. Store moves opaque
+//! Journal owns the one frame v5 encoder and qualifier. Store moves opaque
 //! bytes; Runtime receives only borrowed qualified record and object views.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -155,8 +155,8 @@ pub enum JournalRecord<'a> {
         position: ExecutionPosition,
         /// Original qualified operational cause.
         original: JournalObject<'a>,
-        /// State-owned deterministic context.
-        state_context: JournalObject<'a>,
+        /// Complete executed State input.
+        input: JournalObject<'a>,
         /// Committed invocation decision.
         decision: PendingDecision,
     },
@@ -236,7 +236,7 @@ impl EncodedRunFrame {
         &self.head_digest
     }
 
-    /// Returns exact canonical RunFrameV3 bytes.
+    /// Returns exact canonical frame v5 bytes.
     pub fn canonical_bytes(&self) -> &[u8] {
         self.canonical.as_bytes()
     }
@@ -419,19 +419,19 @@ impl JournalHistory {
         &self,
         position: ExecutionPosition,
         original: JournalObject<'_>,
-        state_context: JournalObject<'_>,
+        input: JournalObject<'_>,
         decision: PendingDecision,
     ) -> Result<EncodedRunFrame> {
         self.construct_successor(
             Record::EffectAdapterFailed {
                 position,
                 original: original.content_ref.clone(),
-                state_context: state_context.content_ref.clone(),
+                input: input.content_ref.clone(),
                 decision,
             },
             vec![
                 (original.content_ref.clone(), original.canonical),
-                (state_context.content_ref.clone(), state_context.canonical),
+                (input.content_ref.clone(), input.canonical),
             ],
         )
     }
@@ -590,12 +590,12 @@ impl EncodedRunFrame {
             Record::EffectAdapterFailed {
                 position,
                 original,
-                state_context,
+                input,
                 decision,
             } => JournalRecord::EffectAdapterFailed {
                 position: *position,
                 original: self.object(original),
-                state_context: self.object(state_context),
+                input: self.object(input),
                 decision: *decision,
             },
             Record::EffectConcluded { evidence, outcome } => JournalRecord::EffectConcluded {
@@ -647,7 +647,7 @@ enum Record {
     EffectAdapterFailed {
         position: ExecutionPosition,
         original: ContentRef,
-        state_context: ContentRef,
+        input: ContentRef,
         decision: PendingDecision,
     },
     EffectConcluded {
@@ -761,12 +761,10 @@ fn record_refs(record: &Record) -> BTreeSet<&ContentRef> {
             refs.insert(command);
         }
         Record::EffectAdapterFailed {
-            original,
-            state_context,
-            ..
+            original, input, ..
         } => {
             refs.insert(original);
-            refs.insert(state_context);
+            refs.insert(input);
         }
         Record::EffectConcluded { evidence, outcome } => {
             refs.insert(evidence);
@@ -798,7 +796,7 @@ fn encode_frame(
         })
         .collect::<Result<Vec<_>>>()?;
     let wire = FrameWire {
-        domain: "mfm.run.frame.v4".to_owned(),
+        domain: "mfm.run.frame.v5".to_owned(),
         run_id: run_id.clone(),
         run_sequence,
         previous_head_digest: previous_head_digest.cloned(),
@@ -861,7 +859,7 @@ fn qualify_frame(bytes: &[u8]) -> std::result::Result<EncodedRunFrame, JournalEr
         record,
         objects: wire_objects,
     } = wire;
-    if domain != "mfm.run.frame.v4"
+    if domain != "mfm.run.frame.v5"
         || run_sequence == 0
         || run_sequence > MAX_RUN_FRAMES
         || (run_sequence == 1) != previous_head_digest.is_none()

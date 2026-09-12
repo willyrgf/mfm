@@ -1,6 +1,6 @@
 # mfm-program
 
-Program owns the immutable `mfm-program-document@7` sequence with the `mfm.program.v7` domain.
+Program owns the immutable `mfm-program-document@8` sequence with the `mfm.program.v8` domain.
 An Operation performs deterministic source authoring; its input check and expansion commit the
 exact initial value, State contracts, resolved policies, root failure maps, checkpoints and finite
 recovery allowances. Runtime associates typed implementations and owns execution and recovery. Old graph bytes
@@ -60,7 +60,7 @@ assert_eq!(program.declarations().len(), 2);
 ```
 
 `ClassifyError` projects exact typed causes into four intrinsic semantics: Retryable,
-OutcomeUnknown, InputInvalidated and Permanent. One static `Handler` consumes the common summary;
+OutcomeUnknown, InputInvalidated and Permanent. One static `Handler` consumes the intrinsic `Classification`;
 Runtime alone authorizes and schedules recovery. `HandlerBinding::new::<H>(params)` is inherited
 from the nearest explicit Operation setting; `Occurrence::handler` replaces it for one occurrence.
 Parameters and checkpoint targets replace together. Allowance overrides remain independent.

@@ -137,22 +137,23 @@ async fn planned_native_and_token_collections_execute_and_reconstruct_typed_fail
                 };
                 assert_eq!(
                     incident
-                        .error
+                        .error()
                         .decode::<EvmOperationalError>()
                         .unwrap()
                         .kind(),
                     mfm_evm::EvmOperationalKind::Timeout
                 );
-                let context = incident
-                    .state_context
-                    .decode::<EvmBalanceAdapterContext>()
+                let mfm_runtime::AdapterIncidentView::Read { input, intent, .. } = incident else {
+                    panic!("Read invocation facts")
+                };
+                let context = input
+                    .decode::<EvmBalanceContext<mfm_portfolio::PortfolioContinuation>>()
                     .unwrap();
-                assert_eq!(context.collection_ordinal(), 0);
-                assert_eq!(context.source_ordinal(), 0);
-                assert!(matches!(
-                    context.intent().subject(),
-                    EvmReadSubject::TokenDecimals { .. }
-                ));
+                let expected = <ReadTokenDecimals<mfm_portfolio::PortfolioContinuation> as mfm_program::ReadState<EvmBalanceRead>>::prepare(&context).unwrap();
+                assert_eq!(intent.decode::<EvmReadIntent>().unwrap(), expected);
+                let wire = serde_json::to_value(&context).unwrap();
+                assert_eq!(wire["metadata"]["collection_ordinal"], 0);
+                assert_eq!(wire["completed"].as_array().unwrap().len(), 0);
             }
             _ => panic!("expected terminal domain result"),
         }
@@ -285,7 +286,7 @@ async fn enrichment_retains_native_and_nonzero_candidates_and_never_filters_prov
                 };
                 assert_eq!(
                     incident
-                        .error
+                        .error()
                         .decode::<EvmOperationalError>()
                         .unwrap()
                         .kind(),

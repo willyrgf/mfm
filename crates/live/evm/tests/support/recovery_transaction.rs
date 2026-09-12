@@ -167,13 +167,26 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
                 observed, incident, ..
             }) if scenario == 2 => {
                 assert_eq!(observed.head_sequence(), 7);
-                assert!(matches!(
-                    incident
-                        .state_context
-                        .decode::<EvmTransactionAdapterContext>()
-                        .unwrap(),
-                    EvmTransactionAdapterContext::Execution { .. }
-                ));
+                let mfm_runtime::AdapterIncidentView::Effect {
+                    input,
+                    command,
+                    effect_id,
+                    ..
+                } = &*incident
+                else {
+                    panic!("retained Effect invocation facts")
+                };
+                input.decode::<PreparedContext<Input, Recipe>>().unwrap();
+                let command = command.decode::<PreparedEvmTransaction>().unwrap();
+                assert_eq!(command.reserved().reservation().nonce(), u64::MAX - 1);
+                let RunViewState::EffectPending {
+                    effect_id: retained,
+                    ..
+                } = observed.state()
+                else {
+                    panic!("pending authority")
+                };
+                assert_eq!(effect_id, retained);
                 let cold = runtime.read(&run).await.unwrap();
                 assert_eq!(cold.head_digest(), observed.head_digest());
                 let (

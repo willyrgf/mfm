@@ -1,3 +1,7 @@
+#[derive(Debug, serde::Serialize, serde::Deserialize, mfm_program_derive::MfmValue)]
+#[serde(deny_unknown_fields)]
+struct EmptyContext {}
+
 use mfm_capabilities::AdapterError;
 use mfm_evm::*;
 use mfm_ids::{DigestBytes, EntryPointId, RunId, StableId};
@@ -14,7 +18,7 @@ use std::{
     },
 };
 
-type Context = EvmBalanceContext<NoContext>;
+type Context = EvmBalanceContext<EmptyContext>;
 struct RetryRead;
 impl Handler for RetryRead {
     type Params = NoParams;
@@ -23,10 +27,10 @@ impl Handler for RetryRead {
     }
     fn handle(
         _: &NoParams,
-        incident: &IncidentSummary,
+        classification: Classification,
         _: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
-        Ok(match incident.classification {
+        Ok(match classification {
             Classification::Retryable => RecoveryRequest::RetryState,
             _ => RecoveryRequest::Stop,
         })
@@ -56,8 +60,8 @@ impl Operation for Child {
         } else {
             Occurrence::new()
         };
-        body.read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead, Identity<EvmBalanceFailure>>(&self.target.binding_ref().map_err(|_| ProgramError::InvalidContract)?, NoParams, first)?;
-        body.read::<ReadInitialAnchor<NoContext>, EvmAnchorRead, Identity<EvmBalanceFailure>>(
+        body.read::<CheckChainIdentity<EmptyContext>, EvmChainIdentityRead, Identity<EvmBalanceFailure>>(&self.target.binding_ref().map_err(|_| ProgramError::InvalidContract)?, NoParams, first)?;
+        body.read::<ReadInitialAnchor<EmptyContext>, EvmAnchorRead, Identity<EvmBalanceFailure>>(
             &self
                 .target
                 .binding_ref()
@@ -90,7 +94,7 @@ impl Operation for Parent {
         })?;
         body.allowances(RecoveryAllowances::new(1, 0))?;
         if self.direct {
-            body.read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead, MapEvmBalanceFailure>(
+            body.read::<CheckChainIdentity<EmptyContext>, EvmChainIdentityRead, MapEvmBalanceFailure>(
                 &self
                     .child
                     .target
@@ -128,7 +132,7 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
         .unwrap();
         let input = Context::new(
             request,
-            NoContext,
+            EmptyContext {},
             0,
             "collection".into(),
             target.binding_ref().unwrap(),
@@ -153,10 +157,10 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
         let mut builder = RuntimeAssemblyBuilder::new().unwrap();
         builder.register_map::<MapEvmBalanceFailure>().unwrap();
         builder
-            .register_read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead>()
+            .register_read::<CheckChainIdentity<EmptyContext>, EvmChainIdentityRead>()
             .unwrap();
         builder
-            .register_read::<ReadInitialAnchor<NoContext>, EvmAnchorRead>()
+            .register_read::<ReadInitialAnchor<EmptyContext>, EvmAnchorRead>()
             .unwrap();
         builder.register_handler::<Stop>().unwrap();
         builder.register_handler::<RetryRead>().unwrap();
@@ -242,12 +246,9 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
             let FailureCauseView::Adapter(incident) = report.cause() else {
                 panic!("original adapter context")
             };
+            let input = incident.input().decode::<Context>().unwrap();
             assert_eq!(
-                incident
-                    .state_context
-                    .decode::<EvmBalanceAdapterContext>()
-                    .unwrap()
-                    .collection_ordinal(),
+                serde_json::to_value(input).unwrap()["metadata"]["collection_ordinal"],
                 0
             );
         }
@@ -271,10 +272,10 @@ impl Handler for RestartCollection {
     }
     fn handle(
         _: &NoParams,
-        incident: &IncidentSummary,
+        classification: Classification,
         context: &RecoveryContext<'_>,
     ) -> std::result::Result<RecoveryRequest, StateExecutionError> {
-        Ok(match incident.classification {
+        Ok(match classification {
             Classification::InputInvalidated => context
                 .eligible_restart_targets()
                 .first()
@@ -285,10 +286,10 @@ impl Handler for RestartCollection {
         })
     }
 }
-struct RecoveringCollection(CollectEvmBalances<NoContext>);
+struct RecoveringCollection(CollectEvmBalances<EmptyContext>);
 impl Operation for RecoveringCollection {
     type Input = Context;
-    type Output = EvmBalanceCollectionCompletion<NoContext>;
+    type Output = EvmBalanceCollectionCompletion<EmptyContext>;
     type Failure = PortfolioSnapshotFailure;
     fn validate_input(&self, input: &Context) -> mfm_program::Result<()> {
         self.0.validate_input(input)
@@ -300,7 +301,7 @@ impl Operation for RecoveringCollection {
         let checkpoint = body.checkpoint::<Context>()?;
         body.handler(HandlerBinding::new::<RestartCollection>(NoParams)?.checkpoint(&checkpoint)?)?;
         body.allowances(RecoveryAllowances::new(0, 1))?;
-        body.operation::<CollectEvmBalances<NoContext>, MapEvmBalanceFailure>(&self.0, NoParams)
+        body.operation::<CollectEvmBalances<EmptyContext>, MapEvmBalanceFailure>(&self.0, NoParams)
     }
 }
 
@@ -333,7 +334,7 @@ async fn changed_anchor_restarts_the_real_collection_and_preserves_its_acknowled
         .unwrap();
         let input = Context::new(
             request.clone(),
-            NoContext,
+            EmptyContext {},
             0,
             "collection".into(),
             target.binding_ref().unwrap(),
@@ -352,19 +353,19 @@ async fn changed_anchor_restarts_the_real_collection_and_preserves_its_acknowled
         let mut builder = RuntimeAssemblyBuilder::new().unwrap();
         builder.register_map::<MapEvmBalanceFailure>().unwrap();
         builder
-            .register_read::<CheckChainIdentity<NoContext>, EvmChainIdentityRead>()
+            .register_read::<CheckChainIdentity<EmptyContext>, EvmChainIdentityRead>()
             .unwrap();
         builder
-            .register_read::<ReadInitialAnchor<NoContext>, EvmAnchorRead>()
+            .register_read::<ReadInitialAnchor<EmptyContext>, EvmAnchorRead>()
             .unwrap();
         builder
-            .register_read::<ConfirmBalanceAnchor<NoContext>, EvmAnchorRead>()
+            .register_read::<ConfirmBalanceAnchor<EmptyContext>, EvmAnchorRead>()
             .unwrap();
         builder
-            .register_read::<ReadNativeBalance<NoContext>, EvmBalanceRead>()
+            .register_read::<ReadNativeBalance<EmptyContext>, EvmBalanceRead>()
             .unwrap();
         builder
-            .register_pure::<ConsolidateBalanceCollection<NoContext>>()
+            .register_pure::<ConsolidateBalanceCollection<EmptyContext>>()
             .unwrap();
         builder.register_handler::<RestartCollection>().unwrap();
         builder.register_handler::<Stop>().unwrap();
@@ -437,7 +438,7 @@ async fn changed_anchor_restarts_the_real_collection_and_preserves_its_acknowled
             panic!("coherent restarted collection")
         };
         let (_, _, _, number, hash, balances, total) = value
-            .decode::<EvmBalanceCollectionCompletion<NoContext>>()
+            .decode::<EvmBalanceCollectionCompletion<EmptyContext>>()
             .unwrap()
             .into_parts();
         assert_eq!(number, "8");
@@ -468,13 +469,13 @@ async fn changed_anchor_restarts_the_real_collection_and_preserves_its_acknowled
         assert_eq!(
             serde_json::to_value(
                 cold_value
-                    .decode::<EvmBalanceCollectionCompletion<NoContext>>()
+                    .decode::<EvmBalanceCollectionCompletion<EmptyContext>>()
                     .unwrap()
             )
             .unwrap(),
             serde_json::to_value(
                 value
-                    .decode::<EvmBalanceCollectionCompletion<NoContext>>()
+                    .decode::<EvmBalanceCollectionCompletion<EmptyContext>>()
                     .unwrap()
             )
             .unwrap()

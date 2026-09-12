@@ -69,7 +69,7 @@ Ordinary routed errors are exactly `{"code":"...","message":"..."}` with the sha
 Application error serializer, except that a start request after identity selection also carries its
 `run_id`. Ambiguous run appends add the shared tagged `recovery` object and `last_observed` (possibly null).
 Other stopped Runtime calls add a tagged `invocation` containing their RunId and last observation,
-or the unresolved Effect observation, typed operational incident/context and stop reason. These
+or the unresolved Effect observation, typed operational cause, complete input and retained command facts and stop reason. These
 are request failures, not newly appended terminal run states. Stopped recovery returns 503;
 execution faults use their reviewed request status. REST-local errors cover
 invalid body/query/media/path/header, fallback 404/405, body size, and RunId entropy failure. HTTP
@@ -107,7 +107,7 @@ uses `capacity_arithmetic_overflow` without fabricated measurements. CLI uses ex
 body limits do not impose a response-size limit.
 
 Pending Effect views include `latest_failure`: null before the first audited failure, otherwise
-`error`, `state_context` (qualified value objects) and `decision` (`{"kind":"retry"}` or
+`mode: "effect"`, qualified `error`, complete `input`, retained `command`, `effect_id`, and `decision` (`{"kind":"retry"}` or
 `{"kind":"stop","reason":"requested"}`, with other reviewed stop codes). Every acknowledged
 pending operational outcome advances the durable head. Retry preserves the command/EffectId and
 spends recovery allowance; Stop ends the invocation while explicit progress may resume it.

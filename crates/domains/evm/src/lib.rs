@@ -47,10 +47,7 @@ macro_rules! impl_checked_deserialize {
 mod provider_failure;
 pub use provider_failure::*;
 mod recovery;
-pub use recovery::{
-    AnchoredCallAdapterContext, EvmBalanceAdapterContext, EvmTransactionAdapterContext,
-    EvmTransactionOperationalError,
-};
+pub use recovery::EvmTransactionOperationalError;
 mod anchored_call;
 pub mod custody;
 mod transaction;
@@ -1916,24 +1913,6 @@ fn consolidate_balance_collection<K: MfmValueTrait>(
 macro_rules! impl_balance_access {
     ($state:ident, $capability:ty, $prepare:path, $interpret:path) => {
         impl<K: MfmValueTrait> ReadState<$capability> for $state<K> {
-            type AdapterContext = EvmBalanceAdapterContext;
-            fn adapter_context(
-                input: &Self::Input,
-                intent: &EvmReadIntent,
-                _: &EvmOperationalError,
-            ) -> std::result::Result<Self::AdapterContext, mfm_program::StateExecutionError> {
-                let expected = $prepare(input).map_err(|_| mfm_program::StateExecutionError)?;
-                if &expected != intent {
-                    return Err(mfm_program::StateExecutionError);
-                }
-                EvmBalanceAdapterContext::new(
-                    input.metadata.collection_ordinal,
-                    u32::try_from(input.completed.len())
-                        .map_err(|_| mfm_program::StateExecutionError)?,
-                    intent.clone(),
-                )
-                .map_err(|_| mfm_program::StateExecutionError)
-            }
             fn prepare(
                 input: &Self::Input,
             ) -> std::result::Result<
@@ -2464,43 +2443,6 @@ mod tests {
         assert!(operation.validate_input(&context()).is_err());
         input.request.sources.reverse();
         assert!(operation.validate_input(&input).is_err());
-    }
-
-    #[test]
-    fn balance_operational_context_retains_intent_and_rejects_local_mismatch() {
-        type Read = CheckChainIdentity<Continuation>;
-        let input = context();
-        let intent = <Read as ReadState<EvmChainIdentityRead>>::prepare(&input).unwrap();
-        let incident = <Read as ReadState<EvmChainIdentityRead>>::adapter_context(
-            &input,
-            &intent,
-            &EvmOperationalError::new(EvmOperationalKind::Unavailable, crate::ProviderFailure {
-        method: crate::EvmRpcMethod::ChainId, stage: crate::RpcStage::Send,
-        failure: crate::ProviderFailureKind::Client,
-        diagnostics: serde_json::from_str(r#"{"response":null,"sources":{"layers":[],"end":"unavailable"},"omissions":[],"omissions_truncated":false}"#).unwrap(),
-    }),
-        )
-        .unwrap();
-        assert_eq!(incident.collection_ordinal(), 0);
-        assert_eq!(incident.source_ordinal(), 0);
-        assert_eq!(incident.intent(), &intent);
-        mfm_values::canonicalize_mfm_value(&incident).unwrap();
-        let different = EvmReadIntent::new(
-            NonZeroU64::new(2).unwrap(),
-            route(),
-            EvmReadSubject::ChainIdentity,
-        )
-        .unwrap();
-        assert!(<Read as ReadState<EvmChainIdentityRead>>::adapter_context(
-            &input,
-            &different,
-            &EvmOperationalError::new(EvmOperationalKind::Unavailable, crate::ProviderFailure {
-        method: crate::EvmRpcMethod::ChainId, stage: crate::RpcStage::Send,
-        failure: crate::ProviderFailureKind::Client,
-        diagnostics: serde_json::from_str(r#"{"response":null,"sources":{"layers":[],"end":"unavailable"},"omissions":[],"omissions_truncated":false}"#).unwrap(),
-    })
-        )
-        .is_err());
     }
 }
 

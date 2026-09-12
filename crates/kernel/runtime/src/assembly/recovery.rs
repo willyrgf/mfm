@@ -1,16 +1,15 @@
 use super::*;
 use mfm_program::{
-    ClassifyError, Handler, HandlerAbi, HandlerBinding, IncidentSource, IncidentSummary, MapAbi,
-    MapBinding, PolicyParams, RecoveryContext, RecoveryRequest, ValueMap,
+    Classification, Handler, HandlerAbi, HandlerBinding, MapAbi, MapBinding, PolicyParams,
+    RecoveryContext, RecoveryRequest, ValueMap,
 };
 
 #[cfg(test)]
 mod tests;
 
 type MapCallback = fn(&QualifiedValue, QualifiedValue) -> Result<QualifiedValue>;
-pub(super) type ClassifyCallback = fn(&QualifiedIncident<'_>) -> Result<IncidentSummary>;
 type HandleCallback =
-    fn(&QualifiedValue, &IncidentSummary, &RecoveryContext<'_>) -> Result<RecoveryRequest>;
+    fn(&QualifiedValue, Classification, &RecoveryContext<'_>) -> Result<RecoveryRequest>;
 
 struct Registration<F> {
     implementation_type: TypeId,
@@ -23,13 +22,7 @@ pub(super) struct Registrations {
     handlers: BTreeMap<HandlerAbi, Registration<HandleCallback>>,
 }
 
-pub(crate) enum QualifiedIncident<'a> {
-    Domain(&'a QualifiedValue),
-    Adapter { original: &'a QualifiedValue },
-}
-
 pub(crate) struct AssociatedRecovery {
-    classify: ClassifyCallback,
     handle: HandleCallback,
     handler_params: QualifiedValue,
 }
@@ -54,11 +47,10 @@ impl AssociatedRootMap {
 impl AssociatedRecovery {
     pub(crate) fn request(
         &self,
-        incident: QualifiedIncident<'_>,
+        classification: Classification,
         context: &RecoveryContext<'_>,
     ) -> Result<RecoveryRequest> {
-        let summary = (self.classify)(&incident)?;
-        (self.handle)(&self.handler_params, &summary, context)
+        (self.handle)(&self.handler_params, classification, context)
     }
 }
 
@@ -147,7 +139,6 @@ impl AssemblyInner {
 
     pub(crate) fn associate_recovery(
         &self,
-        classify: ClassifyCallback,
         handler: &HandlerBinding,
     ) -> Result<AssociatedRecovery> {
         let handle = self
@@ -157,7 +148,6 @@ impl AssemblyInner {
             .ok_or(RuntimeError::IncompatibleAssembly)?
             .callback;
         Ok(AssociatedRecovery {
-            classify,
             handle,
             handler_params: self.policy_params(handler.params(), handler.abi().params())?,
         })
@@ -197,25 +187,11 @@ fn map<M: ValueMap>(params: &QualifiedValue, input: QualifiedValue) -> Result<Qu
     qualify_hot(output).map_err(RuntimeError::from)
 }
 
-pub(super) fn classify<D: ClassifyError, E: ClassifyError>(
-    incident: &QualifiedIncident<'_>,
-) -> Result<IncidentSummary> {
-    Ok(match incident {
-        QualifiedIncident::Domain(value) => IncidentSummary {
-            source: IncidentSource::State,
-            classification: borrow::<D>(value)?.classify(),
-        },
-        QualifiedIncident::Adapter { original, .. } => IncidentSummary {
-            source: IncidentSource::Adapter,
-            classification: borrow::<E>(original)?.classify(),
-        },
-    })
-}
-
 fn handle<H: Handler>(
     params: &QualifiedValue,
-    incident: &IncidentSummary,
+    classification: Classification,
     context: &RecoveryContext<'_>,
 ) -> Result<RecoveryRequest> {
-    H::handle(borrow::<H::Params>(params)?, incident, context).map_err(|_| RuntimeError::Internal)
+    H::handle(borrow::<H::Params>(params)?, classification, context)
+        .map_err(|_| RuntimeError::Internal)
 }

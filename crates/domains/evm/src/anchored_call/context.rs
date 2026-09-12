@@ -239,17 +239,6 @@ impl<C: MfmValueTrait, R: ObservationRecipe<C>> State for ReadAnchoredContractCa
 impl<C: MfmValueTrait, R: ObservationRecipe<C>> ReadState<EvmAnchoredContractCallRead>
     for ReadAnchoredContractCall<C, R>
 {
-    type AdapterContext = crate::AnchoredCallAdapterContext;
-    fn adapter_context(
-        input: &C,
-        intent: &AnchoredContractCallIntent,
-        _: &crate::EvmOperationalError,
-    ) -> Result<Self::AdapterContext, StateExecutionError> {
-        if &R::intent(input).map_err(|_| StateExecutionError)? != intent {
-            return Err(StateExecutionError);
-        }
-        Ok(crate::AnchoredCallAdapterContext::from_intent(intent))
-    }
     fn prepare(input: &C) -> Result<AnchoredContractCallIntent, PreparationError> {
         R::intent(input)
     }

@@ -53,11 +53,10 @@ source; the work cursor derives that source from the completed prefix.
 Planning retains semantic recovery allowances only. Actual values, complete frames and accumulated
 run sizes are checked by their owning boundaries; domain planners provide no lifecycle estimate.
 
-Operational failures use bounded typed causes. Balance contexts retain source/collection ordinals and
-the exact intent; anchored-call contexts retain route, anchor and target without calldata. Transaction
-contexts retain binding, reservation or transaction-hash facts, and operational causes distinguish
-provider, authority and signer unavailability. These contexts exclude caller continuations and command
-bytes and do not claim Runtime phase or settlement authority.
+Operational failures retain typed causes and the complete executed State input, including caller
+continuations. Read failures retain the exact intent; pending Effect views retain the prepared
+command and EffectId. Operational causes distinguish provider, authority and signer unavailability.
+Runtime owns phase and settlement authority; States provide no separate failure contextualizer.
 
 The State definitions and public reusable `CollectEvmBalances<K>` Operation own their
 compiled-product inspection IDs and descriptions. This source metadata is not lowered into Program
