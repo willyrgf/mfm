@@ -82,7 +82,7 @@ Deleting the old snapshot/fold machinery does not delete the necessary continuat
 | Trust upstream diagnostic content | No generic credential detection, sanitization or secret-free certification of dependency-supplied diagnostics. MFM does not deliberately append its own secrets or full request/connection objects. Bounds and accurate omissions remain. |
 | Adapt at the required boundary | Keep concrete library errors where their interfaces support them. Adapt selected internal cause facts once into immutable InvocationDiagnostic data; Runtime/App forward it and clients render it. Delete NativeCause and its opaque owner/projector protocol; no `Box<dyn Error>` replacement. |
 | Reuse the admitted original | The complete admitted Failure/Object serves persistence and reporting. No duplicate native original or parallel fallback payload accompanies it. K2 proves the selected cause facts survive admission. |
-| Report failed initial encoding honestly | If the declared original cannot be encoded/admitted, report known execution/contract context, the encoding cause and unavailable original detail/identity. No arbitrary native-original custody, serializer retry or new producer fallback contract. |
+| Report failed initial encoding honestly | Use the ordinary internal invocation diagnostic for the encoding cause, known execution/contract context and unavailable original detail/identity. No additional Runtime variant for this case, arbitrary native-original custody, serializer retry or new producer fallback contract. |
 | Keep owner classification | Self::Failure and C::OperationalError are concrete owner errors. MfmValue supplies persistence, not erasure; invocation diagnostics never replace these errors or enter classification. |
 
 ### 2.2 Resume and loading semantics
@@ -198,7 +198,7 @@ original execution failure or become a new recursively reportable operational ca
 | Inside an owning library | Keep its existing concrete error and sources while the typed interface supports them. Do not introduce an adapter at every call. |
 | Declared execution failure | The State's Self::Failure or capability's C::OperationalError owns its actual causal payload and classification. Capture required external facts at their producing boundary, before a lossy conversion. |
 | Internal failure crossing a heterogeneous interface | Adapt selected fields to InvocationDiagnostic once while the concrete error is known. It contains immutable report data, no native owner, downcasting interface or stored callback. |
-| Encoding a declared failure | The concrete value may move into the immediately awaited pure encoding job. Failure returns the encoding diagnostic and explicit unavailable original detail/identity; no outside-job Arc custody or fallback payload is required. |
+| Encoding a declared failure | The concrete value may move into the immediately awaited pure encoding job. Failure uses the ordinary internal invocation diagnostic with unavailable original detail/identity; no special recording variant, outside-job Arc custody or fallback payload is required. |
 | Complete admitted failed outcome | Reuse the existing Failure/Object and operation facts for persistence, restored classification and append-failure reports. No second native original survives admission. |
 | Runtime/App/transport reporting | Add actual execution/head/disposition context and forward supplied data. Thin clients choose presentation without rerunning extraction, constructors, Values admission or child projectors. |
 
@@ -375,6 +375,12 @@ DiagnosticEvidence, reuse the existing checked capture implementation and consum
 invocation-only boundary in section 9 does not replace or duplicate this schema/capture service.
 
 ## 6. One authoritative current record
+
+Object is the common value carrier inside the live continuation and its stored representation.
+It erases a value's concrete Rust type while retaining its schema identity, content hash and
+encoded data. Runtime associates typed implementations, admits values against their selected
+contracts and decodes each concrete value at typed use. Object does not select implementations or
+schedule transitions. States and adapters still receive and return their concrete Rust values.
 
 ### 6.1 Remove the independent phase/facts pair
 
@@ -941,6 +947,33 @@ recover arbitrary contents. The user accepted this contract:
 - A successful result whose encoding fails has only an encoding/recording failure. Do not invent
   an original execution error or retain generic successful-result custody.
 
+Use the existing internal RuntimeError route with the actual operation, Stage::Encode and one
+InvocationDiagnostic. No EncodeOriginal variant, encoding-target enum or additional error/context
+wrapper is required. Neither recovery nor transport routing branches on the fact that the encoded
+value was a declared failure. The actual encoding/task cause and its size facts remain primary.
+
+The private encoder returns the admitted Object directly:
+
+```rust
+async fn encode_failure<E: MfmValue>(
+    error: E,
+    operation: Operation,
+    position: ExecutionPosition,
+    failure_contract: &ContentRef,
+) -> Result<Object>;
+```
+
+Supply position and the already associated failure contract at this boundary, including through
+the private erased adapter callbacks; public provider callback arguments remain unchanged. The
+contract comes from association, not a second call to the failed value. At encoding/task failure,
+construct selected diagnostic fields once from the concrete cause and this known context:
+`encoding_target` is `declared_failure`, `position` and `failure_contract` identify the attempted
+slot, `original_detail` and `original_identity` are `unavailable`, and `encoding` holds the selected
+cause fields. Keep the last acknowledged head in the existing invocation context. Section 9.1's
+fixed omission replaces detail if constructing it fails or exceeds its bound; primary code,
+operation, size and the existing invocation head remain intact. No receiver reopens the original
+or recaptures an already constructed diagnostic to supply these facts.
+
 After complete admission, the same Failure/Object serves persistence, restored classification and
 append-failure reporting. It must contain the selected promised causal facts: prove those facts
 rather than infer completeness from successful serialization. Delete ReturnedFailure and its
@@ -986,13 +1019,12 @@ recording cause. The database failure did not cause the provider timeout. Neithe
 by the other's code, and there is no claim of a new committed state. Recovery waits for a committed
 failed outcome; explicit resume follows the last committed state.
 
-Keep RuntimeError::Recording and InvocationFailure::Execution. The minimal stage payloads are:
+Keep RuntimeError::Recording for an admitted original, an exact candidate or a physical append
+outcome. Return these failures through the existing InvocationFailure::Execution route. The
+recording payloads are:
 
 ```rust
 enum RecordingFailure {
-    EncodeOriginal {
-        cause: InvocationDiagnostic,
-    },
     BeforeAppend {
         original: Option<Failure>,
         candidate: Option<EncodedRunFrame>,
@@ -1010,13 +1042,13 @@ enum AppendFailure { NotInserted, Store(StoreError) }
 enum CandidatePresence { Present, Excluded, Absent }
 ```
 
-EncodeOriginal explicitly identifies a returned declared failure with unavailable contents/identity.
-Known execution/contract/head context comes from the existing invocation/admission, not another
-call to the failed value. There is no original or candidate to fabricate in that variant. Later
-variants carry the existing admitted Failure, optionally sharing its immutable data with the
-candidate. BeforeAppend has a candidate only after sealing; Append keeps one exact candidate.
-Public output exposes candidate identity/sequence/digest, not its body. K2 finalizes actual sharing
-and context access without introducing another error/original/candidate wrapper.
+BeforeAppend retains an admitted Failure and/or a sealed candidate. If neither exists, use the
+ordinary internal diagnostic route; declared-failure encoding follows section 9.2. Do not construct
+an empty recording container.
+Share admitted immutable data where needed; no extra native original survives admission. A
+candidate exists only after sealing, and Append keeps one exact candidate. Public output exposes
+candidate identity/sequence/digest, not its body. K2 proves actual sharing without introducing
+another error/original/candidate wrapper.
 
 NotInserted is a physical disposition and need not invent a cause. Only it probes automatically
 under section 7. Store errors, including Indeterminate, return immediately with the actual
@@ -1044,7 +1076,7 @@ without certifying the entire native parser/source object as secret-free.
 | --- | --- | --- |
 | E1 | Pure/Read/Effect preparation, execution/interpretation, handler, map and heterogeneous Runtime conversions forward their required InvocationDiagnostic data. Internal failure appends no fault and never enters classification; explicit resume follows acknowledged state. | Section 9.3 callbacks and their invocation consumer. No erased native owner, arbitrary Deserialize provenance, or new upstream error family. |
 | E2 | A State's concrete Self::Failure and the shipping Read's concrete operational error retain their admitted original through failure-before-recovery and cold inspection. Decode that declared owner type for classification, preserving causal/operation context. Pending Effect preserves command/EffectId and settlement precedes interpretation. | Existing declared payload and exposed cause; selected provider/authority/signing enrichment belongs to Part 2. No per-State error wrapper or universal Error bound. |
-| E3 | An admitted failed Read plus failed append reports the complete original and separate recording failure with actual acknowledgement. A non-Error declared failure whose first encoding fails reports explicit unavailable original detail/identity and its encoding cause. Also cover success plus append failure, dispositions and terminal output failure. | Existing invocation/reporting route, one admitted original and candidate. No serializer retry, native-original custody, producer fallback payload, native-success bag, reporting tree or second audit sink. |
+| E3 | An admitted failed Read plus failed append reports the complete original and separate recording failure with actual acknowledgement. A non-Error declared failure whose first encoding fails uses section 9.2's ordinary invocation diagnostic and omission contract. Also cover success plus append failure, dispositions and terminal output failure. | Existing invocation/reporting route, one admitted original and candidate. No special first-encoding Runtime variant, serializer retry, native-original custody, producer fallback payload, native-success bag, reporting tree or second audit sink. |
 | E4 | Actual nested Object reference/hash/schema failures preserve field and expected/observed facts through direct admission and concrete boundary adaptation to Runtime/App. Parser/canonical errors preserve available category/location/source facts using section 9. | Existing validation and affected consumers; no parent seed grammar, broad ID rewrite, arbitrary error downcasting or JsonError/CanonicalError source-certification project. |
 | E5 | Shipping EvmBalanceContext metadata.correlation constructor: empty and excessive-length failures retain their case/location and required limit/observed length through the actual typed Runtime callback and Application diagnostic after structural/schema admission. | These two cases only; reuse/extract the existing constructor. Keep minimal local raw-to-checked helpers only where necessary; no other context/value family migration. |
 | E6 | Consumers of changed Object, InvocationDiagnostic, shared size data, Store and callback APIs compile and forward supplied causes/fields/classification using shared rendering. | A needed forwarding/import update does not authorize inspecting every producer the caller uses or adding another adapter/schema/capture layer. |
@@ -1105,8 +1137,8 @@ returns the checked observation under section 7.2, with no further work.
 Derive the existing public object `contract_ref` when required by the transport; it is not stored
 again in Object. Retain the public raw canonical `value` position and exact value identity. Add
 captured causal detail to the existing invocation serializer, including original versus recording
-cause and known/unknown acknowledgement. Report the EncodeOriginal exception with explicit
-unavailable original detail/identity, not a generic success or an empty alleged original. Do not
+cause and known/unknown acknowledgement. Failed initial encoding uses the ordinary invocation
+diagnostic with explicit unavailable original detail/identity, not an empty alleged original. Do not
 put raw candidate bytes or native client objects in JSON. App and the transports borrow already
 constructed/admitted data rather than extracting causes, reparsing text-rendering JSON or walking
 size-error sources again. A postcommit projection/delivery failure retains known insertion and cannot reopen work.
@@ -1252,9 +1284,10 @@ originals. The current selected facts define the work, not every source reachabl
 
 Exercise E3: admitted failed Read plus failed/ambiguous append, non-Error declared original whose
 first serializer fails, success plus append failure, NotInserted observation and terminal output
-failure. Assert explicit unavailable original detail for EncodeOriginal, no serialization retry or
-precommit classification, complete admitted original otherwise, independent recording causes, and
-accurate acknowledgement. No outside-job `Arc<E>` or native-success custody is required.
+failure. Assert the ordinary encoding diagnostic retains its actual cause/size and section 9.2's
+known context and unavailable original detail. It triggers no append, serialization retry or
+precommit classification. Otherwise preserve the complete admitted original, independent recording
+causes and accurate acknowledgement. No outside-job `Arc<E>` or native-success custody is required.
 
 Delete NativeCause/Captured/Owner, projectors and companion error Wire trees, ReturnedFailure,
 ReportFailure/IncompleteReport and related reporting types, CLI Fields/MissingField reconstruction,
@@ -1341,7 +1374,7 @@ remain complete for the supported core behavior.
 | C8 | Accepted Effect settlement commits before interpretation. Injected interpreter failure appends no fault; cold resume interprets retained evidence without entering the adapter for that phase. Uncommitted settlement makes no durability claim. |
 | C9 | E1/E4/E5 internal State/preparation/adapter/task/constructor failures retain required code, operation, fields and source facts as InvocationDiagnostic data and append no fault. No native owner/downcast/projector is needed by a receiver. Explicit resume retries permitted unfinished work; there is no automatic retry loop or internal-failure classification. |
 | C10 | Local preflight mismatch performs no provider call/append; post-response binding rejection reports the true stage without appending unauthenticated evidence or falsely claiming no IO occurred. |
-| C11 | E3 reports complete admitted failed outcomes with independent recording causes. Failed first encoding of a non-Error declared original explicitly reports unavailable contents/identity, known operation/contract/head and encoding cause; it retains no arbitrary E, retries no serializer and classifies nothing before commit. Later stages reuse the same Failure/Object. Success plus recording failure invents no original execution error or custody stash. Candidate/disposition is retained once; Store errors return without probe or audit retry. |
+| C11 | E3 reports complete admitted failed outcomes with independent recording causes. Failed first encoding of a non-Error declared original uses the ordinary internal diagnostic: encoding_target, known position/contract and unavailable original contents/identity appear when detail construction succeeds; otherwise section 9.1's fixed omission applies. Primary cause code/operation/size and the invocation head survive either case. It retains no arbitrary E, retries no serializer, appends nothing and classifies nothing. Later stages reuse the same Failure/Object. Success plus recording failure invents no original execution error or custody stash. Candidate/disposition is retained once; Store errors return without probe or audit retry. |
 | C12 | The NotInserted probe covers exact matching candidate, conflicting occupied sequence, candidate followed by later commits, absent candidate, and failed reload/projection. It retains the physical finding independently of the latest view and never drives further work. A candidate-absence snapshot cannot resolve a still-in-flight COMMIT; the Store-error invocation returns with its ambiguity/custody. Fresh resume may use current phase authority without claiming it resolved an unavailable prior candidate. |
 | C13 | Atomic append, immutable earlier frames, exact-head conflict, checked cumulative bounds, consistent loads, and PostgreSQL acknowledgement ambiguity hold through Store public boundaries. |
 | C14 | E5's empty and oversized metadata.correlation constructor failures reach the actual Runtime/Application report with location and reviewed length facts. K3 separately proves nested framework reference/hash/schema failures through direct admission and real adapter signatures, without parent seeds. No additional constructor family is implied. |
