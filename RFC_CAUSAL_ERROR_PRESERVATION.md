@@ -30,10 +30,12 @@ Store can record its own failure.
 An original execution failure and a failure to record it are two related facts with independent
 cause chains. Preserve both and the actual acknowledgement; do not make either the other's
 fabricated source. After complete admission, reuse the existing Failure/Object with no extra
-native original. If initial encoding of a declared error fails, report known operation/contract/head
-and encoding cause, with explicit unavailable original detail/identity. This accepted exception
-requires no opaque owner, serializer retry or producer fallback payload. Successful values acquire
-no custody stash. Part 2 must not reintroduce NativeCause, `Box<dyn Error>` or a custom error protocol.
+native original. If initial encoding of a declared error fails, use Part 1's ordinary internal
+invocation diagnostic for the actual encoding cause/size, known operation/contract/head and
+explicit unavailable original detail/identity. No dedicated recording variant or renderer branch
+is needed for this case. Detail-construction failure follows Part 1's fixed omission contract.
+It requires no opaque owner, serializer retry or producer fallback payload. Successful values
+acquire no custody stash. Part 2 must not reintroduce NativeCause, `Box<dyn Error>` or a custom error protocol.
 
 The diagnostic trust boundary is owned by
 [Part 1 section 4](RFC_AUDITABILITY_ERROR_CHAIN.md#4-error-preservation-and-the-diagnostic-trust-boundary).
@@ -250,7 +252,7 @@ is not performed again.
 | B3 | O1/O2 operational errors, including required O3/O6 causes, survive complete admission and cold observation. Internal execution/recording failures use invocation reports without a fault append. Command/EffectId authority is unchanged. |
 | B4 | Upstream diagnostic content follows the trust contract without credential scanning or blanket source/downcast certification. MFM does not deliberately attach its own secret inputs. Bounds/omissions and any explicitly required shared text/admission change are exercised at the selected boundary. |
 | B5 | Capture occurs once at the required boundary. Receivers forward immutable InvocationDiagnostic/admitted data and supplied size facts without downcasting, JSON field discovery or recapture. Required original facts are compared across admission/restoration/reporting. No NativeCause, projector/custody tree, native-success stash, new size hierarchy, per-owner reporting schema or generic completeness checker remains. |
-| B6 | An admitted execution failure plus recording failure retains two independent causes and actual candidate/acknowledgement. Failed initial error encoding uses Part 1's explicit unavailable-original contract with known context and encoding diagnostic, no opaque custody or fallback payload. Success plus recording failure invents no original error. Reports preserve actual delivery stage; no second audit sink, append retry or recursive reporting. |
+| B6 | An admitted execution failure plus recording failure retains two independent causes and actual candidate/acknowledgement. Failed initial error encoding uses Part 1's ordinary internal diagnostic with known context, encoding cause and explicit unavailable-original detail under its fixed omission contract; no special Runtime variant, opaque custody or fallback payload. Success plus recording failure invents no original error. Reports preserve actual delivery stage; no second audit sink, append retry or recursive reporting. |
 | B7 | Cutovers delete superseded paths/APIs/tests/docs while preserving meaningful behavior coverage. Actual aggregate complexity and production/test/doc/file/API costs are reviewed against both baselines; no compression, hypothetical deletion credit or duplicate native representation hides growth. |
 | B8 | All frozen cases and relevant retained Part 1 behavior pass required checks and final CI. Completion names the accepted commit, evidence and limits; it does not claim platform-wide provenance or secret-free certification of upstream diagnostics. |
 
