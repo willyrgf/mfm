@@ -1,28 +1,41 @@
-# RFC: persist the current run state and preserve causal errors
+# RFC part 1: current run continuation and persistence
 
-Status: ready for implementation handoff after the 2026-09-12 baseline, contract, and interface
-review. The user's behavioral answers and the resulting technical choices are settled. The handoff
-sketches are in sections 6.5, 7.4, 8.5-8.6, 9.3-9.4, and 10.1; the ordered plan is section 12.
-The implementation is not complete; net simplification and
-shipping frame sizes require the core evidence gate before broad owner migration. Readiness of
-the plan is not a claim that the design has already passed that gate.
+Status: bounded core correction; full implementation readiness remains unproved, reviewed 2026-09-13.
+This RFC delivers the continuation/persistence redesign and the error path needed to use it.
+[Part 2: causal-error preservation](RFC_CAUSAL_ERROR_PRESERVATION.md) delivers the broader owner
+migrations after Part 1 is accepted. These are independent completion contracts: Part 1 can be
+finished, verified and accepted while Part 2 remains a design draft. The former combined RFC's
+full-handoff verdict is withdrawn; splitting it does not establish the outstanding core proofs.
 
-Use `7f71beef` as the implementation baseline, applying this RFC revision on top in an isolated
-checkout. Treat the subsequent implementation, including the worktree reviewed at `6573ef68`, as a
-discarded approach for planning. Preserve that worktree. Do not reset/clean it, wholesale restore
-its implementation, or begin another repository-wide salvage project.
+Sections 6 and 9 specify the correction to prove; section 10 closes its error scope, and section 12
+orders the work through Part 1 acceptance. Broader owner losses are Part 2 work, not prerequisites
+for Part 1. Neither RFC currently demonstrates achieved net simplification or complete auditability.
+
+`7f71beef` remains the original comparison baseline. The third attempt applied the previous RFC at
+`377f649f`, completed the initial deletions at `6ea98576`, and committed its core at `aae81795`.
+Continue from that core in an isolated correction checkout; do not restart from `7f71beef` or resume
+the entire later owner branch. Preserve both existing worktrees, commits and all staged, unstaged
+and untracked files. Later work may supply a reviewed test or change when its exact scope is needed;
+it is not imported wholesale. After acceptance, Part 2 starts from the accepted Part 1 commit.
 
 [Design](docs/design.md), [architecture](docs/architecture.md), [code quality](docs/code-quality.md),
-and [AGENTS.md](AGENTS.md) govern the repository. This RFC proposes changes to their current
-persistence, validation, and failure contracts. Update those documents, their producers, consumers,
-and tests together in the implementation cutover. Read their baseline versions at `7f71beef`;
-the dirty worktree's documentation is not the restart specification.
+and [AGENTS.md](AGENTS.md) govern the repository. This RFC proposes changes to their persistence,
+validation, and error contracts. Implemented contract changes require their documentation and
+consumers in the same cutover. Read source contracts at the stated comparison/core commit;
+dirty documentation in either prior attempt is not an independently accepted design.
 
-The [adapter error audit](docs/adapter-error-audit.md) is the first-loss inventory. The complete
-objective still includes closing those causal gaps. Broad owner migrations follow the integrated
-persistence/recovery replacement; they are not prerequisites for proving it.
+The [adapter error audit](docs/adapter-error-audit.md) supplies evidence of losses. It is not an
+instruction to recursively migrate every upstream constructor or every newly discovered caller.
+Preserve available causes at changed boundaries; section 10 distinguishes that required closure
+from adding upstream facts. This split defers remediation of existing gaps, not protection against
+new losses or secret exposure in the changed path.
 
 ## 1. Objective and target
+
+Part 1 owns the current record, admission/load/append, execution/recovery ordering, shared native
+cause mechanism, and their existing Application/CLI/REST consumers. Part 2 owns extending evidence
+at the remaining named error producers. Part 1 acceptance requires its own actual simplification;
+future Part 2 deletions or estimates cannot be used to justify an unfinished or growing core.
 
 Persist the Runtime's actual serializable continuation state. Decode that same type on load,
 validate the current state, and continue from it. Delete event-to-state reconstruction and all
@@ -31,12 +44,12 @@ cache, or reference-only persistence representation to synchronize with the exec
 
 ```text
 execution:
-    current RunState -> permitted typed operation -> next RunState + operation facts
+    current RunRecord -> permitted typed operation -> next RunRecord
         -> encode one complete commit -> atomic Store append
-        -> known insertion -> adopt next RunState
+        -> known insertion -> adopt next RunRecord
 
 resume:
-    load committed bytes -> checked frame decode -> decode RunState
+    load committed bytes -> checked frame decode -> decode RunRecord
         -> validate current state against admission -> dispatch its permitted next operation
 ```
 
@@ -50,9 +63,9 @@ runs. Keep system failures in the invocation's reviewed causal report, outside t
 A classifier or public message never replaces the original error. If recording fails, report the
 available original error and the recording failure without claiming the outcome became durable.
 
-Complete state still contains continuation data: cursor, current context, active checkpoint
-inputs, recovery usage, and unresolved Effect authority. Deleting the old snapshot/fold machinery
-does not delete those facts. There is one persisted current state, not a second snapshot facility.
+Continuation still needs a cursor, current input, checkpoint inputs, recovery usage and unresolved
+Effect authority. The current operation supplies the cursor/input; do not store a second copy.
+Deleting the old snapshot/fold machinery does not delete the necessary continuation facts.
 
 ## 2. Confirmed decisions
 
@@ -60,7 +73,7 @@ does not delete those facts. There is one persisted current state, not a second 
 
 | Decision | Consequence |
 | --- | --- |
-| Remove unnecessary qualified/cold/native-cache representations | One non-generic serializable RunState uses one canonical Values object. No RunState<QualifiedValue> versus RunState<ContentRef> pair. |
+| Remove unnecessary qualified/cold/native-cache representations | One non-generic serializable RunRecord uses one Values carrier. No native cache or generic raw/qualified state pair; section 6.2 must prove the carrier admission API. |
 | Reuse the execution state on restoration | The exact same Rust continuation type is encoded and decoded. Executable State objects, adapters, signers, and secrets remain outside it. |
 | Remove duplicated responsibility | Journal has no lifecycle types or semantic validator; Runtime has no second wire model; Store does not interpret Runtime payloads. |
 | Remove the fold and historical transition scan | No load path calculates historical successors, reconstructs counters, or compares past transitions. Current-state validation remains. |
@@ -92,98 +105,72 @@ inside a declared transaction operational error remains part of that persisted o
 A database failure while appending that error is a separate system/recording failure. Do not discard
 a cause based on its source library, or turn an internal adapter bug into a recoverable incident.
 
-## 3. Why the previous RFC caused expansion
+## 3. Why the third attempt expanded
 
-At the baseline, FoldState stores cursor, checkpoint inputs, recovery usage, and Effect authority.
-It consumes recorded results; it does not rerun business callbacks during loading. Consequently,
-replacing it with a function that checks every historical successor preserves much of its work.
-That was not the deletion previously implied.
+The third attempt did complete the initial deletion steps. The expansion occurred in both the core
+replacement and the later error-owner migrations. Calling it an unfinished step 2 is inaccurate;
+calling every addition unnecessary is also unsupported. The following measurements were reproduced
+from `/tmp/mfm-audit-core-first` at `a3e8fd2c` plus its reviewed worktree on 2026-09-13.
 
-The old execution path also classified and mapped errors before appending their outcomes. Fixing
-custody around that fused path required preserving more in-memory partial progress. Splitting the
-outcome commit first removes much of that need.
+### 3.1 Measured costs and their limits
 
-The measurements below remain a dated review of the engineer's attempt. They are not a current
-working-tree count, a production-only count, or evidence that every added line was unnecessary.
+| Checkpoint | Net production Rust code against 7f71beef |
+| --- | ---: |
+| Steps 1-2, 6ea98576 | -630 |
+| Core, aae81795 | +1,222 |
+| Current candidate, including untracked production files | +5,998 |
+| Growth after the core | +4,776 |
 
-### 3.1 Evidence from the second implementation attempt
+The reproduced counter counts nonblank, non-comment production `src` lines, excluding separate
+and trailing inline tests. It is a convention, not a complexity metric or a Rust syntax analysis.
+The exact tracked diff against `377f649f` is **223 files, 25,713 additions, 10,442 deletions**;
+untracked files are additional to that Git total. Tests and documentation are real migration cost,
+even though they are excluded from production-code counts.
 
-The following measurements describe `7f71beef` versus HEAD `6573ef68` and the worktree inspected
-on 2026-09-12, before this RFC edit. They are physical changed lines, including tests/docs where
-present; they are **not** production-code LOC or a count of unnecessary code.
+Post-core production growth concentrates in PostgreSQL (+1,590), Application (+830), REST (+426),
+Runtime (+400), Store (+331), live EVM (+282), and the remaining owners (+917). The core itself
+added 1,852 production lines after the 630-line initial reduction. Thus the later owner backlog
+is not the sole explanation, and making that backlog finite would not by itself simplify the core.
 
-| Comparison | Files | Added | Deleted | Net |
-| --- | ---: | ---: | ---: | ---: |
-| Baseline to committed HEAD, 30 commits | 176 | 20,313 | 3,553 | +16,760 |
-| HEAD to tracked worktree | 60 | 4,772 | 1,499 | +3,273 |
-| Baseline to tracked worktree | 189 | 24,488 | 4,455 | +20,033 |
-| Untracked files, additional to the tracked diff | 13 | 2,439 | 0 | +2,439 |
+The second attempt's 189-file/+20,033 tracked-line net growth and the third attempt's measurements
+are separate historical observations. Neither is a deletion allowance for the replacement.
 
-The two diffs have overlapping files/edits: add their net deltas, not their insertion/deletion
-totals. Directory totals for the combined tracked diff locate the growth:
+### 3.2 Obligations and mechanisms that caused growth
 
-| Area, including its tests/docs | Added | Deleted | Net |
-| --- | ---: | ---: | ---: |
-| EVM domain | 3,953 | 488 | +3,465 |
-| Runtime | 3,740 | 714 | +3,026 |
-| PostgreSQL adapter | 3,875 | 1,135 | +2,740 |
-| Values and program-derive | 2,869 | 223 | +2,646 |
-| Application | 1,899 | 139 | +1,760 |
-
-Reproduce tracked counts with `git diff --numstat 7f71beef HEAD`, `git diff --numstat`, and
-`git diff --numstat 7f71beef`; enumerate additional files with
-`git ls-files --others --exclude-standard`. The numbers above are a dated review, not a live gate.
-
-Concrete source evidence explains why many locally plausible commits did not reach the objective:
-
-- Baseline and reviewed `crates/kernel/runtime/src/engine/fold.rs` are both 648 lines. The fold,
-  `adapter_context`, and future-capacity declarations remain. Retained live-progression rules
-  must exist once in Runtime; this revision deletes historical checking itself. Deleting the
-  fold file still cannot be booked as 648 lines of net simplification without its replacement cost.
-- Reviewed `crates/kernel/runtime/src/assembly.rs::ColdQualifier` still returns
-  `Result<QualifiedValue, ()>`. `qualify_typed` still uses `serde_json::from_slice::<T>` and unit
-  mappings. New `DecodePersisted` implementations are not connected to this consuming boundary.
-- `cc84dc79` and `30a025f7` add native construction and its derive; subsequent commits migrate
-  nested value families. `6573ef68` adds a 405-line `values/src/error_schema.rs`. Removing the
-  requirement for decoder-error Program identities did not remove wire, field-error, schema,
-  conversion, and test costs for errors nested inside actual persisted results.
-- The worktree's `recording.rs` repeats native/qualified custody in `AdapterReturnedValue` and
-  `StateReturnedValue`. `recovery_evaluation.rs` accumulates classification/request/decision
-  options and every intermediate map output. Application then renders these additional surfaces.
-  This repairs custody around the old fused execution path before replacing that path.
-- PostgreSQL acquisition now keeps failures from the acquired connection; signer/custody wrappers
-  retain causes that were previously discarded. These are real improvements. Their presence does
-  not establish that the complete redesign is integrated, or justify retaining the whole attempt.
-
-### 3.2 Requirements that multiplied implementation work
-
-The section references in this table identify the RFC at `7f71beef`; `36a1e233` is the subsequent
-revision that still retained historical checking and persisted internal faults.
-
-| RFC requirement | Why an engineer following it expanded the code | Correction in this revision |
+| Requirement in the previous revision | Actual expansion it enabled or required | Required correction |
 | --- | --- | --- |
-| Sections 11 and 13 put broad source-owner capture and checked decoding before persistence deletion | Each provider/database/signer/value family brings its callers, schemas, conversions, fixtures, and transport projections. Many coherent local changes can finish while the old Runtime remains intact. | Complete the core cutover using existing baseline operational errors, then close the remaining first-loss boundaries one owner at a time. |
-| Section 9 demands exact native constructor causes across heterogeneous boundaries | Removing recursive decoder identities still leaves raw wire types, field companions, native construction, erasure, nested schemas where errors are persisted, and consuming tests. “Native” did not make that free. | Internal decoder failures are invocation errors without persisted identities/schemas. Migrate only a constructor actually reached by the current slice; preserve its native cause through the real consumer. |
-| Sections 7 and 10 require durable internal/callback/recovery faults | Persisting a system failure turns every internal source into a schema problem, changes callback associations, creates fault phases, and forces cold/client support for each. | Internal errors have source-preserving reports only. No internal-result persistence ABI or durable fault phase. |
-| Section 6 asks for complete state while sections 8.2-8.3 still verify historical transitions | A new snapshot model and its codec are added while most fold rules survive as predecessor-to-successor validation. Removing the fold file need not remove the work. | Remove semantic history validation itself. Validate current state only; apply execution rules when creating its successor. |
-| Sections 8.1 and 9 allow live candidate encode/checked-decode as the ownership route | Native return, canonical object, re-decoded native object, qualified wrapper, and a wire reference can all become separate representations with separate failures. | Canonical objects are the engine's representation. Encode native outputs once, seal the commit, and adopt that candidate after known insertion. Decode native inputs at use; no post-encode round trip. |
-| Section 10 protects all completed work before the fused append | General success/result custody, callback-stage options, intermediate mapping outputs, and report variants spread across Runtime and App before the lifecycle is simplified. | Commit original domain/operational failure before policy. Keep one uncommitted original error and its recording result; no intermediate-progress timeline or universal native-success stash. |
-| The phrase “same state” left declaration ownership unresolved | `36a1e233` made Journal own generic state declarations, with qualified live values and ref-only wire values. It removed duplicate field declarations but retained projection, resolution, caches, and ownership conversions. | Runtime owns one non-generic state and payload. Journal receives an opaque canonical payload. Inline Values objects remove reference swizzling and object tables. |
-| Section 13 defers central deletions; section 15 mixes real deletion and avoided additions | Preparation accumulates indefinitely; preventing archived registries is presented as baseline simplification. | Name actual deletions at every cutover. Report replacement LOC separately; forbidden hypothetical machinery earns no deletion credit. |
+| RunCommit stores RunState.phase and OperationFacts | The same failure, command, settlement or output is serialized twice; the validator reconstructs a phase and checks agreement. The 648-line fold was deleted, but state.rs added 927 physical lines and state/decode.rs another 294. Those files also contain necessary logic; their entire size is not deletion credit. | Store one current record whose operation determines continuation. Delete the independent phase and its agreement checks. Keep actual authorization and current-record admission. |
+| Ordinary Serde plus exact native constructor causes at nested Object admission | ObjectSeed and a macro/seed for every enclosing state struct, enum and collection duplicate the payload grammar, add drain/error-precedence logic, and require parallel wire tests. The previous probe tested shape-only objects and did not exercise this conflict. | Prove parse-then-admit with actual Objects and adapter signatures. Do not claim ordinary Serde preserves arbitrary nested constructor causes. Section 6 records the API tradeoff and blocking proof. |
+| NativeCause retains a fallible reporting operation | project() calls child project(), serializes an owner Wire, parses RawValue, and can return another NativeCause. Store, Runtime, config and PostgreSQL acquire companion projectors; App retains failures of secondary projection. | Capture reviewed detail once at its owner. Outer errors serialize existing data. Remove the fallible projector ABI and recursive reporting-failure construction. |
+| Preserve originals, without a complete custody distinction | CanonicalError retains rejected text; JsonError exposes the underlying Serde error; from_original can expose a secret-rejected value through downcast_ref. A later App sanitizer repairs only one caller. | Apply the custody table at the first owner. Safe typed originals may survive; prohibited raw data may not survive in the public carrier. Explicit withholding is not lossless raw custody. |
+| Close every remaining first-loss owner and every consumer | A real caller justified another constructor migration, then another serializer, transport path and test family. C15 had no finite completion set. | Close Part 1 with its finite core cases. Move remaining producer enrichment into Part 2, whose matrix is refined against the accepted core. Existing cause forwarding closes a changed API; extending an upstream contract does not silently expand Part 1. |
+| Report LOC and explain increases before owner fanout | The engineer supplied measurements and a local rationale, explicitly without establishing overall minimality, then continued. An explanation functioned as acceptance. | Require independent acceptance of the actual corrected core on its own guarantees and cost. Part 2 has a separate design/cost gate after that acceptance. A failed core review does not authorize owner work. |
+| Preserve exact errors from capture and reporting themselves | Auxiliary field validation and projection failures became new error families with their own projections and custody tests. | Use bounded, fixed capture-status/omission data for diagnostic construction. They describe missing evidence; they are not new operational causes or another extensible reporting subsystem. |
 
-The repeated outcome follows these dependency and contract choices, not merely a preference for
-verbose code. The engineer should have exposed the cumulative cost earlier, but the RFC authorized
-it. This revision removes obligations as well as changing the order. It does not claim the former
-contract can be implemented more cheaply by renaming its machinery.
+The RFC author is responsible for these obligations and for the overly strong handoff verdict.
+The engineer also continued after acknowledging unresolved aggregate size, but the design supplied
+multiple routes by which that continuation appeared compliant. More instructions to prefer fewer
+lines, another clean checkout, or another local source-preservation review would not fix this.
 
-The explicit guarantees being withdrawn are durable system-fault reporting in run history,
-permanent stop after such a fault, verification of historical semantic evolution, and advance
-history-capacity assurance. Ordinary loading also no longer verifies older physical frame links.
-The retained execution, causal, command-authority, and atomicity guarantees are specified below.
+### 3.3 What the previous verification established
+
+The ten disposable probe tests established enum wire shape and some ownership mechanics. They did
+not exercise checked Object admission inside the real nested payload, shared error serialization
+across owners, rejected-data custody, or an integrated deletion. Passing them was insufficient
+basis for the previous claim that no important design decisions remained.
+
+The third attempt contains useful consuming tests, frame/load measurements and real deletions.
+They are evidence to preserve and reassess against the corrected contract, not proof that the
+whole attempt is minimal or complete. Final integrated CI was not established by this review.
 
 ## 4. Preservation and disclosure are separate responsibilities
 
 ### 4.1 What must survive
+
+Sections 4-5 and 9 own the shared preservation/custody contract reused by both RFCs. In Part 1,
+apply it to section 10's core cases and changed API closure. The examples below define retained
+data when available; they do not assign every listed producer to Part 1. Part 2 names the remaining
+producer migrations. Keep one shared contract rather than introducing separate core/owner carriers.
 
 The retained error must identify the originating operation, relevant stage, each exposed causal
 layer, and reviewed facts that distinguish the failure. Examples include:
@@ -228,6 +215,34 @@ Distinguish at least:
 Record known presence and safe size facts when available. Do not invent an omitted count when the
 upstream API does not expose it. A bounded or redacted record must never be described as lossless
 raw capture.
+
+### 4.4 Custody is decided at the original owner
+
+| Location | Permitted custody | Boundary obligation |
+| --- | --- | --- |
+| Concrete IO/parser/keystore owner during the operation | Its necessary transient client/source object, including data forbidden outside that owner | Inspect exposed sources once and extract reviewed facts before returning; do not format arbitrary source text. |
+| Returned NativeCause or other public library error | Reviewed secret-free native owner data and immutable diagnostic detail | Everything reachable through fields, source(), downcast_ref, Debug and Display must obey that custody contract, independently of Serialize. |
+| Public diagnostic projection | Already captured reviewed fields plus explicit omissions | Rendering does not run owner capture, arbitrary error callbacks, Values admission, or native constructors again. |
+| Persisted State-domain/adapter operational result | Its admitted exact value, original reviewed causal layers and operation facts | Preserve the declared result before recovery. Internal diagnostics do not gain a persisted error identity or history phase. |
+
+A redacted serializer is insufficient if the returned native error still exposes rejected input.
+JsonError must retain reviewed category/location and explicit withheld-message accounting at its
+owner, not an unrestricted serde_json::Error behind source(). CanonicalError must not return a
+rejected key/message through message() or downcasting. Apply the same rule to IO custom payloads,
+TOML input, HTTP/SQL client objects, channel commands and panic payloads. Reviewed native causes
+whose entire reachable data is safe may retain their concrete types and source links.
+
+MfmValue and Serialize are not evidence that arbitrary rejected data is safe to retain. When a
+returned original fails disclosure/admission, retain permitted operation/type/size/cause facts and
+explicitly account for withheld original detail. Prohibited raw data stays within its original
+transient owner and is dropped there; it is not returned in a hidden error bag. This narrows the
+previous unconditional native-original custody promise. It does not authorize discarding an
+available safe original or replacing the original failure with its classification.
+
+A capture-bound or rejected optional diagnostic field does not replace the primary failure.
+Retain the safe source prefix and explicit status/omissions. Do not recursively treat a failed
+attempt to describe diagnostic data as another extensible operational error. Section 9 specifies
+the bounded reporting consequence; complete raw or post-crash custody is not promised.
 
 ## 5. Shared causal data, with local ownership
 
@@ -336,50 +351,16 @@ bounded by their exact value and complete persisted-value and frame contracts.
 
 ### 5.2 Existing typed wrappers retain operation context
 
-Do not put every EVM, SQL, signer, or Runtime operation into one global stage enum. The source owner
-retains its own operation/stage vocabulary:
+Keep operation/stage and checked domain facts at their existing typed owner. Part 1 preserves the
+operational payload already supplied by the adapter; it does not redesign provider, signer or
+authority error families. Their enrichment and target wrappers belong to
+[Part 2 section 3](RFC_CAUSAL_ERROR_PRESERVATION.md#3-owner-representations).
 
-```rust
-struct ProviderFailure {
-    method: EvmRpcMethod,
-    stage: RpcStage,
-    diagnostics: DiagnosticEvidence,
-}
-
-enum EvmOperationalKind { Unavailable, Timeout, RateLimited }
-
-struct EvmOperationalError {
-    kind: EvmOperationalKind,
-    source: Box<ProviderFailure>,
-}
-
-enum EvmTransactionOperationalError {
-    Provider {
-        operation: TransactionProviderOperation,
-        cause: EvmOperationalError,
-    },
-    Authority {
-        operation: AuthorityOperation,
-        cause: ReviewedAuthorityFailure,
-    },
-    Signer { cause: ReviewedSigningFailure },
-}
-```
-
-The operational carrier factors the three legal alternatives into one closed kind and one common
-payload: `Unavailable(P) | Timeout(P) | RateLimited(P)` is `Kind × P`. Its sole wire shape is
-`{"kind":"timeout","source":{...}}`; boxing changes memory layout only. This avoids repeating the
-same diagnostic schema three times. `new(kind, source)`, `kind()` and borrowing
-`provider_failure()` expose the current API; no unit or compatibility constructor remains.
-Transaction provider, authority and signer alternatives retain their distinct typed payloads.
-
-These sketches preserve the current semantic categories while adding evidence. Do not introduce
-a second `Classification` field that can disagree with the intrinsic classifier.
-
-Use ordinary nested sources and borrowing. Remove incidental `Copy` requirements when errors gain
-owned data. `Error::source()` should preserve a nested typed source when its type supports that
-trait, but generic capability contracts remain usable with operational `MfmValue` types that do
-not implement `std::error::Error`. Typed payload access remains part of the contract.
+Use ordinary nested sources and borrowing. Remove incidental Copy requirements only where the
+changed core API requires owned causes. Do not introduce a second Classification field that can
+disagree with the intrinsic classifier. Error::source() preserves a typed source when supported;
+operational MfmValue types still need not implement std::error::Error. Typed payload access remains
+part of the contract. Sharing captured data must not introduce another error registry or wire tree.
 
 ### 5.3 Capture vocabulary and extraction
 
@@ -394,134 +375,117 @@ of client downcasters. The diagnostics crate imports no client libraries. Never 
 infer their category, and never walk an unbounded discarded suffix to count it. Retain the existing
 checked capture implementation and its consuming tests instead of introducing another capture API.
 
-## 6. One continuation representation and one owner per check
+## 6. One authoritative current record
 
-### 6.1 Runtime owns the state and its payload
+### 6.1 Remove the independent phase/facts pair
 
-Runtime owns one non-generic `RunState` and its commit payload. The payload contains the admitted
-Program content reference, complete current continuation, and completed-operation facts. Admission
-also contains the Program and initial context. Later commits refer to that admitted Program by
-identity; they do not repeat the Program or need earlier operation records to restore context.
+Runtime owns one complete current record. It contains the latest acknowledged operation together
+with complete checkpoint inputs, recovery usage and Effect barrier. The operation determines the
+permitted continuation using the admitted Program. Store and restore that same record type.
+There is no separately stored Phase, cursor/current-input copy or mutable accumulator beside it.
 
-Continuation fields include the current position/visit, current context, active declaration
-checkpoint inputs, semantic recovery usage, and phase-specific pending command or retained result.
-Use enum alternatives for phases with different fields. Do not use a status plus options for every
-possible callback result. Preserve baseline checkpoint eligibility, forward traversal, fresh visits
-on restart, usage charging, and Effect barriers in the live Runtime implementation.
+This is a projection from one current record, not event replay: no predecessor is an input, no
+historical counter is reconstructed, and no earlier operation frame is consulted. Public phase
+names remain useful projections. A transient borrowed selector for dispatch is allowed; another
+serializable phase model or a second authoritative state is not.
 
-The same `RunState` value type is constructed live and deserialized on restoration. A candidate can
-share immutable canonical objects with the acknowledged state. Only known insertion makes that
-candidate authoritative. There is no independently authored snapshot struct or wire-only state.
+### 6.2 Object decoding is a blocking interface proof
 
-### 6.2 Values objects are the engine's value representation
+The former combination of a checked Object Deserialize, exact native constructor errors and
+ordinary derived parent Deserialize did not work as advertised. Serde's generic error conversion
+can erase an Object constructor source. Repeating the complete payload grammar with seeds is not
+an acceptable invisible cost of the one-state claim.
 
-Unify the existing canonical `ValueView` data into one Values-owned object with private checked
-fields, conceptually:
+The target to prove is one shape-only carrier followed by the existing private Driver admission:
 
 ```rust
 struct Object {
-    value_ref: ContentRef,
-    canonical: /* immutable canonical JSON */,
+    schema_id: String,
+    content_digest: String,
+    canonical: Box<serde_json::value::RawValue>,
+}
+impl Object {
+    fn from_value<T: MfmValue>(value: &T) -> Result<Self, ValueError>;
+    fn checked_ref(&self) -> Result<ContentRef, ValueError>;
+    fn canonical_bytes(&self) -> &[u8];
+    fn admit(&self, descriptor: &SchemaDescriptor) -> Result<(), ValueError>;
 }
 ```
 
-The nominal contract is derived from the value reference's schema identity and the existing fixed
-nominal-contract digest rule. Do not also store `contract_ref` in every object. Retain distinct
-contract identities where the Program's declarations require them; removing a redundant object
-field does not remove association checks.
+Fields are private. The wire may keep its existing nested value_ref spelling with a small local
+Serde representation; it must not create a second Runtime payload family or duplicate native T.
+Serde reads shape/raw bytes only. Values admission directly checks reference constructors,
+canonical bytes/hash, descriptor and bounds, retaining native errors before any callback or view.
+The driver is private: only successful admission establishes its executable current record.
+A standalone deserialized Object is explicitly untrusted, not a proof of content identity.
 
-Objects are serialized inline, including their complete canonical payload. Shared in-memory
-ownership is allowed; it does not create a second persisted form. There is no frame-local object
-table, ref-only projection, deduplication map, cross-frame resolver, native `Any` payload, or cache
-of a parallel `T`. Delete `QualifiedValue`, `ColdQualifier`, and their sole-purpose plumbing.
-Do not recreate their behavior under replacement wrapper names.
+This changes the old getter contract: Object cannot return a permanently checked &ContentRef.
+Internal identity comparisons use admitted canonical spellings. A typed adapter entry constructs
+one local ContentRef with checked_ref() and borrows it into the existing callback. This deliberately
+repeats cheap identity construction; it must not repeat JSON/hash/schema admission or add a checked
+reference cache. Hot construction uses the same carrier and established typed Values admission.
 
-At a registered typed callback, decode the required object into its concrete input `T`, execute
-typed code, and encode its output or declared error into an object. This is the same route for a
-fresh run and a restored run. The engine carries canonical objects, while domain code receives its
-own native types. That distinction is deliberate: removing the native cache can require another
-native decode when the same object is used again. Do not claim zero decoding or bypass a native
-constructor before a typed action to save that cost.
+Framework record references/positions need the same honest parse/admit treatment wherever a
+checked Deserialize would erase a required constructor cause. Use raw reference spellings and
+primitive position operands in the private carrier, materializing checked IDs at typed use.
+Do not silently change the checked IDs crate's public invariants or migrate domain-native types
+into raw strings. The exact field/getter closure is part of the proof, not permission to rewrite IDs.
 
-Keep the native domain/operational error locally until recording completes, so a failed encoding or
-append can still report its original cause. Do not retain every successful native value or every
-intermediate map output in a generic custody container. Successful-value encoding failure is an
-invocation failure with the last acknowledged head and the actual encoding cause.
+The proof must exercise malformed nested reference/hash/schema inputs through real Runtime and
+Application consumers and compile the actual Read/Effect callback signatures. If this requires a
+second state model, seeds for every parent, repeated expensive validation, or a broad identity
+rewrite, the proposed decoder correction has failed. Stop for an architect decision; do not
+announce another full implementation handoff. Ordinary Serde and arbitrary nested native-cause
+preservation are not simultaneously guaranteed without this demonstrated boundary.
 
-### 6.3 Journal owns an opaque frame envelope
+### 6.3 Journal and Store ownership
 
-Journal owns frame identity, RunId, sequence, predecessor digest, canonical envelope representation,
-frame hashing, and actual frame bounds. Its payload is opaque canonical JSON produced/decoded by
-Runtime. Do not encode JSON as a JSON byte array or escaped JSON string; embed its canonical value
-without changing the one exact hashing representation.
+Journal seals/decodes an opaque canonical Runtime payload, with exact envelope RunId, sequence,
+predecessor, hashing and actual complete-frame limits. It owns no Program/lifecycle types or
+semantic history validation. Embed canonical JSON values, not escaped JSON strings or byte arrays.
+Store owns mechanical consistent loading, atomic exact-head append and cumulative bounds only.
+Neither owner duplicates Values admission or Runtime authorization.
 
-Move Runtime-specific lifecycle/position/outcome/recovery declarations out of Journal. Journal has
-no Program dependency, State schema registry, policy-enum mirrors, execution rules, or historical
-semantic verifier. It decodes the envelope, not business continuation. A frame's predecessor digest
-remains part of its exact wire and append contract even when ordinary loading does not walk it.
+### 6.4 Validation belongs at admission and typed use
 
-### 6.4 Validation ownership
-
-| Boundary | Sole responsibility |
+| Owner | Required responsibility |
 | --- | --- |
-| Journal frame decode/seal | Canonical envelope, exact framing, frame hash, RunId/sequence/predecessor field shape, and complete frame ceiling. |
-| Values object admission | Canonical object identity/hash, object/descriptor size, and established value-admission constraints. Values owns the exact schema-check function; Runtime supplies the associated descriptor once at slot admission. |
-| Runtime restoration | Admission/Program association, locally valid phase and positions, allowed slot contracts, checkpoint/counter cardinalities and ranges, and current command/authority relationships. |
-| Typed State/adapter/policy boundary | Native constructor invariants and capability/response binding checks needed before this particular operation. |
-| Runtime live execution | Legal successor construction, retry/restart authorization, usage charging, fresh visits, and Effect restrictions. |
-| Store | Consistent physical read, immutable rows, atomic exact-head insertion, and actual cumulative frame/byte accounting. |
+| Journal | Canonical envelope/header and complete-frame bound. |
+| Values | Current object reference/hash/schema admission and object/descriptor bounds. |
+| Private Runtime Driver admission | Program association, current operation mode/slot contracts, checkpoint/usage/barrier relations and current Effect identity. |
+| Typed operation entry | Native constructor invariants and actual capability evidence binding. |
+| Runtime successor construction | Recovery authorization, counter charging, fresh visits and Effect restrictions. |
+| Store | Physical snapshot/rows, atomic append, immutable prefix, cumulative count/bytes. |
 
-Use an existing checked result downstream; do not repeat its hash/schema validation in another
-layer. Native materialization of `T` at a later use is not permission to repeat all frame admission
-checks. Live output construction and cold object admission converge on Values' one implementation.
-A sealed candidate is not decoded back into native objects merely to prove it can be stored.
+Admission checks all present object occurrences. It does not eagerly construct dormant native
+checkpoint or terminal values. Objects selected for a typed operation use their owner's native
+constructor. No semantic history scan, classifying a past error again, root-map replay or comparison
+against an independently reconstructed Phase is allowed.
 
-Restoration checks all present canonical objects' structural/schema contracts. Native owner
-constructors run when an object is selected for a typed operation, including recovery input.
-Inspection does not claim it eagerly constructed every dormant checkpoint or terminal value.
-Failure at either boundary is a causal invocation report and prevents the affected action; it is
-not a durable domain failure. This avoids a separate eager native-validation registry.
+Locally valid forged counter resets or substituted checkpoint inputs remain outside historical
+verification, as explicitly selected by the user. Removing duplicate phase agreement does not
+remove actual contract, range, authority or current-record checks.
 
-Current-state validation cannot establish how counters or checkpoint values evolved. A forged but
-locally valid counter reset or substituted checkpoint is not detected by historical comparison.
-Correct live transitions and the append-only Store are now the authority for that evolution.
-Remove old tests and documentation claiming independent historical semantic verification.
+### 6.5 Record and dispatch sketch for the bounded proof
 
-### 6.5 Concrete state and commit sketch
-
-The following is the declaration boundary to implement, not an extensible framework. Names of
-private helpers may change; ownership, alternatives, and single ownership of continuation facts
-must not. `Object` means the Values type from section 6.2, with shared immutable backing.
-New Runtime payload enums use ordinary externally tagged snake_case variants, such as
-`{"awaiting_recovery":{"domain":{...}}}`;
-structs reject unknown/duplicate fields. Reuse existing checked field contracts. All these
-Runtime payload declarations have one current exact Serde shape; they are not Program values and
-need no Program semantic identity, MfmValue derive, or registered value codec. In the signature
-sketches, `Result<T, E>` denotes the standard Rust result, not a crate's single-error alias.
+The sketch expresses data ownership. Checked ID names below denote their semantic roles; the
+shape-only framework fields and checked materialization boundary must be resolved by section 6.2's
+proof before this becomes a final Rust signature contract. It must not be implemented by retaining
+the old checked parent decoder seeds behind these names.
 
 ```rust
-struct RunState {
-    phase: Phase,
+struct RunRecord {
+    program_ref: ContentRef,
     checkpoints: Vec<Checkpoint>,
     usage: Vec<StateUsage>,
     effect_barrier: Option<StatePosition>,
+    operation: RecordedOperation,
 }
 struct Checkpoint { position: StatePosition, input: Object }
 struct StateUsage { retries: u32, restarts: u32 }
 struct Call { position: ExecutionPosition, input: Object }
 struct EffectCall { call: Call, effect_id: EffectId, command: Object }
 struct Settlement { effect: EffectCall, evidence: Object }
-
-enum Phase {
-    Runnable(Call),
-    EffectPending(EffectCall),
-    AwaitingInterpretation(Settlement),
-    AwaitingRecovery(Failure),
-    Succeeded(Object),
-    Failed(TerminalFailure),
-}
-
-// A completed State invocation, including accepted observational evidence.
 enum StateCall {
     Pure(Call),
     Read { call: Call, intent: Object, evidence: Object },
@@ -534,17 +498,7 @@ enum Failure {
     Read(ReadFailure),
     PendingEffect { effect: EffectCall, original: Object },
 }
-enum TerminalFailure {
-    Domain { failure: DomainFailure, reason: StopReason, root: Object },
-    Read { failure: ReadFailure, reason: StopReason },
-}
-
-struct RunCommit {
-    program_ref: ContentRef,
-    state: RunState,
-    facts: OperationFacts,
-}
-enum OperationFacts {
+enum RecordedOperation {
     Admitted { program: Object, initial: Object },
     Succeeded { call: StateCall, output: Object },
     Failed(Failure),
@@ -554,100 +508,48 @@ enum OperationFacts {
         failure: Failure,
         classification: Classification,
         request: RecoveryRequest,
-        decision: RecoveryDecision,
+        outcome: RecoveryOutcome,
     },
+}
+enum RecoveryOutcome {
+    Retry,
+    Restart { checkpoint: StatePosition },
+    Stop { reason: StopReason, root: Option<Object> },
 }
 ```
 
-`RecoveryRequest` and the authorized `RecoveryDecision` are distinct facts: a requested Retry can
-be denied and become Stop. Reuse the existing Program request/stop vocabulary. Runtime's moved
-decision declaration is `Retry | Restart { checkpoint: StatePosition } | Stop { reason: StopReason }`;
-delete Journal's policy mirrors and redundant StopCode conversion. Serialization of a target
-position grants no authority: Runtime still checks the request against the admitted Program and
-current state. Root mapping appears only in `TerminalFailure::Domain`; do not repeat the root value
-in Recovered facts or put it on adapter errors.
+A root is required for domain Stop and forbidden for Read/pending-Effect Stop; validate that local
+relation. Request and authorized outcome remain distinct because a request may be denied. Reuse
+Program's existing Classification/request/reason vocabulary. Do not add policy mirror enums.
+Program appears as its canonical document Object at admission, without making Program an MfmValue.
+New Runtime enums use external snake_case tags compatible with inline RawValue, reject unknown
+and duplicate fields, and have no MfmValue identity or codec registration.
 
-Add the sole exact Serialize/Deserialize implementations to the existing Program Classification,
-RecoveryRequest, StopReason, RecoveryLimit, and RecoveryDenial types used by this payload; do not
-create parallel record DTOs. RecoveryTarget serializes transparently through its checked
-StatePosition and gains checked deserialization for that representation. Reading a requested
-target grants neither authoring eligibility nor execution authority; current Runtime authorization
-is mandatory. These data-serialization changes add no policy callback or internal-error identity.
-
-Admission carries Program canonical bytes in the same Object representation, without making
-Program an MfmValue or deriving Serialize over its private implementation fields. Runtime calls
-Program::decode_canonical for that object and checks its resulting content reference against the
-commit. Its established Program document schema/constructor remain the authority for the sequence.
-Program object payload bytes count toward the same object-payload accounting as initial context.
-
-The active checkpoint vector is sorted and unique by declaration position. It retains one complete
-input per active checkpoint, replacing that input on re-entry. Active does not mean currently
-eligible. Compute eligibility from Program targets, active checkpoints, execution mode, and Effect
-barrier; do not persist a second eligible-target collection. `usage` has exactly one entry per
-Program declaration. Checkpoints contain no counter/barrier copies. The run-wide decision count
-is the checked sum of all retries and restarts in usage; no independent `decisions` field or cache
-is stored. Reject sum overflow or a total exceeding the Program's global allowance on restoration.
-
-Preserve the baseline eligibility predicate: the target is declared for the failing declaration,
-has an active retained input, is no later than that declaration, is strictly after any Effect
-barrier, and the inclusive target-to-failure interval contains a Read. Do not widen Restart to
-arbitrary historical visits or a Pure-only interval.
-
-Restart takes the selected stored input, removes checkpoints after the target, advances the visit
-from the current execution, and retains current usage/barrier. Forward success and Read Retry also
-advance the visit. Pending Effect Retry preserves its existing position, visit, command and
-EffectId. Only granted Retry/Restart increments its counter on the failing declaration (not the
-restart target), increasing the derived run total once. Stop, denied requests, and internal
-failures do not spend another grant.
-
-Admission constructs zeroed usage, no barrier, and the initial active checkpoint when applicable.
-A zero-State Program is Succeeded at admission. Later terminal states keep the same continuation
-fields; no historical reconstruction is required to inspect their usage or original failure.
-
-The driver retains the loaded admission, latest RunCommit, and mechanical head. It does not keep
-an independently mutable RunState beside that commit or retain the whole history. The candidate
-owns the next commit; after known insertion it replaces the current commit. Reports borrow the
-current commit. In particular, RunnableReason and pending Effect `latest_failure` are derived from
-current facts; neither is copied into Phase. Pending without append leaves those facts unchanged.
-
-Use these exhaustive relations to validate the **one loaded commit**, with no predecessor input:
-
-| Current facts | Required current phase and relation |
+| Current operation | Continuation derived from this record and admitted Program |
 | --- | --- |
-| Admitted | Sequence 1 only, no predecessor; exact admitted Program/initial value; zero usage/no barrier; Runnable at declaration 0/visit 0 with its initial checkpoint, or Succeeded for an empty Program. |
-| Succeeded | The completed StateCall mode/position matches its declaration. Its output becomes the next declaration's input with visit + 1; Succeeded is allowed only after the final declaration. Advancing to a different later declaration is invalid even if schemas match. |
-| Failed | AwaitingRecovery with the same Failure. Domain failures retain their actual StateCall; Read operational failure has no accepted evidence; pending Effect failure retains its exact EffectCall. |
-| EffectPrepared | EffectPending with the same EffectCall and a declaration whose mode is Effect. |
-| EffectSettled | AwaitingInterpretation with the same Settlement. |
-| Recovered Retry | A Read failure selects the same declaration/input and visit + 1; a pending Effect failure selects its unchanged EffectCall. Pure and settled Effect retries are invalid. The request must be RetryState. |
-| Recovered Restart | Runnable at the requested permitted active checkpoint/input and visit + 1 from the failing call; later checkpoints are absent. Pending/settled Effects cannot restart. |
-| Recovered Stop | Domain/Read failure produces the corresponding TerminalFailure with the same original/call and reason; only domain Stop has a mapped root. Pending Effect failure returns the same EffectCall to EffectPending. A denied request can produce Stop. |
+| Admitted | Declaration 0/visit 0 using initial input; an empty Program succeeds with that input. |
+| Succeeded | Next declaration with output and visit + 1; after the final declaration, terminal success. |
+| Failed | AwaitingRecovery of exactly that Failure. |
+| EffectPrepared | EffectPending with exactly that command/EffectId. |
+| EffectSettled | AwaitingInterpretation of exactly that settlement. |
+| Recovered Retry | Same Read input with fresh visit, or unchanged pending Effect authority. |
+| Recovered Restart | Selected retained checkpoint input with fresh visit from the failing call. |
+| Recovered Stop | Domain/Read terminal result, or unchanged pending Effect with recovery stopped. |
 
-Active checkpoint positions are declared checkpoints at/before the current continuation position;
-if the selected call is itself a checkpoint, its retained input agrees with that call's input.
-For terminal success use the completed final call in current facts, not the terminal output as a
-checkpoint input. A barrier names an Effect declaration. Pending/settled Effect calls have their
-barrier at that Effect; an ordinary Runnable call must be strictly after any barrier. Check allowed
-slot contracts for every object in state **and facts**, using the declared operation/position.
+There is no stored phase to compare with this table. Delete TerminalFailure as a second stored
+copy; derive the public terminal report from failure/outcome. Current operation mode, position,
+slot identity and permitted request/outcome relationships remain checked.
 
-Do not reevaluate classification, policy, or root mapping, reconstruct an earlier state, or verify
-changes from earlier counters/checkpoints. Current ranges, static mode restrictions, and
-same-commit identities are checkable; an otherwise locally valid forged past evolution remains
-outside this contract. The table is a current-record invariant, not a restored history validator.
+Checkpoints are sorted, unique, declared and no later than the current continuation; replace their
+input on re-entry and remove later checkpoints on Restart. The run total is the checked sum of
+per-declaration retries/restarts, with no stored global-counter copy. Only authorized Retry/Restart
+charges the failing declaration once. Stop, denial and internal failure charge no grant.
 
-Externally tagged Runtime enums are required for the inline raw-JSON representation. With Serde
-1.0.228/serde_json 1.0.150, an adjacent `kind`/`data` enum buffers the payload when canonical key
-ordering puts `data` first; nested RawValue decoding then fails. Use ordinary streaming-compatible
-Serde decoding, not custom tag buffering, escaped JSON, or an intermediate Value tree that loses
-duplicate-key evidence. Public transport `kind` tags remain separate projections.
-
-Keep one private Runtime current-record check, conceptually
-`RunCommit::validate_current(&self, run_id: &RunId, sequence: u64, executable: &ExecutableProgram)`.
-It receives no predecessor or history. It checks the table, slot identities and static relations,
-including EffectId derived from RunId, Program ref, execution position, and command ref. Values
-performs schema admission for newly loaded object occurrences once; live objects already admitted
-from typed values do not repeat that schema/hash work here. Typed constructor/binding checks run
-at the selected operation entries in section 8.6.
+Retain baseline restart eligibility: target declared for the failing State, active retained input,
+target no later than failure and strictly after the Effect barrier, and a Read in the inclusive
+interval. Pending/settled Effects cannot restart. Ordinary Read Retry and forward advancement use
+a fresh visit; pending Effect Retry retains visit, command and EffectId. Derive/check EffectId from
+the existing RunId/Program/position/command contract. No historical rows establish these facts.
 
 ## 7. Loading, append authority, and reconciliation
 
@@ -669,7 +571,7 @@ verification service as compensation for deleting the historical scan.
 
 ### 7.2 Append and candidate adoption
 
-Runtime constructs its next complete state and actual operation facts, admits any new Values
+Runtime constructs its next complete record, admits any new Values
 objects, and passes the canonical payload to Journal for sealing. Keep the exact sealed candidate
 until its append disposition is known. Do not introduce a generic commit facade around these calls.
 
@@ -803,7 +705,7 @@ The frame exposes checked identity/header fields and a borrowed canonical payloa
 wire has `domain`, `run_id`, `run_sequence`, `previous_head_digest`, and `payload`; the digest is
 computed from exact canonical frame bytes under the existing hashing rule. Replace the old
 record/object-table wire and its domain marker in the single cutover; retain no old reader.
-Runtime encodes/decodes RunCommit inside payload and owns the payload's exact field/tag contract.
+Runtime encodes/decodes RunRecord inside payload and owns the payload's exact field/tag contract.
 Keep frame sequence numbering, RunId spelling, digest algorithms and exact-head append checks.
 
 A new admission/latest query must not acquire history semantics indirectly through a count/sum
@@ -821,13 +723,14 @@ A recovery commit includes the originating failure/input/request, classification
 decision or denial, and resulting state. Each commit remains understandable without replaying
 earlier operation facts.
 
-Where state and operation facts mention the same object, share immutable ownership in memory and
-serialize each required occurrence. Do not make separately mutable context copies or add an
-intermediate-recovery timeline. No internal error is an operation-history variant.
+Where a checkpoint and the current operation require the same input, share immutable ownership in
+memory and serialize those actual occurrences. Do not add an independent phase copy of the latest
+operation or an intermediate-recovery timeline. No internal error is an operation-history variant.
 
 ### 8.2 Phase behavior
 
-The phase names below describe behavior; use the smallest concrete enum expressing it.
+The phase names below describe behavior derived from the one record in section 6.5. They are not
+instructions to introduce another persisted enum or to store the same operation in two places.
 
 | Acknowledged phase | Permitted work and next durable result |
 | --- | --- |
@@ -856,7 +759,7 @@ between stopping recovery and resolving existing Effect authority explicit in th
 The order is strict:
 
 1. Retain the native declared domain/operational error and executed input/request.
-2. Build and append the failure commit with AwaitingRecovery.
+2. Build and append the Failed record, which derives AwaitingRecovery.
 3. After known insertion, classify that original and invoke the selected handler.
 4. Authorize the recommendation against the current state and semantic limits.
 5. Perform root mapping only if the authorized result requires a terminal domain Stop. A denied
@@ -868,7 +771,7 @@ system failure to this caller. Explicit resume may rerun that unfinished recover
 once-only claim applies to uncommitted in-memory policy progress. Ordinary Stop or denial is a
 normal recorded recovery result, not a system fault.
 
-Runtime derives the recovery-context view from RunState and the admitted Program, including current
+Runtime derives the recovery-context view from RunRecord and the admitted Program, including current
 usage and eligible targets. Handlers receive that view with Classification directly. Delete
 IncidentSummary and adapter_context rather than maintaining them beside this route. Keep
 intent/command/input consistency checks at the typed owner that can establish
@@ -940,191 +843,118 @@ admission and binding at interpretation are two typed uses separated by a durabl
 Keep this explicit cost of one dispatch route; add no cached proof, native-value cache, or alternate
 hot path. Preparation/check failure leaves the acknowledged command intact and performs no IO.
 
-## 9. Native errors and invocation reports
+## 9. Capture once; report existing data
 
-### 9.1 Preserve causes without turning system errors into Program values
+### 9.1 Native errors are not executable projectors
 
-Keep actual domain/operational errors as their existing exact persisted contracts, expanded only
-where reviewed causes are missing. Their nested diagnostic data needs an exact schema because it
-is genuinely stored. Native constructor errors and internal callback failures are different: they
-have no `MfmValue` requirement, semantic identity, persisted error schema, or decoder-error codec.
+Keep exact typed State-domain/adapter operational errors for actual persisted results. Internal
+constructor, task, Store and callback failures remain invocation errors, without MfmValue identity,
+persisted error schema, decoder registry or a durable fault lifecycle.
 
-Use one native source-preserving invocation-error boundary through existing Runtime/Application
-reporting. A checked decoder returns its owner's concrete constructor error; the erased boundary
-retains that native cause and an owner-reviewed diagnostic projection. Owner error variants, child
-causes, operation/field location, and reviewed expected/observed facts survive. Serde's formatted
-custom error is not sufficient custody when it discarded an available native source.
+Replace the third attempt's fallible reporting operation with immutable captured detail. The
+owner prepares its reviewed representation once while its safe original is still held. Outer
+errors add their local operation context and serialize existing data, including already-captured
+children. Reporting does not call owner extraction, native constructors, Values admission or
+another error's fallible projector.
 
-Values owns the native cause erasure needed by its decoding boundary. Runtime reuses that carrier
-with operation context; Application projects it. Keep the concrete reviewed cause and its reporting
-operation together, rather than maintaining a second error tree. Values imports no Runtime/domain
-variants. Concrete client errors are inspected and converted to reviewed owner data before this
-boundary; the carrier does not accept credential-bearing client objects. No new public error trait
-or client downcaster registry is needed.
+Delete NativeCause::from_error_with, project() -> Result<RawValue, NativeCause>, companion owner
+Wire/project methods introduced solely to project erased children, and secondary projection
+attempts. Do not replace them with a new trait, serializer registry or generic error framework.
+The shared DiagnosticEvidence representation and typed owner facts remain the capture vocabulary.
 
-A native checked-construction hook may be added to the existing value codec/authoring path when a
-real consuming callback needs it. Prove it with a shipping checked type whose distinct failures
-reach Application before migrating another family. Do not add an eager cold qualifier, parallel
-value registry, universal internal-result ABI, per-error identity, recursively decoded decoder
-error, or automatic migration of every foundational constructor.
+### 9.2 Capture result and failure custody
 
-Raw wire types or native field-error companions are justified only by an actual checked field on
-that consuming path. Reuse the owner's constructor and the same native error in ordinary decoding
-and Runtime invocation. Reviewed serialization can project that native error into an invocation
-report. Exact persisted schema participation is required only when its data is actually part of a
-stored domain/operational result; an independently registered identity is not required for every
-nested field. Showing an error in a report does not make it a Program value or require a second
-report DTO tree.
-
-Native erasure must have bounded, reviewed reporting. Reuse existing Values byte ceilings and the
-shared diagnostic bounds; do not serialize an unbounded native object first and check size later.
-No generic Debug/Display capture, unit replacement, source stringification, or second transport
-error system. Public rendering may omit permitted detail only with explicit omission accounting.
-
-### 9.2 Report recording failure alongside the original
-
-A report identifies the failed operation/stage, last acknowledged head, actual recording
-disposition, and reviewed causal chain. If a domain/operational error could not be recorded, retain
-that original with the separate encoding/Store cause. Once a complete candidate exists, retain its
-exact identity/bytes within the invocation's existing custody so ambiguity can be reconciled.
-
-Before a canonical original exists, the native error is the available original; report that its
-persistence failed. Do not invent a reference. If a callback never returned because of task failure
-or cancellation, report that fact rather than fabricate an error or successful result it did not
-return. Avoid per-stage native-success stashes and intermediate mapping-output collections.
-
-There is no fallback append, shortened replacement outcome, recursive Store-error record, new
-logging system, or second audit store. A Store failure cannot be durably audited through that same
-failed Store. An internal report can be delivered to this caller; the run history will not make it
-available to a later caller after a crash. An error while rendering/delivering the report likewise
-does not prove delivery of the original.
-
-### 9.3 Concrete native-error and callback boundary
-
-Use one Values-owned `NativeCause` with private erased storage. It retains the concrete reviewed
-owner value and its bounded serialization operation; it is not itself MfmValue or a persisted
-schema. The two construction cases below use the same storage/projection mechanism:
+The target private carrier has two coexisting facts: a reviewed native owner when safe to retain,
+and an immutable captured result. It stores no callback to execute during public serialization.
+Conceptually:
 
 ```rust
-impl NativeCause {
-    fn from_error<E>(error: E) -> Self
-    where E: std::error::Error + serde::Serialize + Send + Sync + 'static;
-
-    fn from_original<E: MfmValue>(original: Arc<E>) -> Self;
+struct NativeCause {
+    owner: /* private erased reviewed owner, when safe */,
+    detail: CapturedDetail,
 }
-
-trait MfmValue /* existing bounds retained */ {
-    // Existing descriptor/identity methods remain.
-    fn decode_native(bytes: &[u8]) -> Result<Self, NativeCause>;
+enum CapturedDetail {
+    Available(/* immutable reviewed JSON, bounded while built */),
+    Omitted { reason: CaptureFailure, partial: /* bounded safe prefix, when present */ },
+}
+enum CaptureFailure {
+    Size { limit: u64, observed_at_least: u64 },
+    Encoding { category: ParseCategory, location: ParseLocation },
+    Panicked, // payload withheld
+    Withheld, // prohibited raw original detail
 }
 ```
 
-`from_error` accepts only reviewed owner errors, including reviewed client extraction; implementing
-Serialize alone is not disclosure authorization. `from_original` preserves a declared domain or
-operational error without introducing an Error bound on every MfmValue/capability error. Both
-retain typed downcast access within native library custody and project from that same original.
-Any/erasure here holds an invocation error only, never a cache of executable context/success values.
+These are internal shapes to prove, not a second public report tree. Omission status retains any
+safe diagnostic prefix already captured plus the known operation/stage. It never asserts an exact
+omitted count or full preservation. Use the existing 32 MiB native detail ceiling and 8 KiB shared
+diagnostic ceiling; no unbounded serialization before checking the size. A nested native cause's
+Serialize writes its captured data/status, not its native owner or another fallible projection.
+Only already-complete reviewed diagnostic data can be a partial prefix. Drop an incomplete JSON
+buffer on capture failure; do not add JSON repair, field recovery or streaming introspection.
 
-Give `decode_native` a default ordinary Serde implementation with reviewed parse category/location.
-An owner whose constructor cause would be flattened overrides that one hook with raw-wire decode
-and its existing checked constructor. There is no default-then-fallback retry. An optional native
-`DecodePersisted` helper can implement the override; it is not a new mandatory MfmValue supertrait.
-The default does not close known checked-constructor loss sites: migrate those actually reached by
-the slice, then finish the named remaining owner inventory. A derive emits this override only for
-used owner construction; it does not generate decoder identities or an error-schema subsystem.
+CaptureFailure is fixed reviewed data. Constructing or reporting it does not invoke another
+projector or create another NativeCause with an arbitrary serializer. Raw Serde/client messages
+and panic payloads do not enter it. A source's own safe exposed IO/parser chain is extracted at
+that original owner; a secondary serialization failure is not a fabricated ancestor of it.
 
-`Object` deserialization checks canonical bytes and claimed content hash. Values validates its
-exact descriptor when Runtime checks the admitted slot, using the already-associated descriptor.
-Native materialization selects `T::decode_native`; it checks expected contract identity but does
-not repeat canonical hashing or schema validation. Hot `Object` construction from `&T` uses the
-existing canonicalize/admit implementation. None of these routes stores native T in Object.
+For an admitted declared original, reuse its canonical Object bytes and identity. Do not
+recanonicalize that original to render an invocation error. During initial encoding retain the
+reviewed native original outside the immediately awaited pure encoding job. If encoding fails,
+report the actual failure and absence of a canonical identity; retain the safe original where
+available, with explicit omissions for detail that could not be captured. Do not retry the same
+failed serializer to try to build its error report.
 
-Replace the baseline unit `PreparationError`, `StateExecutionError`, and `AdapterInvariantError`
-with this shared native cause at their existing boundaries; do not wrap each in another unit-like
-layer or introduce per-callback associated internal-result contracts. The resulting signatures are:
+If the original violates disclosure, section 4.4 applies before it reaches the returned carrier.
+Preserving secret-bearing data privately inside a public error is not the solution. The previous
+secret-rejection/downcast test must be replaced by a test of permitted facts and explicit
+withholding without a reachable raw original. Native downcasting remains available for reviewed
+safe owners; MfmValue alone does not establish that property.
 
-| Existing boundary | Target signature / change |
+### 9.3 Callback and decoder boundaries
+
+Keep one native error route through Values, Runtime and Application. The MfmValue native decode
+hook has an ordinary Serde default returning reviewed parser information. Override only the named
+checked-constructor path E5 in section 10: parse that owner's raw fields, call its existing checked
+constructor and preserve its native cause. A checked Object admission failure uses section 6.2's
+direct admission route, not a seed for every parent and not a default-then-fallback decode attempt.
+
+The default does not promise native sources that an arbitrary user Deserialize already erased.
+Report that limitation honestly; do not use it to drop a source supplied by the selected native
+hook. Additional owner constructor migrations are explicit scope changes, not automatic C14 work.
+
+Replace baseline unit PreparationError, StateExecutionError and AdapterInvariantError directly
+with the shared native carrier at their existing boundaries. Keep these signatures:
+
+| Boundary | Result |
 | --- | --- |
-| PureState::evaluate | `(Self::Input) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, NativeCause>` |
-| ReadState<C>::prepare | `(&Self::Input) -> Result<C::Intent, NativeCause>` |
-| EffectState<C>::prepare | `(&Self::Input) -> Result<C::Command, NativeCause>` |
-| ReadState<C>/EffectState<C>::interpret | `(Self::Input, &C::Evidence) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, NativeCause>` |
-| Handler::handle | `(&Self::Params, Classification, &RecoveryContext<'_>) -> Result<RecoveryRequest, NativeCause>` |
-| ValueMap::apply | `(&Self::Params, Self::Input) -> Result<Self::Output, NativeCause>` |
-| ClassifyError::classify | Keep `(&self) -> Classification`; it remains deterministic and infallible. Decoder/task failure around invocation is separate. |
-| AdapterError<E> | Keep `Operational(E)` and replace the unit `Invariant` payload with NativeCause. |
-| Capability evidence binding | Keep each existing intent/command/evidence/ref argument and replace a lossy binding error with NativeCause; do not repeat the check in Journal. |
+| PureState::evaluate(Input) | Result<ProposedStateOutcome<Output, Failure>, NativeCause> |
+| ReadState<C>::prepare(&Input) | Result<C::Intent, NativeCause> |
+| EffectState<C>::prepare(&Input) | Result<C::Command, NativeCause> |
+| ReadState<C>/EffectState<C>::interpret(Input, &C::Evidence) | Result<ProposedStateOutcome<Output, Failure>, NativeCause> |
+| Handler::handle(&Params, Classification, &RecoveryContext) | Result<RecoveryRequest, NativeCause> |
+| ValueMap::apply(&Params, Input) | Result<Output, NativeCause> |
+| ClassifyError::classify(&self) | Classification; deterministic and infallible, unchanged. |
+| AdapterError<E> | Operational(E) or Invariant(NativeCause); E still need not implement Error. |
+| Evidence binding | Existing exact intent/command/evidence/ref arguments with NativeCause on internal rejection. |
 
-The State/handler/map implementation and successful/domain-result ABIs keep their existing exact
-associations except for the explicitly deleted contextualization fields. Internal errors are not
-added to Program authoring, wire identities, or registration keys. Framework boundaries add the
-actual operation/stage to RuntimeError while retaining NativeCause. Native port errors that already
-preserve typed sources need not be erased before reaching this heterogeneous boundary.
+NativeCause's capture/access methods must be finalized by the integrated proof. Do not preserve
+its former fallible projector API simply to avoid changing callers. No callback-associated
+internal persisted-error ABI, native-success cache or per-error identity is added.
 
-### 9.4 Custody through the erased return and append
+### 9.4 Recording and output custody
 
-A typed original kept only inside a callback would be lost when that callback returns Object to
-the driver. Use this one private transient return for declared failures across that boundary:
+One private transient ReturnedFailure carries the admitted Object and the safe native original
+through the erased callback to append. State and adapter failures share this shape. Before Object
+exists, the invocation error carries the safe original, actual encoding cause and explicit absence
+of a canonical identity. Neither path stores successful native results or intermediate map outputs.
 
-```rust
-struct ReturnedFailure {
-    object: Object,
-    original: NativeCause,
-}
-enum AdapterReturn<T> {
-    Observed(T),
-    Operational(ReturnedFailure),
-}
-```
+Erased adapters retain their existing async request/response shapes, decoding the typed request
+and returning admitted evidence or ReturnedFailure. The monomorphized runner owns the evidence
+binding, constructs the next record and appends it. It keeps one original until the disposition
+is known. Known insertion makes the canonical original durable and releases transient custody.
 
-This is the explicitly required uncommitted original-error custody. It is not serialized, does
-not enter RunState, and holds no successful native object or intermediate callback progress. Both
-State-domain and adapter operational returns reuse ReturnedFailure; do not create two parallel
-custody structs. A conversion that fails before Object exists instead returns RuntimeError carrying
-the original plus the encoding cause. Absence of a canonical reference is represented honestly.
-
-Keep the existing monomorphized async State runners and their driver context. Their typed operation
-returns either an Object success, ReturnedFailure, or native RuntimeError; the runner constructs
-and appends the operation commit. Erased adapter callbacks use the following private result shapes:
-
-```text
-Read:   (&Object) -> BoxFuture<Result<AdapterReturn<Object>, RuntimeError>>
-Effect: (&EffectId, &Object)
-            -> BoxFuture<Result<AdapterReturn<EffectAdapterOutcome<Object>>, RuntimeError>>
-```
-
-The monomorphized adapter closure decodes its concrete request, passes its exact object reference
-to the existing typed adapter, and returns canonical evidence or ReturnedFailure. Operational
-failure is different from a local invariant/encoding/task RuntimeError. State recovery callbacks
-similarly consume the required Object references and return Classification, RecoveryRequest, or
-mapped Object through existing registration functions, with native RuntimeError on failure.
-No ColdQualifier, returned-success erasure, or second registration family is introduced.
-
-The ownership sequence for an original E is:
-
-```text
-typed operation returns E
-    -> async runner retains Arc<E>
-    -> immediately awaited pure encoding job borrows its own Arc clone
-    -> encoding failure: return original + encoding/task cause
-    -> encoding success: ReturnedFailure carries Object + NativeCause owning the original Arc
-    -> driver retains that original while constructing/sealing/appending the candidate
-    -> known insertion: canonical original is durable; drop transient native custody
-    -> recording failure/ambiguity: transfer original + cause + available candidate to the report
-```
-
-Do not move the sole original into the encoding job. If the operation itself never returned from
-its task, no returned original exists and task failure must say so. A later policy failure uses
-the already-durable original and its own native cause; it needs no copy of every prior map output.
-
-Extend the existing RuntimeError/InvocationFailure surface, rather than adding a second public
-report tree. Internal failure holds operation/stage and NativeCause. Recording failure additionally
-holds the available original and distinguishes pre-encoding failure from an append disposition
-with a sealed candidate. Candidate bytes remain native library custody; transport exposes only
-candidate RunId/sequence/digest and the reviewed causes, not the complete candidate frame.
-
-Use one boxed recording variant inside RuntimeError, retaining InvocationFailure::Execution as
-the public invocation container. Its minimum payload is:
+Retain one recording variant in RuntimeError and the existing InvocationFailure::Execution:
 
 ```rust
 enum RecordingFailure {
@@ -1141,59 +971,53 @@ enum RecordingFailure {
         reload_cause: Option<NativeCause>,
     },
 }
-enum AppendFailure {
-    NotInserted,
-    Store(StoreError),
-}
+enum AppendFailure { NotInserted, Store(StoreError) }
 enum CandidatePresence { Present, Excluded, Absent }
 ```
 
-BeforeAppend's candidate is absent until sealing succeeds; after sealing, retain it even if a
-later actual metadata check fails. Append always has exact candidate bytes. An absent original
-means this operation returned no declared error, such as successful-value encoding failure;
-it is not permission to discard one. observation retains the mechanical probe result separately
-from the latest view; the candidate may precede the latest head. Present normally returns the
-checked observation successfully, but remains reportable if subsequent payload/view decoding
-fails. Excluded/Absent return a recording error. reload_cause includes failed load, qualification,
-or projection and is secondary to the known append result. For Store errors, observation and
-reload_cause are absent because Runtime returns immediately without probing.
-The enclosing error retains its required operation/stage context, and InvocationFailure retains
-the latest checked observation. Remove incidental Copy/Eq requirements on errors now owning data.
-Classification/size/code accessors borrow these errors; do not consume or clone away their causes
-to satisfy baseline helpers such as size_limit and Application's map_runtime_error.
+BeforeAppend has a candidate only after sealing. Append retains exact candidate bytes in native
+library custody; public output exposes identity/sequence/digest, not the frame body. Capture
+status lives in the cause data; it is not another append disposition. The operation/stage and
+last acknowledged head remain explicit. Status/size accessors borrow rather than consume errors.
 
-The primary StoreError preserves unavailable versus indeterminate. Do not turn a failed
-NotInserted probe into a new claim about insertion. If projection fails after known
-insertion, the existing invocation error additionally retains the acknowledged RunSummary and
-the projection cause; last_observed may still be the earlier renderable view. That view must not
-be presented as the latest acknowledged head. This is invocation data, never another persisted
-fault/stop state or a second reporting API.
+Only NotInserted probes automatically, as section 7 specifies. Its checked finding is independent
+of the latest view, which may be later or fail to decode. Store errors return immediately with
+primary cause and candidate; they do not acquire an automatic probe or a recursive audit append.
 
-## 10. Close remaining owner gaps after the core cutover
+Public encoding/writing may still fail. Retain the available original invocation error and known
+acknowledged head alongside the real encoding/IO cause in the existing transport owner. Report an
+explicit omission if delivery of original detail fails. End after that delivery boundary; do not
+retry projectors, construct a generic ReportFailure<T>/IncompleteReport subsystem for arbitrary
+successful results, or claim socket delivery from REST response handoff. Process death or output
+failure does not prove the original was delivered or durably audited.
 
-Work through the existing first-loss inventory. Each slice follows one actual cause from its owner
-to either the native invocation report or a persisted domain/operational result, as section 2.3
-requires. Update the complete consumer closure and remove its lossy conversion in the same commit.
-Do not prepare unrelated type families in advance.
+## 10. Closed Part 1 error scope
 
-| Owner slice | Required retained evidence and unchanged constraints |
-| --- | --- |
-| RPC/EVM | Retain the baseline method/stage, response status, numeric RPC code, exposed source layers, checked field/range/size facts, and omissions. Headers survive a later body failure. Keep response/deadline bounds, duplicate-safe Read rules, classification meaning, and command identity. |
-| PostgreSQL Store/config/index/custody | One SQLx-specific extraction owner retains category, SQLSTATE, query/transaction stage, and failed gate facts. An acquired connection's gate error must reach its caller; a pool timeout cannot replace it. Keep split roles, authority/epoch/schema checks, latest-state repeatable-read load, and advisory-locked synchronous-commit append. |
-| Signing/keystore/channel/task | Preserve reviewed nested signing/owner/channel/task causes without rejected key-bearing commands or panic payloads. Keep keystore non-Send/non-Sync ownership and test it explicitly. Opaque crypto rejection remains explicit. |
-| Memory Store/index and application | Retain actual physical/owner/parse/entropy/filesystem/environment-access causes. Expected absence is not failure; exclude paths or input values when they can disclose secrets. |
-| CLI/REST delivery | Keep one current safe report surface with causal detail and accurate acknowledgement/delivery disposition. Parse/render only; no separate diagnostic endpoint or recovery implementation. |
+Part 1 proves the mechanism through the cases below. It retains all causes already supplied by the
+starting core and does not make comprehensive upstream extraction a completion condition. The
+original O11 constructor case becomes E5 here; it is not a second Part 2 migration. JsonError and
+CanonicalError custody reached by current-record admission is E4; other client extraction remains
+in Part 2. The shared custody rule still applies wherever a changed core API returns a cause.
 
-Source extraction belongs with the concrete client owner, not in diagnostics or Runtime. Do not
-introduce global operation/downcaster registries, substring error routing, concurrent last-error
-caches, or an unchecked protected acquisition path. Client-internal attempts inaccessible to that
-owner are explicitly unavailable. Preserve each port's own acknowledgement semantics; not every
-custody/configuration operation has Store's append disposition.
+| ID | Required core boundary and evidence | Stopping boundary |
+| --- | --- | --- |
+| E1 | Existing Pure/Read/Effect preparation, interpretation, handler, map and erased Runtime conversions carry their supplied native cause. Internal failure returns it without appending a fault; explicit resume follows the acknowledged record. | Section 9.3 callback signatures and the current invocation consumer; no new upstream constructor family or arbitrary Deserialize provenance. |
+| E2 | A declared State failure and the shipping Read's existing operational failure retain their admitted original through failure-before-recovery and cold inspection. Pending Effect failure preserves command/EffectId; settlement commits before interpretation. | Existing declared payload and exposed cause. New signing/authority/provider extraction belongs to Part 2; preserve the existing payload without inventing evidence erased before this boundary. |
+| E3 | One nested reviewed cause passes through failed recording, Store acknowledgement/probe handling, Application and CLI/REST. Exercise bounded/failed capture, retained original/candidate and actual terminal encoding/IO failure. | Sections 7, 9.4 and 10.1 and existing Store dispositions. No PostgreSQL/config query-diagnostics or client extractor expansion. |
+| E4 | Actual nested Object reference/hash/schema failures preserve native admission facts. JsonError/CanonicalError expose only reviewed data through native access and rendering; unsafe raw originals cannot escape capture. | Sections 6.2 and 9, these shared parser owners, and their existing API consumers. No companion seed grammar, framework-wide checked ID rewrite, TOML/HTTP/SQL diagnostic migration or caller-specific sanitizer family. |
+| E5 | Shipping EvmBalanceContext metadata.correlation checked constructor: empty and excessive-length failures retain location and reviewed limit/observed length through the actual typed Runtime callback and Application report after structural/schema admission. | These two constructor cases only. Reuse/extract the existing checked constructor; no automatic migration of other context/value families. |
+| E6 | Consumers of changed Object, NativeCause, Store and callback APIs compile and preserve existing supplied fields/classification, native custody and public behavior. | Adapt these consumers to the one current API. Forward/capture their already available reviewed data; do not add new owner categories, source traversal or persisted error schemas to close compilation. |
 
-Tests inject distinguishable nested failures through the public consumer, asserting retained
-layers, classification where applicable, redaction, and disposition. Domain/operational routes
-also demonstrate cold preservation. Internal routes assert invocation reporting and no appended
-fault; they do not need persisted internal-error schemas or hot/cold fault tests.
+Before each core API cutover, record its actual declaration/caller files and existing cause fields
+in the section 11.3 review record. This is a bounded dependency check, not a repository-wide first-
+loss inventory. A necessary caller change is in Part 1; extending what that caller's producer can
+supply is Part 2. Tests cover the guarantees above, not every combination of owner and transport.
+
+If the core cannot preserve a supplied cause or enforce safe custody without changing an upstream
+contract, stop that work item for a concrete architect boundary decision. Record the specific
+producer, missing fact and required change; do not migrate a whole owner family. The core cannot
+pass by dropping causes, retaining prohibited data or labeling its own new loss a deferred gap.
+Pre-existing upstream losses outside E1-E6 are recorded for Part 2 and do not block Part 1.
 
 ### 10.1 Current public projection
 
@@ -1201,7 +1025,7 @@ Keep Runtime `start`, `resume(&RunId)`, and `read(&RunId)` and the existing App/
 surfaces. RunView remains an owned immutable projection of admission, current commit, and head,
 optionally sharing Arc-backed commit/object data. Its return type gains no borrowing lifetime and
 it is not another mutable continuation model. Do not serialize all checkpoints/usage implementation
-fields as the public RunView merely because RunState now implements Serialize.
+fields as the public RunView merely because RunRecord now implements Serialize.
 
 Add the two new incomplete phase alternatives to the current RunView/App serializer:
 
@@ -1211,7 +1035,7 @@ Add the two new incomplete phase alternatives to the current RunView/App seriali
 | `effect_pending` | Position, EffectId, and latest failure/decision from current Recovered facts when present. Replace `state_context` with actual input/command facts; do not retain a contextualization API. |
 | `awaiting_recovery` | Position, original failure and its Pure/Read/Effect operation inputs, intent/command and accepted evidence as applicable; no classification/decision is fabricated before it commits. |
 | `awaiting_interpretation` | Position, EffectId, and accepted settlement command/evidence. This is an incomplete state with no recorded internal fault. |
-| `succeeded` / `failed` | Existing complete success value or derived terminal failure report, using the current Object and TerminalFailure data. |
+| `succeeded` / `failed` | Existing complete success value or derived terminal failure report, using the current operation, original Object and recovery outcome. |
 
 Successful observation of either new incomplete phase follows existing nonterminal policy: REST
 returns 200 and CLI exits 1. An invocation that failed internally while leaving that phase returns
@@ -1286,10 +1110,10 @@ Do not truncate required facts, manufacture a smaller error record, or create re
 authority. If an externally accepted settlement cannot be recorded, the acknowledged pending
 command remains authoritative for later reconciliation; do not claim durable settlement.
 
-### 11.2 Prove the representation before owner fanout
+### 11.2 Prove the complete Part 1 representation
 
-At the start of the core cutover, use actual target types and an existing Runtime public entry
-point to exercise a small complete path: admission, successful State/context advance, failed Read
+Reuse the third core's actual Runtime entry points and consuming tests. Revalidate the corrected
+representation on the small complete path: admission, successful State/context advance, failed Read
 committed before a handler error, restoration, and explicit resume. Use the baseline's available
 operational cause. This proves lifecycle/custody integration; it does not claim that all upstream
 causal gaps are already fixed.
@@ -1312,176 +1136,149 @@ explicit candidate-sequence probe. This is an IO contract, not a promised latenc
 input decoding and complete-state size costs still need measurement; avoid full-history validation
 benchmarks for a deleted feature.
 
-Before broad owner migration, report the steps 1-3 production-code delta from `7f71beef`, including
-replacement code and untracked additions, separately from tests/docs. Name removed public types,
-callbacks, code paths, and remaining change sites. The core must have one continuation declaration,
+For Part 1 acceptance, report the corrected core delta against both `aae81795` and `7f71beef`,
+including replacement code and untracked additions, separately from tests/docs. Name removed public
+types, callbacks, code paths, and remaining change sites. The core must have one continuation declaration,
 one object representation, one restoration route, and no semantic-history scan. A smaller fold file
 or passing local test is not evidence if its responsibilities survive elsewhere.
 
-No net LOC forecast is established. If the core grows, explain the additions by retained guarantee
-and identify actual compensating removals. If it needs duplicate models, an unplanned generic layer,
-or rejects a shipping fixture, stop the core expansion and resolve that concrete finding before
-starting another owner. This gate assesses the changed design; it does not authorize repeated
-repository-wide diagnosis or discarding user work.
+Apply section 11.3's acceptance decision after these measurements. An explanation of growth does
+not permit continued owner work. This is a review of the bounded correction, not permission for
+another repository-wide salvage audit or discarding user work.
 
-### 11.3 Handoff review evidence
+### 11.3 An explanation of growth is not acceptance
 
-The 2026-09-12 handoff review exercised a disposable Rust probe outside the production worktree,
-using pinned rustc 1.96.0, Serde 1.0.228, serde_json 1.0.150, and the actual baseline canonicalizer,
-IDs, and Values contracts. The probe's dependency checkout at 15829d89 has identical crates,
-Cargo.toml, and Cargo.lock to 7f71beef. It adds serialization derives to the proposed concrete
-declarations and tests a minimal native-cause carrier and erased async return; it implements no
-Runtime transition model, Store, or alternate production design.
+The previous core supplied measurements and retained tests, yet still introduced duplicate state
+agreement and parent decoder/projector machinery. The gate now requires an independent architect
+review of the actual diff and cost, not an engineer's assertion that each addition has a rationale.
+The review is about convergence of the whole current core, not another local source-custody question.
 
-All ten tests passed under `nix develop -c cargo test --offline --manifest-path <probe>/Cargo.toml`:
+The reviewed packet is one concise current record: baseline/candidate commits, selected test results,
+production delta and total additions/deletions/files including untracked work, removed/added types
+and responsibilities, shipping bytes/load rows, E1-E6 results, and any known upstream gaps deferred
+to Part 2. Keep this evidence with the Part 1 completion record; update it instead of accumulating
+progress or scope-attribution documents. Part 2 estimates or resolved owner contracts are not
+required to accept Part 1.
 
-- Every proposed Phase, OperationFacts, failure, and nested recovery-policy alternative round-trips
-  through real canonical JSON with inline raw objects; duplicate/unknown object fields, unknown or
-  multiple phase alternatives, and out-of-range target positions reject.
-- The previous adjacent kind/data shape reproduces the RawValue deserialization failure described
-  in section 6.5; the selected external shape round-trips.
-- A declared MfmValue without an Error implementation retains its original through erasure and
-  bounded projection failure. A reviewed native Error retains its exposed source links and fields.
-- The original survives an erased async callback's lifetime and a panic in its immediately awaited
-  encoding task because the async owner retains its Arc.
+Acceptance must name the actual removals from the third core and identify every replacement.
+A renamed validator, another generic decoder family, a fallible projector in a different crate,
+or missing original/secret custody fails the gate regardless of LOC. The corrected core must
+remove the identified redundant responsibilities and report a smaller affected core against
+`aae81795`. Also show the total against `7f71beef`; improvement over an inflated attempt is not
+by itself achievement of the user's net-simplification objective.
 
-These are language, wire-shape, and ownership checks. They do not validate semantic transitions,
-shipping values, full Object admission, throughput, production LOC, or the complete C1-C18 contract.
-The temporary probe is review evidence, not a new repository dependency or a test framework to
-import. Step 3 implements these regressions in the real consuming tests and supplies section 11.2's
-integration evidence before owner fanout.
+No unsubstantiated numerical forecast is established here. The architect must reconcile the
+completed Part 1 delta and responsibility removals against both baselines. If Part 1's net reduction
+or required complexity improvement cannot be supported, Part 1 remains unaccepted; future owner
+work cannot supply hypothetical deletion credit. The engineer cannot waive this by describing
+growth as necessary or by removing unrelated code/tests. Conversely, unfinished Part 2 estimates
+or source contracts cannot invalidate an otherwise accepted Part 1.
 
-Baseline tracing also settled locally checkable commit/phase relations, the derived recovery total,
-binding ownership, idempotent start, NotInserted reconciliation, immediate Store-error return,
-error custody through Application, and exact public failure statuses. These choices are specified
-above; an engineer should not need to invent another state, registry, recovery workflow, or error
-transport to connect the sketches.
+## 12. Ordered work and authority to continue
 
-## 12. Ordered logical commits
+The next task is the bounded core correction below. **Do not issue another “fully implement this
+RFC” goal while K1-K3 remain unproved.** Preserve the third attempt and its measurements. An isolated
+checkout of `aae81795` with this RFC may be used for the proof; that is a correction of the existing
+core, not another baseline-to-whole-stack implementation. Steps 1-2 are already measured at
+`6ea98576`; do not repeat them or discard their coherent deletions.
+Carry both revised RFC files into that checkout so their links and scope remain consistent;
+the Part 2 draft does not authorize owner implementation during this work.
 
-The sequence is mandatory. Steps 1-2 are coherent baseline deletions. Step 3 is an inseparable
-persistence/continuation/consumer cutover; preparatory unintegrated schemas are not completed slices.
-Steps 4 onward close the remaining auditability inventory through the new route.
+### K1: `remove duplicate continuation facts`
 
-Before each commit, write a short checklist: observable change and public consumer; affected owner
-files and consumer closure; exact deletions; required cause fields; and narrow verification command.
-A new persisted schema must name its consuming stored field. Include production LOC and actual
-removals in the result. Do not build a separate progress framework or seek approval for routine
-implementation choices already settled here. New architectural conflicts follow AGENTS.md.
+Replace Phase + OperationFacts with the section 6.5 record in the real Runtime path. Delete the
+stored TerminalFailure copy, phase-reconstruction/agreement code and repeated payload accounting
+at the same cutover. Preserve authorization, checkpoint/usage/Effect checks and observable public
+phase behavior. Reuse consuming lifecycle tests, deleting assertions for the superseded duplicated
+wire. Measure actual removals and encoded occurrences before starting a new error owner.
 
-### Step 1: `remove prospective history capacity admission`
+### K2: `capture reviewed invocation detail once`
 
-Cut over Program recovery bounds/authoring/wire, Runtime estimates/quotas, EVM/Portfolio bound
-calculators, and their consumers. Preserve the existing fused lifecycle for this commit. Verify
-actual object/frame/run rejection and semantic recovery limits. Gate: the deleted capacity symbols
-have no production definitions or callers; shipping domains supply no replacement lifecycle bounds.
+Replace fallible NativeCause projection with section 9's immutable captured detail and section 4.4's
+custody boundary. Exercise one nested reviewed owner through a native Runtime recording error and
+Application/CLI/REST. Reuse admitted original bytes; prove failed capture cannot trigger a second
+projector, unsafe downcast or recursive error family. Remove the replaced projector/owner Wire/
+secondary-reporting machinery in that closure. Retain actual append/probe and output-failure facts.
+Do not migrate PostgreSQL/config/signing families to make this proof appear comprehensive.
 
-This precedes contextualization deletion because complete inputs can exceed old context-only frame
-estimates. Do not repair estimates that the next step would remove.
+### K3: `prove direct current-record admission`
 
-### Step 2: `remove adapter contextualization and incident summaries`
+Resolve section 6.2 using real Object/reference/hash/schema failures inside the current payload,
+real typed adapter arguments and the E5 constructor consumer. Compile and exercise both live and
+restored calls. Delete ObjectSeed and the enclosing seed grammar only when this actual admission
+route preserves the required causes and object/identity invariants. The corrected Object getter,
+framework field types and owner capture APIs must be written as final signatures in this RFC.
+A toy shape-only round trip or an independent Runtime model does not pass this proof.
 
-Cut over Program Read/Effect traits and authoring, Runtime association/recovery, current Journal
-adapter-failure payloads, shipping States, and App projections together. Preserve complete executed
-input and intent/command/EffectId. Handlers receive Classification directly with derived context.
-Delete context-only values, codecs, registrations, ABI fields, summary-only branches and callbacks.
-Keep preparation/response-binding checks at their actual owners.
+K1-K3 are logically ordered work items. Keep an inseparable API/cutover together; do not commit a
+broken workspace or preserve two production designs merely to split commits. Retained behavior
+must pass the relevant focused checks from [build and verification](docs/build-and-verification.md).
+No broad owner migrations, new client extractors or arbitrary constructor families belong here.
 
-Use Program `lib.rs`, `authoring.rs`, and `recovery.rs`, Runtime assembly/recovery, EVM
-`anchored_call/context.rs` and `transaction/stages.rs`, and their callers as the initial closure.
-Verify a cold adapter failure and local mismatch rejection through the consuming Runtime/App path.
-Gate: no contextualizer or IncidentSummary path remains, and retained behavior is covered.
+### G1: architect acceptance of the corrected core
 
-### Step 3: `persist current run state and separate recovery commits`
+Apply section 11.3 to the exact K1-K3 candidate. The dedicated architect gives a concrete accepted
+or rejected disposition with the outstanding failures/removals; a request for more evidence is not
+acceptance. This review decides Part 1, independently of Part 2 readiness or cost. If the corrected
+core cannot be justified, return the specific unresolved design to the user. Do not spend another
+work period on unrelated small cleanups and then resume fanout.
 
-This is one inseparable cutover commit, with the following internal execution order. Intermediate
-work is not a completed foundation or an excuse to begin source-owner migrations:
+### F1: complete and accept Part 1
 
-1. Build section 11.2's admission/success/failed-Read/handler-failure/restore/resume path through the
-   existing public Runtime entry point and memory Store. Integrate the canonical Values object,
-   actual RunState/payload, opaque Journal envelope, admission/latest load, failure-before-policy
-   append, and native original-error custody needed by that path together. Remove the replaced
-   qualified/cache/ref-table/fold path from this consuming route; do not first build codecs or a
-   standalone schema inventory. This working path precedes PostgreSQL and broad consumer fanout.
-2. Complete checkpoint restart, terminal recovery, pending Effect, settlement-before-interpretation,
-   and append-failure/collision paths using that same representation. Apply sections 6.5 and 8's
-   current-state checks, grants, yield points, and typed binding ownership. Exercise native
-   constructor reporting at a selected typed callback; the shipping Application proof completes
-   in item 4 because Application depends on PostgreSQL. Add no persisted internal-error contract
-   or dormant decoder-only migration.
-3. Cut PostgreSQL and all Store consumers over to the already-exercised admission/latest plus
-   optional probe contract, preserving atomic append authority. Update queries, baseline/fixtures,
-   and SQLx metadata together. Run the managed checks and shipping-size/load measurements; do not
-   reopen provider/signing capture to make the storage cutover compile.
-4. Render Runtime/App/CLI/REST from the current continuation and causal invocation result. Update
-   authoritative design, architecture, persistence/transport docs, and AGENTS ownership statements
-   that still require a semantic fold, Journal history qualification, or complete-prefix loading.
-   Prove C14 with one shipping checked constructor's distinguishable failures through its actual
-   Runtime callback and Application report, reusing the route already exercised above.
-5. Complete physical deletion of the old fold/accumulator replay, Journal lifecycle declarations,
-   qualified/native caches, duplicate contract refs, object-table resolution, full-prefix load,
-   superseded APIs/tests/docs, and every replaced producer/consumer in this same commit. No earlier
-   intermediate implementation survives as a second current design.
+Reconcile C1-C18 with K1-K3, E1-E6 and G1. Update authoritative design/architecture, AGENTS ownership
+and affected transport contracts in their owning cutovers. Remove superseded implementations,
+tests, fixtures and docs while retaining observable coverage. Part 1 ends here; no owner row from
+Part 2 is required or automatically authorized by G1.
 
-Gate: C1-C14, C16, and C17 pass for the core boundaries; section 11.2's measurements and deletion delta are
-reviewable, and the production workspace has one current design. No PostgreSQL capture overhaul,
-signer migration, or full Values/derive family rewrite is a prerequisite. The core may use baseline
-operational payloads whose upstream first-loss gaps remain explicitly assigned to step 4. C15's
-remaining owner coverage belongs to step 4; C18's final integration evidence belongs to step 5.
-Existing baseline checks for steps 1-2 run during those steps; their new lifecycle cases complete
-here. This assignment must not turn the whole owner inventory into a prerequisite again.
+Use the narrowest relevant checks under [build and verification](docs/build-and-verification.md),
+managed PostgreSQL/SQLx checks for changed persistence queries and managed Effect/client scenarios
+for changed execution boundaries. All direct Rust tooling runs in the default Nix shell. Run one
+final `nix run .#ci` on the complete Part 1 candidate. If verification changes that candidate,
+repeat affected checks and obtain review of changed contracts before recording acceptance.
 
-### Step 4: close source-loss owners in coherent commits
+Record the accepted implementation commit, finalized Object/RunRecord/NativeCause/Store signatures
+and source locations, C1-C18 evidence, real removals/additions and cost against both baselines, and
+known omissions/deferred upstream gaps. Use one concise completion record in this RFC, not a new
+progress-document family. Until completed, that record must say pending rather than cite a proof
+or intermediate commit as accepted. At this revision: **Part 1 acceptance is pending.**
 
-Follow section 10: PostgreSQL ports/gates, signing/keystore ownership, nested EVM operational
-wrappers, and application/transports, using the baseline inventory to avoid redundant work.
-Select one connected owner/consumer slice per commit; its output is a delivered cause, not an
-unused error type. Reuse baseline RPC capture and the single native decoder/reporting route.
-
-For each slice, prove distinguishable nested causes at the consumer, secret exclusion, accurate
-disposition, and cold preservation only for actual domain/operational results. Delete the owner's
-unit/text-only sink and any superseded repeated schema/conversion. Finish that closure before
-opening the next family. Do not preserve compatibility constructors or leave two current APIs.
-
-### Step 5: `complete causal auditability integration`
-
-Reconcile the first-loss inventory, retained guarantees, and acceptance evidence. Complete any
-remaining consuming scenario and documentation in its owning slice; this step does not postpone
-required cutover deletions. Report total production LOC against `7f71beef`, separate tests/docs and
-untracked work, and all explicit unavailable/withheld/bounded upstream evidence.
-
-Use [build and verification](docs/build-and-verification.md) and the executable Nix task graph.
-All Cargo/Rust tooling runs in the default Nix shell. Begin with affected packages and dependent
-consumers; use managed PostgreSQL/SQLx checks when queries change and managed Effect/client scenarios
-when those boundaries change. Run one final `nix run .#ci` on the exact implementation candidate.
-Do not repeatedly run broad gates at every commit or count local successes as final integration.
+This completion record is the input to Part 2's refinement step. Part 2 may remain draft after Part 1
+is complete. Once refined and accepted for implementation, it proceeds on the accepted Part 1 commit;
+it does not restart the persistence cutover or replace Part 1's accepted design implicitly.
 
 ## 13. Acceptance evidence
 
-This table replaces the previous A1-A34 contract, including tests for now-removed durable system
-faults and historical semantic validation. Preserve retained behavior in consuming tests rather
+These C1-C18 criteria apply only to Part 1. The combined RFC's broad C15 has moved to Part 2's
+B1-B8 acceptance; C15 below proves core custody only. Tests for removed durable system faults and
+historical semantic validation are obsolete. Preserve retained behavior in consuming tests rather
 than retaining fixtures for obsolete machinery.
+
+All cause guarantees below, including C5/C9/C11/C17, preserve supplied reviewed causes through
+changed core APIs and prove E1-E6's selected new admission/constructor/custody facts. They do not
+require enriching upstream unit/flattened errors outside that scope. Record those existing gaps
+for Part 2; never create a new loss or fabricate a placeholder to pass a core case. Persistence,
+authorization and execution guarantees remain complete for the supported core behavior.
 
 | ID | Observable acceptance |
 | --- | --- |
-| C1 | Fresh and restored runs use the same RunState/object types and produce equivalent continuation/output through a real Runtime entry point. Every current enum variant round-trips through canonical JSON with inline objects. No qualified cache, alternate wire state, object resolver, or post-encode native round trip. |
+| C1 | Fresh and restored runs use the same RunRecord/object carrier types and produce equivalent continuation/output through a real Runtime entry point. Every current enum variant round-trips through canonical JSON with inline objects. No qualified cache, alternate wire state, object resolver, or post-encode native round trip. |
 | C2 | Admission/latest loading uses one consistent snapshot. Increasing history length does not increase normal rows loaded. A missing required row, inconsistent head, bad frame/object hash, wrong Program identity, or invalid current phase/slot contract rejects before action. Repeating start with identical Program/input returns the checked observation without driving; different admission returns AdmissionConflict. |
-| C3 | Current-state validation rejects the impossible facts/phase relations in section 6.5, invalid checkpoint/barrier relationships, out-of-range counters and checked-sum overflow. The run total has no independently stored counter. No historical successor construction or claim of detecting otherwise locally valid historical counter/checkpoint substitution remains. |
+| C3 | Current-record admission rejects invalid operation/mode/slot and request/outcome relations, checkpoint/barrier relationships, out-of-range counters and checked-sum overflow. There is no independent Phase or agreement validator. The run total has no independently stored counter. No historical successor construction or claim of detecting otherwise locally valid historical counter/checkpoint substitution remains. |
 | C4 | Success carries complete context to the next State. Restart selects an eligible declaration checkpoint's stored input, creates a fresh visit, retains current usage/Effect restrictions, and never consults old operation frames. |
-| C5 | A State-domain failure and an adapter operational failure each commit original/input/request/evidence as applicable before classification, handler, or mapping. Their reviewed causes survive cold inspection. |
+| C5 | E2's State-domain and adapter operational failures each commit original/input/request/evidence as applicable before classification, handler, or mapping. Their supplied reviewed causes survive cold inspection. |
 | C6 | Handler/map failure reports its native cause with no fault append; the original remains AwaitingRecovery. Explicit resume reruns unfinished recovery evaluation. An authorized Retry/Restart charges the failing declaration and run once, then yields. Stop/denial spends no grant. Pending Effect Retry preserves visit/command identity. |
 | C7 | Effect preparation commits command/EffectId before adapter entry. Pending/error/Stop behavior preserves that same unresolved command and existing reconciliation restrictions; no replacement authority or capacity-only retry quota. |
 | C8 | Accepted Effect settlement commits before interpretation. Injected interpreter failure appends no fault; cold resume interprets retained evidence without entering the adapter for that phase. Uncommitted settlement makes no durability claim. |
-| C9 | Internal State/preparation/adapter/task/constructor failures retain reviewed causes in the invocation report and append no fault. Explicit resume retries permitted unfinished work; it does not create an automatic retry loop. |
+| C9 | E1/E4/E5 internal State/preparation/adapter/task/constructor failures retain supplied or explicitly required native causes in the invocation report and append no fault. Explicit resume retries permitted unfinished work; it does not create an automatic retry loop. |
 | C10 | Local preflight mismatch performs no provider call/append; post-response binding rejection reports the true stage without appending unauthenticated evidence or falsely claiming no IO occurred. |
-| C11 | Encoding/limit/Store failure preserves available original error plus separate recording cause and exact candidate when available, including across the erased callback, failed encoding task, and Application's AppendIndeterminate conversion. Known insertion, this attempt's noninsertion, and Indeterminate are distinct. Store errors return immediately without a probe; no fallback record or speculative adoption. |
+| C11 | E3 encoding/limit/Store failure preserves available original error plus the supplied separate recording cause and exact candidate when available, including across the erased callback, failed encoding task, and Application's AppendIndeterminate conversion. Known insertion, this attempt's noninsertion, and Indeterminate are distinct. Store errors return immediately without a probe; no fallback record or speculative adoption. Additional database extraction is Part 2. |
 | C12 | The NotInserted probe covers exact matching candidate, conflicting occupied sequence, candidate followed by later commits, absent candidate, and failed reload/projection. It retains the physical finding independently of the latest view and never drives further work. A candidate-absence snapshot cannot resolve a still-in-flight COMMIT; the Store-error invocation returns with its ambiguity/custody. Fresh resume may use current phase authority without claiming it resolved an unavailable prior candidate. |
 | C13 | Atomic append, immutable earlier frames, exact-head conflict, checked cumulative bounds, consistent loads, and PostgreSQL acknowledgement ambiguity hold through Store public boundaries. |
-| C14 | Two distinguishable native constructor failures reach the consuming Runtime/Application report with owner variants, child causes, locations and reviewed facts. No native failure is flattened into unit/custom text, and no decoder-error persisted identity is needed. |
-| C15 | Each owner slice preserves available reviewed layers/operation/fields, unchanged intrinsic classification where applicable, and correct internal-versus-operational routing. Diagnostic bounds, omissions, opaque/unavailable evidence, and secret exclusion are tested. |
+| C14 | E5's empty and oversized metadata.correlation constructor failures reach the actual Runtime/Application report with location and reviewed length facts. K3 separately proves nested framework reference/hash/schema failures through direct admission and real adapter signatures, without parent seeds. No additional constructor family is implied. |
+| C15 | E1-E6 preserve existing supplied causes, classification/disposition and internal/operational routing. Core custody tests cover source/downcast/getters as well as public/persisted output, rejected originals and explicit omissions. Capture failure produces fixed data and never recursively invokes another projector. Existing upstream losses deferred to Part 2 are identified; no broad owner migration is a prerequisite. |
 | C16 | Actual oversize/frame/run rejection leaves the acknowledged head unchanged. Cover a failure that committed but whose recovery cannot fit, and an externally settled Effect whose settlement cannot fit. No future-capacity promise remains. |
-| C17 | App/CLI/REST show the retained current result or reviewed causal invocation report with section 10.1's exact statuses and accurate acknowledgement/delivery status, including known insertion followed by projection failure. They do not reconstruct history, generate internal-fault records, or expose raw native source input. |
-| C18 | Steps 1-3 show actual baseline removals and replacement costs before owner fanout. Shipping frame sizes and current-state load IO are measured. Required final verification passes on the exact complete implementation. |
+| C17 | App/CLI/REST show the retained current result or E1-E6 supplied/required causal invocation report with section 10.1's exact statuses and accurate acknowledgement/delivery status, including known insertion followed by projection failure. They do not reconstruct history, generate internal-fault records, or expose raw native source input. Broader startup/ingress producer enrichment is Part 2. |
+| C18 | K1-K3 have integrated deletion and retained-behavior evidence; G1 accepts the complete corrected core on its own cost and guarantees. F1 records the accepted Part 1 commit, finalized APIs, shipping bytes/load IO, cost against both baselines and final verification on that candidate. Part 2 readiness or completion is not required. |
 
 No test calls a historical reconstruction implementation merely to compare it with the new one.
 Use baseline observable behavior where it remains contractual, concrete expected transitions, and
@@ -1490,52 +1287,59 @@ policy; do not retain a reader to keep obsolete fixtures passing.
 
 ## 14. Deletion ledger and completion
 
-| Actual baseline responsibility | Replacement or deletion |
+Keep these actual baseline removals in the corrected core:
+
+| Baseline responsibility | Retained replacement |
 | --- | --- |
-| FoldState and history-to-accumulator reconstruction | Delete. Continuation data lives directly in RunState; execution rules remain once in the live driver. Historical semantic checking is removed, not moved. |
-| QualifiedValue, ColdQualifier, native Any cache, redundant per-object contract ref | One canonical Values object, native decode at use, Program association at its owner. |
-| Journal lifecycle declarations, reference-only object projection/table/resolver | Runtime-owned inline payload and opaque Journal envelope. No generic live/wire state family. |
-| Complete-prefix normal Store load and full-prefix reconstruction consumers | Admission/latest read plus optional exact-candidate sequence probe. Store's atomic head/count/byte maintenance remains. |
-| Fused outcome/recovery branches | Original failure commit, then normal recovery decision commit. Accepted Effect settlement commits before interpretation. |
-| adapter_context and context-only types/codecs/ABI/report plumbing | Existing complete input and intent/command facts with owner checks. |
-| IncidentSummary and summary-only callbacks/conversions | Direct Classification and derived recovery context. |
-| Prospective bounds, domain calculators, reservation admission, capacity-only pending quota | Actual limits and semantic recovery counters only. |
-| Real lossy unit/text-only owner and invocation conversions | Native reviewed causal reporting or actual operational/domain payload data. Count the added guarantee honestly. |
+| FoldState/history reconstruction | One current record and live execution rules; no semantic history scan. |
+| QualifiedValue/ColdQualifier/native cache | One serializable carrier with direct admission and native decode at typed use. K3 must prove its concrete API. |
+| Journal lifecycle/object-table/resolver | Opaque Journal envelope and inline Runtime-owned record. |
+| Normal complete-prefix Store load | Admission/latest plus optional exact-candidate probe; physical append accounting remains. |
+| Fused outcome/recovery and settlement/interpretation | Original failure and settlement committed before their respective next operation. |
+| adapter_context/IncidentSummary | Complete actual operation facts and direct Classification/derived recovery context. |
+| Prospective capacity bounds/reservations | Actual bounds and semantic recovery usage only. |
 
-The following proposed/discarded machinery earns **zero baseline deletion credit**: persisted
-internal-result ABI and fault schemas, decoder-error identity/registry, generic partial-progress
-custody, intermediate-map-output timeline, parallel snapshot model, and independent audit store.
-Preventing those additions is a scope reduction, not deletion of baseline production code.
+The third attempt contains these redundant mechanisms. Remove those present in the affected core;
+do not import later owner additions just to delete them:
 
-Necessary additions are complete-state serialization, split outcome/recovery and settlement phases,
-current-state validation, native error reporting, and missing reviewed owner cause data. Report
-their cost separately from deleted code. The goal is fewer concepts, paths, APIs, duplicated checks,
-and change sites; production LOC is evidence, not a quota or permission to weaken retained behavior.
+| Third-attempt mechanism | Required deletion proof |
+| --- | --- |
+| Independent Phase plus OperationFacts and TerminalFailure copy | One authoritative operation record; no phase reconstruction/agreement code or duplicated outcome payload. |
+| ObjectSeed and enclosing struct/enum/collection seeds | One ordinary wire-shape parse and one direct current-record admission route with actual native error evidence. |
+| Fallible NativeCause project/from_error_with and child Wire projectors | Capture once, serialize existing data, reuse admitted original bytes. |
+| Secondary projection and generic successful-result reporting custody | Fixed capture omissions, existing invocation/head custody and the actual terminal output failure. |
+| Per-caller sanitizers for the same parser/client error | One owner custody contract checked before public/native return. |
 
-Completion requires every named consumer to use the current design, the first-loss inventory and
-C1-C18 to be reconciled, all required verification to pass, and the final production delta to include
-all changes. No unintegrated decoder foundation, renamed fold, ignored untracked files, or omitted
-cause can be described as completion. The broad RFC is complete only after its owner slices finish.
+Count a second-table removal against `aae81795` only if it actually exists there. A mechanism
+introduced solely in later owner work earns no core deletion credit. These corrections are not
+additional deletions from `7f71beef`. Hypothetical avoided registries, fault schemas, audit stores and decoder
+identities likewise earn zero baseline deletion credit. Include every replacement, helper, public
+API, schema, test/doc migration and untracked addition in the respective cost report.
 
-This RFC-only change performs no production Rust implementation and discards no engineer work.
-Its verification is link/command/contract review, `git diff --check`, and section 11.3's disposable
-interface probe. Full Rust CI remains an implementation requirement.
+Part 1 completion requires the corrected core, E1-E6/C1-C18 evidence, G1 acceptance, current
+documentation and F1 verification. The separate Part 2 matrix is excluded. A smaller file, passing
+local proof or explanatory cost document alone is insufficient. Do not describe unimplemented
+assumptions, deferred owner losses or secret-withheld detail as complete raw preservation or
+achieved net simplification.
+
+This RFC revision changes no production Rust and discards no engineer work. Verification is source,
+commit, measurement and document-contract review plus `git diff --check`. It performs no new Rust
+probe or CI and does not treat the previous ten-test probe as evidence for K1-K3.
 
 ## 15. Material uncertainties
 
-No known behavioral or ownership choice remains open after the user's answers and the handoff
-review. The following are implementation evidence requirements, not permission for an engineer
-to choose another architecture.
+The user's execution/recovery decisions remain settled. The following assumptions are open core
+proof obligations. Section 12 authorizes bounded correction to resolve them, not an unconditional
+full implementation handoff. Part 2 has its own uncertainties and refinement gate.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation and response |
 | --- | --- | --- | --- |
-| Inline complete state and audit facts fit intended workloads under existing ceilings | Distinct checkpoints and repeated object occurrences may cost more bytes than the old object table/event representation | A shipping outcome or accepted settlement could be unrecordable | Measure the concrete core and shipping fixtures in section 11.2 before owner fanout. Resolve an actual size failure explicitly; do not restore a resolver or increase limits preemptively. |
-| Deleting representations/history work yields a simpler integrated core | Actual serialization, local validation, native decoding, and consumer replacement LOC are not implemented | A new layer could hide the old complexity; per-use decoding may have unacceptable cost | Inspect steps 1-3 production delta and real context/load measurements. Reject duplicate models and explain every increase before continuing. No numerical LOC or speed promise. |
-| One native error/decoder route suffices for the reached owner families | Concrete checked constructors and erased callback ownership differ | Companion types or reporting code could multiply again | Prove one real constructor's distinct causes through the consuming callback and Application in step 3. Extend only an actually reached family per later owner slice. |
-| Client owners expose enough reviewed evidence for the required chain | Libraries can hide retries or return opaque causes | Some evidence cannot be recovered | Inject distinct nested causes at each owner, identify the first unavailable layer, and retain explicit omissions; never invent hidden facts. |
+| The unified record removes more mechanism than its dispatch requires | The former design serialized derived facts and accumulated agreement checks; the corrected production diff does not exist | A renamed validator could preserve the same complexity | K1 replaces the real core route, deletes the old pair and compares retained behavior, encoded occurrences and actual code. |
+| Shape-only carriers and direct admission preserve causes without decoder machinery | Checked ID/getter and nested Object contracts must change; the previous Serde probe omitted admission | Hidden unchecked values, repeated validation or another grammar family could appear | K3 finalizes actual field/getter signatures and exercises native failure plus live/restored typed adapters. Failure returns to architecture before further expansion. |
+| Captured detail can replace recursive projectors while preserving safe originals | Existing owners contain native children and fallible serializers; safe custody is not guaranteed by Serialize/MfmValue | Another projector tree or rejected-data leak could be introduced | K2 uses a real nested owner, bounded/failing capture, unsafe-source rejection and existing transport consumers, deleting superseded paths. |
+| Part 1 alone meets the simplification objective | The measured core is +1,222 production lines against the original baseline; the correction is not implemented | A smaller third attempt could still leave an unjustifiably larger core | G1 reviews actual Part 1 removals, replacements and total cost against both baselines. Unsupported net reduction or complexity improvement keeps Part 1 unaccepted; no credit from future Part 2 deletions. |
 
-The changed trust contract is explicit, not an unresolved assumption: normal loading does not
-verify older frame links or historical semantic evolution. It checks the loaded admission/current
-state and relies on correct live progression and append-only storage for the past. Dormant native
-constructors are checked at typed use; structural/schema validation still covers their stored
-objects on restoration. Internal reports are not promised durable in run history.
+Normal loading deliberately trusts past live progression and append-only storage; it does not
+verify historical semantic evolution or older frame links. Internal errors remain outside history.
+Safe causal preservation is distinct from raw secret-bearing custody and from post-crash delivery.
+Those are explicit contracts, not hidden implementation uncertainties.
