@@ -2,7 +2,7 @@
 
 Status: design draft pending accepted Part 1, reviewed 2026-09-13. **Not ready for a full owner
 implementation goal.** [Part 1](RFC_AUDITABILITY_ERROR_CHAIN.md) independently delivers the current
-continuation/persistence core and shared capture/reporting path. This RFC closes remaining causal
+continuation/persistence core and concrete invocation-diagnostic boundary. This RFC closes remaining causal
 losses on selected State/adapter execution paths using that implementation. It is not a platform-wide
 error-system rewrite. Part 1 can finish while this draft still has open design details.
 
@@ -19,16 +19,22 @@ execution/interpretation and adapter operations through their actual Runtime/App
 Include failures to load or record that execution state. Capture at the producing boundary before
 information is erased; downstream layers carry it instead of reconstructing it.
 
-Use one diagnostic capture and rendering mechanism. Typed domain/operational failures retain their
-classification and recovery meaning. Their operation results commit before recovery; internal and
-recording failures return through the invocation report without another append. Sharing diagnostics
-does not turn a recoverable outcome into a top-level invocation error, or promise that a failed
+Use Part 1's two adaptation boundaries. Declared failures remain the State/capability's concrete
+owner errors with their actual causal payload and intrinsic classifier. Commit the original and
+restore that same declared type for classification. Internal failures cross heterogeneous interfaces
+as immutable InvocationDiagnostic data; Runtime/App forward it and thin clients render it. They
+are not persisted or classified. Keep concrete library errors through compatible typed interfaces;
+an adapter is needed only where the receiving contract changes. Sharing diagnostics does not turn
+a recoverable outcome into a top-level invocation error, or promise that a failed
 Store can record its own failure.
 
 An original execution failure and a failure to record it are two related facts with independent
 cause chains. Preserve both and the actual acknowledgement; do not make either the other's
-fabricated source. After complete error admission, reuse the existing Failure/Object and release
-the extra native original as proved in Part 1. Successful values do not acquire a custody stash.
+fabricated source. After complete admission, reuse the existing Failure/Object with no extra
+native original. If initial encoding of a declared error fails, report known operation/contract/head
+and encoding cause, with explicit unavailable original detail/identity. This accepted exception
+requires no opaque owner, serializer retry or producer fallback payload. Successful values acquire
+no custody stash. Part 2 must not reintroduce NativeCause, `Box<dyn Error>` or a custom error protocol.
 
 The user-approved trust boundary is owned by
 [Part 1 section 4](RFC_AUDITABILITY_ERROR_CHAIN.md#4-error-preservation-and-the-diagnostic-trust-boundary).
@@ -63,11 +69,11 @@ complete finite plan; do not discover each row's design by recursively following
 
 | Required refinement | Result needed before implementation |
 | --- | --- |
-| Pin the baseline and inherited APIs | Record accepted Part 1 commit and actual NativeCause/captured-detail, DiagnosticEvidence, Failure/Object, Store and rendering signatures/source locations. Link owning definitions instead of copying a second shared API. |
+| Pin the baseline and inherited APIs | Record accepted Part 1 commit and actual InvocationDiagnostic/SizeViolation, DiagnosticEvidence, Failure/Object, concrete owner classification, Store and rendering signatures/source locations. Link owning definitions; do not copy a second shared API. |
 | Subtract completed work | Map E1-E6/C1-C18 to already satisfied producer/consumer cases. O11 is Part 1 E5, not a second constructor migration. Reuse Part 1 admission/reporting work; no blanket JsonError/CanonicalError certification is required. |
-| Freeze each error path | Name the producing failure/function, required cause layers/fields, changed API and receiving conversions, terminal observation, finite assertions, omissions, reuse and deletions. File lists or “all consumers” alone do not pass. |
-| Finalize the owner design | Specify changed variants/signatures and conversions, operational schemas where required, and the existing captured data carried through each boundary. No new producer/source/schema/capture mechanism is implied by a caller connection. |
-| Prove admitted-original completeness | Name the required facts in the admitted failed outcome and compare with what the native original exposes. Reuse Part 1's ownership change only when those facts survive; no generic runtime completeness checker or duplicate native copy until COMMIT. |
+| Freeze each error path | Name producing failure/function, selected concrete owner error, required cause layers/fields, any boundary adaptation, receiving conversions, terminal observation, finite assertions, omissions, reuse and deletions. File lists or “all consumers” alone do not pass. |
+| Finalize the owner design | Specify actual changed variants/signatures and selected fields. Keep a typed durable error where classification/persistence needs it; use InvocationDiagnostic only at the internal invocation boundary. Existing compatible interfaces need no new wrapper. No new source/schema/capture mechanism follows from a caller connection. |
+| Prove admitted-original completeness | Compare required causal/operation facts in the concrete owner, admitted original, restored classifier input and report. Successful serialization alone is insufficient. Keep the agreed unavailable-detail exception for first encoding failure; no generic completeness checker, extra native copy or universal fallback interface. |
 | Decide any diagnostic-text requirement | Trust does not automatically add messages to the closed schema. If a case needs supplied text, specify one bounded shared field and its Values admission treatment, including secret-marker behavior. Otherwise retain existing captured fields; no per-provider scrubber, parallel report or speculative schema expansion. |
 | Reconcile cumulative cost | Set coherent dependency/commit order, expected production/test/doc/file/API costs and actual deletions per case and in total. No hypothetical deletion credit or arbitrary LOC quota. |
 
@@ -85,8 +91,9 @@ stays draft while completed Part 1 remains accepted.
 
 ## 3. Owner representations
 
-These proposed owner shapes came from the combined RFC. Finalize them against accepted Part 1
-during section 2 refinement; they are not prerequisites to completing Part 1.
+These existing owner types illustrate the retained responsibilities. Finalize selected changes
+against accepted Part 1 during section 2 refinement; they are not new type families or prerequisites
+to completing Part 1. Reuse the type-review decisions in Part 1 section 14.
 
 Do not put every EVM, SQL, signer, or Runtime operation into one global stage enum. The source owner
 retains its own operation/stage vocabulary:
@@ -95,6 +102,7 @@ retains its own operation/stage vocabulary:
 struct ProviderFailure {
     method: EvmRpcMethod,
     stage: RpcStage,
+    failure: ProviderFailureKind,
     diagnostics: DiagnosticEvidence,
 }
 
@@ -104,30 +112,26 @@ struct EvmOperationalError {
     kind: EvmOperationalKind,
     source: Box<ProviderFailure>,
 }
-
-enum EvmTransactionOperationalError {
-    Provider {
-        operation: TransactionProviderOperation,
-        cause: EvmOperationalError,
-    },
-    Authority {
-        operation: AuthorityOperation,
-        cause: AuthorityFailure,
-    },
-    Signer { cause: SigningFailure },
-}
 ```
 
 The operational carrier factors the three legal alternatives into one closed kind and one common
 payload: `Unavailable(P) | Timeout(P) | RateLimited(P)` is `Kind × P`. Its sole wire shape is
 `{"kind":"timeout","source":{...}}`; boxing changes memory layout only. This avoids repeating the
 same diagnostic schema three times. `new(kind, source)`, `kind()` and borrowing
-`provider_failure()` are the proposed accessors; no unit or compatibility constructor remains in
+`provider_failure()` are the existing accessors to reuse; no unit or compatibility constructor remains in
 the completed owner cutover.
-Transaction provider, authority and signer alternatives retain their distinct typed payloads.
 
-These sketches preserve the current semantic categories while adding evidence. Do not introduce
-a second `Classification` field that can disagree with the intrinsic classifier.
+EvmTransactionOperationalError keeps its provider/authority/signer alternatives and their actual
+operation/cause facts. The former AuthorityFailure and SigningFailure names were unspecified
+payloads, not authorization for new wrappers. R0 must select the existing concrete port errors or
+minimal durable owner fields for O3/O6; no placeholder type can stand in for that decision. A typed
+`Box<ProviderFailure>` shares no erased-error behavior and adds no wire layer.
+
+The whole concrete owner error is the classifier input. MfmValue supplies persistence/schema
+capability, not type erasure; Self::Failure and C::OperationalError remain concrete. Do not add
+a failure trait, per-State enum, adapter-to-State wrapper, PersistedError or second Classification
+field. The same provider cause can be Retryable for a Read and OutcomeUnknown for transaction
+submission; classification belongs to the enclosing owner with its operation context.
 
 Use ordinary nested sources and borrowing. Remove incidental `Copy` requirements when errors gain
 owned data. `Error::source()` should preserve a nested typed source when its type supports that
@@ -135,15 +139,24 @@ trait, but generic capability contracts remain usable with operational `MfmValue
 not implement `std::error::Error`. Typed payload access remains part of the contract.
 
 Reuse [Part 1 section 5](RFC_AUDITABILITY_ERROR_CHAIN.md#5-shared-causal-data-with-local-ownership)
-and [section 9](RFC_AUDITABILITY_ERROR_CHAIN.md#9-capture-once-report-existing-data) for shared
-capture, bounds, omissions and reporting. Capture only the selected cause/field contract once;
-receivers carry it without rerunning extraction or serializing the original again. Native access
-follows the upstream trust policy, not a blanket private-source certification requirement.
+and [section 9](RFC_AUDITABILITY_ERROR_CHAIN.md#9-boundary-adaptation-and-invocation-diagnostics).
+Capture only the selected facts once while the concrete owner is known. A typed source needed for
+a declared operational error must be retained in that error before invocation-only adaptation;
+do not reconstruct a classifiable or durable error from diagnostic JSON. One concrete port error
+may serve both routes through their explicit adapters, without copying a native owner into each.
 
-Native-only failures need no MfmValue identity or persisted error schema. Declared operational
-failures retain their actual typed meaning and admitted original. These sketches must be finalized
-against the accepted core; no extra wrapper is required where its existing type already owns the
-same operation and cause. Do not create a global error-kind enum to force all failures into one type.
+Internal boundary adapters supply the inherited InvocationDiagnostic and primary SizeViolation
+facts directly. Receivers neither downcast native sources nor rediscover fields or size from JSON.
+Use Part 1's bounded field construction and terminal omission behavior. Ordinary private Serialize
+helpers are allowed when existing serializable owner data does not already supply the selected
+field contract; no generic from_error projector, per-owner report
+schema, secondary serialization service or global owner-error enum is permitted. Invocation
+diagnostics have no MfmValue identity and cannot replace the classifier's concrete error.
+
+The provider error types and DiagnosticEvidence vocabulary already existed at 7f71beef. Changes
+within the retained rows must reuse or delete actual mechanisms, not count those types as new concepts or earn
+hypothetical deletion credit. No new nominal wrapper is required where the selected owner already
+carries the same cause and operation.
 
 ## 4. Finite execution producer matrix
 
@@ -155,7 +168,7 @@ permission to enrich every error in the named modules.
 | --- | --- | --- |
 | O1 | Read/read_anchored and existing json_rpc send/body/RPC failure conversions on selected shipping Read calls: method/stage, status/code, exposed source prefix, actual local mismatch and bounds. | Runtime failed Read and cold App observation; internal preflight stays internal. Reuse existing RPC capture. No HTTP client, retry or decoder-family rewrite. |
 | O2 | Selected transaction reserve_nonce/prepare_transaction/execute_transaction calls and map_provider_error/map_authority_error/signer.sign conversions: actual operation and supplied provider/authority/signing cause. | Pending Effect failure through Runtime/App, preserving command/EffectId. O3/O6 own their producer changes; this row forwards their data without a second capture tree or new authority model. |
-| O3 | signer.sign and the executing keystore sign request/reply, plus only signature/evidence helpers required by a frozen transaction case: actual sign operation, returned cause and existing invalid/failed/closed distinctions. | O2's operational failure or native internal invocation report as applicable. No key creation/import/startup/shutdown, comprehensive signing constructors, secret-command capture, cryptographic or concurrency redesign. |
+| O3 | signer.sign and the executing keystore sign request/reply, plus only signature/evidence helpers required by a frozen transaction case: actual sign operation, returned cause and existing invalid/failed/closed distinctions. | O2's concrete operational error or InvocationDiagnostic route according to meaning. No key creation/import/startup/shutdown, comprehensive signing constructors, secret-command capture, cryptographic or concurrency redesign. |
 | O4 | Run Store load/append and PostgreSQL precommit/COMMIT conversions required by the selected Runtime recording/load cases: disposition, returned SQLx/source facts and actual query/transaction stage. | Existing load invocation report, or append recording report with failed outcome/candidate when available and actual acknowledgement. A load failure invents no outcome/candidate or recording phase. Affected memory run-Store consumers forward existing causes. No config/index query migration, connection/provisioning audit, append planner or reconnect protocol. |
 | O6 | Selected execution authority load/reserve_or_compare/retain_prepared calls and their required begin/commit/load_state conversions: operation, source evidence and existing acknowledgement category. | Authority port to O2; reuse O4's selected shared database extraction. No general retained-row/identity constructor audit, nonce/replacement or startup/provisioning redesign. |
 
@@ -186,7 +199,8 @@ row starts with unresolved architecture. At this revision: **R0 is pending Part 
 ### R1: preserve selected recording causes
 
 Complete O4's required run Store conversions and shared database extraction once, reusing Part 1
-recording/reporting and original ownership. Cover failed execution plus failed append, success
+recording/reporting and admitted-original ownership. Supply size facts at the concrete owner;
+do not add a new source-discovery or erased-cause adapter to Store consumers. Cover failed execution plus failed append, success
 plus failed append, actual disposition and independent cause chains. Do not repeat the core load
 redesign or migrate configuration/index/startup errors to make the test pass.
 
@@ -205,8 +219,9 @@ authority. Preserve internal failure routing without adding fault records or ext
 
 ### R4: verify the shared consumer route
 
-Verify Runtime/App/CLI/REST forwarding and rendering for the selected paths using the same captured
-or admitted data. Required caller migrations belong in their producing API cutovers, not this final
+Verify Runtime/App/CLI/REST forwarding and rendering for the selected paths using the same
+InvocationDiagnostic or admitted original data, with no consumer recapture or JSON-to-text reparse.
+Required caller migrations belong in their producing API cutovers, not this final
 step. Reuse Part 1 cases/statuses and add only missing observable boundary coverage. No cross-product
 of every producer and transport, general ingress audit or new successful-result reporting service.
 
@@ -233,11 +248,11 @@ completed migration is not performed again.
 | ID | Observable acceptance |
 | --- | --- |
 | B1 | R0 pins accepted Part 1, actual inherited APIs and every finite producing failure, required fact, changed conversion, consumer assertion, omission, reuse/deletion and cumulative cost. No broad owner or deferred nonexecution row remains mandatory. |
-| B2 | Each selected path preserves its promised available cause layers/fields and operation. Existing classification, acknowledgement and internal/operational routing hold. New producer contracts are explicit; previously completed work is closed with evidence. |
+| B2 | Each selected concrete owner error retains its promised cause/operation fields. Declared State/adapter failures restore the same declared type for classification; neither the deepest source alone nor invocation JSON/classification codes substitute for that owner. Internal load/recording errors remain invocation-only. Existing acknowledgement and operational/internal routing hold. New producer contracts are explicit; completed work is closed with evidence. |
 | B3 | O1/O2 operational errors, including required O3/O6 causes, survive complete admission and cold observation. Internal execution/recording failures use invocation reports without a fault append. Command/EffectId authority is unchanged. |
 | B4 | Upstream diagnostic content follows the trust contract without credential scanning or blanket source/downcast certification. MFM does not deliberately attach its own secret inputs. Bounds/omissions and any explicitly required shared text/admission change are exercised at the selected boundary. |
-| B5 | Capture occurs once and receiving/reporting code uses existing data. A complete admitted failed outcome replaces the additional native original after encoding; required facts are compared rather than inferred from successful serialization. No projector tree, native-success stash, per-owner reporting schema or generic completeness checker remains. |
-| B6 | Failed execution plus recording failure retains two independent causes and actual candidate/acknowledgement. Success plus recording failure invents no execution error. Shared App/CLI/REST reports retain statuses and actual delivery stage; no secondary audit sink, append retry or recursive reporting is introduced. |
+| B5 | Capture occurs once at the required boundary. Receivers forward immutable InvocationDiagnostic/admitted data and supplied size facts without downcasting, JSON field discovery or recapture. Required original facts are compared across admission/restoration/reporting. No NativeCause, projector/custody tree, native-success stash, new size hierarchy, per-owner reporting schema or generic completeness checker remains. |
+| B6 | An admitted execution failure plus recording failure retains two independent causes and actual candidate/acknowledgement. Failed initial error encoding uses Part 1's explicit unavailable-original contract with known context and encoding diagnostic, no opaque custody or fallback payload. Success plus recording failure invents no original error. Reports preserve actual delivery stage; no second audit sink, append retry or recursive reporting. |
 | B7 | Cutovers delete superseded paths/APIs/tests/docs while preserving meaningful behavior coverage. Actual aggregate complexity and production/test/doc/file/API costs are reviewed against both baselines; no compression, hypothetical deletion credit or duplicate native representation hides growth. |
 | B8 | All frozen cases and relevant retained Part 1 behavior pass required checks and final CI. Completion names the accepted commit, evidence and limits; it does not claim platform-wide provenance or secret-free certification of upstream diagnostics. |
 
@@ -245,11 +260,12 @@ completed migration is not performed again.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation and response |
 | --- | --- | --- | --- |
-| The accepted core supplies one sufficient capture/reporting path | K1-K3 and final APIs are not complete | Owner rows could recreate projectors or duplicate originals | R0 inspects accepted APIs and E1-E6 evidence; resolve a concrete missing contract before implementation. |
-| Admitted execution failures contain the required native cause facts | Some serializers may omit information held natively | Releasing native E could lose a promised fact | Compare selected schemas and actual producer/cold/report consumer assertions before the ownership handoff; no generic completeness framework. |
+| The accepted core supplies sufficient boundary diagnostics | K1-K3 and final APIs are not complete | Owner rows could recreate projectors, size discovery or duplicate originals | R0 inspects accepted signatures and E1-E6 evidence, including bounded construction and terminal omission; resolve one concrete missing contract before coding. |
+| Concrete execution error payloads retain required causal and classification facts | Correct associated types can still contain lossy variants or serializers | Cold classification/reporting could lose a promised fact | Compare selected concrete errors, admitted payloads, restored classifier inputs and consuming assertions. The first-encoding unavailable-detail exception remains settled; do not add generic custody. |
 | Existing shared fields suffice under the upstream trust contract | DiagnosticEvidence is closed and ordinary Values strings are marker-scanned | A required text field could be rejected or cause per-provider workarounds | Freeze the needed facts and one shared bounded field/admission change if needed; otherwise preserve existing schema. |
 | The selected paths and cost are finite and simpler overall | Exact conversions and accepted Part 1 baseline remain unproved | Hidden dependencies or locally justified growth could recur | R0 freezes semantics, conversions and cost; exceeded estimates trigger review and F2 judges the actual aggregate result. |
 
 This revision changes documentation only. It implements neither part, claims no new Rust/CI
-evidence and discards no work. The selected trust/scope decisions are settled; implementation
-completeness and LOC improvement are still proofs to deliver.
+evidence and discards no work. The trust/scope, concrete-owner classification and failed-initial-encoding information decisions
+are settled; bounded implementation, exact remaining producer contracts and LOC improvement are
+still proofs to deliver.
