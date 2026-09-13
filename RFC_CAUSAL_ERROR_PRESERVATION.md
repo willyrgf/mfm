@@ -6,11 +6,10 @@ continuation/persistence core and concrete invocation-diagnostic boundary. This 
 losses on selected State/adapter execution paths using that implementation. It is not a platform-wide
 error-system rewrite. Part 1 can finish while this draft still has open design details.
 
-Part 2's implementation baseline is the accepted Part 1 commit, currently **pending**. The branch
-already contains the `aae81795` core plus the revised RFCs; do not restart from `7f71beef` or import
-the accumulated later owner work. `7f71beef` is historical comparison only. Prior attempts remain
-archived, including `/tmp/mfm-audit-core-first`; reuse a specific change/test only if it fits the
-accepted core and a frozen execution case. Part 2 does not reopen Part 1 acceptance retroactively.
+Part 2 starts from the Part 1 implementation accepted at F1, currently **pending**, with this RFC's
+current revision. Continue on that branch; Part 2 does not repeat or reopen Part 1's completed
+cutover. Section 2 defines the required refinement before owner implementation. Earlier diagnoses
+and measurements are optional [background](docs/auditability-implementation-history.md).
 
 ## 1. Objective and explicit limits
 
@@ -36,7 +35,7 @@ and encoding cause, with explicit unavailable original detail/identity. This acc
 requires no opaque owner, serializer retry or producer fallback payload. Successful values acquire
 no custody stash. Part 2 must not reintroduce NativeCause, `Box<dyn Error>` or a custom error protocol.
 
-The user-approved trust boundary is owned by
+The diagnostic trust boundary is owned by
 [Part 1 section 4](RFC_AUDITABILITY_ERROR_CHAIN.md#4-error-preservation-and-the-diagnostic-trust-boundary).
 MFM trusts dependency-supplied diagnostic content and does not scan or certify it as secret-free.
 MFM does not deliberately attach its own secret inputs, requests, connection or keystore-command
@@ -49,17 +48,17 @@ both deliveries. Preserve their existing ordinary error handling. A real depende
 areas does not authorize migrating the area; only a specific producer change needed by a promised
 execution case can be added through an explicit architecture decision.
 
-The [measured diagnosis](RFC_AUDITABILITY_ERROR_CHAIN.md#3-why-the-third-attempt-expanded) remains:
-the previous RFC made every newly discovered loss a delivery prerequisite and repeated capture,
-serialization and reporting-failure machinery per owner. Finite execution guarantees and shared
-mechanisms address both causes of growth; neither establishes a LOC reduction without evidence.
+Only the listed execution paths and their required facts define completion. A newly discovered
+loss does not create another mandatory producer migration. Reuse the accepted core's diagnostics
+and rendering; no owner-specific capture or reporting-failure framework is authorized.
 
 [Design](docs/design.md), [architecture](docs/architecture.md), [code quality](docs/code-quality.md),
 [AGENTS.md](AGENTS.md) and [build and verification](docs/build-and-verification.md) apply. Update
 implemented contracts with their owning cutover, including superseded diagnostic trust wording.
 No cryptographic algorithm, keystore concurrency, retry/reconnect, command-authority or transport
 framework redesign is implied. Simplification is measured against accepted Part 1 and cumulatively
-against `7f71beef`; Part 1 deletions are not an allowance for unlimited additions here.
+against the original comparison baseline in Part 1 section 3. Count each delivery's actual
+changes separately; Part 1 deletions cannot justify unlimited additions here.
 
 ## 2. Refine this RFC from completed Part 1
 
@@ -70,7 +69,7 @@ complete finite plan; do not discover each row's design by recursively following
 | Required refinement | Result needed before implementation |
 | --- | --- |
 | Pin the baseline and inherited APIs | Record accepted Part 1 commit and actual InvocationDiagnostic/SizeViolation, DiagnosticEvidence, Failure/Object, concrete owner classification, Store and rendering signatures/source locations. Link owning definitions; do not copy a second shared API. |
-| Subtract completed work | Map E1-E6/C1-C18 to already satisfied producer/consumer cases. O11 is Part 1 E5, not a second constructor migration. Reuse Part 1 admission/reporting work; no blanket JsonError/CanonicalError certification is required. |
+| Subtract completed work | Map E1-E6/C1-C18 to already satisfied producer/consumer cases. Part 1 E5 is not repeated as a constructor migration. Reuse Part 1 admission/reporting work; no blanket JsonError/CanonicalError certification is required. |
 | Freeze each error path | Name producing failure/function, selected concrete owner error, required cause layers/fields, any boundary adaptation, receiving conversions, terminal observation, finite assertions, omissions, reuse and deletions. File lists or “all consumers” alone do not pass. |
 | Finalize the owner design | Specify actual changed variants/signatures and selected fields. Keep a typed durable error where classification/persistence needs it; use InvocationDiagnostic only at the internal invocation boundary. Existing compatible interfaces need no new wrapper. No new source/schema/capture mechanism follows from a caller connection. |
 | Prove admitted-original completeness | Compare required causal/operation facts in the concrete owner, admitted original, restored classifier input and report. Successful serialization alone is insufficient. Keep the agreed unavailable-detail exception for first encoding failure; no generic completeness checker, extra native copy or universal fallback interface. |
@@ -122,9 +121,8 @@ same diagnostic schema three times. `new(kind, source)`, `kind()` and borrowing
 the completed owner cutover.
 
 EvmTransactionOperationalError keeps its provider/authority/signer alternatives and their actual
-operation/cause facts. The former AuthorityFailure and SigningFailure names were unspecified
-payloads, not authorization for new wrappers. R0 must select the existing concrete port errors or
-minimal durable owner fields for O3/O6; no placeholder type can stand in for that decision. A typed
+operation/cause facts. R0 must select the existing concrete port errors or minimal durable owner
+fields for O3/O6; unspecified payload names do not authorize new wrappers. A typed
 `Box<ProviderFailure>` shares no erased-error behavior and adds no wire layer.
 
 The whole concrete owner error is the classifier input. MfmValue supplies persistence/schema
@@ -153,15 +151,15 @@ field contract; no generic from_error projector, per-owner report
 schema, secondary serialization service or global owner-error enum is permitted. Invocation
 diagnostics have no MfmValue identity and cannot replace the classifier's concrete error.
 
-The provider error types and DiagnosticEvidence vocabulary already existed at 7f71beef. Changes
+The provider error types and DiagnosticEvidence vocabulary are existing shared contracts. Changes
 within the retained rows must reuse or delete actual mechanisms, not count those types as new concepts or earn
 hypothetical deletion credit. No new nominal wrapper is required where the selected owner already
 carries the same cause and operation.
 
 ## 4. Finite execution producer matrix
 
-These are the retained producer groups from the previous O1-O12 inventory. R0 must freeze exact
-cases and source paths against accepted Part 1 and remove work already completed. The rows are not
+The five groups below are the complete producer scope. R0 must freeze exact cases and source
+paths against accepted Part 1 and remove work already completed. The rows are not
 permission to enrich every error in the named modules.
 
 | ID | Selected producing boundary and facts | Consumer and stopping boundary |
@@ -172,11 +170,11 @@ permission to enrich every error in the named modules.
 | O4 | Run Store load/append and PostgreSQL precommit/COMMIT conversions required by the selected Runtime recording/load cases: disposition, returned SQLx/source facts and actual query/transaction stage. | Existing load invocation report, or append recording report with failed outcome/candidate when available and actual acknowledgement. A load failure invents no outcome/candidate or recording phase. Affected memory run-Store consumers forward existing causes. No config/index query migration, connection/provisioning audit, append planner or reconnect protocol. |
 | O6 | Selected execution authority load/reserve_or_compare/retain_prepared calls and their required begin/commit/load_state conversions: operation, source evidence and existing acknowledgement category. | Authority port to O2; reuse O4's selected shared database extraction. No general retained-row/identity constructor audit, nonce/replacement or startup/provisioning redesign. |
 
-The old O5 and O7 producer migrations are removed. O8 is limited to changed run-Store consumers
-within O4; its configuration/index work is excluded. O9/O10 are only forwarding/rendering of the
-selected run results and actual terminal encoding/write/flush failures; their broad producer
-migrations are removed. Reuse Part 1's shared report route and statuses. O12 extraction is a named
-dependency of a retained case, not a separate open-ended owner row. O11 remains Part 1 E5.
+Changed run-Store consumers belong to O4. Runtime/App/CLI/REST only forward and render selected
+results and actual terminal encoding/write/flush failures through the accepted core route. Shared
+extraction is a named dependency of a selected case, not an independent producer backlog. Part 1
+E5 remains completed work. Configuration/index, general ingress and other excluded producers do
+not become mandatory through these consumer dependencies.
 
 For each row, preserve all already supplied causes through changed receivers. Typed error/checked
 constructor changes are allowed only where the frozen execution facts require them. Reaching a
@@ -185,7 +183,7 @@ lossy conversion is a gap to fix when its evidence is promised. No row may claim
 inventing a source layer, discarding a supplied cause, or substituting a classification for it.
 
 Preserve existing schema/canonical bounds. Any required operational schema change uses the shared
-captured representation; do not build another mechanism for persistence. Neither the new trust
+captured representation; do not build another mechanism for persistence. Neither the trust
 policy nor this matrix requires arbitrary raw client object dumps or every dependency message.
 
 ## 5. Ordered work and completion
@@ -235,15 +233,15 @@ for Part 2. Part 1 CI does not substitute for Part 2 integration. Direct Rust to
 default Nix shell; subsequent fixes require affected checks and review of changed contracts.
 
 Report production, tests/docs, total churn, public API/schema changes and actual responsibility
-removals against accepted Part 1 and cumulatively against `7f71beef`. Do not count Part 1 deletions
-twice or credit removal of abandoned-only machinery against the original baseline. Review the
-aggregate design; unresolved simplification objections keep Part 2 unaccepted rather than
-justifying unrelated cleanup or another round of owner migrations.
+removals against accepted Part 1 and the original comparison baseline identified in Part 1
+section 3. Count a deletion only against a baseline where the code exists, and never count Part 1
+deletions twice. Review the aggregate design; unresolved simplification objections keep Part 2
+unaccepted and require a design decision before further owner migrations.
 
 ## 6. Acceptance evidence
 
-B1-B8 replace the former broad owner obligation. Part 1 C1-C18 remain retained behavior; its
-completed migration is not performed again.
+B1-B8 define Part 2 acceptance. Part 1 C1-C18 remain retained behavior; its completed migration
+is not performed again.
 
 | ID | Observable acceptance |
 | --- | --- |
@@ -265,7 +263,6 @@ completed migration is not performed again.
 | Existing shared fields suffice under the upstream trust contract | DiagnosticEvidence is closed and ordinary Values strings are marker-scanned | A required text field could be rejected or cause per-provider workarounds | Freeze the needed facts and one shared bounded field/admission change if needed; otherwise preserve existing schema. |
 | The selected paths and cost are finite and simpler overall | Exact conversions and accepted Part 1 baseline remain unproved | Hidden dependencies or locally justified growth could recur | R0 freezes semantics, conversions and cost; exceeded estimates trigger review and F2 judges the actual aggregate result. |
 
-This revision changes documentation only. It implements neither part, claims no new Rust/CI
-evidence and discards no work. The trust/scope, concrete-owner classification and failed-initial-encoding information decisions
+The trust/scope, concrete-owner classification and failed-initial-encoding information contracts
 are settled; bounded implementation, exact remaining producer contracts and LOC improvement are
 still proofs to deliver.

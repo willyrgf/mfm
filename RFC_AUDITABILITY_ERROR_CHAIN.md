@@ -1,36 +1,23 @@
 # RFC part 1: current run continuation and persistence
 
-Status: bounded core correction; full implementation readiness remains unproved, reviewed 2026-09-13.
-This RFC delivers the continuation/persistence redesign and the error path needed to use it.
-[Part 2: execution error preservation](RFC_CAUSAL_ERROR_PRESERVATION.md) closes the remaining
-causal losses on selected State/adapter execution paths after Part 1 is accepted. These are independent completion contracts: Part 1 can be
-finished, verified and accepted while Part 2 remains a design draft. The former combined RFC's
-full-handoff verdict is withdrawn; splitting it does not establish the outstanding core proofs.
+Status: bounded K1-K3 correction; full implementation readiness remains unproved. Acceptance
+requires their proofs, G1 review and F1 verification. Reviewed 2026-09-13.
 
-Sections 6 and 9 specify the correction to prove; section 10 closes its error scope, and section 12
-orders the work through Part 1 acceptance. Part 2 has a finite execution scope; unrelated platform
-error remediation is outside both RFCs. Neither RFC currently demonstrates achieved net simplification or complete auditability.
+Part 1 delivers current continuation/persistence and the invocation error boundary.
+[Part 2](RFC_CAUSAL_ERROR_PRESERVATION.md) addresses selected execution-error producers after
+Part 1 is accepted; its completion is independent. Continue on the current branch from the
+implementation state pinned in section 3, using this RFC's current revision.
 
-`7f71beef` remains the original comparison baseline. The third attempt applied the previous RFC at
-`377f649f`, completed the initial deletions at `6ea98576`, and committed its core at `aae81795`.
-The current branch was reset to that core and the two RFCs carried in `1a6bcbc5`; continue the
-correction here without another restart or importing the later owner branch. Prior branch/worktree
-changes remain archived; do not restore them wholesale or discard other worktrees. Later work may supply a reviewed test or change when its exact scope is needed;
-it is not imported wholesale. After acceptance, Part 2 starts from the accepted Part 1 commit.
+Read sections 1-3 for the objective, required behavior and starting point; sections 4-10 for the
+contracts; section 12 for ordered execution; and sections 11, 13-15 for evidence, deletions and
+remaining proofs. Earlier diagnoses and measurements are optional background in the
+[implementation history](docs/auditability-implementation-history.md), not prerequisites or scope.
 
 [Design](docs/design.md), [architecture](docs/architecture.md), [code quality](docs/code-quality.md),
-and [AGENTS.md](AGENTS.md) govern the repository. This RFC proposes changes to their persistence,
-validation, and error contracts. Implemented contract changes require their documentation and
-consumers in the same cutover. Read source contracts at the stated comparison/core commit;
-dirty documentation in either prior attempt is not an independently accepted design.
-
-The [adapter error audit](docs/adapter-error-audit.md) supplies evidence of losses. It is not an
-instruction to recursively migrate every upstream constructor or every newly discovered caller.
-Preserve available causes at changed boundaries; section 10 distinguishes that required closure
-from adding upstream facts. Existing losses outside the selected execution paths remain ordinary
-audit-inventory items, not completion conditions. No changed conversion may introduce a new loss.
-The user-approved diagnostic trust boundary in section 4 replaces the previous universal
-secret-free certification requirement for dependency-supplied diagnostics.
+and [AGENTS.md](AGENTS.md) govern the repository. Implement the contract changes proposed here with
+their owning documentation and consumers in the same cutover. The [adapter error audit](docs/adapter-error-audit.md)
+is evidence of gaps; only section 10's selected conversions and supplied facts belong to Part 1.
+Unselected losses are not completion conditions. Section 4 defines the diagnostic trust contract.
 
 ## 1. Objective and target
 
@@ -75,9 +62,9 @@ Continuation still needs a cursor, current input, checkpoint inputs, recovery us
 Effect authority. The current operation supplies the cursor/input; do not store a second copy.
 Deleting the old snapshot/fold machinery does not delete the necessary continuation facts.
 
-## 2. Confirmed decisions
+## 2. Required behavior
 
-### 2.1 Confirmed
+### 2.1 Design requirements
 
 | Decision | Consequence |
 | --- | --- |
@@ -98,9 +85,9 @@ Deleting the old snapshot/fold machinery does not delete the necessary continuat
 | Report failed initial encoding honestly | If the declared original cannot be encoded/admitted, report known execution/contract context, the encoding cause and unavailable original detail/identity. No arbitrary native-original custody, serializer retry or new producer fallback contract. |
 | Keep owner classification | Self::Failure and C::OperationalError are concrete owner errors. MfmValue supplies persistence, not erasure; invocation diagnostics never replace these errors or enter classification. |
 
-### 2.2 Explicit behavioral answers
+### 2.2 Resume and loading semantics
 
-| ID | User decision | Required behavior |
+| ID | Contract | Required behavior |
 | --- | --- | --- |
 | D1 | Retry from the last committed state after an internal failure | End the failed invocation without append. Explicit resume retries the unfinished acknowledged phase; no hidden permanent-stop marker or automatic retry loop. |
 | D2 | Commit settlement first; resume interpretation only | Persist accepted Effect evidence and its awaiting-interpretation continuation before calling the interpreter. An interpreter failure leaves this phase available for explicit resume without adapter reentry. |
@@ -121,65 +108,27 @@ inside a declared transaction operational error remains part of that persisted o
 A database failure while appending that error is a separate system/recording failure. Do not discard
 a cause based on its source library, or turn an internal adapter bug into a recoverable incident.
 
-## 3. Why the third attempt expanded
+## 3. Starting point and work boundary
 
-The third attempt did complete the initial deletion steps. The expansion occurred in both the core
-replacement and the later error-owner migrations. Calling it an unfinished step 2 is inaccurate;
-calling every addition unnecessary is also unsupported. The following measurements were reproduced
-from `/tmp/mfm-audit-core-first` at `a3e8fd2c` plus its reviewed worktree on 2026-09-13.
+| Item | Handoff contract |
+| --- | --- |
+| Working tree | Continue on the current branch with both current RFCs. Do not reset or restart the implementation; preserve unrelated work. |
+| Implementation baseline | 5de114d0 pins the existing implementation for Part 1 cost and deletion measurements. It is a comparison reference, not an instruction to check out an older RFC. |
+| Original comparison baseline | 7f71beef is used only to measure cumulative simplification. It is not a restart point or an alternative contract. |
+| Already implemented | Current-state persistence, opaque Journal, admission/latest/optional-probe Store loading, and failure/settlement-before-recovery/interpretation ordering. Preserve these behaviors and complete their current corrections. |
+| Remaining core work | K1 unifies duplicated continuation data; K2 replaces native error custody/reporting machinery; K3 proves direct Object/current-record admission. Section 14 identifies their concrete deletions. |
+| Allowed next work | Execute K1-K3 in section 12, then obtain G1 acceptance and complete F1. Part 2 owner implementation starts only from accepted Part 1 after its own R0 design refinement. |
 
-### 3.1 Measured costs and their limits
+Measure Part 1 against both listed baselines, including all replacement code. Compare source using
+one consistent production-LOC convention and report tests/docs/churn separately. Deletions already
+present at the implementation baseline are retained work, not fresh reduction against that baseline.
+The original comparison prevents a smaller local change from being mistaken for net simplification.
 
-| Checkpoint | Net production Rust code against 7f71beef |
-| --- | ---: |
-| Steps 1-2, 6ea98576 | -630 |
-| Core, aae81795 | +1,222 |
-| Current candidate, including untracked production files | +5,998 |
-| Growth after the core | +4,776 |
-
-The reproduced counter counts nonblank, non-comment production `src` lines, excluding separate
-and trailing inline tests. It is a convention, not a complexity metric or a Rust syntax analysis.
-The exact tracked diff against `377f649f` is **223 files, 25,713 additions, 10,442 deletions**;
-untracked files are additional to that Git total. Tests and documentation are real migration cost,
-even though they are excluded from production-code counts.
-
-Post-core production growth concentrates in PostgreSQL (+1,590), Application (+830), REST (+426),
-Runtime (+400), Store (+331), live EVM (+282), and the remaining owners (+917). The core itself
-added 1,852 production lines after the 630-line initial reduction. Thus the later owner backlog
-is not the sole explanation, and making that backlog finite would not by itself simplify the core.
-
-The second attempt's 189-file/+20,033 tracked-line net growth and the third attempt's measurements
-are separate historical observations. Neither is a deletion allowance for the replacement.
-
-### 3.2 Obligations and mechanisms that caused growth
-
-| Requirement in the previous revision | Actual expansion it enabled or required | Required correction |
-| --- | --- | --- |
-| RunCommit stores RunState.phase and OperationFacts | The same failure, command, settlement or output is serialized twice; the validator reconstructs a phase and checks agreement. The 648-line fold was deleted, but state.rs added 927 physical lines and state/decode.rs another 294. Those files also contain necessary logic; their entire size is not deletion credit. | Store one current record whose operation determines continuation. Delete the independent phase and its agreement checks. Keep actual authorization and current-record admission. |
-| Ordinary Serde plus exact native constructor causes at nested Object admission | ObjectSeed and a macro/seed for every enclosing state struct, enum and collection duplicate the payload grammar, add drain/error-precedence logic, and require parallel wire tests. The previous probe tested shape-only objects and did not exercise this conflict. | Prove parse-then-admit with actual Objects and adapter signatures. Do not claim ordinary Serde preserves arbitrary nested constructor causes. Section 6 records the API tradeoff and blocking proof. |
-| NativeCause retains a fallible reporting operation | project() calls child project(), serializes an owner Wire, parses RawValue, and can return another NativeCause. Store, Runtime, config and PostgreSQL acquire companion projectors; App retains failures of secondary projection. | Delete NativeCause, its owner protocol and projectors. Adapt selected fields once at the concrete boundary; receivers forward data without another capture or reporting-error tree. |
-| Preserve arbitrary native E even when its only generic extraction method fails | The failure encoder creates erased ownership and Arc custody; later consumers need downcasting or another projector. Successful admission does not remove the exceptional custody requirement. | Explicitly report unavailable original detail on failed initial encoding. Keep the existing typed producer API; add no universal fallback payload, Error bound or opaque owner. |
-| Consumers rediscover owner facts during reporting | Runtime walks and downcasts Value/Journal/Store/Canonical errors for size facts; CLI serializes its own report and parses it back to render text, creating Fields/MissingField failures. | Supply primary size facts at the owner boundary and render both formats from the same data. Delete source inspection and JSON-to-text reconstruction. |
-| Preserve originals while requiring every reachable native diagnostic to be certified secret-free | Parser/client objects and native downcasts triggered owner audits, sanitizers and reporting work beyond the selected execution failures. | Trust dependency diagnostic content under section 4. Stop deliberately attaching MFM secret inputs; remove blanket upstream getter/source certification and per-caller sanitizers from the delivery obligation. |
-| Close every remaining first-loss owner and every consumer | A real caller justified another constructor migration, then another serializer, transport path and test family. C15 had no finite completion set. | Close Part 1 with its finite core cases. Assign selected execution producer enrichment to Part 2, refined against the accepted core; unrelated platform remediation is outside both RFCs. Existing cause forwarding closes a changed API; extending an upstream contract does not silently expand Part 1. |
-| Report LOC and explain increases before owner fanout | The engineer supplied measurements and a local rationale, explicitly without establishing overall minimality, then continued. An explanation functioned as acceptance. | Require independent acceptance of the actual corrected core on its own guarantees and cost. Part 2 has a separate design/cost gate after that acceptance. A failed core review does not authorize owner work. |
-| Preserve exact errors from capture and reporting themselves | Auxiliary field validation and projection failures became new error families with their own projections and custody tests. | Use bounded, fixed capture-status/omission data for diagnostic construction. They describe missing evidence; they are not new operational causes or another extensible reporting subsystem. |
-
-The RFC author is responsible for these obligations and for the overly strong handoff verdict.
-The engineer also continued after acknowledging unresolved aggregate size, but the design supplied
-multiple routes by which that continuation appeared compliant. More instructions to prefer fewer
-lines, another clean checkout, or another local source-preservation review would not fix this.
-
-### 3.3 What the previous verification established
-
-The ten disposable probe tests established enum wire shape and some ownership mechanics. They did
-not exercise checked Object admission inside the real nested payload, shared error serialization
-across owners, rejected-data custody, or an integrated deletion. Passing them was insufficient
-basis for the previous claim that no important design decisions remained.
-
-The third attempt contains useful consuming tests, frame/load measurements and real deletions.
-They are evidence to preserve and reassess against the corrected contract, not proof that the
-whole attempt is minimal or complete. Final integrated CI was not established by this review.
+Scope is the current contracts and finite E1-E6 cases. A changed caller needs correct forwarding;
+it does not authorize following every upstream producer. New producer facts, schemas or mechanisms
+require an explicit design/cost decision before expansion. Section 11.3 defines acceptance and the
+response to failed proofs or unsupported complexity. Part 2 estimates cannot justify an unfinished
+or growing Part 1.
 
 ## 4. Error preservation and the diagnostic trust boundary
 
@@ -200,7 +149,7 @@ their callees use. A source already erased by an MFM mapper cannot be recovered 
 selected case promises that source or SQLSTATE, the producing conversion must be designed and
 fixed before that case passes. Our own loss is not evidence that the dependency never exposed it.
 
-### 4.2 User-approved responsibility for diagnostic content
+### 4.2 Responsibility for diagnostic content
 
 MFM trusts dependency-supplied diagnostic content. This RFC does not require detecting arbitrary
 credentials in provider/database error text, sanitizing every native source, or certifying that
@@ -213,12 +162,12 @@ error context. Preserve existing handling of these explicit secret inputs. Do no
 client/request objects to avoid designing an error conversion. Returned diagnostic text is not
 permission to append extra application payloads.
 
-The earlier blanket withholding of all provider/database messages and blanket native-owner
-certification are superseded. No generic secret scanner, recursive disclosure audit or per-caller
-sanitizer family is required for upstream diagnostics. Bounds, canonical encoding and accurate
-failure/acknowledgement semantics still apply. Update the affected wording in docs/design.md,
+No blanket withholding of provider/database messages, native-owner certification, generic secret
+scanner, recursive disclosure audit or per-caller sanitizer family is required for upstream
+diagnostics. Bounds, canonical encoding and accurate failure/acknowledgement semantics still apply.
+Update the affected wording in docs/design.md,
 docs/architecture.md, docs/code-quality.md and AGENTS.md in the implementing contract cutover;
-their former universal diagnostic promise is not a reason to restore the rejected work.
+conflicting diagnostic wording in those guides must not extend the implementation scope.
 
 Trust alone does not require collecting new fields. The current DiagnosticEvidence schema is
 closed, and Values scans ordinary strings for secret markers. If a selected case requires returned
@@ -441,10 +390,9 @@ serializable phase model or a second authoritative state is not.
 
 ### 6.2 Object decoding is a blocking interface proof
 
-The former combination of a checked Object Deserialize, exact native constructor errors and
-ordinary derived parent Deserialize did not work as advertised. Serde's generic error conversion
-can erase an Object constructor source. Repeating the complete payload grammar with seeds is not
-an acceptable invisible cost of the one-state claim.
+Serde's generic error conversion can erase a checked Object constructor source inside a derived
+parent decoder. Separate wire-shape parsing from checked admission so the selected cause facts
+survive without repeating the parent payload grammar through seeds.
 
 The target to prove is one shape-only carrier followed by the existing private Driver admission:
 
@@ -469,7 +417,7 @@ canonical bytes/hash, descriptor and bounds, retaining native errors before any 
 The driver is private: only successful admission establishes its executable current record.
 A standalone deserialized Object is explicitly untrusted, not a proof of content identity.
 
-This changes the old getter contract: Object cannot return a permanently checked &ContentRef.
+This changes the current getter contract: Object cannot return a permanently checked &ContentRef.
 Internal identity comparisons use admitted canonical spellings. A typed adapter entry constructs
 one local ContentRef with checked_ref() and borrows it into the existing callback. This deliberately
 repeats cheap identity construction; it must not repeat JSON/hash/schema admission or add a checked
@@ -485,7 +433,7 @@ The proof must exercise malformed nested reference/hash/schema inputs through re
 Application consumers and compile the actual Read/Effect callback signatures. If this requires a
 second state model, seeds for every parent, repeated expensive validation, or a broad identity
 rewrite, the proposed decoder correction has failed. Stop for an architect decision; do not
-announce another full implementation handoff. Ordinary Serde and arbitrary nested native-cause
+claim completion of the decoding proof. Ordinary Serde and arbitrary nested native-cause
 preservation are not simultaneously guaranteed without this demonstrated boundary.
 
 ### 6.3 Journal and Store ownership
@@ -1209,7 +1157,7 @@ command remains authoritative for later reconciliation; do not claim durable set
 
 ### 11.2 Prove the complete Part 1 representation
 
-Reuse the third core's actual Runtime entry points and consuming tests. Revalidate the corrected
+Use the current Runtime entry points and consuming tests. Revalidate the corrected
 representation on the small complete path: admission, successful State/context advance, failed Read
 committed before a handler error, restoration, and explicit resume. Use the baseline's available
 operational cause. This proves lifecycle/reporting integration; it does not claim that all upstream
@@ -1233,7 +1181,7 @@ explicit candidate-sequence probe. This is an IO contract, not a promised latenc
 input decoding and complete-state size costs still need measurement; avoid full-history validation
 benchmarks for a deleted feature.
 
-For Part 1 acceptance, report the corrected core delta against both `aae81795` and `7f71beef`,
+For Part 1 acceptance, report the complete delta against both baselines in section 3,
 including replacement code and untracked additions, separately from tests/docs. Name removed public
 types, callbacks, code paths, and remaining change sites. The core must have one continuation declaration,
 one object representation, one restoration route, and no semantic-history scan. A smaller fold file
@@ -1243,12 +1191,11 @@ Apply section 11.3's acceptance decision after these measurements. An explanatio
 not permit continued owner work. This is a review of the bounded correction, not permission for
 another repository-wide salvage audit or discarding user work.
 
-### 11.3 An explanation of growth is not acceptance
+### 11.3 Core acceptance and scope control
 
-The previous core supplied measurements and retained tests, yet still introduced duplicate state
-agreement and parent decoder/projector machinery. The gate now requires an independent architect
-review of the actual diff and cost, not an engineer's assertion that each addition has a rationale.
-The review is about convergence of the whole current core, not another local source-custody question.
+Part 1 requires independent architect review of the complete implementation, actual diff and cost
+against section 3's baselines. Passing a local test or explaining individual additions does not
+establish aggregate simplification. The review must assess the complete design and its removals.
 
 The reviewed packet is one concise current record: baseline/candidate commits, selected test results,
 production delta and total additions/deletions/files including untracked work, removed/added types
@@ -1257,14 +1204,14 @@ to Part 2. Keep this evidence with the Part 1 completion record; update it inste
 progress or scope-attribution documents. Part 2 estimates or resolved owner contracts are not
 required to accept Part 1.
 
-Acceptance must name the actual removals from the third core and identify every replacement.
+Acceptance must name actual removals from the implementation baseline and identify every replacement.
 A renamed validator, another generic decoder family, a fallible projector in a different crate,
 or missing promised original information outside section 9.2's explicit encoding exception fails
 the gate regardless of LOC. Applying blanket upstream secret-free certification would contradict
 the agreed scope. The corrected core must
-remove the identified redundant responsibilities and report a smaller affected core against
-`aae81795`. Also show the total against `7f71beef`; improvement over an inflated attempt is not
-by itself achievement of the user's net-simplification objective.
+remove the identified redundant responsibilities and demonstrate a smaller affected core against
+the implementation baseline. Also report the original-baseline total: local reduction alone does
+not establish the required cumulative simplification.
 
 No unsubstantiated numerical forecast is established here. The architect must reconcile the
 completed Part 1 delta and responsibility removals against both baselines. If Part 1's net reduction
@@ -1275,11 +1222,9 @@ or source contracts cannot invalidate an otherwise accepted Part 1.
 
 ## 12. Ordered work and authority to continue
 
-The next task is the bounded core correction below. **Do not issue another “fully implement this
-RFC” goal while K1-K3 remain unproved.** Continue on the current `aae81795`-based branch with both
-revised RFCs. Preserve the archived third attempt and its measurements. Steps 1-2 are already
-measured at `6ea98576`; do not repeat them or discard their coherent deletions. The Part 2 draft
-does not authorize owner implementation during this work.
+Execute the bounded K1-K3 work below on the current branch under section 3. Keep already
+implemented behaviors and their coverage. K1-K3 must pass before G1/F1 acceptance; this RFC does
+not authorize Part 2 producer migrations during core work.
 
 ### K1: `remove duplicate continuation facts`
 
@@ -1371,10 +1316,10 @@ it does not restart the persistence cutover or replace Part 1's accepted design 
 
 ## 13. Acceptance evidence
 
-These C1-C18 criteria apply only to Part 1. The combined RFC's broad C15 is replaced by Part 1's
-E1-E6/C15 and Part 2's selected execution B1-B8 criteria; excluded platform migrations are removed,
-not transferred. Tests for removed durable system faults and historical semantic validation are
-obsolete. Preserve retained behavior in consuming tests rather than retaining obsolete fixtures.
+These C1-C18 criteria apply only to Part 1. E1-E6/C15 define its error scope; Part 2's B1-B8 define
+that independent delivery. Excluded platform migrations are outside both RFCs. Tests for removed
+durable system faults and historical semantic validation are obsolete. Preserve retained behavior
+in consuming tests rather than retaining obsolete fixtures.
 
 All cause guarantees below, including C5/C9/C11/C17, preserve the selected causal facts through
 changed core APIs and prove E1-E6's admission/constructor/original-retention contracts. C11 explicitly
@@ -1412,22 +1357,22 @@ policy; do not retain a reader to keep obsolete fixtures passing.
 
 ## 14. Deletion ledger and completion
 
-Keep these actual baseline removals in the corrected core:
+Preserve these behaviors already present at the implementation baseline. They are not additional
+work to repeat or deletion credit against that baseline:
 
-| Baseline responsibility | Retained replacement |
+| Established behavior | Contract to preserve |
 | --- | --- |
-| FoldState/history reconstruction | One current record and live execution rules; no semantic history scan. |
-| QualifiedValue/ColdQualifier/native cache | One serializable carrier with direct admission and native decode at typed use. K3 must prove its concrete API. |
-| Journal lifecycle/object-table/resolver | Opaque Journal envelope and inline Runtime-owned record. |
-| Normal complete-prefix Store load | Admission/latest plus optional exact-candidate probe; physical append accounting remains. |
-| Fused outcome/recovery and settlement/interpretation | Original failure and settlement committed before their respective next operation. |
-| adapter_context/IncidentSummary | Complete actual operation facts and direct Classification/derived recovery context. |
-| Prospective capacity bounds/reservations | Actual bounds and semantic recovery usage only. |
+| Current continuation | Store current execution facts; no semantic history scan or fold. K1 removes the remaining duplicate phase/facts representation. |
+| Shared live/stored value carrier | No qualified/native cache; K3 completes the direct-admission API for the existing Object boundary. |
+| Opaque Journal payload | Keep the exact envelope and inline Runtime-owned record, without lifecycle or object-resolution semantics. |
+| Bounded Store loading | Admission/latest plus optional exact-candidate probe; physical append accounting remains. |
+| Durable operation ordering | Original failure and settlement committed before their respective next operation. |
+| Actual operation context | Keep input/request/evidence and direct Classification/derived recovery context; no separate contextualization service. |
+| Actual capacity accounting | Enforce actual bounds and semantic recovery usage without future-capacity predictions. |
 
-The retained core contains these mechanisms to remove or consolidate; do not import later work
-just to delete it. Apply the type review to the affected boundary, preserving actual facts and
-meaningful tests. A fewer-type count is not proof if another wrapper or duplicate responsibility
-appears underneath.
+The current implementation contains these mechanisms to remove or consolidate. Apply the type
+review to the affected boundary, preserving actual facts and meaningful tests. A fewer-type count
+is not proof if another wrapper or duplicate responsibility appears underneath.
 
 | Retained-core mechanism/types | Required correction |
 | --- | --- |
@@ -1462,17 +1407,16 @@ the smallest visibility and implementation; this does not approve every existing
 | BalanceMetadataError; BalanceContextDecodeError, MetadataWire/ContextWire and Object input Wire | Keep actual E5 constructor facts; inline the one-case location wrapper when equivalent. Prove the smallest local parse/admit helpers needed; no parent grammar or general constructor migration. |
 | AdapterFailure, local TaskOperation and parser Base/Parse helpers | Keep selected actual adapter check/source fields. Private foreign-error adapters may be needed where Serialize is absent; no new public schema/registry or upstream library rewrite. |
 
-DiagnosticEvidence and its vocabulary, CanonicalError, NoParams (formerly generated by a macro),
-and the EVM provider owner types already existed at 7f71beef. NoParams still supplies parameterless
+DiagnosticEvidence and its vocabulary, CanonicalError, NoParams and the EVM provider owner types
+are existing shared contracts. NoParams still supplies parameterless
 policy configuration; CanonicalError remains the concrete canonical owner. Reuse these types;
 do not count them as new concepts or hypothetical baseline deletion credit. Likewise, existing
 FailureReport/FailureCauseView may render retained data but must not become another owned failure
 tree. Test helpers are reviewed with their retained behavior; their count is not production growth.
 
-Count a retained-core mechanism removal against `aae81795` only if it actually exists there. A mechanism
-introduced solely in later owner work earns no core deletion credit. These corrections are not
-additional deletions from `7f71beef`. Hypothetical avoided registries, fault schemas, audit stores and decoder
-identities likewise earn zero baseline deletion credit. Include every replacement, helper, public
+Count each removal only against a baseline where that code exists. Use both baselines in section 3
+and include the replacement cost. Hypothetical avoided registries, fault schemas, audit stores and
+decoder identities earn zero deletion credit. Include every replacement, helper, public
 API, schema, test/doc migration and untracked addition in the respective cost report.
 
 Part 1 completion requires the corrected core, E1-E6/C1-C18 evidence, G1 acceptance, current
@@ -1481,23 +1425,19 @@ local proof or explanatory cost document alone is insufficient. Do not describe 
 assumptions, deferred owner losses or secret-withheld detail as complete raw preservation or
 achieved net simplification.
 
-This RFC revision changes no production Rust and discards no engineer work. Verification is source,
-commit, measurement and document-contract review plus `git diff --check`. It performs no new Rust
-probe or CI and does not treat the previous ten-test probe as evidence for K1-K3.
-
 ## 15. Material uncertainties
 
-The user's execution/recovery decisions remain settled. The following assumptions are open core
+The execution/recovery contracts remain settled. The following assumptions are open core
 proof obligations. Section 12 authorizes bounded correction to resolve them, not an unconditional
 full implementation handoff. Part 2 has its own uncertainties and refinement gate.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation and response |
 | --- | --- | --- | --- |
-| The unified record removes more mechanism than its dispatch requires | The former design serialized derived facts and accumulated agreement checks; the corrected production diff does not exist | A renamed validator could preserve the same complexity | K1 replaces the real core route, deletes the old pair and compares retained behavior, encoded occurrences and actual code. |
-| Shape-only carriers and direct admission preserve causes without decoder machinery | Checked ID/getter and nested Object contracts must change; the previous Serde probe omitted admission | Hidden unchecked values, repeated validation or another grammar family could appear | K3 finalizes actual field/getter signatures and exercises native failure plus live/restored typed adapters. Failure returns to architecture before further expansion. |
+| The unified record removes more mechanism than its dispatch requires | The implementation baseline contains duplicate phase/facts data; the unified production diff is not implemented | A renamed validator could preserve the same complexity | K1 replaces the real core route, deletes the old pair and compares retained behavior, encoded occurrences and actual code. |
+| Shape-only carriers and direct admission preserve causes without decoder machinery | Checked ID/getter and nested Object contracts must change; the direct admission path is not implemented | Hidden unchecked values, repeated validation or another grammar family could appear | K3 finalizes actual field/getter signatures and exercises native failure plus live/restored typed adapters. Failure returns to architecture before further expansion. |
 | Concrete invocation data can replace native custody with less machinery | Bounded construction, fixed omissions and actual owner adapters are not implemented | A generic capture framework or lost selected facts could reappear under a new name | K2 proves E4/E5/source fields, size/status, encoding/panic/bound termination and aggregate deletions. The unavailable-unencodable-original decision is settled; no opaque fallback restores the old promise. |
 | Existing shared schemas/admission suffice for the selected diagnostics under the trust policy | DiagnosticEvidence is closed and ordinary Values strings are secret-marker scanned | A required upstream text field might be rejected or provoke per-provider workarounds | Freeze required fields; if text is needed, design one bounded shared field/admission change before coding. No speculative schema expansion or global relaxation of Program/context checks. |
-| Part 1 alone meets the simplification objective | The measured core is +1,222 production lines against the original baseline; the correction is not implemented | A smaller third attempt could still leave an unjustifiably larger core | G1 reviews actual Part 1 removals, replacements and total cost against both baselines. Unsupported net reduction or complexity improvement keeps Part 1 unaccepted; no credit from future Part 2 deletions. |
+| Part 1 alone meets the simplification objective | The final replacement cost and responsibility removals are not implemented or measured | Reduction against the implementation baseline could still leave an unjustifiably larger core overall | G1 reviews actual Part 1 removals, replacements and total cost against both baselines. Unsupported net reduction or complexity improvement keeps Part 1 unaccepted; no credit from future Part 2 deletions. |
 
 Normal loading deliberately trusts past live progression and append-only storage; it does not
 verify historical semantic evolution or older frame links. Internal errors remain outside history.
