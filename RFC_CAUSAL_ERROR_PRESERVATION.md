@@ -1,67 +1,87 @@
-# RFC part 2: causal-error preservation across remaining owners
+# RFC part 2: preserve errors on selected execution paths
 
 Status: design draft pending accepted Part 1, reviewed 2026-09-13. **Not ready for a full owner
-implementation goal.** [Part 1](RFC_AUDITABILITY_ERROR_CHAIN.md) delivers and independently accepts
-the continuation/persistence core, shared causal carrier and bounded consuming cases. This RFC then
-closes the named remaining producer losses using that implementation. Part 1 may finish while this
-draft still has open design details; this RFC does not reopen Part 1's acceptance retroactively.
+implementation goal.** [Part 1](RFC_AUDITABILITY_ERROR_CHAIN.md) independently delivers the current
+continuation/persistence core and shared capture/reporting path. This RFC closes remaining causal
+losses on selected State/adapter execution paths using that implementation. It is not a platform-wide
+error-system rewrite. Part 1 can finish while this draft still has open design details.
 
-Part 2's implementation baseline will be the accepted Part 1 commit, currently **pending**.
-`7f71beef` remains historical evidence/comparison, not a restart point. Preserve
-`/tmp/mfm-audit-core-first`, its commits after `aae81795` and all dirty/untracked work. Review a
-specific later change or test only when its owner row is reached; it must fit the accepted core
-and current row. Do not merge/cherry-pick the accumulated owner series as a substitute for that
-review, or rebuild the persistence design from scratch.
+Part 2's implementation baseline is the accepted Part 1 commit, currently **pending**. The branch
+already contains the `aae81795` core plus the revised RFCs; do not restart from `7f71beef` or import
+the accumulated later owner work. `7f71beef` is historical comparison only. Prior attempts remain
+archived, including `/tmp/mfm-audit-core-first`; reuse a specific change/test only if it fits the
+accepted core and a frozen execution case. Part 2 does not reopen Part 1 acceptance retroactively.
 
-## 1. Objective, dependency and scope
+## 1. Objective and explicit limits
 
-Preserve the complete available, reviewed causal chain at the producing and consuming boundaries
-in section 4. Preserve classification and acknowledgement semantics while deleting lossy
-conversions and redundant capture/serialization paths. Simplification remains an objective of this
-part, measured against its own accepted baseline; Part 1's deletions cannot excuse unlimited growth.
-This is a broad owner migration, not an assumed small cleanup.
+Preserve the original failure and required cause information from selected State preparation,
+execution/interpretation and adapter operations through their actual Runtime/App consumers.
+Include failures to load or record that execution state. Capture at the producing boundary before
+information is erased; downstream layers carry it instead of reconstructing it.
 
-The third attempt grew because the combined RFC made every upstream loss part of a single delivery
-and combined extraction, custody, schemas, callers and tests per owner. Reordering that requirement
-was insufficient. [Part 1 section 3](RFC_AUDITABILITY_ERROR_CHAIN.md#3-why-the-third-attempt-expanded)
-retains the measured diagnosis. This split changes the acceptance dependency: deliver the core,
-learn from its actual APIs and cost, refine this RFC, then execute its finite owner steps.
+Use one diagnostic capture and rendering mechanism. Typed domain/operational failures retain their
+classification and recovery meaning. Their operation results commit before recovery; internal and
+recording failures return through the invocation report without another append. Sharing diagnostics
+does not turn a recoverable outcome into a top-level invocation error, or promise that a failed
+Store can record its own failure.
 
-Part 2 does not repeat the fold/state/persistence replacement, introduce another native carrier,
-or perform historical transition validation. Internal failures remain invocation reports; declared
-State-domain and adapter operational failures retain their originals durably before recovery.
-Accepted settlement still precedes interpretation; explicit resume uses acknowledged continuation.
+An original execution failure and a failure to record it are two related facts with independent
+cause chains. Preserve both and the actual acknowledgement; do not make either the other's
+fabricated source. After complete error admission, reuse the existing Failure/Object and release
+the extra native original as proved in Part 1. Successful values do not acquire a custody stash.
+
+The user-approved trust boundary is owned by
+[Part 1 section 4](RFC_AUDITABILITY_ERROR_CHAIN.md#4-error-preservation-and-the-diagnostic-trust-boundary).
+MFM trusts dependency-supplied diagnostic content and does not scan or certify it as secret-free.
+MFM does not deliberately attach its own secret inputs, requests, connection or keystore-command
+objects. Bounds and source fidelity remain required. No generic sanitizer or native getter/source
+certification project belongs to this RFC.
+
+Configuration administration, deployment, startup/provisioning, RunId entropy, transport listener
+lifecycle, generic request ingress and comprehensive constructor/native-decoder audits are outside
+both deliveries. Preserve their existing ordinary error handling. A real dependency on one of those
+areas does not authorize migrating the area; only a specific producer change needed by a promised
+execution case can be added through an explicit architecture decision.
+
+The [measured diagnosis](RFC_AUDITABILITY_ERROR_CHAIN.md#3-why-the-third-attempt-expanded) remains:
+the previous RFC made every newly discovered loss a delivery prerequisite and repeated capture,
+serialization and reporting-failure machinery per owner. Finite execution guarantees and shared
+mechanisms address both causes of growth; neither establishes a LOC reduction without evidence.
 
 [Design](docs/design.md), [architecture](docs/architecture.md), [code quality](docs/code-quality.md),
 [AGENTS.md](AGENTS.md) and [build and verification](docs/build-and-verification.md) apply. Update
-affected authoritative contracts with implementation. No dependency upgrade, cryptographic,
-keystore concurrency, retry/reconnect, command-authority or transport framework redesign is implied.
+implemented contracts with their owning cutover, including superseded diagnostic trust wording.
+No cryptographic algorithm, keystore concurrency, retry/reconnect, command-authority or transport
+framework redesign is implied. Simplification is measured against accepted Part 1 and cumulatively
+against `7f71beef`; Part 1 deletions are not an allowance for unlimited additions here.
 
 ## 2. Refine this RFC from completed Part 1
 
-Part 1's F1 completion record supplies the accepted commit, finalized API/source locations,
-observable cases, removals, measurements and known gaps. After it exists, make one design commit
-updating this RFC with the following, then obtain the dedicated architect's readiness decision:
+Use Part 1's F1 completion record, then make one design commit finalizing this RFC before owner
+implementation. Obtain the dedicated architect's decision on the actual inherited mechanism and
+complete finite plan; do not discover each row's design by recursively following callers in code.
 
-| Required refinement | Concrete result needed before owner implementation |
+| Required refinement | Result needed before implementation |
 | --- | --- |
-| Pin the real baseline and reusable contracts | Record accepted Part 1 commit and actual NativeCause capture/access, DiagnosticEvidence, operational carrier, Store and reporting signatures/source locations. Link the owning definitions; do not copy a second set of shared type declarations. |
-| Reconcile delivered evidence | Map Part 1 E1-E6/C1-C18 to rows already satisfied or partly satisfied. Mark O11 delivered in Part 1 E5; remove completed JsonError/CanonicalError work from O12. Verify status from the accepted code, not the abandoned branch. |
-| Freeze the remaining source-to-consumer work | For every row, record exact repository paths and symbols, producing failure and endpoint, fields/layers retained, omissions/upstream limits, classification/routing, reuse, required deletion and stopping boundary. Broad crate names alone do not pass. |
-| Resolve each row's design | Specify final owner types/variants, changed signatures/conversions, persisted schema changes when needed and native custody at those sites. State how captured child data is reused. List finite observable tests without a cross-product of all owners/transports. |
-| Reconcile dependency and cumulative cost | Set coherent commit order and expected production, tests/docs, changed-file and API/schema costs for each row and the total. Identify duplicated machinery actually removed; no hypothetical deletion credit or arbitrary LOC ceiling. |
-| Close material architecture gaps | Decide the safe available facts at each client boundary and any remaining constructor/custody questions. Record explicit unavailable/withheld/deferred facts and the corresponding limits on the completion claim. |
+| Pin the baseline and inherited APIs | Record accepted Part 1 commit and actual NativeCause/captured-detail, DiagnosticEvidence, Failure/Object, Store and rendering signatures/source locations. Link owning definitions instead of copying a second shared API. |
+| Subtract completed work | Map E1-E6/C1-C18 to already satisfied producer/consumer cases. O11 is Part 1 E5, not a second constructor migration. Reuse Part 1 admission/reporting work; no blanket JsonError/CanonicalError certification is required. |
+| Freeze each error path | Name the producing failure/function, required cause layers/fields, changed API and receiving conversions, terminal observation, finite assertions, omissions, reuse and deletions. File lists or “all consumers” alone do not pass. |
+| Finalize the owner design | Specify changed variants/signatures and conversions, operational schemas where required, and the existing captured data carried through each boundary. No new producer/source/schema/capture mechanism is implied by a caller connection. |
+| Prove admitted-original completeness | Name the required facts in the admitted failed outcome and compare with what the native original exposes. Reuse Part 1's ownership change only when those facts survive; no generic runtime completeness checker or duplicate native copy until COMMIT. |
+| Decide any diagnostic-text requirement | Trust does not automatically add messages to the closed schema. If a case needs supplied text, specify one bounded shared field and its Values admission treatment, including secret-marker behavior. Otherwise retain existing captured fields; no per-provider scrubber, parallel report or speculative schema expansion. |
+| Reconcile cumulative cost | Set coherent dependency/commit order, expected production/test/doc/file/API costs and actual deletions per case and in total. No hypothetical deletion credit or arbitrary LOC quota. |
 
-The matrix below is the existing finite draft scope, not a claim these details are already frozen.
-Do not start each implementation row and then discover its design through recursive caller tracing.
-A row may be subdivided into named finite commits; this must not add upstream families implicitly.
-A completed or unnecessary row can be closed with evidence, without implementing it again.
+Unexpected callers of a changed API still require correct forwarding and compilation. That does
+not authorize changing every producer they call. If a promised field is already erased by an MFM
+mapper, the case remains unmet until that exact producing contract is resolved. A SQLx error mapped
+to a unit Unavailable is an MFM loss, not evidence that SQLSTATE was unavailable from the client.
 
-A core limitation revealed here requires a specific proposed contract change, affected tests,
-removals and cost. Review it explicitly before implementation; acceptance of Part 1 is not a claim
-that future changes are impossible, and a Part 2 gap is not authorization to restart the core.
-If this refinement cannot support a simpler consistent design and finite completion claim, Part 2
-stays draft. That does not prevent release/acceptance of the completed Part 1.
+A new producer contract, source traversal, public API/schema family, exceeded estimate or failed
+claimed deletion requires a cumulative architect design/cost decision before that expansion or the
+next row. Record unrelated gaps once in the existing audit inventory without making them mandatory
+“deferred” delivery rows. A core limitation needs an explicit proposed change, tests and cost; it
+does not authorize restarting Part 1. If the plan cannot support the required simpler design, Part 2
+stays draft while completed Part 1 remains accepted.
 
 ## 3. Owner representations
 
@@ -92,9 +112,9 @@ enum EvmTransactionOperationalError {
     },
     Authority {
         operation: AuthorityOperation,
-        cause: ReviewedAuthorityFailure,
+        cause: AuthorityFailure,
     },
-    Signer { cause: ReviewedSigningFailure },
+    Signer { cause: SigningFailure },
 }
 ```
 
@@ -114,134 +134,122 @@ owned data. `Error::source()` should preserve a nested typed source when its typ
 trait, but generic capability contracts remain usable with operational `MfmValue` types that do
 not implement `std::error::Error`. Typed payload access remains part of the contract.
 
-The shared custody/data/capture contract has one owner in
-[Part 1 section 4](RFC_AUDITABILITY_ERROR_CHAIN.md#4-preservation-and-disclosure-are-separate-responsibilities),
-[section 5](RFC_AUDITABILITY_ERROR_CHAIN.md#5-shared-causal-data-with-local-ownership) and
-[section 9](RFC_AUDITABILITY_ERROR_CHAIN.md#9-capture-once-report-existing-data).
-Raw/native access, public output and persistence obey that same custody rule. Redacted Serialize
-alone is insufficient. Capture reviewed facts once at the first owner; outer errors retain that
-data. There is no fallible child projector, independent reporting tree, client downcaster registry,
-internal-error MfmValue identity or decoder-error schema family to implement for each row.
+Reuse [Part 1 section 5](RFC_AUDITABILITY_ERROR_CHAIN.md#5-shared-causal-data-with-local-ownership)
+and [section 9](RFC_AUDITABILITY_ERROR_CHAIN.md#9-capture-once-report-existing-data) for shared
+capture, bounds, omissions and reporting. Capture only the selected cause/field contract once;
+receivers carry it without rerunning extraction or serializing the original again. Native access
+follows the upstream trust policy, not a blanket private-source certification requirement.
 
-## 4. Finite owner-to-consumer matrix
+Native-only failures need no MfmValue identity or persisted error schema. Declared operational
+failures retain their actual typed meaning and admitted original. These sketches must be finalized
+against the accepted core; no extra wrapper is required where its existing type already owns the
+same operation and cause. Do not create a global error-kind enum to force all failures into one type.
 
-Source sites were identified against `7f71beef` and the third attempt. Section 2 must update them to
-the accepted Part 1 commit and subtract completed work before implementation. Existing row IDs
-remain for traceability; O11 is fully assigned to Part 1 E5 and is not a Part 2 prerequisite task.
+## 4. Finite execution producer matrix
 
-| ID | Producing boundary and required facts | Consuming endpoint and stopping boundary |
+These are the retained producer groups from the previous O1-O12 inventory. R0 must freeze exact
+cases and source paths against accepted Part 1 and remove work already completed. The rows are not
+permission to enrich every error in the named modules.
+
+| ID | Selected producing boundary and facts | Consumer and stopping boundary |
 | --- | --- | --- |
-| O1 | Existing json_rpc.rs send/body/RPC capture and lib.rs read/read_anchored bridges: retain existing method/stage, status/code, source prefix, bounds and local route mismatch facts. | One actual Read failure through Runtime/App cold observation plus internal preflight rejection. Reuse the baseline capture; no HTTP client, retry or RPC decoder rewrite. |
-| O2 | transaction.rs reserve_nonce/prepare_transaction/execute_transaction, map_provider_error/map_authority_error and signer.sign conversion: preserve provider, authority or signing source with that transaction operation once. | Pending Effect failure through cold App inspection and unchanged command/EffectId. Authority/signing extraction belongs to O3/O4/O6; this row forwards their reviewed data, not a second capture tree. |
-| O3 | signing public-key/signature constructors and recover_public_key; keystore start/import_secp256k1/sign/shutdown and their owner/channel conversions: operation, invalid-vs-failed/closed-vs-owner-failed, exposed safe crypto/source facts. | Native signing error and the transaction operational result from O2. No secret command, key material or panic payload; no signing/keystore concurrency, authority, or cryptographic algorithm redesign. |
-| O4 | PostgreSQL load_run/append_run/configure_append_transaction and precommit/COMMIT mappers: existing disposition, SQLx category/SQLSTATE, query/transaction stage and exposed safe nested sources. | Runtime recording failure and App report, including original/candidate and ambiguity. Reuse one SQLx extraction owner; no new Store lifecycle, reconnect protocol or append planner. |
-| O5 | PostgreSQL config load/list/import/delete, decode_revision/commit_mutation/classify_revision_query; index list_runs/classify_index_query: operation, client cause, existing absence/corruption/indeterminate semantics. | Existing App config/list response or native invocation error. Forward checked reference errors through the owner custody rule; do not expand into all identity/value constructors. |
-| O6 | PostgreSQL evm_tx load/reserve_or_compare/retain_prepared, begin_authority/commit_authority/load_state and its source-erasing helpers: authority operation, SQLx/source evidence, retained-row field and existing acknowledgement category. | Authority port to O2's persisted operational failure or internal invocation report. Share O4's SQLx extraction and domain-owned reviewed authority data; no nonce/replacement authority redesign. |
-| O7 | PostgreSQL connect/classify_open_error/verify_connection/verify_evm_connection and their baseline marker/durability/role/catalog checks; provision_postgres/provision_evm_transaction_authority: query source or actual failed gate. | Existing open/provision result through App startup. Preserve a gate failure before pool acquisition can hide it. Reuse shared extraction; no general catalogue-diff/constraint-diagnostics framework. |
-| O8 | Memory Store/config/index existing task/allocation and local physical-check failure conversions affected by the new public error payload. | Existing native port/Runtime/App error. Preserve available causes and named check facts; no invented provider chain or new memory-backend failure simulator. |
-| O9 | Deployment::load/parse/resolve_environment; Application::open/ComposedRuntime::compose, map_config_repository_error/map_run_index_error/map_runtime_error and existing request task joins. | Existing startup or request response in CLI/REST. Retain the returned child and operation; optional source text is withheld at its owner. No global Runtime assembly-rejection or configuration-field taxonomy migration. |
-| O10 | generate_run_id; CLI read_config_input/write_stdout/emit_error; REST listener/serve/shutdown and existing json_rejection/config_json_rejection/checked ingress conversions. | Existing reviewed request/output error. Retain entropy/IO/parser or concrete framework rejection category and location, omissions and true delivery stage. Stop at the client/framework's exposed source; no clap/axum private diagnostic reconstruction, comprehensive extractor replacement, or logging service. |
-| O12 | Shared IO/client extraction reached by O1/O4/O9/O10, excluding the JsonError/CanonicalError owner correction completed in Part 1: safe category/location/code, available reviewed constructor facts, explicit text/payload withholding. | The returned carrier itself, including source()/downcast/getters, followed by the selected consumer. Reuse Part 1 parser/custody APIs. Correct each remaining listed source owner once; remove caller-specific sanitizers. No blanket new parser/error schema family. |
+| O1 | Read/read_anchored and existing json_rpc send/body/RPC failure conversions on selected shipping Read calls: method/stage, status/code, exposed source prefix, actual local mismatch and bounds. | Runtime failed Read and cold App observation; internal preflight stays internal. Reuse existing RPC capture. No HTTP client, retry or decoder-family rewrite. |
+| O2 | Selected transaction reserve_nonce/prepare_transaction/execute_transaction calls and map_provider_error/map_authority_error/signer.sign conversions: actual operation and supplied provider/authority/signing cause. | Pending Effect failure through Runtime/App, preserving command/EffectId. O3/O6 own their producer changes; this row forwards their data without a second capture tree or new authority model. |
+| O3 | signer.sign and the executing keystore sign request/reply, plus only signature/evidence helpers required by a frozen transaction case: actual sign operation, returned cause and existing invalid/failed/closed distinctions. | O2's operational failure or native internal invocation report as applicable. No key creation/import/startup/shutdown, comprehensive signing constructors, secret-command capture, cryptographic or concurrency redesign. |
+| O4 | Run Store load/append and PostgreSQL precommit/COMMIT conversions required by the selected Runtime recording/load cases: disposition, returned SQLx/source facts and actual query/transaction stage. | Existing load invocation report, or append recording report with failed outcome/candidate when available and actual acknowledgement. A load failure invents no outcome/candidate or recording phase. Affected memory run-Store consumers forward existing causes. No config/index query migration, connection/provisioning audit, append planner or reconnect protocol. |
+| O6 | Selected execution authority load/reserve_or_compare/retain_prepared calls and their required begin/commit/load_state conversions: operation, source evidence and existing acknowledgement category. | Authority port to O2; reuse O4's selected shared database extraction. No general retained-row/identity constructor audit, nonce/replacement or startup/provisioning redesign. |
 
-Persisted schema work is required only for actual declared operational/domain fields in
-O1/O2/O3/O6. Native-only detail has no MfmValue identity or independent schema registry. Use the
-same captured evidence for the native route and the admitted operational value as applicable;
-do not create a second capture subsystem for persistence. Unknown source types retain the exposed
-safe opaque layer/deeper links within the bound. Client-private attempts or prohibited text remain
-unavailable/withheld; they do not authorize client changes.
+The old O5 and O7 producer migrations are removed. O8 is limited to changed run-Store consumers
+within O4; its configuration/index work is excluded. O9/O10 are only forwarding/rendering of the
+selected run results and actual terminal encoding/write/flush failures; their broad producer
+migrations are removed. Reuse Part 1's shared report route and statuses. O12 extraction is a named
+dependency of a retained case, not a separate open-ended owner row. O11 remains Part 1 E5.
 
-Consumer closure forwards the supplied cause through callers of an API changed by that row. It
-does not add new variants or facts to every reachable producer. Record a newly found upstream loss
-once in the [existing audit inventory](docs/adapter-error-audit.md): producer, consumer, missing fact
-and affected guarantee. It does not become a new row automatically. A change in source contract,
-new public API/schema/constructor family, exceeded reviewed estimate or failed claimed deletion
-requires a cumulative architect scope/cost decision before continuing that expansion or another
-row. Update this RFC with the decision; a local cleanup or cost explanation alone is not acceptance.
+For each row, preserve all already supplied causes through changed receivers. Typed error/checked
+constructor changes are allowed only where the frozen execution facts require them. Reaching a
+constructor from a caller is insufficient. Hidden dependency attempts are unavailable; our own
+lossy conversion is a gap to fix when its evidence is promised. No row may claim completion by
+inventing a source layer, discarding a supplied cause, or substituting a classification for it.
+
+Preserve existing schema/canonical bounds. Any required operational schema change uses the shared
+captured representation; do not build another mechanism for persistence. Neither the new trust
+policy nor this matrix requires arbitrary raw client object dumps or every dependency message.
 
 ## 5. Ordered work and completion
 
-### R0: refine and accept the Part 2 design
+### R0: accept the finite execution design
 
-Complete section 2 after Part 1 F1. The architect reviews the actual inherited APIs, frozen rows,
-reuse/deletion plan, acceptance cases and cumulative cost, and records an accepted or rejected
-readiness decision here. No owner implementation begins with an unresolved architectural row.
-Keep that one current record concise. At this revision: **R0 is pending Part 1 acceptance.**
+Complete section 2 after Part 1 F1. The architect records accepted or rejected readiness against
+the actual inherited APIs, frozen paths, required deletions and cumulative cost. No implementation
+row starts with unresolved architecture. At this revision: **R0 is pending Part 1 acceptance.**
 
-### R1: complete shared extraction at the selected owners
+### R1: preserve selected recording causes
 
-Finish only the remaining O12 sites and O4 SQLx extraction, with the core-provided carrier and
-Store semantics. Reuse Part 1 custody/admission rather than reimplementing parser sanitizers.
-Prove a real O4 recording consumer, including the existing ambiguity/category contract.
+Complete O4's required run Store conversions and shared database extraction once, reusing Part 1
+recording/reporting and original ownership. Cover failed execution plus failed append, success
+plus failed append, actual disposition and independent cause chains. Do not repeat the core load
+redesign or migrate configuration/index/startup errors to make the test pass.
 
-### R2: close the database owner rows
+### R2: preserve execution authority and signing causes
 
-O5/O6/O7 reuse O4's extraction and existing port classifications. Each is a coherent owner cutover
-with its named consumer and superseded path removed. O8 covers only remaining memory-port causes;
-no new backend simulator or extra persistence protocol. Do not repeat Part 1 Store load redesign.
+Complete O6 using the shared database extraction and O3 using the existing signing/keystore
+operation. Keep each producing contract and its receiving conversions together. Stronger tests
+cover the changed signing boundary and MFM's deliberate secret-input handling; they do not audit
+every arbitrary dependency diagnostic for credentials.
 
-### R3: close signing and operational adapter rows
+### R3: complete adapter propagation
 
-Complete O3's reviewed signing/keystore causes, then O2 forwarding O3/O6 evidence without a second
-capture tree. Complete O1's remaining gaps using its existing RPC capture. Prove cold Read and
-pending Effect preservation and unchanged command authority. Signing/keystore changes require
-the repository's stronger boundary/secret tests; no cryptographic or concurrency redesign.
+Complete O1's remaining selected Read losses and O2's transaction propagation. Reuse O3/O6 data;
+prove the complete required operational original through cold observation and unchanged command
+authority. Preserve internal failure routing without adding fault records or extra capture layers.
 
-### R4: close Application and transport owner rows
+### R4: verify the shared consumer route
 
-O9/O10 retain causes supplied by earlier rows at startup/request/IO/ingress boundaries. Reuse Part
-1's invocation and public status projection; only the named remaining losses require changes.
-Keep true acknowledgement and delivery stage. A final serializer does not justify changing every
-upstream constructor or transport extractor.
+Verify Runtime/App/CLI/REST forwarding and rendering for the selected paths using the same captured
+or admitted data. Required caller migrations belong in their producing API cutovers, not this final
+step. Reuse Part 1 cases/statuses and add only missing observable boundary coverage. No cross-product
+of every producer and transport, general ingress audit or new successful-result reporting service.
 
 ### F2: accept the complete Part 2 implementation
 
-Each row's commit includes its finite consumer tests, affected documentation and deletion of
-superseded implementations. Use section 2's refined dependency order if it differs from R1-R4;
-keep inseparable cutovers together and do not retain two current designs to split commits.
+Each coherent cutover deletes superseded code/API/tests/docs and retains required behavior coverage.
+Use section 2's refined dependency order if it differs from R1-R4; keep inseparable changes together.
+Reconcile B1-B8 and every frozen case against the complete candidate. Use scope-driven focused
+checks, managed PostgreSQL/SQLx and client scenarios when affected, then one final `nix run .#ci`
+for Part 2. Part 1 CI does not substitute for Part 2 integration. Direct Rust tooling runs in the
+default Nix shell; subsequent fixes require affected checks and review of changed contracts.
 
-Reconcile B1-B8, all frozen rows and known omissions against the exact complete candidate. Apply
-scope-driven focused checks during work, managed PostgreSQL/SQLx and client scenarios when those
-boundaries change, and one final `nix run .#ci` for Part 2. Part 1's CI is evidence for its accepted
-baseline, not a substitute for integration of Part 2's changes. All direct Rust tooling runs in
-the default Nix shell. Final verification and architect review must cover the accepted candidate;
-subsequent fixes need affected checks and review of changed contracts.
-
-Report actual production change, tests/docs, total churn, public API/schema changes, removals and
-necessary additions against accepted Part 1, plus the cumulative result against `7f71beef`.
-Separate reusable completed work from new additions; do not count Part 1 deletions twice or credit
-removal of abandoned-only machinery as an original-baseline deletion. Review the actual aggregate
-design, not merely whether each row has a rationale. An unresolved simplification objection keeps
-Part 2 unaccepted rather than authorizing unrelated cleanup or another owner cycle.
+Report production, tests/docs, total churn, public API/schema changes and actual responsibility
+removals against accepted Part 1 and cumulatively against `7f71beef`. Do not count Part 1 deletions
+twice or credit removal of abandoned-only machinery against the original baseline. Review the
+aggregate design; unresolved simplification objections keep Part 2 unaccepted rather than
+justifying unrelated cleanup or another round of owner migrations.
 
 ## 6. Acceptance evidence
 
-B1-B8 replace the combined RFC's broad C15/final-owner obligation. Part 1 C1-C18 remain retained
-behavior; its completed migration is not performed again.
+B1-B8 replace the former broad owner obligation. Part 1 C1-C18 remain retained behavior; its
+completed migration is not performed again.
 
 | ID | Observable acceptance |
 | --- | --- |
-| B1 | R0 names the accepted Part 1 baseline, final inherited APIs and finite rows with exact symbols, cases, facts, omissions, dependencies, required deletions and cumulative cost. No unresolved source/custody design is delegated to implementation. |
-| B2 | Each remaining row preserves its named available layers, operation and reviewed fields at its actual consumer. Existing classification, absence/corruption/acknowledgement and internal/operational routing remain correct. Previously satisfied rows are closed with baseline evidence. |
-| B3 | O1/O2 and the O3/O6 causes they carry survive admitted operational persistence and cold inspection. Internal Store/config/signing/request failures use native reports and gain no history fault record. Pending Effect identity/authority is unchanged. |
-| B4 | Source/downcast/getters/Debug/Display and public/persisted output expose only permitted reviewed data. Withholding, unavailable layers and bounds are explicit. Native safe original preservation and unsafe-original rejection reuse the core contract. |
-| B5 | Owner errors reuse captured child detail and shared checked diagnostics. Capture limits/encoding failure do not recursively create projectors or arbitrary secondary error trees. No repeated owner Wire, caller sanitizer or native-only schema registry remains in a migrated row. |
-| B6 | App/CLI/REST retain the supplied original and separate recording cause, classification/status, acknowledgement and actual delivery failure. No dropped primary cause, speculative retry/append or hidden framework diagnostic reconstruction is introduced. |
-| B7 | Each row deletes its superseded path/API/tests/docs in the coherent cutover while retaining meaningful behavior coverage. Cumulative production/test/doc/file/API cost and actual complexity reduction are reviewed against accepted Part 1 and the original baseline; neither LOC compression nor hypothetical deletions count. |
-| B8 | All frozen rows and relevant retained Part 1 behavior pass required checks and final CI on the complete candidate. The completion record names the accepted commit, evidence and withheld/unavailable/deferred facts; it makes no broader provenance claim than the tested source contracts. |
-
-The goal remains complete available causal preservation at the named boundaries. Neither this
-matrix nor ordinary Serde guarantees arbitrary downstream Deserialize provenance, inaccessible
-client attempts, raw secret retention, or audit through a failed Store. State those limits without
-silently presenting partial capture as lossless or extending implementation scope to hide them.
+| B1 | R0 pins accepted Part 1, actual inherited APIs and every finite producing failure, required fact, changed conversion, consumer assertion, omission, reuse/deletion and cumulative cost. No broad owner or deferred nonexecution row remains mandatory. |
+| B2 | Each selected path preserves its promised available cause layers/fields and operation. Existing classification, acknowledgement and internal/operational routing hold. New producer contracts are explicit; previously completed work is closed with evidence. |
+| B3 | O1/O2 operational errors, including required O3/O6 causes, survive complete admission and cold observation. Internal execution/recording failures use invocation reports without a fault append. Command/EffectId authority is unchanged. |
+| B4 | Upstream diagnostic content follows the trust contract without credential scanning or blanket source/downcast certification. MFM does not deliberately attach its own secret inputs. Bounds/omissions and any explicitly required shared text/admission change are exercised at the selected boundary. |
+| B5 | Capture occurs once and receiving/reporting code uses existing data. A complete admitted failed outcome replaces the additional native original after encoding; required facts are compared rather than inferred from successful serialization. No projector tree, native-success stash, per-owner reporting schema or generic completeness checker remains. |
+| B6 | Failed execution plus recording failure retains two independent causes and actual candidate/acknowledgement. Success plus recording failure invents no execution error. Shared App/CLI/REST reports retain statuses and actual delivery stage; no secondary audit sink, append retry or recursive reporting is introduced. |
+| B7 | Cutovers delete superseded paths/APIs/tests/docs while preserving meaningful behavior coverage. Actual aggregate complexity and production/test/doc/file/API costs are reviewed against both baselines; no compression, hypothetical deletion credit or duplicate native representation hides growth. |
+| B8 | All frozen cases and relevant retained Part 1 behavior pass required checks and final CI. Completion names the accepted commit, evidence and limits; it does not claim platform-wide provenance or secret-free certification of upstream diagnostics. |
 
 ## 7. Material uncertainties
 
 | Assumption | Why uncertain | Consequence if wrong | Validation and response |
 | --- | --- | --- | --- |
-| The accepted core supplies enough reusable capture/admission/reporting machinery | Part 1 K1-K3 and final APIs are not complete | Owner rows could recreate projectors or require a core contract change | R0 inspects accepted APIs and actual E1-E6 evidence; decide a concrete missing contract before owner implementation. |
-| The draft rows identify all intended remaining work without unnecessary repeats | They were identified against the original/third-attempt sources, not accepted Part 1 | Duplicate work or hidden upstream fanout | R0 pins paths/symbols and subtracts delivered cases; newly discovered losses require an explicit scope/cost decision. |
-| Named client APIs expose enough safe facts | Clients may hide source layers/attempts or retain prohibited input | Some details cannot be recovered or preserved safely | Review each named source and native access path in R0; specify safe facts and explicit omissions before implementation. |
-| The remaining owner design achieves simpler overall code at acceptable cost | No accepted Part 1 baseline or complete row design/cost exists yet | Another collection of locally justified changes could grow without convergence | R0 reviews the cumulative reuse/deletion plan; exceeded estimates trigger review, and F2 accepts only the actual aggregate result. |
+| The accepted core supplies one sufficient capture/reporting path | K1-K3 and final APIs are not complete | Owner rows could recreate projectors or duplicate originals | R0 inspects accepted APIs and E1-E6 evidence; resolve a concrete missing contract before implementation. |
+| Admitted execution failures contain the required native cause facts | Some serializers may omit information held natively | Releasing native E could lose a promised fact | Compare selected schemas and actual producer/cold/report consumer assertions before the ownership handoff; no generic completeness framework. |
+| Existing shared fields suffice under the upstream trust contract | DiagnosticEvidence is closed and ordinary Values strings are marker-scanned | A required text field could be rejected or cause per-provider workarounds | Freeze the needed facts and one shared bounded field/admission change if needed; otherwise preserve existing schema. |
+| The selected paths and cost are finite and simpler overall | Exact conversions and accepted Part 1 baseline remain unproved | Hidden dependencies or locally justified growth could recur | R0 freezes semantics, conversions and cost; exceeded estimates trigger review and F2 judges the actual aggregate result. |
 
-This split is documentation only. It implements neither part, claims no new Rust/CI evidence and
-discards no work. Part 1's pending proofs are not answered by the existence of this second RFC.
+This revision changes documentation only. It implements neither part, claims no new Rust/CI
+evidence and discards no work. The selected trust/scope decisions are settled; implementation
+completeness and LOC improvement are still proofs to deliver.
