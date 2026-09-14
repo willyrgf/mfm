@@ -855,7 +855,7 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
             .unwrap(),
         reserved
     );
-    assert_eq!(
+    assert!(matches!(
         backend
             .reserve_or_compare(
                 &first,
@@ -865,8 +865,8 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
             )
             .await
             .err(),
-        Some(AuthorityError::Internal)
-    );
+        Some(AuthorityError::Internal(_))
+    ));
     // Unsettled reservations do not block independent transactions; external advances are accepted.
     for (id, observed, expected) in [(11, 0, 8), (12, 99, 99), (13, 2, 100)] {
         assert_eq!(
@@ -889,10 +889,10 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
         7,
     )
     .unwrap();
-    assert_eq!(
+    assert!(matches!(
         backend.retain_prepared(&wrong, &candidate).await.err(),
-        Some(AuthorityError::Internal)
-    );
+        Some(AuthorityError::Internal(_))
+    ));
     assert!(
         backend
             .retain_prepared(&reserved, &candidate)
@@ -923,13 +923,13 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
     );
 
     let exhausted = nonce_domain(backend.authority_epoch(), 21, 22, 23);
-    assert_eq!(
+    assert!(matches!(
         backend
             .reserve_or_compare(&effect_id(21), &command, &exhausted, u64::MAX)
             .await
             .err(),
-        Some(AuthorityError::Unavailable)
-    );
+        Some(AuthorityError::Unavailable(_))
+    ));
     assert!(backend.load(&effect_id(21)).await.unwrap().is_none());
     assert_eq!(
         backend
@@ -939,13 +939,13 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
             .nonce(),
         u64::MAX - 1
     );
-    assert_eq!(
+    assert!(matches!(
         backend
             .reserve_or_compare(&effect_id(23), &command, &exhausted, 0)
             .await
             .err(),
-        Some(AuthorityError::Unavailable)
-    );
+        Some(AuthorityError::Unavailable(_))
+    ));
 
     let race_domain = nonce_domain(backend.authority_epoch(), 31, 32, 33);
     let mut tasks = Vec::new();
@@ -990,31 +990,31 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
     let fault_domain = nonce_domain(backend.authority_epoch(), 61, 62, 63);
     let fault_id = effect_id(61);
     backend.inject_authority_commit_fault(AuthorityCommitFault::UnknownRolledBack);
-    assert_eq!(
+    assert!(matches!(
         backend
             .reserve_or_compare(&fault_id, &command, &fault_domain, 5)
             .await
             .err(),
-        Some(AuthorityError::Unavailable)
-    );
+        Some(AuthorityError::Unavailable(evidence)) if evidence.as_value()["operation"] == "authority.reserve_or_compare" && evidence.as_value()["stage"] == "commit" && evidence.as_value()["injected"] == "unknown_rolled_back"
+    ));
     assert!(backend.load(&fault_id).await.unwrap().is_none());
     backend.inject_authority_commit_fault(AuthorityCommitFault::UnknownCommitted);
-    assert_eq!(
+    assert!(matches!(
         backend
             .reserve_or_compare(&fault_id, &command, &fault_domain, 5)
             .await
             .err(),
-        Some(AuthorityError::Unavailable)
-    );
+        Some(AuthorityError::Unavailable(evidence)) if evidence.as_value()["operation"] == "authority.reserve_or_compare" && evidence.as_value()["stage"] == "commit" && evidence.as_value()["injected"] == "unknown_committed"
+    ));
     let reservation = backend.load(&fault_id).await.unwrap().unwrap().reservation;
     backend.inject_authority_commit_fault(AuthorityCommitFault::UnknownRolledBack);
-    assert_eq!(
+    assert!(matches!(
         backend
             .retain_prepared(&reservation, &candidate)
             .await
             .err(),
-        Some(AuthorityError::Unavailable)
-    );
+        Some(AuthorityError::Unavailable(evidence)) if evidence.as_value()["operation"] == "authority.retain_prepared" && evidence.as_value()["stage"] == "commit" && evidence.as_value()["injected"] == "unknown_rolled_back"
+    ));
     assert!(backend
         .load(&fault_id)
         .await
@@ -1023,13 +1023,13 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
         .prepared
         .is_none());
     backend.inject_authority_commit_fault(AuthorityCommitFault::UnknownCommitted);
-    assert_eq!(
+    assert!(matches!(
         backend
             .retain_prepared(&reservation, &candidate)
             .await
             .err(),
-        Some(AuthorityError::Unavailable)
-    );
+        Some(AuthorityError::Unavailable(evidence)) if evidence.as_value()["operation"] == "authority.retain_prepared" && evidence.as_value()["stage"] == "commit" && evidence.as_value()["injected"] == "unknown_committed"
+    ));
     assert!(
         backend
             .load(&fault_id)
@@ -1173,6 +1173,52 @@ async fn managed_postgres_persistence_authority_contract() {
         panic!("load failure must remain invocation-only")
     };
     assert_eq!(forwarded, evidence);
+
+    let closed_authority = PostgresEvmTransactionAuthority::connect(&runtime)
+        .await
+        .unwrap();
+    let domain = nonce_domain(closed_authority.authority_epoch(), 1, 2, 3);
+    let id = effect_id(20);
+    let command = reference("mfm.test.closed-authority", &[1]);
+    let reservation = Reservation::new(id.clone(), command.clone(), domain.clone(), 0).unwrap();
+    let candidate = PreparedRecord::new(
+        evm_hash(20),
+        ExactRawTransaction::new(vec![2, 0xc0]).unwrap(),
+    );
+    closed_authority.pool.close().await;
+    let failures = [
+        (
+            "authority.load",
+            "acquire",
+            closed_authority.load(&id).await.err().unwrap(),
+        ),
+        (
+            "authority.reserve_or_compare",
+            "begin",
+            closed_authority
+                .reserve_or_compare(&id, &command, &domain, 0)
+                .await
+                .err()
+                .unwrap(),
+        ),
+        (
+            "authority.retain_prepared",
+            "begin",
+            closed_authority
+                .retain_prepared(&reservation, &candidate)
+                .await
+                .err()
+                .unwrap(),
+        ),
+    ];
+    for (operation, stage, error) in failures {
+        let AuthorityError::Unavailable(evidence) = error else {
+            panic!("authority SQL disposition")
+        };
+        assert_eq!(evidence.as_value()["operation"], operation);
+        assert_eq!(evidence.as_value()["stage"], stage);
+        assert_eq!(evidence.as_value()["sources"][0]["kind"], "pool_closed");
+    }
 
     let first_run_id = run_id(21);
     let second_run_id = run_id(22);
@@ -1555,10 +1601,10 @@ async fn managed_postgres_persistence_authority_contract() {
     .execute(&mut connection)
     .await
     .expect("inject wrong reservation epoch");
-    assert_eq!(
+    assert!(matches!(
         authority.load(&effect_id(6)).await.err(),
-        Some(AuthorityError::Internal)
-    );
+        Some(AuthorityError::Internal(_))
+    ));
     sqlx::query(
         "UPDATE mfm_evm_tx.nonce_reservations SET authority_epoch = $1 WHERE effect_id = $2",
     )
@@ -1597,10 +1643,10 @@ async fn managed_postgres_persistence_authority_contract() {
         .await
         .expect("replacement authority");
     assert_ne!(replacement.authority_epoch(), &original_epoch);
-    assert_eq!(
+    assert!(matches!(
         authority.load(&effect_id(6)).await.err(),
-        Some(AuthorityError::Internal)
-    );
+        Some(AuthorityError::Internal(_))
+    ));
 
     drop(authority);
     drop(replacement);

@@ -61,9 +61,56 @@ fn diagnostic_owner_schema_identity() {
     use mfm_values::MfmValue;
     for (schema, identity, bytes) in [
         (EvmOperationalError::schema_descriptor().unwrap(), "schema:mfm.evm-operational-error:2:sha256-jcs-v1:c8945cd8c4d79caab00e0f3b75b5f8f9c41b4ff63dcbae466b1677d88f45d67c", 11677),
-        (EvmTransactionOperationalError::schema_descriptor().unwrap(), "schema:mfm.evm-transaction-operational-error:2:sha256-jcs-v1:6293c5ceeb0e9cc6329dfe21ea5d4001f9efce5114878ea77a6a0503b109ce45", 12971),
+        (EvmTransactionOperationalError::schema_descriptor().unwrap(), "schema:mfm.evm-transaction-operational-error:3:sha256-jcs-v1:2292902eaf07f4fe168ab33b496a1eb0913203f3010c41db59fe0ce9d0c56a81", 13227),
     ] {
         assert_eq!(schema.schema_id().unwrap().to_string(), identity);
         assert_eq!(schema.identity_canonical_json().unwrap().as_bytes().len(), bytes);
+    }
+}
+
+#[test]
+fn authority_and_signer_owners_keep_diagnostic_admission_and_reject_old_contracts() {
+    use mfm_program::ClassifyError;
+    for authority in [true, false] {
+        let owner = |cause| {
+            if authority {
+                EvmTransactionOperationalError::AuthorityUnavailable { cause }
+            } else {
+                EvmTransactionOperationalError::SignerUnavailable { cause }
+            }
+        };
+        let error = owner(DiagnosticEvidence::from_value(serde_json::json!({
+            "operation": "execution fixture", "message": "dependency mentions private_key marker",
+            "sources": [{"message": "root"}, {"message": "leaf"}]
+        })));
+        let object = Object::from_value(&error).unwrap();
+        assert_eq!(
+            object.decode::<EvmTransactionOperationalError>().unwrap(),
+            error
+        );
+        assert_eq!(
+            error.classify(),
+            if authority {
+                mfm_program::Classification::OutcomeUnknown
+            } else {
+                mfm_program::Classification::Retryable
+            }
+        );
+        assert!(Object::from_value(&owner(DiagnosticEvidence::from_value(
+            serde_json::json!({"ratio": 0.5})
+        )))
+        .is_err());
+        let oversized = owner(DiagnosticEvidence::from_value(
+            serde_json::json!({"message": "x".repeat(mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES)}),
+        ));
+        assert!(Object::from_value(&oversized).is_err());
+        let old_ref = mfm_ids::ContentRef::new(
+            mfm_ids::SchemaId::parse("schema:mfm.evm-transaction-operational-error:2:sha256-jcs-v1:6293c5ceeb0e9cc6329dfe21ea5d4001f9efce5114878ea77a6a0503b109ce45").unwrap(),
+            object.value_ref().content_digest().clone(),
+        ).unwrap();
+        let old_object = Object::from_canonical(old_ref, object.canonical_bytes()).unwrap();
+        assert!(old_object
+            .decode::<EvmTransactionOperationalError>()
+            .is_err());
     }
 }

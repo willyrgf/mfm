@@ -1,7 +1,8 @@
 # RFC part 2: preserve errors on selected execution paths
 
 Status: R0 design and the R1 checkpoint are accepted by the dedicated architect, 2026-09-14.
-R1 run-Store enrichment is implemented and verified; R2/R3 and final B2–B8 acceptance remain pending.
+R1 run-Store and R2 authority/schema cutovers are implemented and verified; R3 and final
+B2–B8 acceptance remain pending.
 Continue from accepted Part 1 production `87f198a9` and completion record `0a7543ec`,
 with this RFC. Do not restart or reopen that cutover.
 
@@ -510,6 +511,32 @@ estimates, not allowances to consume. Additional producers, recipes, types or fo
 outside the revised range still require cumulative review. Remaining material uncertainties are
 R2/R3's actual cost, new-owner admission/cold reporting and v3 deployment handling; validate them
 through the finite acceptance cases below before final sign-off.
+
+### R2 cutover — 2026-09-14
+
+R1 is committed as `fa042add`. R2 removes both authority discard helpers and AuthorityError's
+serializer, preserves the selected SQL/local facts at their producers, and forwards the two
+routes unchanged through Live. The transaction-error schema moves once to v3, with mandatory
+authority/signer payloads and unchanged typed classification. Existing signer Invalid/Failed
+receiving data is honest; executing SignFailed forwarding remains R3. Current assembly tests
+reject the old v2 contract before admission/provider entry. No deployment is performed; existing
+v2-run handling remains a rollout obligation rather than an automatic rewrite or dual decoder.
+
+All EVM targets pass, including trusted-text/float/size admission for the two new payload branches.
+The targeted Live v3 rejection and custody acknowledgement-recovery cases pass. Selected
+PostgreSQL/EVM/Live/App all-target Clippy passes. Managed PostgreSQL passed
+`run-3376539-1789413131492202944`, retaining distinguishable load/reserve/retain stages and both
+ambiguous authority COMMIT outcomes. The managed Effect test passed
+`run-3374133-1789412900364383372`: real SQL 42501 reaches the operational original, cold assembly
+and App view; retained epoch mismatch reaches internal invocation with unchanged head and prior
+observation. The final explicit App payload assertion also passed in managed Effect run
+`run-3378618-1789413163856077069` (171.71 seconds).
+The test reuses the existing wallet/provider/signer fixture, with test-only SQLx/App dependencies;
+no second provider/signer harness or production hook is added.
+
+R2 adds 334 production lines. Current total is 27,844: +818 against Part 1 and +1,013 against
+original `7f71beef`. Remaining R3 production forecast is +50–90, within the reviewed cumulative
++750–1,050 range. Tests and documentation remain separately measured at final acceptance.
 
 ### Finite acceptance cases
 

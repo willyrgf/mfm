@@ -222,7 +222,11 @@ impl MemoryAuthority {
             .compare_exchange(stage, 0, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            Err(AuthorityError::Unavailable)
+            Err(AuthorityError::Unavailable(
+                mfm_values::DiagnosticEvidence::from_value(
+                    serde_json::json!({"operation": "test.authority", "injected": "unavailable"}),
+                ),
+            ))
         } else {
             Ok(())
         }
@@ -249,13 +253,20 @@ impl EvmTransactionAuthority for MemoryAuthority {
                     || state.reservation.command_value_ref() != reference
                     || state.reservation.domain() != domain
                 {
-                    return Err(AuthorityError::Internal);
+                    return Err(AuthorityError::Internal(
+                        mfm_values::InvocationDiagnostic::from_fields(
+                            "authority_internal",
+                            "test.authority",
+                            &serde_json::json!({"injected": "internal"}),
+                            None,
+                        ),
+                    ));
                 }
                 state.reservation.clone()
             } else {
                 let reservation =
                     Reservation::new(id.clone(), reference.clone(), domain.clone(), observed)
-                        .map_err(|_| AuthorityError::Unavailable)?;
+                        .map_err(|_| AuthorityError::Unavailable(mfm_values::DiagnosticEvidence::from_value(serde_json::json!({"operation": "test.authority", "injected": "unavailable"}))))?;
                 *state = Some(LoadedTransaction {
                     reservation: reservation.clone(),
                     prepared: None,
@@ -273,9 +284,23 @@ impl EvmTransactionAuthority for MemoryAuthority {
     ) -> AuthorityFuture<'a, PreparedRecord> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
-            let state = state.as_mut().ok_or(AuthorityError::Internal)?;
+            let state = state.as_mut().ok_or(AuthorityError::Internal(
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "authority_internal",
+                    "test.authority",
+                    &serde_json::json!({"injected": "internal"}),
+                    None,
+                ),
+            ))?;
             if &state.reservation != reservation {
-                return Err(AuthorityError::Internal);
+                return Err(AuthorityError::Internal(
+                    mfm_values::InvocationDiagnostic::from_fields(
+                        "authority_internal",
+                        "test.authority",
+                        &serde_json::json!({"injected": "internal"}),
+                        None,
+                    ),
+                ));
             }
             let winner = state
                 .prepared
@@ -700,7 +725,7 @@ async fn custody_acknowledgement_loss_recovers_each_stage() {
         assert!(matches!(
             hot.start(run_id(), program(&input), input).await,
             Err(mfm_runtime::InvocationFailure::RecoveryStopped { observed })
-                if matches!(observed.state(), RunViewState::EffectPending { latest_failure: Some((original, _)), .. } if matches!(original.decode::<EvmTransactionOperationalError>().unwrap(), EvmTransactionOperationalError::AuthorityUnavailable))
+                if matches!(observed.state(), RunViewState::EffectPending { latest_failure: Some((original, _)), .. } if matches!(original.decode::<EvmTransactionOperationalError>().unwrap(), EvmTransactionOperationalError::AuthorityUnavailable { .. }))
         ));
         let signer: Arc<dyn Secp256k1Signer> = if fault == 2 {
             Arc::new(RejectingSigner::matching(signer.as_ref()))
@@ -1134,11 +1159,50 @@ async fn unavailable_signer_retains_reservation_and_its_distinct_operational_cau
     assert!(matches!(
         rejected,
         Err(AdapterError::Operational(
-            EvmTransactionOperationalError::SignerUnavailable
+            EvmTransactionOperationalError::SignerUnavailable { .. }
         ))
     ));
     let retained = authority.state().unwrap();
     assert_eq!(&retained.reservation, reserved.reservation());
     assert!(retained.prepared.is_none());
     assert_eq!(provider.operations().len(), operations);
+}
+
+#[tokio::test]
+async fn v3_transaction_assembly_rejects_v2_error_contract_before_admission() {
+    let (_owner, signer, binding, command, _) = fixture().await;
+    let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
+    let provider = Arc::new(ScriptedProvider::new(1337));
+    let store = Arc::new(MemoryStore::new());
+    let runtime = runtime(&binding, signer, authority, provider.clone(), store.clone());
+    let input = RecoveryContext {
+        unrelated: EvmU256::from_u64(0),
+        transaction: CheckedCreatePlan::new(
+            command.binding().clone(),
+            command.input().to_vec(),
+            command.value().clone(),
+            command.gas_limit(),
+            command.max_priority_fee_per_gas(),
+            command.max_fee_per_gas(),
+        )
+        .unwrap(),
+    };
+    let current = program(&input);
+    let bytes = std::str::from_utf8(current.canonical_bytes()).unwrap();
+    let current_id = "schema:mfm.evm-transaction-operational-error:3:sha256-jcs-v1:2292902eaf07f4fe168ab33b496a1eb0913203f3010c41db59fe0ce9d0c56a81";
+    assert!(bytes.contains(current_id));
+    let old = bytes.replace(current_id, "schema:mfm.evm-transaction-operational-error:2:sha256-jcs-v1:6293c5ceeb0e9cc6329dfe21ea5d4001f9efce5114878ea77a6a0503b109ce45");
+    let old = mfm_program::Program::decode_canonical(old.as_bytes()).unwrap();
+    assert!(matches!(
+        runtime.start(run_id(), old, input).await,
+        Err(mfm_runtime::InvocationFailure::Execution {
+            error: RuntimeError::IncompatibleAssembly,
+            ..
+        })
+    ));
+    assert!(mfm_store::Store::load_run(store.as_ref(), &run_id(), None)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(provider.operations().is_empty());
 }

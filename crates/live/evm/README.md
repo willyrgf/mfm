@@ -100,3 +100,11 @@ applied before Runtime sees the Program. This crate never invokes Operation or i
 Success envelopes require an explicit `result` field even for nullable receipt and block results.
 An omitted field is Unavailable; explicit null alone represents absence. Malformed receipt ingress
 retains Prepared without submission, and a later caller resumes the same exact bytes.
+
+Authority unavailable evidence moves unchanged into EvmTransactionOperationalError v3; internal
+InvocationDiagnostic moves unchanged into AdapterError::Invariant. The v3 owner also carries signer
+cause data. Existing SigningError::Invalid/Failed produce only their actual kind and sign/signer
+context, without invented deeper causes. Executing keystore source enrichment remains R3.
+The new owner schema changes dependent assembly contracts. This implementation performs no deployed
+assembly replacement; v2 runs require an explicit handling decision before rollout, without rewriting
+acknowledged history or adding a dual decoder.

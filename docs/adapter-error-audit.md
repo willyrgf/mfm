@@ -8,7 +8,7 @@ not claim that preserving an error received by Runtime repairs a cause discarded
 Part 1 is accepted at production `87f198a9`, recorded in `0a7543ec`. Part 2 refinement selects
 three remaining cutovers: run Store, execution authority, and executing keystore signing. Its
 sections 2–6 freeze producers, fields and stopping boundaries. The findings and remediation ideas
-below distinguish implemented R1 from the remaining gaps; they do not expand those cutovers.
+below distinguish implemented R1/R2 from the remaining signing gaps; they do not expand those cutovers.
 
 ## Result
 
@@ -109,14 +109,12 @@ Source: [transaction.rs](../crates/live/evm/src/transaction.rs), `reserve_nonce`
 - `map_provider_error` retains the complete reviewed provider carrier alongside the originating
   chain-verification, nonce-observation, receipt, canonical-block or submission operation. The
   transaction classification remains OutcomeUnknown.
-- `map_authority_error` maps the custody port to AuthorityUnavailable or a unit invariant. The
-  port itself exposes only Unavailable/Internal, so SQLx/operation detail is already gone.
-- `signer.sign(...).await.map_err(|_| SignerUnavailable)` discards even the signer's existing
-  Invalid/Failed distinction and source provenance.
-- Submitted-hash and canonical-block mismatches now retain the checked expected/observed values
-  in the provider carrier while remaining Unavailable/OutcomeUnknown.
+- R2 `map_authority_error` moves unavailable evidence into the v3 durable transaction owner and
+  forwards internal InvocationDiagnostic unchanged. No receiver recapture or authority serializer remains.
+- Signer Invalid/Failed now enter SignerUnavailable with their actual unit kind and sign/signer
+  context. R3 still needs to preserve executing keystore/channel/primitive causes before that receiver.
 - Codec, checked receipt/binding, and reached blocking-task failures now use native `AdapterFailure`
-  with reviewed causes or task outcomes. The upstream signer/authority source losses remain; this
+  with reviewed causes or task outcomes. The upstream executing-signer source losses remain; this
   local cutover does not recover them or authorize retaining panic payloads.
 
 Remediation: preserve nested provider/custody/signer causes with the transaction stage added once
@@ -144,21 +142,19 @@ Run Store errors remain invocation-only and cannot prove they were recorded thro
 Store. Comparison-only/local-rejection rollback, background cleanup, connection gates,
 configuration and index enrichment remain outside this selected guarantee.
 
-### 5. PostgreSQL transaction custody is a second source-erasing boundary
+### 5. PostgreSQL execution authority retains selected causes (R2)
 
-Source: [evm_tx.rs](../crates/storages/postgres/src/evm_tx.rs), `unavailable(_: impl Sized)`,
-`internal(_: impl Sized)`, transaction commit and retained-record decoding.
+[Authority](../crates/storages/postgres/src/evm_tx.rs) uses the private PostgreSQL SQLx recipe for
+load, reserve_or_compare and retain_prepared. Static operation/stage fields distinguish SQL calls;
+ambiguous COMMIT remains Unavailable/OutcomeUnknown. The input-discarding unavailable/internal
+helpers and AuthorityError's serializer are deleted. Local retained facts and selected identity,
+domain, scalar and byte-length errors become one authority_internal invocation diagnostic, then
+Live forwards it unchanged without append. No rejected bytes, signed wire or connection data is added.
 
-These generic helpers deliberately accept and discard any error. Connection, SQL, acknowledgement,
-conversion and retained-value errors become two unit variants in
-[AuthorityError](../crates/domains/evm/src/custody.rs). The later transaction wrapper cannot restore
-their provenance. Ambiguous custody acknowledgement currently remains Unavailable and is resolved
-through a later load; preserve that established semantic contract while adding its actual cause.
-
-Remediation: replace source-erasing helpers with operation-specific, source-preserving conversion.
-Keep domain custody ports independent of SQLx: adapt the source once at the PostgreSQL boundary
-into a reviewed representation. Do not move PostgreSQL types into Program or introduce a second
-transaction authority mechanism for diagnostics.
+AuthorityUnavailable and SignerUnavailable now carry mandatory DiagnosticEvidence in the v3
+transaction error owner. Typed classification remains OutcomeUnknown/Retryable respectively.
+Restoration reconstructs that owner, not a live SQLx error. Pool/gate failures stop at SQLx's actual
+returned error, including existing Protocol markers; excluded bootstrap losses are not recovered.
 
 ### 6. PostgreSQL configuration and run-index adapters also flatten sources
 

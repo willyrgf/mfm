@@ -8,7 +8,7 @@ use super::*;
 #[mfm(
     namespace = "mfm.evm",
     name = "transaction-operational-error",
-    version = "2",
+    version = "3",
     schema = "mfm.evm-transaction-operational-error"
 )]
 pub enum EvmTransactionOperationalError {
@@ -23,10 +23,18 @@ pub enum EvmTransactionOperationalError {
     },
     /// Transaction authority did not acknowledge the requested operation.
     #[error("transaction authority unavailable")]
-    AuthorityUnavailable,
+    AuthorityUnavailable {
+        /// Evidence retained at the executing producer boundary.
+        #[mfm(persisted)]
+        cause: mfm_values::DiagnosticEvidence,
+    },
     /// The signer could not produce a signature.
     #[error("transaction signer unavailable")]
-    SignerUnavailable,
+    SignerUnavailable {
+        /// Evidence retained at the executing producer boundary.
+        #[mfm(persisted)]
+        cause: mfm_values::DiagnosticEvidence,
+    },
 }
 
 impl mfm_program::ClassifyError for EvmOperationalError {
@@ -55,11 +63,11 @@ impl mfm_program::ClassifyError for EvmTransactionOperationalError {
     fn classify(&self) -> mfm_program::Classification {
         match self {
             // These causes do not establish whether the external operation was acknowledged.
-            Self::Provider { .. } | Self::AuthorityUnavailable => {
+            Self::Provider { .. } | Self::AuthorityUnavailable { .. } => {
                 mfm_program::Classification::OutcomeUnknown
             }
             // Signature acquisition precedes retaining and broadcasting prepared wire.
-            Self::SignerUnavailable => mfm_program::Classification::Retryable,
+            Self::SignerUnavailable { .. } => mfm_program::Classification::Retryable,
         }
     }
 }
@@ -106,11 +114,21 @@ mod tests {
             );
         }
         assert_eq!(
-            EvmTransactionOperationalError::AuthorityUnavailable.classify(),
+            EvmTransactionOperationalError::AuthorityUnavailable {
+                cause: mfm_values::DiagnosticEvidence::from_value(
+                    serde_json::json!({"injected": "AuthorityUnavailable"})
+                )
+            }
+            .classify(),
             Classification::OutcomeUnknown
         );
         assert_eq!(
-            EvmTransactionOperationalError::SignerUnavailable.classify(),
+            EvmTransactionOperationalError::SignerUnavailable {
+                cause: mfm_values::DiagnosticEvidence::from_value(
+                    serde_json::json!({"injected": "SignerUnavailable"})
+                )
+            }
+            .classify(),
             Classification::Retryable
         );
     }

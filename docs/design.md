@@ -61,6 +61,19 @@ before termination; no exact cyclic-object visit count is promised across compil
 There is no identity registry, message comparison or diagnostic budget.
 
 
+Transaction operational error v3 retains required diagnostic evidence on AuthorityUnavailable and
+SignerUnavailable. The provider variant and typed classifications are unchanged. Authority's port
+returns either unavailable evidence or the final internal invocation diagnostic; Live moves these
+through the existing operational/invariant routes. PostgreSQL owns extraction of selected execution
+SQL and retained-fact causes. Existing signer Invalid/Failed values retain their unit kind honestly;
+executing keystore enrichment is the remaining R3 cutover.
+
+The v3 error changes the content-addressed capability/State ABIs of Programs using it. Current
+assemblies reject v2 contracts before admission; no old decoder or history rewrite is provided.
+No deployment replacement is performed by this implementation. Before rollout, inventory existing
+v2 runs and decide their handling explicitly; this source change does not authorize their deletion
+or promise continuation under the v3-only assembly. Journal v6 and unaffected value schemas stay current.
+
 The framework and shipping Portfolio default to Stop with zero global/local allowances. EVM's
 Read operational causes are Retryable; `AnchorChanged` is InputInvalidated. Transaction provider and
 authority failures are OutcomeUnknown; signer unavailability before prepared-wire retention is

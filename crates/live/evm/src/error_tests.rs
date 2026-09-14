@@ -4,9 +4,8 @@ fn existing_owner_errors_disclose_their_upstream_gap() {
     let fields = [
         serde_json::to_value(EvmCodecError::Invalid).unwrap(),
         serde_json::to_value(mfm_signing::SigningError::Failed).unwrap(),
-        serde_json::to_value(mfm_evm::custody::AuthorityError::Internal).unwrap(),
     ];
-    for (fields, kind) in fields.iter().zip(["invalid", "failed", "internal"]) {
+    for (fields, kind) in fields.iter().zip(["invalid", "failed"]) {
         assert_eq!(fields["kind"], kind);
         assert_eq!(
             fields["upstream_detail"],
