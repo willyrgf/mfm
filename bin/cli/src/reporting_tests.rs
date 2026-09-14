@@ -205,7 +205,7 @@ async fn normal_encoding_failure_reports_unavailable_original_without_stdout() {
 }
 
 #[test]
-fn output_custom_source_is_retained_and_cycles_stop_before_duplicate_layers() {
+fn output_custom_source_is_retained_and_repeated_interface_pointers_terminate() {
     #[derive(Debug)]
     struct Cycle;
     impl std::fmt::Display for Cycle {
@@ -233,9 +233,115 @@ fn output_custom_source_is_retained_and_cycles_stop_before_duplicate_layers() {
     assert_eq!(report["details"]["message"], "exposed custom source");
     assert_eq!(report["details"]["os_kind"], "Other");
     assert!(report["details"]["os_code"].is_null());
-    assert_eq!(
-        report["details"]["sources"],
-        serde_json::json!([{"message": "exposed custom source"}])
-    );
+    let sources = report["details"]["sources"].as_array().unwrap();
+    assert!(!sources.is_empty());
+    assert!(sources
+        .iter()
+        .all(|layer| layer["message"] == "exposed custom source"));
     assert_eq!(report["details"]["source_cycle"], true);
+}
+
+#[test]
+fn inline_child_at_the_same_address_is_not_a_source_cycle() {
+    #[derive(Debug)]
+    struct Inner(u8);
+    impl std::fmt::Display for Inner {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "inner cause {}", self.0)
+        }
+    }
+    impl std::error::Error for Inner {}
+    #[repr(C)]
+    #[derive(Debug)]
+    struct Outer(Inner, bool);
+    impl std::fmt::Display for Outer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if self.1 {
+                std::fmt::Display::fmt(&self.0, f)
+            } else {
+                f.write_str("outer cause")
+            }
+        }
+    }
+    impl std::error::Error for Outer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+    struct Writer(bool);
+    impl Write for Writer {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other(Outer(Inner(7), self.0)))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    for equal_messages in [false, true] {
+        let error = write_output(
+            &mut Writer(equal_messages),
+            OutputStream::Stdout,
+            [b"report".as_slice()],
+        )
+        .unwrap_err();
+        let report = serde_json::to_value(error).unwrap();
+        assert_eq!(
+            report["details"]["sources"],
+            serde_json::json!([
+                {"message": if equal_messages { "inner cause 7" } else { "outer cause" }},
+                {"message": "inner cause 7"},
+            ])
+        );
+        assert!(report["details"].get("source_cycle").is_none());
+    }
+}
+
+#[test]
+fn output_acyclic_sources_retain_every_layer_in_order() {
+    #[derive(Debug)]
+    struct Layer {
+        index: usize,
+        source: Option<Box<Layer>>,
+    }
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "layer {}", self.index)
+        }
+    }
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.source
+                .as_deref()
+                .map(|source| source as &dyn std::error::Error)
+        }
+    }
+    struct Writer(Option<Box<Layer>>);
+    impl Write for Writer {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other(*self.0.take().unwrap()))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut chain = None;
+    for index in (0..40).rev() {
+        chain = Some(Box::new(Layer {
+            index,
+            source: chain,
+        }));
+    }
+    let error = write_output(
+        &mut Writer(chain),
+        OutputStream::Stdout,
+        [b"report".as_slice()],
+    )
+    .unwrap_err();
+    let report = serde_json::to_value(error).unwrap();
+    let sources = report["details"]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 40);
+    for (index, layer) in sources.iter().enumerate() {
+        assert_eq!(layer["message"], format!("layer {index}"));
+    }
+    assert!(report["details"].get("source_cycle").is_none());
 }

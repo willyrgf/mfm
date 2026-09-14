@@ -9,14 +9,18 @@ pub(super) fn capture(
 ) -> DiagnosticEvidence {
     let mut details = serde_json::json!({"response": response});
     let mut sources = Vec::new();
-    let mut addresses = Vec::new();
+    let mut pointers = Vec::new();
     while let Some(error) = source {
-        let address = error as *const dyn Error as *const ();
-        if addresses.contains(&address) {
+        // Compare interface pointers, not concrete identities; inline children can share addresses.
+        let pointer = error as *const dyn Error;
+        if pointers
+            .iter()
+            .any(|previous| std::ptr::eq(*previous, pointer))
+        {
             details["source_cycle"] = true.into();
             break;
         }
-        addresses.push(address);
+        pointers.push(pointer);
         let mut layer = serde_json::json!({"message": error.to_string()});
         if let Some(error) = error.downcast_ref::<reqwest::Error>() {
             let kind = if error.is_timeout() {

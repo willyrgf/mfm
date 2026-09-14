@@ -1408,8 +1408,9 @@ fn exposed_source_order_and_cycles_are_retained_without_a_layer_budget() {
     let evidence = capture::capture(None, Some(chain.as_deref().unwrap()));
     let sources = evidence.as_value()["sources"].as_array().unwrap();
     assert_eq!(sources.len(), 40);
-    assert_eq!(sources[0]["message"], "layer 0");
-    assert_eq!(sources[39]["message"], "layer 39");
+    for (index, layer) in sources.iter().enumerate() {
+        assert_eq!(layer["message"], format!("layer {index}"));
+    }
     assert!(evidence.as_value().get("source_cycle").is_none());
 
     #[derive(Debug)]
@@ -1424,10 +1425,79 @@ fn exposed_source_order_and_cycles_are_retained_without_a_layer_budget() {
             Some(self)
         }
     }
-    assert_eq!(
-        capture::capture(None, Some(&Cycle)).as_value(),
-        &serde_json::json!({
-            "response": null, "sources": [{"message": "cycle"}], "source_cycle": true,
-        })
-    );
+    let evidence = capture::capture(None, Some(&Cycle));
+    let sources = evidence.as_value()["sources"].as_array().unwrap();
+    assert!(!sources.is_empty());
+    assert!(sources.iter().all(|layer| layer["message"] == "cycle"));
+    assert_eq!(evidence.as_value()["source_cycle"], true);
+    assert!(evidence.as_value()["response"].is_null());
+}
+
+#[test]
+fn inline_child_at_the_same_address_is_not_a_source_cycle() {
+    #[derive(Debug)]
+    struct Inner(u8);
+    impl std::fmt::Display for Inner {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "inner cause {}", self.0)
+        }
+    }
+    impl std::error::Error for Inner {}
+    #[repr(C)]
+    #[derive(Debug)]
+    struct Outer(Inner, bool);
+    impl std::fmt::Display for Outer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if self.1 {
+                std::fmt::Display::fmt(&self.0, f)
+            } else {
+                f.write_str("outer cause")
+            }
+        }
+    }
+    impl std::error::Error for Outer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+    for equal_messages in [false, true] {
+        let error = Outer(Inner(7), equal_messages);
+        let evidence = capture::capture(None, Some(&error));
+        assert_eq!(
+            evidence.as_value()["sources"],
+            serde_json::json!([
+                {"message": if equal_messages { "inner cause 7" } else { "outer cause" }},
+                {"message": "inner cause 7"},
+            ])
+        );
+        assert!(evidence.as_value().get("source_cycle").is_none());
+    }
+}
+
+#[test]
+fn multi_node_source_cycle_stops_on_repeated_interface_pointer() {
+    #[derive(Debug)]
+    struct Cycle(bool);
+    static FIRST: Cycle = Cycle(false);
+    static SECOND: Cycle = Cycle(true);
+    impl std::fmt::Display for Cycle {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(if self.0 { "second" } else { "first" })
+        }
+    }
+    impl std::error::Error for Cycle {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(if self.0 { &FIRST } else { &SECOND })
+        }
+    }
+    let evidence = capture::capture(None, Some(&FIRST));
+    let sources = evidence.as_value()["sources"].as_array().unwrap();
+    assert!(sources.len() >= 2);
+    for (index, layer) in sources.iter().enumerate() {
+        assert_eq!(
+            layer["message"],
+            if index % 2 == 0 { "first" } else { "second" }
+        );
+    }
+    assert_eq!(evidence.as_value()["source_cycle"], true);
 }

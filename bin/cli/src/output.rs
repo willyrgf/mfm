@@ -31,18 +31,22 @@ fn details(error: &io::Error) -> DiagnosticEvidence {
         "os_code": error.raw_os_error(),
     });
     let mut sources = Vec::new();
-    let mut addresses = Vec::new();
+    let mut pointers = Vec::new();
     // get_ref retains the custom owner itself; io::Error::source can skip that layer.
     let mut source = error
         .get_ref()
         .map(|source| source as &dyn std::error::Error);
     while let Some(error) = source {
-        let address = error as *const dyn std::error::Error as *const ();
-        if addresses.contains(&address) {
+        // Compare interface pointers, not concrete identities; inline children can share addresses.
+        let pointer = error as *const dyn std::error::Error;
+        if pointers
+            .iter()
+            .any(|previous| std::ptr::eq(*previous, pointer))
+        {
             details["source_cycle"] = true.into();
             break;
         }
-        addresses.push(address);
+        pointers.push(pointer);
         let mut layer = serde_json::json!({"message": error.to_string()});
         if let Some(error) = error.downcast_ref::<io::Error>() {
             layer["os_kind"] = format!("{:?}", error.kind()).into();

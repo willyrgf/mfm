@@ -70,6 +70,14 @@ cyclic exposed sources, native fields, and hot/cold originals and reports. The
 [consuming domain contract test](../crates/domains/evm/tests/provider_failure_contract.rs) checks
 full-width owner facts and diagnostic text beyond the deleted 8 KiB quota.
 
+
+`source_cycle: true` means exactly “traversal stopped on a repeated interface pointer.” The local
+source walker compares complete `dyn Error` pointers with `std::ptr::eq`; it does not establish
+concrete-object identity. An inline child may share its parent's data address, and one concrete
+error can have different interface representations. The latter may produce repeated cause entries
+before termination; no exact cyclic-object visit count is promised across compiler configurations.
+There is no identity registry, message comparison or diagnostic budget.
+
 Unknown client sources retain their exposed messages and deeper links. RPC data retains its raw
 JSON spelling as text; no extra body read is introduced. These selected source APIs do not expose
 hidden client attempts or arbitrary foreign-library state. Dependency text follows the diagnostic
