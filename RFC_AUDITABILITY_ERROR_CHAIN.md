@@ -1,8 +1,8 @@
 # RFC part 1: current run continuation and persistence
 
-Status: the follow-up source-cycle contract is approved and implemented; producing Runtime
-acknowledgement coverage is added in `849337c2`. Renewed review and final candidate CI are pending.
-Prior G1/CI results below apply to the earlier candidate.
+Status: Part 1 complete. The approved interface-pointer correction and producing Runtime
+acknowledgement regression are implemented. Renewed G1 accepted `87f198a9`; final CI passed all
+nine stages on that exact candidate. Subsequent completion-record changes are documentation only.
 The [current acceptance record](docs/measurements/auditability-core-acceptance.md) owns the exact
 commits, E1–E6/C1–C18 evidence, shipping measurements, cost and verification disposition.
 
@@ -1860,12 +1860,15 @@ it does not restart the persistence cutover or replace Part 1's accepted design 
 
 ### Part 1 completion record — 2026-09-14
 
-**Prior completion, reopened by follow-up review.** Ordered implementation: K1 `8d783557`, K2 `a1b8d088`, K3 `5f6f3048`,
-K4 `e94e6d4c`. Dedicated architect G1 accepted `b5bde7df` after reviewing both baseline diffs,
-production paths, selected tests and measurements. F1 CI passed all nine stages on `4214dd39`,
-with unchanged production code: `nix run .#ci`, 635.99 seconds. An earlier attempt exhausted disk
-space before the Effect test could compile; disposable development artifacts were removed and the
-complete gate then passed. Subsequent completion-record edits are documentation only.
+**Complete.** Ordered implementation: K1 `8d783557`, K2 `a1b8d088`, K3 `5f6f3048`,
+K4 `e94e6d4c`; producing Runtime acknowledgement regression `849337c2`; user-approved local
+interface-pointer correction `87f198a9`. Renewed G1 review by the dedicated architect accepted candidate
+`87f198a953029c72286f2fd04b98724521ec944c`, including the six Runtime cases and revised source
+contract. F1 passed all nine stages on that same candidate: `nix run .#ci -- --slot 1`,
+669.91 seconds, run `run-3293859-1789403762094683035`. The default-slot attempt stopped before
+checks because another project's PostgreSQL occupied its port; the declared slot 1 isolated the
+services. Subsequent completion-record edits are documentation only, verified by local link/command
+review and `git diff --check`.
 
 | Final owner/API | Source and contract |
 | --- | --- |
@@ -1877,16 +1880,20 @@ complete gate then passed. Subsequent completion-record edits are documentation 
 
 The [acceptance evidence](docs/measurements/auditability-core-acceptance.md) reconciles E1–E6 and
 C1–C18, finalized removals/replacements, focused/managed verification and the [actual frame CSV](docs/measurements/auditability-core-frames.csv).
-Production LOC is 27,016: **-1,250** against implementation `5de114d0`, **+185** against original
+Production LOC is 27,026: **-1,240** against implementation `5de114d0`, **+195** against original
 `7f71beef`. G1 accepts the cumulative responsibility reduction without hypothetical Part 2 credit.
 Deleted mechanisms include seeds, duplicate phase/facts, historical reconstruction, native error
 custody/projectors, diagnostic quotas and generic reporting trees. Necessary replacements are one
 record, immutable boundary diagnostics, concrete recording causes and finite delivery handling.
+The follow-ups add six local comparison lines and four counted test-only Runtime wiring lines;
+they add no production layer, identity registry or diagnostic budget.
 Shipping Portfolio/anchored/transaction/checkpoint frames and report bounds fit; actual cumulative
 refusal preserves the head; short/long histories both load two rows.
 
-Accepted information limits remain sections 6.2/9.2's malformed-storage and unavailable-original
-exceptions, the upstream diagnostic trust boundary, current-state rather than historical semantic
+Accepted information limits include section 5.3's interface-pointer repetition guarantee, which
+does not establish concrete-object identity or exact cyclic visit counts, and sections 6.2/9.2's
+malformed-storage and unavailable-original exceptions, the upstream diagnostic trust boundary,
+current-state rather than historical semantic
 validation, and no post-crash/delivery or future-capacity guarantee. Additional source-owner gaps
 remain separately scoped by Part 2; they neither block this completion nor receive authorization here.
 
@@ -2023,8 +2030,8 @@ achieved net simplification.
 
 None concerning the selected ownership/design. The user approved interface-pointer repetition,
 including its concrete-identity and alias-prefix limits, and the producing Runtime acknowledgement
-regression is implemented. Renewed review and managed CI must validate the corrected candidate;
-the earlier `4214dd39` CI result does not establish that result.
+regression is implemented. Renewed G1 and all nine managed CI stages passed on exact candidate
+`87f198a9`, as recorded above.
 
 The accepted limits remain contractual: normal loading validates current state rather than
 historical semantic evolution; internal failures remain invocation-only; selected dependency
