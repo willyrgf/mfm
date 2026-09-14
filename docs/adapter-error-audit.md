@@ -5,8 +5,8 @@ Part 1 boundaries below from remaining source-owner gaps. Only the producers exp
 in [Part 2](../RFC_CAUSAL_ERROR_PRESERVATION.md) belong to its separate implementation scope. This inventory does
 not claim that preserving an error received by Runtime repairs a cause discarded upstream.
 
-Part 1 is accepted at production `87f198a9`, recorded in `0a7543ec`. Part 2 refinement selects
-three remaining cutovers: run Store, execution authority, and executing keystore signing. Its
+Part 1 is accepted at production `87f198a9`, recorded in `0a7543ec`. Part 2 implements
+three selected cutovers: run Store, execution authority, and executing keystore signing. Its
 sections 2–6 freeze producers, fields and stopping boundaries. The findings and remediation ideas
 below distinguish implemented R1–R3 from excluded source-owner gaps; they do not expand those cutovers.
 
