@@ -5,6 +5,11 @@ Part 1 boundaries below from remaining source-owner gaps. Only the producers exp
 in [Part 2](../RFC_CAUSAL_ERROR_PRESERVATION.md) belong to its separate implementation scope. This inventory does
 not claim that preserving an error received by Runtime repairs a cause discarded upstream.
 
+Part 1 is accepted at production `87f198a9`, recorded in `0a7543ec`. Part 2 refinement selects
+three remaining cutovers: run Store, execution authority, and executing keystore signing. Its
+sections 2–6 freeze producers, fields and stopping boundaries. The findings and remediation ideas
+below describe gaps; they do not expand those cutovers or imply that Part 2 is implemented.
+
 ## Result
 
 Runtime commits declared originals before recovery and accepted Effect settlement before
@@ -132,8 +137,9 @@ causes. Pure blocking join/allocation paths also lose their particular failure c
 Remediation: preserve query/transaction stage, SQLx category, safe SQLSTATE and nested reviewed
 causes alongside the existing semantic Store disposition. Do not weaken Unavailable versus
 Indeterminate, synchronous COMMIT, exact-head append, or repeatable-read load guarantees.
-Database message/detail fields can contain values or private connection information; raw SQLx
-formatting is not an approved audit representation.
+Part 2 selects actual dependency messages and specific fields under the accepted diagnostic trust
+boundary. MFM does not scan or certify that text or attach its own queries, arguments or connection
+objects. Debug dumps and comprehensive native-field extraction are not the selected representation.
 
 The Store cannot guarantee persisting its own failure into that same unavailable Store. Its
 invocation error must retain the cause chain. A durable independent failure sink would need an
