@@ -1,8 +1,8 @@
 # RFC part 2: preserve errors on selected execution paths
 
-Status: R0 design and the R1 checkpoint are accepted by the dedicated architect, 2026-09-14.
-R1 run-Store, R2 authority/schema and R3 executing-signing cutovers are implemented.
-Focused and managed acceptance cases pass; final aggregate architect acceptance and CI remain pending.
+Status: **complete and accepted, 2026-09-14**. R1 run-Store, R2 authority/schema and R3
+executing-signing cutovers are implemented. B1–B8 evidence, aggregate architect acceptance and
+exact-candidate final CI are recorded below.
 Continue from accepted Part 1 production `87f198a9` and completion record `0a7543ec`,
 with this RFC. Do not restart or reopen that cutover.
 
@@ -583,12 +583,12 @@ excluding separate and trailing inline tests. Physical additions/deletions remai
 | --- | ---: | ---: |
 | Production Rust | +837 | +1,132 / -291 |
 | Tests/fixtures | +914 | +1,067 / -131 |
-| Implementation documentation, excluding R0 | +225 | +336 / -73 |
+| Implementation documentation, excluding R0 | +246 | +365 / -75 |
 | Manifests/lockfile | +16 | +18 / -2 |
 
 There are 49 distinct changed files. Production is 27,863: +837 against Part 1's 27,026 and +1,032
 against original `7f71beef`'s 26,831. R0's two documentation files cost +445/-286 physical lines
-(counted net +119); cumulative documentation including R0 is +771/-349 physical lines.
+(counted net +119); cumulative documentation including R0 is +798/-349 physical lines.
 These counts include the current acceptance record and remain within the revised R1 forecast.
 
 Necessary type changes are three existing Store payloads, two authority payload routes, one new
@@ -608,7 +608,34 @@ Part 1 deletions receive no second credit.
 | B5 | [Effect e2e](crates/live/evm/tests/evm_contract_effect_e2e.rs): real authority SQL error admitted and restored, malformed retained epoch internal without append, previous observation unchanged. Managed authority COMMIT and retained-wire recovery cases also pass. |
 | B6 | [Keystore unit tests](crates/keystore/src/lib.rs), [public contract](crates/keystore/tests/api_contract.rs), and signing contract tests retain request/reply/missing-slot/primitive facts and crypto/custody guarantees. |
 | B7 | Effect e2e asserts actual authority/signing originals and exact cold App data/classification; [owner tests](crates/domains/evm/tests/provider_failure_contract.rs) cover trusted text, floats, size and v2 rejection. CLI/REST recording tests and the managed client case above cover shared transport presentation. |
-| B8 | Aggregate reconciliation above; final architect verdict and exact-candidate CI remain pending. |
+| B8 | Aggregate reconciliation above, dedicated architect acceptance and all nine final CI stages passed on the exact source candidate, recorded below. |
+
+### Final acceptance — 2026-09-14
+
+The dedicated architect returned **ACCEPTED** for exact candidate
+`b704a05e82e4e1a9e2180556b455c6a80a28f997`, with no concrete correction remaining. The review
+independently reproduced the aggregate production/test/manifest counts and pre-completion
+implementation documentation (+225 counted lines), inspected all selected producer/receiver
+contracts, and accepted the actual deletion scope, information limits and boundary tests.
+The table above includes this subsequent documentation-only completion record.
+
+Final `nix run .#ci -- --slot 3` passed on that unchanged, clean source candidate:
+**9 passed, 0 failed in 752.82 seconds**. Evidence is
+`run-3405782-1789415140838762760` under the local Nixfied `mfm/dev/3` state root, including
+`artifacts/run-summary.json` and task logs. Format, SQLx metadata, Clippy, workspace compilation,
+workspace tests, rustdoc, managed PostgreSQL, client e2e and Effect e2e all passed. The managed
+client/Effect stages include the final B5–B7 regressions, not only earlier successful scenarios.
+
+The first final-CI attempt, `run-3398062-1789414567999792718` in slot 1, passed the six Rust/metadata
+stages but failed before database tests began because port 23180 refused connections. PostgreSQL
+had received a fast-shutdown request during the unit suite, without a matching registry stop event;
+the sender was not established. The retry used unused declared slot 3 endpoints 23380/23382.
+No source, task-graph or framework change was made, and no other project's service was stopped.
+
+R1–R3 and B1–B8 are complete within this RFC's finite scope. The completion edit changes only
+owning documentation; local link/command review and `git diff --check` pass. No additional Rust gate
+is required for that record. No deployment, existing-run rewrite or excluded producer enrichment
+is claimed. Section 8 retains the explicit pre-rollout inventory obligation.
 
 ### Finite acceptance cases
 
@@ -628,7 +655,7 @@ Part 1 deletions receive no second credit.
 No implementation design uncertainty remains within the selected scope. R1–R3 preserve the fixed
 producer/receiver contracts, SQLx exposure is exercised by native and managed cases, and both new
 owner branches pass Object admission and cold App observation. Final aggregate acceptance and CI
-are required evidence, not permission to expand the selected producer set.
+are complete, as recorded above; they do not expand the selected producer set.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation and response |
 | --- | --- | --- | --- |
