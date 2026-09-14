@@ -46,7 +46,9 @@ and share Object storage without full-record backing or an owned incident/cause 
 public wire distinctions use borrowing serializers. Recording derives its admitted original and
 return disposition from the proposed/acknowledged record; do not restore independent original or
 yield_after arguments. The existing Store selected-row protocol and Journal mfm.run.frame.v6
-envelope remain the inherited persistence boundary.
+envelope remain the inherited persistence boundary. Existing Runtime transition/dispatch selects
+work from the latest acknowledged record and admission under Part 1 section 6.5, without replaying
+recovery or charging it again. Part 2 adds no continuation type or dispatch layer.
 
 Part 1 section 6.2 settles malformed framework data rejected by Runtime record Deserialize:
 report parser category, available location and rejection reason through Restore/
@@ -69,8 +71,12 @@ an admitted Failure and preparation diagnostic; Store/NotInserted hold an option
 exact submitted candidate. Pre-append failure without an admitted original uses the ordinary
 internal diagnostic. Retain no unsent candidate bytes/identity and no nested AppendFailure wrapper.
 Only NotInserted probes; preserve its checked finding independently of a later latest-state
-decode/projection failure. Store errors return immediately without a probe. Part 2 must not
-reintroduce NativeCause, `Box<dyn Error>` or a custom error protocol.
+decode/projection failure. A failed probe load uses observation: None and reload_cause: Some in
+that same variant; it does not establish absence. Store errors return immediately without a probe.
+Runtime returns these observed facts through the existing invocation result; clients present them
+without reloading or reconstructing causes. Public-view construction failure retains any known
+acknowledgement under Part 1 section 9.4. Part 2 must not reintroduce NativeCause, `Box<dyn Error>`,
+a custom error protocol or another reporting subsystem.
 
 The diagnostic trust boundary is owned by
 [Part 1 section 4](RFC_AUDITABILITY_ERROR_CHAIN.md#4-error-preservation-and-the-diagnostic-trust-boundary).

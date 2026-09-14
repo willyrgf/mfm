@@ -401,8 +401,11 @@ There is no separately stored Phase, cursor/current-input copy or mutable accumu
 
 This is a projection from one current record, not event replay: no predecessor is an input, no
 historical counter is reconstructed, and no earlier operation frame is consulted. Public phase
-names remain useful projections. A transient borrowed selector for dispatch is allowed; another
-serializable phase model or a second authoritative state is not.
+names remain useful projections. Existing Runtime transition/dispatch logic selects the next work
+under section 6.5; no new Continuation type is required. A private borrowed helper is
+justified only if its callers would otherwise duplicate those rules. It must remove that duplication,
+not wrap an equivalent existing selector. Add no serializable phase model, cached selection or
+second authoritative state. Selecting work neither reruns recovery nor charges a grant.
 
 ### 6.2 Checked Object and ordinary record decoding
 
@@ -558,6 +561,12 @@ and duplicate fields, and have no MfmValue identity or codec registration.
 | Recovered Retry | Same Read input with fresh visit, or unchanged pending Effect authority. |
 | Recovered Restart | Selected retained checkpoint input with fresh visit from the failing call. |
 | Recovered Stop | Domain/Read terminal result, or unchanged pending Effect with recovery stopped. |
+
+For example, State 5 fails at visit 12 and recovery commits Restart to State 2. The latest
+Recovered record selects State 2 with its checkpoint input at visit 13; it does not say State 2
+has succeeded. After that State's success is committed, the latest Succeeded record selects State 3
+with the output at visit 14. Loading either record derives the same next work without consulting
+earlier frames, replaying the handler or charging the recorded Restart again.
 
 There is no stored phase to compare with this table. Delete TerminalFailure as a second stored
 copy; derive the public terminal report from failure/outcome. Current operation mode, position,
@@ -838,11 +847,12 @@ current observation. Do not create a scheduler, persisted job, or additional ret
 | Adapter Pending without new evidence | Unchanged EffectPending | Yield without append or another grant. |
 | Internal/recording failure | Last acknowledged phase | Return a causal invocation failure; no automatic retry or fallback append. |
 
-On a fresh resume, dispatch solely from the latest phase. Recovered facts explain the prior decision
-for inspection; they are not a command to rerun the old handler or charge its usage again. When
-failure recording is ambiguous, stop before policy. When decision recording is ambiguous, stop
-before dispatch. When settlement recording is ambiguous, stop before interpretation. Retain the
-candidate under section 7.2 without granting work from stale or uncertain state; a Store error
+On a fresh resume, dispatch from the latest acknowledged record under section 6.5. Recovered
+identifies the authorized work and explains the prior decision; it does not rerun the old handler
+or charge its usage again. When failure recording is ambiguous, stop before policy. When decision
+recording is ambiguous, stop before dispatch. When settlement recording is ambiguous, stop before
+interpretation. Retain the candidate under section 7.2 without granting work from stale or uncertain
+state; a Store error
 does not start an automatic reconciliation loop.
 
 The final recording entry point is:
@@ -1149,8 +1159,19 @@ a RecordingFailure; Excluded/Absent may have no secondary cause. Construct these
 the existing probe branches; add no result hierarchy. Do not recursively audit a failed append,
 add a second durable sink or give an uncertain candidate execution authority.
 
+Runtime returns the facts from the operations it performed; the invoker presents them. For example,
+if append returns NotInserted and the subsequent load fails, return the same NotInserted variant
+with observation: None and reload_cause: Some(diagnostic). The client can report both that this
+attempt inserted nothing and that checking the stored candidate failed. This does not establish
+candidate absence. An admitted Read timeout plus an append error instead uses Store, preserving
+the original and the separate StoreError. Neither case needs another reporting layer.
+
 App and both transports render the same supplied diagnostic/admitted data. JSON and text renderers
 borrow the typed report; delete CLI Fields/MissingField and serialize-then-reparse text rendering.
+They do not reload the run or reconstruct causes to produce this report. After Inserted, a failure
+to construct the public view uses the existing RuntimeError::Projection route with its
+acknowledged head and an InvocationDiagnostic; it cannot turn that insertion into a recording
+failure. Here projection means constructing the public view, not another error-capture mechanism.
 Public encoding and writing can still fail: the existing transport owner retains the available
 invocation/head and actual terminal encoding/IO cause, then ends there. Keep write-versus-flush and
 stdout-versus-stderr facts. Known insertion stays acknowledged and cannot reopen work. No socket
@@ -1807,10 +1828,12 @@ achieved net simplification.
 Before handoff, designers must close these focused seams; they are not delegated implementation
 choices:
 
-- Section 6.1's transient dispatch projection: settle its necessity and exact interface while
-  keeping the persisted record authoritative and using no history scan or second owned phase.
-- Runtime projection/reload failure adaptation after removing into_native: fix signatures and the
-  forwarding of existing diagnostics, operation/stage, primary size and known head/probe facts.
+- Section 6.1 fixes work selection ownership and rules in existing Runtime transition/dispatch. Check
+  the actual callers before specifying any optional borrowed helper: identify duplicated rules it
+  removes and pin its minimal interface, or use the existing dispatch directly.
+- Runtime's existing projection/reload error routes retain observed facts for the invoker under
+  section 9.4. Specify the small conversions replacing into_native, forwarding existing diagnostics,
+  operation/stage, primary size and known head/probe facts; no new carrier or reporting subsystem.
 - CLI/REST terminal failure handling after deleting ReportFailure: fix concrete local return/body
   ownership and final exit/response behavior without an erased or recursive reporting carrier.
 
