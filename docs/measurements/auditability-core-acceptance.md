@@ -1,9 +1,10 @@
 # Current-state core acceptance evidence
 
-Current Part 1 correction packet, 2026-09-14. K1 is `8d783557`, K2 is `a1b8d088`; K3 is `5f6f3048`, K4 is `e94e6d4c`. Shipping measurements below use that exact production
-candidate. Prior G1/F1 results are recorded below. Final Part 1 sign-off is reopened after architect review
-confirmed a source-cycle identity bug and a producing Runtime acknowledgement coverage gap. The
-user has approved the interface-pointer contract correction; renewed review and CI are pending. Part 2 enrichment is excluded.
+Current Part 1 acceptance packet, 2026-09-14. K1 is `8d783557`, K2 is `a1b8d088`; K3 is
+`5f6f3048`, K4 is `e94e6d4c`. Shipping measurements below use that production candidate. The
+follow-ups add producing Runtime acknowledgement coverage in `849337c2` and the user-approved
+interface-pointer correction in `87f198a9`. Renewed G1 accepted that exact corrected candidate;
+final CI passed all nine stages. Part 1 is complete; Part 2 enrichment is excluded.
 
 ## Current design and removals
 
@@ -53,7 +54,7 @@ begin with comment markers after whitespace. Use the same convention for every r
 | K3 `5f6f3048` | 27,018 | -1,248 | +187 |
 | K4 `e94e6d4c` | 27,016 | -1,250 | +185 |
 | Runtime follow-up `849337c2` | 27,020 | -1,246 | +189 |
-| Approved pointer-repetition correction | 27,026 | -1,240 | +195 |
+| Pointer-repetition correction `87f198a9` | 27,026 | -1,240 | +195 |
 
 K3 is -728 against K2: diagnostics -778, Values -7, Canonical -42, Runtime +9, App -76,
 binaries +59, Live EVM -25, domains +125, remaining callback signature changes +7. The domain
@@ -194,34 +195,29 @@ error and reporting mechanisms above are removed. G1 accepted aggregate complexi
 | C14 | [Shipping App constructor](../../crates/app/tests/support/native_constructor.rs) admits descriptor-valid EVM balance input and delivers distinct empty/oversized correlation constructor causes through the actual Read callback and App report. It also delivers a stale Object digest as restore/decode with parser category/location/reason, without provider entry or append. |
 | C16 | [Actual capacity](../../crates/kernel/runtime/tests/current_state/capacity.rs) reaches the physical frame-count limit with an acknowledged original or an externally returned settlement and retains the unchanged current state. A separate 16 MiB original plus mapped root exceeds the derived report limit. The frame-count filler is opaque history, not claimed historical Runtime transitions. Measurements record a real Store cumulative-byte refusal. |
 | C15 | Values diagnostic tests admit trusted text in whole owners while ordinary text, floats and actual bounds remain checked. EVM provider tests restore exact owner fields and classification; source recipes preserve ordered messages and stop before repeated interface pointers, permitting alias-prefix cause repetitions. No shared capture framework remains. |
-| C17 | App, CLI and REST tests retain primary status and exact candidate/acknowledgement/head facts. CLI reuses exact encoded JSON or text after stdout failure; unavailable original reporting and final stderr failure terminate without retry. REST evidence ends at response-body handoff. |
+| C17 | [Producing Runtime tests](../../crates/kernel/runtime/src/engine/tests.rs) distinguish projection after insertion from resume/Pending without insertion and preserve the previous observation across six cases. App, CLI and REST tests retain primary status and exact candidate/acknowledgement/head facts. CLI reuses exact encoded JSON or text after stdout failure; unavailable original reporting and final stderr failure terminate without retry. REST evidence ends at response-body handoff. |
 
 ## G1 disposition and final verification
 
-The dedicated architect independently reviewed exact candidate
-`b5bde7df74b3301795c393f1c44d011d4d57ddc7` and returned **ACCEPTED** on 2026-09-14. The review
-inspected both baseline diffs and actual production paths, reproduced all three production LOC
-totals, checked CSV arithmetic, and confirmed the K1–K4 physical removals and retained guarantees.
-It accepts cumulative complexity improvement with +185 original-baseline production lines; it
-uses no future Part 2 credit. No implementation failure or required deletion blocks acceptance.
-The one F1 documentation correction, distinguishing deferred/excluded audit inventory from Part 1,
-is applied with this record. The source candidate remains unchanged after G1.
+The dedicated architect returned renewed **ACCEPTED** on 2026-09-14 for exact candidate
+`87f198a953029c72286f2fd04b98724521ec944c`. The review confirmed the user-approved complete
+interface-pointer comparison, its documented information limits, inline/ordered/cyclic source
+regressions and all six producing Runtime acknowledgement cases. It independently reproduced
+27,026 production lines, -1,240 against the implementation baseline and +195 against the original.
+The ten follow-up lines comprise six local comparison lines and four test-only wiring lines.
+The earlier K1–K4 responsibility/deletion acceptance remains substantiated; no concrete
+implementation or contract gap blocks G1. No future Part 2 deletion credit is used.
 
-The prior C18 disposition is reopened by the follow-up findings; the following CI result
-applies to the earlier candidate. Final
-`nix run .#ci` passed on exact candidate `4214dd39` with **9 passed, 0 failed**, in 635.99 seconds:
-format, SQLx metadata, Clippy, workspace compilation/tests, rustdoc, managed PostgreSQL, client e2e
-and Effect e2e. Run evidence is `run-3250562-1789400329617222583` under the local Nixfied state
-root, with `artifacts/run-summary.json` and task logs. Production code is identical to the G1
-candidate; subsequent completion-record changes are documentation only, checked by link/command
-review and `git diff --check` under the docs-only verification rule.
+Final `nix run .#ci -- --slot 1` passed on that exact candidate with **9 passed, 0 failed**, in
+669.91 seconds: format, SQLx metadata, Clippy, workspace compilation/tests, rustdoc, managed
+PostgreSQL, client e2e and Effect e2e. Run evidence is `run-3293859-1789403762094683035` under
+the local Nixfied `mfm/dev/1` state root, with `artifacts/run-summary.json` and task logs.
+The default-slot attempt (`run-3293306-1789403613462221828`) stopped before checks because another
+project's PostgreSQL occupied port 23080. Slot 1 used separate declared endpoints; no source
+change or interruption of the other project was needed. Subsequent completion-record changes
+are documentation only, checked by local link/command review and `git diff --check`.
 
-The first CI attempt passed eight stages but could not compile the Effect test because the
-filesystem was full (`No space left on device`). Removing only disposable `target/debug` artifacts
-with pinned `cargo clean --target-dir target/debug` freed about 14 GiB. No source change was needed;
-the complete CI rerun above passed, including the formerly blocked stage in 129.35 seconds.
-
-## Follow-up correction: verification pending
+## Follow-up correction and regression evidence
 
 The external architect reproduced dropped inline child causes in both local walkers: distinct
 `Outer(Inner)` errors can share their data address. The new CLI and EVM regressions both failed
@@ -251,8 +247,8 @@ regression, and focused Runtime Clippy pass.
 Runtime release behavior and public APIs are unchanged. The repository LOC convention counts four
 new cfg(test) wiring lines in engine.rs; all actual fault injection and scenario code lives in the
 separate test module. This adds necessary producing-boundary evidence without a production hook,
-callback parameter, cache or alternate projection implementation. Full candidate CI and renewed
-contract review remain pending for the corrected candidate.
+callback parameter, cache or alternate projection implementation. Renewed G1 and full candidate
+CI passed as recorded above.
 
 The corrected source regressions cover distinct and equal-message inline children, complete ordered
 40-layer acyclic chains, self-cycles and a multi-node cycle. Cycle checks require termination and the
@@ -261,7 +257,7 @@ and its information limit are documented in RFC section 5.3, design, adapter aud
 READMEs. Focused debug and release source tests both pass (three CLI and four Live EVM cases each), using
 `nix develop -c cargo test --target-dir target/verification [--release] -p mfm-evm-live -p mfm
 --lib --bins source`. Focused Clippy for both owners, including tests, passes with `--no-deps --
--D warnings`. Renewed review and final CI are pending. The complete-pointer comparisons replace
+-D warnings`. The complete-pointer comparisons replace
 the old thin-address comparisons locally: +3 non-comment production lines in each walker, no new
 public type, dependency, shared mechanism or diagnostic quota. Shipping frame measurements retain
 the same schemas/data and are unaffected by this source-pointer comparison correction.
@@ -269,4 +265,5 @@ the same schemas/data and are unaffected by this source-pointer comparison corre
 ## Material uncertainties
 
 None concerning the user-approved pointer-repetition contract. Concrete-object identity and exact
-cyclic visit counts remain outside that guarantee. Renewed architect review and full CI are pending.
+cyclic visit counts remain outside that guarantee. Renewed architect review and full CI passed
+on the exact corrected candidate.
