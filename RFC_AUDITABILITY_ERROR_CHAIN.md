@@ -1,6 +1,7 @@
 # RFC part 1: current run continuation and persistence
 
-Status: K1–K4 implemented. G1 accepted `b5bde7df` on 2026-09-14. F1 final CI is pending.
+Status: Part 1 complete. K1–K4 implemented; G1 accepted `b5bde7df`; F1 final CI passed on
+`4214dd39` on 2026-09-14.
 The [current acceptance record](docs/measurements/auditability-core-acceptance.md) owns the exact
 commits, E1–E6/C1–C18 evidence, shipping measurements, cost and verification disposition.
 
@@ -1839,11 +1840,43 @@ Record the accepted implementation commit, finalized Object/RunRecord/Diagnostic
 and source locations, C1-C18 evidence, real removals/additions and cost against both baselines, and
 known information limits/deferred upstream gaps. Use one concise completion record in this RFC, not a new
 progress-document family. Until completed, that record must say pending rather than cite a proof
-or intermediate commit as accepted. At this revision: **Part 1 acceptance is pending.**
+or intermediate commit as accepted. The completed record follows.
 
 This completion record is the input to Part 2's refinement step. Part 2 may remain draft after Part 1
 is complete. Once refined and accepted for implementation, it proceeds on the accepted Part 1 commit;
 it does not restart the persistence cutover or replace Part 1's accepted design implicitly.
+
+### Part 1 completion record — 2026-09-14
+
+**Complete and accepted.** Ordered implementation: K1 `8d783557`, K2 `a1b8d088`, K3 `5f6f3048`,
+K4 `e94e6d4c`. Dedicated architect G1 accepted `b5bde7df` after reviewing both baseline diffs,
+production paths, selected tests and measurements. F1 CI passed all nine stages on `4214dd39`,
+with unchanged production code: `nix run .#ci`, 635.99 seconds. An earlier attempt exhausted disk
+space before the Effect test could compile; disposable development artifacts were removed and the
+complete gate then passed. Subsequent completion-record edits are documentation only.
+
+| Final owner/API | Source and contract |
+| --- | --- |
+| Object | [Values Object](crates/kernel/values/src/object.rs): `from_value<T: MfmValue>(&T) -> Result<Object, ValueError>`, `decode<T: MfmValue>(&self) -> Result<T, InvocationDiagnostic>`, borrowed value_ref/canonical_bytes, checked Deserialize. |
+| RunRecord | [Runtime state](crates/kernel/runtime/src/state.rs): private derived record `{ program_ref, operation: RecordedOperation, checkpoints, usage, effect_barrier }`; one operation owns continuation facts, one borrowed selector serves validation/dispatch/projection. |
+| DiagnosticEvidence | [Values diagnostics](crates/kernel/values/src/diagnostic.rs): transparent private Value, `from_value(Value)`/`as_value()`, nested PersistedSchema v2 with diagnostic_float_free; no standalone MfmValue. |
+| InvocationDiagnostic | Same Values owner: `from_fields(code, operation, &impl Serialize, Option<SizeViolation>)`, immutable code/operation/details/size getters; two literal conversion fallbacks, no native custody or projector. |
+| Store | [Store trait](crates/kernel/store/src/lib.rs): `load_run(&RunId, Option<u64>)` returns boxed Send future of `Result<Option<LoadedRun>, StoreError>`; `append_run(&EncodedRunFrame)` returns boxed Send future of `Result<AppendResult, StoreError>`. One admission/latest/optional-probe snapshot and atomic exact-head append. |
+
+The [acceptance evidence](docs/measurements/auditability-core-acceptance.md) reconciles E1–E6 and
+C1–C18, finalized removals/replacements, focused/managed verification and the [actual frame CSV](docs/measurements/auditability-core-frames.csv).
+Production LOC is 27,016: **-1,250** against implementation `5de114d0`, **+185** against original
+`7f71beef`. G1 accepts the cumulative responsibility reduction without hypothetical Part 2 credit.
+Deleted mechanisms include seeds, duplicate phase/facts, historical reconstruction, native error
+custody/projectors, diagnostic quotas and generic reporting trees. Necessary replacements are one
+record, immutable boundary diagnostics, concrete recording causes and finite delivery handling.
+Shipping Portfolio/anchored/transaction/checkpoint frames and report bounds fit; actual cumulative
+refusal preserves the head; short/long histories both load two rows.
+
+Accepted information limits remain sections 6.2/9.2's malformed-storage and unavailable-original
+exceptions, the upstream diagnostic trust boundary, current-state rather than historical semantic
+validation, and no post-crash/delivery or future-capacity guarantee. Additional source-owner gaps
+remain separately scoped by Part 2; they neither block this completion nor receive authorization here.
 
 ## 13. Acceptance evidence
 
@@ -1979,7 +2012,7 @@ achieved net simplification.
 None concerning the implemented ownership/design. K1–K4 and G1 resolve the former handoff
 assumptions with actual deletion, consuming regression and shipping measurement evidence in the
 [acceptance record](docs/measurements/auditability-core-acceptance.md). Final managed integration
-remains unverified until F1 CI passes on the candidate; G1 acceptance does not claim that result.
+passed with all nine CI stages on `4214dd39`, whose production code matches the G1 candidate.
 
 The accepted limits remain contractual: normal loading validates current state rather than
 historical semantic evolution; internal failures remain invocation-only; selected dependency
