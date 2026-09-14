@@ -867,7 +867,7 @@ where
     }
     let call = runnable(&context.driver)?;
     let input = call.input.clone();
-    let intent = run_blocking(Operation::ReadPrepare, move || {
+    let (input, intent) = run_blocking(Operation::ReadPrepare, move || {
         let input = decode::<S::Input>(&input, Operation::ReadPrepare)?;
         let intent = S::prepare(&input)
             .map_err(|cause| RuntimeError::native(Operation::ReadPrepare, cause))?;
@@ -878,7 +878,7 @@ where
                 source.into_diagnostic("start_read"),
             )
         })?;
-        Ok(intent)
+        Ok((input, intent))
     })
     .await?;
     let mfm_program::Execution::Read {
@@ -897,11 +897,9 @@ where
             operational(context, failure, Operation::ReadAdapter).await
         }
         Ok(evidence) => {
-            let input = call.input.clone();
             let retained_intent = intent.clone();
             let retained_evidence = evidence.clone();
             let outcome = run_blocking(Operation::ReadInterpret, move || {
-                let input = decode::<S::Input>(&input, Operation::ReadInterpret)?;
                 let intent = decode::<C::Intent>(&retained_intent, Operation::ReadBind)?;
                 let evidence = decode::<C::Evidence>(&retained_evidence, Operation::ReadBind)?;
                 C::bind_evidence(retained_intent.value_ref(), &intent, &evidence)
