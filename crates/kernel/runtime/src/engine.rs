@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use crate::assembly::{
     AssemblyInner, ErasedEffectAdapterCallback, ErasedReadAdapterCallback, ExecutableMode,
     ExecutableProgram, RuntimeAssembly,
@@ -1208,6 +1211,8 @@ fn failure_report(
     )
 }
 fn view(driver: &Driver) -> Result<RunView> {
+    #[cfg(test)]
+    tests::projection_fault(driver)?;
     let state = match driver.current.continuation(&driver.executable)? {
         Continuation::Runnable {
             position, reason, ..
