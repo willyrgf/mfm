@@ -36,9 +36,9 @@ fn observe<T>(result: std::result::Result<T, StoreError>) -> hostile::Observatio
             | StoreError::FrameCount(_)
             | StoreError::ArithmeticOverflow,
         ) => hostile::Observation::Capacity,
-        Err(StoreError::CorruptPhysicalState) => hostile::Observation::Corrupt,
-        Err(StoreError::Unavailable) => hostile::Observation::Unavailable,
-        Err(StoreError::Indeterminate) => panic!("Memory must not manufacture Indeterminate"),
+        Err(StoreError::CorruptPhysicalState(_)) => hostile::Observation::Corrupt,
+        Err(StoreError::Unavailable(_)) => hostile::Observation::Unavailable,
+        Err(StoreError::Indeterminate(_)) => panic!("Memory must not manufacture Indeterminate"),
     }
 }
 
@@ -243,7 +243,13 @@ async fn memory_runs_the_shared_hostile_conformance_matrix() {
                 sequence: 1,
                 total_bytes: capacity_frame.canonical_bytes().len() as u64,
             },
-            |_| Err(StoreError::Unavailable),
+            |_| {
+                Err(StoreError::Unavailable(
+                    mfm_values::DiagnosticEvidence::from_value(
+                        serde_json::json!({"operation": "test.store", "injected": "Unavailable"}),
+                    ),
+                ))
+            },
         )),
     ));
     assert!(publication.frames.is_empty() && publication.head.is_none());
@@ -292,16 +298,21 @@ fn absent_and_private_empty_loads_are_unavailable_without_tokio() {
         let mut context = Context::from_waker(Waker::noop());
         assert!(matches!(
             future.as_mut().poll(&mut context),
-            Poll::Ready(Err(StoreError::Unavailable))
+            Poll::Ready(Err(StoreError::Unavailable(_)))
         ));
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discarded_or_failed_blocking_jobs_publish_nothing() {
+    let Err(StoreError::Unavailable(details)) =
+        run_pure_blocking::<(), _>(|| panic!("test-only panic")).await
+    else {
+        panic!("missing task failure")
+    };
     assert_eq!(
-        run_pure_blocking::<(), _>(|| panic!("test-only panic")).await,
-        Err(StoreError::Unavailable)
+        details.as_value(),
+        &json!({"operation": "run_pure_blocking", "stage": "join", "cancelled": false, "panicked": true})
     );
 
     let entered = StdArc::new(Barrier::new(2));

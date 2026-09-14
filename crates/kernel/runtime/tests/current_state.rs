@@ -305,7 +305,13 @@ impl Store for RefuseFailure {
         >,
     > {
         if frame.run_sequence() == 3 {
-            Box::pin(async { Err(mfm_store::StoreError::Unavailable) })
+            Box::pin(async {
+                Err(mfm_store::StoreError::Unavailable(
+                    mfm_values::DiagnosticEvidence::from_value(
+                        serde_json::json!({"operation": "test.store", "injected": "Unavailable"}),
+                    ),
+                ))
+            })
         } else {
             self.inner.append_run(frame)
         }
@@ -357,11 +363,19 @@ async fn recording_failure_retains_admitted_original_and_exact_candidate_without
     let mfm_runtime::RecordingFailure::Store {
         original: Some(original),
         candidate,
-        cause: mfm_store::StoreError::Unavailable,
+        cause: mfm_store::StoreError::Unavailable(evidence),
     } = failure.as_ref()
     else {
         panic!("unavailable without automatic probe")
     };
+    assert_eq!(
+        evidence.as_value(),
+        &serde_json::json!({"operation": "test.store", "injected": "Unavailable"})
+    );
+    assert_eq!(
+        projected["store"]["cause"]["unavailable"],
+        *evidence.as_value()
+    );
     assert_eq!(
         original.original().decode::<Outage>().unwrap().deadline_ms,
         731

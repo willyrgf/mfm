@@ -245,7 +245,7 @@ async fn ambiguous_failure_appends_acknowledge_neither_an_uncommitted_cause_nor_
                 let mfm_runtime::RecordingFailure::Store {
                     original: Some(original),
                     candidate,
-                    cause: mfm_store::StoreError::Indeterminate,
+                    cause: mfm_store::StoreError::Indeterminate(_),
                 } = failure.as_ref()
                 else {
                     panic!("original and ambiguous candidate custody")

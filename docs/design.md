@@ -43,6 +43,16 @@ check. Ordinary Program/context strings retain that check. The derived FailureRe
 same diagnostic profile for its already admitted Objects. No independent diagnostic quota applies. Runtime commits this exact original before classification or policy and retains it through cold
 observation. Remaining upstream first-loss gaps are tracked in the owner audit inventory.
 
+Run Store's Unavailable, CorruptPhysicalState and Indeterminate each carry mandatory
+DiagnosticEvidence in their existing externally tagged snake_case wire. Runtime retains the
+concrete Store error and App/clients forward its data without recapture; no Store failure becomes
+a durable operational original. Size/arithmetic variants and acknowledgement semantics are unchanged.
+Selected PostgreSQL run calls retain operation/stage, SQLx layers and reviewed database/IO fields;
+failed precommit writes keep an observed rollback error separate from the primary sources.
+Selected SQLx dependency text follows the same diagnostic trust boundary. Local physical checks,
+allocation and task failures retain their facts without rejected rows, queries, arguments,
+connection objects or panic payloads. Configuration, gates and index errors remain separately scoped.
+
 `source_cycle: true` means exactly “traversal stopped on a repeated interface pointer.” The local
 source walker compares complete `dyn Error` pointers with `std::ptr::eq`; it does not establish
 concrete-object identity. An inline child may share its parent's data address, and one concrete

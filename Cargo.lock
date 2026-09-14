@@ -2436,6 +2436,7 @@ dependencies = [
  "mfm-evm",
  "mfm-ids",
  "mfm-journal",
+ "mfm-runtime",
  "mfm-store",
  "mfm-values",
  "percent-encoding",
@@ -2454,7 +2455,9 @@ dependencies = [
  "mfm-canonical",
  "mfm-ids",
  "mfm-journal",
+ "mfm-values",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

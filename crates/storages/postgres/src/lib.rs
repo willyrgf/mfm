@@ -29,6 +29,10 @@ const SCHEMA_CONTRACT: &str = "mfm.run-history-postgres.v2";
 
 mod catalog;
 mod config;
+mod diagnostic;
+use diagnostic::sqlx_fields;
+use mfm_values::DiagnosticEvidence;
+use serde_json::json;
 mod evm_tx;
 mod index;
 mod locator;
@@ -439,15 +443,29 @@ async fn load_run(
     probe: LoadProbe,
 ) -> std::result::Result<Option<LoadedRun>, StoreError> {
     if probe_sequence.is_some_and(|sequence| sequence == 0 || sequence > MAX_RUN_FRAMES) {
-        return Err(StoreError::CorruptPhysicalState);
+        return Err(StoreError::CorruptPhysicalState(
+            DiagnosticEvidence::from_value(
+                json!({"operation": "run.load", "check": "probe sequence bounds"}),
+            ),
+        ));
     }
     #[cfg(not(test))]
     let _ = probe;
-    let mut transaction = pool.begin().await.map_err(|_| StoreError::Unavailable)?;
+    let mut transaction = pool.begin().await.map_err(|error| {
+        StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.load", "begin", &error,
+        )))
+    })?;
     sqlx::query!("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *transaction)
         .await
-        .map_err(|_| StoreError::Unavailable)?;
+        .map_err(|error| {
+            StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                "run.load",
+                "isolation",
+                &error,
+            )))
+        })?;
 
     // Keep frame bytes in raw rows until the pure blocking validation/copy job.
     let head = sqlx::Executor::fetch_optional(
@@ -459,7 +477,11 @@ async fn load_run(
         ),
     )
     .await
-    .map_err(|_| StoreError::Unavailable)?;
+    .map_err(|error| {
+        StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.load", "head", &error,
+        )))
+    })?;
 
     let Some(head) = head else {
         let orphan: bool = sqlx::query_scalar!(
@@ -469,15 +491,26 @@ async fn load_run(
         )
         .fetch_one(&mut *transaction)
         .await
-        .map_err(|_| StoreError::Unavailable)?;
+        .map_err(|error| {
+            StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                "run.load",
+                "dangling_frames",
+                &error,
+            )))
+        })?;
         if orphan {
             let _ = transaction.rollback().await;
-            return Err(StoreError::CorruptPhysicalState);
+            return Err(StoreError::CorruptPhysicalState(
+                DiagnosticEvidence::from_value(
+                    json!({"operation": "run.load", "check": "frames without head"}),
+                ),
+            ));
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| StoreError::Unavailable)?;
+        transaction.commit().await.map_err(|error| {
+            StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                "run.load", "commit", &error,
+            )))
+        })?;
         return Ok(None);
     };
 
@@ -487,18 +520,34 @@ async fn load_run(
         release.notified().await;
     }
 
-    let head_run_id: &str = head
-        .try_get("run_id")
-        .map_err(|_| StoreError::CorruptPhysicalState)?;
+    let head_run_id: &str = head.try_get("run_id").map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.load",
+            "decode_head",
+            &error,
+        )))
+    })?;
     if head_run_id != run_id.as_str() {
-        return Err(StoreError::CorruptPhysicalState);
+        return Err(StoreError::CorruptPhysicalState(
+            DiagnosticEvidence::from_value(
+                json!({"operation": "run.load", "check": "head run identity"}),
+            ),
+        ));
     }
-    let head_sequence: i64 = head
-        .try_get("head_sequence")
-        .map_err(|_| StoreError::CorruptPhysicalState)?;
-    let total_bytes: i64 = head
-        .try_get("total_bytes")
-        .map_err(|_| StoreError::CorruptPhysicalState)?;
+    let head_sequence: i64 = head.try_get("head_sequence").map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.load",
+            "decode_head",
+            &error,
+        )))
+    })?;
+    let total_bytes: i64 = head.try_get("total_bytes").map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.load",
+            "decode_head",
+            &error,
+        )))
+    })?;
     if head_sequence <= 0
         || u64::try_from(head_sequence)
             .ok()
@@ -509,7 +558,11 @@ async fn load_run(
             .is_none_or(|v| v > MAX_RUN_BYTES)
     {
         let _ = transaction.rollback().await;
-        return Err(StoreError::CorruptPhysicalState);
+        return Err(StoreError::CorruptPhysicalState(
+            DiagnosticEvidence::from_value(
+                json!({"operation": "run.load", "check": "head sequence or byte bounds"}),
+            ),
+        ));
     }
     let rows = sqlx::Executor::fetch_all(
         &mut *transaction,
@@ -523,7 +576,13 @@ async fn load_run(
         ),
     )
     .await
-    .map_err(|_| StoreError::Unavailable)?;
+    .map_err(|error| {
+        StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.load",
+            "selected_frames",
+            &error,
+        )))
+    })?;
     let expected_run_id = run_id.clone();
     #[cfg(test)]
     let blocking_probe = match &probe {
@@ -552,10 +611,11 @@ async fn load_run(
         )
     })
     .await?;
-    transaction
-        .commit()
-        .await
-        .map_err(|_| StoreError::Unavailable)?;
+    transaction.commit().await.map_err(|error| {
+        StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.load", "commit", &error,
+        )))
+    })?;
     Ok(Some(transfer))
 }
 
@@ -571,27 +631,53 @@ fn validate_load_rows(
     let mut probe = None;
     let mut latest_digest = None;
     for row in rows {
-        let row_run_id: &str = row
-            .try_get("run_id")
-            .map_err(|_| StoreError::CorruptPhysicalState)?;
-        let sequence: i64 = row
-            .try_get("run_sequence")
-            .map_err(|_| StoreError::CorruptPhysicalState)?;
-        let bytes: &[u8] = row
-            .try_get("frame_bytes")
-            .map_err(|_| StoreError::CorruptPhysicalState)?;
-        let stored_digest: &str = row
-            .try_get("head_digest")
-            .map_err(|_| StoreError::CorruptPhysicalState)?;
+        let row_run_id: &str = row.try_get("run_id").map_err(|error| {
+            StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+                "run.load",
+                "decode_selected_frame",
+                &error,
+            )))
+        })?;
+        let sequence: i64 = row.try_get("run_sequence").map_err(|error| {
+            StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+                "run.load",
+                "decode_selected_frame",
+                &error,
+            )))
+        })?;
+        let bytes: &[u8] = row.try_get("frame_bytes").map_err(|error| {
+            StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+                "run.load",
+                "decode_selected_frame",
+                &error,
+            )))
+        })?;
+        let stored_digest: &str = row.try_get("head_digest").map_err(|error| {
+            StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+                "run.load",
+                "decode_selected_frame",
+                &error,
+            )))
+        })?;
         let digest = frame_head_digest(bytes);
-        let sequence = u64::try_from(sequence).map_err(|_| StoreError::CorruptPhysicalState)?;
+        let sequence = u64::try_from(sequence).map_err(|error| {
+            StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(json!({
+                "operation": "validate_load_rows",
+                "check": "sequence conversion",
+                "message": error.to_string()
+            })))
+        })?;
         if row_run_id != expected_run_id.as_str()
             || !(sequence == 1 || sequence == head_sequence || Some(sequence) == probe_sequence)
             || bytes.is_empty()
             || bytes.len() > MAX_FRAME_BYTES
             || digest.as_str() != stored_digest
         {
-            return Err(StoreError::CorruptPhysicalState);
+            return Err(StoreError::CorruptPhysicalState(
+                DiagnosticEvidence::from_value(
+                    json!({"operation": "validate_load_rows", "check": "selected row identity, bounds or digest"}),
+                ),
+            ));
         }
         let bytes: Arc<[u8]> = Arc::from(bytes);
         if sequence == 1 {
@@ -606,19 +692,45 @@ fn validate_load_rows(
         }
     }
     if probe_sequence.is_some_and(|sequence| sequence <= head_sequence) && probe.is_none() {
-        return Err(StoreError::CorruptPhysicalState);
+        return Err(StoreError::CorruptPhysicalState(
+            DiagnosticEvidence::from_value(
+                json!({"operation": "validate_load_rows", "check": "missing probe"}),
+            ),
+        ));
     }
     let head = RunSummary::new(
         expected_run_id,
         head_sequence,
-        latest_digest.ok_or(StoreError::CorruptPhysicalState)?,
+        latest_digest.ok_or_else(|| {
+            StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(json!({
+                "operation": "validate_load_rows",
+                "check": "missing latest digest"
+            })))
+        })?,
         total_bytes,
     )
-    .map_err(|_| StoreError::CorruptPhysicalState)?;
+    .map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(json!({
+            "operation": "validate_load_rows",
+            "check": "summary",
+            "source": {
+                "kind": "run_summary_error",
+                "message": error.to_string()
+            }
+        })))
+    })?;
     LoadedRun::new(
         head,
-        admission.ok_or(StoreError::CorruptPhysicalState)?,
-        latest.ok_or(StoreError::CorruptPhysicalState)?,
+        admission.ok_or_else(|| {
+            StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(
+                json!({"operation": "validate_load_rows", "check": "missing admission"}),
+            ))
+        })?,
+        latest.ok_or_else(|| {
+            StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(
+                json!({"operation": "validate_load_rows", "check": "missing latest"}),
+            ))
+        })?,
         probe,
     )
 }
@@ -635,7 +747,13 @@ async fn append_run(
     let head_digest = frame.head_digest().clone();
     let bytes = own_candidate_bytes(frame.canonical_bytes()).await?;
 
-    let mut transaction = pool.begin().await.map_err(|_| StoreError::Unavailable)?;
+    let mut transaction = pool.begin().await.map_err(|error| {
+        StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.append",
+            "begin",
+            &error,
+        )))
+    })?;
     configure_append_transaction(&mut transaction).await?;
     let lock_key = advisory_lock_key(&run_id);
     sqlx::Executor::execute(
@@ -646,7 +764,13 @@ async fn append_run(
         ),
     )
     .await
-    .map_err(|_| StoreError::Unavailable)?;
+    .map_err(|error| {
+        StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.append",
+            "advisory_lock",
+            &error,
+        )))
+    })?;
 
     let head = sqlx::Executor::fetch_optional(
         &mut *transaction,
@@ -659,7 +783,13 @@ async fn append_run(
         ),
     )
     .await
-    .map_err(|_| StoreError::Unavailable)?;
+    .map_err(|error| {
+        StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.append",
+            "head",
+            &error,
+        )))
+    })?;
     let target = sqlx::Executor::fetch_optional(
         &mut *transaction,
         sqlx::query!(
@@ -670,7 +800,13 @@ async fn append_run(
         ),
     )
     .await
-    .map_err(|_| StoreError::Unavailable)?;
+    .map_err(|error| {
+        StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.append",
+            "target",
+            &error,
+        )))
+    })?;
     let any_frame = if head.is_none() {
         sqlx::query_scalar!(
             "SELECT EXISTS(SELECT 1 FROM ONLY public.mfm_run_frames WHERE run_id \
@@ -679,7 +815,13 @@ async fn append_run(
         )
         .fetch_one(&mut *transaction)
         .await
-        .map_err(|_| StoreError::Unavailable)?
+        .map_err(|error| {
+            StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                "run.append",
+                "dangling_frames",
+                &error,
+            )))
+        })?
     } else {
         false
     };
@@ -705,8 +847,8 @@ async fn append_run(
     };
 
     if let Err(error) = query.execute(&mut *transaction).await {
-        let _ = transaction.rollback().await;
-        return Err(classify_precommit_sql(error));
+        let rollback = transaction.rollback().await.err();
+        return Err(classify_precommit_sql("insert_frame", error, rollback));
     }
     if let Err(error) = sqlx::query!(
         "INSERT INTO public.mfm_run_heads (run_id, head_sequence, total_bytes) \
@@ -719,39 +861,50 @@ async fn append_run(
     .execute(&mut *transaction)
     .await
     {
-        let _ = transaction.rollback().await;
-        return Err(classify_precommit_sql(error));
+        let rollback = transaction.rollback().await.err();
+        return Err(classify_precommit_sql("update_head", error, rollback));
     }
     #[cfg(test)]
     match fault {
         CommitFault::BeforeSubmission => {
-            transaction
-                .rollback()
-                .await
-                .map_err(|_| StoreError::Unavailable)?;
-            return Err(StoreError::Unavailable);
+            transaction.rollback().await.map_err(|error| {
+                StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                    "run.append",
+                    "rollback",
+                    &error,
+                )))
+            })?;
+            return Err(StoreError::Unavailable(DiagnosticEvidence::from_value(
+                json!({"operation": "run.append", "stage": "commit", "injected": "before_submission"}),
+            )));
         }
         CommitFault::Rejected => {
             sqlx::query(
-                "DELETE FROM ONLY public.mfm_run_frames WHERE run_id = $1 AND \
-                 run_sequence = $2",
+                "UPDATE ONLY public.mfm_run_heads SET head_sequence = $2 + 1 WHERE run_id = $1",
             )
             .bind(&run_id)
             .bind(sequence)
             .execute(&mut *transaction)
             .await
-            .map_err(classify_precommit_sql)?;
+            .map_err(|error| classify_precommit_sql("injected_head_update", error, None))?;
         }
         CommitFault::UnknownRolledBack => {
             let _ = transaction.rollback().await;
-            return Err(StoreError::Indeterminate);
+            return Err(StoreError::Indeterminate(DiagnosticEvidence::from_value(
+                json!({"operation": "run.append", "stage": "commit", "injected": "unknown_rolled_back"}),
+            )));
         }
         CommitFault::UnknownCommitted => {
-            transaction
-                .commit()
-                .await
-                .map_err(|_| StoreError::Indeterminate)?;
-            return Err(StoreError::Indeterminate);
+            transaction.commit().await.map_err(|error| {
+                StoreError::Indeterminate(DiagnosticEvidence::from_value(sqlx_fields(
+                    "run.append",
+                    "commit",
+                    &error,
+                )))
+            })?;
+            return Err(StoreError::Indeterminate(DiagnosticEvidence::from_value(
+                json!({"operation": "run.append", "stage": "commit", "injected": "unknown_committed"}),
+            )));
         }
         CommitFault::None => {}
     }
@@ -759,8 +912,16 @@ async fn append_run(
     let _ = fault;
     match transaction.commit().await {
         Ok(()) => Ok(AppendResult::Inserted),
-        Err(error) if error.as_database_error().is_some() => Err(StoreError::Unavailable),
-        Err(_) => Err(StoreError::Indeterminate),
+        Err(error) => {
+            let rejected = error.as_database_error().is_some();
+            let details =
+                DiagnosticEvidence::from_value(sqlx_fields("run.append", "commit", &error));
+            if rejected {
+                Err(StoreError::Unavailable(details))
+            } else {
+                Err(StoreError::Indeterminate(details))
+            }
+        }
     }
 }
 
@@ -770,11 +931,23 @@ async fn configure_append_transaction(
     sqlx::query!("SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE")
         .execute(&mut **transaction)
         .await
-        .map_err(|_| StoreError::Unavailable)?;
+        .map_err(|error| {
+            StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                "run.append",
+                "isolation",
+                &error,
+            )))
+        })?;
     sqlx::query!("SET LOCAL synchronous_commit = on")
         .execute(&mut **transaction)
         .await
-        .map_err(|_| StoreError::Unavailable)?;
+        .map_err(|error| {
+            StoreError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                "run.append",
+                "synchronous_commit",
+                &error,
+            )))
+        })?;
     Ok(())
 }
 
@@ -828,7 +1001,11 @@ fn plan_pg_append(
         i64::try_from(candidate.bytes.len()).map_err(|_| StoreError::ArithmeticOverflow)?;
     let current_total = current.as_ref().map_or(0, |head| head.total_bytes);
     if candidate.bytes.is_empty() || candidate.sequence <= 0 || current_total < 0 {
-        return Err(StoreError::CorruptPhysicalState);
+        return Err(StoreError::CorruptPhysicalState(
+            DiagnosticEvidence::from_value(
+                json!({"operation": "plan_pg_append", "check": "candidate sequence, bytes or current total"}),
+            ),
+        ));
     }
     let current_total = current_total as u64;
     let frame_len_u64 = frame_len as u64;
@@ -837,14 +1014,22 @@ fn plan_pg_append(
     mfm_journal::SizeLimitExceeded::check(candidate.sequence as u64, MAX_RUN_FRAMES)
         .map_err(StoreError::FrameCount)?;
     if current_total > MAX_RUN_BYTES {
-        return Err(StoreError::CorruptPhysicalState);
+        return Err(StoreError::CorruptPhysicalState(
+            DiagnosticEvidence::from_value(
+                json!({"operation": "plan_pg_append", "check": "current byte total exceeds bound"}),
+            ),
+        ));
     }
     let total = current_total
         .checked_add(frame_len_u64)
         .ok_or(StoreError::ArithmeticOverflow)?;
     mfm_journal::SizeLimitExceeded::check(total, MAX_RUN_BYTES).map_err(StoreError::HistorySize)?;
     if frame_head_digest(&candidate.bytes) != candidate.head_digest {
-        return Err(StoreError::CorruptPhysicalState);
+        return Err(StoreError::CorruptPhysicalState(
+            DiagnosticEvidence::from_value(
+                json!({"operation": "plan_pg_append", "check": "candidate digest mismatch"}),
+            ),
+        ));
     }
     let total_bytes = current_total
         .checked_add(frame_len_u64)
@@ -878,29 +1063,64 @@ fn validate_observed_head(
     expected_run_id: &str,
 ) -> std::result::Result<Option<ObservedHead>, StoreError> {
     let Some(head) = head else {
-        return (!any_frame)
-            .then_some(None)
-            .ok_or(StoreError::CorruptPhysicalState);
+        return (!any_frame).then_some(None).ok_or_else(|| {
+            StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(
+                json!({"operation": "validate_observed_head", "check": "frames without head"}),
+            ))
+        });
     };
-    let run_id: &str = head
-        .try_get("run_id")
-        .map_err(|_| StoreError::CorruptPhysicalState)?;
-    let sequence: i64 = head
-        .try_get("head_sequence")
-        .map_err(|_| StoreError::CorruptPhysicalState)?;
-    let total_bytes: i64 = head
-        .try_get("total_bytes")
-        .map_err(|_| StoreError::CorruptPhysicalState)?;
-    let bytes: Option<&[u8]> = head
-        .try_get("frame_bytes")
-        .map_err(|_| StoreError::CorruptPhysicalState)?;
-    let digest_text: Option<&str> = head
-        .try_get("head_digest")
-        .map_err(|_| StoreError::CorruptPhysicalState)?;
+    let run_id: &str = head.try_get("run_id").map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.append",
+            "decode_head",
+            &error,
+        )))
+    })?;
+    let sequence: i64 = head.try_get("head_sequence").map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.append",
+            "decode_head",
+            &error,
+        )))
+    })?;
+    let total_bytes: i64 = head.try_get("total_bytes").map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.append",
+            "decode_head",
+            &error,
+        )))
+    })?;
+    let bytes: Option<&[u8]> = head.try_get("frame_bytes").map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.append",
+            "decode_head",
+            &error,
+        )))
+    })?;
+    let digest_text: Option<&str> = head.try_get("head_digest").map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.append",
+            "decode_head",
+            &error,
+        )))
+    })?;
     let (Some(bytes), Some(digest_text)) = (bytes, digest_text) else {
-        return Err(StoreError::CorruptPhysicalState);
+        return Err(StoreError::CorruptPhysicalState(
+            DiagnosticEvidence::from_value(
+                json!({"operation": "validate_observed_head", "check": "missing current bytes or digest"}),
+            ),
+        ));
     };
-    let digest = ContentDigest::parse(digest_text).map_err(|_| StoreError::CorruptPhysicalState)?;
+    let digest = ContentDigest::parse(digest_text).map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(json!({
+            "operation": "parse_content_digest",
+            "field": "head_digest",
+            "source": {
+                "kind": "identity_error",
+                "message": error.to_string()
+            }
+        })))
+    })?;
     if run_id != expected_run_id
         || sequence <= 0
         || u64::try_from(sequence)
@@ -915,7 +1135,11 @@ fn validate_observed_head(
         || digest.algorithm() != DigestAlgorithm::Sha256V1
         || frame_head_digest(bytes) != digest
     {
-        return Err(StoreError::CorruptPhysicalState);
+        return Err(StoreError::CorruptPhysicalState(
+            DiagnosticEvidence::from_value(
+                json!({"operation": "validate_observed_head", "check": "head identity, bounds or digest"}),
+            ),
+        ));
     }
     Ok(Some(ObservedHead {
         sequence,
@@ -932,23 +1156,52 @@ fn validate_observed_target<'a>(
 ) -> std::result::Result<Option<&'a [u8]>, StoreError> {
     let Some(target) = target else {
         if head.is_some_and(|head| candidate_sequence <= head.sequence) {
-            return Err(StoreError::CorruptPhysicalState);
+            return Err(StoreError::CorruptPhysicalState(
+                DiagnosticEvidence::from_value(
+                    json!({"operation": "validate_observed_target", "check": "missing target"}),
+                ),
+            ));
         }
         return Ok(None);
     };
-    let run_id: &str = target
-        .try_get("run_id")
-        .map_err(|_| StoreError::CorruptPhysicalState)?;
-    let sequence: i64 = target
-        .try_get("run_sequence")
-        .map_err(|_| StoreError::CorruptPhysicalState)?;
-    let bytes: &[u8] = target
-        .try_get("frame_bytes")
-        .map_err(|_| StoreError::CorruptPhysicalState)?;
-    let digest_text: &str = target
-        .try_get("head_digest")
-        .map_err(|_| StoreError::CorruptPhysicalState)?;
-    let digest = ContentDigest::parse(digest_text).map_err(|_| StoreError::CorruptPhysicalState)?;
+    let run_id: &str = target.try_get("run_id").map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.append",
+            "decode_target",
+            &error,
+        )))
+    })?;
+    let sequence: i64 = target.try_get("run_sequence").map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.append",
+            "decode_target",
+            &error,
+        )))
+    })?;
+    let bytes: &[u8] = target.try_get("frame_bytes").map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.append",
+            "decode_target",
+            &error,
+        )))
+    })?;
+    let digest_text: &str = target.try_get("head_digest").map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(sqlx_fields(
+            "run.append",
+            "decode_target",
+            &error,
+        )))
+    })?;
+    let digest = ContentDigest::parse(digest_text).map_err(|error| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(json!({
+            "operation": "parse_content_digest",
+            "field": "head_digest",
+            "source": {
+                "kind": "identity_error",
+                "message": error.to_string()
+            }
+        })))
+    })?;
     if run_id != expected_run_id
         || sequence != candidate_sequence
         || head.is_none_or(|head| sequence > head.sequence)
@@ -957,7 +1210,11 @@ fn validate_observed_target<'a>(
         || digest.algorithm() != DigestAlgorithm::Sha256V1
         || frame_head_digest(bytes) != digest
     {
-        return Err(StoreError::CorruptPhysicalState);
+        return Err(StoreError::CorruptPhysicalState(
+            DiagnosticEvidence::from_value(
+                json!({"operation": "validate_observed_target", "check": "target identity, bounds or digest"}),
+            ),
+        ));
     }
     Ok(Some(bytes))
 }
@@ -976,9 +1233,14 @@ async fn own_candidate_bytes(source: &[u8]) -> std::result::Result<Vec<u8>, Stor
     let length = source.len();
     let mut owned = run_pure_blocking(move || {
         let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(length)
-            .map_err(|_| StoreError::Unavailable)?;
+        bytes.try_reserve_exact(length).map_err(|error| {
+            StoreError::Unavailable(DiagnosticEvidence::from_value(json!({
+                "operation": "own_candidate_bytes",
+                "stage": "allocate",
+                "requested_bytes": length,
+                "message": error.to_string()
+            })))
+        })?;
         Ok(bytes)
     })
     .await?;
@@ -994,21 +1256,41 @@ where
     T: Send + 'static,
     F: FnOnce() -> std::result::Result<T, StoreError> + Send + 'static,
 {
-    tokio::runtime::Handle::try_current().map_err(|_| StoreError::Unavailable)?;
-    tokio::task::spawn_blocking(job)
-        .await
-        .map_err(|_| StoreError::Unavailable)?
+    tokio::runtime::Handle::try_current().map_err(|error| {
+        StoreError::Unavailable(DiagnosticEvidence::from_value(json!({
+            "operation": "run_pure_blocking",
+            "stage": "runtime",
+            "message": error.to_string()
+        })))
+    })?;
+    tokio::task::spawn_blocking(job).await.map_err(|error| {
+        StoreError::Unavailable(DiagnosticEvidence::from_value(json!({
+            "operation": "run_pure_blocking",
+            "stage": "join",
+            "cancelled": error.is_cancelled(),
+            "panicked": error.is_panic()
+        })))
+    })?
 }
 
-fn classify_precommit_sql(error: sqlx::Error) -> StoreError {
-    if error
+fn classify_precommit_sql(
+    stage: &'static str,
+    primary: sqlx::Error,
+    rollback: Option<sqlx::Error>,
+) -> StoreError {
+    let corrupt = primary
         .as_database_error()
         .and_then(|error| error.code())
-        .is_some_and(|code| code.starts_with("23"))
-    {
-        StoreError::CorruptPhysicalState
+        .is_some_and(|code| code.starts_with("23"));
+    let mut fields = sqlx_fields("run.append", stage, &primary);
+    if let Some(error) = rollback {
+        fields["rollback"] = sqlx_fields("run.append", "rollback", &error);
+    }
+    let evidence = DiagnosticEvidence::from_value(fields);
+    if corrupt {
+        StoreError::CorruptPhysicalState(evidence)
     } else {
-        StoreError::Unavailable
+        StoreError::Unavailable(evidence)
     }
 }
 

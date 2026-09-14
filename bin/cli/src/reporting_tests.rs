@@ -345,3 +345,81 @@ fn output_acyclic_sources_retain_every_layer_in_order() {
     }
     assert!(report["details"].get("source_cycle").is_none());
 }
+
+#[tokio::test]
+async fn store_recording_payload_reaches_cli_without_changing_disposition() {
+    struct Refuse;
+    impl mfm_store::Store for Refuse {
+        fn load_run<'a>(
+            &'a self,
+            _: &'a RunId,
+            _: Option<u64>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<Option<mfm_store::LoadedRun>, mfm_store::StoreError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Ok(None) })
+        }
+        fn append_run<'a>(
+            &'a self,
+            _: &'a mfm_journal::EncodedRunFrame,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<mfm_store::AppendResult, mfm_store::StoreError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async {
+                Err(mfm_store::StoreError::Unavailable(
+                    mfm_values::DiagnosticEvidence::from_value(
+                        serde_json::json!({"operation": "test.append", "stage": "insert", "injected": "recording unavailable"}),
+                    ),
+                ))
+            })
+        }
+    }
+    let runtime = Runtime::new(
+        RuntimeAssemblyBuilder::new().unwrap().finish(),
+        Arc::new(Refuse),
+    );
+    let program = mfm_program::expand_program(
+        EntryPointId::new("mfm.test/cli-store@1").unwrap(),
+        &Empty,
+        &NoParams,
+        ProgramLimits::new(0),
+    )
+    .unwrap();
+    let failure = runtime
+        .start(run_id(), program, NoParams)
+        .await
+        .err()
+        .unwrap();
+    let mut stderr = Vec::new();
+    assert_eq!(
+        run_error_to(
+            OutputFormat::Json,
+            RunRequestError::Invocation(failure),
+            &mut stderr
+        ),
+        ExitCode::from(2)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&stderr).unwrap();
+    assert_eq!(report["code"], "dependency_unavailable");
+    let store = &report["invocation"]["cause"]["recording"]["failure"]["store"];
+    assert_eq!(
+        store["cause"]["unavailable"],
+        serde_json::json!({"operation": "test.append", "stage": "insert", "injected": "recording unavailable"})
+    );
+    assert_eq!(store["candidate"]["sequence"], 1);
+    assert_eq!(store["original"], serde_json::Value::Null);
+    assert_eq!(
+        report["invocation"]["last_observed"],
+        serde_json::Value::Null
+    );
+}

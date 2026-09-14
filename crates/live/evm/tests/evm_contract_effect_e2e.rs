@@ -309,8 +309,8 @@ async fn drive_to_success<F: mfm_values::MfmValue + std::fmt::Debug>(
                 | Err(mfm_runtime::InvocationFailure::Execution {
                     error:
                         RuntimeError::Store(
-                            mfm_store::StoreError::Unavailable
-                            | mfm_store::StoreError::Indeterminate,
+                            mfm_store::StoreError::Unavailable(_)
+                            | mfm_store::StoreError::Indeterminate(_),
                         ),
                     ..
                 }) => last_progress = String::from("dependency unavailable"),

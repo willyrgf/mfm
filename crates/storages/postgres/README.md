@@ -78,3 +78,17 @@ through `Executor` to retain raw rows: their byte copies and physical validation
 pure blocking job. The append job constructs checked, owned query arguments; only the async caller
 executes the query. Catalog nullability overrides follow the selected expression: outer joins and
 optional expressions remain nullable; required catalog facts and total expressions are non-null.
+
+Selected run load/append failures preserve operation/stage and ordered SQLx sources using one
+private recipe. It retains SQLx variant/column facts, PostgreSQL SQLSTATE, severity, server message,
+detail, hint, schema, table, column and constraint, plus IO kind/code. Missing optional fields are
+null. Full interface-pointer repetition terminates traversal; concrete-object identity and exact
+cyclic visit counts are not guaranteed. Dependency messages are trusted text, not certified secret-free.
+MFM adds no query arguments, statement copies, connections, rejected rows or panic payloads.
+
+Store dispositions are unchanged: row decoding and precommit class 23 are corrupt; load COMMIT
+is unavailable; append COMMIT database rejection is unavailable and other failures indeterminate.
+A failed insert/update retains an observed explicit rollback error separately without changing the
+primary disposition. Local physical/identity, allocation and task failures retain their selected
+facts. Comparison-only/drop cleanup, connection gates, index/configuration and provisioning remain
+outside this run-error cutover. No query protocol, SQL metadata or Journal wire changed.

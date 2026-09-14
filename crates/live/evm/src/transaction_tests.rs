@@ -970,7 +970,11 @@ impl mfm_store::Store for FaultStore {
                 if self.commit {
                     self.inner.append_run(frame).await?;
                 }
-                return Err(mfm_store::StoreError::Indeterminate);
+                return Err(mfm_store::StoreError::Indeterminate(
+                    mfm_values::DiagnosticEvidence::from_value(
+                        serde_json::json!({"operation": "test.store", "injected": "Indeterminate"}),
+                    ),
+                ));
             }
             self.inner.append_run(frame).await
         })
@@ -1044,7 +1048,7 @@ async fn every_transaction_journal_boundary_recovers_after_ambiguous_append() {
                     }) if matches!(
                         failure.as_ref(),
                         mfm_runtime::RecordingFailure::Store {
-                            cause: mfm_store::StoreError::Indeterminate,
+                            cause: mfm_store::StoreError::Indeterminate(_),
                             ..
                         }
                     ) => {}

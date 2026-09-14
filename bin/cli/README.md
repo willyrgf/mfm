@@ -158,3 +158,9 @@ Runtime persists one current operation and derives its public phase. Terminal re
 retained original and mapped domain root; pending recovery reports borrow the unchanged input,
 command and original from their observed Effect. Their JSON field names and status rules remain
 unchanged. There is no duplicate owned incident or terminal cause tree in the public library API.
+
+Run Store failures inside the shared invocation payload now carry mandatory diagnostic data, for
+example `{"unavailable":{"operation":"run.load","stage":"begin","sources":[...]}}`.
+The existing public code/status and acknowledgement meaning remain unchanged. Clients forward
+these producer facts through the shared Application presentation; they do not recapture sources
+or claim the failed Store durably recorded the invocation.

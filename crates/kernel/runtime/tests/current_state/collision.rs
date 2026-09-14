@@ -26,7 +26,13 @@ impl Store for CompetingStore {
     ) -> Pin<Box<dyn Future<Output = Result<Option<LoadedRun>, StoreError>> + Send + 'a>> {
         self.probes.lock().unwrap().push(probe);
         if matches!(self.collision, Collision::ReloadFailure) {
-            Box::pin(async { Err(StoreError::Unavailable) })
+            Box::pin(async {
+                Err(StoreError::Unavailable(
+                    mfm_values::DiagnosticEvidence::from_value(
+                        serde_json::json!({"operation": "test.store", "injected": "Unavailable"}),
+                    ),
+                ))
+            })
         } else {
             self.inner.load_run(run, probe)
         }
@@ -253,7 +259,7 @@ async fn candidate_probe_yields_latest_without_recovery_and_preserves_exclusion_
                     assert!(observation.is_none());
                     assert!(matches!(
                         reload_cause.as_deref(),
-                        Some(RuntimeError::Store(StoreError::Unavailable))
+                        Some(RuntimeError::Store(StoreError::Unavailable(_)))
                     ));
                     assert_eq!(observed.head_sequence(), 2);
                 }

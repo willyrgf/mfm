@@ -73,11 +73,19 @@ impl Store for ScriptedStore {
                     self.record_if_inserted(frame, result);
                     Ok(AppendResult::NotInserted)
                 }
-                Some(AppendAction::Indeterminate) => Err(StoreError::Indeterminate),
+                Some(AppendAction::Indeterminate) => Err(StoreError::Indeterminate(
+                    mfm_values::DiagnosticEvidence::from_value(
+                        serde_json::json!({"operation": "test.store", "injected": "Indeterminate"}),
+                    ),
+                )),
                 Some(AppendAction::RetainThenIndeterminate) => {
                     let result = self.inner.append_run(frame).await?;
                     self.record_if_inserted(frame, result);
-                    Err(StoreError::Indeterminate)
+                    Err(StoreError::Indeterminate(
+                        mfm_values::DiagnosticEvidence::from_value(
+                            serde_json::json!({"operation": "test.store", "injected": "Indeterminate"}),
+                        ),
+                    ))
                 }
                 None => {
                     let result = self.inner.append_run(frame).await?;
