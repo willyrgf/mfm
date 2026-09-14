@@ -7,9 +7,7 @@ use mfm_evm::*;
 use mfm_ids::{DigestBytes, EntryPointId, RunId, StableId};
 use mfm_portfolio::{MapEvmBalanceFailure, PortfolioSnapshotFailure};
 use mfm_program::*;
-use mfm_runtime::{
-    FailureCauseView, RunViewState, RunnableReason, Runtime, RuntimeAssemblyBuilder,
-};
+use mfm_runtime::{RunViewState, RunnableReason, Runtime, RuntimeAssemblyBuilder};
 use std::{
     num::NonZeroU64,
     sync::{
@@ -228,9 +226,10 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
             }
         );
         if scenario == 0 {
-            let FailureCauseView::Domain { original, root } = report.cause() else {
+            let mfm_runtime::Failure::Domain { original, .. } = report.failure() else {
                 panic!("mapped domain failure")
             };
+            let root = report.root().unwrap();
             assert!(matches!(
                 original.decode::<EvmBalanceFailure>().unwrap(),
                 EvmBalanceFailure::SourceUnavailable {
@@ -243,10 +242,9 @@ async fn actual_domain_policies_select_parent_child_and_occurrence_bindings() {
                 PortfolioSnapshotFailure::CollectionFailed { ordinal: 0, .. }
             ));
         } else {
-            let FailureCauseView::Adapter(incident) = report.cause() else {
-                panic!("original adapter context")
-            };
-            let input = incident.input().decode::<Context>().unwrap();
+            let incident = report.failure();
+            assert!(matches!(incident, mfm_runtime::Failure::Read { .. }));
+            let input = incident.call().input().decode::<Context>().unwrap();
             assert_eq!(
                 serde_json::to_value(input).unwrap()["metadata"]["collection_ordinal"],
                 0
@@ -453,7 +451,7 @@ async fn changed_anchor_restarts_the_real_collection_and_preserves_its_acknowled
         let payload: serde_json::Value =
             serde_json::from_slice(frame.payload().as_bytes()).unwrap();
         let original = serde_json::from_value::<mfm_values::Object>(
-            payload["facts"]["recovered"]["failure"]["domain"]["original"].clone(),
+            payload["operation"]["recovered"]["failure"]["domain"]["original"].clone(),
         )
         .unwrap();
         assert!(matches!(original.decode::<EvmBalanceFailure>().unwrap(),

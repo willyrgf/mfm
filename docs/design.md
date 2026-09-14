@@ -86,20 +86,32 @@ Empty hooks require identical input/output contracts. The complete expansion own
 output, expanded failure contract and explicit designated-to-expanded failure map. Original failures
 skip the after hook, which is a success continuation. Every suffix is checked before merging.
 
-Runtime admits `(RunId, Program, C0)` and persists a complete current continuation with each
-operation's facts. `RunCommit` contains `program_ref`, `RunState`, and `OperationFacts`. Admission
-facts retain the exact Program and initial Object. `RunState` owns the current phase, active
-checkpoint inputs, per-State retry/restart usage, and the irreversible Effect barrier. No mutable
-side table or periodic checkpoint service supplies part of this continuation. A zero-State Program
-succeeds in admission; other Programs execute only the selected declaration.
+Runtime admits `(RunId, Program, C0)` and persists one complete `RunRecord`: `program_ref`,
+`checkpoints`, `usage`, `effect_barrier`, and `operation`. `RecordedOperation` retains admission,
+State success/failure, Effect preparation/settlement, or recovery. Its operation is the sole source
+of the current input, cursor and phase. A private borrowed selector computes the permitted next
+work for dispatch, validation and public observation; it is neither stored nor cached. A zero-State
+Program succeeds in admission. Other Programs start at State 0/visit 0; a success selects the next
+State with its output and a fresh visit, or becomes terminal success at the final declaration.
 
-Every declared domain or operational failure is committed as an original `Failed` fact and
-`AwaitingRecovery` phase before classification, handler invocation, authorization, or root mapping.
-A separate `Recovered` fact commits the original, classification, requested recovery and authorized
-decision. Retry/restart spend the applicable allowance and yield; restart restores the selected
-active checkpoint and prunes later checkpoint inputs without resetting accumulated usage. A terminal
-domain stop retains the original and mapped root. A policy, mapping or recording failure leaves the
-already committed original authoritative. Cold observation does not invoke those callbacks.
+Every declared domain or operational failure is committed as `Failed(Failure)` before
+classification, handler invocation, authorization, or root mapping. `Failure` owns its Pure/Read/
+Effect operation and original once. A separate `Recovered` operation retains that failure,
+classification, request and `RecoveryOutcome`. Retry/restart spend the applicable allowance once
+and yield. Restart restores the selected checkpoint at a fresh visit and prunes later checkpoint
+inputs without resetting accumulated usage. Stop stores a mapped root only for domain failures;
+Read and pending-Effect Stop forbid a root. Terminal reports derive from that failure and outcome.
+A policy, mapping or recording failure leaves the committed original authoritative. Restoration
+selects authorized work without repeating classification, mapping or charging a grant.
+
+Current validation checks operation contracts, positions, recovery authorization, sorted active
+checkpoints and Effect identity/barriers. It does not compare a second phase or scan historical
+transitions. Typed operation entry owns native input/intent/command/evidence consistency; a locally
+valid substituted input is not authenticated by historical agreement. Public `FailureReport` owns
+`Failure`, reason, usage and optional root, with borrowing typed accessors and its bounded canonical
+artifact. Pending views own the unchanged `EffectCall` and optional original/outcome pair.
+`RecoveryStopped` owns only its observed view; serializers borrow the pending facts for its existing
+wire fields and status.
 
 Effect execution commits the complete input, command and derived EffectId before adapter entry.
 Pending returns the unchanged view without a record. Operational failure first commits the original
@@ -112,7 +124,7 @@ position. There is no pending-failure quota or future-capacity reservation.
 
 Journal owns only the canonical `mfm.run.frame.v6` envelope: RunId, sequence, previous head and
 opaque canonical payload. Its recursive head is SHA-256 over exact frame bytes. Runtime owns the
-payload and phase/fact relationships; Values owns each Object's exact value ref and canonical bytes.
+payload and current-operation relationships; Values owns each Object's exact value ref and canonical bytes.
 Objects carry neither duplicated contract refs nor native caches. Public contract refs are derived
 when needed. Frames have no object table, back-reference resolver, or Journal lifecycle sum.
 Values implements checked `Object::Deserialize`; Runtime derives decoding on its current payload
@@ -131,7 +143,7 @@ Store loads one mechanical snapshot containing the head, admission row, latest r
 one requested candidate-sequence row. Identical selected rows share ownership. PostgreSQL uses one
 repeatable-read transaction and bounded row selection; memory Store takes one lock-protected
 snapshot. Runtime binds selected headers and Objects, associates the admitted Program, and checks
-current phase/fact agreement, contracts, positions, usage limits, checkpoints and Effect authority.
+current operation, contracts, positions, usage limits, checkpoints and Effect authority.
 It does not replay or prove historical counter increments from earlier frames. Immutable acknowledged
 history and Store's atomic exact-head append remain required trust contracts.
 

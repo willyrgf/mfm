@@ -63,9 +63,7 @@ impl Store for CompetingStore {
                         mfm_values::Object::from_value(&Outage { deadline_ms: 732 }).unwrap(),
                     )
                     .unwrap();
-                    payload["state"]["phase"]["awaiting_recovery"]["read"]["original"] =
-                        other.clone();
-                    payload["facts"]["failed"]["read"]["original"] = other;
+                    payload["operation"]["failed"]["read"]["original"] = other;
                     let payload = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
                         &serde_json::to_string(&payload).unwrap(),
                     )

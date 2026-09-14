@@ -144,3 +144,8 @@ available line/column and rejection reason. This includes nested Object-size rej
 size violation is inferred from parser text. CLI exits 2 and REST returns 500. Direct typed size
 failures retain their structured fields and REST 422 treatment; postdecode slot mismatches retain
 identity fields. JSON diagnostics preserve dependency-supplied text without adding secret inputs.
+
+Runtime persists one current operation and derives its public phase. Terminal reports borrow the
+retained original and mapped domain root; pending recovery reports borrow the unchanged input,
+command and original from their observed Effect. Their JSON field names and status rules remain
+unchanged. There is no duplicate owned incident or terminal cause tree in the public library API.

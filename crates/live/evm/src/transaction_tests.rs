@@ -699,8 +699,8 @@ async fn custody_acknowledgement_loss_recovers_each_stage() {
         };
         assert!(matches!(
             hot.start(run_id(), program(&input), input).await,
-            Err(mfm_runtime::InvocationFailure::RecoveryStopped { incident, .. })
-                if matches!(incident.error().decode::<EvmTransactionOperationalError>().unwrap(), EvmTransactionOperationalError::AuthorityUnavailable)
+            Err(mfm_runtime::InvocationFailure::RecoveryStopped { observed })
+                if matches!(observed.state(), RunViewState::EffectPending { latest_failure: Some((original, _)), .. } if matches!(original.decode::<EvmTransactionOperationalError>().unwrap(), EvmTransactionOperationalError::AuthorityUnavailable))
         ));
         let signer: Arc<dyn Secp256k1Signer> = if fault == 2 {
             Arc::new(RejectingSigner::matching(signer.as_ref()))

@@ -157,9 +157,9 @@ async fn qualified_nonacceptance_retries_and_cold_history_never_reclassifies() {
     else {
         panic!("audited retry")
     };
-    assert_eq!(failure.decision, RecoveryDecision::Retry);
+    assert_eq!(failure.1, RecoveryOutcome::Retry);
     assert!(matches!(
-        failure.incident.error().decode::<NonAcceptance>().unwrap(),
+        failure.0.decode::<NonAcceptance>().unwrap(),
         NonAcceptance::ServerTimeoutBeforeAcceptance { request_id: 17 }
     ));
     let cold = Runtime::new(build(), store);

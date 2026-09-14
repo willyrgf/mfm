@@ -6,15 +6,16 @@ explicit registrations select exact contracts and parameters. A failed registrat
 poison the builder. `finish` freezes the assembly. Generic States may share an implementation ID
 with different exact ABIs; semantic IDs never substitute for exact schema/Rust-type agreement.
 
-Every opaque Journal payload is a Runtime-owned `RunCommit`: the admitted Program ref, complete
-current `RunState`, and facts of the committed operation. State contains its current phase, active
-checkpoint inputs, per-State recovery usage and irreversible Effect barrier. Objects retain exact
-canonical bytes and value refs, without native caches or a frame-local object table. Program commits
-the exact initial value, checked before admission or provider entry.
+Every opaque Journal payload is a Runtime-owned `RunRecord`: the admitted Program ref, current
+`RecordedOperation`, active checkpoint inputs, per-State recovery usage and irreversible Effect
+barrier. The operation alone determines continuation. A private borrowed selector serves dispatch,
+validation and public projection; no stored phase or input copy accompanies it. Objects retain
+exact canonical bytes and refs without native caches or object tables. Program commits the exact
+initial value, checked before admission or provider entry.
 
 `start` admits and progresses, `resume` explicitly progresses an existing run, and `read` observes
 without progression. Cold restore loads admission/latest and any requested candidate probe from
-one Store snapshot. Runtime checks selected headers, current phase/fact agreement, contracts,
+one Store snapshot. Runtime checks selected headers, current operation contracts,
 positions, allowances, checkpoints and Effect authority. It does not fold old frames or reconstruct
 historical counter increments. Immutable acknowledged history remains a required Store contract.
 Runtime derives ordinary Serde decoding on its current payload types; Values' checked Object
@@ -63,3 +64,9 @@ Runtime re-prepares and compares the exact command and identity. Reading complet
 rerun interpretations, classification, policy, mapping, provider or signer IO. Heavy validation,
 callback work and encoding use immediately awaited pure blocking jobs; Store and adapter IO remain
 in the async driver. Read/Effect callbacks receive exact intent/command instance refs.
+
+`Failure` directly owns domain/Read/pending-Effect facts and original values. `RecoveryOutcome::Stop`
+contains a root only for domain failures. `FailureReport::failure()` and `root()` borrow those typed
+owners; its canonical artifact supplies hashing/output. Pending views own their EffectCall and
+optional original/outcome pair. `RecoveryStopped` retains only the observed view. Public wire tags,
+terminal report shape and stop status remain unchanged through borrowing serializers.

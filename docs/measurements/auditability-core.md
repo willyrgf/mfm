@@ -1,4 +1,8 @@
-# Current-state representation measurements
+# Historical current-state representation measurements
+
+These baseline measurements predate K1/K2 and are not current acceptance evidence. The
+[current correction packet](auditability-core-acceptance.md) records the implemented representation
+and its measured delta; full shipping measurements remain due after K3/K4.
 
 Measured on 2026-09-12 during the core cutover from `7f71beef`, using Program v8, frame v6, and
 FailureReport v4. These measurements exercise the production Runtime and memory Store through

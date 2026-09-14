@@ -163,49 +163,38 @@ async fn maximum_transaction_closures_fit_and_pending_operational_failure_preser
             .await
         {
             Ok(view) if scenario != 2 => view,
-            Err(InvocationFailure::RecoveryStopped {
-                observed, incident, ..
-            }) if scenario == 2 => {
+            Err(InvocationFailure::RecoveryStopped { observed, .. }) if scenario == 2 => {
                 assert_eq!(observed.head_sequence(), 10);
-                let mfm_runtime::AdapterIncidentView::Effect {
-                    input,
-                    command,
-                    effect_id,
-                    ..
-                } = &*incident
+                let RunViewState::EffectPending {
+                    effect,
+                    latest_failure: Some(_),
+                } = observed.state()
                 else {
                     panic!("retained Effect invocation facts")
                 };
-                input.decode::<PreparedContext<Input, Recipe>>().unwrap();
-                let command = command.decode::<PreparedEvmTransaction>().unwrap();
+                effect
+                    .call()
+                    .input()
+                    .decode::<PreparedContext<Input, Recipe>>()
+                    .unwrap();
+                let command = effect.command().decode::<PreparedEvmTransaction>().unwrap();
                 assert_eq!(command.reserved().reservation().nonce(), u64::MAX - 1);
-                let RunViewState::EffectPending {
-                    effect_id: retained,
-                    ..
-                } = observed.state()
-                else {
-                    panic!("pending authority")
-                };
-                assert_eq!(effect_id, retained);
                 let cold = runtime.read(&run).await.unwrap();
                 assert_eq!(cold.head_digest(), observed.head_digest());
                 let (
                     RunViewState::EffectPending {
-                        position: hot_position,
-                        effect_id: hot_id,
-                        ..
+                        effect: hot_effect, ..
                     },
                     RunViewState::EffectPending {
-                        position: cold_position,
-                        effect_id: cold_id,
+                        effect: cold_effect,
                         ..
                     },
                 ) = (observed.state(), cold.state())
                 else {
                     panic!("unchanged pending execution authority")
                 };
-                assert_eq!(hot_position, cold_position);
-                assert_eq!(hot_id, cold_id);
+                assert_eq!(hot_effect.call().position(), cold_effect.call().position());
+                assert_eq!(hot_effect.effect_id(), cold_effect.effect_id());
                 assert_eq!(attempts.load(Ordering::SeqCst), 1);
                 runtime.resume(&run).await.unwrap()
             }

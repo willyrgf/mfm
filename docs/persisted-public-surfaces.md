@@ -7,10 +7,10 @@ finite semantic recovery allowances. There is no public wire DTO parallel to `Pr
 
 Journal persists only canonical `mfm.run.frame.v6` envelopes with RunId, sequence, predecessor
 and opaque canonical payload. Recursive heads use `content:sha256-v1` over exact frame bytes.
-Runtime's payload is `RunCommit { program_ref, state, facts }`. Complete state contains the phase,
-active checkpoint inputs, per-State retry/restart usage and Effect barrier. Admission facts retain
-Program and C0; later facts record success, original failure, Effect preparation, accepted
-settlement, or recovery classification/request/decision. Original failure precedes recovery, and
+Runtime's payload is `RunRecord { program_ref, operation, checkpoints, usage, effect_barrier }`.
+The current operation determines continuation; no phase or current-input copy is stored beside it.
+Admission retains Program and C0; later operations record success, original failure, Effect
+preparation/settlement, or recovery classification/request/outcome. Only domain Stop owns a root. Original failure precedes recovery, and
 accepted settlement precedes interpretation, in separate atomic frames.
 
 Values Object contains exactly its value ref and raw canonical value. There is no frame-local object

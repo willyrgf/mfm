@@ -910,9 +910,10 @@ async fn read_success_and_separate_failure_recovery_are_restorable_without_repea
         panic!("rejected observation did not follow the Program failure path");
     };
     assert_eq!(resumed.head_sequence(), 3);
-    let mfm_runtime::FailureCauseView::Domain { original, root } = value.cause() else {
+    let mfm_runtime::Failure::Domain { original, .. } = value.failure() else {
         panic!("domain result")
     };
+    let root = value.root().unwrap();
     assert_eq!(original.decode::<Number>().unwrap().value, 21);
     assert_eq!(root.decode::<Number>().unwrap().value, 21);
 }
@@ -1720,8 +1721,7 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
                     mfm_values::Object::from_value(&Command { value: 7 }).unwrap(),
                 )
                 .unwrap();
-                payload["state"]["phase"]["succeeded"] = wrong_output.clone();
-                payload["facts"]["succeeded"]["output"] = wrong_output;
+                payload["operation"]["succeeded"]["output"] = wrong_output;
             } else {
                 let (name, replacement) = if mutation == 0 {
                     (
@@ -1740,8 +1740,7 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
                         .unwrap(),
                     )
                 };
-                payload["state"]["phase"]["effect_pending"][name] = replacement.clone();
-                payload["facts"]["effect_prepared"][name] = replacement;
+                payload["operation"]["effect_prepared"][name] = replacement;
             }
             let payload = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
                 &serde_json::to_string(&payload).unwrap(),

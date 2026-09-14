@@ -247,10 +247,10 @@ async fn full_history_cannot_acknowledge_external_settlement_or_replace_pending_
     let run = RunId::from_digest(DigestBytes::from_array([161; 32]));
     let pending = runtime.start(run.clone(), program, input).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    let RunViewState::EffectPending { effect_id, .. } = pending.state() else {
+    let RunViewState::EffectPending { effect, .. } = pending.state() else {
         panic!("prepared command")
     };
-    let effect_id = effect_id.clone();
+    let effect_id = effect.effect_id().clone();
     fill_frame_count(&store.0, &run).await;
     let before = runtime.read(&run).await.unwrap();
     let InvocationFailure::Execution {
@@ -285,13 +285,13 @@ async fn full_history_cannot_acknowledge_external_settlement_or_replace_pending_
     let cold = runtime.read(&run).await.unwrap();
     assert_eq!(cold.head_digest(), before.head_digest());
     let RunViewState::EffectPending {
-        effect_id: cold_effect_id,
+        effect: cold_effect,
         ..
     } = cold.state()
     else {
         panic!("settlement was not acknowledged")
     };
-    assert_eq!(cold_effect_id, &effect_id);
+    assert_eq!(cold_effect.effect_id(), &effect_id);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 

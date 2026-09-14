@@ -1,5 +1,5 @@
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
-use mfm_ids::{ContentRef, EffectId, ExecutionPosition, RunId};
+use mfm_ids::{ContentRef, ExecutionPosition, RunId};
 use mfm_program::{RecoveryUsage, StopReason};
 use mfm_values::{
     CanonicalJsonProfile, SchemaIdentity, SchemaKind, SchemaShape, MAX_RUN_OBJECT_CANONICAL_BYTES,
@@ -8,75 +8,24 @@ use serde::Serialize;
 
 use crate::{Object, Result, RunView, RuntimeError};
 
-/// Qualified operational cause and the complete facts of its adapter invocation.
-pub enum AdapterIncidentView {
-    /// A duplicate-safe observation that failed operationally.
-    Read {
-        /// Original operational error.
-        error: Object,
-        /// Complete executed State input.
-        input: Object,
-        /// Exact prepared observational intent.
-        intent: Object,
-    },
-    /// An unresolved Effect invocation; these facts do not imply settlement.
-    Effect {
-        /// Original operational error.
-        error: Object,
-        /// Complete executed State input.
-        input: Object,
-        /// Retained command, unchanged by this failure.
-        command: Object,
-        /// Existing command authority.
-        effect_id: EffectId,
-    },
-}
-
-impl AdapterIncidentView {
-    /// Returns the original operational error.
-    pub const fn error(&self) -> &Object {
-        match self {
-            Self::Read { error, .. } | Self::Effect { error, .. } => error,
-        }
-    }
-    /// Returns the complete executed State input.
-    pub const fn input(&self) -> &Object {
-        match self {
-            Self::Read { input, .. } | Self::Effect { input, .. } => input,
-        }
-    }
-}
-
-/// Original retained cause and, for domain failures, its mapped root value.
-pub enum FailureCauseView {
-    /// A deterministic State domain failure.
-    Domain {
-        /// Unmodified State failure.
-        original: Object,
-        /// Independently mapped root failure.
-        root: Object,
-    },
-    /// A Read execution failure with its original invocation facts.
-    Adapter(AdapterIncidentView),
-}
-
 /// Content-addressed terminal report derived from the acknowledged history.
 pub struct FailureReport {
-    position: ExecutionPosition,
+    failure: crate::Failure,
     reason: StopReason,
     usage: RecoveryUsage,
-    cause: Box<FailureCauseView>,
+    root: Option<Object>,
     value_ref: ContentRef,
     canonical: PlainCanonicalJsonBytes,
 }
 
 impl FailureReport {
     pub(crate) fn new(
-        position: ExecutionPosition,
+        failure: crate::Failure,
         reason: StopReason,
         usage: RecoveryUsage,
-        cause: FailureCauseView,
+        root: Option<Object>,
     ) -> Result<Self> {
+        let position = *failure.call().position();
         #[derive(Serialize)]
         struct WireObject<'a> {
             contract_ref: ContentRef,
@@ -97,6 +46,8 @@ impl FailureReport {
         }
         #[derive(Serialize)]
         #[serde(tag = "kind", rename_all = "snake_case")]
+        // This temporary borrowing serializer needs no heap-owned cause tree.
+        #[allow(clippy::large_enum_variant)]
         enum Cause<'a> {
             Domain {
                 original: WireObject<'a>,
@@ -108,14 +59,6 @@ impl FailureReport {
                 error: WireObject<'a>,
                 input: WireObject<'a>,
                 intent: WireObject<'a>,
-            },
-            #[serde(rename = "adapter")]
-            Effect {
-                mode: &'static str,
-                error: WireObject<'a>,
-                input: WireObject<'a>,
-                command: WireObject<'a>,
-                effect_id: &'a EffectId,
             },
         }
         #[derive(Serialize)]
@@ -141,33 +84,25 @@ impl FailureReport {
                 state_restarts: usage.state_restarts,
                 run_decisions: usage.run_decisions,
             },
-            cause: match &cause {
-                FailureCauseView::Domain { original, root } => Cause::Domain {
+            cause: match (&failure, &root) {
+                (crate::Failure::Domain { original, .. }, Some(root)) => Cause::Domain {
                     original: object(original)?,
                     root: object(root)?,
                 },
-                FailureCauseView::Adapter(AdapterIncidentView::Read {
-                    error,
-                    input,
-                    intent,
-                }) => Cause::Read {
+                (
+                    crate::Failure::Read {
+                        call,
+                        intent,
+                        original,
+                    },
+                    None,
+                ) => Cause::Read {
                     mode: "read",
-                    error: object(error)?,
-                    input: object(input)?,
+                    error: object(original)?,
+                    input: object(call.input())?,
                     intent: object(intent)?,
                 },
-                FailureCauseView::Adapter(AdapterIncidentView::Effect {
-                    error,
-                    input,
-                    command,
-                    effect_id,
-                }) => Cause::Effect {
-                    mode: "effect",
-                    error: object(error)?,
-                    input: object(input)?,
-                    command: object(command)?,
-                    effect_id,
-                },
+                _ => return Err(RuntimeError::InvalidHistory),
             },
         };
         let json = mfm_canonical::to_json_bounded(&wire, MAX_RUN_OBJECT_CANONICAL_BYTES).map_err(
@@ -225,17 +160,17 @@ impl FailureReport {
             },
         )?;
         Ok(Self {
-            position,
+            failure,
             reason,
             usage,
-            cause: Box::new(cause),
+            root,
             value_ref,
             canonical,
         })
     }
     /// Returns the terminal execution occurrence.
-    pub const fn position(&self) -> &ExecutionPosition {
-        &self.position
+    pub fn position(&self) -> &ExecutionPosition {
+        self.failure.call().position()
     }
     /// Returns why automatic recovery stopped.
     pub const fn reason(&self) -> &StopReason {
@@ -245,9 +180,13 @@ impl FailureReport {
     pub const fn usage(&self) -> &RecoveryUsage {
         &self.usage
     }
-    /// Returns the original typed cause and any root mapping.
-    pub const fn cause(&self) -> &FailureCauseView {
-        &self.cause
+    /// Returns the retained original operation and failure.
+    pub const fn failure(&self) -> &crate::Failure {
+        &self.failure
+    }
+    /// Returns the mapped domain root, absent for Read failures.
+    pub const fn root(&self) -> Option<&Object> {
+        self.root.as_ref()
     }
     /// Returns the canonical report instance identity.
     pub const fn value_ref(&self) -> &ContentRef {
@@ -274,10 +213,6 @@ pub enum InvocationFailure {
     RecoveryStopped {
         /// Qualified pending Effect snapshot.
         observed: RunView,
-        /// Unrecorded operational cause and its checked context.
-        incident: Box<AdapterIncidentView>,
-        /// Reason the invocation stopped automatic progression.
-        reason: StopReason,
     },
 }
 
@@ -289,12 +224,9 @@ impl std::fmt::Debug for InvocationFailure {
                 .field("run_id", run_id)
                 .field("error", error)
                 .finish_non_exhaustive(),
-            Self::RecoveryStopped {
-                observed, reason, ..
-            } => formatter
+            Self::RecoveryStopped { observed, .. } => formatter
                 .debug_struct("RecoveryStopped")
                 .field("run_id", observed.run_id())
-                .field("reason", reason)
                 .finish_non_exhaustive(),
         }
     }

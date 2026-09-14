@@ -50,8 +50,9 @@ Store admission/latest/probe snapshot -> Runtime local validation -> RunView
 ```
 
 Journal's privately constructed `EncodedRunFrame` proves exact canonical envelope bytes and hash,
-not a lifecycle or complete-history qualification. Runtime owns `RunCommit`, its complete `RunState`,
-and operation facts. Values Object owns the exact value ref and canonical bytes. Store owns the
+not a lifecycle or complete-history qualification. Runtime owns one `RunRecord` containing its current operation, checkpoints, usage and Effect
+barrier. A private borrowed selector derives continuation for dispatch, validation and public views;
+there is no stored phase, second current input or phase/facts agreement validator. Values Object owns the exact value ref and canonical bytes. Store owns the
 head and bounded selected rows in `LoadedRun`; it does not decode Program or reconstruct state.
 Runtime validates selected rows and current facts without folding earlier frames. Checked Object Deserialize and derived Runtime decoding own stored-payload rejection, with complete
 input consumption. Stored nested constructor rejection reports parser category/location/reason,
