@@ -218,7 +218,7 @@ async fn original_commits_before_policy_failure_and_cold_resume_retries_only_rec
     );
     assert_eq!(observed.head_sequence(), 3);
     let RunViewState::AwaitingRecovery {
-        failure: Failure::Read(failure),
+        failure: failure @ Failure::Read { intent, .. },
     } = observed.state()
     else {
         panic!("retained original")
@@ -230,7 +230,7 @@ async fn original_commits_before_policy_failure_and_cold_resume_retries_only_rec
     let input = failure.call().input().decode::<Input>().unwrap();
     assert_eq!(input.value, 10);
     assert_eq!(input.continuation, "complete caller continuation");
-    assert_eq!(failure.intent().decode::<Request>().unwrap().value, 10);
+    assert_eq!(intent.decode::<Request>().unwrap().value, 10);
     let rows = store.load_run(&run, None).await.unwrap().unwrap();
     let admission = mfm_journal::decode_frame(rows.admission()).unwrap();
     let latest = mfm_journal::decode_frame(rows.latest()).unwrap();
@@ -238,9 +238,9 @@ async fn original_commits_before_policy_failure_and_cold_resume_retries_only_rec
     assert_eq!(latest.run_sequence(), 3);
     assert!(rows.probe().is_none());
     let payload: serde_json::Value = serde_json::from_slice(latest.payload().as_bytes()).unwrap();
-    assert!(payload["state"]["phase"].get("awaiting_recovery").is_some());
-    assert!(payload["facts"].get("failed").is_some());
-    assert!(payload["facts"].get("recovered").is_none());
+    assert!(payload.get("state").is_none());
+    assert!(payload["operation"].get("failed").is_some());
+    assert!(payload["operation"].get("recovered").is_none());
     let cold = runtime.read(&run).await.unwrap();
     assert_eq!(cold.head_digest(), observed.head_digest());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -685,26 +685,17 @@ async fn restart_restores_its_complete_input_prunes_later_checkpoints_and_keeps_
     let original = mfm_journal::decode_frame(loaded.probe().unwrap()).unwrap();
     let original: serde_json::Value =
         serde_json::from_slice(original.payload().as_bytes()).unwrap();
+    assert_eq!(original["checkpoints"].as_array().unwrap().len(), 2);
+    assert_eq!(original["checkpoints"][0]["input"]["canonical"]["value"], 9);
     assert_eq!(
-        original["state"]["checkpoints"].as_array().unwrap().len(),
-        2
-    );
-    assert_eq!(
-        original["state"]["checkpoints"][0]["input"]["canonical"]["value"],
-        9
-    );
-    assert_eq!(
-        original["state"]["checkpoints"][1]["input"]["canonical"]["value"],
+        original["checkpoints"][1]["input"]["canonical"]["value"],
         10
     );
     let current = mfm_journal::decode_frame(loaded.latest()).unwrap();
     let current: serde_json::Value = serde_json::from_slice(current.payload().as_bytes()).unwrap();
-    assert_eq!(current["state"]["checkpoints"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        current["state"]["phase"]["runnable"]["input"]["canonical"]["value"],
-        9
-    );
-    assert_eq!(current["state"]["usage"][2]["restarts"], 1);
+    assert_eq!(current["checkpoints"].as_array().unwrap().len(), 1);
+    assert_eq!(current["checkpoints"][0]["input"]["canonical"]["value"], 9);
+    assert_eq!(current["usage"][2]["restarts"], 1);
     assert_eq!(
         build().read(&run).await.unwrap().head_digest(),
         restarted.head_digest()

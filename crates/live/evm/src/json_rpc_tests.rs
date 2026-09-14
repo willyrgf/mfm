@@ -1012,7 +1012,7 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
     use mfm_program::{
         Identity, NoParams, Occurrence, Operation, OperationExpansion, ProgramLimits,
     };
-    use mfm_runtime::{FailureCauseView, RunViewState, Runtime, RuntimeAssemblyBuilder};
+    use mfm_runtime::{RunViewState, Runtime, RuntimeAssemblyBuilder};
     use std::sync::Arc;
 
     struct ReadChain {
@@ -1089,10 +1089,9 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
             let RunViewState::Failed(report) = view.state() else {
                 panic!("failed read");
             };
-            let FailureCauseView::Adapter(incident) = report.cause() else {
-                panic!("provider cause");
-            };
-            let error = incident.error().decode::<EvmOperationalError>().unwrap();
+            let incident = report.failure();
+            assert!(matches!(incident, mfm_runtime::Failure::Read { .. }));
+            let error = incident.original().decode::<EvmOperationalError>().unwrap();
             assert_eq!(
                 mfm_program::ClassifyError::classify(&error),
                 mfm_program::Classification::Retryable

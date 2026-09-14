@@ -144,3 +144,8 @@ values retain the 32 MiB Values ceiling; the derived FailureReport retains its o
 `encode_response` encodes prepared transport fields without a new whole-response quota. Transports
 own write/flush failures and response handoff; they must retain the reporting failure if that final
 encoding also fails, without recursively attempting another JSON report.
+
+Runtime persists one current operation and derives its public phase. Terminal reports borrow the
+retained original and mapped domain root; pending recovery reports borrow the unchanged input,
+command and original from their observed Effect. Their JSON field names and status rules remain
+unchanged. There is no duplicate owned incident or terminal cause tree in the public library API.

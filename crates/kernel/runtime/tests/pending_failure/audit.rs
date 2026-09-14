@@ -42,48 +42,42 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
         .unwrap();
     assert_eq!(first.head_sequence(), 4);
     let RunViewState::EffectPending {
-        position,
-        effect_id,
+        effect,
         latest_failure: Some(failure),
     } = first.state()
     else {
         panic!("pending retry")
     };
-    assert_eq!(failure.decision, RecoveryDecision::Retry);
+    assert_eq!(failure.1, RecoveryOutcome::Retry);
     assert!(matches!(
-        failure.incident.error().decode::<Cause>().unwrap(),
+        failure.0.decode::<Cause>().unwrap(),
         Cause::Timeout { deadline_ms: 5000 }
     ));
-    assert_eq!(
-        failure.incident.input().decode::<Number>().unwrap().value,
-        9
-    );
+    assert_eq!(effect.call().input().decode::<Number>().unwrap().value, 9);
     let cold = Runtime::new(build(), store.clone());
     let reread = cold.read(&run).await.unwrap();
     assert_eq!(reread.head_digest(), first.head_digest());
     assert_eq!(calls.lock().unwrap().len(), 1);
-    let InvocationFailure::RecoveryStopped {
-        observed, reason, ..
-    } = cold.resume(&run).await.err().unwrap()
+    let InvocationFailure::RecoveryStopped { observed, .. } =
+        cold.resume(&run).await.err().unwrap()
     else {
         panic!("stopped")
     };
-    assert_eq!(reason, StopReason::Exhausted(RecoveryLimit::StateRetry));
     assert_eq!(observed.head_sequence(), 6);
     let RunViewState::EffectPending {
-        position: stopped_position,
-        effect_id: stopped_effect,
+        effect: stopped_effect,
         latest_failure: Some(failure),
     } = observed.state()
     else {
         panic!("pending stop")
     };
-    assert_eq!(stopped_position, position);
-    assert_eq!(stopped_effect, effect_id);
+    assert_eq!(stopped_effect.call().position(), effect.call().position());
+    assert_eq!(stopped_effect.effect_id(), effect.effect_id());
     assert_eq!(
-        failure.decision,
-        RecoveryDecision::Stop {
-            reason: StopReason::Exhausted(RecoveryLimit::StateRetry)
+        failure.1,
+        RecoveryOutcome::Stop {
+            reason: StopReason::Exhausted(RecoveryLimit::StateRetry),
+            root: None
         }
     );
     let InvocationFailure::RecoveryStopped {
@@ -146,9 +140,7 @@ async fn standard_unknown_stop_is_durable_and_explicit_resume_can_settle() {
         ProgramLimits::new(0),
     )
     .unwrap();
-    let InvocationFailure::RecoveryStopped {
-        observed, reason, ..
-    } = runtime
+    let InvocationFailure::RecoveryStopped { observed, .. } = runtime
         .start(run.clone(), program, Number { value: 9 })
         .await
         .err()
@@ -156,7 +148,6 @@ async fn standard_unknown_stop_is_durable_and_explicit_resume_can_settle() {
     else {
         panic!("standard stop")
     };
-    assert_eq!(reason, StopReason::Requested);
     assert_eq!(observed.head_sequence(), 4);
     let cold = Runtime::new(build(), store.clone());
     let retained = cold.read(&run).await.unwrap();
@@ -169,13 +160,14 @@ async fn standard_unknown_stop_is_durable_and_explicit_resume_can_settle() {
         panic!("retained original failure")
     };
     assert_eq!(
-        failure.decision,
-        RecoveryDecision::Stop {
-            reason: StopReason::Requested
+        failure.1,
+        RecoveryOutcome::Stop {
+            reason: StopReason::Requested,
+            root: None
         }
     );
     assert!(matches!(
-        failure.incident.error().decode::<Cause>().unwrap(),
+        failure.0.decode::<Cause>().unwrap(),
         Cause::Timeout { deadline_ms: 5000 }
     ));
     assert_eq!(calls.lock().unwrap().len(), 1);
@@ -292,14 +284,14 @@ async fn ambiguous_failure_appends_acknowledge_neither_an_uncommitted_cause_nor_
             effect.effect_id()
         } else {
             let RunViewState::EffectPending {
-                effect_id,
+                effect,
                 latest_failure: None,
                 ..
             } = cold.state()
             else {
                 panic!("unrecorded attempt retains command")
             };
-            effect_id
+            effect.effect_id()
         };
         assert_eq!(effect_id, &calls.lock().unwrap()[0].0);
         let stored = store.snapshot();
@@ -425,14 +417,14 @@ async fn cancellation_at_failure_append_exposes_only_the_complete_committed_pref
             effect.effect_id()
         } else {
             let RunViewState::EffectPending {
-                effect_id,
+                effect,
                 latest_failure: None,
                 ..
             } = retained.state()
             else {
                 panic!("unchanged prepare")
             };
-            effect_id
+            effect.effect_id()
         };
         assert_eq!(calls.lock().unwrap().len(), 1);
         assert_eq!(effect_id, &calls.lock().unwrap()[0].0);
@@ -545,7 +537,7 @@ async fn current_record_validates_pending_failure_position_input_request_and_sto
         let latest = decode_frame(loaded.latest()).unwrap();
         let mut payload: serde_json::Value =
             serde_json::from_slice(latest.payload().as_bytes()).unwrap();
-        let mut effect = payload["state"]["phase"]["effect_pending"].clone();
+        let mut effect = payload["operation"]["effect_prepared"].clone();
         if wrong_visit {
             effect["call"]["position"]["visit"] = 1.into();
         }
@@ -568,11 +560,11 @@ async fn current_record_validates_pending_failure_position_input_request_and_sto
             }
             _ => RecoveryRequest::RetryState,
         };
-        payload["facts"] = serde_json::json!({"recovered": {
+        payload["operation"] = serde_json::json!({"recovered": {
             "failure": {"pending_effect": {"effect": effect, "original": original}},
             "classification": Classification::OutcomeUnknown,
             "request": request,
-            "decision": RecoveryDecision::Stop { reason },
+            "outcome": RecoveryOutcome::Stop { reason, root: None },
         }});
         let payload = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
             &serde_json::to_string(&payload).unwrap(),
@@ -590,14 +582,41 @@ async fn current_record_validates_pending_failure_position_input_request_and_sto
             mfm_store::AppendResult::Inserted
         );
         let observed = runtime.read(&run).await;
-        if valid {
+        if !wrong_visit && reported_input != 9 {
+            assert!(observed.is_ok());
+            assert!(runtime.resume(&run).await.is_err());
+        } else if valid {
             assert!(
                 matches!(observed.unwrap().state(), RunViewState::EffectPending {
                     latest_failure: Some(failure), ..
-                } if failure.decision == RecoveryDecision::Stop { reason })
+                } if failure.1 == RecoveryOutcome::Stop { reason, root: None })
             );
         } else {
             assert!(observed.is_err());
+        }
+        if valid && reason == StopReason::Requested {
+            let mut payload: serde_json::Value =
+                serde_json::from_slice(frame.payload().as_bytes()).unwrap();
+            payload["operation"]["recovered"]["outcome"]["stop"]["root"] =
+                serde_json::to_value(mfm_values::Object::from_value(&Number { value: 9 }).unwrap())
+                    .unwrap();
+            let payload = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+                &serde_json::to_string(&payload).unwrap(),
+            )
+            .unwrap();
+            let forged = seal_frame(
+                &run,
+                frame.run_sequence() + 1,
+                Some(frame.head_digest()),
+                &payload,
+            )
+            .unwrap();
+            assert_eq!(
+                store.append_run(&forged).await.unwrap(),
+                mfm_store::AppendResult::Inserted
+            );
+            assert!(runtime.read(&run).await.is_err());
+            assert!(runtime.resume(&run).await.is_err());
         }
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
@@ -657,9 +676,7 @@ async fn competing_pending_failures_report_only_the_winning_exact_head_candidate
     for result in [left.await.unwrap(), right.await.unwrap()] {
         let view = match result {
             Ok(winner) => winner,
-            Err(InvocationFailure::RecoveryStopped {
-                observed, incident, ..
-            }) => {
+            Err(InvocationFailure::RecoveryStopped { observed, .. }) => {
                 stopped += 1;
                 let RunViewState::EffectPending {
                     latest_failure: Some(failure),
@@ -668,10 +685,12 @@ async fn competing_pending_failures_report_only_the_winning_exact_head_candidate
                 else {
                     panic!("audited failure")
                 };
-                assert_eq!(
-                    incident.error().value_ref(),
-                    failure.incident.error().value_ref()
-                );
+                assert!(matches!(
+                    failure.0.decode::<Cause>().unwrap(),
+                    Cause::Timeout {
+                        deadline_ms: 5001 | 5002
+                    }
+                ));
                 observed
             }
             Err(InvocationFailure::Execution {
@@ -720,7 +739,7 @@ fn original_count(frames: &[Vec<u8>]) -> usize {
             let frame = decode_frame(bytes).unwrap();
             let payload: serde_json::Value =
                 serde_json::from_slice(frame.payload().as_bytes()).unwrap();
-            payload["facts"].get("failed").is_some()
+            payload["operation"].get("failed").is_some()
         })
         .count()
 }

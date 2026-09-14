@@ -14,14 +14,12 @@ pub use error::{
     AppendFailure, CandidatePresence, Operation, RecordingFailure, Stage, TaskFailure,
 };
 pub use mfm_values::Object;
-pub use report::{AdapterIncidentView, FailureCauseView, FailureReport, InvocationFailure};
-pub use state::{
-    Call, DomainFailure, EffectCall, Failure, ReadFailure, RecoveryDecision, Settlement, StateCall,
-};
+pub use report::{FailureReport, InvocationFailure};
+pub use state::{Call, EffectCall, Failure, RecoveryOutcome, Settlement, StateCall};
 
 use std::sync::Arc;
 
-use mfm_ids::{ContentDigest, EffectId, ExecutionPosition, RunId, StatePosition};
+use mfm_ids::{ContentDigest, ExecutionPosition, RunId, StatePosition};
 use mfm_program::Program;
 use mfm_store::Store;
 use mfm_values::MfmValue;
@@ -287,15 +285,9 @@ pub enum EffectAdapterOutcome<E> {
     Settled(E),
 }
 
-/// Latest audited pending-Effect failure, reconstructed without policy callbacks.
-pub struct PendingFailureView {
-    /// Original error, complete input, and retained command facts.
-    pub incident: AdapterIncidentView,
-    /// Committed decision retaining command authority.
-    pub decision: RecoveryDecision,
-}
-
 /// Durable public state of a run.
+// Keep the owned observation together; Object clones already share immutable payload bytes.
+#[allow(clippy::large_enum_variant)]
 pub enum RunViewState {
     /// The selected State is waiting for caller-driven progression.
     Runnable {
@@ -306,12 +298,10 @@ pub enum RunViewState {
     },
     /// Acknowledged command awaiting reconciliation with the same authority.
     EffectPending {
-        /// Prepared execution occurrence.
-        position: ExecutionPosition,
-        /// Exact retained Effect identity.
-        effect_id: EffectId,
-        /// Most recent acknowledged operational failure and invocation decision.
-        latest_failure: Option<Box<PendingFailureView>>,
+        /// Complete retained command authority and input.
+        effect: EffectCall,
+        /// Most recent acknowledged original and recovery outcome.
+        latest_failure: Option<(Object, RecoveryOutcome)>,
     },
     /// A declared original is durable and awaits recovery evaluation.
     AwaitingRecovery {

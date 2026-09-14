@@ -58,17 +58,12 @@ enum State<'a> {
 struct PendingFailure<'a> {
     #[serde(flatten)]
     incident: Incident<'a>,
-    decision: mfm_runtime::RecoveryDecision,
+    decision: Decision,
 }
 
 #[derive(Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 enum Incident<'a> {
-    Read {
-        error: Object<'a>,
-        input: Object<'a>,
-        intent: Object<'a>,
-    },
     Effect {
         error: Object<'a>,
         input: Object<'a>,
@@ -77,32 +72,34 @@ enum Incident<'a> {
     },
 }
 impl<'a> Incident<'a> {
-    fn new(
-        incident: &'a mfm_runtime::AdapterIncidentView,
-    ) -> Result<Self, mfm_values::NativeCause> {
-        use mfm_runtime::AdapterIncidentView;
-        Ok(match incident {
-            AdapterIncidentView::Read {
-                error,
-                input,
-                intent,
-            } => Self::Read {
-                error: Object::new(error)?,
-                input: Object::new(input)?,
-                intent: Object::new(intent)?,
-            },
-            AdapterIncidentView::Effect {
-                error,
-                input,
-                command,
-                effect_id,
-            } => Self::Effect {
-                error: Object::new(error)?,
-                input: Object::new(input)?,
-                command: Object::new(command)?,
-                effect_id,
-            },
+    fn effect(
+        effect: &'a mfm_runtime::EffectCall,
+        original: &'a mfm_values::Object,
+    ) -> Result<Self, NativeCause> {
+        Ok(Self::Effect {
+            error: Object::new(original)?,
+            input: Object::new(effect.call().input())?,
+            command: Object::new(effect.command())?,
+            effect_id: effect.effect_id(),
         })
+    }
+}
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Decision {
+    Retry,
+    Restart { checkpoint: StatePosition },
+    Stop { reason: mfm_program::StopReason },
+}
+impl From<&mfm_runtime::RecoveryOutcome> for Decision {
+    fn from(outcome: &mfm_runtime::RecoveryOutcome) -> Self {
+        match outcome {
+            mfm_runtime::RecoveryOutcome::Retry => Self::Retry,
+            mfm_runtime::RecoveryOutcome::Restart { checkpoint } => Self::Restart {
+                checkpoint: *checkpoint,
+            },
+            mfm_runtime::RecoveryOutcome::Stop { reason, .. } => Self::Stop { reason: *reason },
+        }
     }
 }
 
@@ -135,7 +132,7 @@ impl<'a> Original<'a> {
         let original = Object::new(failure.original())?;
         let input = Object::new(failure.call().input())?;
         Ok(match failure {
-            Failure::Domain(failure) => match failure.call() {
+            Failure::Domain { call, .. } => match call {
                 StateCall::Pure(_) => Self::Pure { original, input },
                 StateCall::Read {
                     intent, evidence, ..
@@ -153,10 +150,10 @@ impl<'a> Original<'a> {
                     evidence: Some(Object::new(settlement.evidence())?),
                 },
             },
-            Failure::Read(failure) => Self::Read {
+            Failure::Read { intent, .. } => Self::Read {
                 original,
                 input,
-                intent: Object::new(failure.intent())?,
+                intent: Object::new(intent)?,
                 evidence: None,
             },
             Failure::PendingEffect { effect, .. } => Self::Effect {
@@ -204,18 +201,17 @@ impl<'a> SerializableRunView<'a> {
                 },
             },
             RunViewState::EffectPending {
-                position,
-                effect_id,
+                effect,
                 latest_failure,
             } => State::EffectPending {
-                position,
-                effect_id,
+                position: effect.call().position(),
+                effect_id: effect.effect_id(),
                 latest_failure: latest_failure
                     .as_ref()
-                    .map(|failure| {
+                    .map(|(original, outcome)| {
                         Ok::<_, mfm_values::NativeCause>(PendingFailure {
-                            incident: Incident::new(&failure.incident)?,
-                            decision: failure.decision,
+                            incident: Incident::effect(effect, original)?,
+                            decision: outcome.into(),
                         })
                     })
                     .transpose()?,
@@ -286,15 +282,23 @@ impl<'a> Invocation<'a> {
                 size_limit: error.size_limit(),
                 cause: error.project()?,
             },
-            mfm_runtime::InvocationFailure::RecoveryStopped {
-                observed,
-                incident,
-                reason,
-            } => InvocationWire::RecoveryStopped {
-                observed: SerializableRunView::new(observed)?,
-                reason: stop_reason(*reason),
-                incident: Box::new(Incident::new(incident)?),
-            },
+            mfm_runtime::InvocationFailure::RecoveryStopped { observed } => {
+                let RunViewState::EffectPending {
+                    effect,
+                    latest_failure:
+                        Some((original, mfm_runtime::RecoveryOutcome::Stop { reason, .. })),
+                } = observed.state()
+                else {
+                    return Err(NativeCause::from_error(
+                        mfm_values::ValueError::SchemaShapeMismatch,
+                    ));
+                };
+                InvocationWire::RecoveryStopped {
+                    observed: SerializableRunView::new(observed)?,
+                    reason: stop_reason(*reason),
+                    incident: Box::new(Incident::effect(effect, original)?),
+                }
+            }
         }))
     }
 }

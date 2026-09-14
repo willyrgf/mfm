@@ -5,11 +5,11 @@ use crate::assembly::{
 use crate::state::*;
 use crate::{
     AppendFailure, CandidatePresence, EffectAdapterOutcome, InvocationFailure, Operation,
-    RecordingFailure, Result, RunView, RunViewState, RunnableReason, RuntimeError, Stage,
+    RecordingFailure, Result, RunView, RunViewState, RuntimeError, Stage,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::{EffectCapabilityContract, ReadCapabilityContract};
-use mfm_ids::{ContentRef, EffectId, ExecutionPosition, RunId, StatePosition};
+use mfm_ids::{ContentRef, EffectId, ExecutionPosition, RunId};
 use mfm_journal::{decode_frame, seal_frame, EncodedRunFrame};
 use mfm_program::{
     ClassifyError, EffectState, Program, ProposedStateOutcome, PureState, ReadState,
@@ -32,8 +32,8 @@ pub(crate) struct ReturnedFailure {
 }
 #[derive(Clone)]
 pub(crate) struct Driver {
-    admission: Arc<RunCommit>,
-    current: Arc<RunCommit>,
+    admission: Arc<RunRecord>,
+    current: Arc<RunRecord>,
     executable: Arc<ExecutableProgram>,
     head: RunSummary,
 }
@@ -147,12 +147,7 @@ pub(crate) async fn start<T: MfmValue>(
             executable.program.canonical_bytes(),
         )
         .map_err(RuntimeError::from)?;
-        let state = RunState::initial(&executable, initial.clone())?;
-        let commit = Arc::new(RunCommit {
-            program_ref: executable.program.content_ref().clone(),
-            state,
-            facts: OperationFacts::Admitted { program, initial },
-        });
+        let commit = Arc::new(RunRecord::initial(&executable, program, initial)?);
         let candidate = seal(&identity, 1, None, &commit, &executable)?;
         Ok((executable, commit, candidate))
     })
@@ -194,7 +189,7 @@ pub(crate) async fn start<T: MfmValue>(
             let proposed = Arc::clone(&commit);
             run_blocking(Operation::Restore, move || {
                 let driver = restore(executable._assembly.clone(), &run_id, loaded, None)?;
-                if driver.admission.facts != proposed.facts {
+                if driver.admission.operation != proposed.operation {
                     return Err(RuntimeError::AdmissionConflict);
                 }
                 view(&driver)
@@ -325,8 +320,8 @@ fn restore_frames(
     admission_frame: EncodedRunFrame,
     latest_frame: EncodedRunFrame,
 ) -> Result<Driver> {
-    let decode_commit = |frame: &EncodedRunFrame| -> Result<Arc<RunCommit>> {
-        serde_json::from_slice::<RunCommit>(frame.payload().as_bytes())
+    let decode_commit = |frame: &EncodedRunFrame| -> Result<Arc<RunRecord>> {
+        serde_json::from_slice::<RunRecord>(frame.payload().as_bytes())
             .map(Arc::new)
             .map_err(|source| {
                 native(
@@ -337,7 +332,7 @@ fn restore_frames(
             })
     };
     let admission = decode_commit(&admission_frame)?;
-    let OperationFacts::Admitted { program, .. } = &admission.facts else {
+    let RecordedOperation::Admitted { program, .. } = &admission.operation else {
         return Err(RuntimeError::InvalidHistory);
     };
     let program = Program::decode_canonical(program.canonical_bytes())
@@ -370,13 +365,20 @@ async fn advance(
         let observed = project(&driver)
             .await
             .map_err(|error| invocation(run_id.clone(), error, last_observed.take()))?;
-        let position = match &driver.current.state.phase {
-            Phase::Runnable(call) => call.position,
-            Phase::EffectPending(effect) => effect.call.position,
-            Phase::AwaitingInterpretation(settlement) => settlement.effect.call.position,
-            Phase::AwaitingRecovery(failure) => failure.call().position,
-            Phase::Succeeded(_) | Phase::Failed(_) => return Ok(observed),
+        let continuation = driver
+            .current
+            .continuation(&driver.executable)
+            .map_err(|error| invocation(run_id.clone(), error, None))?;
+        let position = match &continuation {
+            Continuation::Succeeded { .. } | Continuation::Failed { .. } => return Ok(observed),
+            _ => {
+                continuation
+                    .active()
+                    .ok_or_else(|| invocation(run_id.clone(), RuntimeError::InvalidHistory, None))?
+                    .0
+            }
         };
+        let runnable = matches!(continuation, Continuation::Runnable { .. });
         let context = DriverContext {
             store: &store,
             driver,
@@ -393,7 +395,7 @@ async fn advance(
                 adapter,
                 ..
             } => {
-                if matches!(&context.driver.current.state.phase, Phase::Runnable(_)) {
+                if runnable {
                     prepare(context).await
                 } else {
                     start_pending(context, Arc::clone(adapter)).await
@@ -418,12 +420,17 @@ fn seal(
     run_id: &RunId,
     sequence: u64,
     previous: Option<&mfm_ids::ContentDigest>,
-    commit: &RunCommit,
+    commit: &RunRecord,
     executable: &ExecutableProgram,
 ) -> Result<EncodedRunFrame> {
     commit.validate_current(run_id, sequence, executable, false)?;
-    if let Phase::Failed(failure) = &commit.state.phase {
-        failure_report(&commit.state, failure)?;
+    if let Continuation::Failed {
+        failure,
+        reason,
+        root,
+    } = commit.continuation(executable)?
+    {
+        failure_report(commit, failure, reason, root)?;
     }
     let payload = canonical(commit, Operation::Record)?;
     let candidate = seal_frame(run_id, sequence, previous, &payload)
@@ -440,7 +447,7 @@ fn seal(
     }
     Ok(candidate)
 }
-fn check_metadata(frame: &EncodedRunFrame, commit: &RunCommit) -> Result<()> {
+fn check_metadata(frame: &EncodedRunFrame, commit: &RunRecord) -> Result<()> {
     let metadata = (frame.canonical_bytes().len() as u64)
         .checked_sub(commit.object_payload_bytes()?)
         .ok_or(RuntimeError::ArithmeticOverflow)?;
@@ -461,18 +468,12 @@ async fn project(driver: &Driver) -> Result<RunView> {
 }
 async fn record(
     context: DriverContext<'_>,
-    state: RunState,
-    facts: OperationFacts,
+    next: RunRecord,
     original: Option<NativeCause>,
     operation: Operation,
-    yield_after: bool,
 ) -> Result<DriverDisposition> {
     let DriverContext { store, driver } = context;
-    let commit = Arc::new(RunCommit {
-        program_ref: driver.current.program_ref.clone(),
-        state,
-        facts,
-    });
+    let commit = Arc::new(next);
     let next_commit = Arc::clone(&commit);
     let executable = Arc::clone(&driver.executable);
     let head = driver.head.clone();
@@ -532,26 +533,24 @@ async fn record(
                 head,
                 ..driver
             };
-            if let OperationFacts::Recovered {
-                failure: Failure::PendingEffect { effect, original },
-                decision: RecoveryDecision::Stop { reason },
+            if let RecordedOperation::Recovered {
+                failure: Failure::PendingEffect { .. },
+                outcome: RecoveryOutcome::Stop { .. },
                 ..
-            } = &next.current.facts
+            } = &next.current.operation
             {
                 let observed = project(&next).await?;
                 return Ok(DriverDisposition::Failed(
-                    InvocationFailure::RecoveryStopped {
-                        observed,
-                        incident: Box::new(effect_incident(effect, original)),
-                        reason: *reason,
-                    },
+                    InvocationFailure::RecoveryStopped { observed },
                 ));
             }
-            Ok(if yield_after {
-                DriverDisposition::Yield(project(&next).await?)
-            } else {
-                DriverDisposition::Continue(next)
-            })
+            Ok(
+                if matches!(next.current.operation, RecordedOperation::Recovered { .. }) {
+                    DriverDisposition::Yield(project(&next).await?)
+                } else {
+                    DriverDisposition::Continue(next)
+                },
+            )
         }
         Ok(AppendResult::NotInserted) => {
             reconcile(store, driver, candidate, original, operation).await
@@ -638,8 +637,13 @@ async fn reconcile(
 }
 
 fn runnable(driver: &Driver) -> Result<Call> {
-    match &driver.current.state.phase {
-        Phase::Runnable(call) => Ok(call.clone()),
+    match driver.current.continuation(&driver.executable)? {
+        Continuation::Runnable {
+            position, input, ..
+        } => Ok(Call {
+            position,
+            input: input.clone(),
+        }),
         _ => Err(RuntimeError::InvalidHistory),
     }
 }
@@ -649,58 +653,26 @@ async fn conclude<O: MfmValue, F: MfmValue>(
     outcome: ProposedStateOutcome<O, F>,
     operation: Operation,
 ) -> Result<DriverDisposition> {
-    let mut state = context.driver.current.state.clone();
-    match outcome {
+    let mut next = (*context.driver.current).clone();
+    let original = match outcome {
         ProposedStateOutcome::Success { output } => {
-            let output = encode(output, operation).await?;
-            let position = call.call().position;
-            if position.state.index() + 1 == context.driver.executable.declarations.len() {
-                state.phase = Phase::Succeeded(output.clone());
-            } else {
-                let position = ExecutionPosition {
-                    state: StatePosition::new(position.state.index() + 1)
-                        .map_err(|source| native(operation, Stage::Execute, source))?,
-                    visit: position
-                        .visit
-                        .checked_next()
-                        .map_err(|source| native(operation, Stage::Execute, source))?,
-                };
-                state.enter(
-                    &context.driver.executable,
-                    Call {
-                        position,
-                        input: output.clone(),
-                    },
-                );
-            }
-            record(
-                context,
-                state,
-                OperationFacts::Succeeded { call, output },
-                None,
-                operation,
-                false,
-            )
-            .await
+            next.operation = RecordedOperation::Succeeded {
+                call,
+                output: encode(output, operation).await?,
+            };
+            next.enter(&context.driver.executable)?;
+            None
         }
         ProposedStateOutcome::Failure { failure } => {
             let returned = encode_failure(failure, operation).await?;
-            let failure = Failure::Domain(DomainFailure {
+            next.operation = RecordedOperation::Failed(Failure::Domain {
                 call,
                 original: returned.object,
             });
-            state.phase = Phase::AwaitingRecovery(failure.clone());
-            record(
-                context,
-                state,
-                OperationFacts::Failed(failure),
-                Some(returned.original),
-                operation,
-                false,
-            )
-            .await
+            Some(returned.original)
         }
-    }
+    };
+    record(context, next, original, operation).await
 }
 async fn operational(
     context: DriverContext<'_>,
@@ -708,24 +680,19 @@ async fn operational(
     original: NativeCause,
     operation: Operation,
 ) -> Result<DriverDisposition> {
-    let mut state = context.driver.current.state.clone();
-    state.phase = Phase::AwaitingRecovery(failure.clone());
-    record(
-        context,
-        state,
-        OperationFacts::Failed(failure),
-        Some(original),
-        operation,
-        false,
-    )
-    .await
+    let mut next = (*context.driver.current).clone();
+    next.operation = RecordedOperation::Failed(failure);
+    record(context, next, Some(original), operation).await
 }
 pub(crate) async fn start_pure<S: PureState>(
     context: DriverContext<'_>,
 ) -> Result<DriverDisposition> {
     if matches!(
-        &context.driver.current.state.phase,
-        Phase::AwaitingRecovery(_)
+        context
+            .driver
+            .current
+            .continuation(&context.driver.executable)?,
+        Continuation::AwaitingRecovery(_)
     ) {
         return recover::<S::Failure, mfm_program::Never>(context).await;
     }
@@ -752,8 +719,11 @@ where
     C::OperationalError: ClassifyError,
 {
     if matches!(
-        &context.driver.current.state.phase,
-        Phase::AwaitingRecovery(_)
+        context
+            .driver
+            .current
+            .continuation(&context.driver.executable)?,
+        Continuation::AwaitingRecovery(_)
     ) {
         return recover::<S::Failure, C::OperationalError>(context).await;
     }
@@ -769,11 +739,11 @@ where
     .await?;
     match adapter(&intent).await? {
         AdapterReturn::Operational(returned) => {
-            let failure = Failure::Read(ReadFailure {
+            let failure = Failure::Read {
                 call,
                 intent,
                 original: returned.object,
-            });
+            };
             operational(context, failure, returned.original, Operation::ReadAdapter).await
         }
         AdapterReturn::Observed(evidence) => {
@@ -823,23 +793,15 @@ pub(crate) async fn start_effect<S: EffectState<C>, C: EffectCapabilityContract>
         call.position,
         command.value_ref(),
     )?;
-    let mut state = context.driver.current.state.clone();
-    state.effect_barrier = Some(call.position.state);
+    let mut next = (*context.driver.current).clone();
+    next.effect_barrier = Some(call.position.state);
     let effect = EffectCall {
         call,
         effect_id,
         command,
     };
-    state.phase = Phase::EffectPending(effect.clone());
-    record(
-        context,
-        state,
-        OperationFacts::EffectPrepared(effect),
-        None,
-        Operation::EffectPrepare,
-        false,
-    )
-    .await
+    next.operation = RecordedOperation::EffectPrepared(effect);
+    record(context, next, None, Operation::EffectPrepare).await
 }
 pub(crate) async fn start_pending_effect<S: EffectState<C>, C: EffectCapabilityContract>(
     context: DriverContext<'_>,
@@ -848,11 +810,15 @@ pub(crate) async fn start_pending_effect<S: EffectState<C>, C: EffectCapabilityC
 where
     C::OperationalError: ClassifyError,
 {
-    match &context.driver.current.state.phase {
-        Phase::AwaitingRecovery(_) => {
+    match context
+        .driver
+        .current
+        .continuation(&context.driver.executable)?
+    {
+        Continuation::AwaitingRecovery(_) => {
             return recover::<S::Failure, C::OperationalError>(context).await
         }
-        Phase::AwaitingInterpretation(settlement) => {
+        Continuation::AwaitingInterpretation(settlement) => {
             let retained = settlement.clone();
             let settlement = settlement.clone();
             let outcome = run_blocking(Operation::EffectInterpret, move || {
@@ -877,7 +843,11 @@ where
         }
         _ => {}
     }
-    let Phase::EffectPending(effect) = &context.driver.current.state.phase else {
+    let Continuation::EffectPending { effect, .. } = context
+        .driver
+        .current
+        .continuation(&context.driver.executable)?
+    else {
         return Err(RuntimeError::InvalidHistory);
     };
     let effect = effect.clone();
@@ -924,17 +894,9 @@ where
                     .map_err(|cause| RuntimeError::native(Operation::EffectBind, cause))
             })
             .await?;
-            let mut state = context.driver.current.state.clone();
-            state.phase = Phase::AwaitingInterpretation(settlement.clone());
-            record(
-                context,
-                state,
-                OperationFacts::EffectSettled(settlement),
-                None,
-                Operation::EffectBind,
-                false,
-            )
-            .await
+            let mut next = (*context.driver.current).clone();
+            next.operation = RecordedOperation::EffectSettled(settlement);
+            record(context, next, None, Operation::EffectBind).await
         }
     }
 }
@@ -943,29 +905,29 @@ async fn recover<D: ClassifyError, E: ClassifyError>(
 ) -> Result<DriverDisposition> {
     let current = Arc::clone(&context.driver.current);
     let executable = Arc::clone(&context.driver.executable);
-    let (state, facts, yield_after) = run_blocking(Operation::Recovery, move || {
-        let Phase::AwaitingRecovery(failure) = &current.state.phase else {
+    let next = run_blocking(Operation::Recovery, move || {
+        let Continuation::AwaitingRecovery(failure) = current.continuation(&executable)? else {
             return Err(RuntimeError::InvalidHistory);
         };
         let classification = match failure {
-            Failure::Domain(value) => decode::<D>(&value.original, Operation::Recovery)?.classify(),
-            Failure::Read(value) => decode::<E>(&value.original, Operation::Recovery)?.classify(),
+            Failure::Domain { original, .. } => {
+                decode::<D>(original, Operation::Recovery)?.classify()
+            }
+            Failure::Read { original, .. } => {
+                decode::<E>(original, Operation::Recovery)?.classify()
+            }
             Failure::PendingEffect { original, .. } => {
                 decode::<E>(original, Operation::Recovery)?.classify()
             }
         };
         let position = failure.call().position;
         let declaration = &executable.program.declarations()[position.state.index()];
-        let used = current.state.usage(position.state)?;
+        let used = current.usage(position.state)?;
         let declared = declaration.recovery_targets();
         let eligible: Vec<_> = declared
             .iter()
             .copied()
-            .filter(|target| {
-                current
-                    .state
-                    .eligible(&executable, position.state, target.position())
-            })
+            .filter(|target| current.eligible(&executable, position.state, target.position()))
             .collect();
         let policy_context = mfm_program::RecoveryContext::new(
             failure.phase(),
@@ -993,102 +955,44 @@ async fn recover<D: ClassifyError, E: ClassifyError>(
         let request = executable.declarations[position.state.index()]
             .recovery
             .request(classification, &policy_context)?;
-        let decision = current.state.authorize(&executable, failure, request)?;
-        let mut state = current.state.clone();
-        match decision {
-            RecoveryDecision::Retry => {
-                state.usage[position.state.index()].retries = used
+        let mut outcome = current.authorize(&executable, failure, request)?;
+        let mut next = (*current).clone();
+        match &mut outcome {
+            RecoveryOutcome::Retry => {
+                next.usage[position.state.index()].retries = used
                     .state_retries
                     .checked_add(1)
                     .ok_or(RuntimeError::ArithmeticOverflow)?;
-                match failure {
-                    value if value.phase() == mfm_program::ExecutionPhase::Read => state.enter(
-                        &executable,
-                        Call {
-                            position: ExecutionPosition {
-                                state: position.state,
-                                visit: position.visit.checked_next().map_err(|source| {
-                                    native(Operation::Recovery, Stage::Execute, source)
-                                })?,
-                            },
-                            input: value.call().input.clone(),
-                        },
-                    ),
-                    Failure::PendingEffect { effect, .. } => {
-                        state.phase = Phase::EffectPending(effect.clone())
-                    }
-                    _ => return Err(RuntimeError::InvalidHistory),
-                }
             }
-            RecoveryDecision::Restart { checkpoint } => {
-                state.usage[position.state.index()].restarts =
-                    used.state_restarts
-                        .checked_add(1)
-                        .ok_or(RuntimeError::ArithmeticOverflow)?;
-                let input = state
-                    .checkpoints
-                    .iter()
-                    .find(|entry| entry.position == checkpoint)
-                    .ok_or(RuntimeError::InvalidHistory)?
-                    .input
-                    .clone();
-                state
-                    .checkpoints
-                    .retain(|entry| entry.position <= checkpoint);
-                state.enter(
-                    &executable,
-                    Call {
-                        position: ExecutionPosition {
-                            state: checkpoint,
-                            visit: position.visit.checked_next().map_err(|source| {
-                                native(Operation::Recovery, Stage::Execute, source)
-                            })?,
-                        },
-                        input,
-                    },
-                );
+            RecoveryOutcome::Restart { checkpoint } => {
+                next.usage[position.state.index()].restarts = used
+                    .state_restarts
+                    .checked_add(1)
+                    .ok_or(RuntimeError::ArithmeticOverflow)?;
+                next.checkpoints
+                    .retain(|entry| entry.position <= *checkpoint);
             }
-            RecoveryDecision::Stop { reason } => {
-                state.phase = match failure {
-                    Failure::Domain(failure) => {
-                        let root = executable.declarations[position.state.index()]
+            RecoveryOutcome::Stop { root, .. } => {
+                if let Failure::Domain { original, .. } = failure {
+                    *root = Some(
+                        executable.declarations[position.state.index()]
                             .root_map
-                            .apply(failure.original.clone())?;
-                        Phase::Failed(TerminalFailure::Domain {
-                            failure: failure.clone(),
-                            reason,
-                            root,
-                        })
-                    }
-                    Failure::Read(failure) => Phase::Failed(TerminalFailure::Read {
-                        failure: failure.clone(),
-                        reason,
-                    }),
-                    Failure::PendingEffect { effect, .. } => Phase::EffectPending(effect.clone()),
+                            .apply(original.clone())?,
+                    );
                 }
             }
         }
-        Ok((
-            state,
-            OperationFacts::Recovered {
-                failure: failure.clone(),
-                classification,
-                request,
-                decision,
-            },
-            !matches!(decision, RecoveryDecision::Stop { .. }),
-        ))
+        next.operation = RecordedOperation::Recovered {
+            failure: failure.clone(),
+            classification,
+            request,
+            outcome,
+        };
+        next.enter(&executable)?;
+        Ok(next)
     })
     .await?;
-    record(
-        context,
-        state,
-        facts,
-        None,
-        Operation::Recovery,
-        yield_after,
-    )
-    .await
+    record(context, next, None, Operation::Recovery).await
 }
 
 pub(crate) fn derive_effect_id(
@@ -1117,90 +1021,46 @@ pub(crate) fn derive_effect_id(
     )?;
     Ok(EffectId::from_digest(canonical.digest_bytes()))
 }
-fn effect_incident(effect: &EffectCall, original: &Object) -> crate::AdapterIncidentView {
-    crate::AdapterIncidentView::Effect {
-        error: original.clone(),
-        input: effect.call.input.clone(),
-        command: effect.command.clone(),
-        effect_id: effect.effect_id.clone(),
-    }
-}
-fn failure_report(state: &RunState, failure: &TerminalFailure) -> Result<crate::FailureReport> {
-    let (call, reason, cause) = match failure {
-        TerminalFailure::Domain {
-            failure,
-            reason,
-            root,
-        } => (
-            failure.call.call(),
-            *reason,
-            crate::FailureCauseView::Domain {
-                original: failure.original.clone(),
-                root: root.clone(),
-            },
-        ),
-        TerminalFailure::Read { failure, reason } => (
-            &failure.call,
-            *reason,
-            crate::FailureCauseView::Adapter(crate::AdapterIncidentView::Read {
-                error: failure.original.clone(),
-                input: failure.call.input.clone(),
-                intent: failure.intent.clone(),
-            }),
-        ),
-    };
+fn failure_report(
+    record: &RunRecord,
+    failure: &Failure,
+    reason: mfm_program::StopReason,
+    root: Option<&Object>,
+) -> Result<crate::FailureReport> {
     crate::FailureReport::new(
-        call.position,
+        failure.clone(),
         reason,
-        state.usage(call.position.state)?,
-        cause,
+        record.usage(failure.call().position.state)?,
+        root.cloned(),
     )
 }
 fn view(driver: &Driver) -> Result<RunView> {
-    let state = match &driver.current.state.phase {
-        Phase::Runnable(call) => RunViewState::Runnable {
-            position: call.position,
-            reason: match &driver.current.facts {
-                OperationFacts::Recovered {
-                    decision: RecoveryDecision::Retry,
-                    ..
-                } => RunnableReason::Retry,
-                OperationFacts::Recovered {
-                    decision: RecoveryDecision::Restart { checkpoint },
-                    ..
-                } => RunnableReason::Restart {
-                    checkpoint: *checkpoint,
-                },
-                _ => RunnableReason::Advance,
-            },
+    let state = match driver.current.continuation(&driver.executable)? {
+        Continuation::Runnable {
+            position, reason, ..
+        } => RunViewState::Runnable { position, reason },
+        Continuation::EffectPending {
+            effect,
+            latest_failure,
+        } => RunViewState::EffectPending {
+            effect: effect.clone(),
+            latest_failure: latest_failure
+                .map(|(original, outcome)| (original.clone(), outcome.clone())),
         },
-        Phase::EffectPending(effect) => RunViewState::EffectPending {
-            position: effect.call.position,
-            effect_id: effect.effect_id.clone(),
-            latest_failure: match &driver.current.facts {
-                OperationFacts::Recovered {
-                    failure: Failure::PendingEffect { original, .. },
-                    decision,
-                    ..
-                } => Some(Box::new(crate::PendingFailureView {
-                    incident: effect_incident(effect, original),
-                    decision: *decision,
-                })),
-                _ => None,
-            },
-        },
-        Phase::AwaitingRecovery(failure) => RunViewState::AwaitingRecovery {
+        Continuation::AwaitingRecovery(failure) => RunViewState::AwaitingRecovery {
             failure: failure.clone(),
         },
-        Phase::AwaitingInterpretation(settlement) => RunViewState::AwaitingInterpretation {
+        Continuation::AwaitingInterpretation(settlement) => RunViewState::AwaitingInterpretation {
             settlement: settlement.clone(),
         },
-        Phase::Succeeded(value) => RunViewState::Succeeded(value.clone()),
-        Phase::Failed(failure) => {
-            RunViewState::Failed(failure_report(&driver.current.state, failure)?)
-        }
+        Continuation::Succeeded { output, .. } => RunViewState::Succeeded(output.clone()),
+        Continuation::Failed {
+            failure,
+            reason,
+            root,
+        } => RunViewState::Failed(failure_report(&driver.current, failure, reason, root)?),
     };
-    let OperationFacts::Admitted { initial, .. } = &driver.admission.facts else {
+    let RecordedOperation::Admitted { initial, .. } = &driver.admission.operation else {
         return Err(RuntimeError::InvalidHistory);
     };
     Ok(RunView {

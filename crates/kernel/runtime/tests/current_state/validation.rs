@@ -3,10 +3,10 @@ use mfm_journal::{decode_frame, seal_frame, EncodedRunFrame};
 use mfm_store::{AppendResult, LoadedRun, RunSummary, StoreError};
 use std::{future::Future, pin::Pin};
 
-struct SnapshotStore {
-    head: RunSummary,
-    admission: Arc<[u8]>,
-    latest: Arc<[u8]>,
+pub(super) struct SnapshotStore {
+    pub(super) head: RunSummary,
+    pub(super) admission: Arc<[u8]>,
+    pub(super) latest: Arc<[u8]>,
 }
 impl Store for SnapshotStore {
     fn load_run<'a>(
@@ -61,25 +61,25 @@ async fn cold_inspection_rejects_locally_inconsistent_current_records_without_ca
         let mut payload = payload.clone();
         match mutation {
             0 => {
-                payload["state"]["usage"].as_array_mut().unwrap().pop();
+                payload["usage"].as_array_mut().unwrap().pop();
             }
             1 => {
-                payload["state"]["usage"][1]["retries"] = 2.into();
+                payload["usage"][1]["retries"] = 2.into();
             }
             2 => {
-                payload["state"]["effect_barrier"] = 0.into();
+                payload["effect_barrier"] = 0.into();
             }
             3 => {
-                payload["facts"] = serde_json::json!({"recovery_retry": {}});
+                payload["operation"] = serde_json::json!({"recovery_retry": {}});
             }
             4 => {
-                payload["state"]["checkpoints"] = serde_json::json!([{
+                payload["checkpoints"] = serde_json::json!([{
                     "position": 0,
-                    "input": payload["facts"]["succeeded"]["call"]["read"]["call"]["input"],
+                    "input": payload["operation"]["succeeded"]["call"]["read"]["call"]["input"],
                 }]);
             }
             5 => {
-                payload["facts"]["succeeded"]["output"] = serde_json::to_value(
+                payload["operation"]["succeeded"]["output"] = serde_json::to_value(
                     mfm_values::Object::from_value(&Input {
                         value: 99,
                         continuation: "different completed output".into(),
@@ -89,7 +89,7 @@ async fn cold_inspection_rejects_locally_inconsistent_current_records_without_ca
                 .unwrap();
             }
             6 => {
-                payload["facts"]["succeeded"]["call"]["read"]["call"]["input"] =
+                payload["operation"]["succeeded"]["call"]["read"]["call"]["input"] =
                     serde_json::to_value(
                         mfm_values::Object::from_value(&Request { value: 9 }).unwrap(),
                     )
@@ -101,21 +101,21 @@ async fn cold_inspection_rejects_locally_inconsistent_current_records_without_ca
                         .unwrap();
             }
             8 => {
-                payload["facts"]["succeeded"]["unexpected"] = true.into();
+                payload["operation"]["succeeded"]["unexpected"] = true.into();
             }
             9 => {
-                payload["facts"]["succeeded"]["call"]["read"]["unexpected"] = true.into();
+                payload["operation"]["succeeded"]["call"]["read"]["unexpected"] = true.into();
             }
             10 | 11 => {
-                payload["facts"]["succeeded"]["call"]["read"]["call"]["input"]["canonical"]
+                payload["operation"]["succeeded"]["call"]["read"]["call"]["input"]["canonical"]
                     ["value"] = 99.into();
                 if mutation == 11 {
-                    payload["facts"]["succeeded"]["call"]["read"]["call"]["zz_unexpected"] =
+                    payload["operation"]["succeeded"]["call"]["read"]["call"]["zz_unexpected"] =
                         true.into();
                 }
             }
             12 => {
-                payload["facts"]["succeeded"]["call"]["read"]["call"]["position"]["state"] =
+                payload["operation"]["succeeded"]["call"]["read"]["call"]["position"]["state"] =
                     999.into();
             }
             _ => unreachable!(),
@@ -148,6 +148,14 @@ async fn cold_inspection_rejects_locally_inconsistent_current_records_without_ca
             Arc::new(AtomicBool::new(true)),
             calls.clone(),
         );
+        if mutation == 5 {
+            let observed = cold.read(&run).await.unwrap();
+            let RunViewState::Succeeded(output) = observed.state() else {
+                panic!("locally valid output")
+            };
+            assert_eq!(output.decode::<Input>().unwrap().value, 99);
+            continue;
+        }
         let InvocationFailure::Execution {
             error:
                 RuntimeError::Native {
@@ -167,7 +175,6 @@ async fn cold_inspection_rejects_locally_inconsistent_current_records_without_ca
             2 => assert_eq!(projected, "barrier"),
             3 | 8 | 9 => assert!(cause.downcast_ref::<mfm_canonical::JsonError>().is_some()),
             4 => assert_eq!(projected, "checkpoint"),
-            5 => assert_eq!(projected, "facts"),
             6 | 7 => assert!(projected.get("identity").is_some()),
             10 | 11 => {
                 assert!(cause.downcast_ref::<mfm_canonical::JsonError>().is_some());
@@ -268,8 +275,8 @@ async fn current_usage_checks_the_derived_sum_without_reconstructing_historical_
         let latest = decode_frame(loaded.latest()).unwrap();
         let mut payload: serde_json::Value =
             serde_json::from_slice(latest.payload().as_bytes()).unwrap();
-        payload["state"]["usage"][0]["retries"] = retries.into();
-        payload["state"]["usage"][1]["restarts"] = restarts.into();
+        payload["usage"][0]["retries"] = retries.into();
+        payload["usage"][1]["restarts"] = restarts.into();
         let canonical =
             mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&payload.to_string()).unwrap();
         let changed = seal_frame(

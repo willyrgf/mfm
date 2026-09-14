@@ -1,5 +1,4 @@
 use super::*;
-use mfm_runtime::FailureCauseView;
 
 #[derive(Debug, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -117,9 +116,10 @@ async fn terminal_mapping_failure_leaves_the_original_committed_and_resume_maps_
     let RunViewState::Failed(report) = stopped.state() else {
         panic!("terminal mapped report")
     };
-    let FailureCauseView::Domain { original, root } = report.cause() else {
+    let mfm_runtime::Failure::Domain { original, .. } = report.failure() else {
         panic!("domain report")
     };
+    let root = report.root().unwrap();
     assert_eq!(original.decode::<Rejected>().unwrap().code, 71);
     assert_eq!(root.decode::<Rejected>().unwrap().code, 72);
     assert_eq!(report.reason(), &mfm_program::StopReason::Requested);
@@ -132,5 +132,44 @@ async fn terminal_mapping_failure_leaves_the_original_committed_and_resume_maps_
         runtime.resume(&run).await.unwrap().head_digest(),
         stopped.head_digest()
     );
+    let loaded = store.load_run(&run, None).await.unwrap().unwrap();
+    let frame = mfm_journal::decode_frame(loaded.latest()).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(frame.payload().as_bytes()).unwrap();
+    for root in [
+        serde_json::Value::Null,
+        serde_json::to_value(mfm_values::Object::from_value(&NoParams).unwrap()).unwrap(),
+    ] {
+        let mut record = record.clone();
+        record["operation"]["recovered"]["outcome"]["stop"]["root"] = root;
+        let payload = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+            &serde_json::to_string(&record).unwrap(),
+        )
+        .unwrap();
+        let changed = mfm_journal::seal_frame(
+            &run,
+            frame.run_sequence(),
+            frame.previous_head_digest(),
+            &payload,
+        )
+        .unwrap();
+        let snapshot = validation::SnapshotStore {
+            head: mfm_store::RunSummary::new(
+                run.clone(),
+                frame.run_sequence(),
+                changed.head_digest().clone(),
+                loaded.head().total_bytes() - frame.canonical_bytes().len() as u64
+                    + changed.canonical_bytes().len() as u64,
+            )
+            .unwrap(),
+            admission: loaded.admission().clone(),
+            latest: Arc::from(changed.canonical_bytes()),
+        };
+        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
+        builder.register_pure::<Reject>().unwrap();
+        builder.register_map::<RootMap>().unwrap();
+        let reader = Runtime::new(builder.finish(), Arc::new(snapshot));
+        assert!(reader.read(&run).await.is_err());
+        assert!(reader.resume(&run).await.is_err());
+    }
     assert_eq!(EVALUATIONS.load(Ordering::SeqCst), 1);
 }

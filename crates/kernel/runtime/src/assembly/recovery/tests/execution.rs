@@ -24,7 +24,7 @@ impl mfm_program::Operation for RetryingRead {
 
 #[tokio::test]
 async fn committed_read_recovery_yields_and_reconstructs_without_provider_calls() {
-    use crate::{FailureCauseView, RunViewState, RunnableReason, Runtime};
+    use crate::{RunViewState, RunnableReason, Runtime};
     use mfm_ids::{DigestBytes, EntryPointId, RunId};
     use mfm_program::{ProgramLimits, RecoveryLimit, StopReason};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -119,17 +119,18 @@ async fn committed_read_recovery_yields_and_reconstructs_without_provider_calls(
         );
         assert_eq!(report.usage().state_retries, 1);
         assert_eq!(report.usage().run_decisions, 1);
-        match (operational, report.cause()) {
-            (false, FailureCauseView::Domain { original, root }) => {
+        match (operational, report.failure()) {
+            (false, crate::Failure::Domain { original, .. }) => {
+                let root = report.root().unwrap();
                 assert_eq!(original.decode::<EvmFailure>().unwrap().source, 7);
                 assert_eq!(root.decode::<EvmFailure>().unwrap().source, 7);
             }
-            (true, FailureCauseView::Adapter(incident)) => {
+            (true, incident @ crate::Failure::Read { .. }) => {
                 assert!(matches!(
-                    incident.error().decode::<ProviderError>().unwrap(),
+                    incident.original().decode::<ProviderError>().unwrap(),
                     ProviderError::Unavailable
                 ));
-                assert_eq!(incident.input().decode::<Offset>().unwrap().value, 7);
+                assert_eq!(incident.call().input().decode::<Offset>().unwrap().value, 7);
             }
             _ => panic!("cause alternative changed"),
         }
@@ -274,25 +275,23 @@ async fn stopped_pending_effect_retains_exact_authority_until_explicit_settlemen
         .await
         .unwrap();
     assert_eq!(pending.head_sequence(), 2);
-    let RunViewState::EffectPending {
-        position,
-        effect_id,
-        ..
-    } = pending.state()
-    else {
+    let RunViewState::EffectPending { effect, .. } = pending.state() else {
         panic!("pending authority")
     };
-    assert_eq!(position.visit.value(), 0);
+    assert_eq!(effect.call().position().visit.value(), 0);
     let stopped = match runtime.resume(&run).await {
-        Err(InvocationFailure::RecoveryStopped {
-            observed,
-            incident,
-            reason,
-        }) => {
-            assert_eq!(reason, StopReason::Requested);
-            assert_eq!(incident.input().decode::<Offset>().unwrap().value, 9);
+        Err(InvocationFailure::RecoveryStopped { observed }) => {
+            let RunViewState::EffectPending {
+                effect,
+                latest_failure: Some((original, crate::RecoveryOutcome::Stop { reason, .. })),
+            } = observed.state()
+            else {
+                panic!("pending failure")
+            };
+            assert_eq!(*reason, StopReason::Requested);
+            assert_eq!(effect.call().input().decode::<Offset>().unwrap().value, 9);
             assert!(matches!(
-                incident.error().decode::<ProviderError>().unwrap(),
+                original.decode::<ProviderError>().unwrap(),
                 ProviderError::Unavailable
             ));
             observed
@@ -303,7 +302,7 @@ async fn stopped_pending_effect_retains_exact_authority_until_explicit_settlemen
     let loaded = runtime.read(&run).await.unwrap();
     assert_eq!(loaded.head_digest(), stopped.head_digest());
     assert!(
-        matches!(loaded.state(), RunViewState::EffectPending { effect_id: retained, position: retained_position, .. } if retained == effect_id && retained_position == position)
+        matches!(loaded.state(), RunViewState::EffectPending { effect: retained, .. } if retained.effect_id() == effect.effect_id() && retained.call().position() == effect.call().position())
     );
     assert_eq!(observed_ids.lock().unwrap().len(), 2);
     let settled = runtime.resume(&run).await.unwrap();
@@ -316,7 +315,7 @@ async fn stopped_pending_effect_retains_exact_authority_until_explicit_settlemen
     assert_eq!(cold.head_digest(), settled.head_digest());
     let ids = observed_ids.lock().unwrap();
     assert_eq!(ids.len(), 3);
-    assert!(ids.iter().all(|id| id == effect_id));
+    assert!(ids.iter().all(|id| id == effect.effect_id()));
 }
 
 struct InjectedObservation;

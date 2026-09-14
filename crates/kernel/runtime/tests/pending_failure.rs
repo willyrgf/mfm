@@ -4,7 +4,7 @@ use mfm_journal::{decode_frame, seal_frame};
 use mfm_program::*;
 use mfm_program_derive::MfmValue;
 use mfm_runtime::{
-    EffectAdapterOutcome, InvocationFailure, RecoveryDecision, RunViewState, Runtime,
+    EffectAdapterOutcome, InvocationFailure, RecoveryOutcome, RunViewState, Runtime,
     RuntimeAssemblyBuilder, RuntimeError,
 };
 use mfm_store::{MemoryStore, Store};

@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RunState {
-    pub(crate) phase: Phase,
+pub(crate) struct RunRecord {
+    pub(crate) program_ref: ContentRef,
+    pub(crate) operation: RecordedOperation,
     pub(crate) checkpoints: Vec<Checkpoint>,
     pub(crate) usage: Vec<StateUsage>,
     pub(crate) effect_barrier: Option<StatePosition>,
@@ -56,17 +57,6 @@ pub struct Settlement {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Phase {
-    Runnable(Call),
-    EffectPending(EffectCall),
-    AwaitingInterpretation(Settlement),
-    AwaitingRecovery(Failure),
-    Succeeded(Object),
-    Failed(TerminalFailure),
-}
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[serde(rename_all = "snake_case")]
 /// The complete facts of an executed State operation.
 pub enum StateCall {
     /// Deterministic execution.
@@ -85,28 +75,25 @@ pub enum StateCall {
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// A declared domain failure with its original State operation.
-pub struct DomainFailure {
-    pub(crate) call: StateCall,
-    pub(crate) original: Object,
-}
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-/// An operational observation failure without fabricated evidence.
-pub struct ReadFailure {
-    pub(crate) call: Call,
-    pub(crate) intent: Object,
-    pub(crate) original: Object,
-}
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 /// The original declared failure awaiting or retained by recovery.
 pub enum Failure {
     /// A State-declared domain failure.
-    Domain(DomainFailure),
+    Domain {
+        /// Completed State operation.
+        call: StateCall,
+        /// Original declared failure.
+        original: Object,
+    },
     /// An operational Read failure.
-    Read(ReadFailure),
+    Read {
+        /// Failed observation occurrence.
+        call: Call,
+        /// Prepared intent.
+        intent: Object,
+        /// Original operational error.
+        original: Object,
+    },
     /// An operational Effect failure retaining command authority.
     PendingEffect {
         /// Unchanged prepared command and execution.
@@ -118,28 +105,7 @@ pub enum Failure {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum TerminalFailure {
-    Domain {
-        failure: DomainFailure,
-        reason: StopReason,
-        root: Object,
-    },
-    Read {
-        failure: ReadFailure,
-        reason: StopReason,
-    },
-}
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RunCommit {
-    pub(crate) program_ref: ContentRef,
-    pub(crate) state: RunState,
-    pub(crate) facts: OperationFacts,
-}
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum OperationFacts {
+pub(crate) enum RecordedOperation {
     Admitted {
         program: Object,
         initial: Object,
@@ -155,14 +121,14 @@ pub(crate) enum OperationFacts {
         failure: Failure,
         classification: Classification,
         request: RecoveryRequest,
-        decision: RecoveryDecision,
+        outcome: RecoveryOutcome,
     },
 }
 
 /// The action authorized and committed by Runtime, distinct from the handler's request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RecoveryDecision {
+pub enum RecoveryOutcome {
     /// Retry the same Read or reconcile the unchanged pending Effect.
     Retry,
     /// Restore the selected active checkpoint.
@@ -174,6 +140,8 @@ pub enum RecoveryDecision {
     Stop {
         /// Exact reason the request did not authorize another action.
         reason: StopReason,
+        /// Mapped domain root; absent for operational failures.
+        root: Option<Object>,
     },
 }
 
@@ -222,31 +190,35 @@ impl Failure {
     /// Returns the complete executed input and occurrence.
     pub fn call(&self) -> &Call {
         match self {
-            Self::Domain(failure) => failure.call.call(),
-            Self::Read(failure) => &failure.call,
+            Self::Domain { call, .. } => call.call(),
+            Self::Read { call, .. } => call,
             Self::PendingEffect { effect, .. } => &effect.call,
         }
     }
     /// Returns the retained original without mapping or classification.
     pub fn original(&self) -> &Object {
         match self {
-            Self::Domain(failure) => &failure.original,
-            Self::Read(failure) => &failure.original,
+            Self::Domain { original, .. } | Self::Read { original, .. } => original,
             Self::PendingEffect { original, .. } => original,
         }
     }
     pub(crate) fn phase(&self) -> mfm_program::ExecutionPhase {
         match self {
-            Self::Domain(failure) => failure.call.phase(),
-            Self::Read(_) => mfm_program::ExecutionPhase::Read,
+            Self::Domain { call, .. } => call.phase(),
+            Self::Read { .. } => mfm_program::ExecutionPhase::Read,
             Self::PendingEffect { .. } => mfm_program::ExecutionPhase::EffectPending,
         }
     }
 }
-impl RunState {
-    pub(crate) fn initial(executable: &ExecutableProgram, input: Object) -> Result<Self> {
-        let mut state = Self {
-            phase: Phase::Succeeded(input.clone()),
+impl RunRecord {
+    pub(crate) fn initial(
+        executable: &ExecutableProgram,
+        program: Object,
+        initial: Object,
+    ) -> Result<Self> {
+        let mut record = Self {
+            program_ref: executable.program.content_ref().clone(),
+            operation: RecordedOperation::Admitted { program, initial },
             checkpoints: Vec::new(),
             usage: vec![
                 StateUsage {
@@ -257,38 +229,29 @@ impl RunState {
             ],
             effect_barrier: None,
         };
-        if !executable.declarations.is_empty() {
-            state.enter(
-                executable,
-                Call {
-                    position: ExecutionPosition {
-                        state: StatePosition::new(0)
-                            .map_err(|_| invalid(StateInvariant::Position))?,
-                        visit: VisitId::new(0),
-                    },
-                    input,
-                },
-            );
-        }
-        Ok(state)
+        record.enter(executable)?;
+        Ok(record)
     }
-    pub(crate) fn enter(&mut self, executable: &ExecutableProgram, call: Call) {
-        if executable.declarations[call.position.state.index()].is_checkpoint {
-            match self
-                .checkpoints
-                .binary_search_by_key(&call.position.state, |checkpoint| checkpoint.position)
-            {
-                Ok(index) => self.checkpoints[index].input = call.input.clone(),
-                Err(index) => self.checkpoints.insert(
-                    index,
-                    Checkpoint {
-                        position: call.position.state,
-                        input: call.input.clone(),
-                    },
-                ),
+    pub(crate) fn enter(&mut self, executable: &ExecutableProgram) -> Result<()> {
+        if let Continuation::Runnable {
+            position, input, ..
+        } = self.continuation(executable)?
+        {
+            if executable.declarations[position.state.index()].is_checkpoint {
+                let checkpoint = Checkpoint {
+                    position: position.state,
+                    input: input.clone(),
+                };
+                match self
+                    .checkpoints
+                    .binary_search_by_key(&position.state, |entry| entry.position)
+                {
+                    Ok(index) => self.checkpoints[index] = checkpoint,
+                    Err(index) => self.checkpoints.insert(index, checkpoint),
+                }
             }
         }
-        self.phase = Phase::Runnable(call);
+        Ok(())
     }
     pub(crate) fn usage(&self, position: StatePosition) -> Result<RecoveryUsage> {
         let current = self
@@ -339,12 +302,12 @@ impl RunState {
         executable: &ExecutableProgram,
         failure: &Failure,
         request: RecoveryRequest,
-    ) -> Result<RecoveryDecision> {
+    ) -> Result<RecoveryOutcome> {
         use mfm_program::ExecutionPhase;
         let position = failure.call().position.state;
         let used = self.usage(position)?;
         let allowance = executable.program.declarations()[position.index()].allowances();
-        let stop = |reason| Ok(RecoveryDecision::Stop { reason });
+        let stop = |reason| Ok(RecoveryOutcome::Stop { reason, root: None });
         match request {
             RecoveryRequest::Stop => return stop(StopReason::Requested),
             RecoveryRequest::RetryState => match failure.phase() {
@@ -384,8 +347,8 @@ impl RunState {
             _ if used.run_decisions >= executable.program.limits().max_recovery_decisions() => {
                 stop(StopReason::Exhausted(RecoveryLimit::Run))
             }
-            RecoveryRequest::RetryState => Ok(RecoveryDecision::Retry),
-            RecoveryRequest::Restart(target) => Ok(RecoveryDecision::Restart {
+            RecoveryRequest::RetryState => Ok(RecoveryOutcome::Retry),
+            RecoveryRequest::Restart(target) => Ok(RecoveryOutcome::Restart {
                 checkpoint: target.position(),
             }),
             RecoveryRequest::Stop => stop(StopReason::Requested),
@@ -393,7 +356,7 @@ impl RunState {
     }
 }
 
-impl RunCommit {
+impl RunRecord {
     /// Validates this record only. No predecessor or historical state is available here.
     pub(crate) fn validate_current(
         &self,
@@ -409,7 +372,7 @@ impl RunCommit {
                 actual: Box::new(self.program_ref.clone()),
             }));
         }
-        let state = &self.state;
+        let state = self;
         if state.usage.len() != executable.declarations.len() {
             return Err(invalid(StateInvariant::Usage));
         }
@@ -512,31 +475,33 @@ impl RunCommit {
                 _ => Err(invalid(StateInvariant::Mode)),
             }
         };
-        let read_failure = |failure: &ReadFailure| -> Result<()> {
-            call(&failure.call)?;
-            let Execution::Read {
-                intent_contract_ref,
-                error_contract_ref,
-                ..
-            } = executable.program.declarations()[failure.call.position.state.index()].execution()
-            else {
-                return Err(invalid(StateInvariant::Mode));
-            };
-            check(&failure.intent, intent_contract_ref)?;
-            check(&failure.original, error_contract_ref)
-        };
-        let domain_failure = |failure: &DomainFailure| -> Result<()> {
-            state_call(&failure.call)?;
-            check(
-                &failure.original,
-                executable.program.declarations()[failure.call.call().position.state.index()]
-                    .failure_contract_ref(),
-            )
-        };
-        let failure = |failure: &Failure| -> Result<()> {
-            match failure {
-                Failure::Domain(value) => domain_failure(value),
-                Failure::Read(value) => read_failure(value),
+        let failure = |value: &Failure| -> Result<()> {
+            match value {
+                Failure::Domain { call, original } => {
+                    state_call(call)?;
+                    check(
+                        original,
+                        executable.program.declarations()[call.call().position.state.index()]
+                            .failure_contract_ref(),
+                    )
+                }
+                Failure::Read {
+                    call: value,
+                    intent,
+                    original,
+                } => {
+                    call(value)?;
+                    let Execution::Read {
+                        intent_contract_ref,
+                        error_contract_ref,
+                        ..
+                    } = executable.program.declarations()[value.position.state.index()].execution()
+                    else {
+                        return Err(invalid(StateInvariant::Mode));
+                    };
+                    check(intent, intent_contract_ref)?;
+                    check(original, error_contract_ref)
+                }
                 Failure::PendingEffect {
                     effect: value,
                     original,
@@ -553,61 +518,117 @@ impl RunCommit {
                 }
             }
         };
-        let terminal = |failure: &TerminalFailure| -> Result<()> {
-            match failure {
-                TerminalFailure::Domain { failure, root, .. } => {
-                    domain_failure(failure)?;
-                    check(root, executable.program.root_failure_contract_ref())
+        if matches!(&self.operation, RecordedOperation::Admitted { .. }) != (sequence == 1) {
+            return Err(invalid(StateInvariant::Facts));
+        }
+        match &self.operation {
+            RecordedOperation::Admitted { program, initial } => {
+                if program.value_ref() != &self.program_ref
+                    || program.canonical_bytes() != executable.program.canonical_bytes()
+                    || initial.value_ref() != executable.program.initial_value_ref()
+                    || self
+                        .usage
+                        .iter()
+                        .any(|used| used.retries != 0 || used.restarts != 0)
+                    || self.effect_barrier.is_some()
+                {
+                    return Err(invalid(StateInvariant::Facts));
                 }
-                TerminalFailure::Read { failure, .. } => read_failure(failure),
+                check(initial, executable.program.admitted_context_contract_ref())?;
             }
-        };
-        let active = match &state.phase {
-            Phase::Runnable(value) => {
-                call(value)?;
-                Some(value)
+            RecordedOperation::Succeeded { call, output } => {
+                state_call(call)?;
+                check(
+                    output,
+                    executable.program.declarations()[call.call().position.state.index()]
+                        .output_contract_ref(),
+                )?;
             }
-            Phase::EffectPending(value) => {
-                effect(value)?;
-                Some(&value.call)
-            }
-            Phase::AwaitingInterpretation(value) => {
-                settlement(value)?;
-                Some(&value.effect.call)
-            }
-            Phase::AwaitingRecovery(value) => {
+            RecordedOperation::Failed(value) => failure(value)?,
+            RecordedOperation::EffectPrepared(value) => effect(value)?,
+            RecordedOperation::EffectSettled(value) => settlement(value)?,
+            RecordedOperation::Recovered {
+                failure: value,
+                request,
+                outcome,
+                ..
+            } => {
                 failure(value)?;
-                Some(value.call())
-            }
-            Phase::Failed(value) => {
-                terminal(value)?;
-                Some(match value {
-                    TerminalFailure::Domain { failure, .. } => failure.call.call(),
-                    TerminalFailure::Read { failure, .. } => &failure.call,
-                })
-            }
-            Phase::Succeeded(value) => {
-                check(value, executable.program.root_success_contract_ref())?;
-                match &self.facts {
-                    OperationFacts::Succeeded { call, .. } => Some(call.call()),
-                    _ => None,
+                let position = value.call().position.state;
+                match outcome {
+                    RecoveryOutcome::Retry => {
+                        if *request != RecoveryRequest::RetryState
+                            || self.usage(position)?.state_retries == 0
+                        {
+                            return Err(invalid(StateInvariant::Facts));
+                        }
+                        if !matches!(
+                            value.phase(),
+                            mfm_program::ExecutionPhase::Read
+                                | mfm_program::ExecutionPhase::EffectPending
+                        ) {
+                            return Err(invalid(StateInvariant::Mode));
+                        }
+                    }
+                    RecoveryOutcome::Restart { checkpoint } => {
+                        if !matches!(request, RecoveryRequest::Restart(target) if target.position() == *checkpoint)
+                            || matches!(
+                                value.phase(),
+                                mfm_program::ExecutionPhase::EffectPending
+                                    | mfm_program::ExecutionPhase::EffectSettled
+                            )
+                            || self.usage(position)?.state_restarts == 0
+                            || !self.eligible(executable, position, *checkpoint)
+                        {
+                            return Err(invalid(StateInvariant::Facts));
+                        }
+                    }
+                    RecoveryOutcome::Stop { reason, root } => {
+                        if !matches!(self.authorize(executable, value, *request)?, RecoveryOutcome::Stop { reason: expected, .. } if expected == *reason)
+                        {
+                            return Err(invalid(StateInvariant::Facts));
+                        }
+                        match (value, root) {
+                            (Failure::Domain { .. }, Some(root)) => {
+                                check(root, executable.program.root_failure_contract_ref())?
+                            }
+                            (Failure::Read { .. } | Failure::PendingEffect { .. }, None) => {}
+                            _ => return Err(invalid(StateInvariant::Facts)),
+                        }
+                    }
                 }
             }
-        };
-        if state
+        }
+        let continuation = self.continuation(executable)?;
+        let active = continuation.active();
+        if let Continuation::Runnable {
+            position, input, ..
+        } = &continuation
+        {
+            let declaration = executable
+                .program
+                .declarations()
+                .get(position.state.index())
+                .ok_or_else(|| invalid(StateInvariant::Position))?;
+            check(input, declaration.input_contract_ref())?;
+        }
+        if let Continuation::Succeeded { output, .. } = &continuation {
+            check(output, executable.program.root_success_contract_ref())?;
+        }
+        if self
             .checkpoints
             .windows(2)
             .any(|pair| pair[0].position >= pair[1].position)
         {
             return Err(invalid(StateInvariant::Checkpoint));
         }
-        for checkpoint in &state.checkpoints {
+        for checkpoint in &self.checkpoints {
             let declaration = executable
                 .declarations
                 .get(checkpoint.position.index())
                 .ok_or_else(|| invalid(StateInvariant::Checkpoint))?;
             if !declaration.is_checkpoint
-                || active.is_none_or(|call| checkpoint.position > call.position.state)
+                || active.is_none_or(|(position, _)| checkpoint.position > position.state)
             {
                 return Err(invalid(StateInvariant::Checkpoint));
             }
@@ -616,20 +637,20 @@ impl RunCommit {
                 executable.program.declarations()[checkpoint.position.index()].input_contract_ref(),
             )?;
         }
-        if let Some(active) = active {
+        if let Some((position, input)) = active {
             let declaration = executable
                 .declarations
-                .get(active.position.state.index())
+                .get(position.state.index())
                 .ok_or_else(|| invalid(StateInvariant::Position))?;
             if declaration.is_checkpoint
-                && !state.checkpoints.iter().any(|checkpoint| {
-                    checkpoint.position == active.position.state && checkpoint.input == active.input
+                && !self.checkpoints.iter().any(|checkpoint| {
+                    checkpoint.position == position.state && &checkpoint.input == input
                 })
             {
                 return Err(invalid(StateInvariant::Checkpoint));
             }
         }
-        if let Some(barrier) = state.effect_barrier {
+        if let Some(barrier) = self.effect_barrier {
             if !matches!(
                 executable
                     .program
@@ -637,172 +658,10 @@ impl RunCommit {
                     .get(barrier.index())
                     .map(|declaration| declaration.execution()),
                 Some(Execution::Effect { .. })
-            ) {
-                return Err(invalid(StateInvariant::Barrier));
-            }
-            if active.is_none_or(|call| barrier > call.position.state)
-                || matches!(&state.phase, Phase::Runnable(call) if barrier >= call.position.state)
+            ) || active.is_none_or(|(position, _)| barrier > position.state)
+                || matches!(continuation, Continuation::Runnable { position, .. } if barrier >= position.state)
             {
                 return Err(invalid(StateInvariant::Barrier));
-            }
-        }
-        let same_phase = |expected: Phase| {
-            if state.phase == expected {
-                Ok(())
-            } else {
-                Err(invalid(StateInvariant::Facts))
-            }
-        };
-        match &self.facts {
-            OperationFacts::Admitted { program, initial } => {
-                if sequence != 1
-                    || program.value_ref() != &self.program_ref
-                    || program.canonical_bytes() != executable.program.canonical_bytes()
-                    || initial.value_ref() != executable.program.initial_value_ref()
-                {
-                    return Err(invalid(StateInvariant::Facts));
-                }
-                check(initial, executable.program.admitted_context_contract_ref())?;
-                if state != &RunState::initial(executable, initial.clone())? {
-                    return Err(invalid(StateInvariant::Facts));
-                }
-            }
-            facts => {
-                if sequence <= 1 {
-                    return Err(invalid(StateInvariant::Facts));
-                }
-                match facts {
-                    OperationFacts::Succeeded {
-                        call: completed,
-                        output,
-                    } => {
-                        state_call(completed)?;
-                        let position = completed.call().position;
-                        check(
-                            output,
-                            executable.program.declarations()[position.state.index()]
-                                .output_contract_ref(),
-                        )?;
-                        if position.state.index() + 1 == executable.declarations.len() {
-                            same_phase(Phase::Succeeded(output.clone()))?;
-                        } else {
-                            same_phase(Phase::Runnable(Call {
-                                position: ExecutionPosition {
-                                    state: StatePosition::new(position.state.index() + 1)
-                                        .map_err(|_| invalid(StateInvariant::Position))?,
-                                    visit: position
-                                        .visit
-                                        .checked_next()
-                                        .map_err(|_| invalid(StateInvariant::Position))?,
-                                },
-                                input: output.clone(),
-                            }))?;
-                        }
-                    }
-                    OperationFacts::Failed(value) => {
-                        failure(value)?;
-                        same_phase(Phase::AwaitingRecovery(value.clone()))?;
-                    }
-                    OperationFacts::EffectPrepared(value) => {
-                        effect(value)?;
-                        same_phase(Phase::EffectPending(value.clone()))?;
-                    }
-                    OperationFacts::EffectSettled(value) => {
-                        settlement(value)?;
-                        same_phase(Phase::AwaitingInterpretation(value.clone()))?;
-                    }
-                    OperationFacts::Recovered {
-                        failure: value,
-                        request,
-                        decision,
-                        ..
-                    } => {
-                        failure(value)?;
-                        let position = value.call().position;
-                        match decision {
-                            RecoveryDecision::Retry => {
-                                if *request != RecoveryRequest::RetryState
-                                    || state.usage(position.state)?.state_retries == 0
-                                {
-                                    return Err(invalid(StateInvariant::Facts));
-                                }
-                                match value {
-                                    value if value.phase() == mfm_program::ExecutionPhase::Read => {
-                                        same_phase(Phase::Runnable(Call {
-                                            position: ExecutionPosition {
-                                                state: position.state,
-                                                visit: position.visit.checked_next().map_err(
-                                                    |_| invalid(StateInvariant::Position),
-                                                )?,
-                                            },
-                                            input: value.call().input.clone(),
-                                        }))?
-                                    }
-                                    Failure::PendingEffect { effect, .. } => {
-                                        same_phase(Phase::EffectPending(effect.clone()))?
-                                    }
-                                    _ => return Err(invalid(StateInvariant::Mode)),
-                                }
-                            }
-                            RecoveryDecision::Restart { checkpoint } => {
-                                if !matches!(request, RecoveryRequest::Restart(target) if target.position() == *checkpoint)
-                                    || matches!(
-                                        value.phase(),
-                                        mfm_program::ExecutionPhase::EffectPending
-                                            | mfm_program::ExecutionPhase::EffectSettled
-                                    )
-                                    || state.usage(position.state)?.state_restarts == 0
-                                    || !state.eligible(executable, position.state, *checkpoint)
-                                {
-                                    return Err(invalid(StateInvariant::Facts));
-                                }
-                                let retained = state
-                                    .checkpoints
-                                    .iter()
-                                    .find(|entry| entry.position == *checkpoint)
-                                    .ok_or_else(|| invalid(StateInvariant::Checkpoint))?;
-                                same_phase(Phase::Runnable(Call {
-                                    position: ExecutionPosition {
-                                        state: *checkpoint,
-                                        visit: position
-                                            .visit
-                                            .checked_next()
-                                            .map_err(|_| invalid(StateInvariant::Position))?,
-                                    },
-                                    input: retained.input.clone(),
-                                }))?;
-                            }
-                            RecoveryDecision::Stop { reason } => {
-                                if state.authorize(executable, value, *request)? != *decision {
-                                    return Err(invalid(StateInvariant::Facts));
-                                }
-                                match (value, &state.phase) {
-                                    (
-                                        Failure::Domain(value),
-                                        Phase::Failed(TerminalFailure::Domain {
-                                            failure,
-                                            reason: retained,
-                                            ..
-                                        }),
-                                    ) if value == failure && reason == retained => {}
-                                    (
-                                        Failure::Read(value),
-                                        Phase::Failed(TerminalFailure::Read {
-                                            failure,
-                                            reason: retained,
-                                        }),
-                                    ) if value == failure && reason == retained => {}
-                                    (
-                                        Failure::PendingEffect { effect, .. },
-                                        Phase::EffectPending(retained),
-                                    ) if effect == retained => {}
-                                    _ => return Err(invalid(StateInvariant::Facts)),
-                                }
-                            }
-                        }
-                    }
-                    OperationFacts::Admitted { .. } => return Err(invalid(StateInvariant::Facts)),
-                }
             }
         }
         Ok(())
@@ -843,32 +702,7 @@ impl Settlement {
         &self.evidence
     }
 }
-impl DomainFailure {
-    /// Returns the completed State operation and its accepted evidence when applicable.
-    pub const fn call(&self) -> &StateCall {
-        &self.call
-    }
-    /// Returns the original declared failure before any root mapping.
-    pub const fn original(&self) -> &Object {
-        &self.original
-    }
-}
-impl ReadFailure {
-    /// Returns the failed observation's execution and input.
-    pub const fn call(&self) -> &Call {
-        &self.call
-    }
-    /// Returns the exact prepared intent.
-    pub const fn intent(&self) -> &Object {
-        &self.intent
-    }
-    /// Returns the original operational cause.
-    pub const fn original(&self) -> &Object {
-        &self.original
-    }
-}
-
-impl RunCommit {
+impl RunRecord {
     pub(crate) fn object_payload_bytes(&self) -> Result<u64> {
         fn object(value: &Object) -> u64 {
             value.canonical_bytes().len() as u64
@@ -893,48 +727,175 @@ impl RunCommit {
                 StateCall::Effect(value) => settlement(value),
             }
         }
-        fn domain(value: &DomainFailure) -> u64 {
-            state_call(&value.call) + object(&value.original)
-        }
-        fn read(value: &ReadFailure) -> u64 {
-            call(&value.call) + object(&value.intent) + object(&value.original)
-        }
         fn failure(value: &Failure) -> u64 {
             match value {
-                Failure::Domain(value) => domain(value),
-                Failure::Read(value) => read(value),
+                Failure::Domain { call, original } => state_call(call) + object(original),
+                Failure::Read {
+                    call: value,
+                    intent,
+                    original,
+                } => call(value) + object(intent) + object(original),
                 Failure::PendingEffect {
                     effect: value,
                     original,
                 } => effect(value) + object(original),
             }
         }
-        let phase = match &self.state.phase {
-            Phase::Runnable(value) => call(value),
-            Phase::EffectPending(value) => effect(value),
-            Phase::AwaitingInterpretation(value) => settlement(value),
-            Phase::AwaitingRecovery(value) => failure(value),
-            Phase::Succeeded(value) => object(value),
-            Phase::Failed(TerminalFailure::Domain { failure, root, .. }) => {
-                domain(failure) + object(root)
-            }
-            Phase::Failed(TerminalFailure::Read { failure, .. }) => read(failure),
-        };
-        let facts = match &self.facts {
-            OperationFacts::Admitted { program, initial } => object(program) + object(initial),
-            OperationFacts::Succeeded { call, output } => state_call(call) + object(output),
-            OperationFacts::Failed(value) | OperationFacts::Recovered { failure: value, .. } => {
+        let facts = match &self.operation {
+            RecordedOperation::Admitted { program, initial } => object(program) + object(initial),
+            RecordedOperation::Succeeded { call, output } => state_call(call) + object(output),
+            RecordedOperation::Failed(value) => failure(value),
+            RecordedOperation::Recovered {
+                failure: value,
+                outcome,
+                ..
+            } => {
                 failure(value)
+                    + match outcome {
+                        RecoveryOutcome::Stop {
+                            root: Some(root), ..
+                        } => object(root),
+                        _ => 0,
+                    }
             }
-            OperationFacts::EffectPrepared(value) => effect(value),
-            OperationFacts::EffectSettled(value) => settlement(value),
+            RecordedOperation::EffectPrepared(value) => effect(value),
+            RecordedOperation::EffectSettled(value) => settlement(value),
         };
-        self.state
-            .checkpoints
-            .iter()
-            .try_fold(phase + facts, |sum, checkpoint| {
-                sum.checked_add(object(&checkpoint.input))
-                    .ok_or(RuntimeError::ArithmeticOverflow)
-            })
+        self.checkpoints.iter().try_fold(facts, |sum, checkpoint| {
+            sum.checked_add(object(&checkpoint.input))
+                .ok_or(RuntimeError::ArithmeticOverflow)
+        })
+    }
+}
+
+// This borrowed selection is computed from the current operation, never stored beside it.
+pub(crate) enum Continuation<'a> {
+    Runnable {
+        position: ExecutionPosition,
+        input: &'a Object,
+        reason: crate::RunnableReason,
+    },
+    EffectPending {
+        effect: &'a EffectCall,
+        latest_failure: Option<(&'a Object, &'a RecoveryOutcome)>,
+    },
+    AwaitingInterpretation(&'a Settlement),
+    AwaitingRecovery(&'a Failure),
+    Succeeded {
+        output: &'a Object,
+        completed: Option<&'a Call>,
+    },
+    Failed {
+        failure: &'a Failure,
+        reason: StopReason,
+        root: Option<&'a Object>,
+    },
+}
+impl Continuation<'_> {
+    pub(crate) fn active(&self) -> Option<(ExecutionPosition, &Object)> {
+        let call = match self {
+            Self::Runnable {
+                position, input, ..
+            } => return Some((*position, input)),
+            Self::EffectPending { effect, .. } => &effect.call,
+            Self::AwaitingInterpretation(value) => &value.effect.call,
+            Self::AwaitingRecovery(value) | Self::Failed { failure: value, .. } => value.call(),
+            Self::Succeeded { completed, .. } => (*completed)?,
+        };
+        Some((call.position, &call.input))
+    }
+}
+impl RunRecord {
+    pub(crate) fn continuation(&self, executable: &ExecutableProgram) -> Result<Continuation<'_>> {
+        let position_error = |source| {
+            RuntimeError::native(
+                crate::Operation::Restore,
+                mfm_values::NativeCause::from_error(source),
+            )
+        };
+        let runnable = |state, visit, input, reason| Continuation::Runnable {
+            position: ExecutionPosition { state, visit },
+            input,
+            reason,
+        };
+        let next_visit =
+            |position: ExecutionPosition| position.visit.checked_next().map_err(position_error);
+        Ok(match &self.operation {
+            RecordedOperation::Admitted { initial, .. } if executable.declarations.is_empty() => {
+                Continuation::Succeeded {
+                    output: initial,
+                    completed: None,
+                }
+            }
+            RecordedOperation::Admitted { initial, .. } => runnable(
+                StatePosition::new(0).map_err(position_error)?,
+                VisitId::new(0),
+                initial,
+                crate::RunnableReason::Advance,
+            ),
+            RecordedOperation::Succeeded { call, output } => {
+                let position = call.call().position;
+                if position.state.index() + 1 == executable.declarations.len() {
+                    Continuation::Succeeded {
+                        output,
+                        completed: Some(call.call()),
+                    }
+                } else {
+                    runnable(
+                        StatePosition::new(position.state.index() + 1).map_err(position_error)?,
+                        next_visit(position)?,
+                        output,
+                        crate::RunnableReason::Advance,
+                    )
+                }
+            }
+            RecordedOperation::Failed(value) => Continuation::AwaitingRecovery(value),
+            RecordedOperation::EffectPrepared(effect) => Continuation::EffectPending {
+                effect,
+                latest_failure: None,
+            },
+            RecordedOperation::EffectSettled(value) => Continuation::AwaitingInterpretation(value),
+            RecordedOperation::Recovered {
+                failure, outcome, ..
+            } => {
+                let position = failure.call().position;
+                match (failure, outcome) {
+                    (
+                        Failure::PendingEffect { effect, original },
+                        RecoveryOutcome::Retry | RecoveryOutcome::Stop { .. },
+                    ) => Continuation::EffectPending {
+                        effect,
+                        latest_failure: Some((original, outcome)),
+                    },
+                    (_, RecoveryOutcome::Retry) => runnable(
+                        position.state,
+                        next_visit(position)?,
+                        &failure.call().input,
+                        crate::RunnableReason::Retry,
+                    ),
+                    (_, RecoveryOutcome::Restart { checkpoint }) => {
+                        let input = &self
+                            .checkpoints
+                            .iter()
+                            .find(|entry| entry.position == *checkpoint)
+                            .ok_or_else(|| invalid(StateInvariant::Checkpoint))?
+                            .input;
+                        runnable(
+                            *checkpoint,
+                            next_visit(position)?,
+                            input,
+                            crate::RunnableReason::Restart {
+                                checkpoint: *checkpoint,
+                            },
+                        )
+                    }
+                    (_, RecoveryOutcome::Stop { reason, root }) => Continuation::Failed {
+                        failure,
+                        reason: *reason,
+                        root: root.as_ref(),
+                    },
+                }
+            }
+        })
     }
 }

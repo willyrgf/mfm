@@ -139,18 +139,18 @@ async fn pending_json_retains_the_committed_original_cause_and_decision() {
     );
     let RunViewState::EffectPending {
         latest_failure: Some(failure),
-        ..
+        effect,
     } = observed.state()
     else {
         panic!("original cause")
     };
     assert_eq!(
         model["state"]["latest_failure"]["error"]["value_ref"],
-        serde_json::to_value(failure.incident.error().value_ref()).unwrap()
+        serde_json::to_value(failure.0.value_ref()).unwrap()
     );
     assert_eq!(
         model["state"]["latest_failure"]["input"]["value_ref"],
-        serde_json::to_value(failure.incident.input().value_ref()).unwrap()
+        serde_json::to_value(effect.call().input().value_ref()).unwrap()
     );
     assert_eq!(model["state"]["latest_failure"]["mode"], "effect");
     assert_eq!(

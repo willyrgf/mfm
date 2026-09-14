@@ -517,7 +517,7 @@ pub fn register_fixture_states(builder: &mut RuntimeAssemblyBuilder) -> mfm_runt
 }
 
 pub fn root_failure<F: MfmValue>(report: &mfm_runtime::FailureReport) -> F {
-    let mfm_runtime::FailureCauseView::Domain { root, .. } = report.cause() else {
+    let Some(root) = report.root() else {
         panic!("expected domain failure")
     };
     root.decode::<F>().unwrap()

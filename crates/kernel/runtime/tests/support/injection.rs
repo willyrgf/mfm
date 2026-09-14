@@ -167,9 +167,10 @@ async fn injected_effects_resume_and_projection_failure_retains_the_root_mapping
     let RunViewState::Failed(report) = finished.state() else {
         panic!("projection domain failure")
     };
-    let mfm_runtime::FailureCauseView::Domain { original, root } = report.cause() else {
+    let mfm_runtime::Failure::Domain { original, .. } = report.failure() else {
         panic!("typed domain cause")
     };
+    let root = report.root().unwrap();
     assert_eq!(original.decode::<Number>().unwrap().value, 2);
     assert_eq!(root.decode::<Number>().unwrap().value, 2);
     assert_eq!(finished.head_sequence(), 11);

@@ -2,7 +2,7 @@ use mfm_capabilities::AdapterError;
 use mfm_evm::*;
 use mfm_ids::{DigestBytes, RunId};
 use mfm_portfolio::*;
-use mfm_runtime::{FailureCauseView, RunViewState, Runtime, RuntimeAssemblyBuilder};
+use mfm_runtime::{RunViewState, Runtime, RuntimeAssemblyBuilder};
 use std::{
     num::NonZeroU64,
     sync::{
@@ -116,9 +116,10 @@ async fn planned_native_and_token_collections_execute_and_reconstruct_typed_fail
                 assert_eq!(observed_calls, if token { 5 } else { 4 });
             }
             (1, RunViewState::Failed(report)) => {
-                let FailureCauseView::Domain { original, root } = report.cause() else {
+                let mfm_runtime::Failure::Domain { original, .. } = report.failure() else {
                     panic!("original and root domain failures")
                 };
+                let root = report.root().unwrap();
                 assert!(matches!(
                     original.decode::<EvmBalanceFailure>().unwrap(),
                     EvmBalanceFailure::SourceUnavailable {
@@ -132,21 +133,21 @@ async fn planned_native_and_token_collections_execute_and_reconstruct_typed_fail
                 ));
             }
             (2, RunViewState::Failed(report)) => {
-                let FailureCauseView::Adapter(incident) = report.cause() else {
-                    panic!("typed adapter incident")
-                };
+                let incident = report.failure();
+                assert!(matches!(incident, mfm_runtime::Failure::Read { .. }));
                 assert_eq!(
                     incident
-                        .error()
+                        .original()
                         .decode::<EvmOperationalError>()
                         .unwrap()
                         .kind(),
                     mfm_evm::EvmOperationalKind::Timeout
                 );
-                let mfm_runtime::AdapterIncidentView::Read { input, intent, .. } = incident else {
+                let mfm_runtime::Failure::Read { call, intent, .. } = incident else {
                     panic!("Read invocation facts")
                 };
-                let context = input
+                let context = call
+                    .input()
                     .decode::<EvmBalanceContext<mfm_portfolio::PortfolioContinuation>>()
                     .unwrap();
                 let expected = <ReadTokenDecimals<mfm_portfolio::PortfolioContinuation> as mfm_program::ReadState<EvmBalanceRead>>::prepare(&context).unwrap();
@@ -281,12 +282,11 @@ async fn enrichment_retains_native_and_nonzero_candidates_and_never_filters_prov
                 );
             }
             RunViewState::Failed(report) if fail => {
-                let FailureCauseView::Adapter(incident) = report.cause() else {
-                    panic!("typed provider cause");
-                };
+                let incident = report.failure();
+                assert!(matches!(incident, mfm_runtime::Failure::Read { .. }));
                 assert_eq!(
                     incident
-                        .error()
+                        .original()
                         .decode::<EvmOperationalError>()
                         .unwrap()
                         .kind(),

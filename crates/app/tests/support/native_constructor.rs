@@ -30,7 +30,7 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
     let frame = mfm_journal::decode_frame(loaded.latest()).unwrap();
     let commit: serde_json::Value = serde_json::from_slice(frame.payload().as_bytes()).unwrap();
     let original: Object =
-        serde_json::from_value(commit["state"]["phase"]["runnable"]["input"].clone()).unwrap();
+        serde_json::from_value(commit["operation"]["succeeded"]["output"].clone()).unwrap();
     let mut input: serde_json::Value = serde_json::from_slice(original.canonical_bytes()).unwrap();
     let ordinary: BalanceInput = serde_json::from_slice(original.canonical_bytes()).unwrap();
     assert_eq!(
@@ -97,7 +97,7 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
             }
         }
         if mutation != 0 {
-            current["state"]["phase"]["runnable"]["input"] = replacement;
+            current["operation"]["succeeded"]["output"] = replacement;
         } else {
             replace_object(
                 &mut current,
