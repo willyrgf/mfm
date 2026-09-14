@@ -41,6 +41,13 @@ frame/run/terminal-report limits remain with their owners. Invocation field conv
 the fixed encoding_failed/panicked markers and primary SizeViolation. Those markers never replace
 required cause data in a successfully admitted operational original.
 
+Reuse Part 1's owned public RunView and FailureReport, which retain Failure/EffectCall/Settlement
+and share Object storage without full-record backing or an owned incident/cause mirror. Required
+public wire distinctions use borrowing serializers. Recording derives its admitted original and
+return disposition from the proposed/acknowledged record; do not restore independent original or
+yield_after arguments. The existing Store selected-row protocol and Journal mfm.run.frame.v6
+envelope remain the inherited persistence boundary.
+
 Part 1 section 6.2 settles malformed framework data rejected by Runtime record Deserialize:
 report parser category, available location and rejection reason through Restore/
 Decode, internal/500 and CLI exit 2. This includes oversized nested stored Objects, without

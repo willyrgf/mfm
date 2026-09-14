@@ -1,6 +1,6 @@
 # RFC part 1: current run continuation and persistence
 
-Status: Part 1 design specified for the K1-K4 implementation handoff. Acceptance requires
+Status: Part 1 handoff awaits the focused design closures listed in section 15. Acceptance requires
 implementation evidence, G1 review and F1 verification. Reviewed 2026-09-14.
 
 Part 1 delivers current continuation/persistence and the invocation error boundary.
@@ -260,8 +260,9 @@ the secret-marker check under section 4.2. GeneralFloatFree and ordinary String/
 rules retain their existing policy. Use DiagnosticFloatFree for the derived FailureReport terminal
 schema too: its embedded Objects have already passed their own typed admission, so the report
 must not reinterpret trusted diagnostic text using a conflicting generic string policy. Advance
-the report schema from version 4 to 5 and update affected owner/schema fixtures together. Test the
-whole error and report contracts, not just a nested-field serializer. No legacy reader or second
+the report schema from version 4 to 5 and its internal domain to mfm.failure-report.v5 in the same
+cutover; update affected owner/schema fixtures together. Test the whole error and report contracts,
+not just a nested-field serializer. No legacy reader or second
 report validation tree is introduced.
 
 Remove the 8 KiB diagnostic budget and all layer/fact/omission counts, reservations, truncation
@@ -541,8 +542,8 @@ enum RecoveryOutcome {
 A root is required for domain Stop and forbidden for Read/pending-Effect Stop; validate that local
 relation. Request and authorized outcome remain distinct because a request may be denied. Reuse
 Program's existing Classification/request/reason vocabulary. Do not add policy mirror enums.
-Inline DomainFailure/ReadFailure payloads here as the TerminalFailure copy disappears; retain a
-separate wrapper only for demonstrated independent reuse, not a differently named extraction view.
+Inline DomainFailure/ReadFailure payloads here as the TerminalFailure copy disappears. Section 10.1
+reuses Failure directly for public inspection; retain no separate owned failure wrapper.
 Program appears as its canonical document Object at admission, without making Program an MfmValue.
 New Runtime enums use external snake_case tags compatible with inline RawValue, reject unknown
 and duplicate fields, and have no MfmValue identity or codec registration.
@@ -664,9 +665,9 @@ metadata and managed PostgreSQL checks in the same commit.
 
 ### 7.4 Store and Journal interface sketch
 
-Replace the complete-prefix load result in the existing Store trait. The future alias below is
-notation for its existing boxed, Send, lifetime-bound future, not a new dependency or executor.
-Keep `append_run` and its Inserted/NotInserted/error dispositions.
+Retain the implemented admission/latest/optional-probe Store interface and physical query protocol.
+The future alias below is notation for its existing boxed, Send, lifetime-bound future, not a new
+dependency or executor. Keep `append_run` and its Inserted/NotInserted/error dispositions.
 
 ```rust
 trait Store: Send + Sync {
@@ -724,15 +725,15 @@ fn seal_frame(
 fn decode_frame(bytes: &[u8]) -> Result<EncodedRunFrame, JournalError>;
 ```
 
-The frame exposes checked identity/header fields and a borrowed canonical payload. Its current
-wire has `domain`, `run_id`, `run_sequence`, `previous_head_digest`, and `payload`; the digest is
-computed from exact canonical frame bytes under the existing hashing rule. Replace the old
-record/object-table wire and its domain marker in the single cutover; retain no old reader.
-Runtime encodes/decodes RunRecord inside payload and owns the payload's exact field/tag contract.
-Keep frame sequence numbering, RunId spelling, digest algorithms and exact-head append checks.
+The frame exposes checked identity/header fields and a borrowed canonical payload. Retain the
+current mfm.run.frame.v6 domain and envelope fields: `domain`, `run_id`, `run_sequence`,
+`previous_head_digest`, and `payload`. The digest uses exact canonical frame bytes under the existing
+hashing rule. K2 changes the Runtime payload to RunRecord and rejects the obsolete payload shape;
+it does not change the Journal envelope protocol or restore an old reader. Keep frame sequence
+numbering, RunId spelling, digest algorithms and exact-head append checks.
 
-A new admission/latest query must not acquire history semantics indirectly through a count/sum
-query or another load helper. Required rows and head metadata come from one repeatable-read
+The retained admission/latest query must not acquire history semantics through a count/sum query
+or another load helper. Required rows and head metadata come from one repeatable-read
 snapshot. The exact candidate probe is the only additional lookup this API permits.
 
 ## 8. Execution and recovery lifecycle
@@ -843,6 +844,30 @@ failure recording is ambiguous, stop before policy. When decision recording is a
 before dispatch. When settlement recording is ambiguous, stop before interpretation. Retain the
 candidate under section 7.2 without granting work from stale or uncertain state; a Store error
 does not start an automatic reconciliation loop.
+
+The final recording entry point is:
+
+```rust
+async fn record(
+    context: DriverContext<'_>,
+    next: RunRecord,
+    operation: Operation,
+) -> Result<DriverDisposition>;
+```
+
+Keep Arc<RunRecord> ownership in Driver and across immediately awaited sealing work. When recording
+fails, obtain the admitted Failure from next.operation's Failed or Recovered variant; other variants
+have no original failure. Clone its Object handles only when an error needs ownership. Do not pass
+an independent original, retain a native original or introduce Arc<Failure>/another custody type.
+Derive continuation/yield behavior from the acknowledged operation under the table above; remove
+yield_after. Known insertion of a recovery decision yields or returns RecoveryStopped. A matching
+NotInserted observation still yields under section 7.2. Retain DriverDisposition's Continue/Yield/
+Failed distinction: an assembled InvocationFailure may already contain a newer checked observation
+than the outer RuntimeError route's caller holds.
+
+K2 removes yield_after with the record/dispatch cutover. K3 removes the native-original argument
+together with ReturnedFailure and the recording payload conversion; preserve the existing native
+route until that coherent cutover rather than introducing an intermediate carrier.
 
 ### 8.6 Typed operation-entry checks
 
@@ -1309,12 +1334,48 @@ stay in the ordinary inventory and are not automatically part of either delivery
 ### 10.1 Current public projection
 
 Keep Runtime `start`, `resume(&RunId)`, and `read(&RunId)` and the existing App/CLI/REST request
-surfaces. RunView remains an owned immutable projection of admission, current commit, and head,
-optionally sharing Arc-backed commit/object data. Its return type gains no borrowing lifetime and
-it is not another mutable continuation model. Do not serialize all checkpoints/usage implementation
-fields as the public RunView merely because RunRecord now implements Serialize.
+surfaces. Keep RunView as an owned immutable public projection. It owns its public result fields
+and shares Object storage; retain no Arc<RunRecord>, checkpoint collection, usage vector or executable
+registration merely to render it. Its return type gains no borrowing lifetime or cached record view.
 
-Add the two new incomplete phase alternatives to the current RunView/App serializer:
+Use these payloads in the existing public state variants:
+
+- EffectPending owns EffectCall and optional (original Object, RecoveryOutcome) from the latest
+  pending-Effect recovery decision. Delete PendingFailureView and owned AdapterIncidentView.
+- AwaitingRecovery owns Failure; AwaitingInterpretation owns Settlement; Succeeded owns Object.
+- Failed owns FailureReport with the representation below. Delete owned FailureCauseView.
+
+```rust
+struct FailureReport {
+    failure: Failure,
+    reason: StopReason,
+    usage: RecoveryUsage,
+    root: Option<Object>,
+    value_ref: ContentRef,
+    canonical: PlainCanonicalJsonBytes,
+}
+```
+
+Its private constructor takes (failure, reason, usage, root), validates the domain/Read terminal
+relation and constructs the bounded canonical report. A domain failure requires root; a Read
+operational failure forbids it; a pending Effect never becomes a terminal FailureReport. Derive
+position() from failure.call().position(); expose borrowing failure()/root() accessors and retain
+reason()/usage()/value_ref()/canonical_bytes(). Keep the existing public report fields and use
+borrowing serialization to select them from Failure; storing Failure does not add all its fields
+to the report wire. The canonical artifact serves report hashing/output, not a second owned cause
+tree or a source to reparse for typed access.
+
+InvocationFailure::RecoveryStopped retains only observed: RunView. Its incident and reason come
+from that observation's pending failure/Stop outcome. Remove the duplicate incident/reason fields;
+Runtime constructs this result only after observing the committed pending-Effect Stop.
+
+App's Incident/Original serializers already borrow data and represent distinct public wire shapes.
+Adapt them to borrow Failure or the pending Effect fields directly after deleting the owned incident
+tree. Keep a small borrowing serializer where those field/tag differences require one; reuse the
+Object renderer. Do not normalize public formats or introduce another owned reporting model to
+delete a serializer name.
+
+Retain the existing public phase tags and required observations:
 
 | Public state tag | Required projection |
 | --- | --- |
@@ -1324,7 +1385,7 @@ Add the two new incomplete phase alternatives to the current RunView/App seriali
 | `awaiting_interpretation` | Position, EffectId, and accepted settlement command/evidence. This is an incomplete state with no recorded internal fault. |
 | `succeeded` / `failed` | Existing complete success value or derived terminal failure report, using the current operation, original Object and recovery outcome. |
 
-Successful observation of either new incomplete phase follows existing nonterminal policy: REST
+Successful observation of either awaiting phase follows existing nonterminal policy: REST
 returns 200 and CLI exits 1. An invocation that failed internally while leaving that phase returns
 the existing execution-stopped error surface, CLI exit 2, and the reviewed REST error status.
 Pending recovery Stop still returns RecoveryStopped/503. Live size failure remains 422; ordinary
@@ -1365,7 +1426,7 @@ section 5.1 supplies its current diagnostic-text schema profile.
 Validate that concrete terminal report before its terminal append; if it cannot fit, leave the
 original AwaitingRecovery and report the construction/size cause. Do not add a persisted report
 copy or another lifecycle reservation. This is an actual report bound in addition to frame bounds;
-include it in the shipping-size proof. Reports for the new incomplete phases derive from their
+include it in the shipping-size proof. Reports for the incomplete phases derive from their
 existing objects without constructing a second independently maintained error tree.
 
 ## 11. Actual limits and the bounded core proof
@@ -1500,9 +1561,12 @@ Measure the actual grammar deletion; no raw carrier or constructor-capture exper
 
 Replace Phase + OperationFacts with the section 6.5 record in the real Runtime path. Delete the
 stored TerminalFailure copy, phase-reconstruction/agreement code and repeated payload accounting
-at the same cutover. Inline DomainFailure/ReadFailure into Failure where their independent reuse
-disappears; do not replace them with new wrapper views. Preserve authorization, checkpoint/usage/
-Effect checks and observable public phase behavior. Reuse consuming lifecycle tests, deleting assertions for the superseded duplicated
+at the same cutover. Inline DomainFailure/ReadFailure into Failure and apply section 10.1's owned
+public payloads, deleting the owned incident/cause copies. Remove yield_after under section 8.5.
+Keep required public wire distinctions through borrowing serializers. Verify typed failure/root
+inspection and the unchanged RecoveryStopped wire/status from its single observed view. Preserve
+authorization, checkpoint/usage/Effect checks and observable public phase behavior. Reuse consuming
+lifecycle tests, deleting assertions for the superseded duplicated
 wire. Use K1's derived decoding; there is no seed grammar to rewrite around the new record.
 Measure actual removals and encoded occurrences before starting a new error owner.
 
@@ -1544,8 +1608,10 @@ compatible library interfaces, and keep Self::Failure/C::OperationalError as the
 originals. The current selected facts define the work, not every source reachable from an error.
 
 Apply section 9.4's three RecordingFailure variants, deleting AppendFailure, BeforeAppend.candidate
-and seal-error unpacking/repacking. Update docs/design.md and renderer fixtures from sealed-candidate
-to submitted-candidate reporting; no unsent frame identity remains in the invocation contract.
+and seal-error unpacking/repacking. Remove record's native-original argument under section 8.5;
+derive its admitted Failure from the proposed record, sharing Object bytes. Update docs/design.md
+and renderer fixtures from sealed-candidate to submitted-candidate reporting; no unsent frame
+identity remains in the invocation contract.
 Exercise E3: pre-append frame preparation failure with/without an admitted failed Read, immediate
 failed/ambiguous append, non-Error declared original whose first serializer fails, success plus
 append failure, NotInserted observation and terminal output failure. Assert the ordinary encoding
@@ -1690,7 +1756,8 @@ is not proof if another wrapper or duplicate responsibility appears underneath.
 | ReturnedFailure and extra native-original Arc/custody | Reuse complete admitted Failure/Object. Failed first encoding reports explicit unavailable original detail without retaining arbitrary E. |
 | App ReportStage, `ReportFailure<T>`, ReportDetail, IncompleteReport, duplicate Omission/ObservedHead; CLI Ordinary | Remove the generic reporting-failure framework. Use existing invocation/head/disposition and terminal output facts through one renderer. |
 | CLI Fields/MissingField | Render text from typed report data; no JSON reparse or missing-own-field failure path. |
-| DomainFailure/ReadFailure; duplicate owned AdapterIncidentView and App Incident/Original views | Inline Failure payloads where independent reuse disappears; borrow the authoritative error through one public view. No extraction-wrapper replacement. |
+| DomainFailure/ReadFailure, PendingFailureView, owned AdapterIncidentView/FailureCauseView; RecoveryStopped incident/reason copies | Section 10.1 reuses Failure/EffectCall/Settlement in owned public observations. RecoveryStopped retains only observed. App's necessary borrowed wire serializers use that data directly. |
+| record original/yield_after arguments | Derive the admitted failure and return disposition from the proposed/acknowledged operation under section 8.5. Remove yield_after in K2 and native-original custody in K3; add no replacement carrier. |
 | InitialValueMismatch; Runtime TaskFailure and Diagnostics TaskFailureKind | Reuse the identity-mismatch payload. Runtime and Live task diagnostics use panicked/cancelled strings; add no type or dependency. |
 | SizeViolation/SizeResource in Runtime; cause_size | Move the existing two data declarations to Values and delete source/downcast discovery. The separate EVM ObservedSize keeps its concrete exact/lower-bound meaning at that owner. No parallel size hierarchy. |
 | AdapterReturn | Delete it and ReturnedFailure. Section 9.6's nested Result separates internal failure from observed/admitted operational outcomes using existing types. |
@@ -1720,8 +1787,9 @@ DiagnosticEvidence's old framework is deleted, not retained vocabulary to expand
 Values replacement has its own actual cost. NoParams still supplies parameterless policy
 configuration; CanonicalError and EVM provider errors keep their concrete owner roles. Count
 removals only against a baseline containing them, including relocated code in replacement cost.
-Likewise, existing FailureReport/FailureCauseView may render retained data but must not become another owned failure
-tree. Test helpers are reviewed with their retained behavior; their count is not production growth.
+FailureReport retains the existing Failure and its required canonical artifact under section 10.1;
+no owned FailureCauseView remains. Test helpers are reviewed with their retained behavior; their
+count is not production growth.
 
 Count each removal only against a baseline where that code exists. Use both baselines in section 3
 and include the replacement cost. Hypothetical avoided registries, fault schemas, audit stores and
@@ -1736,9 +1804,18 @@ achieved net simplification.
 
 ## 15. Material uncertainties
 
-The core representation, diagnostic contracts and K1-K4 designs are specified. The following
-assumptions require implementation and acceptance evidence; they are not deferred choices of
-architecture for the engineer. Part 2 has its own refinement gate and pending producer designs.
+Before handoff, designers must close these focused seams; they are not delegated implementation
+choices:
+
+- Section 6.1's transient dispatch projection: settle its necessity and exact interface while
+  keeping the persisted record authoritative and using no history scan or second owned phase.
+- Runtime projection/reload failure adaptation after removing into_native: fix signatures and the
+  forwarding of existing diagnostics, operation/stage, primary size and known head/probe facts.
+- CLI/REST terminal failure handling after deleting ReportFailure: fix concrete local return/body
+  ownership and final exit/response behavior without an erased or recursive reporting carrier.
+
+The remaining assumptions below require implementation and acceptance evidence. Part 2 has its
+own refinement gate and pending producer designs.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation and response |
 | --- | --- | --- | --- |
