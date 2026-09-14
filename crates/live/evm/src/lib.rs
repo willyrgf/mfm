@@ -84,7 +84,12 @@ pub fn register_evm_reads(
                     .map_err(|source| mfm_runtime::RuntimeError::Native {
                         operation: mfm_runtime::Operation::Admission,
                         stage: mfm_runtime::Stage::Execute,
-                        cause: mfm_values::NativeCause::from_error(source),
+                        cause: mfm_values::InvocationDiagnostic::from_fields(
+                            "adapter_invariant",
+                            "register_evm_reads",
+                            &source,
+                            None,
+                        ),
                     })?;
             let callback_provider = $provider;
             builder.register_adapter::<$capability, EvmPhysicalTarget, _>(
@@ -130,7 +135,12 @@ pub fn register_evm_anchored_contract_calls(
         .map_err(|source| mfm_runtime::RuntimeError::Native {
             operation: mfm_runtime::Operation::Admission,
             stage: mfm_runtime::Stage::Execute,
-            cause: mfm_values::NativeCause::from_error(source),
+            cause: mfm_values::InvocationDiagnostic::from_fields(
+                "adapter_invariant",
+                "register_anchored_contract_call_read",
+                &source,
+                None,
+            ),
         })?;
     builder.register_adapter::<EvmAnchoredContractCallRead, EvmTransactionRoute, _>(
         route,
@@ -367,23 +377,19 @@ mod tests {
             let AdapterError::Invariant(cause) = error else {
                 panic!("local invariant")
             };
-            assert!(
-                serde_json::from_str::<serde_json::Value>(cause.project().unwrap().get())
-                    .unwrap()
-                    .get(expected_kind)
-                    .is_some()
-            );
-            if let Some(AdapterFailure::ReadBinding {
-                expected_chain,
-                observed_chain,
-                expected_route,
-                observed_route,
-            }) = cause.downcast_ref::<AdapterFailure>()
-            {
-                assert_eq!(*expected_chain, registered.chain_id.get());
-                assert_eq!(*observed_chain, other.chain_id.get());
-                assert_eq!(expected_route, &registered.binding_ref().unwrap());
-                assert_eq!(observed_route, &other.binding_ref().unwrap());
+            let fields = cause.details().as_value();
+            assert!(fields.get(expected_kind).is_some());
+            if let Some(binding) = fields.get("read_binding") {
+                assert_eq!(binding["expected_chain"], registered.chain_id.get());
+                assert_eq!(binding["observed_chain"], other.chain_id.get());
+                assert_eq!(
+                    binding["expected_route"],
+                    serde_json::to_value(registered.binding_ref().unwrap()).unwrap()
+                );
+                assert_eq!(
+                    binding["observed_route"],
+                    serde_json::to_value(other.binding_ref().unwrap()).unwrap()
+                );
             }
         }
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
@@ -438,10 +444,7 @@ mod tests {
         let AdapterError::Invariant(cause) = error else {
             panic!("local anchored binding")
         };
-        assert!(matches!(
-            cause.downcast_ref::<AdapterFailure>(),
-            Some(AdapterFailure::ReadBinding { .. })
-        ));
+        assert!(cause.details().as_value().get("read_binding").is_some());
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 
         let provider: Arc<dyn EvmReadProvider> = provider;

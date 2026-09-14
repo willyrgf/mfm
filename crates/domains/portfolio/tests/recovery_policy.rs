@@ -27,7 +27,7 @@ impl Handler for RetryRead {
         _: &NoParams,
         classification: Classification,
         _: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::InvocationDiagnostic> {
         Ok(match classification {
             Classification::Retryable => RecoveryRequest::RetryState,
             _ => RecoveryRequest::Stop,
@@ -272,7 +272,7 @@ impl Handler for RestartCollection {
         _: &NoParams,
         classification: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::InvocationDiagnostic> {
         Ok(match classification {
             Classification::InputInvalidated => context
                 .eligible_restart_targets()

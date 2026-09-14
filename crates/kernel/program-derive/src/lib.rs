@@ -95,7 +95,7 @@ fn expand_schema_derive_result(
         ));
     }
     let native_decode = attrs.decode_native.as_ref().map(|decode| quote! {
-        fn decode_native(bytes: &[u8]) -> ::std::result::Result<Self, ::mfm_values::NativeCause> {
+        fn decode_native(bytes: &[u8]) -> ::std::result::Result<Self, ::mfm_values::InvocationDiagnostic> {
             #decode(bytes)
         }
     });

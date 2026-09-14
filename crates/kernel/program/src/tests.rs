@@ -4,7 +4,7 @@ struct TestError {}
 
 use crate::*;
 use mfm_program_derive::MfmValue;
-use mfm_values::NativeCause;
+use mfm_values::InvocationDiagnostic;
 
 #[derive(Debug, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -24,7 +24,7 @@ impl State for Pass {
 impl PureState for Pass {
     fn evaluate(
         input: Value,
-    ) -> std::result::Result<ProposedStateOutcome<Value, Never>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Value, Never>, InvocationDiagnostic> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -183,12 +183,12 @@ impl EffectCapabilityContract for Effect {
         _: &mfm_ids::EffectId,
         _: &Value,
         _: &Value,
-    ) -> std::result::Result<(), NativeCause> {
+    ) -> std::result::Result<(), InvocationDiagnostic> {
         Ok(())
     }
 }
 impl EffectState<Effect> for Pass {
-    fn prepare(input: &Value) -> std::result::Result<Value, NativeCause> {
+    fn prepare(input: &Value) -> std::result::Result<Value, InvocationDiagnostic> {
         Ok(Value {
             number: input.number,
         })
@@ -196,7 +196,7 @@ impl EffectState<Effect> for Pass {
     fn interpret(
         input: Value,
         _: &Value,
-    ) -> std::result::Result<ProposedStateOutcome<Value, Never>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Value, Never>, InvocationDiagnostic> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -273,7 +273,7 @@ fn capability_identity_distinguishes_operational_contracts_and_modes() {
             _: &ContentRef,
             _: &Value,
             _: &Value,
-        ) -> std::result::Result<(), NativeCause> {
+        ) -> std::result::Result<(), InvocationDiagnostic> {
             Ok(())
         }
     }
@@ -451,7 +451,7 @@ fn nested_handler_replacement_keeps_parameters_targets_and_zero_allowances_scope
             _: &Value,
             _: Classification,
             _: &RecoveryContext<'_>,
-        ) -> std::result::Result<RecoveryRequest, NativeCause> {
+        ) -> std::result::Result<RecoveryRequest, InvocationDiagnostic> {
             Ok(RecoveryRequest::Stop)
         }
     }

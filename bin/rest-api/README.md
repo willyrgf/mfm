@@ -84,8 +84,9 @@ CLI exit 1 represents a runnable, Effect-pending, awaiting-recovery, awaiting-in
 durably failed run. REST returns 200 for each successfully observed phase. Runnable views carry
 position/visit and tagged reason; pending views carry the exact EffectId. Failed views embed the
 canonical `report` and its reference, while successful views embed the canonical `value`.
-Provider failures in those reports retain reviewed method, stage, status/code, source facts and
-explicit capture omissions. Raw provider messages/bodies, URLs and credentials remain excluded.
+Provider failures retain method, stage, status/code, ordered source messages and selected fields
+under the upstream diagnostic trust contract. MFM does not append its own secrets or full
+requests/connections; dependency-supplied text is retained without a diagnostic quota.
 
 `nix run .#run -- --task client-e2e` builds the CLI and REST binaries explicitly. It admits an exact
 historical run with a generated REST identity by interrupting an in-flight live Read, proves
@@ -102,7 +103,7 @@ Repeated publication has no discovery IO. New dependent admission verifies retai
 matching start recovery and ordinary read/progress survive configuration deletion.
 
 Size-limit invocation failures use `size_limit_exceeded` and include
-`invocation.size_limit` with `kind`, `resource`, and `limit` (bytes, or frames for
+`invocation.size_limit` with `resource` and `limit` (bytes, or frames for
 `frame_count`). A measured violation carries `actual`; a serializer stopped at its ceiling carries
 `observed_at_least` because the unvisited suffix has no measured size. The last observation remains historical; oversized inline reports do not
 append a terminal conclusion or discard pending Effect authority. Capacity arithmetic overflow
@@ -120,18 +121,18 @@ Cancellation can interrupt a physical
 attempt before its result is recorded; the audit covers acknowledged qualified failures.
 
 
-Run responses are prepared and encoded before handoff to Axum. Preparation failure uses the shared
-[App incomplete report](../../crates/app/README.md#report-preparation-failures), retaining the original
-request status and recovery identity. Failure to render an otherwise successful observation returns
-500, or 422 for an actual representation limit. `last_observed` identifies a historical observation;
-only explicit insertion evidence is labelled `acknowledged`, including when projection failed after
-insertion. The incomplete body lists omitted fields and retains separate reporting causes natively.
+Run responses are prepared and encoded before handoff to Axum. A preparation or encoding failure
+uses one shared [App failure presentation](../../crates/app/README.md#report-preparation-failures),
+retaining primary request status, recovery identity and available head/candidate/size facts.
+Failure to render a successful observation returns 500, or 422 for an actual representation limit.
+`last_observed` is historical; only explicit insertion evidence is labelled `acknowledged`.
+The supplied diagnostic is forwarded unchanged and `original_report` is null when normal encoding
+never completed. No native projector or normal serializer is retried.
 
-If encoding that prepared incomplete body also fails, the response body yields the retained native
-failure. There is no further JSON fallback. The handler establishes preparation and handoff only;
-neither returned status nor a prepared body proves socket completion or peer receipt. The direct
-`tokio-stream` dependency adapts this terminal native failure into Axum's body error channel without
-an additional error endpoint or a custom streaming protocol.
+If the final presentation also fails to encode, the one-shot body-error channel retains its concrete
+`JsonError`, with no further JSON response. The direct Canonical dependency names that concrete
+error; `tokio-stream` supplies the existing one-shot body channel. The handler establishes response
+handoff only; neither status nor prepared body proves socket completion or peer receipt.
 
 Malformed stored framework Objects are reported as `internal`, with restore/decode parser category,
 available line/column and rejection reason. This includes nested Object-size rejection: no structured

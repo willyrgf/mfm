@@ -246,7 +246,7 @@ pub trait Handler: Send + Sync + 'static {
         params: &Self::Params,
         classification: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause>;
+    ) -> std::result::Result<RecoveryRequest, mfm_values::InvocationDiagnostic>;
 }
 
 /// Explicit typed consuming conversion for root domain failure.
@@ -263,7 +263,7 @@ pub trait ValueMap: Send + Sync + 'static {
     fn apply(
         params: &Self::Params,
         value: Self::Input,
-    ) -> std::result::Result<Self::Output, mfm_values::NativeCause>;
+    ) -> std::result::Result<Self::Output, mfm_values::InvocationDiagnostic>;
 }
 
 /// Identity conversion without requiring values to implement Clone.
@@ -276,7 +276,7 @@ impl<T: MfmValue> ValueMap for Identity<T> {
     fn implementation_id() -> Result<StableId> {
         StableId::new("mfm.recovery.identity@1").map_err(|_| ProgramError::InvalidContract)
     }
-    fn apply(_: &NoParams, value: T) -> std::result::Result<T, mfm_values::NativeCause> {
+    fn apply(_: &NoParams, value: T) -> std::result::Result<T, mfm_values::InvocationDiagnostic> {
         Ok(value)
     }
 }
@@ -291,7 +291,10 @@ impl<T: MfmValue> ValueMap for FromNever<T> {
     fn implementation_id() -> Result<StableId> {
         StableId::new("mfm.recovery.from-never@1").map_err(|_| ProgramError::InvalidContract)
     }
-    fn apply(_: &NoParams, value: Never) -> std::result::Result<T, mfm_values::NativeCause> {
+    fn apply(
+        _: &NoParams,
+        value: Never,
+    ) -> std::result::Result<T, mfm_values::InvocationDiagnostic> {
         match value {}
     }
 }

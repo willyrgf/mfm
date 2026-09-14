@@ -11,7 +11,7 @@ use mfm_program::{
 use mfm_values::Object;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RunRecord {
     pub(crate) program_ref: ContentRef,
@@ -20,26 +20,26 @@ pub(crate) struct RunRecord {
     pub(crate) usage: Vec<StateUsage>,
     pub(crate) effect_barrier: Option<StatePosition>,
 }
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Checkpoint {
     pub(crate) position: StatePosition,
     pub(crate) input: Object,
 }
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StateUsage {
     pub(crate) retries: u32,
     pub(crate) restarts: u32,
 }
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 /// An execution occurrence and its complete input.
 pub struct Call {
     pub(crate) position: ExecutionPosition,
     pub(crate) input: Object,
 }
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 /// One retained Effect command and its authority.
 pub struct EffectCall {
@@ -47,14 +47,14 @@ pub struct EffectCall {
     pub(crate) effect_id: EffectId,
     pub(crate) command: Object,
 }
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 /// Accepted evidence for one retained Effect command.
 pub struct Settlement {
     pub(crate) effect: EffectCall,
     pub(crate) evidence: Object,
 }
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 /// The complete facts of an executed State operation.
@@ -73,7 +73,7 @@ pub enum StateCall {
     /// An interpretation of committed settlement.
     Effect(Settlement),
 }
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 /// The original declared failure awaiting or retained by recovery.
@@ -102,7 +102,7 @@ pub enum Failure {
         original: Object,
     },
 }
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RecordedOperation {
@@ -166,7 +166,7 @@ pub(crate) enum StateInvariant {
 fn invalid(code: StateInvariant) -> RuntimeError {
     RuntimeError::native(
         crate::Operation::Restore,
-        mfm_values::NativeCause::from_error(code),
+        mfm_values::InvocationDiagnostic::from_fields("runtime_invariant", "invalid", &code, None),
     )
 }
 
@@ -810,7 +810,12 @@ impl RunRecord {
         let position_error = |source| {
             RuntimeError::native(
                 crate::Operation::Restore,
-                mfm_values::NativeCause::from_error(source),
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "runtime_invariant",
+                    "continuation",
+                    &source,
+                    None,
+                ),
             )
         };
         let runnable = |state, visit, input, reason| Continuation::Runnable {

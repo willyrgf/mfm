@@ -10,13 +10,13 @@ impl State for Injected {
     }
 }
 impl EffectState<Mutation> for Injected {
-    fn prepare(input: &Number) -> Result<Command, NativeCause> {
+    fn prepare(input: &Number) -> Result<Command, InvocationDiagnostic> {
         Ok(Command { value: input.value })
     }
     fn interpret(
         input: Number,
         _: &EffectEvidence,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, InvocationDiagnostic> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -62,7 +62,7 @@ impl State for Project {
 impl PureState for Project {
     fn evaluate(
         input: Number,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Number>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Number>, InvocationDiagnostic> {
         if input.value == 2 {
             Ok(ProposedStateOutcome::Failure { failure: input })
         } else {
@@ -211,18 +211,18 @@ impl EffectCapabilityContract for Recursive {
         id: &EffectId,
         command: &Command,
         evidence: &EffectEvidence,
-    ) -> Result<(), NativeCause> {
+    ) -> Result<(), InvocationDiagnostic> {
         Mutation::bind_evidence(id, command, evidence)
     }
 }
 impl EffectState<Recursive> for Injected {
-    fn prepare(input: &Number) -> Result<Command, NativeCause> {
+    fn prepare(input: &Number) -> Result<Command, InvocationDiagnostic> {
         <Self as EffectState<Mutation>>::prepare(input)
     }
     fn interpret(
         input: Number,
         evidence: &EffectEvidence,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, InvocationDiagnostic> {
         <Self as EffectState<Mutation>>::interpret(input, evidence)
     }
 }

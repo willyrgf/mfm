@@ -11,10 +11,13 @@ uses Serde's category, location and message; nested canonical/hash/size construc
 separately retained. Direct typed construction still returns concrete `ValueError` fields.
 Consumers admit the decoded Object against its selected slot descriptor before typed use.
 
-`NativeCause::project` also catches unwinding projection panics while retaining the borrowed owner.
-The separate failure identifies native projection and explicitly withholds the panic payload.
-Callers must not retry a failed projector. This does not intercept aborts or suppress a process's
-installed panic hook.
+`DiagnosticEvidence` is nested immutable JSON data with the `diagnostic_float_free` persisted
+profile. It admits dependency-supplied text under ordinary canonical/numeric/structural limits;
+ordinary strings retain the secret-marker rule. It has no standalone executable identity or quota.
+`InvocationDiagnostic::from_fields` converts selected owner fields once and preserves the supplied
+code, operation and primary size even if conversion fails or unwinds. Receivers borrow or move its
+data without recovering a native owner or retrying a serializer. This does not intercept aborts or
+suppress an installed panic hook.
 
 Persisted string shapes name checked owner grammars, including the exact `EffectId` grammar; schema
 validation delegates to the corresponding checked identity type.

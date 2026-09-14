@@ -82,12 +82,9 @@ mod tests {
                     method: EvmRpcMethod::ChainId,
                     stage: RpcStage::Send,
                     failure: ProviderFailureKind::Client,
-                    diagnostics: mfm_diagnostics::DiagnosticEvidence::capture(
-                        None,
-                        None,
-                        mfm_diagnostics::ChainEnd::Unavailable,
-                        |_| unreachable!("no source"),
-                    ),
+                    diagnostics: mfm_values::DiagnosticEvidence::from_value(serde_json::json!({
+                        "response": null, "sources": [],
+                    })),
                 },
             );
             let bytes = mfm_values::canonicalize_mfm_value(&cause).unwrap().0;

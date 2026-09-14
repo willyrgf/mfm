@@ -1,59 +1,18 @@
-use mfm_diagnostics::*;
 use mfm_evm::*;
-use mfm_values::{canonicalize_mfm_value, MfmValue};
+use mfm_values::canonicalize_mfm_value;
+use mfm_values::{DiagnosticEvidence, Object};
 
 #[test]
-fn causal_contracts_preserve_bounded_evidence_through_exact_descriptors() {
-    #[derive(Debug)]
-    struct Cycle;
-    impl std::fmt::Display for Cycle {
-        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            panic!("no source formatting");
-        }
-    }
-    impl std::error::Error for Cycle {
-        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            Some(self)
-        }
-    }
-    let diagnostics = DiagnosticEvidence::capture(
-        Some((
-            ResponseContext::new(HttpStatusCode::new(599).unwrap(), Some(i64::MIN)),
-            vec![(OmittedField::Body, OmissionReason::Withheld, Some(u64::MAX)); 32],
-        )),
-        Some(&Cycle),
-        ChainEnd::Complete,
-        |_| {
-            (
-                SourceLayer::new(
-                    SourceKind::Parse,
-                    vec![
-                        SourceFact::Parse {
-                            category: ParseCategory::Syntax,
-                            location: ParseLocation::LineColumn {
-                                line: u64::MAX,
-                                column: u64::MAX,
-                            },
-                        },
-                        SourceFact::Size {
-                            limit: u64::MAX,
-                            observed: ObservedSize::AtLeast { value: u64::MAX },
-                        },
-                    ],
-                    false,
-                )
-                .unwrap(),
-                vec![],
-            )
+fn causal_contracts_preserve_diagnostic_text_through_whole_owner_admission() {
+    let diagnostics = DiagnosticEvidence::from_value(serde_json::json!({
+        "response": {
+            "status": 599,
+            "rpc_code": i64::MIN,
+            "message": "provider reports missing api_key marker",
+            "data_json": "{\"ratio\":1.2300e-4}",
         },
-    );
-    let diagnostics_bytes = canonicalize_mfm_value(&diagnostics)
-        .unwrap()
-        .0
-        .as_bytes()
-        .len();
-    assert!((7800..=8192).contains(&diagnostics_bytes));
-    assert_eq!(diagnostics.sources().end(), ChainEnd::BoundReached);
+        "sources": [{"message": "source detail".repeat(1024)}],
+    }));
     let maximum = EvmU256::new(
         "115792089237316195423570985008687907853269984665640564039457584007913129639935",
     )
@@ -90,13 +49,21 @@ fn causal_contracts_preserve_bounded_evidence_through_exact_descriptors() {
         .unwrap()
         .source()
         .is_some());
-    for (descriptor, expected, expected_bytes) in [
-        (EvmOperationalError::schema_descriptor().unwrap(),
-            "schema:mfm.evm-operational-error:2:sha256-jcs-v1:c68ccfcced460b7b8bac450fedf549a9710140ef820af7e884e99630ce93a53d", 19296),
-        (EvmTransactionOperationalError::schema_descriptor().unwrap(),
-            "schema:mfm.evm-transaction-operational-error:2:sha256-jcs-v1:684b0846a3f6e2510c1ec265852db0ee50e0ed6e816d86d3ba7f4b7d152c3eec", 20590),
+    let object = Object::from_value(&error).unwrap();
+    assert_eq!(
+        object.decode::<EvmTransactionOperationalError>().unwrap(),
+        error
+    );
+}
+
+#[test]
+fn diagnostic_owner_schema_identity() {
+    use mfm_values::MfmValue;
+    for (schema, identity, bytes) in [
+        (EvmOperationalError::schema_descriptor().unwrap(), "schema:mfm.evm-operational-error:2:sha256-jcs-v1:c8945cd8c4d79caab00e0f3b75b5f8f9c41b4ff63dcbae466b1677d88f45d67c", 11677),
+        (EvmTransactionOperationalError::schema_descriptor().unwrap(), "schema:mfm.evm-transaction-operational-error:2:sha256-jcs-v1:6293c5ceeb0e9cc6329dfe21ea5d4001f9efce5114878ea77a6a0503b109ce45", 12971),
     ] {
-        assert_eq!(descriptor.schema_id().unwrap().to_string(), expected);
-        assert_eq!(descriptor.identity_canonical_json().unwrap().as_bytes().len(), expected_bytes);
+        assert_eq!(schema.schema_id().unwrap().to_string(), identity);
+        assert_eq!(schema.identity_canonical_json().unwrap().as_bytes().len(), bytes);
     }
 }

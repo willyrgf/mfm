@@ -61,18 +61,18 @@ impl EffectCapabilityContract for NestedEffect {
         id: &mfm_ids::EffectId,
         command: &Value,
         evidence: &Value,
-    ) -> std::result::Result<(), NativeCause> {
+    ) -> std::result::Result<(), InvocationDiagnostic> {
         Effect::bind_evidence(id, command, evidence)
     }
 }
 impl EffectState<NestedEffect> for Pass {
-    fn prepare(input: &Value) -> std::result::Result<Value, NativeCause> {
+    fn prepare(input: &Value) -> std::result::Result<Value, InvocationDiagnostic> {
         <Self as EffectState<Effect>>::prepare(input)
     }
     fn interpret(
         input: Value,
         evidence: &Value,
-    ) -> std::result::Result<ProposedStateOutcome<Value, Never>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Value, Never>, InvocationDiagnostic> {
         <Self as EffectState<Effect>>::interpret(input, evidence)
     }
 }

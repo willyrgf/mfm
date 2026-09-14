@@ -95,18 +95,19 @@ never enter these values.
 
 Ambiguous start/progress acknowledgement carries exact recovery identity and the complete
 invocation. Its last observed view may be absent and does not claim the current acknowledged head.
-Recording failures retain candidate bytes natively and expose only candidate identity in JSON.
+Recording failures retain exact submitted candidate bytes and expose only candidate identity in JSON.
 Explicit insertion followed by projection failure retains its acknowledged mechanical head separately. Other invocation errors expose their reviewed execution or
 recovery detail. Both client transports use the same Application-owned error serializer and recovery envelopes
 frozen under `docs/contracts/client-surface/`; an identified REST start error may additionally carry
 the already selected RunId.
-Public surfaces never contain credentials, private keys, raw provider material, or unreviewed error
-details.
+MFM does not deliberately append secrets or full request/connection objects to public diagnostics.
+Selected upstream diagnostic messages follow the explicit trust contract in [design](design.md).
 
-
-Prepared App serializers retain fallible native projection outside Serde. Incomplete reports keep
-primary error codes and recovery identity, compact historical head evidence, explicit acknowledgement
-when available, and named omissions for projection, encoding, delivery or actual-bound failure.
-Native custody is local to the invocation and is not a persisted fault record or delivery proof.
-See [App reporting](../crates/app/README.md#report-preparation-failures) for the shared wire and
-[CLI](../bin/cli/README.md) / [REST](../bin/rest-api/README.md) for write and handoff semantics.
+App borrows concrete Runtime errors and immutable invocation diagnostics. Response encoding returns
+one raw JSON buffer or a concrete JSON error. CLI retains that exact buffer (or the existing text)
+after stdout failure and makes one final stderr attempt. A normal encoding failure leaves the
+original report explicitly unavailable. Primary codes, recovery identity, last observed head and
+known insertion acknowledgement remain distinct from presentation and delivery success. REST keeps
+these same facts through response-body handoff; this does not prove socket delivery.
+See [App reporting](../crates/app/README.md#report-preparation-failures) and
+[CLI](../bin/cli/README.md) / [REST](../bin/rest-api/README.md) for the finite reporting paths.

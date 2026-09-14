@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use mfm_capabilities::{AdapterError, EffectCapabilityContract, ReadCapabilityContract};
-use mfm_ids::{ContentRef, EffectId, SemanticTypeId};
+use mfm_ids::{ContentRef, EffectId, ExecutionPosition, SemanticTypeId};
 use mfm_program::{
     capability_contract_ref, effect_capability_contract_ref, nominal_contract_ref,
     state_implementation_ref, EffectState, Execution, Never, Program, PureState, ReadState,
@@ -20,16 +20,20 @@ use crate::{EffectAdapterOutcome, Result, RuntimeError};
 pub(crate) mod recovery;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-pub(crate) enum AdapterReturn<T> {
-    Observed(T),
-    Operational(engine::ReturnedFailure),
-}
-pub(crate) type ErasedReadAdapterCallback =
-    dyn for<'a> Fn(&'a Object) -> BoxFuture<'a, Result<AdapterReturn<Object>>> + Send + Sync;
+pub(crate) type ErasedReadAdapterCallback = dyn for<'a> Fn(
+        ExecutionPosition,
+        &'a ContentRef,
+        &'a Object,
+    ) -> BoxFuture<'a, Result<std::result::Result<Object, Object>>>
+    + Send
+    + Sync;
 pub(crate) type ErasedEffectAdapterCallback = dyn for<'a> Fn(
+        ExecutionPosition,
+        &'a ContentRef,
         &'a EffectId,
         &'a Object,
-    ) -> BoxFuture<'a, Result<AdapterReturn<EffectAdapterOutcome<Object>>>>
+    )
+        -> BoxFuture<'a, Result<std::result::Result<EffectAdapterOutcome<Object>, Object>>>
     + Send
     + Sync;
 pub(crate) struct ValueContract {
@@ -192,9 +196,16 @@ impl<T, E> Future for CatchAdapterPanic<'_, T, E> {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.inner.as_mut().poll(context)
         }))
-        .unwrap_or(Poll::Ready(Err(AdapterError::Invariant(
-            mfm_values::NativeCause::from_error(crate::TaskFailure::Panicked),
-        ))))
+        .unwrap_or_else(|_| {
+            Poll::Ready(Err(AdapterError::Invariant(
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "task_failure",
+                    "poll",
+                    "panicked",
+                    None,
+                ),
+            )))
+        })
     }
 }
 
@@ -219,7 +230,7 @@ where
         + 'static,
 {
     let callback = Arc::new(callback);
-    Arc::new(move |object| {
+    Arc::new(move |position, failure_contract, object| {
         let callback = Arc::clone(&callback);
         let object = object.clone();
         Box::pin(async move {
@@ -236,18 +247,26 @@ where
             .map_err(|_| {
                 RuntimeError::native(
                     crate::Operation::ReadAdapter,
-                    mfm_values::NativeCause::from_error(crate::TaskFailure::Panicked),
+                    mfm_values::InvocationDiagnostic::from_fields(
+                        "task_failure",
+                        "erase_read_adapter",
+                        "panicked",
+                        None,
+                    ),
                 )
             })?;
             match (CatchAdapterPanic { inner: future }).await {
                 Ok(evidence) => engine::encode(evidence, crate::Operation::ReadAdapter)
                     .await
-                    .map(AdapterReturn::Observed),
-                Err(AdapterError::Operational(error)) => {
-                    engine::encode_failure(error, crate::Operation::ReadAdapter)
-                        .await
-                        .map(AdapterReturn::Operational)
-                }
+                    .map(Ok),
+                Err(AdapterError::Operational(error)) => engine::encode_failure(
+                    error,
+                    crate::Operation::ReadAdapter,
+                    position,
+                    failure_contract,
+                )
+                .await
+                .map(Err),
                 Err(AdapterError::Invariant(cause)) => {
                     Err(RuntimeError::native(crate::Operation::ReadAdapter, cause))
                 }
@@ -278,7 +297,7 @@ where
         + 'static,
 {
     let callback = Arc::new(callback);
-    Arc::new(move |effect_id, object| {
+    Arc::new(move |position, failure_contract, effect_id, object| {
         let callback = Arc::clone(&callback);
         let object = object.clone();
         Box::pin(async move {
@@ -295,25 +314,29 @@ where
             .map_err(|_| {
                 RuntimeError::native(
                     crate::Operation::EffectAdapter,
-                    mfm_values::NativeCause::from_error(crate::TaskFailure::Panicked),
+                    mfm_values::InvocationDiagnostic::from_fields(
+                        "task_failure",
+                        "erase_effect_adapter",
+                        "panicked",
+                        None,
+                    ),
                 )
             })?;
             match (CatchAdapterPanic { inner: future }).await {
-                Ok(EffectAdapterOutcome::Pending) => {
-                    Ok(AdapterReturn::Observed(EffectAdapterOutcome::Pending))
-                }
+                Ok(EffectAdapterOutcome::Pending) => Ok(Ok(EffectAdapterOutcome::Pending)),
                 Ok(EffectAdapterOutcome::Settled(evidence)) => {
                     engine::encode(evidence, crate::Operation::EffectAdapter)
                         .await
-                        .map(|evidence| {
-                            AdapterReturn::Observed(EffectAdapterOutcome::Settled(evidence))
-                        })
+                        .map(|evidence| Ok(EffectAdapterOutcome::Settled(evidence)))
                 }
-                Err(AdapterError::Operational(error)) => {
-                    engine::encode_failure(error, crate::Operation::EffectAdapter)
-                        .await
-                        .map(AdapterReturn::Operational)
-                }
+                Err(AdapterError::Operational(error)) => engine::encode_failure(
+                    error,
+                    crate::Operation::EffectAdapter,
+                    position,
+                    failure_contract,
+                )
+                .await
+                .map(Err),
                 Err(AdapterError::Invariant(cause)) => {
                     Err(RuntimeError::native(crate::Operation::EffectAdapter, cause))
                 }
@@ -329,7 +352,7 @@ fn adapter_binding_ref<B: MfmValue>(binding: &B) -> Result<ContentRef> {
             RuntimeError::at(
                 crate::Operation::Admission,
                 crate::Stage::Execute,
-                mfm_values::NativeCause::from_error(source),
+                source.into_diagnostic("adapter_binding_ref"),
             )
         })
 }
@@ -564,14 +587,14 @@ impl RuntimeAssemblyBuilder {
             RuntimeError::at(
                 crate::Operation::Admission,
                 crate::Stage::Execute,
-                mfm_values::NativeCause::from_error(source),
+                source.into_diagnostic("ensure_value"),
             )
         })?;
         let semantic_id = T::semantic_id().map_err(|source| {
             RuntimeError::at(
                 crate::Operation::Admission,
                 crate::Stage::Execute,
-                mfm_values::NativeCause::from_error(source),
+                source.into_diagnostic("ensure_value"),
             )
         })?;
         if descriptor.identity().semantic_type_id.as_ref() != Some(&semantic_id) {
@@ -581,7 +604,12 @@ impl RuntimeAssemblyBuilder {
             RuntimeError::at(
                 crate::Operation::Admission,
                 crate::Stage::Execute,
-                mfm_values::NativeCause::from_error(source),
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "runtime_invariant",
+                    "ensure_value",
+                    &source,
+                    None,
+                ),
             )
         })?;
         if let Some(previous) = self.values.get(&contract_ref) {
@@ -609,7 +637,12 @@ impl RuntimeAssemblyBuilder {
             RuntimeError::at(
                 crate::Operation::Admission,
                 crate::Stage::Execute,
-                mfm_values::NativeCause::from_error(source),
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "runtime_invariant",
+                    "ensure_read_capability",
+                    &source,
+                    None,
+                ),
             )
         })?;
         if let Some(registration) = self.capabilities.get(&capability_ref) {
@@ -653,7 +686,12 @@ impl RuntimeAssemblyBuilder {
             RuntimeError::at(
                 crate::Operation::Admission,
                 crate::Stage::Execute,
-                mfm_values::NativeCause::from_error(source),
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "runtime_invariant",
+                    "ensure_effect_capability",
+                    &source,
+                    None,
+                ),
             )
         })?;
         if let Some(registration) = self.capabilities.get(&capability_ref) {
@@ -702,7 +740,12 @@ fn state_signature<S: mfm_program::State>(
                 RuntimeError::at(
                     crate::Operation::Admission,
                     crate::Stage::Execute,
-                    mfm_values::NativeCause::from_error(source),
+                    mfm_values::InvocationDiagnostic::from_fields(
+                        "runtime_invariant",
+                        "ensure_effect_capability",
+                        &source,
+                        None,
+                    ),
                 )
             })?,
             input_contract_ref: input.contract_ref.clone(),

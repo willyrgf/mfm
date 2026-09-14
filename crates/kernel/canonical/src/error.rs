@@ -39,122 +39,88 @@ impl Serialize for JsonError {
     }
 }
 
-/// Canonical grammar failure retaining available native parser sources.
-#[derive(thiserror::Error)]
-#[error("canonical processing failed")]
-pub struct CanonicalError {
-    message: String,
-    #[source]
-    source: Option<CanonicalSource>,
-}
-#[derive(Debug, thiserror::Error)]
-enum CanonicalSource {
-    #[error("JSON serialization exceeded its byte ceiling")]
+/// Canonical grammar or encoding failure retaining its concrete source.
+#[derive(Debug, Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalError {
+    /// Canonical grammar rejection.
+    #[error("{message}")]
+    Grammar {
+        /// Available rejection reason.
+        message: String,
+    },
+    /// JSON parsing or encoding failed.
+    #[error("invalid canonical JSON")]
+    Json(#[source] JsonError),
+    /// The input is not UTF-8.
+    #[error("canonical JSON must be UTF-8")]
+    Utf8(
+        #[source]
+        #[serde(serialize_with = "serialize_utf8")]
+        std::str::Utf8Error,
+    ),
+    /// Serialization stopped at its actual accumulation ceiling.
+    #[error("JSON serialization exceeds its byte ceiling")]
     SerializationLimit {
+        /// Inclusive accumulation limit.
         limit: usize,
+        /// Bytes observed before serialization stopped.
         observed_at_least: usize,
+        /// Original serializer failure.
         #[source]
         source: JsonError,
     },
-    #[error(transparent)]
-    Json(#[from] JsonError),
-    #[error("invalid UTF-8")]
-    Utf8(#[source] std::str::Utf8Error),
 }
 impl CanonicalError {
     pub(crate) fn new(message: impl Into<String>) -> Self {
-        Self {
+        Self::Grammar {
             message: message.into(),
-            source: None,
         }
     }
     pub(crate) fn json(source: serde_json::Error) -> Self {
-        Self {
-            message: "invalid canonical JSON".into(),
-            source: Some(CanonicalSource::Json(JsonError::new(source))),
-        }
+        Self::Json(JsonError::new(source))
     }
     pub(crate) fn utf8(source: std::str::Utf8Error) -> Self {
-        Self {
-            message: "canonical JSON must be UTF-8".into(),
-            source: Some(CanonicalSource::Utf8(source)),
-        }
+        Self::Utf8(source)
     }
     pub(crate) fn serialization_limit(
         limit: usize,
         observed_at_least: usize,
         source: serde_json::Error,
     ) -> Self {
-        Self {
-            message: "JSON serialization exceeds its byte ceiling".into(),
-            source: Some(CanonicalSource::SerializationLimit {
-                limit,
-                observed_at_least,
-                source: JsonError::new(source),
-            }),
+        Self::SerializationLimit {
+            limit,
+            observed_at_least,
+            source: JsonError::new(source),
         }
     }
-    /// Returns the ceiling and the observed lower bound when output accumulation stopped early.
+    /// Returns the serialization ceiling and observed lower bound when accumulation stopped.
     pub fn serialization_bound(&self) -> Option<(usize, usize)> {
-        match &self.source {
-            Some(CanonicalSource::SerializationLimit {
+        match self {
+            Self::SerializationLimit {
                 limit,
                 observed_at_least,
                 ..
-            }) => Some((*limit, *observed_at_least)),
+            } => Some((*limit, *observed_at_least)),
             _ => None,
         }
     }
-    /// Returns the existing owner diagnostic; transport projections withhold this text.
+    /// Returns the owner's existing diagnostic message.
     pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-impl fmt::Debug for CanonicalError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("CanonicalError { message: withheld }")
-    }
-}
-impl Serialize for CanonicalError {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        #[serde(rename_all = "snake_case")]
-        enum Cause<'a> {
-            SerializationLimit {
-                limit: usize,
-                observed_at_least: usize,
-                source: &'a JsonError,
-            },
-            Json(&'a JsonError),
-            Utf8 {
-                valid_up_to: usize,
-                error_len: Option<usize>,
-            },
-            Grammar {
-                message: &'static str,
-                message_bytes: usize,
-            },
+        match self {
+            Self::Grammar { message } => message,
+            Self::Json(_) => "invalid canonical JSON",
+            Self::Utf8(_) => "canonical JSON must be UTF-8",
+            Self::SerializationLimit { .. } => "JSON serialization exceeds its byte ceiling",
         }
-        let cause = match &self.source {
-            Some(CanonicalSource::SerializationLimit {
-                limit,
-                observed_at_least,
-                source,
-            }) => Cause::SerializationLimit {
-                limit: *limit,
-                observed_at_least: *observed_at_least,
-                source,
-            },
-            Some(CanonicalSource::Json(source)) => Cause::Json(source),
-            Some(CanonicalSource::Utf8(source)) => Cause::Utf8 {
-                valid_up_to: source.valid_up_to(),
-                error_len: source.error_len(),
-            },
-            None => Cause::Grammar {
-                message: "withheld",
-                message_bytes: self.message.len(),
-            },
-        };
-        cause.serialize(serializer)
     }
+}
+fn serialize_utf8<S: Serializer>(
+    source: &std::str::Utf8Error,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut value = serializer.serialize_struct("Utf8Error", 2)?;
+    value.serialize_field("valid_up_to", &source.valid_up_to())?;
+    value.serialize_field("error_len", &source.error_len())?;
+    value.end()
 }

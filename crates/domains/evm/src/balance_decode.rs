@@ -1,5 +1,5 @@
 use super::*;
-use mfm_values::NativeCause;
+use mfm_values::InvocationDiagnostic;
 
 #[derive(Debug, Serialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
@@ -53,12 +53,17 @@ pub(super) fn metadata(
     collection_ordinal: u32,
     correlation: String,
     route_ref: ContentRef,
-) -> Result<EvmBalanceResultMetadata, NativeCause> {
+) -> Result<EvmBalanceResultMetadata, InvocationDiagnostic> {
     EvmBalanceResultMetadata::new(collection_ordinal, correlation, route_ref).map_err(|source| {
-        NativeCause::from_error(BalanceContextDecodeError::Metadata {
-            location: "metadata.correlation",
-            source,
-        })
+        InvocationDiagnostic::from_fields(
+            "constructor_error",
+            "metadata",
+            &BalanceContextDecodeError::Metadata {
+                location: "metadata.correlation",
+                source,
+            },
+            None,
+        )
     })
 }
 
@@ -90,7 +95,7 @@ struct ContextWire<K> {
     work: EvmBalanceWork,
 }
 impl<K: MfmValueTrait> ContextWire<K> {
-    fn checked(self) -> Result<EvmBalanceContext<K>, NativeCause> {
+    fn checked(self) -> Result<EvmBalanceContext<K>, InvocationDiagnostic> {
         let value = EvmBalanceContext {
             request: self.request,
             caller_continuation: self.caller_continuation,
@@ -102,7 +107,9 @@ impl<K: MfmValueTrait> ContextWire<K> {
             completed: self.completed,
             work: self.work,
         };
-        value.validate().map_err(NativeCause::from_error)?;
+        value.validate().map_err(|error| {
+            mfm_values::InvocationDiagnostic::from_fields("state_internal", "checked", &error, None)
+        })?;
         Ok(value)
     }
 }
@@ -110,13 +117,20 @@ impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmBalanceContext<K> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         ContextWire::<K>::deserialize(deserializer)?
             .checked()
-            .map_err(de::Error::custom)
+            .map_err(|diagnostic| de::Error::custom(diagnostic.details().as_value()))
     }
 }
 impl<K: MfmValueTrait> EvmBalanceContext<K> {
-    pub(super) fn decode_checked(bytes: &[u8]) -> Result<Self, NativeCause> {
+    pub(super) fn decode_checked(bytes: &[u8]) -> Result<Self, InvocationDiagnostic> {
         serde_json::from_slice::<ContextWire<K>>(bytes)
-            .map_err(|source| NativeCause::from_error(mfm_canonical::JsonError::new(source)))?
+            .map_err(|source| {
+                InvocationDiagnostic::from_fields(
+                    "json_error",
+                    "decode_checked",
+                    &mfm_canonical::JsonError::new(source),
+                    None,
+                )
+            })?
             .checked()
     }
 }

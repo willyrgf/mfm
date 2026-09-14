@@ -620,7 +620,7 @@ impl PureState for EnterPortfolioCollection {
         input: PortfolioContinuation,
     ) -> Result<
         ProposedStateOutcome<EvmBalanceContext<PortfolioContinuation>, PortfolioSnapshotFailure>,
-        mfm_values::NativeCause,
+        mfm_values::InvocationDiagnostic,
     > {
         let Some(ordinal) = input.next_collection_ordinal() else {
             return Ok(portfolio_failure(
@@ -714,7 +714,7 @@ impl mfm_program::ValueMap for MapEvmBalanceFailure {
     fn apply(
         _: &Self::Params,
         input: EvmBalanceFailure,
-    ) -> Result<PortfolioSnapshotFailure, mfm_values::NativeCause> {
+    ) -> Result<PortfolioSnapshotFailure, mfm_values::InvocationDiagnostic> {
         Ok(map_evm_balance_failure(input))
     }
 }
@@ -804,7 +804,7 @@ macro_rules! impl_portfolio_pure {
                 input: Self::Input,
             ) -> std::result::Result<
                 ProposedStateOutcome<Self::Output, Self::Failure>,
-                mfm_values::NativeCause,
+                mfm_values::InvocationDiagnostic,
             > {
                 Ok($evaluate(input))
             }

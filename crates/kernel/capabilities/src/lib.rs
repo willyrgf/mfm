@@ -18,7 +18,7 @@ pub enum AdapterError<E> {
     /// Reviewed typed operational cause, retained before recovery policy.
     Operational(E),
     /// Trusted local failure, outside classifier and handler recovery.
-    Invariant(mfm_values::NativeCause),
+    Invariant(mfm_values::InvocationDiagnostic),
 }
 
 impl<E> std::fmt::Debug for AdapterError<E> {
@@ -41,10 +41,10 @@ impl<E> std::fmt::Display for AdapterError<E> {
 
 impl<E: std::error::Error + 'static> std::error::Error for AdapterError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(match self {
-            Self::Operational(error) => error,
-            Self::Invariant(error) => error,
-        })
+        match self {
+            Self::Operational(error) => Some(error),
+            Self::Invariant(_) => None,
+        }
     }
 }
 
@@ -77,7 +77,7 @@ pub trait ReadCapabilityContract: Send + Sync + 'static {
         intent_value_ref: &ContentRef,
         intent: &Self::Intent,
         evidence: &Self::Evidence,
-    ) -> std::result::Result<(), mfm_values::NativeCause>;
+    ) -> std::result::Result<(), mfm_values::InvocationDiagnostic>;
 }
 
 /// One mutating capability with a closed command/evidence contract.
@@ -97,7 +97,7 @@ pub trait EffectCapabilityContract: Send + Sync + 'static {
         effect_id: &EffectId,
         command: &Self::Command,
         evidence: &Self::Evidence,
-    ) -> std::result::Result<(), mfm_values::NativeCause>;
+    ) -> std::result::Result<(), mfm_values::InvocationDiagnostic>;
 }
 
 #[cfg(test)]
@@ -129,9 +129,13 @@ mod tests {
         let operational = AdapterError::Operational(Unformattable);
         assert_eq!(format!("{operational:?}"), "Operational(<redacted>)");
         assert_eq!(operational.to_string(), "adapter operational failure");
-        let invariant: AdapterError<Unformattable> = AdapterError::Invariant(
-            mfm_values::NativeCause::from_error(CapabilityError::EvidenceBinding),
-        );
+        let invariant: AdapterError<Unformattable> =
+            AdapterError::Invariant(mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "bind_evidence",
+                &CapabilityError::EvidenceBinding,
+                None,
+            ));
         assert_eq!(invariant.to_string(), "adapter invariant failed");
     }
 }

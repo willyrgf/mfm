@@ -801,10 +801,9 @@ async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_by
         let AdapterError::Invariant(cause) = error else {
             panic!("receipt invariant")
         };
-        assert!(matches!(
-            cause.downcast_ref::<AdapterFailure>(),
-            Some(AdapterFailure::ReceiptShape { .. } | AdapterFailure::CreatedAddress { .. })
-        ));
+        assert_eq!(cause.code(), "adapter_invariant");
+        let fields = cause.details().as_value();
+        assert!(fields.get("receipt_shape").is_some() || fields.get("created_address").is_some());
     }
     provider.push_receipt(Ok(Some(ProviderReceipt::new(
         prepared.transaction_hash().clone(),
@@ -839,7 +838,9 @@ async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_by
                 method: EvmRpcMethod::SendRawTransaction,
                 stage: RpcStage::Send,
                 failure: ProviderFailureKind::Client,
-                diagnostics: mfm_diagnostics::DiagnosticEvidence::local(),
+                diagnostics: mfm_values::DiagnosticEvidence::from_value(
+                    serde_json::json!({"response": null, "sources": []}),
+                ),
             },
         ))),
         Ok(Some(EvmHash::from_bytes([0x55; 32]))),
@@ -902,8 +903,9 @@ async fn incorrect_signatures_and_corrupt_retained_wire_fail_before_provider_ent
     let AdapterError::Invariant(cause) = error else {
         panic!("signer invariant")
     };
-    assert!(
-        matches!(cause.downcast_ref::<AdapterFailure>(),Some(AdapterFailure::RecoveredSender { expected,.. }) if expected==&binding.sender)
+    assert_eq!(
+        cause.details().as_value()["recovered_sender"]["expected"],
+        serde_json::to_value(&binding.sender).unwrap()
     );
     assert!(authority.state().unwrap().prepared.is_none());
     let evidence =
@@ -921,12 +923,10 @@ async fn incorrect_signatures_and_corrupt_retained_wire_fail_before_provider_ent
     let AdapterError::Invariant(cause) = error else {
         panic!("codec invariant")
     };
-    assert!(matches!(
-        cause.downcast_ref::<AdapterFailure>(),
-        Some(AdapterFailure::QualifyPrepared(
-            crate::codec::EvmCodecError::Invalid
-        ))
-    ));
+    assert_eq!(
+        cause.details().as_value()["qualify_prepared"]["kind"],
+        "invalid"
+    );
     assert_eq!(provider.operations(), operations);
 }
 
@@ -1043,10 +1043,8 @@ async fn every_transaction_journal_boundary_recovers_after_ambiguous_append() {
                         ..
                     }) if matches!(
                         failure.as_ref(),
-                        mfm_runtime::RecordingFailure::Append {
-                            outcome: mfm_runtime::AppendFailure::Store(
-                                mfm_store::StoreError::Indeterminate
-                            ),
+                        mfm_runtime::RecordingFailure::Store {
+                            cause: mfm_store::StoreError::Indeterminate,
                             ..
                         }
                     ) => {}

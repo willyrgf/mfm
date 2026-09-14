@@ -54,22 +54,24 @@ Sources: [transport](../crates/live/evm/src/json_rpc.rs),
 
 | Original first-loss boundary | Replacement | Consuming evidence |
 | --- | --- | --- |
-| Send/body-to-unit mapper | Method/stage, bounded exposed source prefix, OS kind/code and explicit URL/source-detail omissions | `send_failure_retains_os_ancestry_without_request_credentials`, `body_deadline_retains_headers_and_parser_location_is_reviewed` |
+| Send/body-to-unit mapper | Method/stage, exposed source messages and ordered ancestry, OS kind/code | `send_failure_retains_exposed_os_ancestry`, `body_deadline_retains_headers_and_parser_location_is_reviewed` |
 | HTTP status collapse | Received status retained separately from ancestry | `response_status_survives_body_failure_and_size_refusal`, existing 429/deadline test |
-| RPC envelope disposal | Strict envelope with present-null distinction, retained numeric code and withheld message/data sizes | `rpc_codes_remain_distinct_in_committed_and_cold_domain_failures` |
+| RPC envelope disposal | Strict envelope with present-null distinction, retained numeric code, message and original data text | `rpc_codes_remain_distinct_in_committed_and_cold_domain_failures` |
 | Untagged decoding fallback | One raw-field envelope admission followed by typed decoding; parser category/location captured at the failing stage | `only_complete_exact_rpc_error_objects_parse`, parser-location regression |
 | Body bound collapse | Exact declared size or observed streamed lower bound, inclusive limit and Body stage | `response_status_survives_body_failure_and_size_refusal`, `streamed_body_overflow_records_a_lower_bound_without_an_invented_source` |
 | Checked result collapse | Result field, numeric range, ABI size, receipt shape and transaction mismatch facts | `local_range_failure_retains_field_and_checked_observation`, receipt/submission tests |
 
 Tests above are in [JSON-RPC tests](../crates/live/evm/src/json_rpc_tests.rs).
-The shared [diagnostic tests](../crates/kernel/diagnostics/src/tests.rs) cover constructor and
-wire bounds, omission ownership, source ordering, cyclic traversal, and opaque intermediate sources.
-The [consuming domain contract test](../crates/domains/evm/tests/provider_failure_contract.rs)
-freezes exact error identities and checks a near-budget diagnostic plus full-width owner facts.
+The [Values diagnostic tests](../crates/kernel/values/tests/diagnostic_contract.rs) cover whole-owner
+text/numeric admission and invocation conversion failures. The transport tests cover ordered and
+cyclic exposed sources, native fields, and hot/cold originals and reports. The
+[consuming domain contract test](../crates/domains/evm/tests/provider_failure_contract.rs) checks
+full-width owner facts and diagnostic text beyond the deleted 8 KiB quota.
 
-Client sources without reviewed downcasts remain opaque while accessible deeper sources are kept.
-Raw URL, body, RPC message/data and client formatting are withheld. Complete means the exposed
-source chain ended, not that hidden client attempts or raw diagnostic custody were recovered.
+Unknown client sources retain their exposed messages and deeper links. RPC data retains its raw
+JSON spelling as text; no extra body read is introduced. These selected source APIs do not expose
+hidden client attempts or arbitrary foreign-library state. Dependency text follows the diagnostic
+profile; MFM does not deliberately append its own secrets or full request objects.
 Classification is unchanged; timeouts do not establish nonacceptance. Cold Read tests retain the admitted provider carrier. The separate Runtime recovery tests prove
 that the original commits before classification or handler entry.
 
@@ -242,28 +244,26 @@ as AwaitingRecovery before classification, policy or mapping. Recovery is a sepa
 Accepted Effect settlement commits as AwaitingInterpretation before deterministic interpretation.
 Cold reads inspect those current facts without replaying earlier callbacks or operation frames.
 
-`AdapterError<E>` retains either the typed operational value or `NativeCause`. Native causes hold
-actual reviewed owners with fallible bounded projection; non-Error `MfmValue` originals do not
-need a new persisted decoder-error identity. Runtime adds the actual operation and stage. Values'
-checked Object Deserialize and Runtime's derived record decoding retain parser category, location
-and reason for malformed stored data. Nested constructor ancestry and size fields are explicitly
-outside that route's contract; direct construction and postdecode slot errors remain structured. Journal retains canonical/JSON causes while
-owning only its exact opaque envelope.
+`AdapterError<E>` retains either its typed operational value or Values-owned InvocationDiagnostic.
+Concrete owners select fields once; Runtime adds execution operation/stage and consumers forward
+immutable data without reopening a native error. Checked Object Deserialize and record decoding
+retain parser category, location and reason. Nested constructor ancestry/size is outside that stored
+route; direct construction and postdecode slot errors retain structured facts. Journal retains its
+concrete canonical/JSON sources while owning only the opaque frame wire.
 
-A failed failure-encoding task leaves the original in its async owner's custody. Recording failure
-retains that original, the separate recording cause, and the exact sealed candidate when available.
-A Store error causes no probe or fallback append. NotInserted permits one exact snapshot probe;
-its physical finding is independent of later restoration or projection failure. Known insertion
-followed by projection failure retains the acknowledged head separately from an older observation.
-Values catches an unwinding native projection callback and returns a reviewed projection failure
-with an explicit withheld panic-payload marker. The borrowed original remains in custody and the
-failed projector is not retried. This does not suppress process panic hooks or catch aborts.
+Failed first-original encoding reports known position/contract and unavailable original contents/
+identity with the encoding cause. It retries no serializer and appends nothing. Once admitted, the
+same Failure/Object serves recording and failed-append reporting. BeforeAppend holds that admitted
+Failure and a boxed RuntimeError; Store and NotInserted retain submitted candidate identity and
+separate concrete causes. Store errors cause no probe. NotInserted permits one snapshot probe;
+its finding survives independent restoration/view failure. Only known insertion followed by failed
+projection carries an acknowledged head.
 
-Application preserves this custody through AppendIndeterminate and incomplete transport reporting.
-Run reports omit only explicitly accounted-for details; preparation or delivery failure does not
-replace the primary invocation. None of these paths restores layers already erased by the remaining
-PostgreSQL, signer, or other source owners. The
-[core evidence](measurements/auditability-core-acceptance.md) identifies the consuming regressions.
+App and transports borrow existing results through one final presentation. Invocation field
+conversion has exactly two fallback markers, encoding_failed and panicked, while retaining supplied
+code/operation/primary size. No native projector, diagnostic quota or generic reporting tree remains.
+These changes do not repair layers already erased by remaining PostgreSQL, signer or other source
+owners. The [core evidence](measurements/auditability-core-acceptance.md) tracks consuming verification.
 
 ### 12. Development-only funding shares the reviewed RPC boundary
 

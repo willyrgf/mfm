@@ -1,6 +1,6 @@
 use mfm_ids::{ContentRef, EffectId, ExecutionPosition, StatePosition};
 use mfm_runtime::{RunView, RunViewState, RunnableReason};
-use mfm_values::NativeCause;
+use mfm_values::InvocationDiagnostic;
 use serde::Serialize;
 use serde_json::value::RawValue;
 
@@ -75,7 +75,7 @@ impl<'a> Incident<'a> {
     fn effect(
         effect: &'a mfm_runtime::EffectCall,
         original: &'a mfm_values::Object,
-    ) -> Result<Self, NativeCause> {
+    ) -> Result<Self, InvocationDiagnostic> {
         Ok(Self::Effect {
             error: Object::new(original)?,
             input: Object::new(effect.call().input())?,
@@ -127,7 +127,7 @@ enum Original<'a> {
     },
 }
 impl<'a> Original<'a> {
-    fn new(failure: &'a mfm_runtime::Failure) -> Result<Self, mfm_values::NativeCause> {
+    fn new(failure: &'a mfm_runtime::Failure) -> Result<Self, mfm_values::InvocationDiagnostic> {
         use mfm_runtime::{Failure, StateCall};
         let original = Object::new(failure.original())?;
         let input = Object::new(failure.call().input())?;
@@ -174,21 +174,28 @@ pub(super) struct Object<'a> {
     value: &'a RawValue,
 }
 impl<'a> Object<'a> {
-    pub(super) fn new(value: &'a mfm_runtime::Object) -> Result<Self, mfm_values::NativeCause> {
+    pub(super) fn new(
+        value: &'a mfm_runtime::Object,
+    ) -> Result<Self, mfm_values::InvocationDiagnostic> {
         Ok(Self {
             contract_ref: value
                 .contract_ref()
-                .map_err(mfm_values::NativeCause::from_error)?,
+                .map_err(|error| error.into_diagnostic("new"))?,
             value_ref: value.value_ref(),
             value: serde_json::from_slice(value.canonical_bytes()).map_err(|source| {
-                mfm_values::NativeCause::from_error(mfm_canonical::JsonError::new(source))
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "json_error",
+                    "new",
+                    &mfm_canonical::JsonError::new(source),
+                    None,
+                )
             })?,
         })
     }
 }
 impl<'a> SerializableRunView<'a> {
     /// Prepares exact retained fields, preserving native projection failures for the caller.
-    pub fn new(view: &'a RunView) -> Result<Self, NativeCause> {
+    pub fn new(view: &'a RunView) -> Result<Self, InvocationDiagnostic> {
         let state = match view.state() {
             RunViewState::Runnable { position, reason } => State::Runnable {
                 position,
@@ -209,7 +216,7 @@ impl<'a> SerializableRunView<'a> {
                 latest_failure: latest_failure
                     .as_ref()
                     .map(|(original, outcome)| {
-                        Ok::<_, mfm_values::NativeCause>(PendingFailure {
+                        Ok::<_, mfm_values::InvocationDiagnostic>(PendingFailure {
                             incident: Incident::effect(effect, original)?,
                             decision: outcome.into(),
                         })
@@ -233,7 +240,12 @@ impl<'a> SerializableRunView<'a> {
             RunViewState::Failed(report) => State::Failed {
                 value_ref: report.value_ref(),
                 report: serde_json::from_slice(report.canonical_bytes()).map_err(|source| {
-                    NativeCause::from_error(mfm_canonical::JsonError::new(source))
+                    InvocationDiagnostic::from_fields(
+                        "json_error",
+                        "new",
+                        &mfm_canonical::JsonError::new(source),
+                        None,
+                    )
                 })?,
             },
         };
@@ -253,8 +265,8 @@ enum InvocationWire<'a> {
         run_id: &'a mfm_ids::RunId,
         last_observed: Option<SerializableRunView<'a>>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        size_limit: Option<mfm_runtime::SizeViolation>,
-        cause: Box<RawValue>,
+        size_limit: Option<mfm_values::SizeViolation>,
+        cause: &'a mfm_runtime::RuntimeError,
     },
     RecoveryStopped {
         observed: SerializableRunView<'a>,
@@ -267,7 +279,9 @@ enum InvocationWire<'a> {
 #[serde(transparent)]
 pub(super) struct Invocation<'a>(InvocationWire<'a>);
 impl<'a> Invocation<'a> {
-    pub(super) fn new(failure: &'a mfm_runtime::InvocationFailure) -> Result<Self, NativeCause> {
+    pub(super) fn new(
+        failure: &'a mfm_runtime::InvocationFailure,
+    ) -> Result<Self, InvocationDiagnostic> {
         Ok(Self(match failure {
             mfm_runtime::InvocationFailure::Execution {
                 run_id,
@@ -280,7 +294,7 @@ impl<'a> Invocation<'a> {
                     .map(SerializableRunView::new)
                     .transpose()?,
                 size_limit: error.size_limit(),
-                cause: error.project()?,
+                cause: error,
             },
             mfm_runtime::InvocationFailure::RecoveryStopped { observed } => {
                 let RunViewState::EffectPending {
@@ -289,9 +303,7 @@ impl<'a> Invocation<'a> {
                         Some((original, mfm_runtime::RecoveryOutcome::Stop { reason, .. })),
                 } = observed.state()
                 else {
-                    return Err(NativeCause::from_error(
-                        mfm_values::ValueError::SchemaShapeMismatch,
-                    ));
+                    return Err(mfm_values::ValueError::SchemaShapeMismatch.into_diagnostic("new"));
                 };
                 InvocationWire::RecoveryStopped {
                     observed: SerializableRunView::new(observed)?,

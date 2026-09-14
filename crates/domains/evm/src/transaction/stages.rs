@@ -234,17 +234,22 @@ impl EffectCapabilityContract for EvmNonceReservationEffect {
         effect_id: &EffectId,
         command: &Self::Command,
         evidence: &Self::Evidence,
-    ) -> Result<(), mfm_values::NativeCause> {
+    ) -> Result<(), mfm_values::InvocationDiagnostic> {
         let matches = {
-            let (_, reference) =
-                canonicalize_mfm_value(command).map_err(mfm_values::NativeCause::from_error)?;
+            let (_, reference) = canonicalize_mfm_value(command)
+                .map_err(|error| error.into_diagnostic("bind_evidence"))?;
             evidence.effect_id() == effect_id
                 && evidence.command_value_ref() == &reference
                 && evidence.domain() == &NonceDomain::from_binding(command.binding())
         };
-        matches
-            .then_some(())
-            .ok_or_else(|| mfm_values::NativeCause::from_error(CapabilityError::EvidenceBinding))
+        matches.then_some(()).ok_or_else(|| {
+            mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "bind_evidence",
+                &CapabilityError::EvidenceBinding,
+                None,
+            )
+        })
     }
 }
 
@@ -262,14 +267,19 @@ impl EffectCapabilityContract for EvmTransactionPreparationEffect {
         effect_id: &EffectId,
         command: &Self::Command,
         evidence: &Self::Evidence,
-    ) -> Result<(), mfm_values::NativeCause> {
+    ) -> Result<(), mfm_values::InvocationDiagnostic> {
         let matches = {
             let _ = command;
             (&evidence.effect_id) == effect_id
         };
-        matches
-            .then_some(())
-            .ok_or_else(|| mfm_values::NativeCause::from_error(CapabilityError::EvidenceBinding))
+        matches.then_some(()).ok_or_else(|| {
+            mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "bind_evidence",
+                &CapabilityError::EvidenceBinding,
+                None,
+            )
+        })
     }
 }
 
@@ -287,16 +297,21 @@ impl EffectCapabilityContract for EvmTransactionEffect {
         effect_id: &EffectId,
         command: &Self::Command,
         evidence: &Self::Evidence,
-    ) -> Result<(), mfm_values::NativeCause> {
+    ) -> Result<(), mfm_values::InvocationDiagnostic> {
         let matches = {
             evidence.effect_id() == effect_id
                 && evidence.nonce() == command.reserved().reservation().nonce()
                 && evidence.transaction_hash() == command.transaction_hash()
                 && action_matches(command.reserved().command(), evidence)
         };
-        matches
-            .then_some(())
-            .ok_or_else(|| mfm_values::NativeCause::from_error(CapabilityError::EvidenceBinding))
+        matches.then_some(()).ok_or_else(|| {
+            mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "bind_evidence",
+                &CapabilityError::EvidenceBinding,
+                None,
+            )
+        })
     }
 }
 
@@ -367,11 +382,14 @@ impl<C: MfmValueTrait, R: TransactionRecipe<C>> State for ProjectEvmTransactionO
 impl<C: MfmValueTrait, R: TransactionRecipe<C>> EffectState<EvmNonceReservationEffect>
     for ReserveEvmNonce<C, R>
 {
-    fn prepare(input: &C) -> Result<Eip1559TransactionCommand, mfm_values::NativeCause> {
+    fn prepare(input: &C) -> Result<Eip1559TransactionCommand, mfm_values::InvocationDiagnostic> {
         let command = R::command(input);
         if !R::Success::accepts(&command) {
-            return Err(mfm_values::NativeCause::from_error(
-                crate::EvmDomainError::InvalidValue,
+            return Err(mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "prepare",
+                &crate::EvmDomainError::InvalidValue,
+                None,
             ));
         }
         Ok(command)
@@ -379,15 +397,24 @@ impl<C: MfmValueTrait, R: TransactionRecipe<C>> EffectState<EvmNonceReservationE
     fn interpret(
         input: C,
         evidence: &Reservation,
-    ) -> Result<ProposedStateOutcome<Self::Output, Never>, mfm_values::NativeCause> {
+    ) -> Result<ProposedStateOutcome<Self::Output, Never>, mfm_values::InvocationDiagnostic> {
         let command = R::command(&input);
         if !R::Success::accepts(&command) {
-            return Err(mfm_values::NativeCause::from_error(
-                crate::EvmDomainError::InvalidValue,
+            return Err(mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "interpret",
+                &crate::EvmDomainError::InvalidValue,
+                None,
             ));
         }
-        let facts = ReservedEvmTransaction::new(command, evidence.clone())
-            .map_err(mfm_values::NativeCause::from_error)?;
+        let facts = ReservedEvmTransaction::new(command, evidence.clone()).map_err(|error| {
+            mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "interpret",
+                &error,
+                None,
+            )
+        })?;
         Ok(ProposedStateOutcome::Success {
             output: <R::Slot as ContextSlot<C>>::replace(input, facts),
         })
@@ -402,13 +429,15 @@ where
         With<PreparedTransactionFacts> = PreparedContext<C, R>,
     >,
 {
-    fn prepare(input: &Self::Input) -> Result<ReservedEvmTransaction, mfm_values::NativeCause> {
+    fn prepare(
+        input: &Self::Input,
+    ) -> Result<ReservedEvmTransaction, mfm_values::InvocationDiagnostic> {
         Ok(<R::Slot as ContextSlot<Self::Input>>::get(input).clone())
     }
     fn interpret(
         input: Self::Input,
         evidence: &PreparedEvmTransactionEvidence,
-    ) -> Result<ProposedStateOutcome<Self::Output, Never>, mfm_values::NativeCause> {
+    ) -> Result<ProposedStateOutcome<Self::Output, Never>, mfm_values::InvocationDiagnostic> {
         let facts = PreparedTransactionFacts::new(
             <R::Slot as ContextSlot<Self::Input>>::get(&input).clone(),
             evidence.clone(),
@@ -427,18 +456,27 @@ where
         With<ExecutedTransactionFacts> = ExecutedContext<C, R>,
     >,
 {
-    fn prepare(input: &Self::Input) -> Result<PreparedEvmTransaction, mfm_values::NativeCause> {
+    fn prepare(
+        input: &Self::Input,
+    ) -> Result<PreparedEvmTransaction, mfm_values::InvocationDiagnostic> {
         Ok(<R::Slot as ContextSlot<Self::Input>>::get(input).execution_command())
     }
     fn interpret(
         input: Self::Input,
         evidence: &EvmTransactionSettlement,
-    ) -> Result<ProposedStateOutcome<Self::Output, Never>, mfm_values::NativeCause> {
+    ) -> Result<ProposedStateOutcome<Self::Output, Never>, mfm_values::InvocationDiagnostic> {
         let facts = ExecutedTransactionFacts::new(
             <R::Slot as ContextSlot<Self::Input>>::get(&input).clone(),
             evidence.clone(),
         )
-        .map_err(mfm_values::NativeCause::from_error)?;
+        .map_err(|error| {
+            mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "interpret",
+                &error,
+                None,
+            )
+        })?;
         Ok(ProposedStateOutcome::Success {
             output: <R::Slot as ContextSlot<Self::Input>>::replace(input, facts),
         })
@@ -454,11 +492,15 @@ where
 {
     fn evaluate(
         input: Self::Input,
-    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::NativeCause> {
+    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::InvocationDiagnostic>
+    {
         let facts = <R::Slot as ContextSlot<Self::Input>>::get(&input);
         if !R::Success::accepts(facts.command()) {
-            return Err(mfm_values::NativeCause::from_error(
-                crate::EvmDomainError::InvalidValue,
+            return Err(mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "evaluate",
+                &crate::EvmDomainError::InvalidValue,
+                None,
             ));
         }
         if matches!(

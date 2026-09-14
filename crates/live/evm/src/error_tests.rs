@@ -1,31 +1,15 @@
 use super::*;
-use mfm_values::NativeCause;
-
 #[test]
-fn existing_owner_errors_remain_native_and_disclose_their_upstream_gap() {
-    let causes = [
-        NativeCause::from_error(EvmCodecError::Invalid),
-        NativeCause::from_error(mfm_signing::SigningError::Failed),
-        NativeCause::from_error(EvidenceError::InvalidFacts),
-        NativeCause::from_error(mfm_evm::custody::AuthorityError::Internal),
+fn existing_owner_errors_disclose_their_upstream_gap() {
+    let fields = [
+        serde_json::to_value(EvmCodecError::Invalid).unwrap(),
+        serde_json::to_value(mfm_signing::SigningError::Failed).unwrap(),
+        serde_json::to_value(mfm_evm::custody::AuthorityError::Internal).unwrap(),
     ];
-    assert!(matches!(
-        causes[0].downcast_ref::<EvmCodecError>(),
-        Some(EvmCodecError::Invalid)
-    ));
-    assert!(matches!(
-        causes[1].downcast_ref::<mfm_signing::SigningError>(),
-        Some(mfm_signing::SigningError::Failed)
-    ));
-    for (cause, kind) in causes
-        .iter()
-        .zip(["invalid", "failed", "invalid_facts", "internal"])
-    {
-        let projected =
-            serde_json::from_str::<serde_json::Value>(cause.project().unwrap().get()).unwrap();
-        assert_eq!(projected["kind"], kind);
+    for (fields, kind) in fields.iter().zip(["invalid", "failed", "internal"]) {
+        assert_eq!(fields["kind"], kind);
         assert_eq!(
-            projected["upstream_detail"],
+            fields["upstream_detail"],
             "unavailable_at_existing_owner_boundary"
         );
     }

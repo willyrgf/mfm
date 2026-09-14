@@ -57,8 +57,8 @@ primitive obtains exactly 32 bytes of OS cryptographic entropy and applies
 `mfm.run-id.random.v1`; an entropy failure is the stable `RunIdGenerationError`.
 `StartRunResult` reports the actual selected config revision. `RunRequestError` distinguishes
 pre-execution request errors, ambiguous appends with exact `RunRecovery::Start`/`Progress` identity,
-and stopped Runtime invocations. Ambiguous appends retain the complete `InvocationFailure`, including the original cause and exact
-candidate in native custody. JSON carries `recovery` and `invocation`; its optional `last_observed`
+and stopped Runtime invocations. Ambiguous appends retain the complete `InvocationFailure`, including the admitted original and exact
+submitted candidate frame. JSON carries `recovery` and `invocation`; its optional `last_observed`
 is historical. Explicitly acknowledged insertion is separate evidence and may be newer than that view.
 
 `RequestError` owns reviewed codes and messages. `SerializableClientError::for_run` fallibly prepares
@@ -69,7 +69,7 @@ automatic retry. `read_run`, `progress_run` and `start_run` preserve that distin
 
 `SerializableRunView::new` fallibly prepares the current durable state. `StartRunResult::serializable`
 uses the same preparation inside its selected-config envelope. Prepared models implement Serialize;
-the retained native values do not invoke fallible projectors through Serde. State alternatives are:
+the models borrow retained data directly. State alternatives are:
 
 - `runnable`: execution position/visit and tagged advance, retry or restart reason;
 - `effect_pending`: execution position/visit, exact retained EffectId and latest committed operational
@@ -86,9 +86,9 @@ The shipping Portfolio uses Stop with zero allowances. Operational Read failure 
 durable failed result after a separate original-failure commit and recovery decision; it cannot be
 resumed into a fresh attempt. Interruption after the original commit leaves `awaiting_recovery`.
 An accepted Effect settlement is committed before interpretation and can leave `awaiting_interpretation`. Retained revisions are checked on start/list; deleting a revision does
-not revoke an admitted run. Provider failures retain reviewed method, stage, status/code, source
-facts and explicit capture omissions in canonical reports. Raw provider messages/bodies and
-locators remain excluded from client models.
+not revoke an admitted run. Provider failures retain method, stage, status/code, ordered source messages and selected
+dependency fields in canonical reports. RPC envelope message/data text follows the upstream
+diagnostic trust contract; MFM does not append secrets or full requests/connections.
 
 The ignored `evm_contract_effect_e2e` integration test is the only app-level composition of the EVM
 transaction Effect and anchored transaction-route Read. It compiles a first-party Solidity fixture,
@@ -113,7 +113,7 @@ RunId and checks that identity; matching recovery survives config deletion, whil
 Read/progress never reload configuration or enrichment history.
 
 Size-limit invocation failures use `size_limit_exceeded` and include
-`invocation.size_limit` with `kind`, `resource`, and `limit` (bytes, or frames for
+`invocation.size_limit` with `resource` and `limit` (bytes, or frames for
 `frame_count`). Measured violations carry `actual`; a serializer stopped at its ceiling carries
 `observed_at_least`, never a fabricated final size. The last observation remains historical; oversized inline reports do not
 append a terminal conclusion or discard pending Effect authority. Capacity arithmetic overflow
@@ -124,26 +124,19 @@ body limits do not impose a response-size limit.
 
 ## Report preparation failures
 
-`ReportFailure<T>` retains the existing `RunRequestError`, `RunView` or `StartRunResult` together
-with the reporting stage (`prepare`, `encode`, or transport-observed `deliver`), original reporting cause, and any separate failure
-of that cause's projection. Its prepared `IncompleteReport` contains `code`, `message`, available
-`run_id` and recovery identity, compact `last_observed` head evidence, and explicit
-`report_failure.omissions`. Only an explicit Runtime projection failure supplies `acknowledged`;
-reading or adopting a head does not prove this invocation inserted it. Original candidate bytes stay
-in native custody and never enter this JSON surface.
+Emitters retain their concrete result locally and borrow `SerializableClientError` for one final
+presentation after reporting fails. `failed_view_report` retains the observed head and uses
+`report_render_failed`; `failed_run_report` preserves the primary error code, recovery identity,
+size facts, submitted candidate identity and checked observation. Only explicit Runtime insertion
+evidence supplies `acknowledged`; an observed head alone is `last_observed`.
 
-An incomplete error report keeps the original error category. A successful observation that cannot
-be rendered uses `report_render_failed`. Omission fields name the unavailable detail and distinguish
-`projection_failed`, `encoding_failed`, `delivery_failed`, and `bound_reached`; the last carries
-the actual limit and either a measured size or an observed lower bound. A failed secondary projector is retained and never retried. Encoding
-the incomplete report uses only prepared fields and cannot invoke that projector again.
-
-This custody is local to the invocation. It does not append an internal fault, establish durable
-failure auditing through a failed Store, or establish delivery. Native projections and individual
-values retain the 32 MiB Values ceiling; the derived FailureReport retains its own 32 MiB ceiling.
-`encode_response` encodes prepared transport fields without a new whole-response quota. Transports
-own write/flush failures and response handoff; they must retain the reporting failure if that final
-encoding also fails, without recursively attempting another JSON report.
+The final presentation carries the supplied `InvocationDiagnostic` and `original_report`, which
+embeds the exact already encoded JSON or is null if normal encoding never finished. No original
+serializer is retried and no omission ledger or generic reporting-error owner is created.
+`encode_response` returns one `Box<RawValue>` or the concrete `JsonError`, without a response quota.
+The transport borrows that buffer for delivery and retains observed failures until it returns.
+This establishes no durable audit, successful delivery or peer receipt. Values and the derived
+FailureReport retain their existing actual persistence bounds.
 
 Runtime persists one current operation and derives its public phase. Terminal reports borrow the
 retained original and mapped domain root; pending recovery reports borrow the unchanged input,

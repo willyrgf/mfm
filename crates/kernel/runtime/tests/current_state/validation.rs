@@ -168,16 +168,15 @@ async fn cold_inspection_rejects_locally_inconsistent_current_records_without_ca
         else {
             panic!("mutation {mutation} must retain a native restoration cause")
         };
-        let projected: serde_json::Value =
-            serde_json::from_str(cause.project().unwrap().get()).unwrap();
+        let projected = cause.details().as_value();
         match mutation {
-            0 | 1 => assert_eq!(projected, "usage"),
-            2 => assert_eq!(projected, "barrier"),
-            3 | 8 | 9 => assert!(cause.downcast_ref::<mfm_canonical::JsonError>().is_some()),
-            4 => assert_eq!(projected, "checkpoint"),
+            0 | 1 => assert_eq!(projected, &serde_json::json!("usage")),
+            2 => assert_eq!(projected, &serde_json::json!("barrier")),
+            3 | 8 | 9 => assert!(cause.code() == "json_error"),
+            4 => assert_eq!(projected, &serde_json::json!("checkpoint")),
             6 | 7 => assert!(projected.get("identity").is_some()),
             10 | 11 => {
-                assert!(cause.downcast_ref::<mfm_canonical::JsonError>().is_some());
+                assert!(cause.code() == "json_error");
                 assert_eq!(projected["category"], "data");
                 assert!(projected["message"]
                     .as_str()
@@ -321,7 +320,7 @@ async fn current_usage_checks_the_derived_sum_without_reconstructing_historical_
             else {
                 panic!("derived usage limit retains its validation cause")
             };
-            assert_eq!(cause.project().unwrap().get(), "\"usage\"");
+            assert_eq!(cause.details().as_value(), &serde_json::json!("usage"));
         }
     }
 }

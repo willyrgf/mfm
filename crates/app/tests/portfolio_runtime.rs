@@ -67,11 +67,16 @@ impl EvmReadProvider for Provider {
                 ProviderMode::Ready => {}
             }
             let value = match intent.subject() {
-                EvmReadSubject::ChainIdentity => EvmReadValue::ChainId(
-                    NonZeroU64::new(self.chain_id).ok_or(AdapterError::Invariant(
-                        mfm_values::NativeCause::from_error(mfm_evm::EvmDomainError::InvalidValue),
-                    ))?,
-                ),
+                EvmReadSubject::ChainIdentity => {
+                    EvmReadValue::ChainId(NonZeroU64::new(self.chain_id).ok_or(
+                        AdapterError::Invariant(mfm_values::InvocationDiagnostic::from_fields(
+                            "state_internal",
+                            "observe",
+                            &(mfm_evm::EvmDomainError::InvalidValue),
+                            None,
+                        )),
+                    )?)
+                }
                 EvmReadSubject::InitialAnchor | EvmReadSubject::ConfirmAnchor { .. } => {
                     EvmReadValue::Anchor(EvmBlockAnchor {
                         number: EvmU256::new("100").expect("number"),
@@ -99,7 +104,12 @@ impl EvmReadProvider for Provider {
     ) -> ProviderFuture<'a, AnchoredContractCallEvidence> {
         Box::pin(async {
             Err(AdapterError::Invariant(
-                mfm_values::NativeCause::from_error(mfm_evm::EvmDomainError::InvalidValue),
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "state_internal",
+                    "observe_anchored_call",
+                    &(mfm_evm::EvmDomainError::InvalidValue),
+                    None,
+                ),
             ))
         })
     }

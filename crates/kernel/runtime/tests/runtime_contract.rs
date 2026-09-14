@@ -21,7 +21,8 @@ use mfm_runtime::{
 };
 use mfm_store::{AppendResult, LoadedRun, MemoryStore, RunSummary, Store, StoreError};
 use mfm_values::{
-    canonicalize_mfm_value, MfmValue as MfmValueTrait, NativeCause, SchemaAudit, SchemaDescriptor,
+    canonicalize_mfm_value, InvocationDiagnostic, MfmValue as MfmValueTrait, SchemaAudit,
+    SchemaDescriptor,
 };
 use serde::{Deserialize, Serialize};
 
@@ -112,7 +113,8 @@ impl<K: MfmValueTrait> State for GenericState<K> {
 impl<K: MfmValueTrait> PureState for GenericState<K> {
     fn evaluate(
         input: Self::Input,
-    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, InvocationDiagnostic>
+    {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -132,7 +134,8 @@ impl<K: MfmValueTrait> State for ConflictingGenericState<K> {
 impl<K: MfmValueTrait> PureState for ConflictingGenericState<K> {
     fn evaluate(
         input: Self::Input,
-    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, InvocationDiagnostic>
+    {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -171,7 +174,8 @@ impl State for Increment {
 impl PureState for Increment {
     fn evaluate(
         input: Self::Input,
-    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, InvocationDiagnostic>
+    {
         Ok(ProposedStateOutcome::Success {
             output: Number {
                 value: input.value + 1,
@@ -254,15 +258,24 @@ impl ReadCapabilityContract for Observation {
         intent_value_ref: &ContentRef,
         intent: &Self::Intent,
         evidence: &Self::Evidence,
-    ) -> Result<(), NativeCause> {
+    ) -> Result<(), InvocationDiagnostic> {
         let expected_value_ref = canonicalize_mfm_value(intent)
             .map(|(_, value_ref)| value_ref)
-            .map_err(NativeCause::from_error)?;
+            .map_err(|cause| {
+                InvocationDiagnostic::from_fields("state_internal", "bind_evidence", &cause, None)
+            })?;
         (intent_value_ref == &expected_value_ref
             && intent_value_ref == &evidence.intent_value_ref
             && intent.value == evidence.value)
             .then_some(())
-            .ok_or_else(|| NativeCause::from_error(CapabilityError::EvidenceBinding))
+            .ok_or_else(|| {
+                InvocationDiagnostic::from_fields(
+                    "state_internal",
+                    "bind_evidence",
+                    &(CapabilityError::EvidenceBinding),
+                    None,
+                )
+            })
     }
 }
 
@@ -279,14 +292,15 @@ impl State for Observe {
 }
 
 impl ReadState<Observation> for Observe {
-    fn prepare(input: &Self::Input) -> Result<Intent, NativeCause> {
+    fn prepare(input: &Self::Input) -> Result<Intent, InvocationDiagnostic> {
         Ok(Intent { value: input.value })
     }
 
     fn interpret(
         input: Self::Input,
         evidence: &Evidence,
-    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, InvocationDiagnostic>
+    {
         if evidence.accepted {
             Ok(ProposedStateOutcome::Success { output: input })
         } else {
@@ -364,10 +378,17 @@ impl EffectCapabilityContract for Mutation {
         effect_id: &EffectId,
         command: &Self::Command,
         evidence: &Self::Evidence,
-    ) -> Result<(), NativeCause> {
+    ) -> Result<(), InvocationDiagnostic> {
         (effect_id == &evidence.effect_id && command.value == evidence.value)
             .then_some(())
-            .ok_or_else(|| NativeCause::from_error(CapabilityError::EvidenceBinding))
+            .ok_or_else(|| {
+                InvocationDiagnostic::from_fields(
+                    "state_internal",
+                    "bind_evidence",
+                    &(CapabilityError::EvidenceBinding),
+                    None,
+                )
+            })
     }
 }
 
@@ -386,10 +407,17 @@ impl ReadCapabilityContract for ConflictingReadCapability {
         _intent_value_ref: &ContentRef,
         intent: &Self::Intent,
         evidence: &Self::Evidence,
-    ) -> Result<(), NativeCause> {
+    ) -> Result<(), InvocationDiagnostic> {
         (intent.value == evidence.value)
             .then_some(())
-            .ok_or_else(|| NativeCause::from_error(CapabilityError::EvidenceBinding))
+            .ok_or_else(|| {
+                InvocationDiagnostic::from_fields(
+                    "state_internal",
+                    "bind_evidence",
+                    &(CapabilityError::EvidenceBinding),
+                    None,
+                )
+            })
     }
 }
 
@@ -418,11 +446,14 @@ impl State for Mutate {
 }
 
 impl EffectState<Mutation> for Mutate {
-    fn prepare(input: &Self::Input) -> Result<Command, NativeCause> {
+    fn prepare(input: &Self::Input) -> Result<Command, InvocationDiagnostic> {
         if input.value == PREPARATION_FAILURE_SENTINEL {
-            return Err(NativeCause::from_error(PreparationRejected {
-                input: input.value,
-            }));
+            return Err(InvocationDiagnostic::from_fields(
+                "state_internal",
+                "prepare",
+                &(PreparationRejected { input: input.value }),
+                None,
+            ));
         }
         Ok(Command { value: input.value })
     }
@@ -430,7 +461,8 @@ impl EffectState<Mutation> for Mutate {
     fn interpret(
         input: Self::Input,
         evidence: &EffectEvidence,
-    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Self::Output, Self::Failure>, InvocationDiagnostic>
+    {
         if evidence.accepted {
             Ok(ProposedStateOutcome::Success { output: input })
         } else {
@@ -675,8 +707,11 @@ fn effect_registration_rejects_duplicates_and_distinguishes_capability_modes() {
     builder
         .register_adapter::<ConflictingReadCapability, _, _>(Binding { route: 8 }, |_, _| {
             Box::pin(async {
-                Err(AdapterError::Invariant(NativeCause::from_error(
-                    AdapterRejected,
+                Err(AdapterError::Invariant(InvocationDiagnostic::from_fields(
+                    "state_internal",
+                    "effect_registration_rejects_duplicates_and_distinguishes_capability_modes",
+                    &(AdapterRejected),
+                    None,
                 )))
             })
         })
@@ -747,10 +782,11 @@ async fn pure_and_zero_state_programs_restore_without_reserving_future_recovery_
     assert_eq!(hot_value.canonical_bytes(), br#"{"value":5}"#);
     assert_eq!(hot_value.decode::<Number>().unwrap().value, 5);
     let mismatch = hot_value.decode::<FirstGenericValue>().err().unwrap();
-    assert!(matches!(
-        mismatch.downcast_ref::<mfm_values::ValueError>(),
-        Some(mfm_values::ValueError::InvalidSchemaIdentity)
-    ));
+    assert_eq!(mismatch.code(), "value_error");
+    assert_eq!(
+        mismatch.details().as_value(),
+        &serde_json::json!("invalid_schema_identity")
+    );
 
     let cold = runtime.read(&run_id).await.expect("cold read");
     let RunViewState::Succeeded(cold_value) = cold.state() else {
@@ -847,9 +883,7 @@ async fn read_success_and_separate_failure_recovery_are_restorable_without_repea
     unavailable_builder
         .register_adapter::<Observation, _, _>(Binding { route: 7 }, |_, _| {
             Box::pin(async {
-                Err(AdapterError::Invariant(NativeCause::from_error(
-                    AdapterRejected,
-                )))
+                Err(AdapterError::Invariant(InvocationDiagnostic::from_fields("state_internal", "read_success_and_separate_failure_recovery_are_restorable_without_repeating_io", &(AdapterRejected), None)))
             })
         })
         .expect("unavailable adapter");
@@ -877,7 +911,7 @@ async fn read_success_and_separate_failure_recovery_are_restorable_without_repea
                 cause,
             },
             ..
-        }) if cause.downcast_ref::<AdapterRejected>().is_some()
+        }) if cause.details().as_value() == &serde_json::json!(null)
     ));
     let prefix = unavailable
         .read(&interrupted_run_id)
@@ -1227,7 +1261,7 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
                 cause,
             },
             ..
-        }) if cause.downcast_ref::<PreparationRejected>().is_some_and(|error| error.input == PREPARATION_FAILURE_SENTINEL)
+        }) if cause.details().as_value()["input"] == PREPARATION_FAILURE_SENTINEL
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -1282,7 +1316,7 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
                 cause,
             },
             ..
-        }) if matches!(cause.downcast_ref::<CapabilityError>(), Some(CapabilityError::EvidenceBinding))
+        }) if cause.details().as_value() == &serde_json::json!("evidence_binding")
     ));
     assert_eq!(
         invalid
@@ -1598,9 +1632,7 @@ async fn operational_failures_are_audited_while_internal_failures_preserve_prepa
                             Err(AdapterError::Operational(OperationalFailure::Unavailable))
                         }),
                         FailureMode::Internal => Box::pin(async {
-                            Err(AdapterError::Invariant(NativeCause::from_error(
-                                AdapterRejected,
-                            )))
+                            Err(AdapterError::Invariant(InvocationDiagnostic::from_fields("state_internal", "operational_failures_are_audited_while_internal_failures_preserve_prepare", &(AdapterRejected), None)))
                         }),
                         FailureMode::Panic => panic!("adapter panic"),
                     }
@@ -1645,12 +1677,11 @@ async fn operational_failures_are_audited_while_internal_failures_preserve_prepa
                 };
                 match mode {
                     FailureMode::Internal => {
-                        assert!(cause.downcast_ref::<AdapterRejected>().is_some())
+                        assert!(cause.details().as_value() == &serde_json::json!(null))
                     }
-                    FailureMode::Panic => assert!(matches!(
-                        cause.downcast_ref::<mfm_runtime::TaskFailure>(),
-                        Some(mfm_runtime::TaskFailure::Panicked)
-                    )),
+                    FailureMode::Panic => {
+                        assert_eq!(cause.details().as_value(), &serde_json::json!("panicked"))
+                    }
                     FailureMode::Unavailable => unreachable!(),
                 }
             }
@@ -1950,12 +1981,10 @@ fn assert_store_recording(failure: InvocationFailure, expected: StoreError, sequ
     else {
         panic!("recording custody")
     };
-    let mfm_runtime::RecordingFailure::Append {
+    let mfm_runtime::RecordingFailure::Store {
         original: None,
         candidate,
-        outcome: mfm_runtime::AppendFailure::Store(source),
-        observation: None,
-        reload_cause: None,
+        cause: source,
     } = failure.as_ref()
     else {
         panic!("Store outcome without speculative probe")

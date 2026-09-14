@@ -13,7 +13,7 @@ One-field `#[serde(transparent)]` wrappers inherit the checked shape of `String`
 
 A checked owner can select `#[mfm(decode_native = "Self::decode_checked")]` on `MfmValue`.
 The derive emits only an override of the existing `decode_native(&[u8])` method. That function
-returns `Result<Self, mfm_values::NativeCause>` and shares the owner's checked construction with
+returns `Result<Self, mfm_values::InvocationDiagnostic>` and shares the owner's checked construction with
 ordinary deserialization, preserving typed constructor causes at Runtime entry. This attribute
 does not change schema identity and is not supported by `PersistedSchema`.
 

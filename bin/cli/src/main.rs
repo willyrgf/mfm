@@ -178,8 +178,7 @@ enum CliError {
     Request(RequestError),
     RunRequest(Box<RunRequestError>),
     RunIdGeneration(RunIdGenerationError),
-    Output(mfm_values::NativeCause),
-    Reporting(Box<dyn std::error::Error + Send + Sync>),
+    Output(mfm_values::InvocationDiagnostic),
     Usage,
 }
 
@@ -196,7 +195,7 @@ impl CliError {
             Self::Request(error) => error.code(),
             Self::RunRequest(error) => error.code(),
             Self::RunIdGeneration(error) => error.code(),
-            Self::Output(_) | Self::Reporting(_) => "output_failed",
+            Self::Output(_) => "output_failed",
             Self::Usage => "invalid_usage",
         }
     }
@@ -213,7 +212,7 @@ impl CliError {
             Self::Request(error) => error.to_string(),
             Self::RunRequest(error) => error.to_string(),
             Self::RunIdGeneration(error) => error.to_string(),
-            Self::Output(_) | Self::Reporting(_) => "output could not be written".to_owned(),
+            Self::Output(_) => "output could not be written".to_owned(),
             Self::Usage => "command usage is invalid".to_owned(),
         }
     }
@@ -243,11 +242,7 @@ async fn main() -> ExitCode {
     let output = cli.output;
     match run(cli).await {
         Ok(code) => code,
-        Err(CliError::Reporting(_failure)) => ExitCode::from(2),
-        Err(error) => {
-            let _delivery = emit_error(output, error);
-            ExitCode::from(2)
-        }
+        Err(error) => emit_error(output, error),
     }
 }
 
@@ -359,19 +354,19 @@ async fn run_run(
             };
             let application = open(deployment).await?;
             let result = application.start_run(run_id, &selection).await?;
-            emit_start_result(output, result)
+            Ok(emit_start_result(output, result))
         }
         RunCommand::Progress { run_id } => {
             let run_id = RunId::parse(run_id).map_err(|_| CliError::RunId)?;
             let application = open(deployment).await?;
             let view = application.progress_run(&run_id).await?;
-            emit_run_view(output, view)
+            Ok(emit_run_view(output, view))
         }
         RunCommand::Show { run_id } => {
             let run_id = RunId::parse(run_id).map_err(|_| CliError::RunId)?;
             let application = open(deployment).await?;
             let view = application.read_run(&run_id).await?;
-            emit_run_view(output, view)
+            Ok(emit_run_view(output, view))
         }
         RunCommand::List { after, limit } => {
             let after = after

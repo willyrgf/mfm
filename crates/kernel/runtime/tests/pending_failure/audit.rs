@@ -242,18 +242,16 @@ async fn ambiguous_failure_appends_acknowledge_neither_an_uncommitted_cause_nor_
                 else {
                     panic!("indeterminate failure append")
                 };
-                let mfm_runtime::RecordingFailure::Append {
+                let mfm_runtime::RecordingFailure::Store {
                     original: Some(original),
                     candidate,
-                    outcome: mfm_runtime::AppendFailure::Store(mfm_store::StoreError::Indeterminate),
-                    observation: None,
-                    reload_cause: None,
+                    cause: mfm_store::StoreError::Indeterminate,
                 } = failure.as_ref()
                 else {
                     panic!("original and ambiguous candidate custody")
                 };
                 assert!(matches!(
-                    original.downcast_ref::<Cause>(),
+                    original.original().decode::<Cause>().ok(),
                     Some(Cause::Timeout { deadline_ms: 5000 })
                 ));
                 assert_eq!(candidate.run_sequence(), 3);
@@ -698,10 +696,9 @@ async fn competing_pending_failures_report_only_the_winning_exact_head_candidate
                 last_observed: Some(view),
                 ..
             }) => {
-                let mfm_runtime::RecordingFailure::Append {
+                let mfm_runtime::RecordingFailure::NotInserted {
                     original: Some(original),
                     candidate,
-                    outcome: mfm_runtime::AppendFailure::NotInserted,
                     observation: Some((head, mfm_runtime::CandidatePresence::Excluded)),
                     reload_cause: None,
                 } = failure.as_ref()
@@ -709,7 +706,7 @@ async fn competing_pending_failures_report_only_the_winning_exact_head_candidate
                     panic!("excluded candidate retains original")
                 };
                 assert!(matches!(
-                    original.downcast_ref::<Cause>(),
+                    original.original().decode::<Cause>().ok(),
                     Some(Cause::Timeout {
                         deadline_ms: 5001 | 5002
                     })

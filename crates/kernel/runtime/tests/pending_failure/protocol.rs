@@ -29,18 +29,18 @@ impl EffectCapabilityContract for QualifiedSubmit {
         id: &EffectId,
         command: &Number,
         evidence: &Number,
-    ) -> std::result::Result<(), NativeCause> {
+    ) -> std::result::Result<(), InvocationDiagnostic> {
         Submit::bind_evidence(id, command, evidence)
     }
 }
 impl EffectState<QualifiedSubmit> for Execute {
-    fn prepare(input: &Number) -> std::result::Result<Number, NativeCause> {
+    fn prepare(input: &Number) -> std::result::Result<Number, InvocationDiagnostic> {
         Ok(Number { value: input.value })
     }
     fn interpret(
         input: Number,
         _: &Number,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, InvocationDiagnostic> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -69,7 +69,7 @@ impl Handler for CountedStandard {
         params: &NoParams,
         classification: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, NativeCause> {
+    ) -> std::result::Result<RecoveryRequest, InvocationDiagnostic> {
         POLICY_CALLS.fetch_add(1, Ordering::SeqCst);
         StandardRecovery::handle(params, classification, context)
     }

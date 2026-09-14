@@ -69,23 +69,28 @@ context, not a captured Rust backtrace. Classification, retry decisions and publ
 are projections of the retained error; none is a substitute for it.
 
 - Retain concrete sources while they are safely held within their owning boundary. At an audit
-  boundary, retain a bounded typed representation of each available cause layer, operation/stage,
+  boundary, retain the selected representation of each available cause layer, operation/stage,
   protocol or OS code, and reviewed diagnostic fields. Use source-preserving conversions where
   appropriate; `Error::source()` alone neither serializes a chain nor proves complete capture.
 - Do not silently discard a source with `map_err(|_| ...)`, a catch-all mapper, a unit replacement,
   or a success-shaped fallback. A terse public message is legitimate only when the causal audit
   representation remains available. Expected absence and Pending require their explicit protocol
   meaning; they cannot hide a failed observation.
-- Secrets never enter Program, admitted context, Journal, public output, logs or error details.
-  Do not capture generic Debug/Display dumps, request-bearing channel errors, arbitrary provider
-  messages, database details or panic payloads as a shortcut. Preserve reviewed causal facts and
-  explicitly identify any withheld, unavailable or size-limited evidence. Partial capture must
-  never be labeled raw, complete or lossless.
-- Literal byte-exact external evidence and safe causal diagnostics are different contracts. If
-  full retention requires restricted custody, use the architect rule to settle that contract
-  before implementation. Encryption or moving a blob to another file is not implicit permission
-  to persist credentials. Do not introduce a universal opaque error bag or a second logging system
-  to conceal a missing design.
+- Do not deliberately append MFM secrets, full request/connection objects or panic payloads to
+  diagnostics. Selected dependency-supplied JSON/parser, EVM transport/provider and CLI IO messages
+  follow the diagnostic trust contract in `docs/design.md`: retain supplied text without generic
+  credential detection, sanitization, certification, diagnostic quotas or omission ledgers. This
+  trust is not a promise that dependencies cannot disclose sensitive content. Ordinary Program and
+  context validation and actual Object/frame/run/report limits remain in force.
+- Keep concrete errors within interfaces that support them. Selected heterogeneous internal
+  boundaries construct immutable `InvocationDiagnostic` data once; receivers forward it without
+  recapturing or reconstructing classifiable originals from JSON. Declared operational failures
+  retain their concrete owner data before admission. Do not introduce opaque native-error custody,
+  stored projectors, a second logging system or universal error bags.
+- Failed first encoding of a declared original reports the encoding cause, known execution/contract
+  context and explicitly unavailable original detail/identity. Do not retry the original serializer
+  or keep a parallel native payload. Once admitted, the complete Failure/Object supplies persistence
+  and reporting. Neither unavailable details nor invocation-only data prove durable recording.
 - Carry retained causes into acknowledged operational failure records and cold observations.
   Internal failures remain internal; do not manufacture a recoverable domain/provider incident to
   obtain a Journal record. Store, startup and transport failures need their own explicit durability
@@ -105,7 +110,8 @@ its own secrets, full requests or connection objects as diagnostic context.
 
 For each changed adapter, tests must inject distinguishable nested causes and assert retained
 layers/fields, unchanged classification semantics where applicable, hot/cold audit preservation,
-and secret exclusion. Exercise retention bounds and audit-write failure at the affected boundary.
+and exclusion of deliberately appended MFM secrets. Exercise actual size bounds and recording
+failure at the affected boundary.
 Document unresolved loss at the first lossy conversion, with affected callers and remediation;
 existing lossy implementations are gaps to fix within a coherent cutover, not allowed patterns.
 

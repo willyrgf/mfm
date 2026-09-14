@@ -1,6 +1,7 @@
 use super::*;
-use mfm_runtime::{AppendFailure, Operation, RecordingFailure, SizeResource, SizeViolation, Stage};
-use mfm_values::{NativeCause, SizeLimitExceeded, ValueError};
+use mfm_runtime::{Operation, RecordingFailure, Stage};
+use mfm_values::{InvocationDiagnostic, SizeLimitExceeded, ValueError};
+use mfm_values::{SizeResource, SizeViolation};
 
 #[test]
 fn serialization_stop_reports_a_lower_bound_and_preserves_the_native_encoding_cause() {
@@ -8,7 +9,7 @@ fn serialization_stop_reports_a_lower_bound_and_preserves_the_native_encoding_ca
     let error = RuntimeError::Native {
         operation: Operation::ReadAdapter,
         stage: Stage::Encode,
-        cause: NativeCause::from_error(ValueError::Canonical(source)),
+        cause: ValueError::Canonical(source).into_diagnostic("encode"),
     };
     assert!(
         matches!(error.size_limit(), Some(SizeViolation::SerializationBound {
@@ -17,17 +18,10 @@ fn serialization_stop_reports_a_lower_bound_and_preserves_the_native_encoding_ca
     );
     let projection = serde_json::to_value(error.size_limit().unwrap()).unwrap();
     assert!(projection.get("actual").is_none());
-    let RuntimeError::Native { cause, .. } = &error else {
-        unreachable!()
-    };
-    let ValueError::Canonical(source) = cause.downcast_ref::<ValueError>().unwrap() else {
-        unreachable!()
-    };
-    assert!(std::error::Error::source(source).is_some());
     assert!(
-        serde_json::from_str::<serde_json::Value>(error.project().unwrap().get()).unwrap()
-            ["native"]["cause"]["canonical"]["serialization_limit"]
-            .is_object()
+        serde_json::to_value(&error).unwrap()["native"]["cause"]["details"]["canonical"]
+            ["serialization_limit"]["source"]["message"]
+            .is_string()
     );
 }
 
@@ -43,23 +37,20 @@ fn append_size_projection_uses_the_physical_outcome_and_ignores_secondary_reload
     };
     let error = RuntimeError::Recording {
         operation: Operation::ReadAdapter,
-        failure: Box::new(RecordingFailure::Append {
+        failure: Box::new(RecordingFailure::NotInserted {
             original: None,
             candidate: candidate.clone(),
-            outcome: AppendFailure::NotInserted,
             observation: None,
-            reload_cause: Some(secondary.into_native()),
+            reload_cause: Some(Box::new(secondary)),
         }),
     };
     assert!(error.size_limit().is_none());
     let error = RuntimeError::Recording {
         operation: Operation::ReadAdapter,
-        failure: Box::new(RecordingFailure::Append {
+        failure: Box::new(RecordingFailure::Store {
             original: None,
             candidate,
-            outcome: AppendFailure::Store(mfm_store::StoreError::HistorySize(size)),
-            observation: None,
-            reload_cause: None,
+            cause: mfm_store::StoreError::HistorySize(size),
         }),
     };
     assert_eq!(
@@ -72,6 +63,8 @@ fn append_size_projection_uses_the_physical_outcome_and_ignores_secondary_reload
     );
 }
 
+static ORIGINAL_SERIALIZATIONS: AtomicUsize = AtomicUsize::new(0);
+
 #[derive(Debug, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 struct OversizedOriginal {
@@ -80,6 +73,11 @@ struct OversizedOriginal {
 impl Serialize for OversizedOriginal {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
+        if self.detail.len() >= mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES
+            || self.detail == "encoding-task-panic"
+        {
+            ORIGINAL_SERIALIZATIONS.fetch_add(1, Ordering::SeqCst);
+        }
         assert_ne!(
             self.detail, "encoding-task-panic",
             "injected encoding task failure"
@@ -107,18 +105,18 @@ impl ReadCapabilityContract for LargeObservation {
         reference: &ContentRef,
         intent: &Request,
         evidence: &Request,
-    ) -> Result<(), NativeCause> {
+    ) -> Result<(), InvocationDiagnostic> {
         Observation::bind_evidence(reference, intent, evidence)
     }
 }
 impl ReadState<LargeObservation> for Read {
-    fn prepare(input: &Input) -> Result<Request, NativeCause> {
+    fn prepare(input: &Input) -> Result<Request, InvocationDiagnostic> {
         Ok(Request { value: input.value })
     }
     fn interpret(
         input: Input,
         _: &Request,
-    ) -> Result<ProposedStateOutcome<Input, Never>, NativeCause> {
+    ) -> Result<ProposedStateOutcome<Input, Never>, InvocationDiagnostic> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -153,8 +151,9 @@ impl mfm_program::Operation for LargeFlow {
     }
 }
 #[tokio::test]
-async fn unrecordable_original_survives_encoding_bound_and_task_failure_without_append() {
+async fn unrecordable_original_reports_known_slot_and_encoding_cause_without_append() {
     for panics in [false, true] {
+        ORIGINAL_SERIALIZATIONS.store(0, Ordering::SeqCst);
         let store = Arc::new(MemoryStore::new());
         let mut builder = RuntimeAssemblyBuilder::new().unwrap();
         builder.register_read::<Read, LargeObservation>().unwrap();
@@ -206,69 +205,36 @@ async fn unrecordable_original_survives_encoding_bound_and_task_failure_without_
                 })
             ));
         }
-        let RuntimeError::Recording { failure, .. } = error else {
-            panic!("original custody")
-        };
-        let RecordingFailure::BeforeAppend {
-            original: Some(original),
-            candidate: None,
+        let RuntimeError::Native {
+            operation: Operation::ReadAdapter,
+            stage: Stage::Encode,
             cause,
-        } = failure.as_ref()
+        } = error
         else {
-            panic!("no fabricated candidate")
+            panic!("encoding is an ordinary internal failure")
         };
+        assert_eq!(cause.operation(), "encode_failure");
+        assert_eq!(ORIGINAL_SERIALIZATIONS.load(Ordering::SeqCst), 1);
+        let _rendered = serde_json::to_value(&cause).unwrap();
+        assert_eq!(ORIGINAL_SERIALIZATIONS.load(Ordering::SeqCst), 1);
+        let fields = cause.details().as_value();
+        assert_eq!(fields["encoding_target"], "declared_failure");
+        assert_eq!(fields["original_detail"], "unavailable");
+        assert_eq!(fields["original_identity"], "unavailable");
+        assert_eq!(
+            fields["failure_contract"],
+            serde_json::to_value(mfm_program::nominal_contract_ref::<OversizedOriginal>().unwrap())
+                .unwrap()
+        );
+        assert!(fields["position"].is_object());
         if panics {
-            assert_eq!(
-                original.downcast_ref::<OversizedOriginal>().unwrap().detail,
-                "encoding-task-panic"
-            );
-            let Some(RuntimeError::Native {
-                operation: mfm_runtime::Operation::ReadAdapter,
-                stage: mfm_runtime::Stage::Execute,
-                cause,
-            }) = cause.downcast_ref::<RuntimeError>()
-            else {
-                panic!("encoding task failure retains its operation and reviewed outcome");
-            };
-            assert!(matches!(
-                cause.downcast_ref::<mfm_runtime::TaskFailure>(),
-                Some(mfm_runtime::TaskFailure::Panicked)
-            ));
-            let projection = original.project().unwrap_err();
-            let projection: serde_json::Value =
-                serde_json::from_str(projection.project().unwrap().get()).unwrap();
-            assert_eq!(projection["operation"], "native_projection");
-            assert_eq!(projection["outcome"], "panicked");
-            assert_eq!(
-                projection["omissions"],
-                serde_json::json!([
-                    {"field": "panic_payload", "reason": "withheld"}
-                ])
-            );
+            assert_eq!(cause.code(), "task_failure");
+            assert_eq!(fields["encoding"], "panicked");
         } else {
-            assert_eq!(
-                original
-                    .downcast_ref::<OversizedOriginal>()
-                    .unwrap()
-                    .detail
-                    .len(),
-                mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES
-            );
-            assert!(cause.downcast_ref::<RuntimeError>().is_some());
-            let projection_error = original.project().unwrap_err();
-            let ValueError::Canonical(cause) =
-                projection_error.downcast_ref::<ValueError>().unwrap()
-            else {
-                panic!("original projection preserves Values' encoding boundary")
-            };
-            assert!(cause.serialization_bound().is_some());
-            assert_eq!(
-                original
-                    .downcast_ref::<OversizedOriginal>()
-                    .unwrap()
-                    .detail
-                    .len(),
-                mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES
+            assert_eq!(cause.code(), "value_error");
+            assert!(
+                fields["encoding"]["canonical"]["serialization_limit"]["source"]["message"]
+                    .is_string()
             );
         }
         let loaded = store.load_run(&run, None).await.unwrap().unwrap();
@@ -277,69 +243,8 @@ async fn unrecordable_original_survives_encoding_bound_and_task_failure_without_
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("reviewed owner projection stopped")]
-struct UnprojectableOwner {
-    reviewed_code: u64,
-}
-#[derive(Debug, Serialize, thiserror::Error)]
-#[error("reviewed projection failure")]
-struct OwnerProjectionFailure {
-    reviewed_code: u64,
-}
-
-#[test]
-fn nested_runtime_projection_returns_the_native_child_failure_without_losing_its_owner() {
-    let nested = RuntimeError::Native {
-        operation: Operation::ReadAdapter,
-        stage: Stage::Execute,
-        cause: NativeCause::from_error_with(UnprojectableOwner { reviewed_code: 41 }, |owner| {
-            Err(NativeCause::from_error(OwnerProjectionFailure {
-                reviewed_code: owner.reviewed_code + 1,
-            }))
-        }),
-    };
-    let error = RuntimeError::Recording {
-        operation: Operation::ReadAdapter,
-        failure: Box::new(RecordingFailure::BeforeAppend {
-            original: None,
-            candidate: None,
-            cause: nested.into_native(),
-        }),
-    };
-    let projection_failure = error.project().unwrap_err();
-    assert_eq!(
-        projection_failure
-            .downcast_ref::<OwnerProjectionFailure>()
-            .unwrap()
-            .reviewed_code,
-        42
-    );
-    let RuntimeError::Recording { failure, .. } = &error else {
-        panic!("recording custody")
-    };
-    let RecordingFailure::BeforeAppend { cause, .. } = failure.as_ref() else {
-        panic!("before append")
-    };
-    let RuntimeError::Native { cause, .. } = cause.downcast_ref::<RuntimeError>().unwrap() else {
-        panic!("nested runtime")
-    };
-    assert_eq!(
-        cause
-            .downcast_ref::<UnprojectableOwner>()
-            .unwrap()
-            .reviewed_code,
-        41
-    );
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(projection_failure.project().unwrap().get())
-            .unwrap()["reviewed_code"],
-        42
-    );
-}
-
 #[tokio::test]
-async fn rejected_operational_original_cannot_escape_through_recording_failure_projection() {
+async fn rejected_operational_original_reports_unavailable_detail_without_append() {
     let store = Arc::new(MemoryStore::new());
     let mut builder = RuntimeAssemblyBuilder::new().unwrap();
     builder.register_read::<Read, LargeObservation>().unwrap();
@@ -378,42 +283,26 @@ async fn rejected_operational_original_cannot_escape_through_recording_failure_p
         panic!("original violates value admission")
     };
     assert_eq!(observed.head_sequence(), 1);
-    let projection_error = error.project().unwrap_err();
-    assert!(matches!(
-        projection_error.downcast_ref::<ValueError>(),
-        Some(ValueError::SchemaShapeMismatch)
-    ));
-    assert_eq!(
-        projection_error.project().unwrap().get(),
-        "\"schema_shape_mismatch\""
-    );
-    let RuntimeError::Recording { failure, .. } = error else {
-        panic!("native original remains in recording custody")
-    };
-    let RecordingFailure::BeforeAppend {
-        original: Some(original),
-        candidate: None,
-        cause,
-    } = failure.as_ref()
-    else {
-        panic!("no candidate or policy decision")
-    };
-    assert_eq!(
-        original.downcast_ref::<OversizedOriginal>().unwrap().detail,
-        "api_key=must-not-escape"
-    );
+    let encoded = serde_json::to_string(&error).unwrap();
+    assert!(!encoded.contains("must-not-escape"));
     let RuntimeError::Native {
         operation: Operation::ReadAdapter,
         stage: Stage::Encode,
         cause,
-    } = cause.downcast_ref::<RuntimeError>().unwrap()
+    } = error
     else {
         panic!("actual admission boundary retained")
     };
-    assert!(matches!(
-        cause.downcast_ref::<ValueError>(),
-        Some(ValueError::SchemaShapeMismatch)
-    ));
+    assert_eq!(cause.code(), "value_error");
+    assert_eq!(
+        cause.details().as_value()["encoding"],
+        "schema_shape_mismatch"
+    );
+    assert_eq!(cause.details().as_value()["original_detail"], "unavailable");
+    assert_eq!(
+        cause.details().as_value()["original_identity"],
+        "unavailable"
+    );
     let retained = store.load_run(&run, None).await.unwrap().unwrap();
     assert_eq!(retained.head().head_digest(), observed.head_digest());
     assert!(!std::str::from_utf8(retained.latest())

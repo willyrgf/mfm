@@ -1,12 +1,9 @@
 use super::*;
 use mfm_ids::{DigestBytes, EntryPointId, RunId};
 use mfm_program::{Never, NoParams, Operation, OperationExpansion, ProgramLimits};
-use mfm_runtime::{InvocationFailure, Runtime, RuntimeAssemblyBuilder, RuntimeError, Stage};
+use mfm_runtime::{Runtime, RuntimeAssemblyBuilder};
 use std::io;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 struct Empty;
 impl Operation for Empty {
@@ -95,7 +92,7 @@ async fn successful_json_and_text_preserve_the_observed_value_and_exit() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         assert_eq!(
-            view_to(output, view, &mut stdout, &mut stderr).unwrap(),
+            view_to(output, view, &mut stdout, &mut stderr),
             ExitCode::SUCCESS
         );
         assert!(stderr.is_empty());
@@ -107,7 +104,7 @@ async fn successful_json_and_text_preserve_the_observed_value_and_exit() {
             OutputFormat::Text => {
                 let text = String::from_utf8(stdout).unwrap();
                 assert!(text.contains("state=succeeded\n"));
-                assert!(text.contains("value=null\n"));
+                assert!(text.contains("canonical=null\n"));
                 assert!(text.contains(&format!("value_ref={}\n", expected["state"]["value_ref"])));
             }
         }
@@ -115,30 +112,28 @@ async fn successful_json_and_text_preserve_the_observed_value_and_exit() {
 }
 
 #[tokio::test]
-async fn stdout_write_and_flush_failures_report_historical_head_without_claiming_insertion() {
+async fn stdout_write_and_flush_failure_preserve_original_report_and_observed_head() {
     for (mut stdout, stage, code) in [
         (FailingWriter::write_failure(3), "write", 32),
         (FailingWriter::flush_failure(), "flush", 5),
     ] {
         let view = view().await;
+        let expected = serde_json::to_value(SerializableRunView::new(&view).unwrap()).unwrap();
         let head = view.head_sequence();
         let mut stderr = Vec::new();
         assert_eq!(
-            view_to(OutputFormat::Json, view, &mut stdout, &mut stderr).unwrap(),
+            view_to(OutputFormat::Json, view, &mut stdout, &mut stderr),
             ExitCode::from(2)
         );
         let report: serde_json::Value = serde_json::from_slice(&stderr).unwrap();
         assert_eq!(report["code"], "report_render_failed");
         assert_eq!(report["last_observed"]["head_sequence"], head);
         assert!(report.get("acknowledged").is_none());
-        assert_eq!(report["report_failure"]["stage"], "deliver");
-        assert_eq!(
-            report["report_failure"]["omissions"][0]["reason"],
-            "delivery_failed"
-        );
-        assert_eq!(report["report_failure"]["cause"]["stream"], "stdout");
-        assert_eq!(report["report_failure"]["cause"]["stage"], stage);
-        assert_eq!(report["report_failure"]["cause"]["cause"]["os_code"], code);
+        assert_eq!(report["original_report"], expected);
+        assert_eq!(report["diagnostic"]["code"], "output_io");
+        assert_eq!(report["diagnostic"]["details"]["stream"], "stdout");
+        assert_eq!(report["diagnostic"]["details"]["stage"], stage);
+        assert_eq!(report["diagnostic"]["details"]["details"]["os_code"], code);
         if stage == "write" {
             assert_eq!(stdout.bytes.len(), 3);
         } else {
@@ -147,173 +142,100 @@ async fn stdout_write_and_flush_failures_report_historical_head_without_claiming
     }
 }
 
-#[derive(Debug, Serialize, thiserror::Error)]
-#[error("reviewed original")]
-struct Cause {
-    code: u64,
-}
-
-#[test]
-fn failed_stderr_retains_the_original_invocation_and_its_acknowledged_head() {
-    let frame = mfm_journal::seal_frame(
-        &run_id(),
-        1,
-        None,
-        &mfm_canonical::PlainCanonicalJsonBytes::from_json_str("{}").unwrap(),
-    )
-    .unwrap();
-    let acknowledged = mfm_store::RunSummary::new(
-        run_id(),
-        1,
-        frame.head_digest().clone(),
-        frame.canonical_bytes().len() as u64,
-    )
-    .unwrap();
-    let expected = acknowledged.clone();
-    let original = RunRequestError::Invocation(InvocationFailure::Execution {
-        run_id: run_id(),
-        last_observed: None,
-        error: RuntimeError::Projection {
-            acknowledged: Box::new(acknowledged),
-            cause: NativeCause::from_error(Cause { code: 71 }),
-        },
-    });
-    let mut stderr = FailingWriter::write_failure(0);
-    let CliError::Reporting(failure) =
-        run_error_to(OutputFormat::Json, original, &mut stderr).unwrap_err()
-    else {
-        panic!("terminal custody")
-    };
-    let failure = failure
-        .downcast_ref::<ReportFailure<RunRequestError>>()
-        .unwrap();
-    let RunRequestError::Invocation(InvocationFailure::Execution {
-        error: RuntimeError::Projection {
-            acknowledged,
-            cause,
-        },
-        ..
-    }) = failure.original()
-    else {
-        panic!("known insertion retained")
-    };
-    assert_eq!(acknowledged.as_ref(), &expected);
-    assert_eq!(cause.downcast_ref::<Cause>().unwrap().code, 71);
-    let delivery: serde_json::Value =
-        serde_json::from_str(failure.cause().project().unwrap().get()).unwrap();
-    assert_eq!(delivery["stream"], "stderr");
-    assert_eq!(stderr.writes, 1);
-}
-
-#[test]
-fn failed_delivery_of_incomplete_report_retains_both_failures_without_projector_retry() {
-    #[derive(Debug, thiserror::Error)]
-    #[error("reviewed original projection failed")]
-    struct Original(Arc<AtomicUsize>);
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let original = RunRequestError::Invocation(InvocationFailure::Execution {
-        run_id: run_id(),
-        last_observed: None,
-        error: RuntimeError::Native {
-            operation: mfm_runtime::Operation::ReadPrepare,
-            stage: Stage::Decode,
-            cause: NativeCause::from_error_with(Original(attempts.clone()), |original| {
-                original.0.fetch_add(1, Ordering::SeqCst);
-                Err(NativeCause::from_error(Cause { code: 72 }))
-            }),
-        },
-    });
-    let mut stderr = FailingWriter::write_failure(0);
-    let CliError::Reporting(failure) =
-        run_error_to(OutputFormat::Json, original, &mut stderr).unwrap_err()
-    else {
-        panic!("terminal custody")
-    };
-    let failure = failure
-        .downcast_ref::<ReportFailure<ReportFailure<RunRequestError>>>()
-        .unwrap();
+#[tokio::test]
+async fn stdout_text_failure_keeps_the_already_formatted_buffer() {
+    let view = view().await;
+    let expected = run_text(&view).unwrap();
+    let mut stdout = FailingWriter::flush_failure();
+    let mut stderr = Vec::new();
     assert_eq!(
-        failure
-            .original()
-            .cause()
-            .downcast_ref::<Cause>()
-            .unwrap()
-            .code,
-        72
+        view_to(OutputFormat::Text, view, &mut stdout, &mut stderr),
+        ExitCode::from(2)
     );
-    let RunRequestError::Invocation(InvocationFailure::Execution {
-        error: RuntimeError::Native { cause, .. },
-        ..
-    }) = failure.original().original()
-    else {
-        panic!("original custody")
-    };
-    assert!(cause.downcast_ref::<Original>().is_some());
-    assert!(failure
-        .cause()
-        .downcast_ref::<output::OutputWriteError>()
-        .is_some());
-    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    let text = String::from_utf8(stderr).unwrap();
+    assert!(text.contains(&format!("original_text={expected}")));
+    assert!(text.contains("\"stream\":\"stdout\""));
+    assert!(text.contains("\"stage\":\"flush\""));
+}
+
+#[tokio::test]
+async fn stderr_failure_ends_both_normal_and_final_presentations_without_retry() {
+    let mut stderr = FailingWriter::write_failure(0);
+    let error = RunRequestError::Request(mfm_app::RequestError::RunAppendNotInserted);
+    assert_eq!(
+        run_error_to(OutputFormat::Json, error, &mut stderr),
+        ExitCode::from(2)
+    );
+    assert_eq!(stderr.writes, 1);
+    let mut stdout = FailingWriter::write_failure(0);
+    let mut stderr = FailingWriter::write_failure(0);
+    assert_eq!(
+        view_to(OutputFormat::Json, view().await, &mut stdout, &mut stderr),
+        ExitCode::from(2)
+    );
+    assert_eq!(stdout.writes, 1);
     assert_eq!(stderr.writes, 1);
 }
 
+#[tokio::test]
+async fn normal_encoding_failure_reports_unavailable_original_without_stdout() {
+    let view = view().await;
+    let cause = mfm_canonical::JsonError::new(serde_json::from_str::<bool>("bad").unwrap_err());
+    let diagnostic = InvocationDiagnostic::from_fields("json_error", "emit_run_view", &cause, None);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    assert_eq!(
+        json_view_to(
+            &view,
+            Err(diagnostic),
+            "emit_run_view",
+            &mut stdout,
+            &mut stderr
+        ),
+        ExitCode::from(2)
+    );
+    assert!(stdout.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&stderr).unwrap();
+    assert!(report["original_report"].is_null());
+    assert_eq!(
+        report["last_observed"]["head_sequence"],
+        view.head_sequence()
+    );
+    assert_eq!(report["diagnostic"]["code"], "json_error");
+}
+
 #[test]
-fn output_owner_retains_reviewed_nested_os_facts_and_withholds_custom_input() {
-    #[derive(Debug, thiserror::Error)]
-    #[error("secret-shaped custom output input")]
-    struct Secret(#[source] io::Error);
+fn output_custom_source_is_retained_and_cycles_stop_before_duplicate_layers() {
+    #[derive(Debug)]
+    struct Cycle;
+    impl std::fmt::Display for Cycle {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("exposed custom source")
+        }
+    }
+    impl std::error::Error for Cycle {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(self)
+        }
+    }
     struct Writer;
     impl Write for Writer {
         fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                Secret(io::Error::from_raw_os_error(13)),
-            ))
+            Err(io::Error::other(Cycle))
         }
         fn flush(&mut self) -> io::Result<()> {
-            panic!("write failed before flush")
+            Ok(())
         }
     }
-    let error = write_output(
-        &mut Writer,
-        OutputStream::Stdout,
-        b"rejected private buffer",
-    )
-    .unwrap_err();
-    let native = NativeCause::from_error(error);
-    let projection = native.project().unwrap();
-    let json = projection.get();
-    assert!(!json.contains("secret-shaped"));
-    assert!(!json.contains("rejected private buffer"));
-    assert!(!format!("{native:?}").contains("secret-shaped"));
-    let report: serde_json::Value = serde_json::from_str(json).unwrap();
-    let sources = &report["cause"]["sources"];
-    assert_eq!(sources["sources"]["layers"][0]["kind"], "opaque");
-    assert_eq!(sources["sources"]["layers"][1]["kind"], "os");
+    let error =
+        write_output(&mut Writer, OutputStream::Stdout, [b"report".as_slice()]).unwrap_err();
+    let report = serde_json::to_value(error).unwrap();
+    assert_eq!(report["details"]["message"], "exposed custom source");
+    assert_eq!(report["details"]["os_kind"], "Other");
+    assert!(report["details"]["os_code"].is_null());
     assert_eq!(
-        sources["sources"]["layers"][1]["facts"][1]["OsCode"]["code"],
-        13
+        report["details"]["sources"],
+        serde_json::json!([{"message": "exposed custom source"}])
     );
-    assert_eq!(sources["omissions"][0]["reason"], "withheld");
-}
-
-#[test]
-fn ordinary_output_projection_failure_retains_its_actual_prepare_stage_without_writing() {
-    let original = CliError::Output(NativeCause::from_error_with(Cause { code: 81 }, |_| {
-        Err(NativeCause::from_error(Cause { code: 82 }))
-    }));
-    let mut stderr = Vec::new();
-    let CliError::Reporting(failure) =
-        error_to(OutputFormat::Json, original, &mut stderr).unwrap_err()
-    else {
-        panic!("terminal native reporting custody")
-    };
-    let failure = failure.downcast_ref::<ReportFailure<CliError>>().unwrap();
-    assert_eq!(failure.stage(), ReportStage::Prepare);
-    assert_eq!(failure.cause().downcast_ref::<Cause>().unwrap().code, 82);
-    let CliError::Output(cause) = failure.original() else {
-        panic!("original output cause")
-    };
-    assert_eq!(cause.downcast_ref::<Cause>().unwrap().code, 81);
-    assert!(stderr.is_empty());
+    assert_eq!(report["details"]["source_cycle"], true);
 }

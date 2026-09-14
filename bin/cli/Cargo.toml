@@ -15,7 +15,6 @@ mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-values = { path = "../../crates/kernel/values" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
-mfm-diagnostics = { path = "../../crates/kernel/diagnostics" }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

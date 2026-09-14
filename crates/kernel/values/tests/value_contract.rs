@@ -85,29 +85,6 @@ fn exact_32_mib_object_is_accepted_and_one_more_byte_retains_encoding_bound() {
 }
 
 #[test]
-fn rejected_original_projection_keeps_native_custody_without_bypassing_secret_policy() {
-    let original = mfm_values::NativeCause::from_original(std::sync::Arc::new(TextValue {
-        text: "api_key=must-not-escape".into(),
-    }));
-    let failure = original
-        .project()
-        .expect_err("rejected value cannot become public error detail");
-    assert!(matches!(
-        failure.downcast_ref::<ValueError>(),
-        Some(ValueError::SchemaShapeMismatch)
-    ));
-    assert_eq!(
-        original.downcast_ref::<TextValue>().unwrap().text,
-        "api_key=must-not-escape"
-    );
-    assert_eq!(
-        failure.project().unwrap().get(),
-        "\"schema_shape_mismatch\""
-    );
-    assert!(!format!("{original:?}").contains("must-not-escape"));
-}
-
-#[test]
 fn object_deserialize_checks_admission_and_reports_parser_errors() {
     use mfm_values::Object;
 

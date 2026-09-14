@@ -9,14 +9,13 @@ use std::time::Duration;
 use crate::error::{invariant, AdapterFailure};
 use alloy_primitives::{hex, Address, U256};
 use mfm_capabilities::AdapterError;
-use mfm_diagnostics::{
-    CaptureOmission, HttpStatusCode, ObservedSize, OmissionReason, OmittedField, ResponseContext,
-};
 use mfm_evm::custody::ExactRawTransaction;
+use mfm_evm::ObservedSize;
 use mfm_evm::{
     EvmOperationalError, EvmOperationalKind, EvmRpcMethod, ProviderFailure, ProviderFailureKind,
     RpcField, RpcRejection, RpcStage,
 };
+use reqwest::StatusCode;
 mod capture;
 use mfm_evm::{
     AnchoredContractCallEvidence, AnchoredContractCallIntent, AnchoredContractCallResult,
@@ -67,7 +66,7 @@ pub enum EvmProviderBuildError {
     #[error("evm provider transport could not be constructed")]
     Client {
         /// Reviewed construction source chain.
-        diagnostics: mfm_diagnostics::DiagnosticEvidence,
+        diagnostics: mfm_values::DiagnosticEvidence,
     },
 }
 
@@ -207,21 +206,15 @@ impl JsonRpcEvmProvider {
             .send()
             .await
             .map_err(|error| client_failure(method, RpcStage::Send, None, &error))?;
-        let status_code = response.status().as_u16();
-        let status = HttpStatusCode::new(status_code).map_err(|source| {
-            invariant(AdapterFailure::HttpStatus {
-                status: status_code,
-                source,
-            })
-        })?;
+        let status = response.status();
         if !response.status().is_success() {
             return Err(provider_failure(
                 method,
                 RpcStage::Status,
                 ProviderFailureKind::HttpStatus,
-                Some(ResponseContext::new(status, None)),
+                Some(status),
                 None,
-                vec![withheld_body(response.content_length())],
+                None,
             ));
         }
         let body = bounded_body(method, status, response).await?;
@@ -243,25 +236,13 @@ impl JsonRpcEvmProvider {
                 let error: RpcError<'_> = serde_json::from_str(error.get()).map_err(|error| {
                     client_failure(method, RpcStage::Envelope, Some(status), &error)
                 })?;
-                let mut omissions = vec![(
-                    OmittedField::Message,
-                    OmissionReason::Withheld,
-                    Some(error.message.len() as u64),
-                )];
-                if let Some(data) = error.data {
-                    omissions.push((
-                        OmittedField::Data,
-                        OmissionReason::Withheld,
-                        Some(data.get().len() as u64),
-                    ));
-                }
                 Err(provider_failure(
                     method,
                     RpcStage::Envelope,
                     ProviderFailureKind::RpcError,
-                    Some(ResponseContext::new(status, Some(error.code))),
+                    Some(status),
                     None,
-                    omissions,
+                    Some(&error),
                 ))
             }
             _ => Err(rejected(
@@ -608,7 +589,7 @@ fn present_raw<'de, D: serde::Deserializer<'de>>(
 
 struct RpcObservation<T> {
     method: EvmRpcMethod,
-    status: HttpStatusCode,
+    status: StatusCode,
     value: T,
 }
 impl<T> RpcObservation<T> {
@@ -823,25 +804,30 @@ impl TryFrom<RpcData> for AbiWord {
     }
 }
 
-fn withheld_body(observed_bytes: Option<u64>) -> CaptureOmission {
-    (OmittedField::Body, OmissionReason::Withheld, observed_bytes)
-}
-
 fn provider_failure(
     method: EvmRpcMethod,
     stage: RpcStage,
     failure: ProviderFailureKind,
-    response: Option<ResponseContext>,
+    status: Option<StatusCode>,
     source: Option<&(dyn std::error::Error + 'static)>,
-    omissions: Vec<CaptureOmission>,
+    rpc_error: Option<&RpcError<'_>>,
 ) -> AdapterError<EvmOperationalError> {
-    let rate_limited = response
-        .as_ref()
-        .is_some_and(|response| response.status().get() == 429);
+    let rate_limited = status.is_some_and(|status| status == StatusCode::TOO_MANY_REQUESTS);
     let timeout = source
         .and_then(|source| source.downcast_ref::<reqwest::Error>())
         .is_some_and(reqwest::Error::is_timeout);
-    let diagnostics = capture::capture(response.map(|response| (response, omissions)), source);
+    let response = status.map(|status| {
+        let mut response = serde_json::json!({
+            "status": status.as_u16(),
+            "rpc_code": rpc_error.map(|error| error.code),
+        });
+        if let Some(error) = rpc_error {
+            response["message"] = error.message.as_str().into();
+            response["data_json"] = serde_json::json!(error.data.map(|data| data.get()));
+        }
+        response
+    });
+    let diagnostics = capture::capture(response, source);
     let source = ProviderFailure {
         method,
         stage,
@@ -861,22 +847,22 @@ fn provider_failure(
 fn client_failure(
     method: EvmRpcMethod,
     stage: RpcStage,
-    status: Option<HttpStatusCode>,
+    status: Option<StatusCode>,
     error: &(dyn std::error::Error + 'static),
 ) -> AdapterError<EvmOperationalError> {
     provider_failure(
         method,
         stage,
         ProviderFailureKind::Client,
-        status.map(|status| ResponseContext::new(status, None)),
+        status,
         Some(error),
-        status.map(|_| withheld_body(None)).into_iter().collect(),
+        None,
     )
 }
 
 fn rejected(
     method: EvmRpcMethod,
-    status: HttpStatusCode,
+    status: StatusCode,
     field: RpcField,
     cause: RpcRejection,
 ) -> AdapterError<EvmOperationalError> {
@@ -884,15 +870,15 @@ fn rejected(
         method,
         RpcStage::Result,
         ProviderFailureKind::Rejected { field, cause },
-        Some(ResponseContext::new(status, None)),
+        Some(status),
         None,
-        vec![withheld_body(None)],
+        None,
     )
 }
 
 async fn bounded_body(
     method: EvmRpcMethod,
-    status: HttpStatusCode,
+    status: StatusCode,
     mut response: reqwest::Response,
 ) -> Result<Vec<u8>, AdapterError<EvmOperationalError>> {
     let maximum = match method {
@@ -913,9 +899,9 @@ async fn bounded_body(
                     observed: ObservedSize::Exact { value: length },
                 },
             },
-            Some(ResponseContext::new(status, None)),
+            Some(status),
             None,
-            vec![withheld_body(Some(length))],
+            None,
         ));
     }
     let mut body = Vec::new();
@@ -936,9 +922,9 @@ async fn bounded_body(
                         observed: ObservedSize::AtLeast { value: observed },
                     },
                 },
-                Some(ResponseContext::new(status, None)),
+                Some(status),
                 None,
-                vec![withheld_body(None)],
+                None,
             ));
         }
         body.extend_from_slice(&chunk);

@@ -10,6 +10,7 @@ autotests = false
 layer = "binary"
 
 [dependencies]
+mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-app = { path = "../../crates/app" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }

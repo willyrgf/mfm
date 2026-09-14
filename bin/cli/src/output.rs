@@ -1,6 +1,4 @@
-use mfm_diagnostics::{
-    ChainEnd, DiagnosticEvidence, OmissionReason, OmittedField, OsFailureKind, SourceLayer,
-};
+use mfm_values::DiagnosticEvidence;
 use serde::Serialize;
 use std::io::{self, Write};
 
@@ -23,92 +21,55 @@ enum WriteStage {
 pub(super) struct OutputWriteError {
     stream: OutputStream,
     stage: WriteStage,
-    #[source]
-    cause: Box<OutputIoError>,
+    details: DiagnosticEvidence,
 }
 
-#[derive(Debug, Serialize, thiserror::Error)]
-#[error("output IO failed; unreviewed details withheld")]
-struct OutputIoError {
-    kind: OsFailureKind,
-    os_code: Option<i32>,
-    message: &'static str,
-    sources: DiagnosticEvidence,
-}
-
-impl OutputIoError {
-    fn capture(error: io::Error) -> Self {
-        // get_ref retains the exposed custom owner itself; io::Error::source may skip that layer.
-        // Neither arbitrary client objects nor rejected output buffers leave this IO owner.
-        let source = error
-            .get_ref()
-            .map(|source| source as &dyn std::error::Error);
-        let sources = DiagnosticEvidence::capture(
-            None,
-            source,
-            if source.is_some() {
-                ChainEnd::Complete
-            } else {
-                ChainEnd::Unavailable
-            },
-            |source| {
-                let layer = match source.downcast_ref::<io::Error>() {
-                    Some(source) => SourceLayer::os(os_kind(source.kind()), source.raw_os_error()),
-                    None => SourceLayer::opaque(),
-                };
-                (
-                    layer,
-                    vec![(OmittedField::SourceDetail, OmissionReason::Withheld, None)],
-                )
-            },
-        );
-        Self {
-            kind: os_kind(error.kind()),
-            os_code: error.raw_os_error(),
-            message: "withheld",
-            sources,
+fn details(error: &io::Error) -> DiagnosticEvidence {
+    let mut details = serde_json::json!({
+        "message": error.to_string(),
+        "os_kind": format!("{:?}", error.kind()),
+        "os_code": error.raw_os_error(),
+    });
+    let mut sources = Vec::new();
+    let mut addresses = Vec::new();
+    // get_ref retains the custom owner itself; io::Error::source can skip that layer.
+    let mut source = error
+        .get_ref()
+        .map(|source| source as &dyn std::error::Error);
+    while let Some(error) = source {
+        let address = error as *const dyn std::error::Error as *const ();
+        if addresses.contains(&address) {
+            details["source_cycle"] = true.into();
+            break;
         }
+        addresses.push(address);
+        let mut layer = serde_json::json!({"message": error.to_string()});
+        if let Some(error) = error.downcast_ref::<io::Error>() {
+            layer["os_kind"] = format!("{:?}", error.kind()).into();
+            layer["os_code"] = serde_json::json!(error.raw_os_error());
+        }
+        sources.push(layer);
+        source = error.source();
     }
+    details["sources"] = sources.into();
+    DiagnosticEvidence::from_value(details)
 }
 
-pub(super) fn write_output(
+pub(super) fn write_output<'a>(
     writer: &mut impl Write,
     stream: OutputStream,
-    bytes: &[u8],
+    chunks: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<(), OutputWriteError> {
-    writer.write_all(bytes).map_err(|error| OutputWriteError {
-        stream,
-        stage: WriteStage::Write,
-        cause: Box::new(OutputIoError::capture(error)),
-    })?;
+    for bytes in chunks {
+        writer.write_all(bytes).map_err(|error| OutputWriteError {
+            stream,
+            stage: WriteStage::Write,
+            details: details(&error),
+        })?;
+    }
     writer.flush().map_err(|error| OutputWriteError {
         stream,
         stage: WriteStage::Flush,
-        cause: Box::new(OutputIoError::capture(error)),
+        details: details(&error),
     })
-}
-
-fn os_kind(kind: io::ErrorKind) -> OsFailureKind {
-    use io::ErrorKind as Io;
-    match kind {
-        Io::NotFound => OsFailureKind::NotFound,
-        Io::PermissionDenied => OsFailureKind::PermissionDenied,
-        Io::ConnectionRefused => OsFailureKind::ConnectionRefused,
-        Io::ConnectionReset => OsFailureKind::ConnectionReset,
-        Io::ConnectionAborted => OsFailureKind::ConnectionAborted,
-        Io::NotConnected => OsFailureKind::NotConnected,
-        Io::AddrInUse => OsFailureKind::AddrInUse,
-        Io::AddrNotAvailable => OsFailureKind::AddrNotAvailable,
-        Io::BrokenPipe => OsFailureKind::BrokenPipe,
-        Io::AlreadyExists => OsFailureKind::AlreadyExists,
-        Io::WouldBlock => OsFailureKind::WouldBlock,
-        Io::InvalidInput => OsFailureKind::InvalidInput,
-        Io::InvalidData => OsFailureKind::InvalidData,
-        Io::TimedOut => OsFailureKind::TimedOut,
-        Io::WriteZero => OsFailureKind::WriteZero,
-        Io::Interrupted => OsFailureKind::Interrupted,
-        Io::UnexpectedEof => OsFailureKind::UnexpectedEof,
-        Io::OutOfMemory => OsFailureKind::OutOfMemory,
-        _ => OsFailureKind::Other,
-    }
 }

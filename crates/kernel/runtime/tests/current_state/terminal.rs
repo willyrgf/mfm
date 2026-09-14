@@ -22,7 +22,7 @@ impl State for Reject {
     }
 }
 impl PureState for Reject {
-    fn evaluate(_: Input) -> Result<ProposedStateOutcome<Input, Rejected>, NativeCause> {
+    fn evaluate(_: Input) -> Result<ProposedStateOutcome<Input, Rejected>, InvocationDiagnostic> {
         EVALUATIONS.fetch_add(1, Ordering::SeqCst);
         Ok(ProposedStateOutcome::Failure {
             failure: Rejected { code: 71 },
@@ -37,15 +37,20 @@ impl mfm_program::ValueMap for RootMap {
     fn implementation_id() -> mfm_program::Result<StableId> {
         StableId::new("mfm.test.current-root-map@1").map_err(|_| ProgramError::InvalidContract)
     }
-    fn apply(_: &NoParams, original: Rejected) -> Result<Rejected, NativeCause> {
+    fn apply(_: &NoParams, original: Rejected) -> Result<Rejected, InvocationDiagnostic> {
         if MAP_AVAILABLE.load(Ordering::SeqCst) {
             Ok(Rejected {
                 code: original.code + 1,
             })
         } else {
-            Err(NativeCause::from_error(PolicyUnavailable {
-                operation: "map_root",
-            }))
+            Err(InvocationDiagnostic::from_fields(
+                "state_internal",
+                "apply",
+                &(PolicyUnavailable {
+                    operation: "map_root",
+                }),
+                None,
+            ))
         }
     }
 }
@@ -100,10 +105,7 @@ async fn terminal_mapping_failure_leaves_the_original_committed_and_resume_maps_
     else {
         panic!("native root mapping failure")
     };
-    assert_eq!(
-        cause.downcast_ref::<PolicyUnavailable>().unwrap().operation,
-        "map_root"
-    );
+    assert_eq!(cause.details().as_value()["operation"], "map_root");
     assert_eq!(view.head_sequence(), 2);
     let RunViewState::AwaitingRecovery { failure } = view.state() else {
         panic!("committed original")
