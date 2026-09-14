@@ -127,9 +127,12 @@ enum AuthorityError {
 ```
 
 Keep port method signatures. Remove incidental Copy/Clone/Eq requirements instead of adding them
-to InvocationDiagnostic. Use ordinary serialization of these variants; delete the current blanket
-unavailable-detail serializer. Live moves Unavailable evidence into the durable owner and forwards
-Internal directly as `AdapterError::Invariant(diagnostic)`, without recapturing it.
+to InvocationDiagnostic. Delete AuthorityError's Serialize implementation without replacement:
+its only production serialization consumer is removed by this cutover. Live moves Unavailable
+evidence into the durable owner and forwards Internal directly as
+`AdapterError::Invariant(diagnostic)`, without recapturing it.
+Remove the AuthorityError serializer-only assertion in Live's error_tests.rs; retain tests of
+these two actual receiving branches. The enum needs neither a wire contract nor a persistence identity.
 
 ### 3.3 Signing: remove the executing error roundtrip
 
@@ -216,26 +219,35 @@ The producer assembles these fields and any separate rollback failure, then call
 DiagnosticEvidence::from_value exactly once. The helper returns ordinary JSON so this needs no
 mutation API on immutable DiagnosticEvidence, serialization roundtrip or second capture.
 JSON contains operation, stage and an ordered sources array starting with the SQLx error itself.
-Every layer retains its actual Display message. Root kind is the snake_case SQLx 0.9 variant name;
-a future unrecognized variant uses other and retains message/sources. Select these additional fields:
+Every layer retains its actual Display message in message. Each SQLx layer, including sources[0],
+also has kind: the snake_case SQLx 0.9 variant name. A future unrecognized variant uses other
+and retains message/sources. Select these additional fields:
 
 | Known layer | Fields when supplied |
 | --- | --- |
 | SQLx | ColumnDecode: index; ColumnIndexOutOfBounds: index/len; ColumnNotFound: column; TypeNotFound: type_name |
-| PostgreSQL Database error | sqlstate, severity, message, detail, hint, schema, table, column, constraint |
+| PostgreSQL Database error | sqlstate, severity, server_message, detail, hint, schema, table, column, constraint |
 | std::io::Error | os_kind, os_code |
 
 Null means an optional field was not supplied. Do not add query arguments, SQL statement copies,
 connections or rejected rows. Other PostgreSQL fields (data_type, position, internal query/context,
 server file/line/routine) are outside this selected contract. No metadata ledger is needed;
-do not claim preservation of every native field.
+do not claim preservation of every native field. server_message is PgDatabaseError::message();
+keep it separate from Display, which can add a line suffix. Do not strip that suffix from message
+or parse it to reconstruct a field.
 
-Follow the actual exposed chain, without Debug dumps or parsing Display. Visit SQLx::Database's
-concrete database error through its public error interface so a Box wrapper cannot hide it.
-At io::Error, retain an exposed inner error if ordinary source traversal skips its wrapper.
-Keep one path, not a separately captured tree plus a source chain. Use Part 1's full-interface-
-pointer repetition guard and source_cycle meaning. Other source types retain exposed messages
-and ancestry; no global downcast registry or generic Values capture API is introduced.
+Follow one path without Debug dumps, parsing Display or a separate cause tree. At each visited
+layer, select the next layer in this order:
+
+1. SQLx::Database: database.as_error(); read PostgreSQL fields on the visited concrete PgDatabaseError.
+2. SQLx::Io: the contained io::Error.
+3. SQLx Configuration/Tls/ColumnDecode/Encode/Decode/AnyDriverError: the contained source.as_ref().
+4. io::Error: its get_ref() child if present, otherwise Error::source().
+5. Other layers: Error::source().
+
+Apply Part 1's full-interface-pointer repetition guard before emitting each layer. Retain its
+source_cycle meaning; do not compare messages or thin addresses. These branches stay inside
+sqlx_fields, without a global downcast registry or generic Values capture API.
 
 | Operation | Stages at the current producing calls |
 | --- | --- |
@@ -253,6 +265,21 @@ rollback in a separate rollback evidence field alongside the primary sources. It
 primary failure's source and does not change its disposition. Successful rollback adds no error.
 No extra rollback attempt or transaction controller is needed.
 
+Extend the existing mapper, rather than introducing another failure-assembly abstraction:
+
+```rust
+fn classify_precommit_sql(
+    stage: &'static str,
+    primary: sqlx::Error,
+    rollback: Option<sqlx::Error>,
+) -> StoreError;
+```
+
+The two failed-write branches pass their primary and transaction.rollback().await.err().
+The mapper selects disposition from primary, assembles sqlx_fields("run.append", stage, &primary)
+and optional rollback fields with stage "rollback", then wraps once. With no rollback error,
+omit the rollback key. Existing injected precommit callers pass None.
+
 ### 4.2 Necessary local constructors
 
 Mandatory Store payloads also affect LoadedRun/MemoryStore and PostgreSQL physical validation,
@@ -260,10 +287,18 @@ planning and their existing own_candidate_bytes/run_pure_blocking helpers. Do no
 or refactor planning. Local checks retain their reason; size/arithmetic variants stay unchanged.
 Allocation failures retain message and requested byte count; unavailable runtime handles retain
 their message; joins retain task stage and cancelled/panicked distinction, never panic payload.
-The direct ContentDigest::parse and RunSummary::new mappings in these physical helpers retain
-the existing returned error and field/check through ordinary serialization; do not change those
-constructors or follow their callers upstream. These and the row try_get calls above are the
-complete additional producers selected by this result-type cutover.
+The direct ContentDigest::parse and RunSummary::new mappings retain their returned error and
+field/check through the exact leaf recipes below. Do not change those constructors or follow their
+callers upstream. These and the row try_get calls above are the complete additional producers
+selected by this result-type cutover.
+
+For the already selected ContentDigest::parse, SchemaId::parse, ContentRef::new and EffectId::parse
+calls in R1/R2, source is {"kind":"identity_error","message":error.to_string()}.
+IdentityError's current Serialize replaces the message with "withheld"; it is not the recipe here.
+The returned IdentityError exposes no child source. Preserve its actual Display without attempting
+to reconstruct any earlier checked-string error. For RunSummaryError use
+{"kind":"run_summary_error","message":error.to_string()}. These are local leaf fields, not new
+types or generic capture functions. Do not change the IDs serializer or add rejected input.
 
 Runtime/App matches retain the payload and current public code/status, including special handling
 of Indeterminate. Update fixtures/borrowing; add no Store-to-diagnostic recapture or new renderer.
@@ -279,7 +314,7 @@ do not store an operation context or introduce an operation enum.
 | Port methods, begin_authority, commit_authority | acquire, begin, isolation, synchronous_commit, advisory_lock, commit |
 | load_state, latest_reserved_nonce, insert_reservation, prepared insert | load_state, latest_reserved_nonce, insert_reservation, retain_prepared |
 | ensure_reservation and local predicates | fixed violated contract: epoch/binding, missing/partial reservation or prepared record, marker count, zero chain ID, nonce overflow/exhaustion |
-| parse_content_ref, EffectId::parse, Reservation::new | exact concrete error already returned, with helper/field; no upstream constructor changes |
+| parse_content_ref, EffectId::parse, Reservation::new | helper/field plus section 4.2's IdentityError leaf or the existing serialized EvmDomainError kind; no upstream constructor changes |
 | parse_u64; epoch/hash/address byte helpers | parse kind/message or local syntax reason; field and expected/observed length for byte conversion, no rejected bytes |
 | nonce_domain_lock_key; ExactRawTransaction::new | local conversion/length failure, existing expected/observed lengths, no raw signed wire |
 
@@ -287,8 +322,9 @@ SQLx failures remain Unavailable, including ambiguous authority COMMIT. Existing
 remains Unavailable with its own reason. Other local/retained-data failures remain Internal.
 Construct InvocationDiagnostic once, code authority_internal, named operation and stage/check/source
 fields. For local helpers without port context, operation names that helper; do not extend a public
-constructor just to supply the outer port name. Serializable concrete errors use from_fields directly. Foreign scalar parse/length errors
-use the fixed facts above, not a generic serializer family. Forward existing AuthorityError/
+constructor just to supply the outer port name. Use section 4.2 for IdentityError. Other selected
+serializable concrete errors use from_fields directly. Foreign scalar parse/length errors use
+the fixed facts above, not a generic serializer family. Forward existing AuthorityError/
 InvocationDiagnostic rather than nesting another capture.
 
 Delete unavailable(_: impl Sized) and internal(_: impl Sized); no renamed input-discarding helpers.
@@ -326,6 +362,9 @@ owner-thread mechanics. Error enrichment does not authorize another sign call or
 
 R0 is complete: the dedicated architect accepted sections 2-6 as one target, including the
 immutable-evidence assembly, row-decoding dispositions, finite cleanup limit and estimates below.
+Final handoff review also accepted the local identity-error recipe, removal of AuthorityError
+serialization, exact source traversal and existing-mapper rollback tests; no core design choice
+remains delegated to the implementation.
 This accepts the bounded design, not the unimplemented result.
 Order: R1 storage; R2 authority plus the single durable schema/receiver cutover;
 R3 executing signing; final acceptance. Each cutover includes its receiving conversions, tests
@@ -362,8 +401,11 @@ source file. These ranges estimate the work; they are not targets to consume or 
 Report R0's RFC/inventory editing cost separately and include it in the final cumulative comparison
 against Part 1. Exclude inline tests consistently from production counts and count each file once.
 
-Measure after each cutover, including untracked files.
-An exceeded estimate, extra type/source recipe or failed claimed deletion stops owner
+Measure after each cutover, including untracked files and the estimated remaining work.
+Before R2, obtain the dedicated architect's review of the actual R1 diff, retained guarantees,
+new/deleted responsibilities and forecast for the complete delivery. This is an agent design
+checkpoint, not another user approval or an instruction to run full CI early.
+An actual or forecast exceeded estimate, extra type/source recipe or failed claimed deletion stops owner
 fanout for cumulative design review. Passing tests or small local cleanups do not resolve aggregate
 design objections. Do not compress code or weaken coverage to satisfy a line count.
 
@@ -379,8 +421,8 @@ sqlx-prepare is only needed for a separately justified query change. Run one fin
 | ID | Producing behavior and required observation |
 | --- | --- |
 | B1 | R0 records accepted baseline, exact type/producer/receiver design, information limits, reviewed estimates and architect verdict. Completed O1/provider/core work is absent from the migration sequence. |
-| B2 | SQLx evidence retains ordered nested layers, inline-child/interface-pointer regression and repetition marker, selected database/SQLSTATE fields and IO kind/code. Real PostgreSQL errors test DB facts; small local foreign-error fixtures test exposed nested sources. No mock SQLx framework. |
-| B3 | Actual load failure is invocation-only. Precommit class-23 rejection, definite COMMIT rejection and ambiguous acknowledgement preserve disposition and facts. Reuse existing fault support; identify injected facts without fabricating native sources. Preserve both primary query and explicit rollback failure when both occur. |
+| B2 | SQLx evidence retains ordered nested layers, inline-child/interface-pointer regression and repetition marker, selected database/SQLSTATE fields and IO kind/code. Use real PostgreSQL errors for DB facts; wrap small nested/inline/cyclic fixtures in SQLx::Decode and use SQLx::Io(io::Error::new(...)) for the exposed-inner-layer case. Selected identity rejection must report the actual constraint message through its caller, not "withheld". No mock SQLx framework or IDs rewrite. |
+| B3 | Actual load failure is invocation-only. Precommit class-23 rejection, definite COMMIT rejection and both ambiguous acknowledgement outcomes preserve disposition and facts. Reuse managed PostgreSQL/fault cases; identify injected facts without fabricating native sources. Test the production classify_precommit_sql mapper with distinguishable native primary/rollback fixtures and unchanged primary disposition. No connection-kill harness, rollback fault framework or additional transaction layer is required. |
 | B4 | Declared failure plus Store failure retains admitted original, Store cause and submitted candidate. Success plus Store failure invents no original. Preserve previous observation/acknowledgement, immediate Store return and existing NotInserted/projection behavior. Extend Part 1 producer assertions with enriched payloads. |
 | B5 | Authority load/reserve/retain errors have distinguishable operation/stage. One actual SQL error reaches the operational original; one malformed retained fact reaches internal invocation without append. Ambiguous authority COMMIT stays OutcomeUnknown and existing reservation/prepared-wire recovery tests pass. |
 | B6 | Real closed sign request/reply and private missing-slot cases remain distinguishable without inferring panic; check the primitive-boundary message. Retain valid signing, low-S/recovery, secret non-renderability and non-Send/non-Sync custody tests. No crypto fault harness or concurrency redesign. |
