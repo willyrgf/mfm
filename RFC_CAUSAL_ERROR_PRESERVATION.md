@@ -2,7 +2,7 @@
 
 Status: R0 design and the R1 checkpoint are accepted by the dedicated architect, 2026-09-14.
 R1 run-Store, R2 authority/schema and R3 executing-signing cutovers are implemented.
-Final client coverage, aggregate architect acceptance and CI remain pending.
+Focused and managed acceptance cases pass; final aggregate architect acceptance and CI remain pending.
 Continue from accepted Part 1 production `87f198a9` and completion record `0a7543ec`,
 with this RFC. Do not restart or reopen that cutover.
 
@@ -562,6 +562,54 @@ original `7f71beef`**. The smaller increase comes from deleting the executing-si
 serializer while reusing the existing result channel and v3 payload. Complete measured costs and
 final B1–B8 acceptance follow the remaining thin-client coverage and aggregate review.
 
+### B7 client evidence and aggregate candidate — 2026-09-14
+
+R3 is committed as `b6e72d0d`. The architect identified the remaining thin-client coverage gap and
+selected one additional case in the existing managed client test. Its single loopback fixture now
+supports either the retained interrupted-request case or one supplied JSON-RPC error response;
+no new production path, dependency or separate fixture family is added.
+
+Managed client run `run-3393312-1789414260919479735` passed in 112.66 seconds. The new case checks the
+actual admitted Read original's Unavailable kind, chain_id/envelope/rpc_error provenance, HTTP 200,
+RPC -32073, supplied message and exact data_json. A fresh REST process returns the entire same
+failed view/head; fresh CLI output is identical with exit 1 and empty stderr. Focused test-target
+Clippy passes. The initial test expectation incorrectly treated the tagged rpc_error field as a
+string; the corrected assertion uses the owning wire contract and the complete scenario passes.
+
+Aggregate implementation reconciliation uses Part 1's nonblank/non-comment Rust convention,
+excluding separate and trailing inline tests. Physical additions/deletions remain separate:
+
+| Category | Counted net LOC | Physical added/deleted |
+| --- | ---: | ---: |
+| Production Rust | +837 | +1,132 / -291 |
+| Tests/fixtures | +914 | +1,067 / -131 |
+| Implementation documentation, excluding R0 | +225 | +336 / -73 |
+| Manifests/lockfile | +16 | +18 / -2 |
+
+There are 49 distinct changed files. Production is 27,863: +837 against Part 1's 27,026 and +1,032
+against original `7f71beef`'s 26,831. R0's two documentation files cost +445/-286 physical lines
+(counted net +119); cumulative documentation including R0 is +771/-349 physical lines.
+These counts include the current acceptance record and remain within the revised R1 forecast.
+
+Necessary type changes are three existing Store payloads, two authority payload routes, one new
+SigningError variant, and two payloads on the existing transaction-error owner. Named public error
+types added: zero. Persisted schema cutovers: one, transaction-error v3. Private extraction recipes
+added: one, SQLx. Deleted: two authority input-discarding helpers, AuthorityError's serializer,
+executing signing's KeystoreError roundtrip and SigningError's unavailable-detail serializer.
+No extra Runtime API, source registry, recovery layer, diagnostic quota or compatibility reader
+remains. Production growth buys the selected causal facts at their actual producers; earlier
+Part 1 deletions receive no second credit.
+
+| Acceptance | Current authoritative evidence |
+| --- | --- |
+| B1 | R0 design commits `49605208` through `70200449`, accepted baseline and R1 checkpoint above. |
+| B2–B3 | [PostgreSQL tests](crates/storages/postgres/src/tests.rs): native nested/inline/cyclic/IO/column sources, real DB fields and identity message, primary/rollback mapper, actual Runtime load and COMMIT dispositions; managed R1/R2 runs above. |
+| B4 | [Runtime contract](crates/kernel/runtime/tests/runtime_contract.rs): declared original plus failed Store, success without invented original, previous observation/candidate and immediate return. Existing producing projection regression remains intact. |
+| B5 | [Effect e2e](crates/live/evm/tests/evm_contract_effect_e2e.rs): real authority SQL error admitted and restored, malformed retained epoch internal without append, previous observation unchanged. Managed authority COMMIT and retained-wire recovery cases also pass. |
+| B6 | [Keystore unit tests](crates/keystore/src/lib.rs), [public contract](crates/keystore/tests/api_contract.rs), and signing contract tests retain request/reply/missing-slot/primitive facts and crypto/custody guarantees. |
+| B7 | Effect e2e asserts actual authority/signing originals and exact cold App data/classification; [owner tests](crates/domains/evm/tests/provider_failure_contract.rs) cover trusted text, floats, size and v2 rejection. CLI/REST recording tests and the managed client case above cover shared transport presentation. |
+| B8 | Aggregate reconciliation above; final architect verdict and exact-candidate CI remain pending. |
+
 ### Finite acceptance cases
 
 | ID | Producing behavior and required observation |
@@ -577,13 +625,16 @@ final B1–B8 acceptance follow the remaining thin-client coverage and aggregate
 
 ## 8. Material uncertainties
 
+No implementation design uncertainty remains within the selected scope. R1–R3 preserve the fixed
+producer/receiver contracts, SQLx exposure is exercised by native and managed cases, and both new
+owner branches pass Object admission and cold App observation. Final aggregate acceptance and CI
+are required evidence, not permission to expand the selected producer set.
+
 | Assumption | Why uncertain | Consequence if wrong | Validation and response |
 | --- | --- | --- | --- |
-| Selected extraction and payloads stay small in aggregate | Implementation and full consumer cutover are unmeasured | Finite scope could still generate excessive plumbing | Compare with R0 estimates, inspect R1 before R2, reconcile at B8; redesign instead of opening more rows. |
-| New owner payloads fit inherited admission/reporting | New persisted fields are not implemented | Causes could fail admission or cold observation | B7 exercises actual owner/Object/report and ABI; preserve limits/first-encoding behavior instead of adding a carrier. |
-| SQLx exposure matches the selected recipe | Foreign Box/IO source interfaces can skip layers | Root-message tests could falsely certify fidelity | B2 uses actual variants and nested/inline/cyclic fixtures; retain the accepted pointer guarantee. |
-| No deployed v2 run requires continuation under a replacement assembly | Deployed runs have not been inventoried | v3-only assembly cannot promise to execute old contracts | Test rejection and resolve existing-run deployment handling before rollout, without automatic rewrites or dual decoders. |
+| No deployed v2 run requires continuation under a replacement assembly | Deployment inventory is outside this source implementation | A v3-only assembly cannot execute old contracts | Old-contract rejection is tested. Inventory runs and resolve their handling before rollout; do not rewrite history or add a dual decoder. No rollout is performed here. |
 
-The internal/operational split, trust policy, no-budget diagnostics, classifier ownership, Store/
-authority acknowledgement semantics and current-schema policy are settled. Implementation,
-aggregate cost and B2-B8 evidence remain to be proved.
+The internal/operational split, trusted dependency text, repeated-interface-pointer information
+limit, no-budget diagnostics, classifier ownership and Store/authority acknowledgement semantics
+remain explicit accepted limits. Completion of this finite RFC does not certify dependency text
+or close excluded platform source-owner gaps.

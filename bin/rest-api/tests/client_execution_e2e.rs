@@ -1,6 +1,6 @@
 //! Managed cross-transport execution verification over production composition.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -91,7 +91,7 @@ async fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() 
     assert_eq!(replacement["outcome"], "created");
     assert_ne!(replacement["config"]["digest"], historical_digest);
 
-    let blocked = BlockedRpc::start();
+    let blocked = RpcStub::start(None);
     let mut fault_daemon = Daemon::start(
         &rest,
         &xdg,
@@ -211,6 +211,72 @@ async fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() 
     );
     assert_ne!(repeated["run"]["head_digest"], progressed.1["head_digest"]);
     assert_eq!(repeated["run"]["state"], progressed.1["state"]);
+
+    let rejected = RpcStub::start(Some(serde_json::json!({
+        "jsonrpc": "2.0",
+        "error": {"code": -32073, "message": "client-e2e provider refusal", "data": {"attempt": 7}}
+    })));
+    let mut fault_daemon = Daemon::start(
+        &rest,
+        &xdg,
+        &socket,
+        Some(&fault_deployment),
+        Some(rejected.locator()),
+    );
+    fault_daemon.wait_ready().await;
+    let start_body =
+        serde_json::json!({"config": {"name": "daily", "digest": historical_digest}}).to_string();
+    let failed = rest_json(
+        &socket,
+        "POST",
+        "/v1/runs/start",
+        Some((&start_body, "application/json")),
+    )
+    .await;
+    rejected.assert_chain_identity_request();
+    assert_eq!(failed.0, 200);
+    let failed_view = &failed.1["run"];
+    assert_eq!(failed_view["state"]["kind"], "failed");
+    assert_eq!(failed_view["state"]["report"]["cause"]["kind"], "adapter");
+    assert_eq!(failed_view["state"]["report"]["cause"]["mode"], "read");
+    assert_eq!(
+        failed_view["state"]["report"]["cause"]["error"]["canonical"],
+        serde_json::json!({
+            "kind": "unavailable",
+            "source": {
+                "method": "chain_id", "stage": "envelope", "failure": {"kind": "rpc_error"},
+                "diagnostics": {
+                    "response": {
+                        "status": 200, "rpc_code": -32073,
+                        "message": "client-e2e provider refusal", "data_json": "{\"attempt\":7}"
+                    },
+                    "sources": []
+                }
+            }
+        })
+    );
+    let failed_run_id = failed_view["run_id"].as_str().expect("failed run id");
+    fault_daemon.stop();
+    rejected.finish();
+
+    let mut cold_daemon = Daemon::start(&rest, &xdg, &socket, None, None);
+    cold_daemon.wait_ready().await;
+    let restored_failure =
+        rest_json(&socket, "GET", &format!("/v1/runs/{failed_run_id}"), None).await;
+    assert_eq!(restored_failure.0, 200);
+    assert_eq!(&restored_failure.1, failed_view);
+    cold_daemon.stop();
+    let cli_failure = run_cli(
+        &cli,
+        &xdg,
+        &["--output", "json", "run", "show", "--run-id", failed_run_id],
+    );
+    assert_eq!(cli_failure.status.code(), Some(1));
+    assert!(cli_failure.stderr.is_empty());
+    assert_eq!(
+        &serde_json::from_slice::<serde_json::Value>(&cli_failure.stdout).unwrap(),
+        failed_view
+    );
 
     verify_enrichment_publication(&cli, &rest, &xdg, &socket, &root).await;
     std::fs::remove_dir_all(&root).expect("remove client e2e tree");
@@ -470,16 +536,16 @@ fn is_lower_hex_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-struct BlockedRpc {
+struct RpcStub {
     locator: String,
     observed: Receiver<Vec<u8>>,
     server: JoinHandle<()>,
 }
 
-impl BlockedRpc {
-    fn start() -> Self {
-        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
-            .expect("bind blocked RPC stub");
+impl RpcStub {
+    fn start(response: Option<serde_json::Value>) -> Self {
+        let listener =
+            TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("bind RPC stub");
         let address = listener.local_addr().expect("stub address");
         let (sender, observed) = mpsc::sync_channel(1);
         let server = std::thread::spawn(move || {
@@ -491,14 +557,31 @@ impl BlockedRpc {
                 .set_write_timeout(Some(Duration::from_secs(5)))
                 .expect("stub write timeout");
             let encoded = read_http_request(&mut stream).expect("read provider request");
-            sender.send(encoded).expect("retain provider request");
-            let mut byte = [0_u8; 1];
-            assert_eq!(
-                stream
-                    .read(&mut byte)
-                    .expect("wait for interrupted provider connection"),
-                0
-            );
+            sender
+                .send(encoded.clone())
+                .expect("retain provider request");
+            if let Some(mut response) = response {
+                let request: serde_json::Value =
+                    serde_json::from_slice(http_request_body(&encoded))
+                        .expect("provider request JSON");
+                response["id"] = request["id"].clone();
+                let body = serde_json::to_vec(&response).expect("provider response JSON");
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("provider response headers");
+                stream.write_all(&body).expect("provider response body");
+            } else {
+                let mut byte = [0_u8; 1];
+                assert_eq!(
+                    stream
+                        .read(&mut byte)
+                        .expect("wait for interrupted provider connection"),
+                    0
+                );
+            }
         });
         Self {
             locator: format!("http://{address}"),
@@ -524,7 +607,7 @@ impl BlockedRpc {
     }
 
     fn finish(self) {
-        self.server.join().expect("blocked RPC stub");
+        self.server.join().expect("RPC stub");
     }
 }
 

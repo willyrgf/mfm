@@ -93,7 +93,9 @@ historical run with a generated REST identity by interrupting an in-flight live 
 the durable runnable prefix, deletes the selected config, cold-resumes the admitted Program through
 this listener against Reth, validates the complete snapshot, and reloads the identical RunView
 through the CLI. It then reimports the same revision and requires a fresh CLI-generated run to
-produce the same semantic result. The two renderers also match the same frozen start/progress
+produce the same semantic result. One supplied JSON-RPC error is then durably retained and compared
+with exact code/message/data through a fresh REST process and CLI; HTTP remains 200 and CLI exits 1.
+The two renderers also match the same frozen start/progress
 indeterminate recovery fixtures under `docs/contracts/client-surface/`.
 
 Enrichment uses the ordinary run routes with an exact `mfm.portfolio/enrich@1` config revision.
