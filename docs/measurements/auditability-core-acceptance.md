@@ -1,7 +1,7 @@
 # Current-state core acceptance evidence
 
-Current Part 1 correction packet, 2026-09-14. K1 is `8d783557`, K2 is `a1b8d088`; K3 is `5f6f3048`; K4 is the
-current candidate. Refreshed shipping measurements, G1 acceptance and F1 final CI remain due.
+Current Part 1 correction packet, 2026-09-14. K1 is `8d783557`, K2 is `a1b8d088`; K3 is `5f6f3048`, K4 is `e94e6d4c`. Shipping measurements below use that exact production
+candidate. Independent G1 acceptance and F1 final CI remain due.
 This packet does not claim Part 1 acceptance. Part 2 enrichment is excluded.
 
 ## Current design and removals
@@ -50,7 +50,7 @@ begin with comment markers after whitespace. Use the same convention for every r
 | K1 `8d783557` | 27,975 | -291 | +1,144 |
 | K2 `a1b8d088` | 27,746 | -520 | +915 |
 | K3 `5f6f3048` | 27,018 | -1,248 | +187 |
-| K4 candidate | 27,016 | -1,250 | +185 |
+| K4 `e94e6d4c` | 27,016 | -1,250 | +185 |
 
 K3 is -728 against K2: diagnostics -778, Values -7, Canonical -42, Runtime +9, App -76,
 binaries +59, Live EVM -25, domains +125, remaining callback signature changes +7. The domain
@@ -79,12 +79,98 @@ All direct commands use `nix develop -c`.
 - Focused Clippy across Runtime, App, Live EVM, CLI and REST, all targets with no dependencies and
   `-D warnings`, passes. Rust is formatted and `git diff --check` passes.
 
-## Measurements still required
+## Shipping frames and loading
 
-The historical shipping CSV predates K1–K3 and is not current acceptance evidence. Refresh actual
-Portfolio/anchored/transaction/checkpoint frames, report/input bytes, short/long load rows/bytes and
-cumulative-limit refusal after K4, using the existing temporary consuming harness. No estimate or
-future Part 2 deletion counts toward acceptance.
+Measured 2026-09-14 through production Runtime `start`, `read`, `resume` and MemoryStore, using
+Program v8, Journal frame v6 and FailureReport v5. A temporary Store wrapper retained successfully
+inserted frames for inspection; it did not provide another execution/persistence model. The harness
+and temporary dependency changes were removed. `nix develop -c cargo run -p mfm-app --example
+measure_current` completed normally; its separate `limits` case also passed.
+
+The [CSV](auditability-core-frames.csv) records every complete frame. Context bytes are inline
+input/initial/output Objects; checkpoint bytes are saved contexts; audit-fact bytes are other inline
+Objects, including the admission Program, requests/evidence/originals/root. Counts include each
+serialized occurrence. Repeated occurrences are subsequent identical complete value references.
+Metadata subtracts all canonical Object payload bytes from the exact complete frame; it includes
+identities, record fields and Journal envelope. There is no inline deduplication or size prediction.
+
+| Fixture | Frames | Admission bytes | Largest frame | Largest metadata | History bytes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| portfolio | 10 | 47,639 | 47,639 | 1,972 | 83,376 |
+| portfolio_failure | 5 | 47,639 | 47,639 | 2,364 | 61,191 |
+| anchored_success | 2 | 10,224 | 10,224 | 1,754 | 18,095 |
+| anchored_failure | 3 | 10,224 | 10,895 | 2,164 | 28,793 |
+| transaction | 11 | 26,550 | 26,550 | 1,944 | 75,107 |
+| transaction_recovered | 13 | 26,550 | 26,550 | 1,944 | 81,288 |
+| checkpoints_identical | 4 | 13,087 | 13,087 | 1,800 | 26,359 |
+| checkpoints_distinct | 4 | 13,087 | 13,087 | 1,800 | 26,359 |
+| retry_short | 4 | 10,226 | 10,226 | 1,754 | 26,909 |
+| retry_long | 12 | 10,226 | 10,226 | 1,755 | 62,160 |
+
+Portfolio uses shipping `plan_snapshot` with one native-balance source, PortfolioContinuation and
+controlled adapters; failure returns rejected chain-identity evidence. Anchored Read uses checked
+completed-call facts, the public `alpha` endpoint and rejected evidence for its domain failure.
+Transaction uses EvmTransaction/CreateAt and a checked three-byte creation plan with real typed
+reservation/preparation/settlement/completed contexts. Its recovered case returns AuthorityUnavailable
+once, cold-inspects pending Stop without adapter reentry and explicitly resumes the same authority.
+These measure existing owner facts, not additional Part 2 producer capture.
+
+The two-active-checkpoint fixtures both retain two 656-byte contexts. The distinct case increments
+an unrelated integer before checkpoint two; the control preserves it. At sequence 2 there are four
+inline Objects and respectively two or three repeated occurrences. Both frames are 4,424 bytes,
+including 1,312 context bytes, 1,312 checkpoint bytes and 1,800 metadata bytes. Equal widths do not
+imply deduplication. The shipping Portfolio restart regression separately exercises authorized
+restoration/pruning and the unchanged acknowledged prefix.
+
+Terminal derived reports measure 1,462 bytes for Portfolio domain failure and 6,939 bytes for
+anchored domain failure. Both are checked before terminal append. The existing real 16 MiB original
+plus mapped root regression exceeds the separate 32 MiB report ceiling, leaves AwaitingRecovery
+acknowledged and proves that reporting shares the admitted original's canonical allocation.
+
+Normal Portfolio load returns two rows: 50,491 bytes for success and 51,873 for domain failure.
+The same anchored Program/final output after one versus five retries has 4 versus 12 frames, but
+normal loading still returns two rows: 18,097 versus 18,098 bytes. The one-byte difference is the
+sequence width. This proves selected-row IO, not a latency ratio or historical semantic validation.
+
+Single debug-profile native Object decode measurements: Portfolio 516 bytes in 9.1–9.2 ms,
+anchored input 2,329 bytes in 105.7–108.6 ms, transaction input 656 bytes in 20.2–20.7 ms. These are
+observations, not performance guarantees. K4 removes one native input decode from the Read runner;
+no native cache or alternate resume path remains.
+
+Actual cumulative refusal appended 31 real 16 MiB payload frames totaling 520,101,729 bytes.
+The next 16,777,478-byte frame attempted 536,879,207 bytes against the unchanged 536,870,912-byte
+limit and was rejected. A subsequent load retained the exact sequence, digest and history total.
+Runtime's 65,536-frame regressions separately preserve an acknowledged original and an externally
+returned but unrecordable settlement without inventing a new command or claiming settlement durability.
+
+## Diff accounting
+
+Physical line additions/deletions are distinct from production LOC; Rust source-file churn includes
+inline test modules. Separate test paths, docs and configuration/fixtures are counted separately.
+The exact K1–K4 source candidate `e94e6d4c` has no untracked implementation additions:
+
+| Baseline | Rust source files + / - (files) | Separate tests + / - (files) | Docs + / - (files) | Config/fixtures + / - (files) | Total + / - (files) |
+| --- | --- | --- | --- | --- | --- |
+| `5de114d0` | 2,393 / 3,915 (47) | 1,427 / 1,999 (40) | 1,663 / 829 (21) | 5 / 50 (9) | 5,488 / 6,793 (117) |
+| `7f71beef` | 5,842 / 6,365 (65) | 5,218 / 3,107 (49) | 3,314 / 2,309 (30) | 204 / 115 (20) | 14,578 / 11,896 (164) |
+
+Current evidence/document consolidation is counted separately in its commit. The cumulative +185
+production lines (0.7%) includes all replacements; no future Part 2 deletion offsets it. Compared
+with the original, Journal loses lifecycle/fold responsibilities, Program loses capacity prediction,
+and Runtime gains required continuation/recording/settlement phases while deleting historical
+reconstruction. Compared with the implementation baseline, the actual redundant decoder, record,
+error and reporting mechanisms above are removed. G1 must judge aggregate complexity, not a quota.
+
+## E1–E6 boundary evidence
+
+| Case | Evidence |
+| --- | --- |
+| E1 | Runtime callback-error, current-state, pending and contract tests forward diagnostic fields through Pure/Read/Effect, handler and map without internal-fault append or classification. Resume follows committed authority. |
+| E2 | State/domain originals commit before policy; EVM RPC tests retain distinct codes, ordered transport/IO/parser fields, RPC raw data spelling and trusted text through whole-owner admission, cold decode and FailureReport. Typed classification is unchanged. |
+| E3 | Actual erased callbacks prove non-Error first original encoding runs once, retains known slot/contract/size and explicitly unavailable original. Admitted-original recording failures share Object bytes; Store/NotInserted retain submitted candidates and independent causes; projection acknowledgement is limited to known insertion. |
+| E4 | Shipping App stored-data cases reject malformed reference/hash/oversize as restore/decode internal/500 with parser category/location/reason and no callback/append. Direct size remains 422; postdecode slot mismatch retains typed facts. |
+| E5 | Shipping balance metadata.correlation empty and excessive-length constructors reach the actual Runtime Read callback and App with case/location/limit/observed length. |
+| E6 | Workspace all-target compilation, consuming derives and transport tests cover the changed public APIs. K4's actual Read suite retains success, failure, mismatch and cancellation without a Clone bound or moved evidence binding. |
 
 ## Consuming requirements
 
@@ -108,6 +194,5 @@ future Part 2 deletion counts toward acceptance.
 ## Material uncertainties
 
 No ownership/design question remains open within the specified cutover. Aggregate simplification
-and the final shipping cost still require measurements and independent G1 judgement. Assuming the
-current replacement cost is acceptable without that evidence could incorrectly close Part 1;
-validate the exact K1–K4 candidate before F1 and final CI.
+requires independent G1 judgement; final integration requires F1 CI. Assuming those gates pass could
+incorrectly close Part 1. Validate this exact source candidate and record their actual dispositions.
