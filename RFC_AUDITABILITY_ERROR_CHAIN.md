@@ -1759,6 +1759,17 @@ Retain concrete boxed RuntimeError in BeforeAppend, Projection and NotInserted.r
 delete into_native rather than replacing it with a capture helper. Verify original operation/stage,
 known head and checked finding survive, including a secondary size failure that leaves NotInserted/409
 unchanged. Keep direct Store disposition and primary-size handling.
+
+Correct the existing project helper's unconditional acknowledgement wrapper: view construction
+returns an ordinary RuntimeError; only a known Inserted path adds Projection with that inserted
+head. Construct the initial observation once at each advance caller: start's Inserted branch
+wraps its projection failure; resume's loaded observation does not. Pass the successful RunView
+into the private advance loop and retain that existing observation. Continue(next) currently has
+one producer, record's Inserted branch; project next there in the loop, wrapping a failure with
+next.head and retaining the previous observation in InvocationFailure. The Inserted Yield and
+RecoveryStopped paths likewise wrap projection failures. Pending without an append uses ordinary
+projection. This needs no acknowledgement flag, cached second view or new public type.
+
 Exercise E3: pre-append frame preparation failure with/without an admitted failed Read, immediate
 failed/ambiguous append, non-Error declared original whose first serializer fails, success plus
 append failure, NotInserted observation and terminal output failure. Assert the ordinary encoding
@@ -1873,6 +1884,8 @@ execution guarantees remain complete for the supported core behavior.
 C12 includes a boxed secondary RuntimeError with size evidence that preserves the primary 409
 category. C17 includes section 9.7's exact encoded JSON/text reuse after stdout failure, unavailable
 normal report after encoding failure, retained primary status/head and final-failure termination.
+It also covers projection failure after admission/continuation insertion versus resume/Pending
+without insertion: only the inserted paths supply acknowledged; retain any last valid observation.
 These extend the existing boundary cases, not a cross-product of every producer and transport.
 
 No test calls a historical reconstruction implementation merely to compare it with the new one.
