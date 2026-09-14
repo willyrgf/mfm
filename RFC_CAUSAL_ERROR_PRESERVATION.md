@@ -60,6 +60,49 @@ C1-C18 and terminal reporting are retained behavior, not another migration backl
 Only O2's authority/signing receiving conversions remain. They belong in their producing
 cutovers, not a later “complete all consumers” phase.
 
+### Inherited example: an RPC request receives HTTP 429
+
+The existing [HTTP-status branch](crates/live/evm/src/json_rpc.rs) returns a declared operational
+provider error. For eth_getBalance, its representation is:
+
+```rust
+let error = EvmOperationalError::new(
+    EvmOperationalKind::RateLimited,
+    ProviderFailure {
+        method: EvmRpcMethod::GetBalance,
+        stage: RpcStage::Status,
+        failure: ProviderFailureKind::HttpStatus,
+        diagnostics: DiagnosticEvidence::from_value(serde_json::json!({
+            "response": { "status": 429, "rpc_code": null },
+            "sources": []
+        })),
+    },
+);
+// The adapter returns this concrete error through its existing operational branch.
+let adapter_error = AdapterError::Operational(error);
+```
+
+RateLimited, GetBalance, Status and HttpStatus are concrete typed alternatives. DiagnosticEvidence
+contains the observed status and available source data; it does not replace the classifiable
+EvmOperationalError. The Box inside that error contains a concrete ProviderFailure, not dyn Error.
+An HTTP rejection need not have a native client error: sources is empty here because the client
+received a response. Do not invent another cause to populate it.
+
+Runtime admits the complete original through Failure/Object and commits it before classification.
+Cold restoration reconstructs EvmOperationalError with the same diagnostic data. For this Read,
+classify() returns Retryable; the handler and allowances decide whether recovery retries.
+RateLimited does not itself trigger a retry, sleep or a new adapter request.
+
+For eth_sendRawTransaction, the same provider cause is nested in
+EvmTransactionOperationalError::Provider with operation Submit. That enclosing error retains the
+current OutcomeUnknown classification and command-authority semantics.
+
+The current non-success HTTP-status branch returns before reading the body and does not capture
+Retry-After. rpc_code: null means no JSON-RPC code was captured, not proof that the response body
+contained none. Supplied message/data_json preservation applies when the JSON-RPC error envelope
+is actually parsed. Body/header capture on HTTP rejection is not a guarantee of this example
+or an additional Part 2 producer requirement.
+
 ## 2. Finite scope and stopping rule
 
 | Slice | Selected producers | Required receiving boundary |
