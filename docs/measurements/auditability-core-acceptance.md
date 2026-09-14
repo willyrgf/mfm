@@ -1,7 +1,7 @@
 # Current-state core acceptance evidence
 
-Current Part 1 correction packet, 2026-09-14. K1 is `8d783557`, K2 is `a1b8d088`; K3 is the
-current candidate. K4, refreshed shipping measurements, G1 acceptance and F1 final CI remain due.
+Current Part 1 correction packet, 2026-09-14. K1 is `8d783557`, K2 is `a1b8d088`; K3 is `5f6f3048`; K4 is the
+current candidate. Refreshed shipping measurements, G1 acceptance and F1 final CI remain due.
 This packet does not claim Part 1 acceptance. Part 2 enrichment is excluded.
 
 ## Current design and removals
@@ -32,6 +32,11 @@ JsonError through one direct dependency to retain body-channel encoding failure.
 dependency was added. Necessary complexity is the trusted nested diagnostic profile, the explicit
 first-encoding unavailable context and local terminal ownership/delivery paths.
 
+K4 retains the first decoded Read input locally through preparation and moves it into interpretation.
+It removes the second input decode without a Clone bound, Driver cache, new carrier or moved
+admitted-intent/evidence binding. Existing Read success, operational/internal rejection, evidence
+mismatch and cancellation tests exercise the actual runner.
+
 ## Cost
 
 Count tracked plus untracked production Rust paths containing `src`, excluding `tests` components,
@@ -44,7 +49,8 @@ begin with comment markers after whitespace. Use the same convention for every r
 | Implementation `5de114d0` | 28,266 | 0 | +1,435 |
 | K1 `8d783557` | 27,975 | -291 | +1,144 |
 | K2 `a1b8d088` | 27,746 | -520 | +915 |
-| K3 candidate | 27,018 | -1,248 | +187 |
+| K3 `5f6f3048` | 27,018 | -1,248 | +187 |
+| K4 candidate | 27,016 | -1,250 | +185 |
 
 K3 is -728 against K2: diagnostics -778, Values -7, Canonical -42, Runtime +9, App -76,
 binaries +59, Live EVM -25, domains +125, remaining callback signature changes +7. The domain
@@ -62,7 +68,8 @@ All direct commands use `nix develop -c`.
   consuming compile-fail cases and the 32 MiB boundary.
 - EVM, Portfolio and Live EVM `--all-targets` pass, including all 48 Live unit tests, transaction
   ambiguity/recovery and Portfolio checkpoint restart. Managed Effect e2e is reserved for CI.
-- Runtime lib/current-state/pending/runtime-contract tests pass. The new first-encoding counter
+- Runtime lib/current-state/pending/runtime-contract tests pass. All 19 Runtime contract cases
+  pass again on K4, including Read evidence rejection and cancellation. The new first-encoding counter
   initially included a concurrent unrelated fixture; it now counts only the selected originals
   and the focused regression passes. The admitted-Object sharing/report-limit test passes.
 - App unit and integration cases pass, including 11 shipping Portfolio Runtime cases. An obsolete
