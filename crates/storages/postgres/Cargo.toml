@@ -32,5 +32,6 @@ tokio = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+mfm-runtime = { path = "../../kernel/runtime" }
 static_assertions = "1.1"
 tokio = { workspace = true }

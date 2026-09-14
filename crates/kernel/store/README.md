@@ -23,3 +23,11 @@ enumeration authority and listing never parses frames or derives run status.
 Large candidate copies are cooperative; snapshots share bounded immutable rows. Pure validation
 uses immediately awaited blocking jobs without mutation authority. Store has no Program/domain/capability/reducer dependency or
 semantic facade.
+
+`CorruptPhysicalState`, `Unavailable` and `Indeterminate` require `DiagnosticEvidence` payloads;
+size/arithmetic variants retain their existing data. For example, a local unavailable result is
+`{"unavailable":{"operation":"require_runtime","stage":"runtime","message":"..."}}`.
+MemoryStore captures fixed violated-check reasons, allocation messages/requested bytes, runtime
+handle messages and task cancelled/panicked flags. It never includes panic payloads. Data is
+constructed only on failure and follows the existing Runtime/App invocation route. This does not
+claim a Store failure was persisted through that same failed Store.

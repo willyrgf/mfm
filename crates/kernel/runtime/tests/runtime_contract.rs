@@ -1340,14 +1340,14 @@ impl Store for RetainedStore {
             let Some(latest) = self.0.last() else {
                 return Ok(None);
             };
-            let frame = decode_frame(latest).map_err(|_| StoreError::CorruptPhysicalState)?;
+            let frame = decode_frame(latest).map_err(|_| StoreError::CorruptPhysicalState(mfm_values::DiagnosticEvidence::from_value(serde_json::json!({"operation": "test.store", "injected": "CorruptPhysicalState"}))))?;
             let head = RunSummary::new(
                 run_id.clone(),
                 frame.run_sequence(),
                 frame.head_digest().clone(),
                 self.0.iter().map(|bytes| bytes.len() as u64).sum(),
             )
-            .map_err(|_| StoreError::CorruptPhysicalState)?;
+            .map_err(|_| StoreError::CorruptPhysicalState(mfm_values::DiagnosticEvidence::from_value(serde_json::json!({"operation": "test.store", "injected": "CorruptPhysicalState"}))))?;
             let probe = probe_sequence
                 .and_then(|sequence| self.0.get(sequence.checked_sub(1)? as usize))
                 .map(|bytes| Arc::from(bytes.as_slice()));
@@ -1365,7 +1365,13 @@ impl Store for RetainedStore {
         &'a self,
         _frame: &'a EncodedRunFrame,
     ) -> Pin<Box<dyn Future<Output = Result<AppendResult, StoreError>> + Send + 'a>> {
-        Box::pin(async { Err(StoreError::CorruptPhysicalState) })
+        Box::pin(async {
+            Err(StoreError::CorruptPhysicalState(
+                mfm_values::DiagnosticEvidence::from_value(
+                    serde_json::json!({"operation": "test.store", "injected": "CorruptPhysicalState"}),
+                ),
+            ))
+        })
     }
 }
 
@@ -1495,7 +1501,9 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
                 .await
                 .err()
                 .unwrap(),
-            StoreError::Indeterminate,
+            StoreError::Indeterminate(mfm_values::DiagnosticEvidence::from_value(
+                serde_json::json!({"operation": "test.store", "injected": "Indeterminate"}),
+            )),
             sequence,
         );
         assert_eq!(
@@ -1896,14 +1904,14 @@ impl Store for FaultStore {
         _probe_sequence: Option<u64>,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<Option<LoadedRun>, StoreError>> + Send + 'a>>
     {
-        Box::pin(async move { Err(self.failure) })
+        Box::pin(async move { Err(self.failure.clone()) })
     }
 
     fn append_run<'a>(
         &'a self,
         _frame: &'a EncodedRunFrame,
     ) -> Pin<Box<dyn Future<Output = Result<AppendResult, StoreError>> + Send + 'a>> {
-        Box::pin(async move { Err(self.failure) })
+        Box::pin(async move { Err(self.failure.clone()) })
     }
 }
 
@@ -1911,16 +1919,27 @@ impl Store for FaultStore {
 async fn store_failures_preserve_mechanical_source_and_unknown_observation() {
     for (offset, failure) in [
         StoreError::ArithmeticOverflow,
-        StoreError::CorruptPhysicalState,
-        StoreError::Unavailable,
-        StoreError::Indeterminate,
+        StoreError::CorruptPhysicalState(mfm_values::DiagnosticEvidence::from_value(
+            serde_json::json!({"operation": "test.store", "injected": "CorruptPhysicalState"}),
+        )),
+        StoreError::Unavailable(mfm_values::DiagnosticEvidence::from_value(
+            serde_json::json!({"operation": "test.store", "injected": "Unavailable"}),
+        )),
+        StoreError::Indeterminate(mfm_values::DiagnosticEvidence::from_value(
+            serde_json::json!({"operation": "test.store", "injected": "Indeterminate"}),
+        )),
     ]
     .into_iter()
     .enumerate()
     {
         let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
         builder.register_value::<Number>().expect("root value");
-        let runtime = Runtime::new(builder.finish(), Arc::new(FaultStore { failure }));
+        let runtime = Runtime::new(
+            builder.finish(),
+            Arc::new(FaultStore {
+                failure: failure.clone(),
+            }),
+        );
         let run_id = RunId::from_digest(DigestBytes::from_array(
             [u8::try_from(offset + 10).expect("RunId byte"); 32],
         ));

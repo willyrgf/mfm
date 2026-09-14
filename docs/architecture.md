@@ -60,6 +60,11 @@ retain their concrete fields. Ordinary Serde structural forms are accepted; no p
 grammar or re-encoding comparison exists. Every physical
 append still enforces exact predecessor, sequence and all-or-nothing immutable insertion.
 
+Store's three physical failure dispositions carry Values-owned diagnostic data. PostgreSQL owns
+one private SQLx extraction recipe at selected run producers; MemoryStore owns its local check,
+allocation and task facts. Runtime and Application forward the existing concrete Store error;
+no new reporting owner, source registry or mutation authority is introduced.
+
 Concrete storage backends may implement both `Store` and the separate `RunIndex`, but Runtime
 receives only `dyn Store`. Config custody and run enumeration therefore cannot widen Runtime's
 append-only storage authority. Config listing returns all retained revisions as one unpaginated

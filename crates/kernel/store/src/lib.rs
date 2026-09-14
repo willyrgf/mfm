@@ -14,7 +14,9 @@ use mfm_ids::{ContentDigest, RunId};
 use mfm_journal::{
     frame_head_digest, EncodedRunFrame, MAX_FRAME_BYTES, MAX_RUN_BYTES, MAX_RUN_FRAMES,
 };
+use mfm_values::DiagnosticEvidence;
 use serde::Serialize;
+use serde_json::json;
 use tokio::sync::Mutex;
 
 /// Maximum number of items returned by one run-index page.
@@ -179,7 +181,7 @@ pub enum AppendResult {
 }
 
 /// Redaction-safe Store failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum StoreError {
     /// The insertion candidate exceeded a fixed format capacity.
@@ -196,13 +198,13 @@ pub enum StoreError {
     ArithmeticOverflow,
     /// Retained physical rows or metadata were inconsistent.
     #[error("store physical state is corrupt")]
-    CorruptPhysicalState,
+    CorruptPhysicalState(DiagnosticEvidence),
     /// The operation definitely did not complete.
     #[error("store operation is unavailable")]
-    Unavailable,
+    Unavailable(DiagnosticEvidence),
     /// An append may have committed but acknowledgement was unavailable.
     #[error("store append outcome is indeterminate")]
-    Indeterminate,
+    Indeterminate(DiagnosticEvidence),
 }
 
 /// Bounded rows and mechanical metadata from one consistent Store snapshot.
@@ -232,7 +234,11 @@ impl LoadedRun {
                         || bytes.len() as u64 > head.total_bytes()
                 })
         {
-            return Err(StoreError::CorruptPhysicalState);
+            return Err(StoreError::CorruptPhysicalState(
+                DiagnosticEvidence::from_value(
+                    json!({"operation": "LoadedRun::new", "check": "transfer bounds"}),
+                ),
+            ));
         }
         Ok(Self {
             head,
@@ -333,7 +339,11 @@ impl Store for MemoryStore {
         Box::pin(async move {
             require_runtime()?;
             if probe_sequence.is_some_and(|sequence| sequence == 0 || sequence > MAX_RUN_FRAMES) {
-                return Err(StoreError::CorruptPhysicalState);
+                return Err(StoreError::CorruptPhysicalState(
+                    DiagnosticEvidence::from_value(
+                        json!({"operation": "run.load", "check": "probe sequence bounds"}),
+                    ),
+                ));
             }
             let run = {
                 let runs = self.runs.lock().await;
@@ -347,21 +357,41 @@ impl Store for MemoryStore {
                 return if run.frames.is_empty() {
                     Ok(None)
                 } else {
-                    Err(StoreError::CorruptPhysicalState)
+                    Err(StoreError::CorruptPhysicalState(
+                        DiagnosticEvidence::from_value(
+                            json!({"operation": "run.load", "check": "frames without head"}),
+                        ),
+                    ))
                 };
             };
             if head.sequence == 0 || usize::try_from(head.sequence).ok() != Some(run.frames.len()) {
-                return Err(StoreError::CorruptPhysicalState);
+                return Err(StoreError::CorruptPhysicalState(
+                    DiagnosticEvidence::from_value(
+                        json!({"operation": "run.load", "check": "head sequence and frame count"}),
+                    ),
+                ));
             }
-            let admission = run.frames.first().ok_or(StoreError::CorruptPhysicalState)?;
-            let latest = run.frames.last().ok_or(StoreError::CorruptPhysicalState)?;
+            let admission = run.frames.first().ok_or_else(|| {
+                StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(
+                    json!({"operation": "run.load", "check": "missing admission"}),
+                ))
+            })?;
+            let latest = run.frames.last().ok_or_else(|| {
+                StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(
+                    json!({"operation": "run.load", "check": "missing latest"}),
+                ))
+            })?;
             let probe = probe_sequence.and_then(|sequence| {
                 usize::try_from(sequence - 1)
                     .ok()
                     .and_then(|index| run.frames.get(index))
             });
             if probe_sequence.is_some_and(|sequence| sequence <= head.sequence) && probe.is_none() {
-                return Err(StoreError::CorruptPhysicalState);
+                return Err(StoreError::CorruptPhysicalState(
+                    DiagnosticEvidence::from_value(
+                        json!({"operation": "run.load", "check": "missing probe"}),
+                    ),
+                ));
             }
             let summary = RunSummary::new(
                 run_id.clone(),
@@ -369,7 +399,16 @@ impl Store for MemoryStore {
                 latest.head_digest.clone(),
                 head.total_bytes,
             )
-            .map_err(|_| StoreError::CorruptPhysicalState)?;
+            .map_err(|error| {
+                StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(json!({
+                    "operation": "run.load",
+                    "check": "summary",
+                    "source": {
+                        "kind": "run_summary_error",
+                        "message": error.to_string()
+                    }
+                })))
+            })?;
             let admission = Arc::clone(admission);
             let latest = Arc::clone(latest);
             let probe = probe.cloned();
@@ -389,7 +428,12 @@ impl Store for MemoryStore {
                         || frame.bytes.len() > MAX_FRAME_BYTES
                         || frame_head_digest(&frame.bytes) != frame.head_digest
                     {
-                        return Err(StoreError::CorruptPhysicalState);
+                        return Err(StoreError::CorruptPhysicalState(
+                            DiagnosticEvidence::from_value(json!({
+                                "operation": "run.load",
+                                "check": "selected frame bounds or digest"
+                            })),
+                        ));
                     }
                 }
                 LoadedRun::new(
@@ -445,9 +489,14 @@ impl Store for MemoryStore {
                 AppendPlan::NotInserted => Ok(AppendResult::NotInserted),
                 AppendPlan::Insert { stored, head } => {
                     publish_insert(&mut guard, stored, head, |frames| {
-                        frames
-                            .try_reserve_exact(1)
-                            .map_err(|_| StoreError::Unavailable)
+                        frames.try_reserve_exact(1).map_err(|error| {
+                            StoreError::Unavailable(DiagnosticEvidence::from_value(json!({
+                                "operation": "run.append",
+                                "stage": "reserve_frame",
+                                "requested_bytes": std::mem::size_of::<Arc<StoredFrame>>(),
+                                "message": error.to_string()
+                            })))
+                        })
                     })?;
                     Ok(AppendResult::Inserted)
                 }
@@ -577,9 +626,11 @@ fn plan_append(
     mfm_journal::SizeLimitExceeded::check(candidate.sequence, MAX_RUN_FRAMES)
         .map_err(StoreError::FrameCount)?;
     let current_total = head.as_ref().map_or(0, |current| current.total_bytes);
-    let remaining = MAX_RUN_BYTES
-        .checked_sub(current_total)
-        .ok_or(StoreError::CorruptPhysicalState)?;
+    let remaining = MAX_RUN_BYTES.checked_sub(current_total).ok_or(
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(
+            json!({"operation": "plan_append", "check": "current byte total exceeds bound"}),
+        )),
+    )?;
     if frame_len > remaining {
         let total = current_total
             .checked_add(frame_len)
@@ -588,7 +639,11 @@ fn plan_append(
             .map_err(StoreError::HistorySize)?;
     }
     if frame_head_digest(&candidate.bytes) != candidate.head_digest {
-        return Err(StoreError::CorruptPhysicalState);
+        return Err(StoreError::CorruptPhysicalState(
+            DiagnosticEvidence::from_value(
+                json!({"operation": "plan_append", "check": "candidate digest mismatch"}),
+            ),
+        ));
     }
     let total_bytes = head
         .as_ref()
@@ -617,7 +672,12 @@ fn validate_append_observation(
     let Some(head) = head else {
         return (observed_count == 0 && current.is_none() && target.is_none())
             .then_some(())
-            .ok_or(StoreError::CorruptPhysicalState);
+            .ok_or_else(|| {
+                StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(json!({
+                    "operation": "validate_append_observation",
+                    "check": "frames without head"
+                })))
+            });
     };
     if head.sequence == 0
         || head.sequence > MAX_RUN_FRAMES
@@ -625,22 +685,38 @@ fn validate_append_observation(
         || head.total_bytes == 0
         || head.total_bytes > MAX_RUN_BYTES
     {
-        return Err(StoreError::CorruptPhysicalState);
+        return Err(StoreError::CorruptPhysicalState(
+            DiagnosticEvidence::from_value(
+                json!({"operation": "validate_append_observation", "check": "head count or byte bounds"}),
+            ),
+        ));
     }
-    let current = current.ok_or(StoreError::CorruptPhysicalState)?;
+    let current = current.ok_or_else(|| {
+        StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(
+            json!({"operation": "validate_append_observation", "check": "missing current frame"}),
+        ))
+    })?;
     if current.bytes.is_empty()
         || current.bytes.len() > MAX_FRAME_BYTES
         || frame_head_digest(&current.bytes) != current.head_digest
         || (candidate_sequence <= head.sequence && target.is_none())
     {
-        return Err(StoreError::CorruptPhysicalState);
+        return Err(StoreError::CorruptPhysicalState(
+            DiagnosticEvidence::from_value(
+                json!({"operation": "validate_append_observation", "check": "current frame or target presence"}),
+            ),
+        ));
     }
     if let Some(target) = target {
         if target.bytes.is_empty()
             || target.bytes.len() > MAX_FRAME_BYTES
             || frame_head_digest(&target.bytes) != target.head_digest
         {
-            return Err(StoreError::CorruptPhysicalState);
+            return Err(StoreError::CorruptPhysicalState(
+                DiagnosticEvidence::from_value(
+                    json!({"operation": "validate_append_observation", "check": "target frame bounds or digest"}),
+                ),
+            ));
         }
     }
     Ok(())
@@ -650,9 +726,14 @@ async fn own_candidate_bytes(source: &[u8]) -> std::result::Result<Vec<u8>, Stor
     let length = source.len();
     let mut owned = run_pure_blocking(move || {
         let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(length)
-            .map_err(|_| StoreError::Unavailable)?;
+        bytes.try_reserve_exact(length).map_err(|error| {
+            StoreError::Unavailable(DiagnosticEvidence::from_value(json!({
+                "operation": "own_candidate_bytes",
+                "stage": "allocate",
+                "requested_bytes": length,
+                "message": error.to_string()
+            })))
+        })?;
         Ok(bytes)
     })
     .await?;
@@ -670,15 +751,26 @@ where
     F: FnOnce() -> std::result::Result<T, StoreError> + Send + 'static,
 {
     require_runtime()?;
-    tokio::task::spawn_blocking(job)
-        .await
-        .map_err(|_| StoreError::Unavailable)?
+    tokio::task::spawn_blocking(job).await.map_err(|error| {
+        StoreError::Unavailable(DiagnosticEvidence::from_value(json!({
+            "operation": "run_pure_blocking",
+            "stage": "join",
+            "cancelled": error.is_cancelled(),
+            "panicked": error.is_panic()
+        })))
+    })?
 }
 
 fn require_runtime() -> std::result::Result<(), StoreError> {
     tokio::runtime::Handle::try_current()
         .map(|_| ())
-        .map_err(|_| StoreError::Unavailable)
+        .map_err(|error| {
+            StoreError::Unavailable(DiagnosticEvidence::from_value(json!({
+                "operation": "require_runtime",
+                "stage": "runtime",
+                "message": error.to_string()
+            })))
+        })
 }
 
 #[cfg(test)]

@@ -474,7 +474,7 @@ impl RunRequestError {
             InvocationFailure::Execution {
                 error: RuntimeError::Recording { failure, .. }, ..
             } if matches!(failure.as_ref(), mfm_runtime::RecordingFailure::Store {
-                cause: mfm_store::StoreError::Indeterminate, ..
+                cause: mfm_store::StoreError::Indeterminate(_), ..
             })
         );
         if indeterminate {
@@ -977,13 +977,13 @@ fn map_runtime_error(error: &RuntimeError) -> RequestError {
 
 fn map_store_error(error: &mfm_store::StoreError) -> RequestError {
     match error {
-        mfm_store::StoreError::Unavailable => RequestError::DependencyUnavailable,
+        mfm_store::StoreError::Unavailable(_) => RequestError::DependencyUnavailable,
         mfm_store::StoreError::FrameSize(_)
         | mfm_store::StoreError::HistorySize(_)
         | mfm_store::StoreError::FrameCount(_) => RequestError::SizeLimitExceeded,
         mfm_store::StoreError::ArithmeticOverflow => RequestError::CapacityArithmeticOverflow,
-        mfm_store::StoreError::CorruptPhysicalState => RequestError::InvalidRunHistory,
-        mfm_store::StoreError::Indeterminate => RequestError::Internal,
+        mfm_store::StoreError::CorruptPhysicalState(_) => RequestError::InvalidRunHistory,
+        mfm_store::StoreError::Indeterminate(_) => RequestError::Internal,
     }
 }
 
@@ -1093,7 +1093,7 @@ mod tests {
                                             .unwrap()
                                         )
                                         .unwrap(),
-                                        cause: mfm_store::StoreError::Indeterminate
+                                        cause: mfm_store::StoreError::Indeterminate(mfm_values::DiagnosticEvidence::from_value(serde_json::json!({"operation": "test.store", "injected": "Indeterminate"})))
                                     }),
                                 },
                             }

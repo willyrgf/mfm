@@ -67,7 +67,11 @@ async fn ambiguous_append_keeps_503_and_exact_recovery_identity() {
                 failure: Box::new(mfm_runtime::RecordingFailure::Store {
                     original: None,
                     candidate,
-                    cause: mfm_store::StoreError::Indeterminate,
+                    cause: mfm_store::StoreError::Indeterminate(
+                        mfm_values::DiagnosticEvidence::from_value(
+                            serde_json::json!({"operation": "test.store", "injected": "Indeterminate"}),
+                        ),
+                    ),
                 }),
             },
         },
@@ -77,6 +81,10 @@ async fn ambiguous_append_keeps_503_and_exact_recovery_identity() {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(report["code"], "run_append_indeterminate");
+    assert_eq!(
+        report["invocation"]["cause"]["recording"]["failure"]["store"]["cause"]["indeterminate"],
+        serde_json::json!({"operation": "test.store", "injected": "Indeterminate"})
+    );
     assert_eq!(report["recovery"]["run_id"], run_id().as_str());
     assert_eq!(
         report["invocation"]["cause"]["recording"]["failure"]["store"]["candidate"]["digest"],

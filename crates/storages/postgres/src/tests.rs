@@ -86,8 +86,8 @@ fn observe_store<T>(result: Result<T, StoreError>) -> store_hostile::Observation
             | StoreError::FrameCount(_)
             | StoreError::ArithmeticOverflow,
         ) => store_hostile::Observation::Capacity,
-        Err(StoreError::CorruptPhysicalState) => store_hostile::Observation::Corrupt,
-        Err(StoreError::Unavailable | StoreError::Indeterminate) => {
+        Err(StoreError::CorruptPhysicalState(_)) => store_hostile::Observation::Corrupt,
+        Err(StoreError::Unavailable(_) | StoreError::Indeterminate(_)) => {
             store_hostile::Observation::Unavailable
         }
     }
@@ -205,10 +205,18 @@ fn migration_and_classifier_contracts_are_exact() {
         classify_open_error(sqlx::Error::Protocol("transport".to_owned())),
         PostgresOpenError::Unavailable
     );
+    let StoreError::Unavailable(evidence) = classify_precommit_sql(
+        "insert_frame",
+        sqlx::Error::Protocol("rejected".to_owned()),
+        None,
+    ) else {
+        panic!("protocol disposition")
+    };
     assert_eq!(
-        classify_precommit_sql(sqlx::Error::Protocol("rejected".to_owned())),
-        StoreError::Unavailable
+        evidence.as_value()["sources"][0]["message"],
+        "encountered unexpected or invalid data: rejected"
     );
+    assert!(evidence.as_value().get("rollback").is_none());
     assert!(durability_matches(true, "on", "on"));
     assert!(!durability_matches(false, "on", "on"));
     assert!(!durability_matches(true, "off", "on"));
@@ -353,25 +361,10 @@ async fn assert_commit_and_hostile_contract(
     ));
 
     for (byte, fault, expected, committed) in [
-        (
-            41,
-            CommitFault::BeforeSubmission,
-            StoreError::Unavailable,
-            false,
-        ),
-        (42, CommitFault::Rejected, StoreError::Unavailable, false),
-        (
-            43,
-            CommitFault::UnknownRolledBack,
-            StoreError::Indeterminate,
-            false,
-        ),
-        (
-            44,
-            CommitFault::UnknownCommitted,
-            StoreError::Indeterminate,
-            true,
-        ),
+        (41, CommitFault::BeforeSubmission, false, false),
+        (42, CommitFault::Rejected, false, false),
+        (43, CommitFault::UnknownRolledBack, true, false),
+        (44, CommitFault::UnknownCommitted, true, true),
     ] {
         if matches!(fault, CommitFault::Rejected) {
             connection
@@ -388,7 +381,25 @@ async fn assert_commit_and_hostile_contract(
         }
         let fault_id = run_id(byte);
         let result = append_run(&store.pool, &genesis(&fault_id), fault).await;
-        assert_eq!(result, Err(expected));
+        let evidence = match result.as_ref().expect_err("injected failure") {
+            StoreError::Unavailable(evidence) => {
+                assert!(!expected);
+                evidence
+            }
+            StoreError::Indeterminate(evidence) => {
+                assert!(expected);
+                evidence
+            }
+            other => panic!("unexpected disposition: {other}"),
+        };
+        assert_eq!(evidence.as_value()["operation"], "run.append");
+        assert_eq!(evidence.as_value()["stage"], "commit");
+        if matches!(fault, CommitFault::Rejected) {
+            assert_eq!(evidence.as_value()["sources"][0]["kind"], "database");
+            assert_eq!(evidence.as_value()["sources"][1]["sqlstate"], "23503");
+        } else {
+            assert!(evidence.as_value().get("injected").is_some());
+        }
         if matches!(fault, CommitFault::BeforeSubmission) {
             observed.push((Case::AtomicFault, observe_store(result)));
         }
@@ -1085,6 +1096,83 @@ async fn managed_postgres_persistence_authority_contract() {
         .expect("production connection options");
     assert!(matches!(options.get_ssl_mode(), PgSslMode::Disable));
     store_scenarios::exercise_store(backend.as_ref(), &store_scenarios::run(9)).await;
+
+    // Real server diagnostics exercise the private recipe and the production precommit mapper.
+    let primary = sqlx::query("DO $$ BEGIN RAISE EXCEPTION 'primary constraint' USING ERRCODE = '23514', DETAIL = 'constraint detail', HINT = 'constraint hint', SCHEMA = 'public', TABLE = 'fixture', COLUMN = 'value', CONSTRAINT = 'fixture_check'; END $$")
+        .execute(&mut connection).await.unwrap_err();
+    let fields = sqlx_fields("run.append", "insert_frame", &primary);
+    let database = &fields["sources"][1];
+    assert_eq!(fields["sources"][0]["kind"], "database");
+    assert_eq!(database["sqlstate"], "23514");
+    assert_eq!(database["severity"], "ERROR");
+    assert_eq!(database["server_message"], "primary constraint");
+    assert_eq!(database["detail"], "constraint detail");
+    assert_eq!(database["hint"], "constraint hint");
+    assert_eq!(database["schema"], "public");
+    assert_eq!(database["table"], "fixture");
+    assert_eq!(database["column"], "value");
+    assert_eq!(database["constraint"], "fixture_check");
+    assert_eq!(
+        database["message"],
+        primary.as_database_error().unwrap().to_string()
+    );
+    let StoreError::CorruptPhysicalState(evidence) =
+        classify_precommit_sql("insert_frame", primary, Some(sqlx::Error::PoolClosed))
+    else {
+        panic!("class-23 disposition")
+    };
+    assert_eq!(evidence.as_value()["sources"], fields["sources"]);
+    assert_eq!(
+        evidence.as_value()["rollback"]["sources"][0]["kind"],
+        "pool_closed"
+    );
+
+    // Exercise the selected identity conversion through the physical-row validator.
+    let invalid_row = sqlx::query("SELECT $1::text AS run_id, 1::bigint AS head_sequence, 1::bigint AS total_bytes, 'x'::bytea AS frame_bytes, 'invalid'::text AS head_digest")
+        .bind(run_id(20).as_str()).fetch_one(&mut connection).await.unwrap();
+    let StoreError::CorruptPhysicalState(evidence) =
+        validate_observed_head(Some(&invalid_row), true, run_id(20).as_str())
+            .err()
+            .unwrap()
+    else {
+        panic!("identity disposition")
+    };
+    assert_eq!(evidence.as_value()["field"], "head_digest");
+    assert_eq!(evidence.as_value()["source"]["kind"], "identity_error");
+    assert_eq!(
+        evidence.as_value()["source"]["message"],
+        ContentDigest::parse("invalid").unwrap_err().to_string()
+    );
+    assert_ne!(evidence.as_value()["source"]["message"], "withheld");
+
+    let closed = PostgresBackend::connect(&runtime).await.unwrap();
+    closed.pool.close().await;
+    let StoreError::Unavailable(evidence) = closed.load_run(&run_id(20), None).await.err().unwrap()
+    else {
+        panic!("closed load disposition")
+    };
+    assert_eq!(evidence.as_value()["operation"], "run.load");
+    assert_eq!(evidence.as_value()["stage"], "begin");
+    assert_eq!(evidence.as_value()["sources"][0]["kind"], "pool_closed");
+
+    let runtime_with_closed_store = mfm_runtime::Runtime::new(
+        mfm_runtime::RuntimeAssemblyBuilder::new().unwrap().finish(),
+        Arc::new(closed),
+    );
+    let failure = runtime_with_closed_store
+        .read(&run_id(20))
+        .await
+        .err()
+        .unwrap();
+    let mfm_runtime::InvocationFailure::Execution {
+        error: mfm_runtime::RuntimeError::Store(StoreError::Unavailable(forwarded)),
+        last_observed: None,
+        ..
+    } = failure
+    else {
+        panic!("load failure must remain invocation-only")
+    };
+    assert_eq!(forwarded, evidence);
 
     let first_run_id = run_id(21);
     let second_run_id = run_id(22);
@@ -1815,4 +1903,164 @@ async fn inherited_rows_are_outside_physical_table_custody() {
         .execute("DROP SCHEMA mfm_test_children CASCADE")
         .await
         .unwrap();
+}
+
+#[test]
+fn sqlx_sources_preserve_order_inline_children_and_interface_repetition() {
+    use std::{error::Error, fmt, io};
+    #[derive(Debug)]
+    struct Inner(u8);
+    impl fmt::Display for Inner {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("inner")
+        }
+    }
+    impl Error for Inner {}
+    #[derive(Debug)]
+    #[repr(C)]
+    struct Outer(Inner, bool);
+    impl fmt::Display for Outer {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(if self.1 { "inner" } else { "outer" })
+        }
+    }
+    impl Error for Outer {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+    for equal_messages in [false, true] {
+        let outer = Outer(Inner(1), equal_messages);
+        assert_eq!(
+            &outer as *const Outer as *const (),
+            &outer.0 as *const Inner as *const ()
+        );
+        assert_eq!(outer.0 .0, 1);
+        let error = sqlx::Error::Decode(Box::new(outer));
+        let details = sqlx_fields("run.load", "decode_head", &error);
+        let sources = details["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources[0]["kind"], "decode");
+        assert_eq!(
+            sources[1]["message"],
+            if equal_messages { "inner" } else { "outer" }
+        );
+        assert_eq!(sources[2]["message"], "inner");
+        assert!(details.get("source_cycle").is_none());
+    }
+    let error = sqlx::Error::Io(io::Error::other(Outer(Inner(2), false)));
+    let details = sqlx_fields("run.append", "begin", &error);
+    let sources = details["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 4);
+    assert_eq!(sources[0]["kind"], "io");
+    assert_eq!(sources[1]["os_kind"], "Other");
+    assert_eq!(sources[1]["os_code"], serde_json::Value::Null);
+    assert_eq!(sources[2]["message"], "outer");
+    assert_eq!(sources[3]["message"], "inner");
+    let error = sqlx::Error::Io(io::Error::from_raw_os_error(13));
+    assert_eq!(
+        sqlx_fields("run.load", "begin", &error)["sources"][1]["os_code"],
+        13
+    );
+
+    #[derive(Debug)]
+    struct Layer(usize, Option<Box<Layer>>);
+    impl fmt::Display for Layer {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "layer {}", self.0)
+        }
+    }
+    impl Error for Layer {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.1.as_deref().map(|v| v as &dyn Error)
+        }
+    }
+    let mut tail = None;
+    for i in (0..40).rev() {
+        tail = Some(Box::new(Layer(i, tail)));
+    }
+    let error = sqlx::Error::Decode(tail.unwrap());
+    let details = sqlx_fields("run.load", "decode_head", &error);
+    let sources = details["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 41);
+    for i in 0..40 {
+        assert_eq!(sources[i + 1]["message"], format!("layer {i}"));
+    }
+    assert!(details.get("source_cycle").is_none());
+
+    #[derive(Debug)]
+    struct Cycle(bool);
+    static FIRST: Cycle = Cycle(false);
+    static SECOND: Cycle = Cycle(true);
+    impl fmt::Display for Cycle {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(if self.0 { "second" } else { "first" })
+        }
+    }
+    impl Error for Cycle {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(if self.0 { &FIRST } else { &SECOND })
+        }
+    }
+    let error = sqlx::Error::Decode(Box::new(Cycle(false)));
+    let details = sqlx_fields("run.load", "decode_head", &error);
+    assert_eq!(details["source_cycle"], true);
+    let sources = details["sources"].as_array().unwrap();
+    assert!(sources.len() >= 3);
+    for (i, source) in sources[1..].iter().enumerate() {
+        assert_eq!(
+            source["message"],
+            if i % 2 == 0 { "first" } else { "second" }
+        );
+    }
+}
+
+#[test]
+fn sqlx_columns_and_secondary_rollback_keep_distinct_native_facts() {
+    for (error, field, expected) in [
+        (
+            sqlx::Error::ColumnDecode {
+                index: "head".into(),
+                source: Box::new(sqlx::Error::RowNotFound),
+            },
+            "index",
+            json!("head"),
+        ),
+        (
+            sqlx::Error::ColumnIndexOutOfBounds { index: 3, len: 2 },
+            "index",
+            json!(3),
+        ),
+        (
+            sqlx::Error::ColumnNotFound("frame".into()),
+            "column",
+            json!("frame"),
+        ),
+        (
+            sqlx::Error::TypeNotFound {
+                type_name: "custom".into(),
+            },
+            "type_name",
+            json!("custom"),
+        ),
+    ] {
+        let fields = sqlx_fields("run.load", "decode_head", &error);
+        assert_eq!(fields["sources"][0][field], expected);
+        assert_eq!(fields["sources"][0]["message"], error.to_string());
+    }
+    let error = classify_precommit_sql(
+        "update_head",
+        sqlx::Error::Decode(Box::new(sqlx::Error::RowNotFound)),
+        Some(sqlx::Error::Io(std::io::Error::from_raw_os_error(32))),
+    );
+    let StoreError::Unavailable(details) = error else {
+        panic!("primary disposition")
+    };
+    let details = details.as_value();
+    assert_eq!(details["stage"], "update_head");
+    assert_eq!(details["sources"][0]["kind"], "decode");
+    assert_eq!(details["sources"][1]["kind"], "row_not_found");
+    assert_eq!(details["rollback"]["stage"], "rollback");
+    assert_eq!(details["rollback"]["sources"][0]["kind"], "io");
+    assert_eq!(details["rollback"]["sources"][1]["os_code"], 32);
 }

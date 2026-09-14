@@ -581,7 +581,7 @@ async fn ambiguous_recovery_append_stops_with_historical_observation_and_preserv
     assert!(matches!(
         failure.as_ref(),
         crate::RecordingFailure::Store {
-            cause: mfm_store::StoreError::Indeterminate,
+            cause: mfm_store::StoreError::Indeterminate(_),
             ..
         }
     ));

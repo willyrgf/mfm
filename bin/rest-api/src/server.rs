@@ -763,7 +763,11 @@ mod tests {
                     failure: Box::new(mfm_runtime::RecordingFailure::Store {
                         original: None,
                         candidate,
-                        cause: mfm_store::StoreError::Indeterminate,
+                        cause: mfm_store::StoreError::Indeterminate(
+                            mfm_values::DiagnosticEvidence::from_value(
+                                serde_json::json!({"operation": "test.store", "injected": "Indeterminate"}),
+                            ),
+                        ),
                     }),
                 },
             },

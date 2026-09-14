@@ -8,7 +8,7 @@ not claim that preserving an error received by Runtime repairs a cause discarded
 Part 1 is accepted at production `87f198a9`, recorded in `0a7543ec`. Part 2 refinement selects
 three remaining cutovers: run Store, execution authority, and executing keystore signing. Its
 sections 2–6 freeze producers, fields and stopping boundaries. The findings and remediation ideas
-below describe gaps; they do not expand those cutovers or imply that Part 2 is implemented.
+below distinguish implemented R1 from the remaining gaps; they do not expand those cutovers.
 
 ## Result
 
@@ -124,26 +124,25 @@ at this boundary. Keep the same prepared command/EffectId, no renonce or replace
 the existing operational-versus-invariant distinction. Classification remains independent of the
 diagnostic payload. Avoid a separate generic exception framework for each transaction stage.
 
-### 4. PostgreSQL run Store loses SQLx causes, including at COMMIT
+### 4. PostgreSQL run Store retains selected producing causes (R1)
 
-Source: [postgres/lib.rs](../crates/storages/postgres/src/lib.rs), connection setup,
-`load_run`, append transaction code, `classify_precommit_sql` and `run_pure_blocking`.
+[Run storage](../crates/storages/postgres/src/lib.rs) retains mandatory diagnostic data on
+Unavailable, CorruptPhysicalState and Indeterminate. The private
+[SQLx recipe](../crates/storages/postgres/src/diagnostic.rs) captures operation/stage, ordered
+messages, SQLx variants, selected column facts, PostgreSQL SQLSTATE/severity/server message,
+detail/hint/schema/table/column/constraint, and IO kind/code. It follows contained database,
+boxed and IO children before ordinary source traversal, stopping on repeated full interface
+pointers under the accepted information limit. Unknown native fields are not reconstructed.
 
-Most SQLx acquisition/query/read errors become StoreError::Unavailable. Precommit classification
-uses the SQLSTATE class `23` to select CorruptPhysicalState, then discards the SQLSTATE and source.
-COMMIT distinguishes a database error from an uncertain acknowledgement but discards both concrete
-causes. Pure blocking join/allocation paths also lose their particular failure category.
+Run load/append and row-decoding dispositions remain unchanged. A failed insert_frame/update_head
+retains its already attempted rollback failure separately; rollback success adds no error.
+Allocation/runtime-handle/task failures and local physical/identity checks retain their selected
+facts. No SQL arguments, statement copies, connection objects or panic payloads are appended.
+Dependency text follows the trust contract, without scans, certification or diagnostic quotas.
 
-Remediation: preserve query/transaction stage, SQLx category, safe SQLSTATE and nested reviewed
-causes alongside the existing semantic Store disposition. Do not weaken Unavailable versus
-Indeterminate, synchronous COMMIT, exact-head append, or repeatable-read load guarantees.
-Part 2 selects actual dependency messages and specific fields under the accepted diagnostic trust
-boundary. MFM does not scan or certify that text or attach its own queries, arguments or connection
-objects. Debug dumps and comprehensive native-field extraction are not the selected representation.
-
-The Store cannot guarantee persisting its own failure into that same unavailable Store. Its
-invocation error must retain the cause chain. A durable independent failure sink would need an
-explicit ownership and failure contract; neither recursive append nor plaintext logging solves it.
+Run Store errors remain invocation-only and cannot prove they were recorded through the failed
+Store. Comparison-only/local-rejection rollback, background cleanup, connection gates,
+configuration and index enrichment remain outside this selected guarantee.
 
 ### 5. PostgreSQL transaction custody is a second source-erasing boundary
 
@@ -216,8 +215,9 @@ keystore design and strengthen secret-exclusion tests in any implementation chan
 Sources: [MemoryStore](../crates/kernel/store/src/lib.rs), allocation/ownership helpers and
 blocking joins; [memory configuration](../crates/config/src/memory.rs).
 
-Memory Store/index retain numeric capacity facts where their public errors carry them, but map
-allocation and task-join failures to Unavailable and checked physical failures to Corrupt. The
+R1 MemoryStore retains allocation messages/requested bytes, runtime-handle messages, task
+cancelled/panicked facts and local physical-check reasons on its existing dispositions. Numeric
+capacity errors are unchanged. RunIndex enrichment remains excluded. The
 in-memory configuration backend has no network/client error chain to preserve; ordinary absent or
 unchanged outcomes are not dropped errors.
 

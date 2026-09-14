@@ -1,7 +1,7 @@
 # RFC part 2: preserve errors on selected execution paths
 
-Status: R0 design accepted by the dedicated architect, 2026-09-14; implementation and B2-B8
-acceptance remain pending.
+Status: R0 design and the R1 checkpoint are accepted by the dedicated architect, 2026-09-14.
+R1 run-Store enrichment is implemented and verified; R2/R3 and final B2–B8 acceptance remain pending.
 Continue from accepted Part 1 production `87f198a9` and completion record `0a7543ec`,
 with this RFC. Do not restart or reopen that cutover.
 
@@ -458,6 +458,58 @@ PostgreSQL authority/EVM/Live and affected ABI consumers; R3 selects signing/key
 Use managed postgres-test for real SQLx/COMMIT behavior. SQL text/metadata should not change;
 sqlx-prepare is only needed for a separately justified query change. Run one final
 `nix run .#ci` on the complete candidate.
+
+### R1 checkpoint — 2026-09-14
+
+R1 continues from R0 `70200449` and implements the selected run-Store boundary. The three
+existing dispositions now require evidence; SQLx extraction is private to PostgreSQL. Selected
+local checks and allocation/task/identity failures retain facts without another error family or
+capture service. Existing SQL, isolation, locking, synchronous COMMIT and ambiguity semantics
+remain unchanged. App and clients forward the enriched existing wire; obsolete unit fixtures are
+replaced. R2/R3's authority/signing deletions remain outstanding and earn no R1 deletion credit.
+
+The dedicated architect reviewed the actual diff and returned **ACCEPTED** for the bounded design
+and revised aggregate forecast. The review required readable multiline JSON and an actual closed
+PostgreSQL backend through Runtime::read; both are implemented. The latter preserves the exact
+run.load/begin/pool_closed evidence and has no last observation. A previously misleading rejected
+COMMIT fixture failed at denied DELETE; its test-only injection now uses an authorized head update
+and proves deferred foreign-key rejection at COMMIT with SQLSTATE 23503.
+
+Focused `nix develop -c cargo test --target-dir target/verification` with
+`-p mfm-store -p mfm-storage-postgres -p mfm-runtime -p mfm-app -p mfm -p mfm-rest-api --all-targets`
+passed. New SQLx regressions cover nested/inline/cyclic sources, IO children, column facts and
+separate rollback. Existing Runtime recording tests now assert enriched evidence alongside the
+admitted original, submitted candidate and previous observation; the no-original case remains
+explicit. Focused App/CLI/REST assertions cover the changed wire. Selected all-target Clippy passes
+with `--no-deps -- -D warnings`. Managed `nix run .#run -- --task postgres-test --slot 1` passed
+run `run-3362366-1789412275902410274`, including real database fields, identity rejection,
+COMMIT outcomes and the actual Runtime load failure. Full CI is reserved for the final R3 candidate.
+
+Using Part 1's production convention (including untracked sources and excluding trailing inline
+tests), R1 is **27,510 production lines: +484 against Part 1, +679 against original `7f71beef`**.
+Before this checkpoint record, R1 changes 30 files: production physical +651/-163, tests/fixtures
++472/-61, implementation docs +69/-20, manifests/lockfile +7/-1. R0 is separate: two documentation
+files, +445/-286 physical lines. The diagnostic facts account for the increase; completed provider
+and core deletions are not counted again.
+
+The architect replaces the provisional production/test estimates with this cumulative forecast:
+
+| Category/slice | Revised net addition against Part 1 |
+| --- | ---: |
+| R1 production, actual | +484 |
+| R2 production | +220–350 |
+| R3 production | +50–90 |
+| Complete production planning range | +750–1,050 |
+| Complete tests/fixtures | +800–1,200 |
+| Implementation documentation, excluding R0 | +100–300 |
+| Manifests/lockfile | +10–30 |
+| Distinct changed files | approximately 40–55 |
+
+This estimates 27,776–28,076 production lines, +945–1,245 against the original. These are reviewed
+estimates, not allowances to consume. Additional producers, recipes, types or forecast growth
+outside the revised range still require cumulative review. Remaining material uncertainties are
+R2/R3's actual cost, new-owner admission/cold reporting and v3 deployment handling; validate them
+through the finite acceptance cases below before final sign-off.
 
 ### Finite acceptance cases
 

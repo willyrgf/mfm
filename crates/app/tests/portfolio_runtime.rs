@@ -289,7 +289,13 @@ impl Store for FaultStore {
         frame: &'a mfm_journal::EncodedRunFrame,
     ) -> Pin<Box<dyn Future<Output = Result<AppendResult, StoreError>> + Send + 'a>> {
         if self.indeterminate_next_append.swap(false, Ordering::SeqCst) {
-            Box::pin(async { Err(StoreError::Indeterminate) })
+            Box::pin(async {
+                Err(StoreError::Indeterminate(
+                    mfm_values::DiagnosticEvidence::from_value(
+                        serde_json::json!({"operation": "test.store", "injected": "Indeterminate"}),
+                    ),
+                ))
+            })
         } else {
             self.inner.append_run(frame)
         }
@@ -639,6 +645,11 @@ async fn ambiguous_run_appends_carry_exact_start_and_progress_recovery_sums() {
         mfm_app::SerializableClientError::for_run(&error, &error.to_string()).unwrap(),
     )
     .unwrap();
+    assert_eq!(
+        serialized["invocation"]["cause"]["recording"]["failure"]["store"]["cause"]
+            ["indeterminate"],
+        serde_json::json!({"operation": "test.store", "injected": "Indeterminate"})
+    );
     assert_eq!(
         serialized["invocation"]["last_observed"],
         serde_json::Value::Null
