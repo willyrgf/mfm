@@ -332,12 +332,19 @@ impl ReadCapabilityContract for EvmAnchoredContractCallRead {
         intent_value_ref: &ContentRef,
         intent: &Self::Intent,
         evidence: &Self::Evidence,
-    ) -> Result<(), mfm_values::NativeCause> {
+    ) -> Result<(), mfm_values::InvocationDiagnostic> {
         (evidence.intent_value_ref() == intent_value_ref)
             .then_some(())
             .ok_or(EvmDomainError::EvidenceBinding)
             .and_then(|_| evidence.validate_for(intent))
-            .map_err(mfm_values::NativeCause::from_error)
+            .map_err(|error| {
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "state_internal",
+                    "bind_evidence",
+                    &error,
+                    None,
+                )
+            })
     }
 }
 

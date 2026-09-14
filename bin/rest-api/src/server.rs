@@ -440,7 +440,12 @@ mod tests {
                     }
                     _ => {
                         return Err(AdapterError::Invariant(
-                            mfm_runtime::RuntimeError::IncompatibleAssembly.into_native(),
+                            mfm_values::InvocationDiagnostic::from_fields(
+                                "adapter_invariant",
+                                "observe",
+                                &"incompatible_assembly",
+                                None,
+                            ),
                         ))
                     }
                 };
@@ -455,7 +460,12 @@ mod tests {
         ) -> ProviderFuture<'a, AnchoredContractCallEvidence> {
             Box::pin(async {
                 Err(AdapterError::Invariant(
-                    mfm_runtime::RuntimeError::IncompatibleAssembly.into_native(),
+                    mfm_values::InvocationDiagnostic::from_fields(
+                        "adapter_invariant",
+                        "observe",
+                        &"incompatible_assembly",
+                        None,
+                    ),
                 ))
             })
         }
@@ -750,14 +760,10 @@ mod tests {
                 last_observed: None,
                 error: mfm_runtime::RuntimeError::Recording {
                     operation: mfm_runtime::Operation::Record,
-                    failure: Box::new(mfm_runtime::RecordingFailure::Append {
+                    failure: Box::new(mfm_runtime::RecordingFailure::Store {
                         original: None,
                         candidate,
-                        outcome: mfm_runtime::AppendFailure::Store(
-                            mfm_store::StoreError::Indeterminate,
-                        ),
-                        observation: None,
-                        reload_cause: None,
+                        cause: mfm_store::StoreError::Indeterminate,
                     }),
                 },
             },

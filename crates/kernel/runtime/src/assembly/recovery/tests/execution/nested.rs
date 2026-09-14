@@ -16,14 +16,20 @@ impl mfm_program::State for IncrementOffset {
 impl mfm_program::PureState for IncrementOffset {
     fn evaluate(
         input: Offset,
-    ) -> std::result::Result<ProposedStateOutcome<Offset, EvmFailure>, mfm_values::NativeCause>
-    {
+    ) -> std::result::Result<
+        ProposedStateOutcome<Offset, EvmFailure>,
+        mfm_values::InvocationDiagnostic,
+    > {
         Ok(ProposedStateOutcome::Success {
             output: Offset {
-                value: input
-                    .value
-                    .checked_add(1)
-                    .ok_or_else(|| RuntimeError::ArithmeticOverflow.into_native())?,
+                value: input.value.checked_add(1).ok_or_else(|| {
+                    mfm_values::InvocationDiagnostic::from_fields(
+                        "runtime_invariant",
+                        "apply",
+                        &"arithmetic_overflow",
+                        None,
+                    )
+                })?,
             },
         })
     }
@@ -40,7 +46,7 @@ impl Handler for SelectRegion {
         initial: &Offset,
         _: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::InvocationDiagnostic> {
         let selected = (initial.value - u64::from(context.remaining().restarts()) + 1) % 2;
         Ok(context
             .eligible_restart_targets()

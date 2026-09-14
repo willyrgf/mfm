@@ -1,6 +1,6 @@
 use crate::{
-    canonicalize_mfm_value, MfmValue, NativeCause, SchemaDescriptor, SizeLimitExceeded, ValueError,
-    MAX_RUN_OBJECT_CANONICAL_BYTES,
+    canonicalize_mfm_value, InvocationDiagnostic, MfmValue, SchemaDescriptor, SizeLimitExceeded,
+    ValueError, MAX_RUN_OBJECT_CANONICAL_BYTES,
 };
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_ids::ContentRef;
@@ -63,10 +63,14 @@ impl Object {
             .validate_canonical_value(self.canonical_bytes())
     }
     /// Materializes its exact native owner without repeating schema/hash admission.
-    pub fn decode<T: MfmValue>(&self) -> Result<T, NativeCause> {
-        let descriptor = T::schema_descriptor().map_err(NativeCause::from_error)?;
-        if self.value_ref.schema_id() != &descriptor.schema_id().map_err(NativeCause::from_error)? {
-            return Err(NativeCause::from_error(ValueError::InvalidSchemaIdentity));
+    pub fn decode<T: MfmValue>(&self) -> Result<T, InvocationDiagnostic> {
+        let descriptor = T::schema_descriptor().map_err(|error| error.into_diagnostic("decode"))?;
+        if self.value_ref.schema_id()
+            != &descriptor
+                .schema_id()
+                .map_err(|error| error.into_diagnostic("decode"))?
+        {
+            return Err(ValueError::InvalidSchemaIdentity.into_diagnostic("decode"));
         }
         T::decode_native(self.canonical_bytes())
     }

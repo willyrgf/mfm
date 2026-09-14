@@ -42,12 +42,16 @@ impl ValueMap for MapFailure {
     fn apply(
         params: &Offset,
         value: EvmFailure,
-    ) -> std::result::Result<PortfolioFailure, mfm_values::NativeCause> {
+    ) -> std::result::Result<PortfolioFailure, mfm_values::InvocationDiagnostic> {
         Ok(PortfolioFailure {
-            collection: value
-                .source
-                .checked_add(params.value)
-                .ok_or_else(|| RuntimeError::ArithmeticOverflow.into_native())?,
+            collection: value.source.checked_add(params.value).ok_or_else(|| {
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "runtime_invariant",
+                    "apply",
+                    &"arithmetic_overflow",
+                    None,
+                )
+            })?,
         })
     }
 }
@@ -75,7 +79,7 @@ impl Handler for RetryRead {
         _: &NoParams,
         classification: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::InvocationDiagnostic> {
         Ok(
             if classification == Classification::Retryable
                 && context.phase() == ExecutionPhase::Read
@@ -98,7 +102,7 @@ impl Handler for ConfiguredHandler {
         params: &Offset,
         _: Classification,
         _: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::InvocationDiagnostic> {
         Ok(if params.value == 10 {
             RecoveryRequest::RetryState
         } else {
@@ -223,7 +227,7 @@ impl mfm_capabilities::ReadCapabilityContract for Observation {
         _: &ContentRef,
         _: &Offset,
         _: &Offset,
-    ) -> std::result::Result<(), mfm_values::NativeCause> {
+    ) -> std::result::Result<(), mfm_values::InvocationDiagnostic> {
         Ok(())
     }
 }
@@ -237,7 +241,7 @@ impl mfm_program::State for EvmRead {
     }
 }
 impl mfm_program::ReadState<Observation> for EvmRead {
-    fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_values::NativeCause> {
+    fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_values::InvocationDiagnostic> {
         Ok(Offset { value: input.value })
     }
     fn interpret(
@@ -245,7 +249,7 @@ impl mfm_program::ReadState<Observation> for EvmRead {
         evidence: &Offset,
     ) -> std::result::Result<
         mfm_program::ProposedStateOutcome<Offset, EvmFailure>,
-        mfm_values::NativeCause,
+        mfm_values::InvocationDiagnostic,
     > {
         Ok(mfm_program::ProposedStateOutcome::Failure {
             failure: EvmFailure {

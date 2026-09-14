@@ -35,8 +35,12 @@ may request retry of an unknown pending outcome under retained-command policy, w
 nonacceptance or authorizing a replacement command.
 
 EVM provider errors retain one owner category and one reviewed provider source. The source owns
-method, stage, local checked facts and bounded diagnostics; response status and RPC code are
-observations separate from causal source ancestry. Runtime commits this exact original before classification or policy and retains it through cold
+method, stage, local checked facts and Values-owned diagnostic data. Response status, RPC code,
+message and original RPC data text are observations separate from ordered exposed source ancestry.
+Diagnostic text uses the `diagnostic_float_free` persisted profile: ordinary numeric, structural
+and actual-size limits apply, while dependency-supplied text bypasses the generic secret-marker
+check. Ordinary Program/context strings retain that check. The derived FailureReport v5 uses the
+same diagnostic profile for its already admitted Objects. No independent diagnostic quota applies. Runtime commits this exact original before classification or policy and retains it through cold
 observation. Remaining upstream first-loss gaps are tracked in the owner audit inventory.
 
 The framework and shipping Portfolio default to Stop with zero global/local allowances. EVM's
@@ -64,12 +68,13 @@ context namespace and stable field name. Domain stage types and checked fact con
 the mechanical slot primitive, own preservation of preceding facts.
 
 Pure evaluation and Read/Effect interpretation return a proposed domain outcome or a reviewed
-Values-owned `NativeCause`. Preparation, typed decoding, handlers and maps use the same native route.
-Runtime retains the actual operation/stage and concrete cause in `InvocationFailure`; internal errors
+Values-owned `InvocationDiagnostic`. Preparation, typed decoding, handlers and maps forward the same
+immutable data. Runtime retains the actual operation/stage in `InvocationFailure`; internal errors
 never become persisted Program values or fault records. Pure and Read internal failures preserve
 the current head. Effect interpretation runs only after accepted settlement is committed, so its
-failure preserves `AwaitingInterpretation` and does not repeat external reconciliation. Native
-projection is bounded and fallible; a projection failure retains the original and its separate cause.
+failure preserves `AwaitingInterpretation` and does not repeat external reconciliation. Owner field
+conversion happens once; its two fixed failure markers retain the supplied code/operation/primary
+size. There is no native error custody, reporting quota, source downcast or receiver recapture.
 Only authenticated transaction reversion produces a reversion outcome; local action mismatches
 remain internal execution errors.
 
@@ -152,8 +157,11 @@ performs one exact candidate probe: presence can adopt a checked current observa
 absence remains a noninsertion failure. Candidate presence is independent of later payload/view
 projection, and any reload failure remains secondary. These paths yield without executing another
 visit. Store errors return immediately without a probe. Indeterminate never becomes a claim of
-insertion or noninsertion. Recording failures retain the original when available, the separate
-recording cause, and exact candidate bytes once sealed. Public reports expose candidate identity,
+insertion or noninsertion. BeforeAppend requires an admitted Failure and retains its separate
+concrete Runtime cause without unsent candidate bytes. Store and NotInserted retain the admitted
+original when present, independent causes and exact submitted bytes. Failed first-original encoding
+reports known position/contract and unavailable original detail/identity, without retry or append.
+Public reports expose candidate identity,
 not its complete frame. Known insertion followed by projection failure retains the acknowledged
 RunSummary separately from any older last-observed view.
 

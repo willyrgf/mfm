@@ -35,8 +35,10 @@ pub use mfm_canonical::limits::{
     MAX_ARRAY_ITEMS, MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES, MAX_OBJECT_ENTRIES, MAX_STRING_UTF8_BYTES,
 };
 
-mod native;
-pub use native::NativeCause;
+mod diagnostic;
+mod size;
+pub use diagnostic::{DiagnosticEvidence, InvocationDiagnostic};
+pub use size::{SizeResource, SizeViolation};
 mod object;
 pub use object::Object;
 
@@ -78,7 +80,6 @@ const SECRET_MARKERS: &[&str] = &[
     "bearer ",
 ];
 const MAX_SCHEMA_IDENTITY_BYTES: usize = 65_536;
-mod size;
 pub use size::SizeLimitExceeded;
 
 /// Maximum canonical bytes of one value retained in a run frame.
@@ -95,7 +96,8 @@ pub const MAX_SCHEMA_DEPTH: usize = MAX_CANONICAL_JSON_DEPTH - 3;
 pub type Result<T> = std::result::Result<T, ValueError>;
 
 /// Error returned by value descriptor helpers.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
 pub enum ValueError {
     /// Descriptor construction failed.
     #[error("descriptor error: {0}")]
@@ -173,9 +175,15 @@ fn looks_like_mnemonic_phrase(input: &str) -> bool {
 /// Values that may cross typed state boundaries.
 pub trait MfmValue: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Materializes the native owner, retaining reviewed construction failures.
-    fn decode_native(bytes: &[u8]) -> std::result::Result<Self, NativeCause> {
-        serde_json::from_slice(bytes)
-            .map_err(|source| NativeCause::from_error(mfm_canonical::JsonError::new(source)))
+    fn decode_native(bytes: &[u8]) -> std::result::Result<Self, InvocationDiagnostic> {
+        serde_json::from_slice(bytes).map_err(|source| {
+            InvocationDiagnostic::from_fields(
+                "json_error",
+                "decode_native",
+                &mfm_canonical::JsonError::new(source),
+                None,
+            )
+        })
     }
 
     /// Returns the schema descriptor for this value type.
@@ -1710,13 +1718,17 @@ fn validate_canonical_json_terminal(
                 return Err(ValueError::SchemaShapeMismatch);
             }
             match profile {
-                CanonicalJsonProfile::GeneralFloatFree => {
+                CanonicalJsonProfile::GeneralFloatFree
+                | CanonicalJsonProfile::DiagnosticFloatFree => {
                     require(number.is_u64() || number.is_i64())
                 }
             }
         }
         serde_json::Value::String(text) => {
-            if text.len() > MAX_STRING_UTF8_BYTES || string_contains_secret_marker(text) {
+            if text.len() > MAX_STRING_UTF8_BYTES
+                || (profile == CanonicalJsonProfile::GeneralFloatFree
+                    && string_contains_secret_marker(text))
+            {
                 return Err(ValueError::SchemaShapeMismatch);
             }
             Ok(())
@@ -1734,11 +1746,8 @@ fn validate_canonical_json_terminal(
                 return Err(ValueError::SchemaShapeMismatch);
             }
             for (key, value) in entries {
-                // A key is a structural name, judged as a declared struct
-                // field name is rather than scanned for secret markers. Secret
-                // material is a value, and every value below is still scanned,
-                // so a structural protocol name is admitted
-                // while a `"Bearer …"` value is not.
+                // Keys are structural names, like declared fields. Text values follow
+                // the selected profile; both profiles retain identical structural limits.
                 if key.is_empty()
                     || key.len() > MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES
                     || key.chars().any(char::is_control)
@@ -2044,10 +2053,13 @@ fn parse_sequence_ordering(value: &str) -> Result<SequenceOrdering> {
 }
 
 fn parse_canonical_json_profile(value: &str) -> Result<CanonicalJsonProfile> {
-    [CanonicalJsonProfile::GeneralFloatFree]
-        .into_iter()
-        .find(|profile| profile.as_str() == value)
-        .ok_or(ValueError::InvalidSchemaIdentity)
+    [
+        CanonicalJsonProfile::GeneralFloatFree,
+        CanonicalJsonProfile::DiagnosticFloatFree,
+    ]
+    .into_iter()
+    .find(|profile| profile.as_str() == value)
+    .ok_or(ValueError::InvalidSchemaIdentity)
 }
 
 #[derive(Serialize, Deserialize)]

@@ -42,10 +42,18 @@ impl ValueContract for CheckedInput {
     fn semantic_id() -> mfm_values::Result<mfm_ids::SemanticTypeId> {
         Request::semantic_id()
     }
-    fn decode_native(bytes: &[u8]) -> Result<Self, NativeCause> {
-        let raw: Request = serde_json::from_slice(bytes)
-            .map_err(|source| NativeCause::from_error(mfm_canonical::JsonError::new(source)))?;
-        Self::new(raw.value).map_err(NativeCause::from_error)
+    fn decode_native(bytes: &[u8]) -> Result<Self, InvocationDiagnostic> {
+        let raw: Request = serde_json::from_slice(bytes).map_err(|source| {
+            InvocationDiagnostic::from_fields(
+                "state_internal",
+                "decode_native",
+                &(mfm_canonical::JsonError::new(source)),
+                None,
+            )
+        })?;
+        Self::new(raw.value).map_err(|cause| {
+            InvocationDiagnostic::from_fields("state_internal", "decode_native", &cause, None)
+        })
     }
 }
 static EVALUATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -61,7 +69,7 @@ impl State for Checked {
 impl PureState for Checked {
     fn evaluate(
         input: CheckedInput,
-    ) -> Result<ProposedStateOutcome<CheckedInput, Never>, NativeCause> {
+    ) -> Result<ProposedStateOutcome<CheckedInput, Never>, InvocationDiagnostic> {
         EVALUATIONS.fetch_add(1, Ordering::SeqCst);
         Ok(ProposedStateOutcome::Success { output: input })
     }
@@ -119,26 +127,22 @@ async fn native_constructor_causes_reach_the_callback_boundary_without_a_paralle
         else {
             panic!("decode stage")
         };
-        assert!(matches!(
-            (value, cause.downcast_ref::<RangeError>()),
-            (
-                0,
-                Some(RangeError::Below {
-                    minimum: 1,
-                    actual: 0
-                })
-            ) | (
-                11,
-                Some(RangeError::Above {
-                    maximum: 10,
-                    actual: 11
-                })
-            )
-        ));
-        let projection =
-            serde_json::from_str::<serde_json::Value>(error.project().unwrap().get()).unwrap();
+        let fields = cause.details().as_value();
+        if value == 0 {
+            assert_eq!(
+                fields,
+                &serde_json::json!({"Below": {"minimum": 1, "actual": 0}})
+            );
+        } else {
+            assert_eq!(
+                fields,
+                &serde_json::json!({"Above": {"maximum": 10, "actual": 11}})
+            );
+        }
+        let projection = serde_json::to_value(&error).unwrap();
         assert_eq!(
-            projection["native"]["cause"][if value == 0 { "Below" } else { "Above" }]["actual"],
+            projection["native"]["cause"]["details"][if value == 0 { "Below" } else { "Above" }]
+                ["actual"],
             value
         );
         assert_eq!(observed.head_sequence(), 1);

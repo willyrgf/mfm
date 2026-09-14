@@ -67,8 +67,8 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
         } else {
             assert!(serde_json::from_slice::<BalanceInput>(object.canonical_bytes()).is_err());
             let native = object.decode::<BalanceInput>().err().unwrap();
-            let projected: serde_json::Value =
-                serde_json::from_str(native.project().unwrap().get()).unwrap();
+            let projected = native.details().as_value().clone();
+            assert_eq!(native.code(), "constructor_error");
             assert_eq!(projected["metadata"]["location"], "metadata.correlation");
             let expected = if correlation.is_empty() {
                 serde_json::json!("empty_correlation")
@@ -76,9 +76,6 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
                 serde_json::json!({"correlation_too_long":{"limit":256,"observed_bytes":257}})
             };
             assert_eq!(projected["metadata"]["source"], expected);
-            assert!(
-                std::error::Error::source(std::error::Error::source(&native).unwrap()).is_some()
-            );
             Some(projected)
         };
         let mut current = commit.clone();
@@ -155,12 +152,12 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
             assert_eq!(native["operation"], "restore");
             if mutation == 4 {
                 assert_eq!(native["stage"], "execute");
-                let identity = &native["cause"]["identity"];
+                let identity = &native["cause"]["details"]["identity"];
                 assert_ne!(identity["expected"], identity["actual"]);
             } else {
                 assert_eq!(native["stage"], "decode");
-                assert_eq!(native["cause"]["category"], "data");
-                let reason = native["cause"]["message"].as_str().unwrap();
+                assert_eq!(native["cause"]["details"]["category"], "data");
+                let reason = native["cause"]["details"]["message"].as_str().unwrap();
                 assert!(!reason.is_empty());
                 if mutation == 1 {
                     assert!(reason.contains("content_digest"));
@@ -168,8 +165,8 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
                 if mutation == 3 {
                     assert!(reason.contains("33554433"));
                 }
-                assert!(native["cause"]["line"].as_u64().unwrap() > 0);
-                assert!(native["cause"]["column"].as_u64().unwrap() > 0);
+                assert!(native["cause"]["details"]["line"].as_u64().unwrap() > 0);
+                assert!(native["cause"]["details"]["column"].as_u64().unwrap() > 0);
             }
             assert!(report["invocation"]["size_limit"].is_null());
             assert!(matches!(
@@ -196,7 +193,7 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
         );
         assert_eq!(report["invocation"]["cause"]["native"]["stage"], "decode");
         assert_eq!(
-            report["invocation"]["cause"]["native"]["cause"],
+            report["invocation"]["cause"]["native"]["cause"]["details"],
             projected.unwrap()
         );
         assert_eq!(

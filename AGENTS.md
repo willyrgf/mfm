@@ -38,7 +38,13 @@ owns verification selection and `nixfied.nix` owns the executable task graph.
   Direct typed construction, postdecode admission and declared execution originals keep their
   separate causal contracts. Dependency-supplied JSON diagnostic text is trusted, not certified
   secret-free; do not deliberately attach MFM secret inputs or full request/connection objects.
-- Error preservation does not authorize secret disclosure. Explicitly account for unavailable,
+- Selected dependency diagnostics follow the explicit upstream trust contract in `docs/design.md`:
+  retain supplied JSON/parser, EVM provider/transport and CLI IO messages without generic sanitizers
+  or diagnostic quotas. Never deliberately append MFM secrets or full request/connection objects.
+  Keep concrete owner errors where supported; adapt selected internal facts once into immutable
+  invocation data. Failed first original encoding reports its cause and known context with original
+  detail/identity unavailable, without serializer retry or opaque native-original custody.
+- Error preservation does not authorize deliberate secret disclosure. Explicitly account for unavailable,
   withheld, or size-limited details; never describe a partial representation as lossless. If full
   preservation conflicts with the secret-free boundary, resolve the custody contract rather than
   silently weakening either requirement.

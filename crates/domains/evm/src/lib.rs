@@ -348,11 +348,15 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
         collection_ordinal: u32,
         correlation: String,
         route_ref: ContentRef,
-    ) -> Result<Self, mfm_values::NativeCause> {
-        request
-            .sources
-            .first()
-            .ok_or_else(|| mfm_values::NativeCause::from_error(EvmDomainError::InvalidValue))?;
+    ) -> Result<Self, mfm_values::InvocationDiagnostic> {
+        request.sources.first().ok_or_else(|| {
+            mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "new",
+                &EvmDomainError::InvalidValue,
+                None,
+            )
+        })?;
         let metadata = balance_decode::metadata(collection_ordinal, correlation, route_ref)?;
         let context = Self {
             request,
@@ -361,9 +365,9 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
             completed: Vec::new(),
             work: EvmBalanceWork::CheckChainIdentity,
         };
-        context
-            .validate()
-            .map_err(mfm_values::NativeCause::from_error)?;
+        context.validate().map_err(|error| {
+            mfm_values::InvocationDiagnostic::from_fields("state_internal", "new", &error, None)
+        })?;
         Ok(context)
     }
 
@@ -1150,7 +1154,7 @@ macro_rules! impl_read_capability {
                 intent_value_ref: &ContentRef,
                 intent: &Self::Intent,
                 evidence: &Self::Evidence,
-            ) -> Result<(), mfm_values::NativeCause> {
+            ) -> Result<(), mfm_values::InvocationDiagnostic> {
                 (evidence.intent_value_ref() == intent_value_ref)
                     .then_some(())
                     .ok_or(EvmDomainError::EvidenceBinding)
@@ -1161,7 +1165,14 @@ macro_rules! impl_read_capability {
                             .ok_or(EvmDomainError::EvidenceBinding)
                     })
                     .and_then(|_| evidence.validate_for(intent))
-                    .map_err(mfm_values::NativeCause::from_error)
+                    .map_err(|error| {
+                        mfm_values::InvocationDiagnostic::from_fields(
+                            "state_internal",
+                            "bind_evidence",
+                            &error,
+                            None,
+                        )
+                    })
             }
         }
     };
@@ -1857,9 +1868,16 @@ macro_rules! impl_balance_access {
                 input: &Self::Input,
             ) -> std::result::Result<
                 <$capability as ReadCapabilityContract>::Intent,
-                mfm_values::NativeCause,
+                mfm_values::InvocationDiagnostic,
             > {
-                $prepare(input).map_err(mfm_values::NativeCause::from_error)
+                $prepare(input).map_err(|error| {
+                    mfm_values::InvocationDiagnostic::from_fields(
+                        "state_internal",
+                        "prepare",
+                        &error,
+                        None,
+                    )
+                })
             }
 
             fn interpret(
@@ -1867,7 +1885,7 @@ macro_rules! impl_balance_access {
                 evidence: &<$capability as ReadCapabilityContract>::Evidence,
             ) -> std::result::Result<
                 ProposedStateOutcome<Self::Output, Self::Failure>,
-                mfm_values::NativeCause,
+                mfm_values::InvocationDiagnostic,
             > {
                 Ok($interpret(input, evidence))
             }
@@ -1916,7 +1934,7 @@ impl<K: MfmValueTrait> PureState for ConsolidateBalanceCollection<K> {
         input: Self::Input,
     ) -> std::result::Result<
         ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_values::NativeCause,
+        mfm_values::InvocationDiagnostic,
     > {
         Ok(consolidate_balance_collection(input))
     }

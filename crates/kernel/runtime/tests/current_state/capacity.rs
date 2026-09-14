@@ -1,7 +1,8 @@
 use super::*;
 use mfm_journal::{decode_frame, seal_frame};
-use mfm_runtime::{RecordingFailure, SizeResource, SizeViolation};
+use mfm_runtime::RecordingFailure;
 use mfm_store::{AppendResult, LoadedRun, StoreError};
+use mfm_values::{SizeResource, SizeViolation};
 use std::{future::Future, pin::Pin};
 
 struct PauseSecond(MemoryStore);
@@ -48,7 +49,9 @@ impl State for RejectAtCapacity {
     }
 }
 impl PureState for RejectAtCapacity {
-    fn evaluate(_: Input) -> Result<ProposedStateOutcome<Input, CapacityFailure>, NativeCause> {
+    fn evaluate(
+        _: Input,
+    ) -> Result<ProposedStateOutcome<Input, CapacityFailure>, InvocationDiagnostic> {
         Ok(ProposedStateOutcome::Failure {
             failure: CapacityFailure { code: 91 },
         })
@@ -146,10 +149,7 @@ async fn full_history_preserves_committed_original_when_recovery_cannot_fit() {
     };
     assert!(matches!(
         failure.as_ref(),
-        RecordingFailure::BeforeAppend {
-            candidate: None,
-            ..
-        }
+        RecordingFailure::BeforeAppend { .. }
     ));
     let cold = runtime.read(&run).await.unwrap();
     assert_eq!(cold.head_digest(), before.head_digest());
@@ -172,10 +172,13 @@ impl State for CapacityEffect {
     }
 }
 impl mfm_program::EffectState<Submit> for CapacityEffect {
-    fn prepare(input: &Input) -> Result<Request, NativeCause> {
+    fn prepare(input: &Input) -> Result<Request, InvocationDiagnostic> {
         Ok(Request { value: input.value })
     }
-    fn interpret(_: Input, _: &Request) -> Result<ProposedStateOutcome<Input, Never>, NativeCause> {
+    fn interpret(
+        _: Input,
+        _: &Request,
+    ) -> Result<ProposedStateOutcome<Input, Never>, InvocationDiagnostic> {
         panic!("uncommitted settlement cannot enter interpretation")
     }
 }
@@ -271,17 +274,7 @@ async fn full_history_cannot_acknowledge_external_settlement_or_replace_pending_
             limit: 65_536
         })
     ));
-    let RuntimeError::Recording { failure, .. } = error else {
-        panic!("settlement recording cause")
-    };
-    assert!(matches!(
-        failure.as_ref(),
-        RecordingFailure::BeforeAppend {
-            original: None,
-            candidate: None,
-            ..
-        }
-    ));
+    assert!(matches!(error, RuntimeError::Native { .. }));
     let cold = runtime.read(&run).await.unwrap();
     assert_eq!(cold.head_digest(), before.head_digest());
     let RunViewState::EffectPending {
@@ -316,7 +309,9 @@ impl State for RejectWithLargeReport {
     }
 }
 impl PureState for RejectWithLargeReport {
-    fn evaluate(_: Input) -> Result<ProposedStateOutcome<Input, LargeReportFailure>, NativeCause> {
+    fn evaluate(
+        _: Input,
+    ) -> Result<ProposedStateOutcome<Input, LargeReportFailure>, InvocationDiagnostic> {
         Ok(ProposedStateOutcome::Failure {
             failure: LargeReportFailure {
                 detail: "a".repeat(16 * 1024 * 1024),
@@ -382,29 +377,30 @@ async fn individually_admitted_causes_cannot_append_an_oversized_terminal_report
     let RuntimeError::Recording { failure, .. } = error else {
         panic!("report recording cause")
     };
-    let RecordingFailure::BeforeAppend {
-        candidate: None,
-        cause,
-        ..
-    } = failure.as_ref()
-    else {
+    let RecordingFailure::BeforeAppend { original, cause } = failure.as_ref() else {
         panic!("report rejected before sealing a terminal candidate")
     };
+    let RunViewState::AwaitingRecovery {
+        failure: observed_original,
+    } = observed.state()
+    else {
+        panic!("last observed retains the admitted original")
+    };
+    assert!(std::ptr::eq(
+        original.original().canonical_bytes(),
+        observed_original.original().canonical_bytes(),
+    ));
     let RuntimeError::Native {
         operation: mfm_runtime::Operation::Project,
         stage: mfm_runtime::Stage::Encode,
         cause,
-    } = cause.downcast_ref::<RuntimeError>().unwrap()
+    } = cause.as_ref()
     else {
         panic!("report encoding retains its actual boundary")
     };
-    let bound = cause
-        .downcast_ref::<mfm_canonical::CanonicalError>()
-        .unwrap()
-        .serialization_bound()
-        .unwrap();
-    assert_eq!(bound.0, 33_554_432);
-    assert!(bound.1 > bound.0);
+    let bound = &cause.details().as_value()["serialization_limit"];
+    assert_eq!(bound["limit"], 33_554_432);
+    assert!(bound["observed_at_least"].as_u64().unwrap() > 33_554_432);
     let cold = runtime.read(&run).await.unwrap();
     assert_eq!(cold.head_digest(), observed.head_digest());
     let RunViewState::AwaitingRecovery { failure } = cold.state() else {

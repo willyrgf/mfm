@@ -23,11 +23,13 @@ subject re-observes the committed block its intent names and never the head.
 
 Provider failures retain an `EvmOperationalError` with one closed kind and one boxed
 `ProviderFailure`. Its exact wire has `kind` and `source`; the box is transparent. The source owns
-the RPC method, stage, local checked rejection facts and `mfm-diagnostics` evidence. Capture follows
-exposed client source links, retaining parser category/location and OS kind/code without client
-text. Response status/code remain outside ancestry; message/data/body/URL omissions are explicit.
-The complete shared diagnostic budget is 8 KiB. Unknown client source types remain opaque and
-accessible deeper sources are still captured. These are reviewed diagnostics, not raw evidence.
+the RPC method, stage, local checked rejection facts and Values' `DiagnosticEvidence`. Capture
+retains exposed source messages, parser category/location, transport kind and OS kind/code.
+Response status/code and RPC message/data remain outside ancestry; `data_json` preserves the
+original numeric spelling as text. Unknown source types retain their exposed message and child
+links. A repeated source address ends traversal with `source_cycle: true`. Whole-owner admission
+applies the ordinary canonical/object limits without a separate diagnostic budget. Dependency text
+is trusted diagnostic input; MFM does not deliberately add requests or credentials to that context.
 
 Request/body deadlines are Timeout,
 HTTP 429 is RateLimited, and other transport, JSON-RPC, unexpected-null, malformed-field and

@@ -1,6 +1,6 @@
 use super::*;
 use mfm_journal::{decode_frame, seal_frame, EncodedRunFrame};
-use mfm_runtime::{AppendFailure, CandidatePresence, RecordingFailure};
+use mfm_runtime::{CandidatePresence, RecordingFailure};
 use mfm_store::{AppendResult, LoadedRun, StoreError};
 use std::{future::Future, pin::Pin};
 
@@ -190,17 +190,19 @@ async fn candidate_probe_yields_latest_without_recovery_and_preserves_exclusion_
                 else {
                     panic!("recording conflict")
                 };
-                let RecordingFailure::Append {
+                let RecordingFailure::NotInserted {
                     original: Some(original),
                     candidate,
-                    outcome: AppendFailure::NotInserted,
                     observation,
                     reload_cause,
                 } = failure.as_ref()
                 else {
                     panic!("known attempt disposition")
                 };
-                assert_eq!(original.downcast_ref::<Outage>().unwrap().deadline_ms, 731);
+                assert_eq!(
+                    original.original().decode::<Outage>().unwrap().deadline_ms,
+                    731
+                );
                 assert_eq!(
                     decode_frame(candidate.canonical_bytes())
                         .unwrap()
@@ -231,22 +233,14 @@ async fn candidate_probe_yields_latest_without_recovery_and_preserves_exclusion_
                         operation: mfm_runtime::Operation::Restore,
                         stage: mfm_runtime::Stage::Decode,
                         cause,
-                    } = reload_cause
-                        .as_ref()
-                        .unwrap()
-                        .downcast_ref::<RuntimeError>()
-                        .unwrap()
+                    } = reload_cause.as_deref().unwrap()
                     else {
                         panic!("native reload failure retains its operation and stage")
                     };
-                    let json = cause.downcast_ref::<mfm_canonical::JsonError>().unwrap();
-                    let source = std::error::Error::source(json)
-                        .unwrap()
-                        .downcast_ref::<serde_json::Error>()
-                        .unwrap();
-                    assert!(source.is_data());
-                    assert_eq!(source.line(), 1);
-                    assert_eq!(source.column(), 2);
+                    assert_eq!(cause.code(), "json_error");
+                    assert_eq!(cause.details().as_value()["category"], "data");
+                    assert_eq!(cause.details().as_value()["line"], 1);
+                    assert_eq!(cause.details().as_value()["column"], 2);
                 } else if matches!(collision, Collision::Absent) {
                     let Some((head, CandidatePresence::Absent)) = observation else {
                         panic!("bound snapshot proves candidate absence")
@@ -258,10 +252,7 @@ async fn candidate_probe_yields_latest_without_recovery_and_preserves_exclusion_
                 } else {
                     assert!(observation.is_none());
                     assert!(matches!(
-                        reload_cause
-                            .as_ref()
-                            .unwrap()
-                            .downcast_ref::<RuntimeError>(),
+                        reload_cause.as_deref(),
                         Some(RuntimeError::Store(StoreError::Unavailable))
                     ));
                     assert_eq!(observed.head_sequence(), 2);

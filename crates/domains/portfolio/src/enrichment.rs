@@ -186,7 +186,8 @@ impl_portfolio_state!(
 impl PureState for ResolvePortfolioAssets {
     fn evaluate(
         input: PortfolioContinuation,
-    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::NativeCause> {
+    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::InvocationDiagnostic>
+    {
         let resolve = || -> Result<PortfolioEnrichmentOutput, PortfolioError> {
             input.validate()?;
             if input.completed_collections.len() != input.input.collections.len() {

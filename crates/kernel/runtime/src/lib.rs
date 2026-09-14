@@ -10,9 +10,7 @@ mod engine;
 mod error;
 mod report;
 mod state;
-pub use error::{
-    AppendFailure, CandidatePresence, Operation, RecordingFailure, Stage, TaskFailure,
-};
+pub use error::{CandidatePresence, Operation, RecordingFailure, Stage};
 pub use mfm_values::Object;
 pub use report::{FailureReport, InvocationFailure};
 pub use state::{Call, EffectCall, Failure, RecoveryOutcome, Settlement, StateCall};
@@ -30,7 +28,8 @@ pub use assembly::{RuntimeAssembly, RuntimeAssemblyBuilder};
 pub type Result<T> = std::result::Result<T, RuntimeError>;
 
 /// Redaction-safe Runtime failure.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, serde::Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeError {
     /// The requested run does not exist.
     #[error("run is absent")]
@@ -65,9 +64,8 @@ pub enum RuntimeError {
         operation: Operation,
         /// Actual stage within that operation.
         stage: Stage,
-        /// Complete available reviewed native custody.
-        #[source]
-        cause: mfm_values::NativeCause,
+        /// Selected owner data, without native custody.
+        cause: mfm_values::InvocationDiagnostic,
     },
     /// A returned original and candidate remain in invocation custody.
     #[error("runtime recording failed")]
@@ -85,19 +83,23 @@ pub enum RuntimeError {
         acknowledged: Box<mfm_store::RunSummary>,
         /// Actual projection failure.
         #[source]
-        cause: mfm_values::NativeCause,
+        cause: Box<RuntimeError>,
     },
 }
 
 impl RuntimeError {
-    pub(crate) fn native(operation: Operation, cause: mfm_values::NativeCause) -> Self {
+    pub(crate) fn native(operation: Operation, cause: mfm_values::InvocationDiagnostic) -> Self {
         Self::Native {
             operation,
             stage: Stage::Execute,
             cause,
         }
     }
-    pub(crate) fn at(operation: Operation, stage: Stage, cause: mfm_values::NativeCause) -> Self {
+    pub(crate) fn at(
+        operation: Operation,
+        stage: Stage,
+        cause: mfm_values::InvocationDiagnostic,
+    ) -> Self {
         Self::Native {
             operation,
             stage,
@@ -110,74 +112,12 @@ impl From<mfm_values::ValueError> for RuntimeError {
         Self::at(
             Operation::Record,
             Stage::Encode,
-            mfm_values::NativeCause::from_error(error),
+            error.into_diagnostic("from"),
         )
     }
 }
 
-/// Resource measured by a Runtime size-limit failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SizeResource {
-    /// One canonical typed value.
-    CanonicalObject,
-    /// One complete Journal frame.
-    Frame,
-    /// Non-payload frame metadata.
-    FrameEnvelope,
-    /// The complete run's accumulated frame bytes.
-    HistoryBytes,
-    /// The complete run's frame count.
-    FrameCount,
-    /// The derived inline terminal failure report.
-    FailureReport,
-}
-
-impl std::fmt::Display for SizeResource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::CanonicalObject => "canonical_object",
-            Self::Frame => "frame",
-            Self::FrameEnvelope => "frame_envelope",
-            Self::HistoryBytes => "history_bytes",
-            Self::FrameCount => "frame_count",
-            Self::FailureReport => "failure_report",
-        })
-    }
-}
-
-/// Borrowed-cause projection of a measured size or an early serialization stop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(untagged)]
-pub enum SizeViolation {
-    /// The complete representation was measured.
-    Measured {
-        /// Resource whose ceiling was exceeded.
-        resource: SizeResource,
-        /// Complete measured size.
-        actual: u64,
-        /// Inclusive byte or count ceiling.
-        limit: u64,
-    },
-    /// Serialization stopped before the complete size was known.
-    SerializationBound {
-        /// Resource being serialized.
-        resource: SizeResource,
-        /// Lower bound observed when accumulation stopped.
-        observed_at_least: u64,
-        /// Inclusive byte ceiling.
-        limit: u64,
-    },
-}
-impl SizeViolation {
-    fn measured(resource: SizeResource, size: mfm_values::SizeLimitExceeded) -> Self {
-        Self::Measured {
-            resource,
-            actual: size.actual(),
-            limit: size.limit(),
-        }
-    }
-}
+use mfm_values::{SizeResource, SizeViolation};
 impl RuntimeError {
     /// Projects size evidence from the primary failure without consuming its cause chain.
     /// A reconciliation error does not replace the original append disposition.
@@ -185,29 +125,12 @@ impl RuntimeError {
         match self {
             Self::SizeLimit { resource, size } => Some(SizeViolation::measured(*resource, *size)),
             Self::Store(error) => store_size(error),
-            Self::Native {
-                operation, cause, ..
-            } => cause_size(
-                cause,
-                if matches!(operation, Operation::Project) {
-                    SizeResource::FailureReport
-                } else {
-                    SizeResource::Frame
-                },
-            ),
-            Self::Projection { cause, .. } => cause_size(cause, SizeResource::FailureReport),
+            Self::Native { cause, .. } => cause.size(),
+            Self::Projection { cause, .. } => cause.size_limit(),
             Self::Recording { failure, .. } => match failure.as_ref() {
-                RecordingFailure::BeforeAppend { cause, .. } => {
-                    cause_size(cause, SizeResource::Frame)
-                }
-                RecordingFailure::Append {
-                    outcome: AppendFailure::Store(error),
-                    ..
-                } => store_size(error),
-                RecordingFailure::Append {
-                    outcome: AppendFailure::NotInserted,
-                    ..
-                } => None,
+                RecordingFailure::BeforeAppend { cause, .. } => cause.size_limit(),
+                RecordingFailure::Store { cause, .. } => store_size(cause),
+                RecordingFailure::NotInserted { .. } => None,
             },
             _ => None,
         }
@@ -223,51 +146,6 @@ fn store_size(error: &mfm_store::StoreError) -> Option<SizeViolation> {
     };
     Some(SizeViolation::measured(resource, *size))
 }
-fn cause_size(
-    cause: &mfm_values::NativeCause,
-    mut resource: SizeResource,
-) -> Option<SizeViolation> {
-    let mut current: &(dyn std::error::Error + 'static) = cause;
-    loop {
-        if let Some(error) = current.downcast_ref::<RuntimeError>() {
-            return error.size_limit();
-        }
-        if let Some(error) = current.downcast_ref::<mfm_store::StoreError>() {
-            return store_size(error);
-        }
-        if let Some(error) = current.downcast_ref::<mfm_values::ValueError>() {
-            resource = SizeResource::CanonicalObject;
-            if let mfm_values::ValueError::SizeLimit(size) = error {
-                return Some(SizeViolation::measured(resource, *size));
-            }
-        }
-        if let Some(error) = current.downcast_ref::<mfm_journal::JournalError>() {
-            resource = SizeResource::Frame;
-            match error {
-                mfm_journal::JournalError::FrameSize(size) => {
-                    return Some(SizeViolation::measured(resource, *size))
-                }
-                mfm_journal::JournalError::FrameCount(size) => {
-                    return Some(SizeViolation::measured(SizeResource::FrameCount, *size))
-                }
-                _ => {}
-            }
-        }
-        if let Some(error) = current.downcast_ref::<mfm_canonical::CanonicalError>() {
-            return error
-                .serialization_bound()
-                .map(
-                    |(limit, observed_at_least)| SizeViolation::SerializationBound {
-                        resource,
-                        observed_at_least: observed_at_least as u64,
-                        limit: limit as u64,
-                    },
-                );
-        }
-        current = current.source()?;
-    }
-}
-
 pub(crate) fn check_size(resource: SizeResource, actual: u64, limit: u64) -> Result<()> {
     mfm_values::SizeLimitExceeded::check(actual, limit)
         .map_err(|size| RuntimeError::SizeLimit { resource, size })

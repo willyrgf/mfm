@@ -1,7 +1,30 @@
 //! Provider-owned operation and validation facts; client extraction stays in live adapters.
 
 use super::*;
-use mfm_diagnostics::{DiagnosticEvidence, ObservedSize};
+use mfm_program_derive::PersistedSchema;
+use mfm_values::DiagnosticEvidence;
+
+/// Whether an observed size is exact or only a lower bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.diagnostics",
+    name = "observed-size",
+    version = "1",
+    schema = "mfm.diagnostics.observed-size"
+)]
+pub enum ObservedSize {
+    /// Exact measured size.
+    Exact {
+        /// Measured bytes or items.
+        value: u64,
+    },
+    /// Reading stopped after this many bytes or items.
+    AtLeast {
+        /// Known lower bound.
+        value: u64,
+    },
+}
 
 /// Reviewed RPC methods used by first-party EVM and development funding adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -227,7 +250,8 @@ pub struct ProviderFailure {
     /// Local checked facts or upstream failure category.
     #[source]
     pub failure: ProviderFailureKind,
-    /// Bounded reviewed causal evidence, excluding raw client text.
+    /// Selected response and exposed native source data.
+    #[mfm(persisted)]
     pub diagnostics: DiagnosticEvidence,
 }
 

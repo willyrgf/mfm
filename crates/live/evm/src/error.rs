@@ -1,5 +1,4 @@
 use alloy_primitives::ruint::{BaseConvertError, ParseError};
-use mfm_diagnostics::{EvidenceError, TaskFailureKind};
 use mfm_evm::{
     EvmAddress, EvmAuthorityEpoch, EvmBalanceSource, EvmBlockAnchor, EvmChainInstance,
     EvmDomainError, EvmHash, EvmReadSubject, EvmTransactionBinding, NonceDomain,
@@ -86,12 +85,6 @@ pub(crate) enum AdapterFailure {
     },
     #[error("token call has no token address")]
     MissingToken { balance_source: EvmBalanceSource },
-    #[error("HTTP status construction failed")]
-    HttpStatus {
-        status: u16,
-        #[source]
-        source: EvidenceError,
-    },
     #[error("anchored result construction failed")]
     AnchoredResult {
         anchor: EvmBlockAnchor,
@@ -110,7 +103,7 @@ pub(crate) enum AdapterFailure {
     #[error("adapter pure task failed")]
     Task {
         operation: TaskOperation,
-        outcome: TaskFailureKind,
+        outcome: &'static str,
         panic_payload: &'static str,
     },
     #[error("block tag parsing failed")]
@@ -136,11 +129,7 @@ impl AdapterFailure {
         let panicked = error.is_panic();
         Self::Task {
             operation,
-            outcome: if panicked {
-                TaskFailureKind::Panicked
-            } else {
-                TaskFailureKind::Cancelled
-            },
+            outcome: if panicked { "panicked" } else { "cancelled" },
             panic_payload: if panicked { "withheld" } else { "not_present" },
         }
     }
@@ -148,9 +137,14 @@ impl AdapterFailure {
 
 pub(crate) fn invariant<E, O>(source: E) -> mfm_capabilities::AdapterError<O>
 where
-    E: std::error::Error + Serialize + Send + Sync + 'static,
+    E: Serialize,
 {
-    mfm_capabilities::AdapterError::Invariant(mfm_values::NativeCause::from_error(source))
+    mfm_capabilities::AdapterError::Invariant(mfm_values::InvocationDiagnostic::from_fields(
+        "adapter_invariant",
+        "invariant",
+        &source,
+        None,
+    ))
 }
 
 fn parse_error<S: serde::Serializer>(
@@ -159,7 +153,7 @@ fn parse_error<S: serde::Serializer>(
 ) -> Result<S::Ok, S::Error> {
     #[derive(Serialize)]
     #[serde(rename_all = "snake_case")]
-    enum Base {
+    enum Conversion {
         Overflow,
         InvalidBase { base: u64 },
         InvalidDigit { digit: u64, base: u64 },
@@ -169,7 +163,7 @@ fn parse_error<S: serde::Serializer>(
     enum Parse {
         InvalidDigit { character: char },
         InvalidRadix { radix: u64 },
-        BaseConvert { source: Base },
+        BaseConvert { source: Conversion },
     }
     // The pinned parser retains only these facts, never the rejected decimal string.
     let projected = match source {
@@ -179,9 +173,9 @@ fn parse_error<S: serde::Serializer>(
         ParseError::InvalidRadix(radix) => Parse::InvalidRadix { radix: *radix },
         ParseError::BaseConvertError(source) => Parse::BaseConvert {
             source: match source {
-                BaseConvertError::Overflow => Base::Overflow,
-                BaseConvertError::InvalidBase(base) => Base::InvalidBase { base: *base },
-                BaseConvertError::InvalidDigit(digit, base) => Base::InvalidDigit {
+                BaseConvertError::Overflow => Conversion::Overflow,
+                BaseConvertError::InvalidBase(base) => Conversion::InvalidBase { base: *base },
+                BaseConvertError::InvalidDigit(digit, base) => Conversion::InvalidDigit {
                     digit: *digit,
                     base: *base,
                 },

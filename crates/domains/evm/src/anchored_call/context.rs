@@ -150,7 +150,7 @@ pub trait ObservationRecipe<C: MfmValueTrait>: Send + Sync + 'static {
     /// Ordered destination then source slot identities.
     fn source_ids() -> mfm_values::Result<Vec<StableId>>;
     /// Constructs the intent, rejecting local cross-field mismatches before provider entry.
-    fn intent(context: &C) -> Result<AnchoredContractCallIntent, mfm_values::NativeCause>;
+    fn intent(context: &C) -> Result<AnchoredContractCallIntent, mfm_values::InvocationDiagnostic>;
 }
 
 /// Observes a completed ordinary call at its retained target and exact receipt anchor.
@@ -168,16 +168,19 @@ where
     fn source_ids() -> mfm_values::Result<Vec<StableId>> {
         Ok(vec![O::slot_id()?, T::slot_id()?])
     }
-    fn intent(context: &C) -> Result<AnchoredContractCallIntent, mfm_values::NativeCause> {
+    fn intent(context: &C) -> Result<AnchoredContractCallIntent, mfm_values::InvocationDiagnostic> {
         let plan = O::get(context);
         let call = T::get(context);
         let route = &call.command().binding().route;
-        let reference = route
-            .binding_ref()
-            .map_err(mfm_values::NativeCause::from_error)?;
+        let reference = route.binding_ref().map_err(|error| {
+            mfm_values::InvocationDiagnostic::from_fields("state_internal", "intent", &error, None)
+        })?;
         if &reference != plan.route_ref() || route.chain_instance.chain_id != plan.chain_id() {
-            return Err(mfm_values::NativeCause::from_error(
-                crate::EvmDomainError::InvalidValue,
+            return Err(mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "intent",
+                &crate::EvmDomainError::InvalidValue,
+                None,
             ));
         }
         Ok(plan.intent_for(
@@ -240,16 +243,23 @@ impl<C: MfmValueTrait, R: ObservationRecipe<C>> State for ReadAnchoredContractCa
 impl<C: MfmValueTrait, R: ObservationRecipe<C>> ReadState<EvmAnchoredContractCallRead>
     for ReadAnchoredContractCall<C, R>
 {
-    fn prepare(input: &C) -> Result<AnchoredContractCallIntent, mfm_values::NativeCause> {
+    fn prepare(input: &C) -> Result<AnchoredContractCallIntent, mfm_values::InvocationDiagnostic> {
         R::intent(input)
     }
     fn interpret(
         input: C,
         evidence: &AnchoredContractCallEvidence,
-    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::NativeCause> {
+    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::InvocationDiagnostic>
+    {
         let intent = R::intent(&input)?;
-        let facts = AnchoredObservationFacts::new(intent, evidence.clone())
-            .map_err(mfm_values::NativeCause::from_error)?;
+        let facts = AnchoredObservationFacts::new(intent, evidence.clone()).map_err(|error| {
+            mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "interpret",
+                &error,
+                None,
+            )
+        })?;
         let reason = facts.failure_reason();
         let context = R::Slot::replace(input, facts);
         Ok(match reason {

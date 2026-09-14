@@ -93,7 +93,7 @@ pub trait PureState: State {
         input: Self::Input,
     ) -> std::result::Result<
         ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_values::NativeCause,
+        mfm_values::InvocationDiagnostic,
     >;
 }
 
@@ -103,7 +103,9 @@ where
     C: ReadCapabilityContract,
 {
     /// Prepares the exact adapter intent.
-    fn prepare(input: &Self::Input) -> std::result::Result<C::Intent, mfm_values::NativeCause>;
+    fn prepare(
+        input: &Self::Input,
+    ) -> std::result::Result<C::Intent, mfm_values::InvocationDiagnostic>;
 
     /// Interprets accepted evidence.
     fn interpret(
@@ -111,7 +113,7 @@ where
         evidence: &C::Evidence,
     ) -> std::result::Result<
         ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_values::NativeCause,
+        mfm_values::InvocationDiagnostic,
     >;
 }
 
@@ -121,7 +123,9 @@ where
     C: EffectCapabilityContract,
 {
     /// Prepares the exact adapter command.
-    fn prepare(input: &Self::Input) -> std::result::Result<C::Command, mfm_values::NativeCause>;
+    fn prepare(
+        input: &Self::Input,
+    ) -> std::result::Result<C::Command, mfm_values::InvocationDiagnostic>;
 
     /// Interprets accepted evidence.
     fn interpret(
@@ -129,7 +133,7 @@ where
         evidence: &C::Evidence,
     ) -> std::result::Result<
         ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_values::NativeCause,
+        mfm_values::InvocationDiagnostic,
     >;
 }
 

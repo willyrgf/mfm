@@ -168,18 +168,21 @@ impl mfm_capabilities::EffectCapabilityContract for Settlement {
         _: &mfm_ids::EffectId,
         command: &Offset,
         evidence: &Offset,
-    ) -> std::result::Result<(), mfm_values::NativeCause> {
+    ) -> std::result::Result<(), mfm_values::InvocationDiagnostic> {
         if command.value == evidence.value {
             Ok(())
         } else {
-            Err(mfm_values::NativeCause::from_error(
-                mfm_capabilities::CapabilityError::EvidenceBinding,
+            Err(mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "bind_evidence",
+                &(mfm_capabilities::CapabilityError::EvidenceBinding),
+                None,
             ))
         }
     }
 }
 impl mfm_program::EffectState<Settlement> for EvmSettlement {
-    fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_values::NativeCause> {
+    fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_values::InvocationDiagnostic> {
         Ok(Offset { value: input.value })
     }
     fn interpret(
@@ -187,7 +190,7 @@ impl mfm_program::EffectState<Settlement> for EvmSettlement {
         _: &Offset,
     ) -> std::result::Result<
         mfm_program::ProposedStateOutcome<Offset, EvmFailure>,
-        mfm_values::NativeCause,
+        mfm_values::InvocationDiagnostic,
     > {
         Ok(mfm_program::ProposedStateOutcome::Success { output: input })
     }
@@ -331,12 +334,12 @@ impl mfm_capabilities::ReadCapabilityContract for InjectedObservation {
         reference: &ContentRef,
         intent: &Offset,
         evidence: &Offset,
-    ) -> std::result::Result<(), mfm_values::NativeCause> {
+    ) -> std::result::Result<(), mfm_values::InvocationDiagnostic> {
         Observation::bind_evidence(reference, intent, evidence)
     }
 }
 impl mfm_program::ReadState<InjectedObservation> for EvmRead {
-    fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_values::NativeCause> {
+    fn prepare(input: &Offset) -> std::result::Result<Offset, mfm_values::InvocationDiagnostic> {
         <Self as mfm_program::ReadState<Observation>>::prepare(input)
     }
     fn interpret(
@@ -344,7 +347,7 @@ impl mfm_program::ReadState<InjectedObservation> for EvmRead {
         evidence: &Offset,
     ) -> std::result::Result<
         mfm_program::ProposedStateOutcome<Offset, EvmFailure>,
-        mfm_values::NativeCause,
+        mfm_values::InvocationDiagnostic,
     > {
         <Self as mfm_program::ReadState<Observation>>::interpret(input, evidence)
     }
@@ -387,7 +390,7 @@ impl Handler for RestartFirst {
         _: &NoParams,
         _: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, mfm_values::NativeCause> {
+    ) -> std::result::Result<RecoveryRequest, mfm_values::InvocationDiagnostic> {
         Ok(context
             .eligible_restart_targets()
             .first()
@@ -577,10 +580,8 @@ async fn ambiguous_recovery_append_stops_with_historical_observation_and_preserv
     };
     assert!(matches!(
         failure.as_ref(),
-        crate::RecordingFailure::Append {
-            outcome: crate::AppendFailure::Store(mfm_store::StoreError::Indeterminate),
-            observation: None,
-            reload_cause: None,
+        crate::RecordingFailure::Store {
+            cause: mfm_store::StoreError::Indeterminate,
             ..
         }
     ));

@@ -21,7 +21,7 @@ impl EffectCapabilityContract for Submission {
         _: &EffectId,
         _: &NoParams,
         _: &NoParams,
-    ) -> std::result::Result<(), mfm_values::NativeCause> {
+    ) -> std::result::Result<(), mfm_values::InvocationDiagnostic> {
         Ok(())
     }
 }
@@ -35,13 +35,14 @@ impl State for Execute {
     }
 }
 impl EffectState<Submission> for Execute {
-    fn prepare(_: &NoParams) -> std::result::Result<NoParams, mfm_values::NativeCause> {
+    fn prepare(_: &NoParams) -> std::result::Result<NoParams, mfm_values::InvocationDiagnostic> {
         Ok(NoParams)
     }
     fn interpret(
         input: NoParams,
         _: &NoParams,
-    ) -> std::result::Result<ProposedStateOutcome<NoParams, Never>, mfm_values::NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<NoParams, Never>, mfm_values::InvocationDiagnostic>
+    {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }

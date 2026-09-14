@@ -1,5 +1,5 @@
 use super::*;
-use mfm_values::NativeCause;
+use mfm_values::InvocationDiagnostic;
 
 #[derive(Debug, Serialize, thiserror::Error)]
 #[error("test callback execution failed")]
@@ -29,40 +29,45 @@ error_state!(FailingPure, "mfm.test.runtime/failing-pure@1");
 error_state!(FailingRead, "mfm.test.runtime/failing-read@1");
 error_state!(FailingEffect, "mfm.test.runtime/failing-effect@1");
 
-fn execution(input: Number) -> Result<ProposedStateOutcome<Number, Number>, NativeCause> {
+fn execution(input: Number) -> Result<ProposedStateOutcome<Number, Number>, InvocationDiagnostic> {
     if FAIL_EXECUTION.load(Ordering::SeqCst) {
-        Err(NativeCause::from_error(ExecutionFault {
-            input: input.value,
-        }))
+        Err(InvocationDiagnostic::from_fields(
+            "state_internal",
+            "execution",
+            &(ExecutionFault { input: input.value }),
+            None,
+        ))
     } else {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
 
 impl PureState for FailingPure {
-    fn evaluate(input: Number) -> Result<ProposedStateOutcome<Number, Number>, NativeCause> {
+    fn evaluate(
+        input: Number,
+    ) -> Result<ProposedStateOutcome<Number, Number>, InvocationDiagnostic> {
         execution(input)
     }
 }
 impl ReadState<Observation> for FailingRead {
-    fn prepare(input: &Number) -> Result<Intent, NativeCause> {
+    fn prepare(input: &Number) -> Result<Intent, InvocationDiagnostic> {
         Ok(Intent { value: input.value })
     }
     fn interpret(
         input: Number,
         _: &Evidence,
-    ) -> Result<ProposedStateOutcome<Number, Number>, NativeCause> {
+    ) -> Result<ProposedStateOutcome<Number, Number>, InvocationDiagnostic> {
         execution(input)
     }
 }
 impl EffectState<Mutation> for FailingEffect {
-    fn prepare(input: &Number) -> Result<Command, NativeCause> {
+    fn prepare(input: &Number) -> Result<Command, InvocationDiagnostic> {
         Ok(Command { value: input.value })
     }
     fn interpret(
         input: Number,
         _: &EffectEvidence,
-    ) -> Result<ProposedStateOutcome<Number, Number>, NativeCause> {
+    ) -> Result<ProposedStateOutcome<Number, Number>, InvocationDiagnostic> {
         execution(input)
     }
 }
@@ -256,8 +261,7 @@ fn assert_execution_failure(failure: InvocationFailure, expected_operation: &str
         panic!("typed callback failure")
     };
     assert_eq!(serde_json::to_value(operation).unwrap(), expected_operation);
-    assert_eq!(cause.downcast_ref::<ExecutionFault>().unwrap().input, 12);
-    let projected: serde_json::Value =
-        serde_json::from_str(cause.project().unwrap().get()).unwrap();
+    assert_eq!(cause.details().as_value()["input"], 12);
+    let projected = cause.details().as_value();
     assert_eq!(projected["input"], 12);
 }

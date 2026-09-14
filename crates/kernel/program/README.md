@@ -13,7 +13,7 @@ use mfm_program::{
     OperationExpansion, ProgramError, ProgramLimits, ProposedStateOutcome, PureState, State,
 };
 use mfm_program_derive::MfmValue;
-use mfm_values::NativeCause;
+use mfm_values::InvocationDiagnostic;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, MfmValue)]
@@ -32,11 +32,11 @@ impl State for Increment {
     }
 }
 impl PureState for Increment {
-    fn evaluate(input: Count) -> Result<ProposedStateOutcome<Count, Never>, NativeCause> {
+    fn evaluate(input: Count) -> Result<ProposedStateOutcome<Count, Never>, InvocationDiagnostic> {
         Ok(ProposedStateOutcome::Success {
             output: Count {
                 value: input.value.checked_add(1).ok_or_else(|| {
-                    NativeCause::from_error(IncrementOverflow { input: input.value })
+                    InvocationDiagnostic::from_fields("state_internal", "evaluate", &IncrementOverflow { input: input.value }, None)
                 })?,
             },
         })

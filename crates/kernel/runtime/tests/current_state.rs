@@ -10,7 +10,7 @@ use mfm_runtime::{
     Failure, InvocationFailure, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError,
 };
 use mfm_store::{MemoryStore, Store};
-use mfm_values::NativeCause;
+use mfm_values::InvocationDiagnostic;
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -56,13 +56,18 @@ impl Handler for Policy {
         _: &NoParams,
         _: Classification,
         _: &RecoveryContext<'_>,
-    ) -> Result<RecoveryRequest, NativeCause> {
+    ) -> Result<RecoveryRequest, InvocationDiagnostic> {
         if HANDLER_AVAILABLE.load(Ordering::SeqCst) {
             Ok(RecoveryRequest::RetryState)
         } else {
-            Err(NativeCause::from_error(PolicyUnavailable {
-                operation: "select_retry",
-            }))
+            Err(InvocationDiagnostic::from_fields(
+                "state_internal",
+                "handle",
+                &(PolicyUnavailable {
+                    operation: "select_retry",
+                }),
+                None,
+            ))
         }
     }
 }
@@ -76,7 +81,9 @@ impl State for Increment {
     }
 }
 impl PureState for Increment {
-    fn evaluate(mut input: Input) -> Result<ProposedStateOutcome<Input, Never>, NativeCause> {
+    fn evaluate(
+        mut input: Input,
+    ) -> Result<ProposedStateOutcome<Input, Never>, InvocationDiagnostic> {
         input.value += 1;
         Ok(ProposedStateOutcome::Success { output: input })
     }
@@ -103,12 +110,15 @@ impl ReadCapabilityContract for Observation {
         _: &ContentRef,
         intent: &Request,
         evidence: &Request,
-    ) -> Result<(), NativeCause> {
+    ) -> Result<(), InvocationDiagnostic> {
         if intent.value == evidence.value {
             Ok(())
         } else {
-            Err(NativeCause::from_error(
-                mfm_capabilities::CapabilityError::EvidenceBinding,
+            Err(InvocationDiagnostic::from_fields(
+                "state_internal",
+                "bind_evidence",
+                &(mfm_capabilities::CapabilityError::EvidenceBinding),
+                None,
             ))
         }
     }
@@ -129,13 +139,13 @@ impl mfm_program::CapabilityInjection<Read> for Observation {
     }
 }
 impl ReadState<Observation> for Read {
-    fn prepare(input: &Input) -> Result<Request, NativeCause> {
+    fn prepare(input: &Input) -> Result<Request, InvocationDiagnostic> {
         Ok(Request { value: input.value })
     }
     fn interpret(
         input: Input,
         _: &Request,
-    ) -> Result<ProposedStateOutcome<Input, Never>, NativeCause> {
+    ) -> Result<ProposedStateOutcome<Input, Never>, InvocationDiagnostic> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -212,10 +222,7 @@ async fn original_commits_before_policy_failure_and_cold_resume_retries_only_rec
     else {
         panic!("native handler failure")
     };
-    assert_eq!(
-        cause.downcast_ref::<PolicyUnavailable>().unwrap().operation,
-        "select_retry"
-    );
+    assert_eq!(cause.details().as_value()["operation"], "select_retry");
     assert_eq!(observed.head_sequence(), 3);
     let RunViewState::AwaitingRecovery {
         failure: failure @ Failure::Read { intent, .. },
@@ -305,7 +312,7 @@ impl Store for RefuseFailure {
     }
 }
 #[tokio::test]
-async fn recording_failure_retains_native_original_and_exact_candidate_without_probing() {
+async fn recording_failure_retains_admitted_original_and_exact_candidate_without_probing() {
     let store = Arc::new(RefuseFailure {
         inner: MemoryStore::new(),
         loads: AtomicUsize::new(0),
@@ -334,9 +341,7 @@ async fn recording_failure_retains_native_original_and_exact_candidate_without_p
         .err()
         .unwrap();
     let projected = match &error {
-        InvocationFailure::Execution { error, .. } => {
-            serde_json::from_str::<serde_json::Value>(error.project().unwrap().get()).unwrap()
-        }
+        InvocationFailure::Execution { error, .. } => serde_json::to_value(error).unwrap(),
         _ => panic!("recording invocation"),
     };
     let projected = &projected["recording"]["failure"];
@@ -349,24 +354,28 @@ async fn recording_failure_retains_native_original_and_exact_candidate_without_p
         panic!("recording custody")
     };
     assert_eq!(observed.head_sequence(), 2);
-    let mfm_runtime::RecordingFailure::Append {
+    let mfm_runtime::RecordingFailure::Store {
         original: Some(original),
         candidate,
-        outcome: mfm_runtime::AppendFailure::Store(mfm_store::StoreError::Unavailable),
-        observation: None,
-        reload_cause: None,
+        cause: mfm_store::StoreError::Unavailable,
     } = failure.as_ref()
     else {
         panic!("unavailable without automatic probe")
     };
-    assert_eq!(original.downcast_ref::<Outage>().unwrap().deadline_ms, 731);
+    assert_eq!(
+        original.original().decode::<Outage>().unwrap().deadline_ms,
+        731
+    );
     assert_eq!(candidate.run_sequence(), 3);
     assert_eq!(
         candidate.previous_head_digest(),
         Some(observed.head_digest())
     );
-    assert_eq!(projected["append"]["original"]["deadline_ms"], 731);
-    assert!(projected["append"]["candidate"].get("payload").is_none());
+    assert_eq!(
+        projected["store"]["original"]["read"]["original"]["canonical"]["deadline_ms"],
+        731
+    );
+    assert!(projected["store"]["candidate"].get("payload").is_none());
     assert_eq!(store.loads.load(Ordering::SeqCst), 0);
     let cold = runtime.read(&run).await.unwrap();
     assert_eq!(cold.head_digest(), observed.head_digest());
@@ -398,7 +407,7 @@ impl mfm_capabilities::EffectCapabilityContract for Submit {
         _: &mfm_ids::EffectId,
         command: &Request,
         evidence: &Request,
-    ) -> Result<(), NativeCause> {
+    ) -> Result<(), InvocationDiagnostic> {
         Observation::bind_evidence(
             &mfm_program::nominal_contract_ref::<Request>().unwrap(),
             command,
@@ -407,20 +416,25 @@ impl mfm_capabilities::EffectCapabilityContract for Submit {
     }
 }
 impl mfm_program::EffectState<Submit> for Effect {
-    fn prepare(input: &Input) -> Result<Request, NativeCause> {
+    fn prepare(input: &Input) -> Result<Request, InvocationDiagnostic> {
         PREPARATIONS.fetch_add(1, Ordering::SeqCst);
         Ok(Request { value: input.value })
     }
     fn interpret(
         input: Input,
         _: &Request,
-    ) -> Result<ProposedStateOutcome<Input, Never>, NativeCause> {
+    ) -> Result<ProposedStateOutcome<Input, Never>, InvocationDiagnostic> {
         if INTERPRETER_AVAILABLE.load(Ordering::SeqCst) {
             Ok(ProposedStateOutcome::Success { output: input })
         } else {
-            Err(NativeCause::from_error(PolicyUnavailable {
-                operation: "interpret_settlement",
-            }))
+            Err(InvocationDiagnostic::from_fields(
+                "state_internal",
+                "interpret",
+                &(PolicyUnavailable {
+                    operation: "interpret_settlement",
+                }),
+                None,
+            ))
         }
     }
 }
@@ -509,7 +523,7 @@ async fn pending_command_settles_before_interpretation_and_resume_enters_no_adap
         panic!("interpreter failure")
     };
     assert_eq!(
-        cause.downcast_ref::<PolicyUnavailable>().unwrap().operation,
+        cause.details().as_value()["operation"],
         "interpret_settlement"
     );
     assert_eq!(observed.head_sequence(), 3);
@@ -559,18 +573,18 @@ impl ReadCapabilityContract for Refresh {
         reference: &ContentRef,
         intent: &Request,
         evidence: &Request,
-    ) -> Result<(), NativeCause> {
+    ) -> Result<(), InvocationDiagnostic> {
         Observation::bind_evidence(reference, intent, evidence)
     }
 }
 impl ReadState<Refresh> for Read {
-    fn prepare(input: &Input) -> Result<Request, NativeCause> {
+    fn prepare(input: &Input) -> Result<Request, InvocationDiagnostic> {
         Ok(Request { value: input.value })
     }
     fn interpret(
         input: Input,
         _: &Request,
-    ) -> Result<ProposedStateOutcome<Input, Never>, NativeCause> {
+    ) -> Result<ProposedStateOutcome<Input, Never>, InvocationDiagnostic> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -599,7 +613,7 @@ impl Handler for Rewind {
         _: &NoParams,
         _: Classification,
         context: &RecoveryContext<'_>,
-    ) -> Result<RecoveryRequest, NativeCause> {
+    ) -> Result<RecoveryRequest, InvocationDiagnostic> {
         Ok(context
             .eligible_restart_targets()
             .first()

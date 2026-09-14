@@ -12,20 +12,20 @@ impl State for FailureState {
 impl PureState for FailureState {
     fn evaluate(
         _: Number,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Cause>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Cause>, InvocationDiagnostic> {
         Ok(ProposedStateOutcome::Failure {
             failure: Cause::Timeout { deadline_ms: 5000 },
         })
     }
 }
 impl EffectState<Submit> for FailureState {
-    fn prepare(input: &Number) -> std::result::Result<Number, NativeCause> {
+    fn prepare(input: &Number) -> std::result::Result<Number, InvocationDiagnostic> {
         Ok(Number { value: input.value })
     }
     fn interpret(
         input: Number,
         _: &Number,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Cause>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Cause>, InvocationDiagnostic> {
         Self::evaluate(input)
     }
 }
@@ -54,13 +54,20 @@ impl Handler for RestartDeclared {
         _: &NoParams,
         _: Classification,
         context: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, NativeCause> {
+    ) -> std::result::Result<RecoveryRequest, InvocationDiagnostic> {
         context
             .declared_restart_targets()
             .first()
             .copied()
             .map(RecoveryRequest::Restart)
-            .ok_or_else(|| NativeCause::from_error(ProgramError::InvalidContract))
+            .ok_or_else(|| {
+                InvocationDiagnostic::from_fields(
+                    "state_internal",
+                    "handle",
+                    &(ProgramError::InvalidContract),
+                    None,
+                )
+            })
     }
 }
 struct PhaseOperation {

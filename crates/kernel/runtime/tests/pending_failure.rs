@@ -8,7 +8,7 @@ use mfm_runtime::{
     RuntimeAssemblyBuilder, RuntimeError,
 };
 use mfm_store::{MemoryStore, Store};
-use mfm_values::NativeCause;
+use mfm_values::InvocationDiagnostic;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -40,12 +40,15 @@ impl EffectCapabilityContract for Submit {
         _: &EffectId,
         command: &Number,
         evidence: &Number,
-    ) -> std::result::Result<(), NativeCause> {
+    ) -> std::result::Result<(), InvocationDiagnostic> {
         if command.value == evidence.value {
             Ok(())
         } else {
-            Err(NativeCause::from_error(
-                mfm_capabilities::CapabilityError::EvidenceBinding,
+            Err(InvocationDiagnostic::from_fields(
+                "state_internal",
+                "bind_evidence",
+                &(mfm_capabilities::CapabilityError::EvidenceBinding),
+                None,
             ))
         }
     }
@@ -60,13 +63,13 @@ impl State for Execute {
     }
 }
 impl EffectState<Submit> for Execute {
-    fn prepare(input: &Number) -> std::result::Result<Number, NativeCause> {
+    fn prepare(input: &Number) -> std::result::Result<Number, InvocationDiagnostic> {
         Ok(Number { value: input.value })
     }
     fn interpret(
         input: Number,
         _: &Number,
-    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, NativeCause> {
+    ) -> std::result::Result<ProposedStateOutcome<Number, Never>, InvocationDiagnostic> {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
@@ -95,7 +98,7 @@ impl Handler for RetryUnknown {
         _: &NoParams,
         classification: Classification,
         _: &RecoveryContext<'_>,
-    ) -> std::result::Result<RecoveryRequest, NativeCause> {
+    ) -> std::result::Result<RecoveryRequest, InvocationDiagnostic> {
         assert_eq!(classification, Classification::OutcomeUnknown);
         Ok(RecoveryRequest::RetryState)
     }

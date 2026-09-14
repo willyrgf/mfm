@@ -424,7 +424,9 @@ async fn execute_transaction(
                                     observed: submitted,
                                 },
                             },
-                            diagnostics: mfm_diagnostics::DiagnosticEvidence::local(),
+                            diagnostics: mfm_values::DiagnosticEvidence::from_value(
+                                serde_json::json!({"response": null, "sources": []}),
+                            ),
                         },
                     ),
                 },
@@ -459,7 +461,9 @@ async fn execute_transaction(
                                 observed: canonical,
                             },
                         },
-                        diagnostics: mfm_diagnostics::DiagnosticEvidence::local(),
+                        diagnostics: mfm_values::DiagnosticEvidence::from_value(
+                            serde_json::json!({"response": null, "sources": []}),
+                        ),
                     },
                 ),
             },

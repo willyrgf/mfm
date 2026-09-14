@@ -79,6 +79,8 @@ impl StringGrammar {
 pub enum CanonicalJsonProfile {
     /// Framework surfaces that deliberately admit signed and unsigned integers.
     GeneralFloatFree,
+    /// Float-free diagnostic data with trusted dependency-supplied text.
+    DiagnosticFloatFree,
 }
 
 impl CanonicalJsonProfile {
@@ -86,6 +88,7 @@ impl CanonicalJsonProfile {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::GeneralFloatFree => "general_float_free",
+            Self::DiagnosticFloatFree => "diagnostic_float_free",
         }
     }
 }

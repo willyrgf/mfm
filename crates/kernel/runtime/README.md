@@ -44,7 +44,9 @@ probe, yielding a checked observation only when the candidate is present. Exclus
 remains this attempt's noninsertion. Presence is retained independently if subsequent projection
 fails. Store errors return immediately without probing; ambiguous acknowledgement remains
 Indeterminate. Recording errors retain the available original, separate recording cause and exact
-candidate once sealed. A projection failure after known insertion additionally retains its
+candidate only after submission. BeforeAppend requires an admitted Failure and retains its concrete
+preparation cause without unsent bytes. Failed first-original encoding instead reports known
+position/contract, unavailable original contents/identity and the concrete encoding facts. A projection failure after known insertion additionally retains its
 acknowledged head, separately from any older last-observed view.
 
 Audit records cover acknowledged originals. Cancellation between provider response and failure
@@ -55,9 +57,10 @@ and derived-report limits apply at their owning boundaries.
 RunView distinguishes Runnable, EffectPending, AwaitingRecovery, AwaitingInterpretation, Succeeded
 Object and Failed FailureReport. Pending views expose their latest committed original and decision.
 FailureReport is a content-addressed canonical projection of original/root causes, reason, position
-and usage, bounded to 32 MiB before terminal append and never separately persisted. Internal native
-errors remain invocation data, with their originating operation/stage and fallible bounded
-projection. Application owns the prepared transport models and incomplete-report omissions.
+and usage, bounded to 32 MiB before terminal append and never separately persisted. Internal
+errors remain immutable invocation data with their originating operation/stage and supplied primary
+size facts. Application borrows those facts for normal or final transport presentation; no native
+projector, independent reporting quota or omission ledger remains.
 
 Typed constructors materialize at selected callbacks. Before reconciling an unresolved Effect,
 Runtime re-prepares and compares the exact command and identity. Reading completed work does not

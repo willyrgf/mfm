@@ -77,10 +77,10 @@ or `invocation` alone for an execution-stopped call or stopped pending-Effect re
 Ambiguous appends retain `run_append_indeterminate`; known noninsertion uses
 `run_append_not_inserted` even when a later probe has a different failure. A null
 last observation means no qualified head is known. Text prints the same recovery identity and
-invocation details after `error: <message>`. These errors do not claim a durable terminal state. Locator
-values, URLs, credentials, config bodies, and raw provider messages/bodies are never rendered.
-Canonical reports can contain reviewed provider method, stage, status/code, source facts and
-explicit omissions from bounded diagnostic capture.
+invocation details after `error: <message>`. These errors do not claim a durable terminal state. MFM does not
+append secrets, configuration bodies or full requests/connections to diagnostics. Canonical reports
+retain provider method, stage, status/code, ordered source messages and selected fields under the
+upstream diagnostic trust contract. No independent diagnostic quota or omission ledger applies.
 
 ## Exit codes
 
@@ -106,7 +106,7 @@ a snapshot revision. Repetition returns the same revision without discovery. Sta
 RunId with the same selection works after config deletion; a different revision conflicts.
 
 Size-limit invocation failures use `size_limit_exceeded` and include
-`invocation.size_limit` with `kind`, `resource`, and `limit` (bytes, or frames for
+`invocation.size_limit` with `resource` and `limit` (bytes, or frames for
 `frame_count`). Measured violations carry `actual`; a serializer stopped at its ceiling carries
 `observed_at_least` without claiming a measured final size. The last observation remains historical; oversized inline reports do not
 append a terminal conclusion or discard pending Effect authority. Capacity arithmetic overflow
@@ -124,20 +124,21 @@ Cancellation can interrupt a physical
 attempt before its result is recorded; the audit covers acknowledged qualified failures.
 
 
-Run emitters retain the existing result through output preparation, write and flush. Preparation or
-stdout delivery failure uses the shared [App incomplete report](../../crates/app/README.md#report-preparation-failures)
-on stderr and exit 2. It preserves the original request category and recovery identity, labels an
-observed head `last_observed`, and carries `acknowledged` only for explicit Runtime insertion
-evidence. The report records its failed stage and omitted detail. Text prints the same detail as
-JSON fields after the error message, including the complete `recovery` object.
+Run emitters retain their concrete result through output preparation, write and flush. They return
+an exit code directly. A normal encoding failure or stdout write/flush failure gets one final stderr
+presentation and exit 2. Failure of a normal or final stderr presentation ends without another write.
+The shared [App failure presentation](../../crates/app/README.md#report-preparation-failures) preserves
+the original request category and recovery identity, historical `last_observed` head, explicit
+Runtime `acknowledged` head and available candidate/size facts.
 
-The output owner captures reviewed OS category/code and bounded exposed source facts, with arbitrary
-messages and custom source details withheld. It never retains a rejected buffer as diagnostic input.
-A partial write and a failed flush remain distinct. If stderr delivery or encoding the incomplete
-report fails, the CLI retains that failure and its original until termination and attempts no further
-report. Successful write and flush establish completion of those local operations only; they do not
-prove reader consumption. None of these output failures creates a Journal record or proves delivery
-of the original report.
+JSON output embeds the exact already encoded value as `original_report`; this is null if normal
+encoding never completed. Text output borrows typed fields directly, and a stdout failure includes
+its existing buffer as `original_text`. Structured field values are JSON on individual text lines;
+there is no JSON-to-text parse round trip. The output diagnostic retains stream, write/flush stage,
+top IO message, OS kind/code and ordered exposed custom source messages. Repeated source addresses
+end traversal with `source_cycle: true`; no independent diagnostic quota applies. MFM does not
+append rejected buffers or credentials to source details. Successful local write/flush does not
+prove reader consumption, and no output failure creates a Journal record.
 
 Malformed stored framework Objects are reported as `internal`, with restore/decode parser category,
 available line/column and rejection reason. This includes nested Object-size rejection: no structured

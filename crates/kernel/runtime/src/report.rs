@@ -39,7 +39,12 @@ impl FailureReport {
                 canonical: serde_json::from_slice(value.canonical_bytes()).map_err(|source| {
                     RuntimeError::native(
                         crate::Operation::Project,
-                        mfm_values::NativeCause::from_error(mfm_canonical::JsonError::new(source)),
+                        mfm_values::InvocationDiagnostic::from_fields(
+                            "json_error",
+                            "object",
+                            &mfm_canonical::JsonError::new(source),
+                            None,
+                        ),
                     )
                 })?,
             })
@@ -76,7 +81,7 @@ impl FailureReport {
             cause: Cause<'a>,
         }
         let wire = Report {
-            domain: "mfm.failure-report.v4",
+            domain: "mfm.failure-report.v5",
             position,
             reason,
             usage: Usage {
@@ -110,7 +115,20 @@ impl FailureReport {
                 RuntimeError::at(
                     crate::Operation::Project,
                     crate::Stage::Encode,
-                    mfm_values::NativeCause::from_error(source),
+                    mfm_values::InvocationDiagnostic::from_fields(
+                        "canonical_error",
+                        "new",
+                        &source,
+                        source
+                            .serialization_bound()
+                            .map(|(limit, observed_at_least)| {
+                                mfm_values::SizeViolation::SerializationBound {
+                                    resource: mfm_values::SizeResource::FailureReport,
+                                    limit: limit as u64,
+                                    observed_at_least: observed_at_least as u64,
+                                }
+                            }),
+                    ),
                 )
             },
         )?;
@@ -127,35 +145,37 @@ impl FailureReport {
         let canonical = PlainCanonicalJsonBytes::from_json_str(&json).map_err(|source| {
             RuntimeError::native(
                 crate::Operation::Project,
-                mfm_values::NativeCause::from_error(source),
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "canonical_error",
+                    "new",
+                    &source,
+                    None,
+                ),
             )
         })?;
         let schema = SchemaIdentity::new(
             SchemaKind::PersistedContract,
             None,
             "mfm-failure-report",
-            mfm_ids::SchemaVersion::new("4").map_err(|source| {
+            mfm_ids::SchemaVersion::new("5").map_err(|source| {
                 RuntimeError::native(
                     crate::Operation::Project,
-                    mfm_values::NativeCause::from_error(source),
+                    mfm_values::ValueError::Identity(source).into_diagnostic("new"),
                 )
             })?,
             SchemaShape::CanonicalJsonTerminal {
-                profile: CanonicalJsonProfile::GeneralFloatFree,
+                profile: CanonicalJsonProfile::DiagnosticFloatFree,
             },
         )
         .and_then(|identity| identity.schema_id())
         .map_err(|source| {
-            RuntimeError::native(
-                crate::Operation::Project,
-                mfm_values::NativeCause::from_error(source),
-            )
+            RuntimeError::native(crate::Operation::Project, source.into_diagnostic("new"))
         })?;
         let value_ref = ContentRef::new(schema, raw_content_digest(canonical.as_bytes())).map_err(
             |source| {
                 RuntimeError::native(
                     crate::Operation::Project,
-                    mfm_values::NativeCause::from_error(source),
+                    mfm_values::ValueError::Identity(source).into_diagnostic("new"),
                 )
             },
         )?;

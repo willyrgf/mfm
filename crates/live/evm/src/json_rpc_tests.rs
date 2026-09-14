@@ -1036,7 +1036,7 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
     let mut retained = Vec::new();
     for (ordinal, code) in [-32001, -32002].into_iter().enumerate() {
         let stub = Stub::new(vec![format!(
-            r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":{code},"message":"secret-canary","data":{{"credential":"secret-canary"}}}}}}"#
+            r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":{code},"message":"secret-canary","data":{{"ratio":1.2300e-4}}}}}}"#
         )]);
         let target = EvmPhysicalTarget {
             chain_id: NonZeroU64::new(1).unwrap(),
@@ -1099,18 +1099,17 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
             let cause = error.provider_failure();
             assert_eq!(cause.method, EvmRpcMethod::ChainId);
             assert_eq!(cause.stage, RpcStage::Envelope);
-            let response = cause.diagnostics.response().as_ref().unwrap();
-            assert_eq!(response.status().get(), 200);
-            assert_eq!(response.rpc_code(), Some(code));
-            assert!(cause.diagnostics.sources().layers().is_empty());
-            assert_eq!(
-                cause.diagnostics.sources().end(),
-                mfm_diagnostics::ChainEnd::Complete
-            );
-            assert_eq!(cause.diagnostics.omissions().len(), 2);
+            let details = cause.diagnostics.as_value();
+            assert_eq!(details["response"]["status"], 200);
+            assert_eq!(details["response"]["rpc_code"], code);
+            assert_eq!(details["response"]["message"], "secret-canary");
+            assert_eq!(details["response"]["data_json"], r#"{"ratio":1.2300e-4}"#);
+            assert_eq!(details["sources"], serde_json::json!([]));
             let (bytes, _) = canonicalize_mfm_value(&error).unwrap();
-            assert!(!bytes.as_str().contains("secret-canary"));
-            assert!(!format!("{error:?} {error}").contains("secret-canary"));
+            assert!(bytes.as_str().contains("secret-canary"));
+            assert!(std::str::from_utf8(report.canonical_bytes())
+                .unwrap()
+                .contains("secret-canary"));
             errors.push(error);
         }
         assert_eq!(errors[0], errors[1]);
@@ -1143,16 +1142,7 @@ async fn response_status_survives_body_failure_and_size_refusal() {
         };
         let cause = error.provider_failure();
         assert_eq!(cause.stage, RpcStage::Body);
-        assert_eq!(
-            cause
-                .diagnostics
-                .response()
-                .as_ref()
-                .unwrap()
-                .status()
-                .get(),
-            206
-        );
+        assert_eq!(cause.diagnostics.as_value()["response"]["status"], 206);
         if bounded {
             assert_eq!(
                 cause.failure,
@@ -1164,14 +1154,16 @@ async fn response_status_survives_body_failure_and_size_refusal() {
                     }
                 }
             );
-            assert!(cause.diagnostics.sources().layers().is_empty());
+            assert!(cause.diagnostics.as_value()["sources"]
+                .as_array()
+                .unwrap()
+                .is_empty());
         } else {
             assert_eq!(cause.failure, ProviderFailureKind::Client);
             assert_eq!(
-                cause.diagnostics.sources().layers()[0].kind(),
-                mfm_diagnostics::SourceKind::Transport
+                cause.diagnostics.as_value()["sources"][0]["transport_kind"],
+                "decode"
             );
-            assert!(!cause.diagnostics.omissions().is_empty());
         }
         let (bytes, _) = canonicalize_mfm_value(&error).unwrap();
         assert_eq!(
@@ -1224,16 +1216,10 @@ async fn development_funding_uses_the_shared_causal_rpc_boundary() {
         EvmRpcMethod::SendTransaction
     );
     assert_eq!(
-        error
-            .provider_failure()
-            .diagnostics
-            .response()
-            .as_ref()
-            .unwrap()
-            .rpc_code(),
-        Some(-32011)
+        error.provider_failure().diagnostics.as_value()["response"]["rpc_code"],
+        -32011
     );
-    assert!(!canonicalize_mfm_value(&error)
+    assert!(canonicalize_mfm_value(&error)
         .unwrap()
         .0
         .as_str()
@@ -1272,19 +1258,10 @@ async fn body_deadline_retains_headers_and_parser_location_is_reviewed() {
     assert_eq!(error.kind(), EvmOperationalKind::Timeout);
     let source = error.provider_failure();
     assert_eq!(source.stage, RpcStage::Body);
+    assert_eq!(source.diagnostics.as_value()["response"]["status"], 200);
     assert_eq!(
-        source
-            .diagnostics
-            .response()
-            .as_ref()
-            .unwrap()
-            .status()
-            .get(),
-        200
-    );
-    assert_eq!(
-        source.diagnostics.sources().layers()[0].kind(),
-        mfm_diagnostics::SourceKind::Transport
+        source.diagnostics.as_value()["sources"][0]["transport_kind"],
+        "timeout"
     );
 
     let stub = Stub::new(vec!["{\n  \"jsonrpc\": \"2.0\",\n  ?secret-canary".into()]);
@@ -1293,11 +1270,11 @@ async fn body_deadline_retains_headers_and_parser_location_is_reviewed() {
     };
     assert_eq!(error.provider_failure().stage, RpcStage::Envelope);
     assert_eq!(
-        error.provider_failure().diagnostics.sources().layers()[0].facts(),
-        &[mfm_diagnostics::SourceFact::Parse {
-            category: mfm_diagnostics::ParseCategory::Syntax,
-            location: mfm_diagnostics::ParseLocation::LineColumn { line: 3, column: 3 }
-        },]
+        error.provider_failure().diagnostics.as_value()["sources"][0],
+        serde_json::json!({
+            "category": "syntax", "line": 3, "column": 3,
+            "message": "key must be a string at line 3 column 3",
+        })
     );
     assert!(!canonicalize_mfm_value(&error)
         .unwrap()
@@ -1335,23 +1312,19 @@ async fn local_range_failure_retains_field_and_checked_observation() {
             },
         }
     );
-    assert!(error
-        .provider_failure()
-        .diagnostics
-        .sources()
-        .layers()
+    assert!(error.provider_failure().diagnostics.as_value()["sources"]
+        .as_array()
+        .unwrap()
         .is_empty());
     assert_eq!(stub.observed_requests().len(), 1);
 }
 
 #[tokio::test]
-async fn send_failure_retains_os_ancestry_without_request_credentials() {
+async fn send_failure_retains_exposed_os_ancestry() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    let locator =
-        EvmAdapterLocator::parse(format!("http://user:secret-canary@{address}/secret-canary"))
-            .unwrap();
+    let locator = EvmAdapterLocator::parse(format!("http://{address}/rpc")).unwrap();
     let AdapterError::Operational(error) = JsonRpcEvmProvider::connect(&locator)
         .unwrap()
         .chain_id()
@@ -1362,24 +1335,17 @@ async fn send_failure_retains_os_ancestry_without_request_credentials() {
     };
     let cause = error.provider_failure();
     assert_eq!(cause.stage, RpcStage::Send);
-    assert!(cause.diagnostics.response().is_none());
-    assert!(cause
-        .diagnostics
-        .sources()
-        .layers()
+    let details = cause.diagnostics.as_value();
+    assert!(details["response"].is_null());
+    let sources = details["sources"].as_array().unwrap();
+    assert_eq!(sources[0]["transport_kind"], "connect");
+    assert!(sources
         .iter()
-        .any(|layer| layer.kind() == mfm_diagnostics::SourceKind::Os));
-    assert!(cause
-        .diagnostics
-        .omissions()
+        .any(|layer| layer["os_kind"] == "ConnectionRefused"));
+    assert!(sources
         .iter()
-        .any(|omission| omission.field() == mfm_diagnostics::OmittedField::Url));
-    assert!(!canonicalize_mfm_value(&error)
-        .unwrap()
-        .0
-        .as_str()
-        .contains("secret-canary"));
-    assert!(!format!("{error:?} {error}").contains("secret-canary"));
+        .all(|layer| !layer["message"].as_str().unwrap().is_empty()));
+    canonicalize_mfm_value(&error).unwrap();
 }
 
 #[tokio::test]
@@ -1407,10 +1373,61 @@ async fn streamed_body_overflow_records_a_lower_bound_without_an_invented_source
         ProviderFailureKind::Rejected { field: RpcField::Data, cause: RpcRejection::Size {
             limit: 524288, observed: ObservedSize::AtLeast { value },
         } } if value >= 524289));
-    assert!(error
-        .provider_failure()
-        .diagnostics
-        .sources()
-        .layers()
+    assert!(error.provider_failure().diagnostics.as_value()["sources"]
+        .as_array()
+        .unwrap()
         .is_empty());
+}
+
+#[test]
+fn exposed_source_order_and_cycles_are_retained_without_a_layer_budget() {
+    #[derive(Debug)]
+    struct Layer {
+        index: usize,
+        source: Option<Box<Layer>>,
+    }
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "layer {}", self.index)
+        }
+    }
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.source
+                .as_deref()
+                .map(|source| source as &dyn std::error::Error)
+        }
+    }
+    let mut chain = None;
+    for index in (0..40).rev() {
+        chain = Some(Box::new(Layer {
+            index,
+            source: chain,
+        }));
+    }
+    let evidence = capture::capture(None, Some(chain.as_deref().unwrap()));
+    let sources = evidence.as_value()["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 40);
+    assert_eq!(sources[0]["message"], "layer 0");
+    assert_eq!(sources[39]["message"], "layer 39");
+    assert!(evidence.as_value().get("source_cycle").is_none());
+
+    #[derive(Debug)]
+    struct Cycle;
+    impl std::fmt::Display for Cycle {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("cycle")
+        }
+    }
+    impl std::error::Error for Cycle {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(self)
+        }
+    }
+    assert_eq!(
+        capture::capture(None, Some(&Cycle)).as_value(),
+        &serde_json::json!({
+            "response": null, "sources": [{"message": "cycle"}], "source_cycle": true,
+        })
+    );
 }

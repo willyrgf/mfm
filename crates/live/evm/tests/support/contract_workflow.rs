@@ -6,7 +6,7 @@ use mfm_evm::{
     EvmTransactionFailure, ExecutedTransactionFacts, ObserveAt,
 };
 use mfm_program_derive::MfmContext;
-use mfm_values::NativeCause;
+use mfm_values::InvocationDiagnostic;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -128,14 +128,18 @@ impl TransactionEvidence {
     pub fn executed(
         &self,
         command: Eip1559TransactionCommand,
-    ) -> Result<ExecutedTransactionFacts, NativeCause> {
+    ) -> Result<ExecutedTransactionFacts, InvocationDiagnostic> {
         let reserved = mfm_evm::ReservedEvmTransaction::new(command, self.reservation.clone())
-            .map_err(NativeCause::from_error)?;
+            .map_err(|cause| {
+                InvocationDiagnostic::from_fields("state_internal", "executed", &cause, None)
+            })?;
         ExecutedTransactionFacts::new(
             mfm_evm::PreparedTransactionFacts::new(reserved, self.preparation.clone()),
             self.settlement.clone(),
         )
-        .map_err(NativeCause::from_error)
+        .map_err(|cause| {
+            InvocationDiagnostic::from_fields("state_internal", "executed", &cause, None)
+        })
     }
 }
 
@@ -146,15 +150,21 @@ pub(super) struct CreateProgress<N> {
     pub next: Option<N>,
 }
 impl<N> CreateProgress<N> {
-    pub fn validate(&self, plan: &CheckedCreatePlan) -> Result<Option<EvmAddress>, NativeCause> {
+    pub fn validate(
+        &self,
+        plan: &CheckedCreatePlan,
+    ) -> Result<Option<EvmAddress>, InvocationDiagnostic> {
         let facts = self.evidence.executed(plan.command())?;
         match (facts.settlement().outcome(), self.next.is_some()) {
             (mfm_evm::EvmTransactionOutcome::Reverted, false) => Ok(None),
             (mfm_evm::EvmTransactionOutcome::Created { created_address }, true) => {
                 Ok(Some(created_address.clone()))
             }
-            _ => Err(NativeCause::from_error(
-                mfm_evm::EvmDomainError::InvalidValue,
+            _ => Err(InvocationDiagnostic::from_fields(
+                "state_internal",
+                "validate",
+                &(mfm_evm::EvmDomainError::InvalidValue),
+                None,
             )),
         }
     }
@@ -172,10 +182,13 @@ impl CallProgress {
         &self,
         plans: &FailurePlans<C>,
         target: &EvmAddress,
-    ) -> Result<(), NativeCause> {
+    ) -> Result<(), InvocationDiagnostic> {
         if &self.target != target {
-            return Err(NativeCause::from_error(
-                mfm_evm::EvmDomainError::InvalidValue,
+            return Err(InvocationDiagnostic::from_fields(
+                "state_internal",
+                "validate",
+                &(mfm_evm::EvmDomainError::InvalidValue),
+                None,
             ));
         }
         let facts = self
@@ -195,21 +208,34 @@ impl CallProgress {
                             .binding()
                             .route
                             .binding_ref()
-                            .map_err(NativeCause::from_error)?
+                            .map_err(|cause| {
+                                InvocationDiagnostic::from_fields(
+                                    "state_internal",
+                                    "validate",
+                                    &cause,
+                                    None,
+                                )
+                            })?
                     || observation.intent().chain_id()
                         != facts.command().binding().route.chain_instance.chain_id
                     || observation
                         .result()
                         .is_some_and(|value| decode_fixture_value(value.return_bytes()).is_some())
                 {
-                    return Err(NativeCause::from_error(
-                        mfm_evm::EvmDomainError::InvalidValue,
+                    return Err(InvocationDiagnostic::from_fields(
+                        "state_internal",
+                        "validate",
+                        &(mfm_evm::EvmDomainError::InvalidValue),
+                        None,
                     ));
                 }
                 Ok(())
             }
-            _ => Err(NativeCause::from_error(
-                mfm_evm::EvmDomainError::InvalidValue,
+            _ => Err(InvocationDiagnostic::from_fields(
+                "state_internal",
+                "validate",
+                &(mfm_evm::EvmDomainError::InvalidValue),
+                None,
             )),
         }
     }
@@ -226,10 +252,13 @@ impl CallProgress {
 
 pub(super) fn create_plan(
     command: &Eip1559TransactionCommand,
-) -> Result<CheckedCreatePlan, NativeCause> {
+) -> Result<CheckedCreatePlan, InvocationDiagnostic> {
     if command.to().is_some() {
-        return Err(NativeCause::from_error(
-            mfm_evm::EvmDomainError::InvalidValue,
+        return Err(InvocationDiagnostic::from_fields(
+            "state_internal",
+            "create_plan",
+            &(mfm_evm::EvmDomainError::InvalidValue),
+            None,
         ));
     }
     CheckedCreatePlan::new(
@@ -240,14 +269,19 @@ pub(super) fn create_plan(
         command.max_priority_fee_per_gas(),
         command.max_fee_per_gas(),
     )
-    .map_err(NativeCause::from_error)
+    .map_err(|cause| {
+        InvocationDiagnostic::from_fields("state_internal", "create_plan", &cause, None)
+    })
 }
 pub(super) fn call_plan(
     command: &Eip1559TransactionCommand,
-) -> Result<CheckedCallPlan, NativeCause> {
+) -> Result<CheckedCallPlan, InvocationDiagnostic> {
     if command.to().is_none() {
-        return Err(NativeCause::from_error(
-            mfm_evm::EvmDomainError::InvalidValue,
+        return Err(InvocationDiagnostic::from_fields(
+            "state_internal",
+            "call_plan",
+            &(mfm_evm::EvmDomainError::InvalidValue),
+            None,
         ));
     }
     CheckedCallPlan::new(
@@ -258,14 +292,17 @@ pub(super) fn call_plan(
         command.max_priority_fee_per_gas(),
         command.max_fee_per_gas(),
     )
-    .map_err(NativeCause::from_error)
+    .map_err(|cause| InvocationDiagnostic::from_fields("state_internal", "call_plan", &cause, None))
 }
 pub(super) fn observation_plan(
     facts: &AnchoredObservationFacts,
     binding: &EvmTransactionBinding,
-) -> Result<CheckedObservationPlan, NativeCause> {
-    CheckedObservationPlan::new(binding.route.clone(), facts.intent().calldata().to_vec())
-        .map_err(NativeCause::from_error)
+) -> Result<CheckedObservationPlan, InvocationDiagnostic> {
+    CheckedObservationPlan::new(binding.route.clone(), facts.intent().calldata().to_vec()).map_err(
+        |cause| {
+            InvocationDiagnostic::from_fields("state_internal", "observation_plan", &cause, None)
+        },
+    )
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, MfmValue)]
@@ -287,7 +324,7 @@ impl FixtureFailure {
         request: FixtureRequest,
         plans: FailurePlans<CheckedCreatePlan>,
         progress: CreateProgress<CallProgress>,
-    ) -> Result<Self, NativeCause> {
+    ) -> Result<Self, InvocationDiagnostic> {
         let target = progress.validate(&plans.creations)?;
         if let (Some(call), Some(target)) = (&progress.next, target) {
             call.validate(&plans, &target)?;
@@ -304,7 +341,7 @@ impl FixtureFailure {
             CallProgress::reason,
         )
     }
-    fn from_observed(context: Observed) -> Result<Self, NativeCause> {
+    fn from_observed(context: Observed) -> Result<Self, InvocationDiagnostic> {
         let plans = FailurePlans {
             creations: create_plan(context.deployment.command())?,
             configuration: call_plan(context.configuration.command())?,
@@ -334,7 +371,8 @@ impl<'de> Deserialize<'de> for FixtureFailure {
             progress: CreateProgress<CallProgress>,
         }
         let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.request, wire.plans, wire.progress).map_err(serde::de::Error::custom)
+        Self::new(wire.request, wire.plans, wire.progress)
+            .map_err(|diagnostic| serde::de::Error::custom(diagnostic.details().as_value()))
     }
 }
 impl
@@ -344,7 +382,7 @@ impl
         >,
     > for FixtureFailure
 {
-    type Error = NativeCause;
+    type Error = InvocationDiagnostic;
     fn try_from(failure: DeployFailure) -> Result<Self, Self::Error> {
         let context = failure.into_context();
         let plans = FailurePlans {
@@ -373,7 +411,7 @@ impl
         >,
     > for FixtureFailure
 {
-    type Error = NativeCause;
+    type Error = InvocationDiagnostic;
     fn try_from(failure: ConfigureFailure) -> Result<Self, Self::Error> {
         let context = failure.into_context();
         let plans = FailurePlans {
@@ -388,7 +426,14 @@ impl
                     .configuration
                     .command()
                     .to()
-                    .ok_or_else(|| NativeCause::from_error(mfm_evm::EvmDomainError::InvalidValue))?
+                    .ok_or_else(|| {
+                        InvocationDiagnostic::from_fields(
+                            "state_internal",
+                            "try_from",
+                            &(mfm_evm::EvmDomainError::InvalidValue),
+                            None,
+                        )
+                    })?
                     .clone(),
                 evidence: TransactionEvidence::from_executed(&context.configuration),
                 observation: None,
@@ -408,7 +453,7 @@ impl
         >,
     > for FixtureFailure
 {
-    type Error = NativeCause;
+    type Error = InvocationDiagnostic;
     fn try_from(failure: ObserveFailure) -> Result<Self, Self::Error> {
         Self::from_observed(failure.into_context())
     }
@@ -427,11 +472,15 @@ impl State for DecodeValue {
 impl PureState for DecodeValue {
     fn evaluate(
         input: Observed,
-    ) -> Result<ProposedStateOutcome<FixtureReport, FixtureFailure>, NativeCause> {
-        let result = input
-            .observation
-            .result()
-            .ok_or_else(|| NativeCause::from_error(mfm_evm::EvmDomainError::InvalidValue))?;
+    ) -> Result<ProposedStateOutcome<FixtureReport, FixtureFailure>, InvocationDiagnostic> {
+        let result = input.observation.result().ok_or_else(|| {
+            InvocationDiagnostic::from_fields(
+                "state_internal",
+                "evaluate",
+                &(mfm_evm::EvmDomainError::InvalidValue),
+                None,
+            )
+        })?;
         match decode_fixture_value(result.return_bytes()) {
             Some(decoded) => Ok(ProposedStateOutcome::Success {
                 output: FixtureReport {
@@ -447,7 +496,7 @@ impl PureState for DecodeValue {
 }
 
 pub struct MapFailure<I, F = FixtureFailure>(PhantomData<fn(I) -> F>);
-impl<I: MfmValue, F: MfmValue + TryFrom<I, Error = NativeCause>> mfm_program::ValueMap
+impl<I: MfmValue, F: MfmValue + TryFrom<I, Error = InvocationDiagnostic>> mfm_program::ValueMap
     for MapFailure<I, F>
 {
     type Input = I;
@@ -457,7 +506,7 @@ impl<I: MfmValue, F: MfmValue + TryFrom<I, Error = NativeCause>> mfm_program::Va
         StableId::new("mfm.test.evm-effect/map-failure@1")
             .map_err(|_| ProgramError::InvalidContract)
     }
-    fn apply(_: &Self::Params, input: I) -> Result<F, NativeCause> {
+    fn apply(_: &Self::Params, input: I) -> Result<F, InvocationDiagnostic> {
         F::try_from(input)
     }
 }

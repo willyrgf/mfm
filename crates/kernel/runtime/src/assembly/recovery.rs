@@ -37,13 +37,18 @@ impl AssociatedRootMap {
             RuntimeError::at(
                 crate::Operation::RootMap,
                 crate::Stage::Decode,
-                mfm_values::NativeCause::from_error(source),
+                source.into_diagnostic("apply"),
             )
         })? != self.input
         {
             return Err(RuntimeError::native(
                 crate::Operation::RootMap,
-                mfm_values::NativeCause::from_error(crate::state::StateInvariant::Contract),
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "runtime_invariant",
+                    "apply",
+                    &crate::state::StateInvariant::Contract,
+                    None,
+                ),
             ));
         }
         for (callback, params) in &self.steps {
@@ -73,7 +78,12 @@ impl RuntimeAssemblyBuilder {
             RuntimeError::at(
                 crate::Operation::Admission,
                 crate::Stage::Execute,
-                mfm_values::NativeCause::from_error(source),
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "runtime_invariant",
+                    "register_map",
+                    &source,
+                    None,
+                ),
             )
         })?;
         insert(
@@ -91,7 +101,12 @@ impl RuntimeAssemblyBuilder {
             RuntimeError::at(
                 crate::Operation::Admission,
                 crate::Stage::Execute,
-                mfm_values::NativeCause::from_error(source),
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "runtime_invariant",
+                    "register_handler",
+                    &source,
+                    None,
+                ),
             )
         })?;
         insert(
@@ -184,7 +199,7 @@ impl AssemblyInner {
             RuntimeError::at(
                 crate::Operation::Admission,
                 crate::Stage::Decode,
-                mfm_values::NativeCause::from_error(source),
+                source.into_diagnostic("policy_params"),
             )
         })?;
         contract.admit(&object)?;
@@ -205,7 +220,7 @@ fn map<M: ValueMap>(params: &Object, input: Object) -> Result<Object> {
         RuntimeError::at(
             crate::Operation::RootMap,
             crate::Stage::Encode,
-            mfm_values::NativeCause::from_error(source),
+            source.into_diagnostic("map"),
         )
     })
 }

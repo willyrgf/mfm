@@ -19,7 +19,6 @@ use mfm_storage_postgres::{
     RuntimePostgresLocator,
 };
 use mfm_store::{RunIndex, RunIndexError, Store};
-use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 
 mod config;
@@ -29,7 +28,7 @@ mod reporting;
 #[cfg(test)]
 mod reporting_tests;
 mod run_view;
-pub use reporting::{encode_response, IncompleteReport, ReportFailure, ReportStage};
+pub use reporting::encode_response;
 pub use run_view::SerializableRunView;
 
 pub use config::{
@@ -324,6 +323,7 @@ pub struct SerializableClientError<'a> {
     code: &'a str,
     message: &'a str,
     detail: ClientErrorDetail<'a>,
+    diagnostic: Option<&'a mfm_values::InvocationDiagnostic>,
 }
 
 enum ClientErrorDetail<'a> {
@@ -334,6 +334,14 @@ enum ClientErrorDetail<'a> {
         invocation: run_view::Invocation<'a>,
     },
     Invocation(run_view::Invocation<'a>),
+    FailedView {
+        view: &'a mfm_runtime::RunView,
+        original_report: Option<&'a serde_json::value::RawValue>,
+    },
+    FailedRun {
+        error: &'a RunRequestError,
+        original_report: Option<&'a serde_json::value::RawValue>,
+    },
 }
 
 impl<'a> SerializableClientError<'a> {
@@ -343,6 +351,7 @@ impl<'a> SerializableClientError<'a> {
             code,
             message,
             detail: ClientErrorDetail::None,
+            diagnostic: None,
         }
     }
 
@@ -352,6 +361,7 @@ impl<'a> SerializableClientError<'a> {
             code,
             message,
             detail: ClientErrorDetail::RunId(run_id),
+            diagnostic: None,
         }
     }
 
@@ -359,10 +369,11 @@ impl<'a> SerializableClientError<'a> {
     pub fn for_run(
         error: &'a RunRequestError,
         message: &'a str,
-    ) -> Result<Self, mfm_values::NativeCause> {
+    ) -> Result<Self, mfm_values::InvocationDiagnostic> {
         Ok(Self {
             code: error.code(),
             message,
+            diagnostic: None,
             detail: match error {
                 RunRequestError::Request(_) => ClientErrorDetail::None,
                 RunRequestError::AppendIndeterminate {
@@ -385,29 +396,40 @@ impl Serialize for SerializableClientError<'_> {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct(
-            "ClientError",
-            2 + match &self.detail {
-                ClientErrorDetail::None => 0,
-                ClientErrorDetail::Recovery { .. } => 2,
-                _ => 1,
-            },
-        )?;
-        state.serialize_field("code", self.code)?;
-        state.serialize_field("message", self.message)?;
+        use serde::ser::SerializeMap;
+        let mut state = serializer.serialize_map(None)?;
+        state.serialize_entry("code", self.code)?;
+        state.serialize_entry("message", self.message)?;
         match &self.detail {
             ClientErrorDetail::None => {}
-            ClientErrorDetail::RunId(run_id) => state.serialize_field("run_id", run_id)?,
+            ClientErrorDetail::RunId(run_id) => state.serialize_entry("run_id", run_id)?,
             ClientErrorDetail::Recovery {
                 recovery,
                 invocation,
             } => {
-                state.serialize_field("recovery", recovery)?;
-                state.serialize_field("invocation", invocation)?;
+                state.serialize_entry("recovery", recovery)?;
+                state.serialize_entry("invocation", invocation)?;
             }
             ClientErrorDetail::Invocation(failure) => {
-                state.serialize_field("invocation", failure)?
+                state.serialize_entry("invocation", failure)?
             }
+            ClientErrorDetail::FailedView {
+                view,
+                original_report,
+            } => {
+                reporting::view_fields(&mut state, view)?;
+                state.serialize_entry("original_report", original_report)?;
+            }
+            ClientErrorDetail::FailedRun {
+                error,
+                original_report,
+            } => {
+                reporting::run_fields(&mut state, error)?;
+                state.serialize_entry("original_report", original_report)?;
+            }
+        }
+        if let Some(diagnostic) = self.diagnostic {
+            state.serialize_entry("diagnostic", diagnostic)?;
         }
         state.end()
     }
@@ -451,8 +473,8 @@ impl RunRequestError {
             &error,
             InvocationFailure::Execution {
                 error: RuntimeError::Recording { failure, .. }, ..
-            } if matches!(failure.as_ref(), mfm_runtime::RecordingFailure::Append {
-                outcome: mfm_runtime::AppendFailure::Store(mfm_store::StoreError::Indeterminate), ..
+            } if matches!(failure.as_ref(), mfm_runtime::RecordingFailure::Store {
+                cause: mfm_store::StoreError::Indeterminate, ..
             })
         );
         if indeterminate {
@@ -540,7 +562,7 @@ impl StartRunResult {
 
 impl StartRunResult {
     /// Prepares the selected revision and its qualified run view for transport serialization.
-    pub fn serializable(&self) -> Result<impl Serialize + '_, mfm_values::NativeCause> {
+    pub fn serializable(&self) -> Result<impl Serialize + '_, mfm_values::InvocationDiagnostic> {
         #[derive(Serialize)]
         struct Prepared<'a> {
             config: &'a ConfigSummary,
@@ -945,14 +967,9 @@ fn map_runtime_error(error: &RuntimeError) -> RequestError {
         RuntimeError::SizeLimit { .. } => RequestError::SizeLimitExceeded,
         RuntimeError::ArithmeticOverflow => RequestError::CapacityArithmeticOverflow,
         RuntimeError::Recording { failure, .. } => match failure.as_ref() {
-            mfm_runtime::RecordingFailure::BeforeAppend { cause, .. } => cause
-                .downcast_ref::<RuntimeError>()
-                .map(map_runtime_error)
-                .unwrap_or(RequestError::Internal),
-            mfm_runtime::RecordingFailure::Append { outcome, .. } => match outcome {
-                mfm_runtime::AppendFailure::NotInserted => RequestError::RunAppendNotInserted,
-                mfm_runtime::AppendFailure::Store(source) => map_store_error(source),
-            },
+            mfm_runtime::RecordingFailure::BeforeAppend { cause, .. } => map_runtime_error(cause),
+            mfm_runtime::RecordingFailure::NotInserted { .. } => RequestError::RunAppendNotInserted,
+            mfm_runtime::RecordingFailure::Store { cause, .. } => map_store_error(cause),
         },
         RuntimeError::Native { .. } | RuntimeError::Projection { .. } => RequestError::Internal,
     }
@@ -1064,7 +1081,7 @@ mod tests {
                                 last_observed: None,
                                 error: RuntimeError::Recording {
                                     operation: mfm_runtime::Operation::Record,
-                                    failure: Box::new(mfm_runtime::RecordingFailure::Append {
+                                    failure: Box::new(mfm_runtime::RecordingFailure::Store {
                                         original: None,
                                         candidate: mfm_journal::seal_frame(
                                             &run_id,
@@ -1076,11 +1093,7 @@ mod tests {
                                             .unwrap()
                                         )
                                         .unwrap(),
-                                        outcome: mfm_runtime::AppendFailure::Store(
-                                            mfm_store::StoreError::Indeterminate
-                                        ),
-                                        observation: None,
-                                        reload_cause: None,
+                                        cause: mfm_store::StoreError::Indeterminate
                                     }),
                                 },
                             }
@@ -1277,7 +1290,7 @@ mod tests {
         let failure = RunRequestError::Invocation(InvocationFailure::Execution {
             run_id: RunId::from_digest(mfm_ids::DigestBytes::from_array([90; 32])),
             error: RuntimeError::SizeLimit {
-                resource: mfm_runtime::SizeResource::FailureReport,
+                resource: mfm_values::SizeResource::FailureReport,
                 size,
             },
             last_observed: None,
