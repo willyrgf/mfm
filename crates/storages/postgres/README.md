@@ -91,4 +91,12 @@ is unavailable; append COMMIT database rejection is unavailable and other failur
 A failed insert/update retains an observed explicit rollback error separately without changing the
 primary disposition. Local physical/identity, allocation and task failures retain their selected
 facts. Comparison-only/drop cleanup, connection gates, index/configuration and provisioning remain
-outside this run-error cutover. No query protocol, SQL metadata or Journal wire changed.
+outside these selected execution-error cutovers. No query protocol, SQL metadata or Journal wire changed.
+
+Execution authority load/reserve_or_compare/retain_prepared now share the selected private SQLx
+recipe with run storage, retaining their distinct operation/stage. SQL failures (including ambiguous
+COMMIT) remain Unavailable. Local retained-data and binding failures carry one authority_internal
+InvocationDiagnostic; Live forwards it unchanged. Selected identity errors retain their actual
+returned message, scalar failures retain kind/message, and byte conversions retain lengths without
+rejected values. The authority's old discard helpers and unavailable-detail serializer are removed;
+bootstrap/gate conversions remain excluded. No authority SQL or nonce/prepared-wire semantics change.

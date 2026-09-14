@@ -100,3 +100,11 @@ Runtime decoder retain constructor errors with their metadata location and revie
 and overlong correlations remain distinct; rejected text is withheld. Ordinary Serde and native
 decoding share construction, while the native route avoids Serde's custom-error conversion.
 Other checked value families still use their existing decoder boundaries pending their owner cutovers.
+
+Transaction operational error v3 requires persisted diagnostic evidence on authority and signer
+unavailability, retaining OutcomeUnknown and Retryable classifications without reading JSON.
+AuthorityError itself has no wire schema: Unavailable carries DiagnosticEvidence, Internal carries
+InvocationDiagnostic for direct forwarding. ExactRawTransaction length rejection supplies its
+bounds and observed length without signed bytes. v3 changes dependent capability/State ABIs;
+old contracts are rejected, with no compatibility decoder or history rewrite. Existing v2 runs
+must be inventoried and handled explicitly before replacing any deployed assembly.

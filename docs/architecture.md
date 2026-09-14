@@ -60,6 +60,12 @@ retain their concrete fields. Ordinary Serde structural forms are accepted; no p
 grammar or re-encoding comparison exists. Every physical
 append still enforces exact predecessor, sequence and all-or-nothing immutable insertion.
 
+Execution authority preserves unavailable diagnostic data or one final internal invocation value.
+PostgreSQL alone extracts SQLx and selected retained-fact causes; Live moves the result into the
+existing operational owner or invariant route. EVM owns the v3 classifiable transaction-error
+payloads and has no SQLx, signing or keystore dependency. AuthorityError has no persistence schema
+or serializer. No new recovery, capture or reporting layer is introduced.
+
 Store's three physical failure dispositions carry Values-owned diagnostic data. PostgreSQL owns
 one private SQLx extraction recipe at selected run producers; MemoryStore owns its local check,
 allocation and task facts. Runtime and Application forward the existing concrete Store error;

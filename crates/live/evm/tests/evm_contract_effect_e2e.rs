@@ -94,7 +94,11 @@ impl EvmTransactionAuthority for ReservationAcknowledgementFault {
                 .reserve_or_compare(effect_id, command_value_ref, domain, observed_pending_nonce)
                 .await?;
             if !self.consumed.swap(true, Ordering::SeqCst) {
-                return Err(AuthorityError::Unavailable);
+                return Err(AuthorityError::Unavailable(
+                    mfm_values::DiagnosticEvidence::from_value(
+                        serde_json::json!({"operation": "test.authority", "injected": "unavailable"}),
+                    ),
+                ));
             }
             Ok(retained)
         })
@@ -384,6 +388,163 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
             .expect("initial pending nonce"),
         0
     );
+
+    // Reuse the managed wallet fixture to observe actual authority failures before any reservation.
+    use mfm_program::ClassifyError;
+    use sqlx::{ConnectOptions, Connection};
+    let options = admin_raw
+        .parse::<sqlx::postgres::PgConnectOptions>()
+        .unwrap_or_else(|_| panic!("managed admin options"))
+        .disable_statement_logging();
+    let mut admin = sqlx::PgConnection::connect_with(&options)
+        .await
+        .unwrap_or_else(|_| panic!("managed admin connection"));
+    let diagnostic_run = RunId::from_digest(DigestBytes::from_array([0x59; 32]));
+    let diagnostic_input = WalletContext {
+        transaction: CheckedTargetCallPlan::new(
+            CheckedCallPlan::new(
+                binding.clone(),
+                Vec::new(),
+                EvmU256::from_u64(0),
+                nonzero(21_000),
+                PRIORITY_FEE as u128,
+                MAX_FEE as u128,
+            )
+            .unwrap(),
+            sender.clone(),
+        ),
+        label: 19,
+    };
+    let diagnostic_program = expand_program(
+        EntryPointId::new("mfm.test.evm-effect/authority-diagnostic@1").unwrap(),
+        &WalletTransaction::new(binding.clone()),
+        &diagnostic_input,
+        mfm_program::ProgramLimits::new(0),
+    )
+    .unwrap();
+    let hot = runtime(
+        &runtime_locator,
+        &rpc_locator,
+        &binding,
+        signer.clone(),
+        Arc::new(AtomicBool::new(true)),
+    )
+    .await;
+    sqlx::query("REVOKE SELECT ON mfm_evm_tx.nonce_reservations FROM mfm_runtime")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let failure = hot
+        .start(diagnostic_run.clone(), diagnostic_program, diagnostic_input)
+        .await;
+    sqlx::query("GRANT SELECT ON mfm_evm_tx.nonce_reservations TO mfm_runtime")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let Err(mfm_runtime::InvocationFailure::RecoveryStopped { observed }) = failure else {
+        panic!("durable authority failure")
+    };
+    let RunViewState::EffectPending {
+        latest_failure: Some((original, _)),
+        ..
+    } = observed.state()
+    else {
+        panic!("retained authority original")
+    };
+    let original = original
+        .decode::<mfm_evm::EvmTransactionOperationalError>()
+        .unwrap();
+    assert_eq!(
+        original.classify(),
+        mfm_program::Classification::OutcomeUnknown
+    );
+    let mfm_evm::EvmTransactionOperationalError::AuthorityUnavailable { cause } = &original else {
+        panic!("authority owner")
+    };
+    assert_eq!(cause.as_value()["operation"], "authority.load");
+    assert_eq!(cause.as_value()["stage"], "load_state");
+    assert_eq!(cause.as_value()["sources"][0]["kind"], "database");
+    assert_eq!(cause.as_value()["sources"][1]["sqlstate"], "42501");
+    let hot_wire =
+        serde_json::to_value(mfm_app::SerializableRunView::new(&observed).unwrap()).unwrap();
+    assert_eq!(
+        hot_wire["state"]["latest_failure"]["error"]["value"],
+        serde_json::to_value(&original).unwrap()
+    );
+    drop(hot);
+    let cold = runtime(
+        &runtime_locator,
+        &rpc_locator,
+        &binding,
+        signer.clone(),
+        Arc::new(AtomicBool::new(true)),
+    )
+    .await;
+    let cold_view = cold.read(&diagnostic_run).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(mfm_app::SerializableRunView::new(&cold_view).unwrap()).unwrap(),
+        hot_wire
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM mfm_evm_tx.nonce_reservations")
+        .fetch_one(&mut admin)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "SQL failure must precede nonce reservation");
+
+    let saved_epoch = binding.authority_epoch.as_bytes();
+    let mut other_epoch = saved_epoch.to_vec();
+    other_epoch[0] ^= 1;
+    sqlx::query("UPDATE mfm_evm_tx.mfm_evm_tx_schema SET authority_epoch = $1")
+        .bind(other_epoch.as_slice())
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let internal = cold.resume(&diagnostic_run).await;
+    sqlx::query("UPDATE mfm_evm_tx.mfm_evm_tx_schema SET authority_epoch = $1")
+        .bind(saved_epoch)
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let Err(failure) = internal else {
+        panic!("retained epoch mismatch")
+    };
+    let mfm_runtime::InvocationFailure::Execution {
+        error: RuntimeError::Native { cause, .. },
+        last_observed: Some(previous),
+        ..
+    } = &failure
+    else {
+        panic!("internal invocation with previous observation")
+    };
+    assert_eq!(cause.code(), "authority_internal");
+    assert_eq!(cause.operation(), "authority.load");
+    assert_eq!(
+        cause.details().as_value()["check"],
+        "schema or epoch binding"
+    );
+    assert_eq!(previous.head_digest(), cold_view.head_digest());
+    assert_eq!(previous.head_sequence(), cold_view.head_sequence());
+    let wire = serde_json::to_value(
+        mfm_app::SerializableClientError::for_run(
+            &mfm_app::RunRequestError::Invocation(failure),
+            "authority invocation",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        wire["invocation"]["cause"]["native"]["cause"]["code"],
+        "authority_internal"
+    );
+    let after = cold.read(&diagnostic_run).await.unwrap();
+    assert_eq!(after.head_sequence(), cold_view.head_sequence());
+    assert_eq!(after.head_digest(), cold_view.head_digest());
+    assert_eq!(
+        serde_json::to_value(mfm_app::SerializableRunView::new(&after).unwrap()).unwrap(),
+        hot_wire
+    );
+    drop(cold);
+    drop(admin);
 
     let deployment = CheckedCreatePlan::new(
         binding.clone(),

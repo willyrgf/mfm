@@ -327,8 +327,16 @@ async fn prepare_transaction(
                 invariant(AdapterFailure::task(TaskOperation::SigningDigest, source))
             })?
             .map_err(|source| invariant(AdapterFailure::SigningDigest(source)))?;
-            let signature = signer.sign(digest).await.map_err(|_| {
-                AdapterError::Operational(EvmTransactionOperationalError::SignerUnavailable)
+            let signature = signer.sign(digest).await.map_err(|error| {
+                let kind = match error {
+                    mfm_signing::SigningError::Invalid => "invalid",
+                    mfm_signing::SigningError::Failed => "failed",
+                };
+                AdapterError::Operational(EvmTransactionOperationalError::SignerUnavailable {
+                    cause: mfm_values::DiagnosticEvidence::from_value(
+                        serde_json::json!({"operation": "sign", "stage": "signer", "kind": kind}),
+                    ),
+                })
             })?;
             let owned = command.clone();
             let candidate = tokio::task::spawn_blocking(move || {
@@ -595,10 +603,12 @@ fn map_provider_error(
 
 fn map_authority_error(error: AuthorityError) -> AdapterError<EvmTransactionOperationalError> {
     match error {
-        AuthorityError::Unavailable => {
-            AdapterError::Operational(EvmTransactionOperationalError::AuthorityUnavailable)
+        AuthorityError::Unavailable(cause) => {
+            AdapterError::Operational(EvmTransactionOperationalError::AuthorityUnavailable {
+                cause,
+            })
         }
-        AuthorityError::Internal => invariant(error),
+        AuthorityError::Internal(diagnostic) => AdapterError::Invariant(diagnostic),
     }
 }
 
