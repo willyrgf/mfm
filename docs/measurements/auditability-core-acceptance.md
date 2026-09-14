@@ -1,8 +1,8 @@
 # Current-state core acceptance evidence
 
 Current Part 1 correction packet, 2026-09-14. K1 is `8d783557`, K2 is `a1b8d088`; K3 is `5f6f3048`, K4 is `e94e6d4c`. Shipping measurements below use that exact production
-candidate. Independent G1 acceptance is recorded below; F1 final CI remains due.
-This packet does not yet claim final verification. Part 2 enrichment is excluded.
+candidate. Independent G1 acceptance and F1 final CI have both passed, as recorded below.
+Part 1 is complete. Part 2 enrichment is excluded.
 
 ## Current design and removals
 
@@ -55,8 +55,8 @@ begin with comment markers after whitespace. Use the same convention for every r
 K3 is -728 against K2: diagnostics -778, Values -7, Canonical -42, Runtime +9, App -76,
 binaries +59, Live EVM -25, domains +125, remaining callback signature changes +7. The domain
 increase is explicit typed-error adaptation plus relocated ObservedSize. The binary increase is
-finite delivery handling and direct typed text rendering. G1 must assess the complete cumulative
-cost and responsibility removal; these numbers alone are not acceptance. Tests/docs/churn are
+finite delivery handling and direct typed text rendering. G1 accepted the complete cumulative
+cost and responsibility removal as recorded below; the numbers alone are not acceptance. Tests/docs/churn are
 reported separately on the final candidate.
 
 ## Focused verification
@@ -160,7 +160,7 @@ production lines (0.7%) includes all replacements; no future Part 2 deletion off
 with the original, Journal loses lifecycle/fold responsibilities, Program loses capacity prediction,
 and Runtime gains required continuation/recording/settlement phases while deleting historical
 reconstruction. Compared with the implementation baseline, the actual redundant decoder, record,
-error and reporting mechanisms above are removed. G1 must judge aggregate complexity, not a quota.
+error and reporting mechanisms above are removed. G1 accepted aggregate complexity improvement, without treating LOC as a quota.
 
 ## E1–E6 boundary evidence
 
@@ -203,13 +203,20 @@ uses no future Part 2 credit. No implementation failure or required deletion blo
 The one F1 documentation correction, distinguishing deferred/excluded audit inventory from Part 1,
 is applied with this record. The source candidate remains unchanged after G1.
 
-C18's design/cost gate is satisfied by that independent disposition. F1's final command is
-`nix run .#ci`; its result is pending and must pass before marking the goal complete. It composes
-format, SQLx check, Clippy, workspace compilation/tests, rustdoc, managed PostgreSQL, client e2e and
-Effect e2e. Earlier focused results do not substitute for this exact-candidate integration gate.
+C18 is satisfied by that independent disposition and the completed F1 gate. Final
+`nix run .#ci` passed on exact candidate `4214dd39` with **9 passed, 0 failed**, in 635.99 seconds:
+format, SQLx metadata, Clippy, workspace compilation/tests, rustdoc, managed PostgreSQL, client e2e
+and Effect e2e. Run evidence is `run-3250562-1789400329617222583` under the local Nixfied state
+root, with `artifacts/run-summary.json` and task logs. Production code is identical to the G1
+candidate; subsequent completion-record changes are documentation only, checked by link/command
+review and `git diff --check` under the docs-only verification rule.
+
+The first CI attempt passed eight stages but could not compile the Effect test because the
+filesystem was full (`No space left on device`). Removing only disposable `target/debug` artifacts
+with pinned `cargo clean --target-dir target/debug` freed about 14 GiB. No source change was needed;
+the complete CI rerun above passed, including the formerly blocked stage in 129.35 seconds.
 
 ## Material uncertainties
 
-None concerning the reviewed ownership/design. Final managed integration remains unverified until
-F1 CI completes; assuming it passes could incorrectly close Part 1. The accepted information and
-physical-delivery limits remain explicit, and Part 2 is neither required nor authorized here.
+None. The accepted information and physical-delivery limits remain explicit. Part 2 is neither
+required nor authorized by this completion.
