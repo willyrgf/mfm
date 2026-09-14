@@ -27,9 +27,16 @@ the RPC method, stage, local checked rejection facts and Values' `DiagnosticEvid
 retains exposed source messages, parser category/location, transport kind and OS kind/code.
 Response status/code and RPC message/data remain outside ancestry; `data_json` preserves the
 original numeric spelling as text. Unknown source types retain their exposed message and child
-links. A repeated source address ends traversal with `source_cycle: true`. Whole-owner admission
+links. Whole-owner admission
 applies the ordinary canonical/object limits without a separate diagnostic budget. Dependency text
 is trusted diagnostic input; MFM does not deliberately add requests or credentials to that context.
+
+`source_cycle: true` means exactly “traversal stopped on a repeated interface pointer.” The local
+source walker compares complete `dyn Error` pointers with `std::ptr::eq`; it does not establish
+concrete-object identity. An inline child may share its parent's data address, and one concrete
+error can have different interface representations. The latter may produce repeated cause entries
+before termination; no exact cyclic-object visit count is promised across compiler configurations.
+There is no identity registry, message comparison or diagnostic budget.
 
 Request/body deadlines are Timeout,
 HTTP 429 is RateLimited, and other transport, JSON-RPC, unexpected-null, malformed-field and

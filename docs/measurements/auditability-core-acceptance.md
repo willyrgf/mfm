@@ -2,7 +2,8 @@
 
 Current Part 1 correction packet, 2026-09-14. K1 is `8d783557`, K2 is `a1b8d088`; K3 is `5f6f3048`, K4 is `e94e6d4c`. Shipping measurements below use that exact production
 candidate. Prior G1/F1 results are recorded below. Final Part 1 sign-off is reopened after architect review
-confirmed a source-cycle identity bug and a producing Runtime acknowledgement coverage gap. Part 2 enrichment is excluded.
+confirmed a source-cycle identity bug and a producing Runtime acknowledgement coverage gap. The
+user has approved the interface-pointer contract correction; renewed review and CI are pending. Part 2 enrichment is excluded.
 
 ## Current design and removals
 
@@ -51,6 +52,8 @@ begin with comment markers after whitespace. Use the same convention for every r
 | K2 `a1b8d088` | 27,746 | -520 | +915 |
 | K3 `5f6f3048` | 27,018 | -1,248 | +187 |
 | K4 `e94e6d4c` | 27,016 | -1,250 | +185 |
+| Runtime follow-up `849337c2` | 27,020 | -1,246 | +189 |
+| Approved pointer-repetition correction | 27,026 | -1,240 | +195 |
 
 K3 is -728 against K2: diagnostics -778, Values -7, Canonical -42, Runtime +9, App -76,
 binaries +59, Live EVM -25, domains +125, remaining callback signature changes +7. The domain
@@ -155,8 +158,9 @@ The exact K1–K4 source candidate `e94e6d4c` has no untracked implementation ad
 | `7f71beef` | 5,842 / 6,365 (65) | 5,218 / 3,107 (49) | 3,314 / 2,309 (30) | 204 / 115 (20) | 14,578 / 11,896 (164) |
 
 Evidence/document consolidation at `b5bde7df` adds 172 and deletes 253 physical lines across
-four files, with no production-code change. F1 documentation reconciliation is likewise separate. The cumulative +185
-production lines (0.7%) includes all replacements; no future Part 2 deletion offsets it. Compared
+four files, with no production-code change. F1 documentation reconciliation is likewise separate. The original K1–K4 cumulative +185
+production lines (0.7%) includes its replacements; the two follow-ups add ten counted lines
+(four test-only Runtime wiring lines and six local walker lines), reaching +195; no future Part 2 deletion offsets it. Compared
 with the original, Journal loses lifecycle/fold responsibilities, Program loses capacity prediction,
 and Runtime gains required continuation/recording/settlement phases while deleting historical
 reconstruction. Compared with the implementation baseline, the actual redundant decoder, record,
@@ -189,7 +193,7 @@ error and reporting mechanisms above are removed. G1 accepted aggregate complexi
 | C13 | [Public Store scenarios](../../crates/kernel/store/tests/support/scenarios.rs), MemoryStore and managed PostgreSQL tests retain atomic exact-head append, complete selected snapshots, immutable prior bytes, cumulative bounds and COMMIT ambiguity. SQLx metadata is checked against the managed baseline. Additional SQLx source extraction remains outside Part 1. |
 | C14 | [Shipping App constructor](../../crates/app/tests/support/native_constructor.rs) admits descriptor-valid EVM balance input and delivers distinct empty/oversized correlation constructor causes through the actual Read callback and App report. It also delivers a stale Object digest as restore/decode with parser category/location/reason, without provider entry or append. |
 | C16 | [Actual capacity](../../crates/kernel/runtime/tests/current_state/capacity.rs) reaches the physical frame-count limit with an acknowledged original or an externally returned settlement and retains the unchanged current state. A separate 16 MiB original plus mapped root exceeds the derived report limit. The frame-count filler is opaque history, not claimed historical Runtime transitions. Measurements record a real Store cumulative-byte refusal. |
-| C15 | Values diagnostic tests admit trusted text in whole owners while ordinary text, floats and actual bounds remain checked. EVM provider tests restore exact owner fields and classification; source recipes preserve ordered messages and stop before cyclic duplicates. No shared capture framework remains. |
+| C15 | Values diagnostic tests admit trusted text in whole owners while ordinary text, floats and actual bounds remain checked. EVM provider tests restore exact owner fields and classification; source recipes preserve ordered messages and stop before repeated interface pointers, permitting alias-prefix cause repetitions. No shared capture framework remains. |
 | C17 | App, CLI and REST tests retain primary status and exact candidate/acknowledgement/head facts. CLI reuses exact encoded JSON or text after stdout failure; unavailable original reporting and final stderr failure terminate without retry. REST evidence ends at response-body handoff. |
 
 ## G1 disposition and final verification
@@ -217,20 +221,22 @@ filesystem was full (`No space left on device`). Removing only disposable `targe
 with pinned `cargo clean --target-dir target/debug` freed about 14 GiB. No source change was needed;
 the complete CI rerun above passed, including the formerly blocked stage in 129.35 seconds.
 
-## Follow-up review: sign-off held
+## Follow-up correction: verification pending
 
 The external architect reproduced dropped inline child causes in both local walkers: distinct
 `Outer(Inner)` errors can share their data address. The new CLI and EVM regressions both failed
 against the accepted implementation. Comparing full trait pointers preserves those children, but
 an experiment also duplicated the existing CLI self-cycle layer because the same error can have
-different vtables. That experimental source change is not accepted as a complete correction.
+different vtables. This disproved exact concrete-object identity as the old implementation
+implicitly assumed; the accepted correction describes observed interface pointers instead.
 
 The dedicated architect withdrew the earlier walker acceptance: stable Error exposes no public
 arbitrary dynamic identity, and Rust does not promise reliable concrete-object identity from trait
 pointers. The recommended minimal refinement detects repeated full interface pointers and explicitly
-permits alias-prefix repetitions. User acceptance is pending; neither that narrower contract nor a
-larger producer identity interface has been adopted. No message heuristic, quota or unsafe workaround
-is authorized by this finding. See [Rust pointer equality](https://doc.rust-lang.org/std/ptr/fn.eq.html).
+permits alias-prefix repetitions. The user explicitly approved this narrower contract: each local
+walker compares complete dyn Error pointers using std::ptr::eq, and source_cycle means precisely
+“traversal stopped on a repeated interface pointer.” The correction adds no identity registry,
+wrapper, message comparison or restored diagnostic budget. See [Rust pointer equality](https://doc.rust-lang.org/std/ptr/fn.eq.html).
 
 The producing Runtime coverage gap is independently corrected in
 [engine tests](../../crates/kernel/runtime/src/engine/tests.rs). One run-scoped, one-shot test-only
@@ -246,11 +252,21 @@ Runtime release behavior and public APIs are unchanged. The repository LOC conve
 new cfg(test) wiring lines in engine.rs; all actual fault injection and scenario code lives in the
 separate test module. This adds necessary producing-boundary evidence without a production hook,
 callback parameter, cache or alternate projection implementation. Full candidate CI and renewed
-contract review remain pending the source-identity decision.
+contract review remain pending for the corrected candidate.
+
+The corrected source regressions cover distinct and equal-message inline children, complete ordered
+40-layer acyclic chains, self-cycles and a multi-node cycle. Cycle checks require termination and the
+repetition marker without an exact visit count across compiler configurations. The narrowed contract
+and its information limit are documented in RFC section 5.3, design, adapter audit and both owner
+READMEs. Focused debug and release source tests both pass (three CLI and four Live EVM cases each), using
+`nix develop -c cargo test --target-dir target/verification [--release] -p mfm-evm-live -p mfm
+--lib --bins source`. Focused Clippy for both owners, including tests, passes with `--no-deps --
+-D warnings`. Renewed review and final CI are pending. The complete-pointer comparisons replace
+the old thin-address comparisons locally: +3 non-comment production lines in each walker, no new
+public type, dependency, shared mechanism or diagnostic quota. Shipping frame measurements retain
+the same schemas/data and are unaffected by this source-pointer comparison correction.
 
 ## Material uncertainties
 
-- The proposed source identity contract is not yet approved. Full interface-pointer repetition is
-  observable, but exact concrete-object identity is not provided by stable Error. Assuming them
-  equivalent could again discard or duplicate causal layers. Resolve the contract explicitly,
-  test inline/equal-message children and real cycles, then review and verify the corrected candidate.
+None concerning the user-approved pointer-repetition contract. Concrete-object identity and exact
+cyclic visit counts remain outside that guarantee. Renewed architect review and full CI are pending.

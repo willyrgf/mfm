@@ -82,6 +82,14 @@ append secrets, configuration bodies or full requests/connections to diagnostics
 retain provider method, stage, status/code, ordered source messages and selected fields under the
 upstream diagnostic trust contract. No independent diagnostic quota or omission ledger applies.
 
+
+`source_cycle: true` means exactly “traversal stopped on a repeated interface pointer.” The local
+source walker compares complete `dyn Error` pointers with `std::ptr::eq`; it does not establish
+concrete-object identity. An inline child may share its parent's data address, and one concrete
+error can have different interface representations. The latter may produce repeated cause entries
+before termination; no exact cyclic-object visit count is promised across compiler configurations.
+There is no identity registry, message comparison or diagnostic budget.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -135,8 +143,8 @@ JSON output embeds the exact already encoded value as `original_report`; this is
 encoding never completed. Text output borrows typed fields directly, and a stdout failure includes
 its existing buffer as `original_text`. Structured field values are JSON on individual text lines;
 there is no JSON-to-text parse round trip. The output diagnostic retains stream, write/flush stage,
-top IO message, OS kind/code and ordered exposed custom source messages. Repeated source addresses
-end traversal with `source_cycle: true`; no independent diagnostic quota applies. MFM does not
+top IO message, OS kind/code and ordered exposed custom source messages. Repeated full interface pointers
+end traversal with `source_cycle: true`, under the information limit above; no independent diagnostic quota applies. MFM does not
 append rejected buffers or credentials to source details. Successful local write/flush does not
 prove reader consumption, and no output failure creates a Journal record.
 

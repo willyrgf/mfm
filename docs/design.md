@@ -43,6 +43,14 @@ check. Ordinary Program/context strings retain that check. The derived FailureRe
 same diagnostic profile for its already admitted Objects. No independent diagnostic quota applies. Runtime commits this exact original before classification or policy and retains it through cold
 observation. Remaining upstream first-loss gaps are tracked in the owner audit inventory.
 
+`source_cycle: true` means exactly “traversal stopped on a repeated interface pointer.” The local
+source walker compares complete `dyn Error` pointers with `std::ptr::eq`; it does not establish
+concrete-object identity. An inline child may share its parent's data address, and one concrete
+error can have different interface representations. The latter may produce repeated cause entries
+before termination; no exact cyclic-object visit count is promised across compiler configurations.
+There is no identity registry, message comparison or diagnostic budget.
+
+
 The framework and shipping Portfolio default to Stop with zero global/local allowances. EVM's
 Read operational causes are Retryable; `AnchorChanged` is InputInvalidated. Transaction provider and
 authority failures are OutcomeUnknown; signer unavailability before prepared-wire retention is

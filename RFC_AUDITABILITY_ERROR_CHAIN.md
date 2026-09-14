@@ -1,8 +1,8 @@
 # RFC part 1: current run continuation and persistence
 
-Status: final Part 1 sign-off reopened after architect review found a source-cycle identity bug
-and missing Runtime acknowledgement regression. The prior G1/CI results below are historical;
-the corrected candidate requires verification and review.
+Status: the follow-up source-cycle contract is approved and implemented; producing Runtime
+acknowledgement coverage is added in `849337c2`. Renewed review and final candidate CI are pending.
+Prior G1/CI results below apply to the earlier candidate.
 The [current acceptance record](docs/measurements/auditability-core-acceptance.md) owns the exact
 commits, E1–E6/C1–C18 evidence, shipping measurements, cost and verification disposition.
 
@@ -353,12 +353,23 @@ The existing CLI error becomes OutputWriteError { stream: OutputStream, stage: W
 details: DiagnosticEvidence }. Its Serialize includes that data; remove the old source-marked
 Box<OutputIoError>. DiagnosticEvidence supplies no std::error::Error source implementation.
 
-Walk source() only at those owning boundaries and preserve each exposed layer in order. Keep a
-small list of borrowed source addresses locally; if a reference repeats, stop before duplicating
-it and add source_cycle: true to the diagnostic object. No native reference leaves extraction.
-Absent that condition there is no cycle field. Do not add a source-count budget, truncation branch,
-cycle registry or discarded-suffix traversal. This records what the selected source APIs expose;
-it does not promise hidden foreign-library data or arbitrary custom source implementations.
+Walk source() only at those owning boundaries and preserve encountered layers in order. Each
+existing extraction function keeps a small local list of complete `*const dyn Error` interface
+pointers and compares them with `std::ptr::eq`, including their metadata. When one repeats, stop
+before emitting that repeated interface pointer and add `source_cycle: true`, meaning precisely
+“traversal stopped on a repeated interface pointer.” Absent that condition there is no cycle field.
+
+This is not exact concrete-object identity. Distinct inline children can share a data address, and
+Rust can give one concrete error different interface representations. An alias prefix may therefore
+emit a cyclic cause more than once; no compiler-independent visit count is promised. Trait-pointer
+comparison does not establish a universal concrete-object identity guarantee. The user explicitly
+accepted this information limit in the follow-up review. Keep CLI get_ref() for the initial custom
+IO source and source() thereafter. No native reference leaves extraction. Do not add an identity
+registry, additional error wrapper, message comparison, source-count budget, truncation branch or
+discarded-suffix traversal. Tests preserve inline children, ordered acyclic chains and cycle
+termination without requiring an exact cyclic-object visit count across compiler configurations.
+This records what the selected source APIs expose, not hidden foreign-library data or arbitrary
+custom source implementations.
 
 from_value cannot fail: these helpers supply ordinary JSON scalar/array/object data, not callbacks
 or arbitrary native serializers. A failed execution job, source formatter or later whole-error
@@ -2010,11 +2021,10 @@ achieved net simplification.
 
 ## 15. Material uncertainties
 
-Source-cycle identity requires correction and producing Runtime acknowledgement coverage is
-being added; final sign-off is held. The prior K1–K4/G1 work resolved the former handoff
-assumptions with actual deletion, consuming regression and shipping measurement evidence in the
-[acceptance record](docs/measurements/auditability-core-acceptance.md). Final managed integration
-passed with all nine CI stages on `4214dd39`, whose production code matches the G1 candidate.
+None concerning the selected ownership/design. The user approved interface-pointer repetition,
+including its concrete-identity and alias-prefix limits, and the producing Runtime acknowledgement
+regression is implemented. Renewed review and managed CI must validate the corrected candidate;
+the earlier `4214dd39` CI result does not establish that result.
 
 The accepted limits remain contractual: normal loading validates current state rather than
 historical semantic evolution; internal failures remain invocation-only; selected dependency
