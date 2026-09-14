@@ -1,7 +1,8 @@
 # RFC part 1: current run continuation and persistence
 
-Status: Part 1 complete. K1–K4 implemented; G1 accepted `b5bde7df`; F1 final CI passed on
-`4214dd39` on 2026-09-14.
+Status: final Part 1 sign-off reopened after architect review found a source-cycle identity bug
+and missing Runtime acknowledgement regression. The prior G1/CI results below are historical;
+the corrected candidate requires verification and review.
 The [current acceptance record](docs/measurements/auditability-core-acceptance.md) owns the exact
 commits, E1–E6/C1–C18 evidence, shipping measurements, cost and verification disposition.
 
@@ -1848,7 +1849,7 @@ it does not restart the persistence cutover or replace Part 1's accepted design 
 
 ### Part 1 completion record — 2026-09-14
 
-**Complete and accepted.** Ordered implementation: K1 `8d783557`, K2 `a1b8d088`, K3 `5f6f3048`,
+**Prior completion, reopened by follow-up review.** Ordered implementation: K1 `8d783557`, K2 `a1b8d088`, K3 `5f6f3048`,
 K4 `e94e6d4c`. Dedicated architect G1 accepted `b5bde7df` after reviewing both baseline diffs,
 production paths, selected tests and measurements. F1 CI passed all nine stages on `4214dd39`,
 with unchanged production code: `nix run .#ci`, 635.99 seconds. An earlier attempt exhausted disk
@@ -2009,7 +2010,8 @@ achieved net simplification.
 
 ## 15. Material uncertainties
 
-None concerning the implemented ownership/design. K1–K4 and G1 resolve the former handoff
+Source-cycle identity requires correction and producing Runtime acknowledgement coverage is
+being added; final sign-off is held. The prior K1–K4/G1 work resolved the former handoff
 assumptions with actual deletion, consuming regression and shipping measurement evidence in the
 [acceptance record](docs/measurements/auditability-core-acceptance.md). Final managed integration
 passed with all nine CI stages on `4214dd39`, whose production code matches the G1 candidate.

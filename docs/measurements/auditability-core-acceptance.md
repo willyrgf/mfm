@@ -1,8 +1,8 @@
 # Current-state core acceptance evidence
 
 Current Part 1 correction packet, 2026-09-14. K1 is `8d783557`, K2 is `a1b8d088`; K3 is `5f6f3048`, K4 is `e94e6d4c`. Shipping measurements below use that exact production
-candidate. Independent G1 acceptance and F1 final CI have both passed, as recorded below.
-Part 1 is complete. Part 2 enrichment is excluded.
+candidate. Prior G1/F1 results are recorded below. Final Part 1 sign-off is reopened after architect review
+confirmed a source-cycle identity bug and a producing Runtime acknowledgement coverage gap. Part 2 enrichment is excluded.
 
 ## Current design and removals
 
@@ -203,7 +203,8 @@ uses no future Part 2 credit. No implementation failure or required deletion blo
 The one F1 documentation correction, distinguishing deferred/excluded audit inventory from Part 1,
 is applied with this record. The source candidate remains unchanged after G1.
 
-C18 is satisfied by that independent disposition and the completed F1 gate. Final
+The prior C18 disposition is reopened by the follow-up findings; the following CI result
+applies to the earlier candidate. Final
 `nix run .#ci` passed on exact candidate `4214dd39` with **9 passed, 0 failed**, in 635.99 seconds:
 format, SQLx metadata, Clippy, workspace compilation/tests, rustdoc, managed PostgreSQL, client e2e
 and Effect e2e. Run evidence is `run-3250562-1789400329617222583` under the local Nixfied state
@@ -216,7 +217,40 @@ filesystem was full (`No space left on device`). Removing only disposable `targe
 with pinned `cargo clean --target-dir target/debug` freed about 14 GiB. No source change was needed;
 the complete CI rerun above passed, including the formerly blocked stage in 129.35 seconds.
 
+## Follow-up review: sign-off held
+
+The external architect reproduced dropped inline child causes in both local walkers: distinct
+`Outer(Inner)` errors can share their data address. The new CLI and EVM regressions both failed
+against the accepted implementation. Comparing full trait pointers preserves those children, but
+an experiment also duplicated the existing CLI self-cycle layer because the same error can have
+different vtables. That experimental source change is not accepted as a complete correction.
+
+The dedicated architect withdrew the earlier walker acceptance: stable Error exposes no public
+arbitrary dynamic identity, and Rust does not promise reliable concrete-object identity from trait
+pointers. The recommended minimal refinement detects repeated full interface pointers and explicitly
+permits alias-prefix repetitions. User acceptance is pending; neither that narrower contract nor a
+larger producer identity interface has been adopted. No message heuristic, quota or unsafe workaround
+is authorized by this finding. See [Rust pointer equality](https://doc.rust-lang.org/std/ptr/fn.eq.html).
+
+The producing Runtime coverage gap is independently corrected in
+[engine tests](../../crates/kernel/runtime/src/engine/tests.rs). One run-scoped, one-shot test-only
+fault inside view construction exercises real Runtime start/resume with MemoryStore for admission,
+continuation insertion, initial resume projection, Pending projection, recovered Retry and recovered
+Stop. It checks exact mechanical acknowledgement only after insertion, the prior observation's
+sequence/digest/state, unchanged head for no-insertion cases, cause forwarding and adapter entry.
+Temporary false-resume-ack, false-Pending-ack and lost-prior-observation mutations each fail this
+regression; the mutations were removed. All 15 Runtime library tests, including the six-case
+regression, and focused Runtime Clippy pass.
+
+Runtime release behavior and public APIs are unchanged. The repository LOC convention counts four
+new cfg(test) wiring lines in engine.rs; all actual fault injection and scenario code lives in the
+separate test module. This adds necessary producing-boundary evidence without a production hook,
+callback parameter, cache or alternate projection implementation. Full candidate CI and renewed
+contract review remain pending the source-identity decision.
+
 ## Material uncertainties
 
-None. The accepted information and physical-delivery limits remain explicit. Part 2 is neither
-required nor authorized by this completion.
+- The proposed source identity contract is not yet approved. Full interface-pointer repetition is
+  observable, but exact concrete-object identity is not provided by stable Error. Assuming them
+  equivalent could again discard or duplicate causal layers. Resolve the contract explicitly,
+  test inline/equal-message children and real cycles, then review and verify the corrected candidate.
