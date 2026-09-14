@@ -33,6 +33,11 @@ owns verification selection and `nixfied.nix` owns the executable task graph.
 - Retain each cause layer, its originating operation, and available reviewed diagnostic fields in
   the audit representation. Do not flatten a source into `Unavailable`, `Internal`, or a formatted
   string without retaining its causal information. Follow `docs/code-quality.md` for error audit.
+- Malformed stored framework data uses parser category, available location and rejection reason;
+  ordinary Serde decoding need not retain nested constructor ancestry or structured size fields.
+  Direct typed construction, postdecode admission and declared execution originals keep their
+  separate causal contracts. Dependency-supplied JSON diagnostic text is trusted, not certified
+  secret-free; do not deliberately attach MFM secret inputs or full request/connection objects.
 - Error preservation does not authorize secret disclosure. Explicitly account for unavailable,
   withheld, or size-limited details; never describe a partial representation as lossless. If full
   preservation conflicts with the secret-free boundary, resolve the custody contract rather than

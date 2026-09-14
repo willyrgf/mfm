@@ -17,10 +17,12 @@ without progression. Cold restore loads admission/latest and any requested candi
 one Store snapshot. Runtime checks selected headers, current phase/fact agreement, contracts,
 positions, allowances, checkpoints and Effect authority. It does not fold old frames or reconstruct
 historical counter increments. Immutable acknowledged history remains a required Store contract.
-Private Serde seeds construct the current payload types directly and preserve checked Object
-admission causes under `restore`/`decode`. Wire failures retain their parser cause. After a native
-admission failure, visitors consume remaining containers without constructing unused Objects;
-later structural rejections do not replace that cause, while parser failures remain wire errors.
+Runtime derives ordinary Serde decoding on its current payload types; Values' checked Object
+constructor runs during Deserialize. Invalid stored Objects report `restore`/`decode` with parser
+category, available location and reason, including nested size rejection. No structured nested
+constructor or size fields are promised on that path. Direct typed construction and postdecode
+slot admission retain their structured errors. Readers accept supported Serde sequence forms and
+reject unknown/duplicate fields, invalid checked values and trailing input.
 
 A declared failure commits its original and complete executed facts as `AwaitingRecovery` before
 classification, policy or root mapping. A separate recovery commit records classification, request

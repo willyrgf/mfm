@@ -10,7 +10,7 @@ pub struct JsonError {
     source: serde_json::Error,
 }
 impl JsonError {
-    /// Retains the original parser/serializer error without exposing its message.
+    /// Retains the original parser/serializer error and its available diagnostic text.
     pub fn new(source: serde_json::Error) -> Self {
         Self { source }
     }
@@ -34,7 +34,7 @@ impl Serialize for JsonError {
         )?;
         value.serialize_field("line", &self.source.line())?;
         value.serialize_field("column", &self.source.column())?;
-        value.serialize_field("message", "withheld")?;
+        value.serialize_field("message", &self.source.to_string())?;
         value.end()
     }
 }

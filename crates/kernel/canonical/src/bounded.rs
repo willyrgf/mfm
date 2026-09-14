@@ -77,7 +77,7 @@ mod tests {
         assert!(calls.load(Ordering::SeqCst) < 100);
     }
     #[test]
-    fn a_serializer_failure_retains_its_kind_and_withholds_its_custom_message() {
+    fn a_serializer_failure_retains_its_kind_and_supplied_message() {
         struct Reject;
         impl Serialize for Reject {
             fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
@@ -89,8 +89,7 @@ mod tests {
         let failure = to_json_bounded(&Reject, 1024).unwrap_err();
         assert!(failure.serialization_bound().is_none());
         let projection = serde_json::to_string(&failure).unwrap();
-        assert!(projection.contains("withheld"));
-        assert!(!projection.contains("credential-shaped"));
+        assert!(projection.contains("credential-shaped rejected input"));
         assert!(!format!("{failure:?}").contains("credential-shaped"));
     }
 }

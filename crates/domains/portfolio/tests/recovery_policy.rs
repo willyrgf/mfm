@@ -452,11 +452,9 @@ async fn changed_anchor_restarts_the_real_collection_and_preserves_its_acknowled
         let frame = mfm_journal::decode_frame(prefix.latest()).unwrap();
         let payload: serde_json::Value =
             serde_json::from_slice(frame.payload().as_bytes()).unwrap();
-        let original = serde::de::DeserializeSeed::deserialize(
-            mfm_values::ObjectSeed,
+        let original = serde_json::from_value::<mfm_values::Object>(
             payload["facts"]["recovered"]["failure"]["domain"]["original"].clone(),
         )
-        .unwrap()
         .unwrap();
         assert!(matches!(original.decode::<EvmBalanceFailure>().unwrap(),
             EvmBalanceFailure::AnchorChanged { previous, observed, .. }

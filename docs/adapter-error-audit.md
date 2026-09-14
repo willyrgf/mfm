@@ -245,8 +245,9 @@ Cold reads inspect those current facts without replaying earlier callbacks or op
 `AdapterError<E>` retains either the typed operational value or `NativeCause`. Native causes hold
 actual reviewed owners with fallible bounded projection; non-Error `MfmValue` originals do not
 need a new persisted decoder-error identity. Runtime adds the actual operation and stage. Values'
-`ObjectSeed` retains checked admission causes separately from wire errors, and private Runtime
-seeds construct the existing payload types directly. Journal retains canonical/JSON causes while
+checked Object Deserialize and Runtime's derived record decoding retain parser category, location
+and reason for malformed stored data. Nested constructor ancestry and size fields are explicitly
+outside that route's contract; direct construction and postdecode slot errors remain structured. Journal retains canonical/JSON causes while
 owning only its exact opaque envelope.
 
 A failed failure-encoding task leaves the original in its async owner's custody. Recording failure

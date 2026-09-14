@@ -164,7 +164,7 @@ fn current_payload_alternatives_roundtrip_through_canonical_json() {
         let wire = PlainCanonicalJsonBytes::from_json_str(&serde_json::to_string(&commit).unwrap())
             .unwrap();
         let mut decoder = serde_json::Deserializer::from_slice(wire.as_bytes());
-        let decoded = RunCommitSeed.deserialize(&mut decoder).unwrap().unwrap();
+        let decoded = RunCommit::deserialize(&mut decoder).unwrap();
         decoder.end().unwrap();
         assert!(decoded == commit);
         assert_eq!(
@@ -182,32 +182,50 @@ fn phase_wire_rejects_unknown_or_multiple_variants_and_out_of_range_restart() {
         serde_json::to_string(&object).unwrap()
     );
     for wire in [r#"{"unknown":null}"#, multiple.as_str()] {
-        assert!(PhaseSeed
-            .deserialize(&mut serde_json::Deserializer::from_str(wire))
-            .is_err());
+        assert!(Phase::deserialize(&mut serde_json::Deserializer::from_str(wire)).is_err());
     }
     assert!(serde_json::from_str::<RecoveryRequest>(r#"{"restart":65536}"#).is_err());
 }
 
 #[test]
-fn checkpoint_native_failure_survives_discarding_the_remaining_array() {
+fn checkpoint_rejects_invalid_nested_object_with_parser_reason() {
     let object = Object::from_value(&NoParams).unwrap();
     let wire = format!(
-        r#"[{{"input":{{"canonical":true,"value_ref":{}}},"position":0}},{{"unknown":true}}]"#,
+        r#"[{{"input":{{"canonical":true,"value_ref":{}}},"position":0}}]"#,
         serde_json::to_string(object.value_ref()).unwrap()
     );
-    let mut decoder = serde_json::Deserializer::from_str(&wire);
-    let cause = CheckpointsSeed
-        .deserialize(&mut decoder)
-        .unwrap()
+    let error = serde_json::from_str::<Vec<Checkpoint>>(&wire)
         .err()
         .unwrap();
-    decoder.end().unwrap();
-    assert!(matches!(
-        cause.downcast_ref::<mfm_values::ValueError>(),
-        Some(mfm_values::ValueError::ArtifactTypeMismatch {
-            field: "content_digest",
-            ..
-        })
-    ));
+    assert_eq!(error.classify(), serde_json::error::Category::Data);
+    assert!(error.to_string().contains("content_digest"));
+    assert_eq!(error.line(), 1);
+    assert!(error.column() > 0);
+}
+
+#[test]
+fn current_record_accepts_serde_sequences_but_rejects_duplicate_and_unknown_fields() {
+    let object = Object::from_value(&NoParams).unwrap();
+    let position = ExecutionPosition {
+        state: StatePosition::new(0).unwrap(),
+        visit: VisitId::new(0),
+    };
+    let input = serde_json::to_string(&object).unwrap();
+    let position = serde_json::to_string(&position).unwrap();
+    let sequence = format!("[{position},{input}]");
+    let call = serde_json::from_str::<Call>(&sequence).unwrap();
+    assert_eq!(call.input, object);
+    for wire in [
+        format!(r#"{{"position":{position},"input":{input},"input":{input}}}"#),
+        format!(r#"{{"position":{position},"input":{input},"unknown":null}}"#),
+        format!("{sequence} null"),
+    ] {
+        assert!(serde_json::from_str::<Call>(&wire).is_err());
+    }
+    let record = format!(
+        r#"[{},[{{"runnable":{sequence}}},[],[],null],{{"admitted":{{"program":{input},"initial":{input}}}}}]"#,
+        serde_json::to_string(object.value_ref()).unwrap(),
+    );
+    let decoded = serde_json::from_str::<RunCommit>(&record).unwrap();
+    assert!(matches!(decoded.state.phase, Phase::Runnable(_)));
 }

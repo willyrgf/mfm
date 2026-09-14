@@ -1,6 +1,5 @@
 use super::*;
 use mfm_values::{MfmValue, Object};
-use serde::de::DeserializeSeed;
 
 type BalanceInput = mfm_evm::EvmBalanceContext<mfm_portfolio::PortfolioContinuation>;
 
@@ -30,10 +29,8 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
     let loaded = backend.load_run(&run, None).await.unwrap().unwrap();
     let frame = mfm_journal::decode_frame(loaded.latest()).unwrap();
     let commit: serde_json::Value = serde_json::from_slice(frame.payload().as_bytes()).unwrap();
-    let original = mfm_values::ObjectSeed
-        .deserialize(commit["state"]["phase"]["runnable"]["input"].clone())
-        .unwrap()
-        .unwrap();
+    let original: Object =
+        serde_json::from_value(commit["state"]["phase"]["runnable"]["input"].clone()).unwrap();
     let mut input: serde_json::Value = serde_json::from_slice(original.canonical_bytes()).unwrap();
     let ordinary: BalanceInput = serde_json::from_slice(original.canonical_bytes()).unwrap();
     assert_eq!(
@@ -41,10 +38,13 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
         serde_json::to_value(original.decode::<BalanceInput>().unwrap()).unwrap()
     );
     let calls_before = provider.calls.load(Ordering::SeqCst);
-    for (correlation, stale_digest) in [
-        (String::new(), false),
-        ("a".repeat(257), false),
-        ("changed".into(), true),
+    for (correlation, mutation) in [
+        (String::new(), 0),
+        ("a".repeat(257), 0),
+        ("changed".into(), 1),
+        ("malformed".into(), 2),
+        ("oversized".into(), 3),
+        ("wrong-slot".into(), 4),
     ] {
         input["metadata"]["correlation"] = serde_json::json!(correlation);
         let canonical =
@@ -62,7 +62,7 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
         object
             .admit(&BalanceInput::schema_descriptor().unwrap())
             .unwrap();
-        let projected = if stale_digest {
+        let projected = if mutation != 0 {
             None
         } else {
             assert!(serde_json::from_slice::<BalanceInput>(object.canonical_bytes()).is_err());
@@ -83,14 +83,28 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
         };
         let mut current = commit.clone();
         let mut replacement = serde_json::to_value(&object).unwrap();
-        if stale_digest {
-            replacement["value_ref"] = serde_json::to_value(original.value_ref()).unwrap();
+        if mutation != 0 {
+            match mutation {
+                1 => replacement["value_ref"] = serde_json::to_value(original.value_ref()).unwrap(),
+                2 => replacement["value_ref"] = serde_json::json!("malformed-reference"),
+                3 => replacement["canonical"] = serde_json::json!("a".repeat(33_554_431)),
+                4 => {
+                    replacement =
+                        serde_json::to_value(Object::from_value(&mfm_program::NoParams).unwrap())
+                            .unwrap()
+                }
+                _ => unreachable!(),
+            }
         }
-        replace_object(
-            &mut current,
-            &serde_json::to_value(&original).unwrap(),
-            &replacement,
-        );
+        if mutation != 0 {
+            current["state"]["phase"]["runnable"]["input"] = replacement;
+        } else {
+            replace_object(
+                &mut current,
+                &serde_json::to_value(&original).unwrap(),
+                &replacement,
+            );
+        }
         let payload =
             PlainCanonicalJsonBytes::from_json_str(&serde_json::to_string(&current).unwrap())
                 .unwrap();
@@ -130,7 +144,7 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
         .unwrap();
         let fixture_app =
             Application::from_parts(composed, Arc::new(MemoryConfigRepository::default()));
-        if stale_digest {
+        if mutation != 0 {
             let failure = fixture_app.read_run(&run).await.err().unwrap();
             assert_eq!(failure.code(), "internal");
             let report = serde_json::to_value(
@@ -139,10 +153,29 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
             .unwrap();
             let native = &report["invocation"]["cause"]["native"];
             assert_eq!(native["operation"], "restore");
-            assert_eq!(native["stage"], "decode");
-            let mismatch = &native["cause"]["artifact_type_mismatch"];
-            assert_eq!(mismatch["field"], "content_digest");
-            assert_ne!(mismatch["expected"], mismatch["actual"]);
+            if mutation == 4 {
+                assert_eq!(native["stage"], "execute");
+                let identity = &native["cause"]["identity"];
+                assert_ne!(identity["expected"], identity["actual"]);
+            } else {
+                assert_eq!(native["stage"], "decode");
+                assert_eq!(native["cause"]["category"], "data");
+                let reason = native["cause"]["message"].as_str().unwrap();
+                assert!(!reason.is_empty());
+                if mutation == 1 {
+                    assert!(reason.contains("content_digest"));
+                }
+                if mutation == 3 {
+                    assert!(reason.contains("33554433"));
+                }
+                assert!(native["cause"]["line"].as_u64().unwrap() > 0);
+                assert!(native["cause"]["column"].as_u64().unwrap() > 0);
+            }
+            assert!(report["invocation"]["size_limit"].is_null());
+            assert!(matches!(
+                failure.request_error(),
+                Some(mfm_app::RequestError::Internal)
+            ));
             assert_eq!(provider.calls.load(Ordering::SeqCst), calls_before);
             continue;
         }

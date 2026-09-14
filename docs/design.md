@@ -115,9 +115,17 @@ opaque canonical payload. Its recursive head is SHA-256 over exact frame bytes. 
 payload and phase/fact relationships; Values owns each Object's exact value ref and canonical bytes.
 Objects carry neither duplicated contract refs nor native caches. Public contract refs are derived
 when needed. Frames have no object table, back-reference resolver, or Journal lifecycle sum.
-Values' `ObjectSeed` separates native checked admission failures from Serde wire failures.
-Runtime seeds construct its existing payload types directly and retain admission causes under
-the restore/decode operation and stage, without a second wire model or decoder-error identity.
+Values implements checked `Object::Deserialize`; Runtime derives decoding on its current payload
+and requires complete input consumption. Object decoding rejects invalid checked identities,
+canonical bytes, hashes and bounds before returning an Object. Enclosing records reject unknown
+or duplicate fields and unknown variants, while accepting ordinary Serde structural forms,
+including supported sequence forms. No record re-encoding comparison or decoder seeds are needed.
+Stored-data rejection reports restore/decode with parser category, available line/column and the
+rejection reason. Nested constructor ancestry, structured expected/actual identities and size
+facts are outside this decoding contract; oversized nested Objects remain internal errors (500),
+not typed size failures (422). Subsequent slot admission and direct typed construction keep their
+structured identity/size diagnostics. Declared execution originals and selected native constructor
+hooks retain their separate causal contracts.
 
 Store loads one mechanical snapshot containing the head, admission row, latest row, and optionally
 one requested candidate-sequence row. Identical selected rows share ownership. PostgreSQL uses one

@@ -138,3 +138,65 @@ async fn failed_incomplete_encoding_yields_retained_native_body_error_without_js
     );
     assert_eq!(retained.cause().downcast_ref::<Cause>().unwrap().code, 6);
 }
+
+#[tokio::test]
+async fn stored_object_rejection_is_internal_while_direct_size_is_unprocessable() {
+    let reference = mfm_ids::ContentRef::new(
+        mfm_ids::SchemaId::new(
+            "mfm-test",
+            "1",
+            mfm_ids::DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([1; 32]),
+        )
+        .unwrap(),
+        mfm_canonical::raw_content_digest(b"null"),
+    )
+    .unwrap();
+    let wire = format!(
+        r#"{{"value_ref":{},"canonical":"{}"}}"#,
+        serde_json::to_string(&reference).unwrap(),
+        "a".repeat(33_554_431),
+    );
+    let parser = serde_json::from_str::<mfm_values::Object>(&wire).unwrap_err();
+    let failure = RunRequestError::Invocation(InvocationFailure::Execution {
+        run_id: run_id(),
+        last_observed: None,
+        error: RuntimeError::Native {
+            operation: mfm_runtime::Operation::Restore,
+            stage: mfm_runtime::Stage::Decode,
+            cause: NativeCause::from_error(mfm_canonical::JsonError::new(parser)),
+        },
+    });
+    let response = error(failure);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(report["code"], "internal");
+    assert!(report["invocation"]["size_limit"].is_null());
+    let diagnostic = &report["invocation"]["cause"]["native"];
+    assert_eq!(diagnostic["operation"], "restore");
+    assert_eq!(diagnostic["stage"], "decode");
+    assert_eq!(diagnostic["cause"]["category"], "data");
+    assert!(diagnostic["cause"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("33554433"));
+
+    let canonical = serde_json::to_vec(&"a".repeat(33_554_431)).unwrap();
+    let size = mfm_values::Object::from_canonical(reference, &canonical).unwrap_err();
+    let failure = RunRequestError::Invocation(InvocationFailure::Execution {
+        run_id: run_id(),
+        last_observed: None,
+        error: RuntimeError::Native {
+            operation: mfm_runtime::Operation::Restore,
+            stage: mfm_runtime::Stage::Execute,
+            cause: NativeCause::from_error(size),
+        },
+    });
+    let response = error(failure);
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(report["invocation"]["size_limit"]["actual"], 33_554_433);
+    assert_eq!(report["invocation"]["size_limit"]["limit"], 33_554_432);
+}

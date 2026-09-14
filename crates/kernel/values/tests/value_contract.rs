@@ -108,9 +108,8 @@ fn rejected_original_projection_keeps_native_custody_without_bypassing_secret_po
 }
 
 #[test]
-fn object_seed_separates_native_admission_from_wire_errors() {
-    use mfm_values::{Object, ObjectSeed};
-    use serde::de::DeserializeSeed;
+fn object_deserialize_checks_admission_and_reports_parser_errors() {
+    use mfm_values::Object;
 
     let object = Object::from_value(&ExactValue {
         label: "public".into(),
@@ -118,42 +117,35 @@ fn object_seed_separates_native_admission_from_wire_errors() {
     })
     .unwrap();
     let reference = serde_json::to_string(object.value_ref()).unwrap();
-    let decode = |wire: &str| {
-        let mut deserializer = serde_json::Deserializer::from_str(wire);
-        let result = ObjectSeed.deserialize(&mut deserializer)?;
-        deserializer.end()?;
-        Ok::<_, serde_json::Error>(result)
-    };
+    let decode = |wire: &str| serde_json::from_str::<Object>(wire);
     let roundtrip = serde_json::to_string(&object).unwrap();
-    assert_eq!(decode(&roundtrip).unwrap().unwrap(), object);
+    assert_eq!(decode(&roundtrip).unwrap(), object);
+    let sequence = format!(r#"[{reference},{{"label":"public","value":7}}]"#);
+    assert_eq!(decode(&sequence).unwrap(), object);
     let stale =
         format!(r#"{{"value_ref":{reference},"canonical":{{"label":"public","value":8}}}}"#);
-    let cause = decode(&stale).unwrap().unwrap_err();
-    assert!(matches!(
-        cause.downcast_ref::<ValueError>(),
-        Some(ValueError::ArtifactTypeMismatch {
-            field: "content_digest",
-            ..
-        })
-    ));
+    let error = decode(&stale).unwrap_err();
+    assert_eq!(error.classify(), serde_json::error::Category::Data);
+    assert!(error.to_string().contains("content_digest"));
     let noncanonical =
         format!(r#"{{"value_ref":{reference},"canonical":{{"value":7,"label":"public"}}}}"#);
-    let cause = decode(&noncanonical).unwrap().unwrap_err();
-    assert!(matches!(
-        cause.downcast_ref::<ValueError>(),
-        Some(ValueError::Canonical(_))
-    ));
+    assert_eq!(
+        decode(&noncanonical).unwrap_err().classify(),
+        serde_json::error::Category::Data
+    );
 
     for wire in [
         format!(r#"{{"value_ref":{reference}}}"#),
         format!(r#"{{"value_ref":{reference},"canonical":null,"canonical":null}}"#),
         format!(r#"{{"value_ref":{reference},"canonical":null,"unknown":null}}"#),
+        r#"{"value_ref":"invalid","canonical":null}"#.into(),
     ] {
         assert_eq!(
             decode(&wire).unwrap_err().classify(),
             serde_json::error::Category::Data
         );
     }
+    assert!(decode(&format!("{roundtrip} null")).is_err());
     let malformed = format!(r#"{{"value_ref":{reference},"canonical":[}}"#);
     let error = decode(&malformed).unwrap_err();
     assert_eq!(error.classify(), serde_json::error::Category::Syntax);
@@ -164,10 +156,8 @@ fn object_seed_separates_native_admission_from_wire_errors() {
         r#"{{"value_ref":{reference},"canonical":"{}"}}"#,
         "a".repeat(33_554_431)
     );
-    let cause = decode(&oversized).unwrap().unwrap_err();
-    let Some(ValueError::SizeLimit(size)) = cause.downcast_ref::<ValueError>() else {
-        panic!("expected native measured size rejection");
-    };
-    assert_eq!(size.actual(), 33_554_433);
-    assert_eq!(size.limit(), 33_554_432);
+    let error = decode(&oversized).unwrap_err();
+    assert_eq!(error.classify(), serde_json::error::Category::Data);
+    assert!(error.to_string().contains("33554433"));
+    assert!(error.to_string().contains("33554432"));
 }

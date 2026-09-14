@@ -132,3 +132,9 @@ failure. There is no further JSON fallback. The handler establishes preparation 
 neither returned status nor a prepared body proves socket completion or peer receipt. The direct
 `tokio-stream` dependency adapts this terminal native failure into Axum's body error channel without
 an additional error endpoint or a custom streaming protocol.
+
+Malformed stored framework Objects are reported as `internal`, with restore/decode parser category,
+available line/column and rejection reason. This includes nested Object-size rejection: no structured
+size violation is inferred from parser text. CLI exits 2 and REST returns 500. Direct typed size
+failures retain their structured fields and REST 422 treatment; postdecode slot mismatches retain
+identity fields. JSON diagnostics preserve dependency-supplied text without adding secret inputs.

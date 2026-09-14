@@ -95,6 +95,14 @@ are projections of the retained error; none is a substitute for it.
   candidate or underlying outcome was committed. Do not recursively try to audit a failed Store
   through that same Store or silently fall back to plaintext logs.
 
+Malformed persisted framework data has a deliberately narrower decoding contract: preserve parser
+category, available location and rejection reason. Ordinary Serde conversion need not retain nested
+constructor ancestry or structured size facts. This exception does not apply to direct typed
+construction, postdecode slot admission, declared execution originals or selected native hooks.
+JSON parser/serializer diagnostics retain dependency-supplied text. This trusted text is not a
+certification that dependencies cannot disclose sensitive content; MFM must not deliberately append
+its own secrets, full requests or connection objects as diagnostic context.
+
 For each changed adapter, tests must inject distinguishable nested causes and assert retained
 layers/fields, unchanged classification semantics where applicable, hot/cold audit preservation,
 and secret exclusion. Exercise retention bounds and audit-write failure at the affected boundary.

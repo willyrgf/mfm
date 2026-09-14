@@ -53,7 +53,11 @@ Journal's privately constructed `EncodedRunFrame` proves exact canonical envelop
 not a lifecycle or complete-history qualification. Runtime owns `RunCommit`, its complete `RunState`,
 and operation facts. Values Object owns the exact value ref and canonical bytes. Store owns the
 head and bounded selected rows in `LoadedRun`; it does not decode Program or reconstruct state.
-Runtime validates selected rows and current facts without folding earlier frames. Every physical
+Runtime validates selected rows and current facts without folding earlier frames. Checked Object Deserialize and derived Runtime decoding own stored-payload rejection, with complete
+input consumption. Stored nested constructor rejection reports parser category/location/reason,
+without structured nested ancestry or size facts. Direct construction and postdecode slot admission
+retain their concrete fields. Ordinary Serde structural forms are accepted; no parallel decoder
+grammar or re-encoding comparison exists. Every physical
 append still enforces exact predecessor, sequence and all-or-nothing immutable insertion.
 
 Concrete storage backends may implement both `Store` and the separate `RunIndex`, but Runtime

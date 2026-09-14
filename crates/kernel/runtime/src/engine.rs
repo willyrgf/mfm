@@ -326,27 +326,15 @@ fn restore_frames(
     latest_frame: EncodedRunFrame,
 ) -> Result<Driver> {
     let decode_commit = |frame: &EncodedRunFrame| -> Result<Arc<RunCommit>> {
-        use serde::de::DeserializeSeed;
-        let mut decoder = serde_json::Deserializer::from_slice(frame.payload().as_bytes());
-        let commit = crate::state::RunCommitSeed
-            .deserialize(&mut decoder)
+        serde_json::from_slice::<RunCommit>(frame.payload().as_bytes())
+            .map(Arc::new)
             .map_err(|source| {
                 native(
                     Operation::Restore,
                     Stage::Decode,
                     mfm_canonical::JsonError::new(source),
                 )
-            })?;
-        decoder.end().map_err(|source| {
-            native(
-                Operation::Restore,
-                Stage::Decode,
-                mfm_canonical::JsonError::new(source),
-            )
-        })?;
-        commit
-            .map(Arc::new)
-            .map_err(|cause| RuntimeError::at(Operation::Restore, Stage::Decode, cause))
+            })
     };
     let admission = decode_commit(&admission_frame)?;
     let OperationFacts::Admitted { program, .. } = &admission.facts else {
