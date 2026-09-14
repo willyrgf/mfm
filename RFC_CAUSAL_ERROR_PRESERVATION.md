@@ -57,7 +57,13 @@ invocation diagnostic for the actual encoding cause/size, known operation/contra
 explicit unavailable original detail/identity. No dedicated recording variant or renderer branch
 is needed for this case. Detail-construction failure follows Part 1's fixed invocation-marker contract.
 It requires no opaque owner, serializer retry or producer fallback payload. Successful values
-acquire no custody stash. Part 2 must not reintroduce NativeCause, `Box<dyn Error>` or a custom error protocol.
+acquire no custody stash. Reuse Part 1 section 9.4's RecordingFailure directly: BeforeAppend holds
+an admitted Failure and preparation diagnostic; Store/NotInserted hold an optional original and
+exact submitted candidate. Pre-append failure without an admitted original uses the ordinary
+internal diagnostic. Retain no unsent candidate bytes/identity and no nested AppendFailure wrapper.
+Only NotInserted probes; preserve its checked finding independently of a later latest-state
+decode/projection failure. Store errors return immediately without a probe. Part 2 must not
+reintroduce NativeCause, `Box<dyn Error>` or a custom error protocol.
 
 The diagnostic trust boundary is owned by
 [Part 1 section 4](RFC_AUDITABILITY_ERROR_CHAIN.md#4-error-preservation-and-the-diagnostic-trust-boundary).
@@ -230,9 +236,10 @@ row starts with unresolved architecture. At this revision: **R0 is pending Part 
 ### R1: preserve selected recording causes
 
 Complete O4's required run Store conversions and shared database extraction once, reusing Part 1
-recording/reporting and admitted-original ownership. Supply size facts at the concrete owner;
-do not add a new source-discovery or erased-cause adapter to Store consumers. Cover failed execution plus failed append, success
-plus failed append, actual disposition and independent cause chains. Do not repeat the core load
+recording/reporting and admitted-original ownership, including Part 1 section 9.4's direct Store
+variant without probe fields. Supply size facts at the concrete owner; do not add a new
+source-discovery or erased-cause adapter to Store consumers. Cover failed execution plus failed
+append, success plus failed append, actual disposition and independent cause chains. Do not repeat the core load
 redesign or migrate configuration/index/startup errors to make the test pass.
 
 ### R2: preserve execution authority and signing causes
@@ -283,7 +290,7 @@ is not performed again.
 | B3 | O1/O2 operational errors, including required O3/O6 causes, survive complete admission and cold observation. Internal execution/recording failures use invocation reports without a fault append. Command/EffectId authority is unchanged. |
 | B4 | Selected dependency messages/data follow the inherited trusted-text profile without credential scanning or source certification. MFM does not deliberately attach its own secret inputs. Whole-owner and terminal-report admission preserves floats/actual-limit rejection and ordinary-input policy; no diagnostic quota, truncation or omission ledger returns. |
 | B5 | Capture occurs once at the selected producer. Receivers forward the same Values DiagnosticEvidence/InvocationDiagnostic data or admitted Object and primary size facts without downcasting or recapture. Compare required facts across admission/restoration/reporting. No mfm-diagnostics, global source/fact vocabulary, capture factory, second value eraser, NativeCause, seed/projector/custody tree, new size hierarchy, per-owner reporting schema or generic completeness checker remains. |
-| B6 | An admitted execution failure plus recording failure retains two independent causes and actual candidate/acknowledgement. Failed initial error encoding uses Part 1's ordinary internal diagnostic with known context, encoding cause and explicit unavailable-original detail under its fixed invocation-marker contract; no special Runtime variant, opaque custody or fallback payload. Success plus recording failure invents no original error. Reports preserve actual delivery stage; no second audit sink, append retry or recursive reporting. |
+| B6 | An admitted execution failure plus recording failure retains two independent causes under Part 1 section 9.4: BeforeAppend requires an admitted original, while direct Store/NotInserted variants retain the exact submitted candidate and actual acknowledgement. No unsent-candidate custody or AppendFailure wrapper returns. Failed initial error encoding uses Part 1's ordinary internal diagnostic with known context, encoding cause and explicit unavailable-original detail under its fixed invocation-marker contract; no special Runtime variant, opaque custody or fallback payload. Success plus recording failure invents no original error. Preserve immediate Store-error return and independent NotInserted finding/reload cause. Reports preserve actual delivery stage; no second audit sink, append retry or recursive reporting. |
 | B7 | Cutovers delete superseded paths/APIs/tests/docs while preserving meaningful behavior coverage. Actual aggregate complexity and production/test/doc/file/API costs are reviewed against both baselines; no compression, hypothetical deletion credit or duplicate native representation hides growth. |
 | B8 | All frozen cases and relevant retained Part 1 behavior pass required checks and final CI. Completion names the accepted commit, evidence and limits; it does not claim platform-wide provenance or secret-free certification of upstream diagnostics. |
 
