@@ -1,7 +1,8 @@
 # Adapter error-chain audit
 
 This inventory follows the current-state auditability cutover. It distinguishes the completed
-core boundaries below from source-owner gaps still assigned to RFC section 12, step 4. It does
+Part 1 boundaries below from remaining source-owner gaps. Only the producers explicitly selected
+in [Part 2](../RFC_CAUSAL_ERROR_PRESERVATION.md) belong to its separate implementation scope. This inventory does
 not claim that preserving an error received by Runtime repairs a cause discarded upstream.
 
 ## Result
@@ -12,8 +13,9 @@ retain reviewed causes through Application and the run transport surfaces. Journ
 frames and Store loads admission/latest/optional-probe snapshots; neither reconstructs run semantics.
 
 The repository still has first-loss gaps in PostgreSQL, signer/keystore, upstream transaction
-custody, memory/task, bootstrap, and non-run transport paths. Their concrete owner closure remains
-required. Core acceptance and its limits are recorded in the
+custody, memory/task, bootstrap, and non-run transport paths. These are not Part 1 completion
+conditions; bootstrap and non-run transport enrichment are outside both RFCs. Core acceptance
+and its limits are recorded in the
 [core evidence](measurements/auditability-core-acceptance.md).
 
 The requirements are in [AGENTS.md](../AGENTS.md) and
@@ -287,59 +289,23 @@ funded readiness, and lost acknowledgement never authorizes blind resubmission.
   protocol meanings. Do not indiscriminately convert these into failures to increase log volume.
 - Public redacted formatting is appropriate; silent loss of the audit cause behind it is the gap.
 
-## Minimal implementation direction and deletion scope
+## Deferred work and verification
 
-Keep one causal audit representation per actual error boundary, with typed nested sources where
-they remove ambiguity. Add reviewed fields to existing error contracts, rather than adding a
-parallel classifier, generic exception registry, logging framework or `serde_json::Value` bag.
-The source owner performs the safe conversion once; outer layers add their operation context
-without replacing the cause. Literal raw bytes, error.source() chains and structured RPC error
-objects must not be treated as interchangeable evidence.
+The remaining inventory identifies first-loss sites, not authorization for a repository-wide
+migration. Part 1 implements only its E1–E6/shared-data recipes; the separately refined Part 2
+selects additional producers. Follow those RFC contracts and current code-quality policy rather
+than the superseded generic remediation directions from this audit. In particular, selected
+upstream diagnostic text follows the explicit trust boundary, not a generic sanitizer or omission
+ledger. Expected absence and Pending remain protocol outcomes, not invented errors.
 
-Complete boundary cutovers should replace/delete:
-
-1. RPC source-loss paths have been replaced as recorded above. Complete the remaining typed
-   internal adapter/Runtime cutover without changing the retained provider classifications.
-2. SQLx-to-unit helpers, generic `unavailable(_: impl Sized)`/`internal(_: impl Sized)` source sinks
-   and repeated category-only translations. Preserve storage ports and commit semantics.
-3. Signer/keystore-to-unit conversions through the full signer-to-transaction chain, with explicit
-   safe categories instead of retaining secret-bearing channel objects.
-4. Application/startup and binary translations that replace the causal error instead of merely
-   rendering it. Retain the shared transport surface; do not add a second public diagnostics API
-   without a demonstrated consumer need.
-
-Change exact schema/implementation identities when error contracts or classification semantics
-change, update all consumers and docs in each coherent cutover, and reject superseded formats.
-Do not add migrations, compatibility wrappers, or blanket suppression exceptions. Report LOC
-removed from lossy plumbing separately from necessary audit additions. The core cutover changes the current persistence and reporting contracts; it retains no previous
-wire reader or historical qualification API.
-
-## Required evidence for remediation
-
-- Inject distinct RPC errors with equal classifications; verify their original codes and reviewed
-  details remain distinguishable in hot and cold records.
-- Distinguish HTTP status, send/body timeout, parser category/location and response-size failures.
-  Verify method/stage survives transaction wrapping.
-- Inject SQLx connection/query/decode/COMMIT failures; verify cause preservation and unchanged
-  Unavailable/Indeterminate behavior, including an audit sink failure.
-- Exercise signer channel closure, owner failure and cryptographic rejection separately. Use
-  synthetic secret sentinels to prove exclusion without printing real secrets or source payloads.
-- Verify public codes remain reviewed projections while typed invocation/audit causes remain
-  available. Assert explicit omission metadata for any withheld or bounded evidence.
-- Verify admitted sizes, exact schema identity, append ambiguity, concurrent candidates and
-  cancellation. Never acknowledge an error record that did not commit.
-- Audit every mapper touched by a boundary cutover. A grep match alone is not a defect, and a
-  successful grep for `source` is not proof of end-to-end provenance.
-
-Use [build and verification](build-and-verification.md) for scope-selected tests. Runtime/domain
-or persistence changes require focused consuming tests and one final CI on the exact candidate;
-keystore changes require strengthened tests explicitly. The core evidence records focused and
-managed checks; final CI remains required on the complete owner implementation.
+Use [build and verification](build-and-verification.md) for scope-selected tests. The
+[Part 1 acceptance packet](measurements/auditability-core-acceptance.md) records its corrected core,
+focused evidence, G1 disposition and final CI. Future owner changes require their own affected
+verification; they neither block nor supply deletion credit for Part 1.
 
 ## Material uncertainties
 
-| Assumption | Why uncertain | Consequence if wrong | Validation |
-| --- | --- | --- | --- |
-| Whole stack means complete available causal provenance, with explicit accounting for withheld data | Arbitrary provider/SQL messages and channel error objects can contain secrets | Lossless raw capture requires a restricted custody contract beyond the secret-free Journal | Set concrete evidence acceptance cases before implementing raw-message retention; do not equate redaction with losslessness |
-| Client APIs expose enough structured source detail | A library may discard evidence before MFM receives an error | Capturing Error::source() alone still misses the real provider error | Inspect each concrete client capture point and inject nested/malformed protocol failures |
-| Acknowledged operational outcomes remain the run-audit boundary | Store/bootstrap failure or process death can prevent the audit write itself | Independent durable failure capture or physical-attempt auditing needs additional authority and protocol | Define those guarantees separately; preserve causal invocation errors and never claim failed persistence succeeded |
+None for the Part 1 boundary. Remaining upstream evidence availability and producer designs belong
+to the separate Part 2 refinement gate. A dependency may discard details before MFM receives them;
+its selected owner must establish what is actually available. No inventory entry establishes
+post-crash delivery or proves that a failed persistence operation was durably audited.

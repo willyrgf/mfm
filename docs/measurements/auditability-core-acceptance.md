@@ -1,8 +1,8 @@
 # Current-state core acceptance evidence
 
 Current Part 1 correction packet, 2026-09-14. K1 is `8d783557`, K2 is `a1b8d088`; K3 is `5f6f3048`, K4 is `e94e6d4c`. Shipping measurements below use that exact production
-candidate. Independent G1 acceptance and F1 final CI remain due.
-This packet does not claim Part 1 acceptance. Part 2 enrichment is excluded.
+candidate. Independent G1 acceptance is recorded below; F1 final CI remains due.
+This packet does not yet claim final verification. Part 2 enrichment is excluded.
 
 ## Current design and removals
 
@@ -154,7 +154,8 @@ The exact K1–K4 source candidate `e94e6d4c` has no untracked implementation ad
 | `5de114d0` | 2,393 / 3,915 (47) | 1,427 / 1,999 (40) | 1,663 / 829 (21) | 5 / 50 (9) | 5,488 / 6,793 (117) |
 | `7f71beef` | 5,842 / 6,365 (65) | 5,218 / 3,107 (49) | 3,314 / 2,309 (30) | 204 / 115 (20) | 14,578 / 11,896 (164) |
 
-Current evidence/document consolidation is counted separately in its commit. The cumulative +185
+Evidence/document consolidation at `b5bde7df` adds 172 and deletes 253 physical lines across
+four files, with no production-code change. F1 documentation reconciliation is likewise separate. The cumulative +185
 production lines (0.7%) includes all replacements; no future Part 2 deletion offsets it. Compared
 with the original, Journal loses lifecycle/fold responsibilities, Program loses capacity prediction,
 and Runtime gains required continuation/recording/settlement phases while deleting historical
@@ -191,8 +192,24 @@ error and reporting mechanisms above are removed. G1 must judge aggregate comple
 | C15 | Values diagnostic tests admit trusted text in whole owners while ordinary text, floats and actual bounds remain checked. EVM provider tests restore exact owner fields and classification; source recipes preserve ordered messages and stop before cyclic duplicates. No shared capture framework remains. |
 | C17 | App, CLI and REST tests retain primary status and exact candidate/acknowledgement/head facts. CLI reuses exact encoded JSON or text after stdout failure; unavailable original reporting and final stderr failure terminate without retry. REST evidence ends at response-body handoff. |
 
+## G1 disposition and final verification
+
+The dedicated architect independently reviewed exact candidate
+`b5bde7df74b3301795c393f1c44d011d4d57ddc7` and returned **ACCEPTED** on 2026-09-14. The review
+inspected both baseline diffs and actual production paths, reproduced all three production LOC
+totals, checked CSV arithmetic, and confirmed the K1–K4 physical removals and retained guarantees.
+It accepts cumulative complexity improvement with +185 original-baseline production lines; it
+uses no future Part 2 credit. No implementation failure or required deletion blocks acceptance.
+The one F1 documentation correction, distinguishing deferred/excluded audit inventory from Part 1,
+is applied with this record. The source candidate remains unchanged after G1.
+
+C18's design/cost gate is satisfied by that independent disposition. F1's final command is
+`nix run .#ci`; its result is pending and must pass before marking the goal complete. It composes
+format, SQLx check, Clippy, workspace compilation/tests, rustdoc, managed PostgreSQL, client e2e and
+Effect e2e. Earlier focused results do not substitute for this exact-candidate integration gate.
+
 ## Material uncertainties
 
-No ownership/design question remains open within the specified cutover. Aggregate simplification
-requires independent G1 judgement; final integration requires F1 CI. Assuming those gates pass could
-incorrectly close Part 1. Validate this exact source candidate and record their actual dispositions.
+None concerning the reviewed ownership/design. Final managed integration remains unverified until
+F1 CI completes; assuming it passes could incorrectly close Part 1. The accepted information and
+physical-delivery limits remain explicit, and Part 2 is neither required nor authorized here.

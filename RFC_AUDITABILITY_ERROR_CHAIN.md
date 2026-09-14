@@ -1,7 +1,8 @@
 # RFC part 1: current run continuation and persistence
 
-Status: Ready for Part 1 engineer handoff. Implementation acceptance requires K1-K4 evidence,
-G1 review and F1 verification; section 15 records the remaining proofs. Reviewed 2026-09-14.
+Status: K1–K4 implemented. G1 accepted `b5bde7df` on 2026-09-14. F1 final CI is pending.
+The [current acceptance record](docs/measurements/auditability-core-acceptance.md) owns the exact
+commits, E1–E6/C1–C18 evidence, shipping measurements, cost and verification disposition.
 
 Part 1 delivers current continuation/persistence and the invocation error boundary.
 [Part 2](RFC_CAUSAL_ERROR_PRESERVATION.md) addresses selected execution-error producers after
@@ -1975,29 +1976,15 @@ achieved net simplification.
 
 ## 15. Material uncertainties
 
-No core design decision remains open for Part 1 handoff. Section 6.1 fixes Runtime work selection;
-an optional private borrowed helper is ordinary factoring only when it removes actual duplicated
-rules. Sections 9.4 and 9.7 fix concrete error ownership and terminal presentation/termination.
-The assumptions below still require implementation and acceptance evidence. Part 2 retains its
-own refinement gate and pending producer designs.
+None concerning the implemented ownership/design. K1–K4 and G1 resolve the former handoff
+assumptions with actual deletion, consuming regression and shipping measurement evidence in the
+[acceptance record](docs/measurements/auditability-core-acceptance.md). Final managed integration
+remains unverified until F1 CI passes on the candidate; G1 acceptance does not claim that result.
 
-| Assumption | Why uncertain | Consequence if wrong | Validation and response |
-| --- | --- | --- | --- |
-| The unified record removes more mechanism than its dispatch requires | The implementation baseline contains duplicate phase/facts data; the unified production diff is not implemented | A renamed validator could preserve the same complexity | K2 replaces the real core route, deletes the old pair and compares retained behavior, encoded occurrences and actual code. |
-| Ordinary checked decoding removes the seed grammar while preserving required validation | The structural acceptance and diagnostic contracts are settled; the real decoder cutover is not implemented | Invalid values could enter Runtime or obsolete map-only/native-error assertions could recreate decoder machinery | K1 tests accepted Serde forms plus reference/hash/oversize/current-state rejection, direct typed/slot fields, E5 and actual callbacks. No whole-record re-encoding pass. |
-| Shared diagnostic data removes more machinery than its conversions require | The minimal wrapper, trusted-text profile and local source recipes are specified but not implemented | A generic capture factory, duplicate serializer or retained diagnostic framework could erase the simplification | K3 verifies E1-E6 fields and two invocation fallbacks, deletes the diagnostics crate, and measures the full shared-data/owner/report replacement. |
-| Concrete Runtime causes and local terminal ownership cover the existing consumers | Their signatures and workflows are settled but the K3 cutover has not compiled | A consumer could lose primary status/head facts or recreate generic custody | K3 exercises section 9.4's typed nesting and section 9.7's exact encoded-report reuse, unavailable-report case and final-failure termination through CLI/REST. |
-| The new nested field and terminal report share the intended admission policy | PersistedSchema/derive and whole-report integration have not been implemented together | Valid diagnostic text could be rejected by an outer validator, or ordinary input/float checks weakened | Admit and restore the real operational owner and FailureReport with selected messages, compare typed classification and test ordinary-input, float and actual-size rejection. Reuse the existing terminal validator; add no second grammar. |
-| Part 1 alone meets the simplification objective | The final replacement cost and responsibility removals are not implemented or measured | Reduction against the implementation baseline could still leave an unjustifiably larger core overall | G1 reviews actual Part 1 removals, replacements and total cost against both baselines. Unsupported net reduction or complexity improvement keeps Part 1 unaccepted; no credit from future Part 2 deletions. |
-
-Normal loading deliberately trusts past live progression and append-only storage; it does not
-verify historical semantic evolution or older frame links. Internal errors remain outside history.
-The agreed upstream diagnostic trust boundary is distinct from deliberate inclusion of MFM secret
-inputs and from post-crash delivery.
-Concrete owner errors remain the classification input; failed initial encoding explicitly reports
-original detail unavailable, with no opaque native custody. Checked Object at explicit boundaries,
-ordinary Serde record forms with the narrower malformed-storage diagnostic/status contract, no
-diagnostic quotas, one Values-owned diagnostic data type, minimal concrete errors, local Read-input
-reuse, concrete Runtime causes, terminal presentation and deletion-first order are settled.
-These are accepted contracts;
-implementation evidence and aggregate net simplification remain to be delivered.
+The accepted limits remain contractual: normal loading validates current state rather than
+historical semantic evolution; internal failures remain invocation-only; selected dependency
+text follows the upstream trust boundary; failed initial original encoding explicitly reports
+unavailable original detail/identity; malformed stored framework data retains parser category,
+location and reason without reconstructing nested constructor ancestry. These are not claims of
+arbitrary raw preservation, post-crash delivery or future-capacity admission.
+Part 2 remains separate and is not automatically authorized by completing Part 1.
