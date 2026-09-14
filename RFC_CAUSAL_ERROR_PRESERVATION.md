@@ -67,16 +67,26 @@ explicit unavailable original detail/identity. No dedicated recording variant or
 is needed for this case. Detail-construction failure follows Part 1's fixed invocation-marker contract.
 It requires no opaque owner, serializer retry or producer fallback payload. Successful values
 acquire no custody stash. Reuse Part 1 section 9.4's RecordingFailure directly: BeforeAppend holds
-an admitted Failure and preparation diagnostic; Store/NotInserted hold an optional original and
+an admitted Failure and boxed RuntimeError; Store/NotInserted hold an optional original and
 exact submitted candidate. Pre-append failure without an admitted original uses the ordinary
-internal diagnostic. Retain no unsent candidate bytes/identity and no nested AppendFailure wrapper.
+RuntimeError. Retain no unsent candidate bytes/identity and no nested AppendFailure wrapper.
 Only NotInserted probes; preserve its checked finding independently of a later latest-state
-decode/projection failure. A failed probe load uses observation: None and reload_cause: Some in
-that same variant; it does not establish absence. Store errors return immediately without a probe.
+decode/projection failure. Its reload_cause and Projection.cause retain boxed concrete RuntimeError,
+not another diagnostic conversion. A failed probe load uses observation: None and the actual boxed
+Store RuntimeError in reload_cause; it does not establish absence or change the primary 409 category.
+Store errors return immediately without a probe.
 Runtime returns these observed facts through the existing invocation result; clients present them
 without reloading or reconstructing causes. Public-view construction failure retains any known
 acknowledgement under Part 1 section 9.4. Part 2 must not reintroduce NativeCause, `Box<dyn Error>`,
 a custom error protocol or another reporting subsystem.
+
+Inherit Part 1 section 9.7's terminal contracts. App encode_response returns `Box<RawValue>` or concrete
+JsonError; existing emitters own their concrete result locally. The shared borrowed client-error
+presentation includes the diagnostic and exact original JSON when encoding succeeded, or explicitly
+unavailable normal rendering plus known context when it failed. CLI text reuses its formatted
+buffer directly. Permit one final stderr/compact REST presentation; final failure ends with exit 2
+or the existing concrete body-error handoff, preserving primary status and acknowledgement facts.
+No serializer retry, generic terminal owner or new error-output service belongs to Part 2.
 
 The diagnostic trust boundary is owned by
 [Part 1 section 4](RFC_AUDITABILITY_ERROR_CHAIN.md#4-error-preservation-and-the-diagnostic-trust-boundary).
@@ -111,7 +121,7 @@ complete finite plan; do not discover each row's design by recursively following
 
 | Required refinement | Result needed before implementation |
 | --- | --- |
-| Pin the baseline and inherited APIs | Record accepted Part 1 commit and actual Values DiagnosticEvidence/InvocationDiagnostic/SizeViolation, trusted-text profile, Failure/checked Object, concrete owner classification, Store and rendering definitions. Link those owning APIs; do not copy a second schema or reintroduce the deleted diagnostics crate. |
+| Pin the baseline and inherited APIs | Record accepted Part 1 commit and actual Values DiagnosticEvidence/InvocationDiagnostic/SizeViolation, trusted-text profile, Failure/checked Object, concrete owner classification, Store, boxed RuntimeError causes and section 9.7's encoder/terminal definitions. Link those owning APIs; do not copy a second schema or reintroduce the deleted diagnostics crate. |
 | Subtract completed work | Map E1-E6/C1-C18 and Part 1 sections 5.3/9.6 to completed cases. EVM response messages/data_json, exposed native-source fields, CLI output sources and the shared admission profile are already in the core cutover. Inherit E4's ordinary structural decoding and diagnostic/status exception; do not reopen seeds/map-only validation. E5 is not another constructor migration. |
 | Freeze each error path | Name producing failure/function, selected concrete owner error, required cause layers/fields, boundary adaptation, receiving conversions, terminal observation, finite assertions, information limits, reuse and deletions. File lists or “all consumers” alone do not pass. No omission ledger is required. |
 | Finalize the owner design | Specify actual changed variants/signatures and selected fields. The complete declared owner remains typed; facts used by classify() remain typed and any DiagnosticEvidence is nested data. Handlers receive Classification/RecoveryContext. Internal errors use InvocationDiagnostic at their heterogeneous boundary. Existing compatible interfaces need no wrapper or new source/schema/capture framework. |
@@ -275,6 +285,8 @@ InvocationDiagnostic or admitted original data, with no consumer recapture or JS
 Required caller migrations belong in their producing API cutovers, not this final
 step. Reuse Part 1 cases/statuses and add only missing observable boundary coverage. No cross-product
 of every producer and transport, general ingress audit or new successful-result reporting service.
+Retain Part 1's exact encoded-report reuse and final-presentation stopping rules; owner enrichment
+does not reopen terminal ownership or introduce another Runtime-error capture conversion.
 
 ### F2: accept the complete Part 2 implementation
 
