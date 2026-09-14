@@ -703,7 +703,14 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         .unwrap(),
         sender.clone(),
     );
-    let cold_runtime = runtime(&runtime_locator, &rpc_locator, &binding, signer, consumed).await;
+    let cold_runtime = runtime(
+        &runtime_locator,
+        &rpc_locator,
+        &binding,
+        signer.clone(),
+        consumed,
+    )
+    .await;
     let fresh_run = RunId::from_digest(DigestBytes::from_array([0x5b; 32]));
     let fresh_input = WalletContext {
         transaction: fresh_plan.clone(),
@@ -764,4 +771,58 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     );
 
     owner.shutdown().await.expect("keystore shutdown");
+    let signing_run = RunId::from_digest(DigestBytes::from_array([0x5c; 32]));
+    let hot = runtime(
+        &runtime_locator,
+        &rpc_locator,
+        &binding,
+        signer.clone(),
+        Arc::new(AtomicBool::new(true)),
+    )
+    .await;
+    let failed = hot
+        .start(signing_run.clone(), fresh_program, fresh_input)
+        .await;
+    let Err(mfm_runtime::InvocationFailure::RecoveryStopped { observed }) = failed else {
+        panic!("durable closed signer failure")
+    };
+    let RunViewState::EffectPending {
+        latest_failure: Some((original, _)),
+        ..
+    } = observed.state()
+    else {
+        panic!("retained signer original")
+    };
+    let original = original
+        .decode::<mfm_evm::EvmTransactionOperationalError>()
+        .unwrap();
+    assert_eq!(original.classify(), mfm_program::Classification::Retryable);
+    let mfm_evm::EvmTransactionOperationalError::SignerUnavailable { cause } = &original else {
+        panic!("signer owner")
+    };
+    assert_eq!(
+        cause.as_value(),
+        &serde_json::json!({"operation": "sign", "stage": "request_send", "kind": "channel_closed", "message": "channel closed"})
+    );
+    let hot_wire =
+        serde_json::to_value(mfm_app::SerializableRunView::new(&observed).unwrap()).unwrap();
+    assert_eq!(
+        hot_wire["state"]["latest_failure"]["error"]["value"],
+        serde_json::to_value(&original).unwrap()
+    );
+    drop(hot);
+    let cold = runtime(
+        &runtime_locator,
+        &rpc_locator,
+        &binding,
+        signer,
+        Arc::new(AtomicBool::new(true)),
+    )
+    .await;
+    let cold_view = cold.read(&signing_run).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(mfm_app::SerializableRunView::new(&cold_view).unwrap()).unwrap(),
+        hot_wire
+    );
+    assert_eq!(setup_provider.pending_nonce(&sender).await.unwrap(), 4);
 }

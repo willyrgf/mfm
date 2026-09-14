@@ -2315,7 +2315,9 @@ dependencies = [
  "k256",
  "mfm-ids",
  "mfm-signing",
+ "mfm-values",
  "serde",
+ "serde_json",
  "static_assertions",
  "thiserror",
  "tokio",
@@ -2423,6 +2425,7 @@ version = "0.1.0"
 dependencies = [
  "k256",
  "mfm-ids",
+ "mfm-values",
  "serde",
  "static_assertions",
  "thiserror",

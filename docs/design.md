@@ -65,8 +65,9 @@ Transaction operational error v3 retains required diagnostic evidence on Authori
 SignerUnavailable. The provider variant and typed classifications are unchanged. Authority's port
 returns either unavailable evidence or the final internal invocation diagnostic; Live moves these
 through the existing operational/invariant routes. PostgreSQL owns extraction of selected execution
-SQL and retained-fact causes. Existing signer Invalid/Failed values retain their unit kind honestly;
-executing keystore enrichment is the remaining R3 cutover.
+SQL and retained-fact causes. Executing keystore failures carry SignFailed evidence directly through
+the owner reply and into SignerUnavailable. Existing signer Invalid/Failed values retain their unit
+kind honestly; checked primitive constructors remain outside this enrichment.
 
 The v3 error changes the content-addressed capability/State ABIs of Programs using it. Current
 assemblies reject v2 contracts before admission; no old decoder or history rewrite is provided.

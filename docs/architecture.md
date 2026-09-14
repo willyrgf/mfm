@@ -64,7 +64,10 @@ Execution authority preserves unavailable diagnostic data or one final internal 
 PostgreSQL alone extracts SQLx and selected retained-fact causes; Live moves the result into the
 existing operational owner or invariant route. EVM owns the v3 classifiable transaction-error
 payloads and has no SQLx, signing or keystore dependency. AuthorityError has no persistence schema
-or serializer. No new recovery, capture or reporting layer is introduced.
+or serializer. Executing keystore replies carry SigningError directly; the signer port supplies
+SignFailed evidence without a KeystoreError roundtrip. Live moves it into SignerUnavailable.
+Thread-affine custody and channel authority are unchanged. No new recovery, capture or reporting
+layer is introduced.
 
 Store's three physical failure dispositions carry Values-owned diagnostic data. PostgreSQL owns
 one private SQLx extraction recipe at selected run producers; MemoryStore owns its local check,

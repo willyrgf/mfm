@@ -8,7 +8,7 @@ not claim that preserving an error received by Runtime repairs a cause discarded
 Part 1 is accepted at production `87f198a9`, recorded in `0a7543ec`. Part 2 refinement selects
 three remaining cutovers: run Store, execution authority, and executing keystore signing. Its
 sections 2–6 freeze producers, fields and stopping boundaries. The findings and remediation ideas
-below distinguish implemented R1/R2 from the remaining signing gaps; they do not expand those cutovers.
+below distinguish implemented R1–R3 from excluded source-owner gaps; they do not expand those cutovers.
 
 ## Result
 
@@ -17,8 +17,8 @@ interpretation. Native callback, checked Object admission, recording, and report
 retain reviewed causes through Application and the run transport surfaces. Journal seals opaque
 frames and Store loads admission/latest/optional-probe snapshots; neither reconstructs run semantics.
 
-The repository still has first-loss gaps in PostgreSQL, signer/keystore, upstream transaction
-custody, memory/task, bootstrap, and non-run transport paths. These are not Part 1 completion
+The repository still has first-loss gaps in excluded PostgreSQL, keystore startup/import, general
+cryptographic construction, bootstrap, and non-run transport paths. These are not Part 1 completion
 conditions; bootstrap and non-run transport enrichment are outside both RFCs. Core acceptance
 and its limits are recorded in the
 [core evidence](measurements/auditability-core-acceptance.md).
@@ -101,7 +101,7 @@ Wrong local route, chain or capability family returns a native `AdapterFailure` 
 expected/observed binding or subject facts. It stays Internal and prevents provider entry, without
 manufacturing authenticated integrity evidence or a recoverable provider error.
 
-### 3. Transaction adapters preserve provider categories but erase other layers
+### 3. Transaction adapters preserve selected provider, authority and signing causes
 
 Source: [transaction.rs](../crates/live/evm/src/transaction.rs), `reserve_nonce`,
 `prepare_transaction`, `execute_transaction`, `map_provider_error` and `map_authority_error`.
@@ -112,13 +112,13 @@ Source: [transaction.rs](../crates/live/evm/src/transaction.rs), `reserve_nonce`
 - R2 `map_authority_error` moves unavailable evidence into the v3 durable transaction owner and
   forwards internal InvocationDiagnostic unchanged. No receiver recapture or authority serializer remains.
 - Signer Invalid/Failed now enter SignerUnavailable with their actual unit kind and sign/signer
-  context. R3 still needs to preserve executing keystore/channel/primitive causes before that receiver.
+  context. SignFailed evidence moves unchanged from executing keystore/channel/primitive producers.
 - Codec, checked receipt/binding, and reached blocking-task failures now use native `AdapterFailure`
-  with reviewed causes or task outcomes. The upstream executing-signer source losses remain; this
-  local cutover does not recover them or authorize retaining panic payloads.
+  with reviewed causes or task outcomes. Excluded checked primitive APIs can still expose only
+  their unit result; this cutover does not recover earlier layers or authorize panic payloads.
 
-Remediation: preserve nested provider/custody/signer causes with the transaction stage added once
-at this boundary. Keep the same prepared command/EffectId, no renonce or replacement command, and
+Retained contract: preserve selected provider/custody/signer causes with operation context at
+the owning boundary. Keep the same prepared command/EffectId, no renonce or replacement command, and
 the existing operational-versus-invariant distinction. Classification remains independent of the
 diagnostic payload. Avoid a separate generic exception framework for each transaction stage.
 
@@ -187,24 +187,23 @@ before any run or usable Store exists; do not promise their errors already have 
 Replace string-marker routing only as part of a concrete pool/open error cutover that preserves the
 gate contract, not by adding an additional shadow connection registry.
 
-### 8. Keystore/signing loses the causal chain before transaction handling
+### 8. Executing keystore signing retains selected producing causes (R3)
 
-Sources: [keystore/lib.rs](../crates/keystore/src/lib.rs), `KeystoreOwner`,
-`KeystoreSigner::sign`; [signing/lib.rs](../crates/signing/src/lib.rs).
+Sources: [keystore/lib.rs](../crates/keystore/src/lib.rs), `KeystoreSigner::sign` and private
+`Keystore::sign`; [signing/lib.rs](../crates/signing/src/lib.rs).
 
-Thread spawn errors become KeystoreUnavailable; channel closure, response closure, owner failures
-and signing failures are successively reduced to Internal/Unavailable and then SigningFailed.
-The transaction adapter finally converts that to SignerUnavailable. Checked cryptographic
-construction/recovery errors similarly retain only Invalid/Failed.
+Command::Sign replies now carry SigningError directly, deleting the KeystoreError roundtrip.
+SignFailed retains operation sign and distinct request_send/reply_receive channel messages,
+key_lookup/missing_key local facts, or sign_prehash_recoverable/signature_error primitive text.
+The pinned primitive exposes no child source. Checked compact-signature conversion passes its
+concrete result unchanged. Live moves supplied evidence into the durable SignerUnavailable owner.
+The old blanket unavailable-detail serializer is removed; Invalid/Failed remain honest unit kinds.
 
-Remediation: preserve reviewed causal layers such as owner-start, command-channel-closed,
-response-channel-closed, owner-signing-failed and checked-signature-invalid. Record a structured
-OS code where one exists. A library can intentionally expose an opaque crypto error; record that
-the source supplies no additional detail rather than inventing one.
-
-Never retain `SendError<Command>` wholesale: import commands can own a private scalar. Do not
-format panic payloads or secret-bearing objects to obtain a source chain. Keep the thread-affine
-keystore design and strengthen secret-exclusion tests in any implementation change.
+Remaining excluded gaps: owner startup, import/shutdown and general checked cryptographic
+construction/recovery retain their existing reduced errors. Remediation belongs at those producing
+APIs in a separate cutover; executing sign enrichment cannot reconstruct earlier discarded causes.
+Never retain SendError<Command>, panic payloads or secret-bearing objects. Real request/reply closure,
+missing-slot and primitive tests accompany valid-signing and thread-affine custody regressions.
 
 ### 9. In-memory backends have fewer source layers but are not universal exemptions
 

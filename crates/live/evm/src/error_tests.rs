@@ -1,17 +1,16 @@
 use super::*;
 #[test]
 fn existing_owner_errors_disclose_their_upstream_gap() {
-    let fields = [
-        serde_json::to_value(EvmCodecError::Invalid).unwrap(),
+    let fields = serde_json::to_value(EvmCodecError::Invalid).unwrap();
+    assert_eq!(fields["kind"], "invalid");
+    assert_eq!(
+        fields["upstream_detail"],
+        "unavailable_at_existing_owner_boundary"
+    );
+    assert_eq!(
         serde_json::to_value(mfm_signing::SigningError::Failed).unwrap(),
-    ];
-    for (fields, kind) in fields.iter().zip(["invalid", "failed"]) {
-        assert_eq!(fields["kind"], kind);
-        assert_eq!(
-            fields["upstream_detail"],
-            "unavailable_at_existing_owner_boundary"
-        );
-    }
+        serde_json::json!({"kind": "failed"})
+    );
 }
 
 #[test]

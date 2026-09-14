@@ -15,7 +15,8 @@ use mfm_ids::StableId;
 pub type Result<T> = std::result::Result<T, SigningError>;
 
 /// Redaction-safe signing error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, thiserror::Error)]
+#[serde(tag = "kind", content = "cause", rename_all = "snake_case")]
 pub enum SigningError {
     /// A checked public value or transient signing input was invalid.
     #[error("signing input is invalid")]
@@ -23,22 +24,9 @@ pub enum SigningError {
     /// Signing or public verification failed.
     #[error("signing operation failed")]
     Failed,
-}
-impl serde::Serialize for SigningError {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut value = serializer.serialize_struct("SigningError", 2)?;
-        let kind = match self {
-            Self::Invalid => "invalid",
-            Self::Failed => "failed",
-        };
-        value.serialize_field("kind", kind)?;
-        value.serialize_field("upstream_detail", "unavailable_at_existing_owner_boundary")?;
-        value.end()
-    }
+    /// Evidence retained at an executing signer boundary.
+    #[error("signing execution failed")]
+    SignFailed(mfm_values::DiagnosticEvidence),
 }
 
 /// Exact 32-byte prehashed signing digest.
