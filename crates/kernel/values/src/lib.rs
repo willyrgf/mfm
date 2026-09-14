@@ -38,7 +38,7 @@ pub use mfm_canonical::limits::{
 mod native;
 pub use native::NativeCause;
 mod object;
-pub use object::{Object, ObjectSeed};
+pub use object::Object;
 
 mod context;
 pub use self::context::ContextSlot;

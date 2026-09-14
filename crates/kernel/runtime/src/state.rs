@@ -1,5 +1,5 @@
-mod decode;
-pub(crate) use decode::RunCommitSeed;
+#[cfg(test)]
+mod tests;
 
 use crate::assembly::ExecutableProgram;
 use crate::{Result, RuntimeError};
@@ -11,14 +11,16 @@ use mfm_program::{
 use mfm_values::Object;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RunState {
     pub(crate) phase: Phase,
     pub(crate) checkpoints: Vec<Checkpoint>,
     pub(crate) usage: Vec<StateUsage>,
     pub(crate) effect_barrier: Option<StatePosition>,
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Checkpoint {
     pub(crate) position: StatePosition,
     pub(crate) input: Object,
@@ -29,26 +31,30 @@ pub(crate) struct StateUsage {
     pub(crate) retries: u32,
     pub(crate) restarts: u32,
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// An execution occurrence and its complete input.
 pub struct Call {
     pub(crate) position: ExecutionPosition,
     pub(crate) input: Object,
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// One retained Effect command and its authority.
 pub struct EffectCall {
     pub(crate) call: Call,
     pub(crate) effect_id: EffectId,
     pub(crate) command: Object,
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// Accepted evidence for one retained Effect command.
 pub struct Settlement {
     pub(crate) effect: EffectCall,
     pub(crate) evidence: Object,
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Phase {
     Runnable(Call),
@@ -58,7 +64,8 @@ pub(crate) enum Phase {
     Succeeded(Object),
     Failed(TerminalFailure),
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 /// The complete facts of an executed State operation.
 pub enum StateCall {
@@ -76,20 +83,23 @@ pub enum StateCall {
     /// An interpretation of committed settlement.
     Effect(Settlement),
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// A declared domain failure with its original State operation.
 pub struct DomainFailure {
     pub(crate) call: StateCall,
     pub(crate) original: Object,
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// An operational observation failure without fabricated evidence.
 pub struct ReadFailure {
     pub(crate) call: Call,
     pub(crate) intent: Object,
     pub(crate) original: Object,
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 /// The original declared failure awaiting or retained by recovery.
 pub enum Failure {
@@ -105,7 +115,8 @@ pub enum Failure {
         original: Object,
     },
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TerminalFailure {
     Domain {
@@ -118,13 +129,15 @@ pub(crate) enum TerminalFailure {
         reason: StopReason,
     },
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RunCommit {
     pub(crate) program_ref: ContentRef,
     pub(crate) state: RunState,
     pub(crate) facts: OperationFacts,
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OperationFacts {
     Admitted {

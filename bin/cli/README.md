@@ -138,3 +138,9 @@ report fails, the CLI retains that failure and its original until termination an
 report. Successful write and flush establish completion of those local operations only; they do not
 prove reader consumption. None of these output failures creates a Journal record or proves delivery
 of the original report.
+
+Malformed stored framework Objects are reported as `internal`, with restore/decode parser category,
+available line/column and rejection reason. This includes nested Object-size rejection: no structured
+size violation is inferred from parser text. CLI exits 2 and REST returns 500. Direct typed size
+failures retain their structured fields and REST 422 treatment; postdecode slot mismatches retain
+identity fields. JSON diagnostics preserve dependency-supplied text without adding secret inputs.

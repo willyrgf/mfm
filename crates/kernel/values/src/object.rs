@@ -103,13 +103,8 @@ impl Serialize for Object {
         .serialize(serializer)
     }
 }
-/// Decodes an Object while keeping checked admission failures separate from parser errors.
-/// The outer result reports malformed wire; the inner result retains Values' native cause.
-#[derive(Clone, Copy, Default)]
-pub struct ObjectSeed;
-impl<'de> serde::de::DeserializeSeed<'de> for ObjectSeed {
-    type Value = Result<Object, NativeCause>;
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+impl<'de> Deserialize<'de> for Object {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
@@ -117,9 +112,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for ObjectSeed {
             canonical: Box<RawValue>,
         }
         let wire = Wire::deserialize(deserializer)?;
-        Ok(
-            Object::from_canonical(wire.value_ref, wire.canonical.get().as_bytes())
-                .map_err(NativeCause::from_error),
-        )
+        Self::from_canonical(wire.value_ref, wire.canonical.get().as_bytes())
+            .map_err(serde::de::Error::custom)
     }
 }

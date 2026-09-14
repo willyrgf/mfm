@@ -5,10 +5,11 @@
 content ref. Values reject floats, malformed schema descriptors, known secret markers, and payloads
 above `MAX_RUN_OBJECT_CANONICAL_BYTES` (32 MiB).
 
-`Object` stores checked canonical bytes with their content ref. Decode its inline wire with
-`ObjectSeed`: the outer result retains the Serde wire error, while the inner result retains native
-Values admission failures, including canonical grammar, measured size and digest mismatch.
-Consumers propagate the inner cause directly instead of converting it to a Serde message.
+`Object` stores checked canonical bytes with their content ref. Its ordinary `Deserialize`
+implementation calls the same checked constructor before returning a value. Stored-wire rejection
+uses Serde's category, location and message; nested canonical/hash/size constructor fields are not
+separately retained. Direct typed construction still returns concrete `ValueError` fields.
+Consumers admit the decoded Object against its selected slot descriptor before typed use.
 
 `NativeCause::project` also catches unwinding projection panics while retaining the borrowed owner.
 The separate failure identifies native projection and explicitly withholds the panic payload.

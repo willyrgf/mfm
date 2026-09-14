@@ -170,22 +170,14 @@ async fn cold_inspection_rejects_locally_inconsistent_current_records_without_ca
             5 => assert_eq!(projected, "facts"),
             6 | 7 => assert!(projected.get("identity").is_some()),
             10 | 11 => {
-                let mfm_values::ValueError::ArtifactTypeMismatch {
-                    field,
-                    expected,
-                    actual,
-                } = cause.downcast_ref::<mfm_values::ValueError>().unwrap()
-                else {
-                    panic!("native Object hash failure survives its containing fields")
-                };
-                assert_eq!(*field, "content_digest");
-                assert_ne!(expected, actual);
-                assert_eq!(
-                    projected["artifact_type_mismatch"]["field"],
-                    "content_digest"
-                );
-                assert_eq!(projected["artifact_type_mismatch"]["expected"], *expected);
-                assert_eq!(projected["artifact_type_mismatch"]["actual"], *actual);
+                assert!(cause.downcast_ref::<mfm_canonical::JsonError>().is_some());
+                assert_eq!(projected["category"], "data");
+                assert!(projected["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("content_digest"));
+                assert!(projected["line"].as_u64().unwrap() > 0);
+                assert!(projected["column"].as_u64().unwrap() > 0);
             }
             12 => assert_eq!(projected, "position"),
             _ => unreachable!(),

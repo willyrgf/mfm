@@ -100,7 +100,7 @@ development shell. The managed PostgreSQL and SQLx checks exercised the same bou
 
 ## Deletions and replacement cost
 
-The current core candidate has 28,019 production Rust code lines versus 26,797 at `7f71beef`:
+The earlier measured core candidate has 28,019 production Rust code lines versus 26,797 at `7f71beef`:
 **+1,222 lines**, including new files in both `crates` and `bin`. This counts nonblank, non-comment
 lines in production `src` files, excluding separate test modules and trailing inline test modules.
 Nonblank lines including comments increased by 1,232; physical lines increased by 1,138. Formatting
@@ -142,10 +142,10 @@ native-value cache, or object-table resolver. Immutable identity/byte sharing av
 owners when the same Object appears in current state and facts. No alternate decoder registry,
 persisted internal-fault contract, or second history representation was introduced.
 
-Native Object admission uses a separate inner result from wire parsing. Private Runtime seeds
-construct the existing current-record types directly; replacing derived decoding retains native
-constructor causes without a parallel wire model or registry. This adds explicit container
-consumption and error-precedence handling. One native projection unwind boundary also returns a
+K1 replaces the former Object and Runtime seeds with checked Object Deserialize and derived
+record decoding. It deletes the container-consumption and error-precedence grammar. Malformed
+stored data reports parser category/location/reason, under the RFC's explicit exception to
+structured nested constructor preservation. One native projection unwind boundary also returns a
 reviewed failure with explicit payload withholding while retaining the borrowed original.
 
 Necessary additions account for the increase: original-failure and settlement durability require
