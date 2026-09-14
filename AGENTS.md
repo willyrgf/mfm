@@ -36,11 +36,11 @@ owns verification selection and `nixfied.nix` owns the executable task graph.
 - Malformed stored framework data uses parser category, available location and rejection reason;
   ordinary Serde decoding need not retain nested constructor ancestry or structured size fields.
   Direct typed construction, postdecode admission and declared execution originals keep their
-  separate causal contracts. Dependency-supplied JSON diagnostic text is trusted, not certified
-  secret-free; do not deliberately attach MFM secret inputs or full request/connection objects.
+  separate causal contracts.
 - Selected dependency diagnostics follow the explicit upstream trust contract in `docs/design.md`:
   retain supplied JSON/parser, EVM provider/transport and CLI IO messages without generic sanitizers
-  or diagnostic quotas. Never deliberately append MFM secrets or full request/connection objects.
+  or diagnostic quotas. This trusts supplied text; it does not certify it secret-free. Never
+  deliberately append MFM secrets or full request/connection objects.
   Keep concrete owner errors where supported; adapt selected internal facts once into immutable
   invocation data. Failed first original encoding reports its cause and known context with original
   detail/identity unavailable, without serializer retry or opaque native-original custody.
@@ -89,8 +89,9 @@ the architect rule above.
 - Structured hashing uses canonical JSON with JCS-style semantics. Hashed structures contain no
   floats; use scaled integers or decimal strings.
 - Network and filesystem IO cross explicit adapter or Store abstractions.
-- Secrets never appear in Program, admitted context, Journal, Store metadata, RunView, public output,
-  or error detail.
+- MFM secret inputs never enter Program, admitted context, Journal, Store metadata, RunView,
+  public output or diagnostic context. Dependency-supplied diagnostic text follows the explicit
+  upstream trust contract above.
 - One explicit caller-supplied RunId identifies a run. Writable rollback of acknowledged history is
   unsupported.
 
