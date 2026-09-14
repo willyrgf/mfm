@@ -1,6 +1,6 @@
 # RFC part 2: preserve errors on selected execution paths
 
-Status: design draft pending accepted Part 1, reviewed 2026-09-13. **Not ready for a full owner
+Status: design draft pending accepted Part 1, reviewed 2026-09-14. **Not ready for a full owner
 implementation goal.** [Part 1](RFC_AUDITABILITY_ERROR_CHAIN.md) independently delivers the current
 continuation/persistence core and concrete invocation-diagnostic boundary. This RFC closes remaining causal
 losses on selected State/adapter execution paths using that implementation. It is not a platform-wide
@@ -32,10 +32,14 @@ heterogeneous continuation and private registered callback connections. State/ad
 compatible helpers retain concrete values/errors. Reuse checked IDs and borrowed identity getters;
 do not introduce raw carriers, qualification/native caches or another value eraser. InvocationDiagnostic
 is final report data, with no executable-value, native-owner or classification role.
-It contains one serde_json::Value and has no diagnostic byte quota. Reuse Part 1's exact
-encoding_failed/panicked fallback objects and primary SizeViolation; add no metadata budget,
-bounded diagnostic writer or bound_reached accounting. Existing persisted DiagnosticEvidence and
-Object/frame/run/terminal-report limits continue to apply to their own representations.
+Its details field uses the same Values-owned DiagnosticEvidence nested in concrete owner errors:
+one transparent JSON value with from_value/as_value and the existing PersistedSchema contract.
+The diagnostics crate and source/fact/omission framework are deleted in Part 1. Add no diagnostic
+quota, metadata accounting, capture factory or standalone diagnostic MfmValue identity. Reuse the
+accepted trusted-text profile and ordinary whole-owner/Object admission; actual canonical/Object/
+frame/run/terminal-report limits remain with their owners. Invocation field conversion alone uses
+the fixed encoding_failed/panicked markers and primary SizeViolation. Those markers never replace
+required cause data in a successfully admitted operational original.
 
 Part 1 section 6.2 settles malformed framework data rejected by Runtime record Deserialize:
 report parser category, available location and rejection reason through Restore/
@@ -51,7 +55,7 @@ fabricated source. After complete admission, reuse the existing Failure/Object w
 native original. If initial encoding of a declared error fails, use Part 1's ordinary internal
 invocation diagnostic for the actual encoding cause/size, known operation/contract/head and
 explicit unavailable original detail/identity. No dedicated recording variant or renderer branch
-is needed for this case. Detail-construction failure follows Part 1's fixed omission contract.
+is needed for this case. Detail-construction failure follows Part 1's fixed invocation-marker contract.
 It requires no opaque owner, serializer retry or producer fallback payload. Successful values
 acquire no custody stash. Part 2 must not reintroduce NativeCause, `Box<dyn Error>` or a custom error protocol.
 
@@ -59,7 +63,7 @@ The diagnostic trust boundary is owned by
 [Part 1 section 4](RFC_AUDITABILITY_ERROR_CHAIN.md#4-error-preservation-and-the-diagnostic-trust-boundary).
 MFM trusts dependency-supplied diagnostic content and does not scan or certify it as secret-free.
 MFM does not deliberately attach its own secret inputs, requests, connection or keystore-command
-objects. Bounds and source fidelity remain required. No generic sanitizer or native getter/source
+objects. Actual admission limits and source fidelity remain required. No generic sanitizer or native getter/source
 certification project belongs to this RFC.
 
 Configuration administration, deployment, startup/provisioning, RunId entropy, transport listener
@@ -88,12 +92,12 @@ complete finite plan; do not discover each row's design by recursively following
 
 | Required refinement | Result needed before implementation |
 | --- | --- |
-| Pin the baseline and inherited APIs | Record accepted Part 1 commit and actual InvocationDiagnostic/SizeViolation, DiagnosticEvidence, Failure/checked Object, concrete owner classification, Store and rendering signatures/source locations. Retain Object's limited boundaries and checked getters. Link owning definitions; do not copy a second shared API. |
-| Subtract completed work | Map E1-E6/C1-C18 and Part 1 section 9.6's concrete recipes to completed cases. Inherit E4's ordinary structural decoding and diagnostic/status exception; do not reopen native capture, seeds or map-only validation. E5 is not repeated as a constructor migration. Reuse the no-budget invocation route and minimal ValueError/JSON/canonical adapters. |
-| Freeze each error path | Name producing failure/function, selected concrete owner error, required cause layers/fields, any boundary adaptation, receiving conversions, terminal observation, finite assertions, omissions, reuse and deletions. File lists or “all consumers” alone do not pass. |
-| Finalize the owner design | Specify actual changed variants/signatures and selected fields. Keep a typed durable error where classification/persistence needs it; use InvocationDiagnostic only at the internal invocation boundary. Existing compatible interfaces need no new wrapper. No new source/schema/capture mechanism follows from a caller connection. |
+| Pin the baseline and inherited APIs | Record accepted Part 1 commit and actual Values DiagnosticEvidence/InvocationDiagnostic/SizeViolation, trusted-text profile, Failure/checked Object, concrete owner classification, Store and rendering definitions. Link those owning APIs; do not copy a second schema or reintroduce the deleted diagnostics crate. |
+| Subtract completed work | Map E1-E6/C1-C18 and Part 1 sections 5.3/9.6 to completed cases. EVM response messages/data_json, exposed native-source fields, CLI output sources and the shared admission profile are already in the core cutover. Inherit E4's ordinary structural decoding and diagnostic/status exception; do not reopen seeds/map-only validation. E5 is not another constructor migration. |
+| Freeze each error path | Name producing failure/function, selected concrete owner error, required cause layers/fields, boundary adaptation, receiving conversions, terminal observation, finite assertions, information limits, reuse and deletions. File lists or “all consumers” alone do not pass. No omission ledger is required. |
+| Finalize the owner design | Specify actual changed variants/signatures and selected fields. The complete declared owner remains typed; facts used by classify() remain typed and any DiagnosticEvidence is nested data. Handlers receive Classification/RecoveryContext. Internal errors use InvocationDiagnostic at their heterogeneous boundary. Existing compatible interfaces need no wrapper or new source/schema/capture framework. |
 | Prove admitted-original completeness | Compare required causal/operation facts in the concrete owner, admitted original, restored classifier input and report. Successful serialization alone is insufficient. Keep the agreed unavailable-detail exception for first encoding failure; no generic completeness checker, extra native copy or universal fallback interface. |
-| Decide any diagnostic-text requirement | Trust does not automatically add messages to the closed schema. If a case needs supplied text, specify one bounded shared field and its Values admission treatment, including secret-marker behavior. Otherwise retain existing captured fields; no per-provider scrubber, parallel report or speculative schema expansion. |
+| Reuse diagnostic admission | Use Part 1's DiagnosticFloatFree profile and shared nested field. Freeze selected fields and preserve raw protocol error data as explicit data_json text where numeric spelling matters. Do not create per-owner text types, new number/secret policies, a second JSON validator or quota. Verify the whole owner and resulting report through the accepted admission route. |
 | Reconcile cumulative cost | Set coherent dependency/commit order, expected production/test/doc/file/API costs and actual deletions per case and in total. No hypothetical deletion credit or arbitrary LOC quota. |
 
 Unexpected callers of a changed API still require correct forwarding and compilation. That does
@@ -122,7 +126,8 @@ struct ProviderFailure {
     method: EvmRpcMethod,
     stage: RpcStage,
     failure: ProviderFailureKind,
-    diagnostics: DiagnosticEvidence,
+    #[mfm(persisted)]
+    diagnostics: mfm_values::DiagnosticEvidence,
 }
 
 enum EvmOperationalKind { Unavailable, Timeout, RateLimited }
@@ -150,6 +155,10 @@ capability, not type erasure; Self::Failure and C::OperationalError remain concr
 a failure trait, per-State enum, adapter-to-State wrapper, PersistedError or second Classification
 field. The same provider cause can be Retryable for a Read and OutcomeUnknown for transaction
 submission; classification belongs to the enclosing owner with its operation context.
+DiagnosticEvidence travels inside that owner through Object admission and restoration. Restoration
+reconstructs the same MFM owner with the selected foreign cause facts, not a live client error.
+The classifier uses its typed semantic fields; the handler receives Classification/RecoveryContext,
+not diagnostic JSON or the original error directly. A domain-only failure needs no diagnostic field.
 
 Use ordinary nested sources and borrowing. Remove incidental `Copy` requirements when errors gain
 owned data. `Error::source()` should preserve a nested typed source when its type supports that
@@ -165,16 +174,19 @@ may serve both routes through their explicit adapters, without copying a native 
 
 Internal boundary adapters supply the inherited InvocationDiagnostic and primary SizeViolation
 facts directly. Receivers neither downcast native sources nor rediscover fields or size from JSON.
-Use Part 1's direct JSON-value construction with no diagnostic quota and its two fixed fallbacks. Ordinary private Serialize
-helpers are allowed when existing serializable owner data does not already supply the selected
-field contract; no generic from_error projector, per-owner report
-schema, secondary serialization service or global owner-error enum is permitted. Invocation
-diagnostics have no MfmValue identity and cannot replace the classifier's concrete error.
+Use Part 1's shared data without a diagnostic quota. Operational adapters build their selected
+scalar/source fields directly; existing from_fields is the only generic invocation serializer.
+Its two fixed construction-failure markers are invocation-only. Ordinary private Serialize helpers
+are allowed where existing owner data lacks the selected field contract; no generic from_error
+projector, per-owner report schema, second serializer service or global owner-error enum is needed.
+Neither DiagnosticEvidence nor InvocationDiagnostic supplies a standalone MfmValue identity or
+replaces the classifier's concrete error.
 
-The provider error types and DiagnosticEvidence vocabulary are existing shared contracts. Changes
-within the retained rows must reuse or delete actual mechanisms, not count those types as new concepts or earn
-hypothetical deletion credit. No new nominal wrapper is required where the selected owner already
-carries the same cause and operation.
+Provider error types retain their concrete roles; the inherited DiagnosticEvidence is the small
+Values data wrapper, with no shared source vocabulary. Reuse its constructor, getter and nested
+schema. New required native facts are supplied only by the selected producer's local recipe; they
+do not require extending a global enum. Count actual changes and deletions against accepted Part 1,
+including owner-local code; no nominal wrapper is needed where an owner already carries the facts.
 
 ## 4. Finite execution producer matrix
 
@@ -184,7 +196,7 @@ permission to enrich every error in the named modules.
 
 | ID | Selected producing boundary and facts | Consumer and stopping boundary |
 | --- | --- | --- |
-| O1 | Read/read_anchored and existing json_rpc send/body/RPC failure conversions on selected shipping Read calls: method/stage, status/code, exposed source prefix, actual local mismatch and bounds. | Runtime failed Read and cold App observation; internal preflight stays internal. Reuse existing RPC capture. No HTTP client, retry or decoder-family rewrite. |
+| O1 | Read/read_anchored and existing json_rpc send/body/RPC failure conversions on selected shipping Read calls: method/stage, status/code, exposed source chain, actual local mismatch and limits. | Runtime failed Read and cold App observation; internal preflight stays internal. Reuse Part 1's local RPC source-data recipe; R0 subtracts its completed cases. No HTTP client, retry or decoder-family rewrite. |
 | O2 | Selected transaction reserve_nonce/prepare_transaction/execute_transaction calls and map_provider_error/map_authority_error/signer.sign conversions: actual operation and supplied provider/authority/signing cause. | Pending Effect failure through Runtime/App, preserving command/EffectId. O3/O6 own their producer changes; this row forwards their data without a second capture tree or new authority model. |
 | O3 | signer.sign and the executing keystore sign request/reply, plus only signature/evidence helpers required by a frozen transaction case: actual sign operation, returned cause and existing invalid/failed/closed distinctions. | O2's concrete operational error or InvocationDiagnostic route according to meaning. No key creation/import/startup/shutdown, comprehensive signing constructors, secret-command capture, cryptographic or concurrency redesign. |
 | O4 | Run Store load/append and PostgreSQL precommit/COMMIT conversions required by the selected Runtime recording/load cases: disposition, returned SQLx/source facts and actual query/transaction stage. | Existing load invocation report, or append recording report with failed outcome/candidate when available and actual acknowledgement. A load failure invents no outcome/candidate or recording phase. Affected memory run-Store consumers forward existing causes. No config/index query migration, connection/provisioning audit, append planner or reconnect protocol. |
@@ -202,8 +214,9 @@ constructor from a caller is insufficient. Hidden dependency attempts are unavai
 lossy conversion is a gap to fix when its evidence is promised. No row may claim completion by
 inventing a source layer, discarding a supplied cause, or substituting a classification for it.
 
-Preserve existing schema/canonical bounds. Any required operational schema change uses the shared
-captured representation; do not build another mechanism for persistence. Neither the trust
+Preserve actual canonical/Object/frame/report limits. A required operational schema change uses
+the same shared diagnostic field and ordinary admission; do not add a diagnostics quota, truncation
+policy, omission accounting or another persistence mechanism. Neither the trust
 policy nor this matrix requires arbitrary raw client object dumps or every dependency message.
 
 ## 5. Ordered work and completion
@@ -265,12 +278,12 @@ is not performed again.
 
 | ID | Observable acceptance |
 | --- | --- |
-| B1 | R0 pins accepted Part 1, actual inherited APIs and every finite producing failure, required fact, changed conversion, consumer assertion, omission, reuse/deletion and cumulative cost. No broad owner or deferred nonexecution row remains mandatory. |
-| B2 | Each selected concrete owner error retains its promised cause/operation fields. Declared State/adapter failures restore the same declared type for classification; neither the deepest source alone nor invocation JSON/classification codes substitute for that owner. Internal load/recording errors remain invocation-only. Existing acknowledgement and operational/internal routing hold. New producer contracts are explicit; completed work is closed with evidence. |
+| B1 | R0 pins accepted Part 1, inherited APIs and every finite producing failure, required fact, conversion, consumer assertion, information limit, reuse/deletion and cumulative cost. Subtract completed EVM/CLI source-data cases; no broad owner or deferred nonexecution row remains mandatory. |
+| B2 | Each selected concrete owner retains promised cause/operation fields. Declared errors restore the same MFM type with nested diagnostic data for classification. Semantic decision fields remain typed; neither the deepest source nor JSON/classification codes replace the owner. Handlers receive Classification/RecoveryContext. |
 | B3 | O1/O2 operational errors, including required O3/O6 causes, survive complete admission and cold observation. Internal execution/recording failures use invocation reports without a fault append. Command/EffectId authority is unchanged. |
-| B4 | Upstream diagnostic content follows the trust contract without credential scanning or blanket source/downcast certification. MFM does not deliberately attach its own secret inputs. Bounds/omissions and any explicitly required shared text/admission change are exercised at the selected boundary. |
-| B5 | Capture occurs once at the required boundary. Receivers forward InvocationDiagnostic's single JSON value/admitted data and primary size facts without downcasting or recapture. Compare required original facts across admission/restoration/reporting. Checked Object's boundaries and ordinary decoding remain closed. No diagnostic quota, raw carrier, second value eraser, NativeCause, seed/projector/custody tree, native-success stash, new size hierarchy, per-owner reporting schema or generic completeness checker remains. |
-| B6 | An admitted execution failure plus recording failure retains two independent causes and actual candidate/acknowledgement. Failed initial error encoding uses Part 1's ordinary internal diagnostic with known context, encoding cause and explicit unavailable-original detail under its fixed omission contract; no special Runtime variant, opaque custody or fallback payload. Success plus recording failure invents no original error. Reports preserve actual delivery stage; no second audit sink, append retry or recursive reporting. |
+| B4 | Selected dependency messages/data follow the inherited trusted-text profile without credential scanning or source certification. MFM does not deliberately attach its own secret inputs. Whole-owner and terminal-report admission preserves floats/actual-limit rejection and ordinary-input policy; no diagnostic quota, truncation or omission ledger returns. |
+| B5 | Capture occurs once at the selected producer. Receivers forward the same Values DiagnosticEvidence/InvocationDiagnostic data or admitted Object and primary size facts without downcasting or recapture. Compare required facts across admission/restoration/reporting. No mfm-diagnostics, global source/fact vocabulary, capture factory, second value eraser, NativeCause, seed/projector/custody tree, new size hierarchy, per-owner reporting schema or generic completeness checker remains. |
+| B6 | An admitted execution failure plus recording failure retains two independent causes and actual candidate/acknowledgement. Failed initial error encoding uses Part 1's ordinary internal diagnostic with known context, encoding cause and explicit unavailable-original detail under its fixed invocation-marker contract; no special Runtime variant, opaque custody or fallback payload. Success plus recording failure invents no original error. Reports preserve actual delivery stage; no second audit sink, append retry or recursive reporting. |
 | B7 | Cutovers delete superseded paths/APIs/tests/docs while preserving meaningful behavior coverage. Actual aggregate complexity and production/test/doc/file/API costs are reviewed against both baselines; no compression, hypothetical deletion credit or duplicate native representation hides growth. |
 | B8 | All frozen cases and relevant retained Part 1 behavior pass required checks and final CI. Completion names the accepted commit, evidence and limits; it does not claim platform-wide provenance or secret-free certification of upstream diagnostics. |
 
@@ -280,9 +293,9 @@ is not performed again.
 | --- | --- | --- | --- |
 | The accepted core supplies sufficient boundary diagnostics | K1-K4 implementation is not complete | Owner rows could recreate projectors, size discovery or duplicate originals | R0 inspects the implemented section 9 signatures/recipes and E1-E6 evidence. Reuse the no-budget constructor, fixed fallbacks and minimal typed errors; resolve only an actual missing producer contract. |
 | Concrete execution error payloads retain required causal and classification facts | Correct associated types can still contain lossy variants or serializers | Cold classification/reporting could lose a promised fact | Compare selected concrete errors, admitted payloads, restored classifier inputs and consuming assertions. The first-encoding unavailable-detail exception remains settled; do not add generic custody. |
-| Existing shared fields suffice under the upstream trust contract | DiagnosticEvidence is closed and ordinary Values strings are marker-scanned | A required text field could be rejected or cause per-provider workarounds | Freeze the needed facts and one shared bounded field/admission change if needed; otherwise preserve existing schema. |
+| Selected owner facts fit the inherited shared-data admission route | Exact remaining producers are frozen only at R0 | A row might duplicate admission, lose required facts or weaken ordinary-input checks | Verify the real concrete owner, restored classifier input and complete report with the required source data, floats/limits and marker cases. Reuse the accepted profile rather than reopening shared representation design. |
 | The selected paths and cost are finite and simpler overall | Exact conversions and accepted Part 1 baseline remain unproved | Hidden dependencies or locally justified growth could recur | R0 freezes semantics, conversions and cost; exceeded estimates trigger review and F2 judges the actual aggregate result. |
 
-The trust/scope, concrete-owner classification, failed-initial-encoding and checked-Object/
-stored-data diagnostic contracts are settled. Part 1's deletion-first K1-K4 sequence precedes R0;
+The trust/scope, shared Values diagnostic data, concrete-owner classification, failed-initial-
+encoding and checked-Object/stored-data diagnostic contracts are settled. Part 1's deletion-first K1-K4 sequence precedes R0;
 implementation, exact remaining producer contracts and LOC improvement remain to be proved.
