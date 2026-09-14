@@ -13,6 +13,7 @@ layer = "signing"
 [dependencies]
 k256 = { workspace = true }
 mfm-ids = { path = "../kernel/ids" }
+mfm-values = { path = "../kernel/values" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 

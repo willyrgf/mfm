@@ -9,3 +9,8 @@ their exact uncompressed SEC1 and compact low-S bytes are exposed only at the wi
 These values have no serde or diagnostic surface. Persisted account identity, secret scalars,
 custody-provider selection, EVM address derivation, transaction encoding, and provider IO remain
 outside this crate.
+
+SigningError serializes its concrete kind. SignFailed carries immutable diagnostic evidence from
+the executing owner; Invalid and Failed retain their existing checked-primitive meanings. This
+error surface does not make transient key, digest or signature values serializable. Consumers
+forward supplied evidence without converting it to a unit error or inferring unavailable causes.

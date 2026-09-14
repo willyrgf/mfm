@@ -328,14 +328,23 @@ async fn prepare_transaction(
             })?
             .map_err(|source| invariant(AdapterFailure::SigningDigest(source)))?;
             let signature = signer.sign(digest).await.map_err(|error| {
-                let kind = match error {
-                    mfm_signing::SigningError::Invalid => "invalid",
-                    mfm_signing::SigningError::Failed => "failed",
+                let cause = match error {
+                    mfm_signing::SigningError::SignFailed(cause) => cause,
+                    mfm_signing::SigningError::Invalid | mfm_signing::SigningError::Failed => {
+                        let kind = if matches!(error, mfm_signing::SigningError::Invalid) {
+                            "invalid"
+                        } else {
+                            "failed"
+                        };
+                        mfm_values::DiagnosticEvidence::from_value(serde_json::json!({
+                            "operation": "sign",
+                            "stage": "signer",
+                            "kind": kind
+                        }))
+                    }
                 };
                 AdapterError::Operational(EvmTransactionOperationalError::SignerUnavailable {
-                    cause: mfm_values::DiagnosticEvidence::from_value(
-                        serde_json::json!({"operation": "sign", "stage": "signer", "kind": kind}),
-                    ),
+                    cause,
                 })
             })?;
             let owned = command.clone();

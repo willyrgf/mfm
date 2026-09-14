@@ -1,8 +1,8 @@
 # RFC part 2: preserve errors on selected execution paths
 
 Status: R0 design and the R1 checkpoint are accepted by the dedicated architect, 2026-09-14.
-R1 run-Store and R2 authority/schema cutovers are implemented and verified; R3 and final
-B2–B8 acceptance remain pending.
+R1 run-Store, R2 authority/schema and R3 executing-signing cutovers are implemented.
+Final client coverage, aggregate architect acceptance and CI remain pending.
 Continue from accepted Part 1 production `87f198a9` and completion record `0a7543ec`,
 with this RFC. Do not restart or reopen that cutover.
 
@@ -537,6 +537,30 @@ no second provider/signer harness or production hook is added.
 R2 adds 334 production lines. Current total is 27,844: +818 against Part 1 and +1,013 against
 original `7f71beef`. Remaining R3 production forecast is +50–90, within the reviewed cumulative
 +750–1,050 range. Tests and documentation remain separately measured at final acceptance.
+
+### R3 cutover — 2026-09-14
+
+R2 is committed as `f97b5d3d`. Executing sign now returns SigningError directly through the existing
+owner reply, removing the KeystoreError roundtrip and blanket unavailable-detail serializer.
+SignFailed adds only the selected operation/stage/local fact or dependency message. Live moves its
+evidence unchanged into the already-current v3 SignerUnavailable owner; no further schema cutover,
+concurrency change, source walker or new public named error type is needed. Import/startup/shutdown
+and general checked cryptographic constructors retain their excluded contracts.
+
+Focused signing/keystore all-target tests, Live signer tests and selected all-target Clippy pass.
+Real request closure after
+owner shutdown and accepted-request/reply closure retain distinct stages; private missing-slot and
+pinned primitive-error tests assert exactly available nonsecret facts. Existing valid signing,
+low-S/recovery, secret non-renderability and non-Send/non-Sync custody coverage is retained.
+Managed Effect run `run-3385277-1789413601544019249` passed in 212.25 seconds: after the existing wallet
+scenario shuts down its actual owner, a fresh run admits the real closed-signer failure, preserves
+Retryable classification and exact sign/request_send/channel_closed evidence, and restores the
+same App view with a fresh assembly. Provider pending nonce remains unchanged at four.
+
+R3 adds 19 production lines, bringing the total to **27,863: +837 against Part 1 and +1,032 against
+original `7f71beef`**. The smaller increase comes from deleting the executing-sign roundtrip and
+serializer while reusing the existing result channel and v3 payload. Complete measured costs and
+final B1–B8 acceptance follow the remaining thin-client coverage and aggregate review.
 
 ### Finite acceptance cases
 
