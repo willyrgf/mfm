@@ -1,7 +1,7 @@
 # RFC part 1: current run continuation and persistence
 
 Status: Part 1 design specified for the K1-K4 implementation handoff. Acceptance requires
-implementation evidence, G1 review and F1 verification. Reviewed 2026-09-13.
+implementation evidence, G1 review and F1 verification. Reviewed 2026-09-14.
 
 Part 1 delivers current continuation/persistence and the invocation error boundary.
 [Part 2](RFC_CAUSAL_ERROR_PRESERVATION.md) addresses selected execution-error producers after
@@ -22,8 +22,9 @@ Unselected losses are not completion conditions. Section 4 defines the diagnosti
 ## 1. Objective and target
 
 Part 1 owns the current record, admission/load/append, execution/recovery ordering, concrete
-invocation diagnostics, and their existing Application/CLI/REST consumers. Part 2 owns extending evidence
-at the named producers on selected execution paths, including their necessary recording failures. Part 1 acceptance requires its own actual simplification;
+invocation diagnostics, the shared diagnostic-data replacement in section 5, and their existing
+Application/CLI/REST consumers. Part 2 extends evidence at its remaining named execution producers,
+including their necessary recording failures. Part 1 acceptance requires its own actual simplification;
 future Part 2 deletions or estimates cannot be used to justify an unfinished or growing core.
 
 Persist the Runtime's actual serializable continuation state. Decode that same type on load,
@@ -79,7 +80,7 @@ Deleting the old snapshot/fold machinery does not delete the necessary continuat
 | Keep acknowledged history append-only | No rollback, old-format reader, compatibility path, or rewriting previous frames. |
 | Keep recovery action authorization durable | Commit a normal recovery decision and resulting state before executing the action. A recommendation alone is not authority. |
 | Scope auditability to execution | Preserve selected State/adapter execution failures and necessary recording/report forwarding. No comprehensive startup, config, deployment, ingress or constructor migration. |
-| Trust upstream diagnostic content | No generic credential detection, sanitization or secret-free certification of dependency-supplied diagnostics. MFM does not deliberately append its own secrets or full request/connection objects. Bounds and accurate omissions remain. |
+| Trust upstream diagnostic content | No generic credential detection, sanitization or secret-free certification of dependency-supplied diagnostics. MFM does not deliberately append its own secrets or full request/connection objects. Actual persistence limits and honest information limits remain; no diagnostic quota or omission ledger. |
 | Adapt at the required boundary | Keep concrete library errors where their interfaces support them. Adapt selected internal cause facts once into immutable InvocationDiagnostic data; Runtime/App forward it and clients render it. Delete NativeCause and its opaque owner/projector protocol; no `Box<dyn Error>` replacement. |
 | Reuse the admitted original | The complete admitted Failure/Object serves persistence and reporting. No duplicate native original or parallel fallback payload accompanies it. K3 proves the selected cause facts survive admission. |
 | Report failed initial encoding honestly | Use the ordinary internal invocation diagnostic for the encoding cause, known execution/contract context and unavailable original detail/identity. No additional Runtime variant for this case, arbitrary native-original custody, serializer retry or new producer fallback contract. |
@@ -172,27 +173,28 @@ Update the affected wording in docs/design.md,
 docs/architecture.md, docs/code-quality.md and AGENTS.md in the implementing contract cutover;
 conflicting diagnostic wording in those guides must not extend the implementation scope.
 
-Trust alone does not require collecting new fields. Part 1 adds no persisted diagnostic text field,
-schema or admission change. Descriptor, JSON and canonical messages enter InvocationDiagnostic
-only; they do not pass through Object or DiagnosticEvidence admission. E2/E3 verify the existing
-declared originals remain admissible and retain their promised facts. A future persisted-text
-requirement belongs to Part 2's R0 design: specify the shared field and admission treatment there,
-without provider-specific scrubbing or disabling checks on ordinary Program/context inputs.
+Part 1 replaces the existing persisted diagnostic schema with section 5's shared data and explicit
+trusted-text profile. Its finite EVM/CLI recipes define the retained fields; the profile does not
+authorize collecting every dependency field. Descriptor, JSON and canonical invocation conversions
+reuse that data representation without making their invocation envelopes persistable. Required
+semantic/classification fields remain typed in the owner. Ordinary Program/context input checks
+remain at their existing boundaries; no provider-specific scrubber or global relaxation is needed.
 
-### 4.3 Missing evidence must be explicit
+### 4.3 Information limits are part of the contract
 
-| Condition | Meaning |
-| --- | --- |
-| Withheld | A specific field was deliberately excluded under the selected contract, for example an MFM-owned secret input; not a blanket assumption about dependency text. |
-| Unavailable upstream evidence | The dependency did not expose the evidence, including hidden attempts. An MFM conversion that discarded exposed information is a remediation gap instead. |
-| Opaque source | A source layer exists without the structured facts promised for a known category; retain its available representation and deeper links within the bound. |
-| Capture bound reached | The retained source prefix or detail reached its finite bound. |
-| Original not admitted | A declared failure was returned but could not be encoded/admitted. Original contents and canonical identity are unavailable; retain known operation/contract context and the encoding cause. Do not retry the serializer or retain an opaque original. |
-| Malformed persisted framework data | Checked decoding rejects it; retain the parser category, available location and rejection reason under section 6.2. Nested constructor structure and size fields converted by Serde are outside this selected contract, not unavailable upstream evidence or complete native preservation. |
+Preserve the exposed source chain and the facts selected in sections 5.3 and 9.6. Unknown native
+source types contribute their available message and exposed child links; do not replace them with
+an empty Opaque category. Hidden foreign-library attempts or fields cannot be reconstructed.
+An MFM mapper that drops a promised exposed fact remains a gap at that producing conversion.
+These scope limits belong in the contract and consuming tests, not per-error omission records.
 
-Keep known counts/size facts only when exposed. A bounded, deliberately partial or erased
-representation is not complete raw preservation. Optional detail failure does not replace the
-original execution failure or become a new recursively reportable operational cause.
+A declared failure that cannot be encoded/admitted follows section 9.2: retain the encoding cause,
+known operation/contract context and explicit unavailable original contents/identity. Append and
+classify nothing; do not truncate the original, retry its serializer or retain opaque custody.
+Malformed stored framework data follows section 6.2's narrower parser/category/location contract.
+Invocation field conversion alone has section 9.1's two fixed failure markers; they never stand in
+for a successfully preserved operational original. None of these cases needs an omission ledger,
+source-count quota, discarded-suffix scan or recursive reporting of missing detail.
 
 ### 4.4 One representation at each necessary stage
 
@@ -205,7 +207,7 @@ original execution failure or become a new recursively reportable operational ca
 | Complete admitted failed outcome | Reuse the existing Failure/Object and operation facts for persistence, restored classification and append-failure reports. No second native original survives admission. |
 | Runtime/App/transport reporting | Add actual execution/head/disposition context and forward supplied data. Thin clients choose presentation without rerunning extraction, constructors, Values admission or child projectors. |
 
-Completeness means the selected cause/field contract with explicit bounds and omissions, not the
+Completeness means the selected cause/field contract and its stated information limits, not the
 private contents or identity of a dependency's Rust object. K3 compares those facts in the concrete
 owner, admitted value, restored error and append-failure report. Missing promised facts require a
 specific producing conversion/schema correction, not duplicate custody. The accepted failed-initial-
@@ -213,115 +215,69 @@ encoding exception does not weaken normal admitted-original or failed-append pre
 
 ## 5. Shared causal data, with local ownership
 
-Keep the small `mfm-diagnostics` crate for checked causal data and its exact schema. Its purpose
-is to remove duplicated diagnostic representation, omission accounting and bounds validation across
-selected execution ports. The dependency graph below describes placement, not migration scope.
+Delete `mfm-diagnostics`. Values owns one small DiagnosticEvidence data type, reused as a nested
+field of concrete persisted errors and as InvocationDiagnostic.details. It has no IO, client
+library dependency, native owner, error trait, classification or recovery role. Object remains the
+sole executable/persisted value eraser; this type carries diagnostic data only.
 
-```text
-diagnostics -> values -> canonical / ids
-
-program, domains, store, config, signing -> diagnostics
-live adapters -> their ports and concrete client libraries
-```
-
-The crate depends on existing foundational/serialization facilities, not Program, Runtime, client
-libraries, or storage. It performs no IO and owns no error registry or recovery behavior.
-InvocationDiagnostic belongs to Values at the existing heterogeneous value/decoder boundary; it
-uses only existing foundational/Serde data. Values must not depend on Diagnostics. Section 9
-defines this invocation-only data separately from the existing persisted DiagnosticEvidence schema.
-
-Define the shared nested persisted schema once; Serde alone does not establish its exact shape.
-Reuse it in owner errors instead of repeating a diagnostic schema in every domain. Nested schema
-participation does not require independent Program identity. `EvidenceError` stays a native checked
-constructor error, not a Program value or a registered decoder-error contract.
-
-### 5.1 Shape and bounds
-
-The shared representation separates a source's identity in the chain from its facts, and separates
-response observations from ancestry:
+### 5.1 Minimal data and ordinary admission
 
 ```rust
-struct DiagnosticEvidence {
-    response: Option<ResponseContext>,
-    sources: SourceChain,
-    omissions: Vec<Omission>,
-    omissions_truncated: bool,
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct DiagnosticEvidence(serde_json::Value);
+
+impl DiagnosticEvidence {
+    pub fn from_value(value: serde_json::Value) -> Self {
+        Self(value)
+    }
+
+    pub fn as_value(&self) -> &serde_json::Value {
+        &self.0
+    }
 }
-struct ResponseContext {
-    status: HttpStatusCode,
-    rpc_code: Option<i64>, // only when a checked RPC error envelope was received
-}
-struct SourceChain {
-    layers: Vec<SourceLayer>, // outermost captured error first; at most 32
-    end: ChainEnd,
-}
-struct SourceLayer {
-    kind: SourceKind,
-    facts: Vec<SourceFact>, // at most 8 reviewed facts about THIS source
-    facts_truncated: bool,
-}
-enum ChainEnd { Complete, Unavailable, BoundReached }
-enum SourceKind { Transport, Database, Os, Parse, Task, Channel, Crypto, Opaque }
-enum SourceFact {
-    Transport { kind: TransportFailureKind },
-    Database { kind: DatabaseFailureKind },
-    SqlState { code: SqlState },
-    Os { kind: OsFailureKind },
-    OsCode { code: i32 },
-    Parse { category: ParseCategory, location: ParseLocation },
-    Size { limit: u64, observed: ObservedSize },
-    Task { outcome: TaskFailureKind },
-    Channel { outcome: ChannelFailureKind },
-}
-struct Omission {
-    at: EvidenceLocation,
-    field: OmittedField,
-    reason: OmissionReason,
-    observed_bytes: Option<u64>,
-}
-enum EvidenceLocation { Response, SourceLayer { index: u8 } }
 ```
 
-Fields are private and checked. `DiagnosticEvidence` owns the **8 KiB total canonical budget**,
-including response context, layers, facts and omission metadata. There are at most 32 omission
-entries. A layer represents one concrete captured error, not one diagnostic field: an OS error can
-retain both kind and numeric code in the same layer. An opaque source has `kind: Opaque` and no
-invented structured facts; preserve any accessible deeper source in its own next layer. Source order follows
-actual exposed `source()` links, not the order in which observations arrived. Owner-typed outer
-wrappers already represent their own nesting and are not duplicated as fictitious client layers.
-An empty chain with `Complete` is legitimate when a local checked failure has no upstream source;
-`Unavailable` means the boundary knows upstream evidence was not exposed. Do not manufacture an
-opaque source for a local error whose full facts are already in its typed payload.
+The wrapper supplies a named persisted-field contract; from_value transfers ownership and
+as_value borrows the same data. Private storage provides no mutation API. This is one JSON tree,
+without an encoded-text copy, generic capture factory or standalone MfmValue/decoder identity.
+Construction and Deserialize produce diagnostic data, not proof of Object admission. Neither
+canonicalizes, validates persistence rules nor imposes a byte quota.
 
-HTTP status and a received RPC error code belong to response context. They are not automatically
-ancestors of a later body or parsing failure. For a checked RPC error response without a client
-source object, response context plus an empty complete source chain is valid. For headers followed
-by a body failure, retain the status in response context and the body error/source links in the
-chain. Do not insert the status as an extra source layer. Local operation/stage and checked domain
-facts remain in the owner's exact error type (section 5.2).
+Implement Values' existing PersistedSchema for this type without adding a derive dependency to
+Values. schema_identity() uses SchemaKind::PersistedContract, no semantic type id, schema name
+mfm.diagnostics.diagnostic-evidence, version 2, and the existing CanonicalJsonTerminal shape with
+CanonicalJsonProfile::DiagnosticFloatFree (wire diagnostic_float_free). validate() delegates to
+validate_derived_persisted_owner(self, &Self::schema_identity()?). There is no second JSON grammar
+or validator. Nested owner fields use the existing #[mfm(persisted)] path; ordinary whole-owner/
+Object admission checks that declared shape, canonical bytes, floats and actual limits once at
+its existing boundary. Keep semantic facts such as kind/method/stage in their typed owner fields;
+JSON cannot replace executable inputs, declared error types or classification inputs.
 
-Omission locations refer only to an existing layer index or a present response. An explicitly
-omitted response field uses `Response`; an omitted client field belongs to its source layer.
-These locations do not mandate secret-based filtering of upstream text under section 4.2.
-`ChainEnd::BoundReached` accounts for an unretained suffix without inventing an index or
-number of omitted sources. `facts_truncated` accounts for a layer's omitted facts, and
-`omissions_truncated` accounts for omitted omission entries. These flags have distinct meanings.
+Extend the existing canonical terminal validator with that one profile. Reuse GeneralFloatFree's
+number and structural rules and existing canonical/global limits; only diagnostic text bypasses
+the secret-marker check under section 4.2. GeneralFloatFree and ordinary String/Program/context
+rules retain their existing policy. Use DiagnosticFloatFree for the derived FailureReport terminal
+schema too: its embedded Objects have already passed their own typed admission, so the report
+must not reinterpret trusted diagnostic text using a conflicting generic string policy. Advance
+the report schema from version 4 to 5 and update affected owner/schema fixtures together. Test the
+whole error and report contracts, not just a nested-field serializer. No legacy reader or second
+report validation tree is introduced.
 
-Capture retains response context first, then an outer source prefix, within the shared byte bound.
-Reserve space for all fixed bound markers before appending variable entries. Stop before an entire
-next layer would exceed the byte/layer bound and mark the chain end; do not merge its facts into the
-previous layer. The per-layer fact bound uses `facts_truncated`. Omission overflow uses its marker.
-Constructors and deserialization enforce counts, byte bounds, legal kind/fact combinations, unique
-fact fields per layer, valid omission locations and response presence. Facts are emitted in their
-schema-defined field order so equivalent evidence has one canonical representation. Source kinds
-and omission vocabulary are closed; there is no arbitrary map escape hatch. Section 4.2 governs
-any explicitly required shared diagnostic-text addition; this existing schema is not a secret-free
-certification requirement or permission for a new owner-specific schema family.
+Remove the 8 KiB diagnostic budget and all layer/fact/omission counts, reservations, truncation
+and completeness accounting. Actual Object, canonical, frame, run and terminal-report limits stay
+with their existing owners. If complete operational data cannot be admitted, use the existing
+internal encoding/admission failure route; do not persist smaller substitute evidence. The two
+invocation-only field-conversion markers in section 9.1 do not apply to operational originals.
 
-Traversal stops at its own finite bound, including a pathological cyclic source chain. Do not walk
-the discarded suffix to count it. Do not format sources to infer identity or classify by messages.
-The byte/layer bounds describe only shared diagnostics; owner-typed checked facts are separately
-bounded by their exact value and complete persisted-value and frame contracts.
+Delete the Diagnostics crate's manifest, workspace/dependency entries, code, obsolete tests and
+README in K3. Move only EVM's existing two-case ObservedSize payload to its owning EVM module;
+it retains its exact/lower-bound meaning and persisted field contract. Live keeps the already
+checked reqwest::StatusCode through private helpers and serializes its numeric value at this
+boundary: delete HttpStatusCode and AdapterFailure::HttpStatus's redundant reconstruction path.
+Use task outcome strings panicked/cancelled in Runtime and Live instead of TaskFailureKind.
+Delete the remaining source/fact/omission vocabulary, EvidenceError, builders and budget writers;
+none is retained to support hypothetical future owners.
 
 ### 5.2 Concrete owner errors supply classification
 
@@ -344,13 +300,22 @@ Self::Failure can be an existing domain error shared by related States. Generic 
 such as E: MfmValue does not erase that concrete type: MfmValue supplies its schema/persistence
 capability. Keep the associated types and ClassifyError; add no new failure trait, PersistedError
 wrapper, associated-type rename or error enum per State. A local failure with no upstream cause
-need not invent one. Where a cause exists, its promised information belongs in the owner payload.
+need not invent one or include DiagnosticEvidence. Where a cause exists, its promised information
+belongs in the owner payload before Object admission.
 
 Runtime commits the original, then decodes that same declared type for classify(), both live and
 after restoration. An invocation diagnostic, formatted message, cached classification or mapped
 root cannot replace the original. Classify the whole owner error, not automatically its deepest
 source: a provider failure in a duplicate-safe Read can be Retryable, while the same cause during
 transaction submission is OutcomeUnknown. The owner's operation changes the safe inference.
+
+The ownership path is concrete owner error (including any nested DiagnosticEvidence) -> whole
+error admitted/persisted through Object -> same concrete MFM owner restored -> owner.classify()
+-> handler(Classification, RecoveryContext). A foreign client error exists concretely inside its
+adapter; its selected external cause facts become diagnostic data there. Restoration reconstructs
+the MFM owner and those facts, not a live foreign client object. Fields needed for classification
+remain typed in the owner; the classifier does not parse diagnostic JSON. The handler receives
+neither DiagnosticEvidence nor the original error directly.
 
 An adapter independently supplies C::OperationalError. Runtime requires its ClassifyError bound
 at association; do not move that trait into capabilities or add a State wrapper around an adapter
@@ -360,22 +325,47 @@ Keep operation/stage and checked facts at their existing owner. Ordinary typed s
 borrowing remain useful; std::error::Error is not a universal bound, persistence contract or
 classification mechanism. Remove incidental Copy requirements only where owned causes require it.
 A Box around a concrete payload is not erased native ownership. Do not duplicate Classification
-as a mutable owner field. Part 1 preserves already supplied payloads; selected producer enrichment
-belongs to [Part 2 section 3](RFC_CAUSAL_ERROR_PRESERVATION.md#3-owner-representations).
+as a mutable owner field. Part 1 applies section 5.3's finite shared-data cutover; remaining selected
+producer enrichment belongs to [Part 2 section 3](RFC_CAUSAL_ERROR_PRESERVATION.md#3-owner-representations).
 
-### 5.3 Capture vocabulary and extraction
+### 5.3 Closed source-data recipes and extraction
 
-The omitted-field vocabulary is closed: Message, Data, Body, Url, DatabaseDetail, Parameters,
-PanicPayload, and SourceDetail. Reasons are Withheld, Unavailable, and BoundReached. Observed sizes
-are integers only when known. SQLSTATE is five checked ASCII alphanumeric bytes; parser locations
-retain reviewed line/column/offset. Unknown OS codes may remain numeric; unknown source categories
-remain opaque while accessible deeper sources retain their own layers.
+Use the two existing extraction sites: [EVM capture](crates/live/evm/src/json_rpc/capture.rs) and
+[CLI output](bin/cli/src/output.rs).
+Their local helpers construct the selected scalar/source JSON directly, then call
+DiagnosticEvidence::from_value. Values imports no client library and supplies no shared native
+source walker, downcaster registry, arbitrary-error serializer or evidence-construction error
+family. Existing concrete owner serializers still serve section 9's invocation conversions.
 
-Capture walks exposed source links with the selected owner's extraction, not a shared registry
-of client downcasters. The diagnostics crate imports no client libraries. Returned diagnostic text may be retained under section 4.2, but never parse messages to
-infer their category, and never walk an unbounded discarded suffix to count it. For this persisted
-DiagnosticEvidence, reuse the existing checked capture implementation and consuming tests. The
-invocation-only boundary in section 9 does not replace or duplicate this schema/capture service.
+| Actual producer | Data retained in this cutover | Boundary and deletion |
+| --- | --- | --- |
+| EVM JSON-RPC response | response is null or an object containing numeric status and nullable rpc_code; an error envelope also supplies message and nullable data_json. data_json is the original RawValue text, preserving its numeric spelling as text rather than introducing floats into hashed JSON. sources is an ordered array. Response observations are separate from source ancestry. | Keep method, stage, operational kind and RpcRejection typed. Replace ResponseContext and omission construction in json_rpc.rs; do not fetch an extra response body or add IO. |
+| Exposed native EVM source | Each sources entry retains message. reqwest entries additionally retain the existing transport_kind category from the current predicates; IO entries retain os_kind and nullable os_code; JSON entries retain category, line and column. Unknown sources retain their exposed message and child links. | Replace the current source/fact enums with these fields at capture.rs. Use native ErrorKind's Debug name for os_kind; do not maintain a mirrored OS enum or parse messages. The existing reqwest category precedence and parser category spellings remain. |
+| CLI output failure | Keep typed stream and write/flush stage. Its diagnostic data retains the top IO message, os_kind/os_code and the ordered exposed child sources with message and IO fields when known. | Inline OutputIoError's data in the output error; preserve get_ref() as the initial custom IO source and source() for deeper links. Use the same scalar/array spelling; no generic reporting custody or second capture service. |
+
+Compute the existing timeout/rate-limit owner kind from the concrete client error and checked
+HTTP status before constructing response JSON; no classification decision reads that JSON.
+The existing CLI error becomes OutputWriteError { stream: OutputStream, stage: WriteStage,
+details: DiagnosticEvidence }. Its Serialize includes that data; remove the old source-marked
+Box<OutputIoError>. DiagnosticEvidence supplies no std::error::Error source implementation.
+
+Walk source() only at those owning boundaries and preserve each exposed layer in order. Keep a
+small list of borrowed source addresses locally; if a reference repeats, stop before duplicating
+it and add source_cycle: true to the diagnostic object. No native reference leaves extraction.
+Absent that condition there is no cycle field. Do not add a source-count budget, truncation branch,
+cycle registry or discarded-suffix traversal. This records what the selected source APIs expose;
+it does not promise hidden foreign-library data or arbitrary custom source implementations.
+
+from_value cannot fail: these helpers supply ordinary JSON scalar/array/object data, not callbacks
+or arbitrary native serializers. A failed execution job, source formatter or later whole-error
+encoding uses the existing internal failure route; partial evidence and invocation fallback
+markers are never acknowledged as a complete operational original. Receiver forwarding does not
+rerun extraction. Preserve the same cause fields through whole-owner admission, restoration,
+classification and the actual invocation/report consumer.
+
+This list is closed. Existing construction callers of the shared EVM helper only adopt its new
+return/import path; they do not authorize a startup/config audit. Part 2 subtracts these completed
+response/native-source cases before selecting further provider, signing or recording producers.
 
 ## 6. One authoritative current record
 
@@ -903,14 +893,14 @@ capture exposed layers; no erased native owner or deferred extractor crosses thi
 
 InvocationDiagnostic is needed only to carry selected internal failure facts through interfaces
 that cannot name every producer's concrete error. Its minimal Values-owned representation is one
-owned JSON value, constructed once and forwarded immutably. It has no byte-budget policy:
+owned DiagnosticEvidence, constructed once and forwarded immutably. It has no byte-budget policy:
 
 ```rust
 #[derive(Debug, serde::Serialize)]
 pub struct InvocationDiagnostic {
     code: &'static str,
     operation: &'static str,
-    details: serde_json::Value,
+    details: DiagnosticEvidence,
     size: Option<SizeViolation>,
 }
 impl InvocationDiagnostic {
@@ -926,17 +916,18 @@ impl InvocationDiagnostic {
             Ok(Err(_)) => serde_json::json!({"omitted": {"reason": "encoding_failed"}}),
             Err(_) => serde_json::json!({"omitted": {"reason": "panicked"}}),
         };
-        Self { code, operation, details, size }
+        Self { code, operation, details: DiagnosticEvidence::from_value(details), size }
     }
     pub fn code(&self) -> &'static str;
     pub fn operation(&self) -> &'static str;
-    pub fn details(&self) -> &serde_json::Value;
+    pub fn details(&self) -> &DiagnosticEvidence;
     pub fn size(&self) -> Option<SizeViolation>;
 }
 ```
 
-The getter bodies simply borrow/return their fields. Fields stay private and there is no mutation
-API, native-owner access, MfmValue identity or custom error trait. Move or borrow the value through
+The getter bodies simply borrow/return their fields; details().as_value() borrows the same tree.
+Fields stay private and there is no mutation API, native-owner access, MfmValue identity or custom
+error trait. Move or borrow the value through
 existing error variants; share it only where an actual owner needs sharing. The JSON value is final
 report data, never executable input or a second representation beside RawValue/encoded JSON.
 Implement ordinary Display/Error for existing typed error wrappers without an erased source;
@@ -955,14 +946,16 @@ nested-size diagnostic/status exception. Do not reconstruct nested constructor f
 E5 retains the constructor case, metadata.correlation location and,
 for an excessive length, limit 256 and actual observed bytes. Owner codes and fields belong to
 those selected contracts. An opaque code or message alone does not satisfy these cases. Existing
-DiagnosticEvidence can be included by its owner as already captured source data; Values imports
-neither that crate nor any client library. Part 1 adds no persisted diagnostics schema extension.
+DiagnosticEvidence is the same Values-owned data in declared error fields and invocation details.
+Section 5 owns its one persisted schema/profile; no client library or diagnostic crate dependency
+enters Values. Serializing an owner can include its already captured data without native recapture.
 
 Move the existing Serialize-only SizeResource and SizeViolation declarations together from Runtime
 to Values and update their actual consumers. Reuse the same measured-versus-serialization-lower-
-bound variants and public spellings. Do not add SizeDiagnostic, move Diagnostics::ObservedSize,
-or create a second size hierarchy. Populate size when the concrete failure is known; delete
-cause_size and its cross-crate source traversal/downcasts. Receivers read supplied facts directly.
+bound variants and public spellings. Do not add SizeDiagnostic or a second size hierarchy;
+section 5.1 relocates the existing ObservedSize to EVM without changing its meaning. Populate size
+when the concrete failure is known; delete cause_size and its cross-crate source traversal/downcasts.
+Receivers read supplied facts directly.
 Runtime adds its own actual execution operation/stage once; owner operation context remains intact.
 No secondary reload/report failure can replace the primary disposition or size evidence.
 
@@ -973,16 +966,17 @@ constructs one JSON tree directly; it does not encode text and parse it back. Fi
 belongs to the existing transport renderer. Owner codes/operations are fixed identifiers from the
 table; no identifier-size type, budget arithmetic or metadata-overflow branch is required.
 
-The two literal omission objects in the sketch are the complete fallback wire. They contain no
+The two literal objects in the sketch are the complete invocation-only fallback wire. They contain no
 secondary error or exception payload. Reserve the top-level omitted field, discard partial details,
 and preserve code/operation/size unchanged. Do not retry a serializer or report its failure
 recursively. Add no Omission enum, capture-failure type or fallback parser.
 
 Delete the invocation diagnostic's 32 MiB ceiling, bounded writer, metadata reservations,
 bound_reached/truncation fields and their tests. There is no new reporting quota. Keep the actual
-Object/frame/run limits, the content-addressed FailureReport bound and the persisted 8 KiB
-DiagnosticEvidence contract. Optional SizeViolation describes a primary execution or Store limit,
-not a limit on this diagnostic. K3 verifies selected fields, the two construction-failure markers
+Object/frame/run limits and the content-addressed FailureReport bound. Section 5 likewise deletes
+the independent persisted-diagnostic quota and accounting. Optional SizeViolation describes a
+primary execution or Store limit, not a limit on this diagnostic. K3 verifies selected fields,
+the two construction-failure markers
 and immutable forwarding through the real invocation consumer.
 
 ### 9.2 Failed initial encoding has an explicit information limit
@@ -1025,7 +1019,7 @@ construct selected diagnostic fields once from the concrete cause and this known
 `encoding_target` is `declared_failure`, `position` and `failure_contract` identify the attempted
 slot, `original_detail` and `original_identity` are `unavailable`, and `encoding` holds the selected
 cause fields. Keep the last acknowledged head in the existing invocation context. Section 9.1's
-fixed omission replaces detail if constructing it fails or panics; primary code,
+fixed invocation marker replaces detail if constructing it fails or panics; primary code,
 operation, size and the existing invocation head remain intact. No receiver reopens the original
 or recaptures an already constructed diagnostic to supply these facts.
 
@@ -1219,8 +1213,8 @@ descriptors or persisted value schemas as part of this consolidation.
 ### 9.6 Closed adaptation and callback recipes
 
 The following rows replace K3's open-ended owner discovery. They cover existing supplied data,
-not upstream enrichment. Preserve each named owner's current variants/fields except the explicit
-ValueError/JSON/canonical simplifications above. Other concrete error APIs remain concrete.
+not upstream enrichment. Preserve each named owner's current variants/fields except section 5's shared-data cutover and
+the explicit ValueError/JSON/canonical simplifications above. Other concrete error APIs remain concrete.
 In each row, operation is the name of the existing function doing the adaptation; this names a
 known boundary rather than inferring an operation from error text. Fixed diagnostic codes are
 listed below; they do not replace Runtime Operation/Stage or App's status/disposition code.
@@ -1233,9 +1227,9 @@ listed below; they do not replace Runtime Operation/Stage or App's status/dispos
 | Runtime StateInvariant, InitialValueMismatch and task failure conversions in engine/state/assembly/recovery | runtime_invariant with existing concrete identity/relation fields; reuse its identity mismatch variant for InitialValueMismatch. task_failure with details equal to the scalar panicked or cancelled. Known size remains a direct Runtime size variant. | E1/E4 actual operation/stage and no fault append; keep local mismatch and cancellation behavior. Delete Runtime TaskFailure; add no enum or Diagnostics dependency to represent these two strings. |
 | Existing EVM/Portfolio internal State and capability binding conversions | state_internal over the current serializable EvmDomainError/CapabilityError or existing owner payload at that call. Preserve its fields and nesting; size None unless it is the Values row. | E1 same internal routing and supplied facts. Declared Self::Failure/C::OperationalError stay concrete and follow Object admission, never this diagnostic route. |
 | E5 metadata.correlation native hook in evm/balance_decode.rs | constructor_error; retain metadata.correlation location and the existing empty/excessive-length case with limit 256/observed_bytes. Reuse the current BalanceMetadataError data; no mirrored error tree. | E5's two Runtime/App assertions after shape admission; no additional constructor family. |
-| Live's existing invariant helper and AdapterFailure/AuthorityError::Internal conversions | adapter_invariant over the existing serializable owner: binding/identity expected/observed, task outcome and supplied typed codec/signing/evidence source fields. The helper needs only Serialize for the selected payload, no Error/custody bound. | E1 actual mismatch/preflight/response stage. Forward existing child errors; do not enrich signing, authority, HTTP or provider producers before Part 2. |
+| Live's existing invariant helper and AdapterFailure/AuthorityError::Internal conversions | adapter_invariant over the existing serializable owner: binding/identity expected/observed, task outcome and supplied typed codec/signing source fields. Use panicked/cancelled strings for task outcome; section 5 removes the redundant HTTP-status reconstruction failure. The helper needs only Serialize, no Error/custody bound. | E1 actual mismatch/preflight/response stage. Apply section 5.3's finite source-data cutover; additional signing, authority or provider enrichment belongs to Part 2. |
 | Store load/append and Journal typed ports | Keep StoreError/JournalError and existing variants. Store errors keep their actual disposition and direct size mapping; adapt Journal fields only where a heterogeneous boundary requires it, with journal_error. | E3 append/probe/ambiguity and existing load failures. No Store/provider error schema rewrite in Part 1. |
-| CLI write/flush and REST/App terminal report owners | output_io over OutputWriteError's stream/stage, OS kind/code and already captured DiagnosticEvidence. Inline OutputIoError's fields where its wrapper has no remaining role. JSON encoding uses the JSON row. | E6 terminal write/flush/stream facts and existing known insertion. Keep lexical ownership until return/handoff; delete generic reporting custody. Reuse the current finite source capture, adding no native-owner certification or new traversal. |
+| CLI write/flush and REST/App terminal report owners | output_io over the output owner's stream/stage and section 5.3's shared message/OS/source data. Inline OutputIoError's data in OutputWriteError; JSON encoding uses the JSON row. | E6 terminal write/flush/stream facts and known insertion. Keep lexical ownership until return/handoff; replace the old capture bookkeeping at this existing boundary and delete generic reporting custody. |
 
 Use from_fields directly for one-off typed conversions. Keep a local helper only when multiple
 existing callers share that exact recipe, such as Live's invariant helper. Do not add a trait,
@@ -1265,8 +1259,8 @@ State failure, the runner supplies its existing State failure contract to that s
 
 ## 10. Closed Part 1 error scope
 
-Part 1 proves the shared mechanism through the cases below, preserving already supplied causes.
-Part 2 enriches only its selected execution producers. Startup/config/deployment/ingress and broad
+Part 1 proves the shared mechanism through the cases below, including section 5.3's finite
+EVM/CLI source-data replacement. Part 2 enriches only its remaining selected execution producers. Startup/config/deployment/ingress and broad
 constructor audits are outside both RFCs. E5 remains one explicitly selected execution-time decode
 case; it does not authorize a general constructor migration. E4 keeps checked Object and ordinary
 record decoding with the explicit diagnostic boundary in section 6.2; it does not certify an entire
@@ -1275,16 +1269,16 @@ native parser/source object as secret-free.
 | ID | Required core boundary and evidence | Stopping boundary |
 | --- | --- | --- |
 | E1 | Pure/Read/Effect preparation, execution/interpretation, handler, map and heterogeneous Runtime conversions forward their required InvocationDiagnostic data. Internal failure appends no fault and never enters classification; explicit resume follows acknowledged state. | Section 9.3 callbacks and their invocation consumer. No erased native owner, arbitrary Deserialize provenance, or new upstream error family. |
-| E2 | A State's concrete Self::Failure and the shipping Read's concrete operational error retain their admitted original through failure-before-recovery and cold inspection. Decode that declared owner type for classification, preserving causal/operation context. Pending Effect preserves command/EffectId and settlement precedes interpretation. | Existing declared payload and exposed cause; selected provider/authority/signing enrichment belongs to Part 2. No per-State error wrapper or universal Error bound. |
-| E3 | An admitted failed Read plus failed append reports the complete original and separate recording failure with actual acknowledgement. A non-Error declared failure whose first encoding fails uses section 9.2's ordinary invocation diagnostic and omission contract. Also cover success plus append failure, dispositions and terminal output failure. | Existing invocation/reporting route, one admitted original and candidate. No special first-encoding Runtime variant, serializer retry, native-original custody, producer fallback payload, native-success bag, reporting tree or second audit sink. |
+| E2 | A State's concrete Self::Failure and the shipping Read's concrete operational error retain the complete admitted original through failure-before-recovery and cold inspection. Verify section 5's nested DiagnosticEvidence, response/native-source fields and trusted-text admission through the whole owner and derived report. Restore that concrete type for classification; handler inputs remain Classification/RecoveryContext. Pending Effect preserves command/EffectId and settlement precedes interpretation. | Section 5.3's listed EVM response/source cases are part of the shared-data deletion. Additional provider/authority/signing producers belong to Part 2. No per-State wrapper, diagnostic classifier or standalone diagnostic value registration. |
+| E3 | An admitted failed Read plus failed append reports the complete original and separate recording failure with actual acknowledgement. A non-Error declared failure whose first encoding fails uses section 9.2's ordinary invocation diagnostic and fixed-marker contract. Also cover success plus append failure, dispositions and terminal output failure. | Existing invocation/reporting route, one admitted original and candidate. No special first-encoding Runtime variant, serializer retry, native-original custody, producer fallback payload, native-success bag, reporting tree or second audit sink. |
 | E4 | Malformed nested stored references, bad hashes and oversized Objects reject through checked Deserialize: Restore/Decode, parser category, available location/reason, internal/500 and CLI 2. Postdecode slot/schema mismatch and direct typed construction retain supplied concrete fields. Live size errors keep structured size/422; nested stored-object oversize has no structured SizeViolation. Assert no execution callback or append on rejected restoration. | Section 6.2's stored-data exception is closed. No native nested-constructor ancestry/field recovery, parent seeds, raw framework IDs, parser side channel, message parsing, broad ID rewrite or source-certification project. E5's selected owner hook is separate. |
 | E5 | Shipping EvmBalanceContext metadata.correlation constructor: empty and excessive-length failures retain their case/location and required limit/observed length through the actual typed Runtime callback and Application diagnostic after structural/schema admission. | These two cases only; reuse/extract the existing constructor. Keep minimal local raw-to-checked helpers only where necessary; no other context/value family migration. |
-| E6 | Consumers of checked Object Deserialize, InvocationDiagnostic, shared size data, Store and callback APIs compile and forward their selected diagnostics/classification using shared rendering. Read/Effect callbacks retain borrowed checked identity arguments; Read reuses its typed input within one invocation. | A needed forwarding/import update does not authorize inspecting every producer the caller uses or adding another adapter/schema/capture layer, value eraser or registration API redesign. |
+| E6 | Consumers of checked Object Deserialize, shared DiagnosticEvidence/InvocationDiagnostic, size data, Store and callback APIs compile and forward selected facts/classification. Delete mfm-diagnostics and update actual dependency/task/docs references. Read/Effect callbacks retain borrowed checked identity arguments; Read reuses its typed input within one invocation. | Section 5's named schema/source-data cutover is authorized. A needed forwarding/import update adds no producer audit, second value eraser, capture service or registration redesign. |
 
-Sections 9.1-9.6 fix the core diagnostic representation, field recipes, callback signatures and
+Sections 5 and 9.1-9.6 fix the shared data, admission, field recipes, callback signatures and
 deletions. Apply those recipes to the named current conversions and record E1-E6 results in section
-11.3's completion evidence. New producer facts or capture/schema mechanisms remain outside this
-handoff and need a concrete architect design/cost decision before expansion.
+11.3's completion evidence. Producer facts or capture/schema mechanisms beyond those named remain
+outside this handoff and need a concrete architect design/cost decision before expansion.
 
 If a promised cause has already been erased, that case is unmet until the producing conversion is
 resolved; it cannot pass by relabeling the loss unavailable. Preserve the selected supplied facts
@@ -1347,7 +1341,8 @@ put raw candidate bytes or native client objects in JSON. App and the transports
 constructed/admitted data rather than extracting causes, reparsing text-rendering JSON or walking
 size-error sources again. A postcommit projection/delivery failure retains known insertion and cannot reopen work.
 
-Keep the baseline derived FailureReport's 32 MiB ceiling and content-addressed report contract.
+Keep the baseline derived FailureReport's 32 MiB ceiling and content-addressed report contract;
+section 5.1 supplies its current diagnostic-text schema profile.
 Validate that concrete terminal report before its terminal append; if it cannot fit, leave the
 original AwaitingRecovery and report the construction/size cause. Do not add a persisted report
 copy or another lifecycle reservation. This is an actual report bound in addition to frame bounds;
@@ -1498,10 +1493,30 @@ Prove section 9's concrete data shape with E4's already established direct-admis
 stored-data parser diagnostic, E5 constructor fields, an already supplied foreign cause from these
 selected paths, and measured/lower-bound live size evidence. Preserve K1's nested stored-object
 size exception; do not restore native capture to recover fields intentionally outside that contract.
-Implement section 9.1's from_fields sketch and section 9.5's concrete error simplifications, then
-apply the closed recipes/signatures in section 9.6. Verify the two literal encoding/panic omissions
-retain primary code/operation/size without recursively constructing an error. Delete the diagnostic
-budget, metadata accounting, bounded writer and bound_reached behavior. No new quota replaces them.
+Implement section 5's shared Values data/profile and the two existing source-data conversions,
+then section 9.1's from_fields sketch and section 9.5's concrete error simplifications. Apply the
+closed recipes/signatures in section 9.6. Keep shared data/profile, affected owner/report schemas,
+consumer migration and mfm-diagnostics deletion in one coherent cutover. Do not keep a compatibility
+crate or legacy diagnostics reader underneath the new type. Verify that the two literal invocation
+encoding/panic markers retain primary code/operation/size without recursively constructing an error. Delete the diagnostic
+budgets, metadata accounting, bounded diagnostic writers and bound_reached behavior. No new quota
+replaces them. Remove the 8 KiB policy, source/fact/omission hierarchy, EvidenceError and redundant
+HTTP-status conversion; relocate only EVM's real ObservedSize and use task outcome strings.
+
+Prove nested-field admission through a real ProviderFailure and its enclosing operational error,
+Object restoration and the derived FailureReport. Include exposed nested messages/native fields,
+HTTP/RPC facts, RPC data_json with its original numeric spelling, trusted text containing a marker,
+source text larger than the deleted 8 KiB quota, and unchanged typed classification/handler inputs.
+A same-marker ordinary Program/context string
+still follows its existing rejection rule. Floats in diagnostic JSON or an oversized whole error
+reject initial Object admission without truncation, append or classification; section 9.2 reports
+that encoding/admission failure. Separately test terminal-report overflow under section 10.1:
+the original is already admitted and committed, and classification/handler execution may have
+occurred. Keep that original AwaitingRecovery and report the projection/size failure without a
+terminal append, unavailable-original claim or replay of those callbacks. Retain cause order,
+repeated-reference termination and the CLI custom IO source/write/flush checks. Delete quota/
+vocabulary/omission fixtures and standalone diagnostic
+MfmValue tests rather than carrying their obsolete assertions into the new route.
 
 Cut over the existing callback/decoder/Runtime/App/transport interfaces coherently to immutable
 InvocationDiagnostic data. Move the same SizeResource/SizeViolation declarations into Values;
@@ -1519,12 +1534,14 @@ causes and accurate acknowledgement. No outside-job `Arc<E>` or native-success c
 Delete NativeCause/Captured/Owner, projectors and companion error Wire trees, ReturnedFailure,
 ReportFailure/IncompleteReport and related reporting types, CLI Fields/MissingField reconstruction,
 and superseded custody tests in the same closure. Retain tests of promised cause fields, bounds,
-classification and delivery. Section 14 distinguishes real necessary data from removable wrappers.
+classification and delivery. Update the affected dependency manifests/lockfile, workspace/task
+references and owning documentation as part of removing the crate; do not redesign the build graph.
+Section 14 distinguishes real necessary data from removable wrappers.
 
 Use the agreed upstream trust boundary and specified diagnostic/recording/context signatures.
 Measure the whole replacement, including owner-local adapters and tests. Do not migrate PostgreSQL,
-config or signing families, add diagnostic fields, or expand persisted schema to make K3 appear
-comprehensive. A new fact contract needs a specific design before implementation.
+config or signing families or expand beyond section 5's specified fields and persisted profile.
+A further fact contract needs a specific design before implementation.
 
 ### K4: `retain typed input through read interpretation`
 
@@ -1565,9 +1582,9 @@ for changed execution boundaries. All direct Rust tooling runs in the default Ni
 final `nix run .#ci` on the complete Part 1 candidate. If verification changes that candidate,
 repeat affected checks and obtain review of changed contracts before recording acceptance.
 
-Record the accepted implementation commit, finalized Object/RunRecord/InvocationDiagnostic/Store signatures
+Record the accepted implementation commit, finalized Object/RunRecord/DiagnosticEvidence/InvocationDiagnostic/Store signatures
 and source locations, C1-C18 evidence, real removals/additions and cost against both baselines, and
-known omissions/deferred upstream gaps. Use one concise completion record in this RFC, not a new
+known information limits/deferred upstream gaps. Use one concise completion record in this RFC, not a new
 progress-document family. Until completed, that record must say pending rather than cite a proof
 or intermediate commit as accepted. At this revision: **Part 1 acceptance is pending.**
 
@@ -1603,11 +1620,11 @@ execution guarantees remain complete for the supported core behavior.
 | C8 | Accepted Effect settlement commits before interpretation. Injected interpreter failure appends no fault; cold resume interprets retained evidence without entering the adapter for that phase. Uncommitted settlement makes no durability claim. |
 | C9 | E1/E4/E5 internal failures retain their selected diagnostic contract as InvocationDiagnostic and append no fault. E4 distinguishes stored-data decoding from direct typed/slot errors under section 6.2; E5 retains its selected native constructor fields. No native owner/downcast/projector is needed by a receiver. Explicit resume retries permitted unfinished work; there is no automatic retry loop or internal-failure classification. |
 | C10 | Local preflight mismatch performs no provider call/append; post-response binding rejection reports the true stage without appending unauthenticated evidence or falsely claiming no IO occurred. |
-| C11 | E3 reports complete admitted failed outcomes with independent recording causes. Failed first encoding of a non-Error declared original uses the ordinary internal diagnostic: encoding_target, known position/contract and unavailable original contents/identity appear when detail construction succeeds; otherwise section 9.1's fixed omission applies. Primary cause code/operation/size and the invocation head survive either case. It retains no arbitrary E, retries no serializer, appends nothing and classifies nothing. Later stages reuse the same Failure/Object. Success plus recording failure invents no original execution error or custody stash. Candidate/disposition is retained once; Store errors return without probe or audit retry. |
+| C11 | E3 reports complete admitted failed outcomes with independent recording causes. Failed first encoding of a non-Error declared original uses the ordinary internal diagnostic: encoding_target, known position/contract and unavailable original contents/identity appear when detail construction succeeds; otherwise section 9.1's fixed invocation marker applies. Primary cause code/operation/size and the invocation head survive either case. It retains no arbitrary E, retries no serializer, appends nothing and classifies nothing. Later stages reuse the same Failure/Object. Success plus recording failure invents no original execution error or custody stash. Candidate/disposition is retained once; Store errors return without probe or audit retry. |
 | C12 | The NotInserted probe covers exact matching candidate, conflicting occupied sequence, candidate followed by later commits, absent candidate, and failed reload/projection. It retains the physical finding independently of the latest view and never drives further work. A candidate-absence snapshot cannot resolve a still-in-flight COMMIT; the Store-error invocation returns with its ambiguity/custody. Fresh resume may use current phase authority without claiming it resolved an unavailable prior candidate. |
 | C13 | Atomic append, immutable earlier frames, exact-head conflict, checked cumulative bounds, consistent loads, and PostgreSQL acknowledgement ambiguity hold through Store public boundaries. |
 | C14 | E5's empty and oversized metadata.correlation constructor failures reach Runtime/Application with location and reviewed length facts. K1 proves E4's checked rejection and narrower parser/status contract, including nested-size handling. Ordinary Serde structural forms still obey checked-value/frame/current-state invariants. Read/Effect callbacks keep borrowed checked identity arguments. No parent seeds, re-encoding validator or additional constructor family is implied. |
-| C15 | E1-E6 and section 9.6's closed recipes preserve selected data, routing and declared-error classification. InvocationDiagnostic has no byte budget and retains one JSON tree. Its two literal encoding_failed/panicked omissions preserve primary code/operation/size. Live measured size and serialization lower bounds keep their projection; E4 nested stored-object oversize remains internal/500 without SizeViolation. No NativeCause, opaque owner, projector registry, diagnostic-budget machinery, size-source downcasts, consumer recapture or generic reporting tree remains. |
+| C15 | E1-E6 and sections 5/9's closed recipes retain selected causes and typed classification. One Values DiagnosticEvidence supplies nested owner data and InvocationDiagnostic.details with no independent quota. Whole-owner/Object restoration and FailureReport admit the trusted text profile; ordinary Program/context checks and float/actual-size rejection remain. The two invocation-only encoding_failed/panicked markers preserve code/operation/size and never become persisted original substitutes. E4's nested stored-object size exception remains internal/500. No mfm-diagnostics, source/fact/omission framework, NativeCause, projector registry, diagnostic-budget machinery, size-source downcasts, consumer recapture or generic reporting tree remains. |
 | C16 | Actual oversize/frame/run rejection leaves the acknowledged head unchanged. Cover a failure that committed but whose recovery cannot fit, and an externally settled Effect whose settlement cannot fit. No future-capacity promise remains. |
 | C17 | App/CLI/REST show the retained current result or E1-E6 supplied/required causal invocation report with section 10.1's exact statuses and accurate acknowledgement/delivery status, including known insertion followed by projection failure. They do not reconstruct history, generate internal-fault records, or deliberately append MFM secret inputs. Upstream diagnostic content follows section 4; broad startup/ingress enrichment is outside both RFCs. |
 | C18 | K1-K4 have integrated deletion and retained-behavior evidence, including checked decoding, one record, no native custody and local Read-input reuse without a cache or moved evidence binding. G1 accepts the complete corrected core on its own cost and guarantees. F1 records the accepted Part 1 commit, finalized APIs, shipping bytes/load IO, cost against both baselines and final verification on that candidate. Part 2 readiness or completion is not required. |
@@ -1640,18 +1657,20 @@ is not proof if another wrapper or duplicate responsibility appears underneath.
 | --- | --- |
 | RunState/RunCommit, Phase, OperationFacts, TerminalFailure | One RunRecord/RecordedOperation; delete agreement code and duplicate payloads. RecoveryOutcome replaces RecoveryDecision. |
 | ObjectSeed, CheckpointsSeed/Visitor, generated parent/collection seeds and macros in runtime/state/decode.rs | K1 replaces these with ordinary checked Object Deserialize and derived record decoding before K2 changes the record. Preserve rejection and selected E4/E5 diagnostics; delete seed-specific assertions. |
+| mfm-diagnostics; SourceChain/SourceLayer/SourceKind/SourceFact, ResponseContext, omission vocabulary, EvidenceError, builders and capture bookkeeping | Replace with Values' transparent DiagnosticEvidence and the two local recipes. Delete crate/API/test/doc/dependency references. Keep only the owner-local ObservedSize payload; no shared source taxonomy. |
+| HttpStatusCode and AdapterFailure::HttpStatus | Keep the already checked reqwest::StatusCode locally; delete reconstruction and its impossible failure path. |
 | Read runner's second S::Input decode | K4 retains the first typed input locally through preparation/interpretation. No new Driver field, Clone bound, alternate resume path or change to admitted-evidence binding. |
 | NativeCause, Captured, `Owner<E>`, from_error/from_original/from_error_with, ProjectionPanicked and local omission serializer | InvocationDiagnostic contains one selected JSON value and the two literal fallbacks; no native owner or stored callback. No capture-failure subsystem replaces them. |
-| Invocation diagnostic quota, bounded/canonical writer, metadata reservation and bound_reached accounting | Delete this policy and its tests. Retain only primary size facts for the existing execution/persistence/report limits. |
+| Diagnostic quotas and accounting: 8 KiB evidence bound, invocation ceiling, layer/fact/omission counts, bounded diagnostic writer, metadata reservations and bound_reached/truncation | Delete these policies, helpers and obsolete assertions. Actual execution/Object/frame/run/report limits retain their current owners. |
 | Runtime RecordingFailure/RuntimeError Wire projectors and Values ValueError Wire projector | Keep ValueError's eight concrete variants with derived Serialize and one typed into_diagnostic helper. Delete serializer mirrors and generic projectors; follow sections 9.5-9.6. |
 | ReturnedFailure and extra native-original Arc/custody | Reuse complete admitted Failure/Object. Failed first encoding reports explicit unavailable original detail without retaining arbitrary E. |
 | App ReportStage, `ReportFailure<T>`, ReportDetail, IncompleteReport, duplicate Omission/ObservedHead; CLI Ordinary | Remove the generic reporting-failure framework. Use existing invocation/head/disposition and terminal output facts through one renderer. |
 | CLI Fields/MissingField | Render text from typed report data; no JSON reparse or missing-own-field failure path. |
 | DomainFailure/ReadFailure; duplicate owned AdapterIncidentView and App Incident/Original views | Inline Failure payloads where independent reuse disappears; borrow the authoritative error through one public view. No extraction-wrapper replacement. |
-| InitialValueMismatch; TaskFailure | Reuse the identity-mismatch payload. Runtime task diagnostics use panicked/cancelled scalars; Live keeps its existing TaskFailureKind. Add no type or dependency. |
-| SizeViolation/SizeResource in Runtime; cause_size | Move the existing two data declarations to Values, update consumers and delete source/downcast discovery. No parallel size hierarchy or Diagnostics schema move. |
+| InitialValueMismatch; Runtime TaskFailure and Diagnostics TaskFailureKind | Reuse the identity-mismatch payload. Runtime and Live task diagnostics use panicked/cancelled strings; add no type or dependency. |
+| SizeViolation/SizeResource in Runtime; cause_size | Move the existing two data declarations to Values and delete source/downcast discovery. The separate EVM ObservedSize keeps its concrete exact/lower-bound meaning at that owner. No parallel size hierarchy. |
 | AdapterReturn | Delete it and ReturnedFailure. Section 9.6's nested Result separates internal failure from observed/admitted operational outcomes using existing types. |
-| CanonicalSource and canonical Cause companion; OutputIoError | Flatten the canonical owner as specified in section 9.5; inline the output wrapper's existing fields and capture in OutputWriteError. No parser/IO redesign or new source extractor. |
+| CanonicalSource and canonical Cause companion; OutputIoError | Flatten the canonical owner as specified in section 9.5; inline the output wrapper's selected data in OutputWriteError using section 5.3. No parser/IO redesign or new capture service. |
 | Per-caller upstream sanitizers and native-owner certification | Use the explicit upstream trust boundary and deliberate MFM-input handling; no replacement certification framework. |
 
 The following data and small helpers earn their place through a concrete responsibility. Keep
@@ -1660,6 +1679,7 @@ the smallest visibility and implementation; this does not approve every existing
 | Retained type/data | Reason and limit |
 | --- | --- |
 | Object; RunRecord/RecordedOperation | One checked value eraser at section 6's explicit heterogeneous/persistence boundaries and one complete continuation. Typed callbacks keep concrete values; no raw carrier, native cache, second state or persisted diagnostic envelope. |
+| DiagnosticEvidence; InvocationDiagnostic | One Values-owned JSON data wrapper with constructor/getter and nested PersistedSchema; one invocation envelope with code/operation/primary size. Share the data, keep classification typed, and add no standalone MfmValue, native owner or capture factory. |
 | ValueError; JsonError; CanonicalError | Concrete Values rejection and necessary native JSON/canonical source ownership. Section 9.5 defines the minimal representations; no serializer mirror or arbitrary-error carrier. |
 | Call, EffectCall, Settlement, StateCall, Failure | Factor actual input/position, command authority, accepted evidence and original failure once. Distinguish valid operation facts without a bag of optional fields. |
 | Checkpoint, StateUsage | Save authorized restart input and committed allowances. They do not restore a periodic-snapshot service, fold or historical counter scan. |
@@ -1672,11 +1692,11 @@ the smallest visibility and implementation; this does not approve every existing
 | BalanceMetadataError; BalanceContextDecodeError, MetadataWire/ContextWire and Object input Wire | Keep actual E5 constructor facts; inline the one-case location wrapper when equivalent. Prove the smallest local parse/admit helpers needed; no parent grammar or general constructor migration. |
 | AdapterFailure, local TaskOperation and parser Base/Parse helpers | Keep selected actual adapter check/source fields. Private foreign-error adapters may be needed where Serialize is absent; no new public schema/registry or upstream library rewrite. |
 
-DiagnosticEvidence and its vocabulary, CanonicalError, NoParams and the EVM provider owner types
-are existing shared contracts. NoParams still supplies parameterless
-policy configuration; CanonicalError remains the concrete canonical owner. Reuse these types;
-do not count them as new concepts or hypothetical baseline deletion credit. Likewise, existing
-FailureReport/FailureCauseView may render retained data but must not become another owned failure
+DiagnosticEvidence's old framework is deleted, not retained vocabulary to expand later. Its small
+Values replacement has its own actual cost. NoParams still supplies parameterless policy
+configuration; CanonicalError and EVM provider errors keep their concrete owner roles. Count
+removals only against a baseline containing them, including relocated code in replacement cost.
+Likewise, existing FailureReport/FailureCauseView may render retained data but must not become another owned failure
 tree. Test helpers are reviewed with their retained behavior; their count is not production growth.
 
 Count each removal only against a baseline where that code exists. Use both baselines in section 3
@@ -1700,8 +1720,8 @@ architecture for the engineer. Part 2 has its own refinement gate and pending pr
 | --- | --- | --- | --- |
 | The unified record removes more mechanism than its dispatch requires | The implementation baseline contains duplicate phase/facts data; the unified production diff is not implemented | A renamed validator could preserve the same complexity | K2 replaces the real core route, deletes the old pair and compares retained behavior, encoded occurrences and actual code. |
 | Ordinary checked decoding removes the seed grammar while preserving required validation | The structural acceptance and diagnostic contracts are settled; the real decoder cutover is not implemented | Invalid values could enter Runtime or obsolete map-only/native-error assertions could recreate decoder machinery | K1 tests accepted Serde forms plus reference/hash/oversize/current-state rejection, direct typed/slot fields, E5 and actual callbacks. No whole-record re-encoding pass. |
-| Concrete invocation data removes more machinery than its conversion requires | The no-budget constructor, minimal Values errors and closed recipes are specified but not implemented | Duplicate serializers or lost selected facts could remain | K3 verifies E1-E6 fields, primary size/status, the two fixed fallbacks and aggregate deletions under sections 9.1-9.6. No quota or native fallback is reintroduced. |
-| The cutover preserves existing declared-original admission | The boundary changes are specified but not implemented | An invocation diagnostic could incorrectly enter the persisted original or alter its admission | E2/E3 compare existing concrete/admitted/restored originals. Part 1 adds no persisted text/schema/admission change; Descriptor/JSON/canonical messages stay in invocation data. Future persisted-text design belongs to Part 2 R0. |
+| Shared diagnostic data removes more machinery than its conversions require | The minimal wrapper, trusted-text profile and local source recipes are specified but not implemented | A generic capture factory, duplicate serializer or retained diagnostic framework could erase the simplification | K3 verifies E1-E6 fields and two invocation fallbacks, deletes the diagnostics crate, and measures the full shared-data/owner/report replacement. |
+| The new nested field and terminal report share the intended admission policy | PersistedSchema/derive and whole-report integration have not been implemented together | Valid diagnostic text could be rejected by an outer validator, or ordinary input/float checks weakened | Admit and restore the real operational owner and FailureReport with selected messages, compare typed classification and test ordinary-input, float and actual-size rejection. Reuse the existing terminal validator; add no second grammar. |
 | Part 1 alone meets the simplification objective | The final replacement cost and responsibility removals are not implemented or measured | Reduction against the implementation baseline could still leave an unjustifiably larger core overall | G1 reviews actual Part 1 removals, replacements and total cost against both baselines. Unsupported net reduction or complexity improvement keeps Part 1 unaccepted; no credit from future Part 2 deletions. |
 
 Normal loading deliberately trusts past live progression and append-only storage; it does not
@@ -1711,6 +1731,7 @@ inputs and from post-crash delivery.
 Concrete owner errors remain the classification input; failed initial encoding explicitly reports
 original detail unavailable, with no opaque native custody. Checked Object at explicit boundaries,
 ordinary Serde record forms with the narrower malformed-storage diagnostic/status contract, no
-invocation diagnostic budget, minimal Values errors, local Read-input reuse and deletion-first
+diagnostic quotas, one Values-owned diagnostic data type, minimal concrete errors, local Read-input
+reuse and deletion-first
 order are settled. These are accepted contracts;
 implementation evidence and aggregate net simplification remain to be delivered.
