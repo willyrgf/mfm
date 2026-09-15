@@ -73,9 +73,7 @@ struct OversizedOriginal {
 impl Serialize for OversizedOriginal {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        if self.detail.len() >= mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES
-            || self.detail == "encoding-task-panic"
-        {
+        if self.detail == "encoding-task-panic" {
             ORIGINAL_SERIALIZATIONS.fetch_add(1, Ordering::SeqCst);
         }
         assert_ne!(
@@ -152,95 +150,72 @@ impl mfm_program::Operation for LargeFlow {
 }
 #[tokio::test]
 async fn unrecordable_original_reports_known_slot_and_encoding_cause_without_append() {
-    for panics in [false, true] {
-        ORIGINAL_SERIALIZATIONS.store(0, Ordering::SeqCst);
-        let store = Arc::new(MemoryStore::new());
-        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-        builder.register_read::<Read, LargeObservation>().unwrap();
-        builder
-            .register_adapter::<LargeObservation, _, _>(NoParams, move |_, _| {
-                Box::pin(async move {
-                    Err(AdapterError::Operational(OversizedOriginal {
-                        detail: if panics {
-                            "encoding-task-panic".into()
-                        } else {
-                            "a".repeat(mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES)
-                        },
-                    }))
-                })
+    ORIGINAL_SERIALIZATIONS.store(0, Ordering::SeqCst);
+    let store = Arc::new(MemoryStore::new());
+    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
+    builder.register_read::<Read, LargeObservation>().unwrap();
+    builder
+        .register_adapter::<LargeObservation, _, _>(NoParams, move |_, _| {
+            Box::pin(async move {
+                Err(AdapterError::Operational(OversizedOriginal {
+                    detail: "encoding-task-panic".into(),
+                }))
             })
-            .unwrap();
-        let runtime = Runtime::new(builder.finish(), store.clone());
-        let input = Input {
-            value: 9,
-            continuation: "actual size rejection".into(),
-        };
-        let program = mfm_program::expand_program(
-            EntryPointId::new("mfm.test/current-oversize@1").unwrap(),
-            &LargeFlow,
-            &input,
-            ProgramLimits::new(1),
-        )
+        })
         .unwrap();
-        let run = RunId::from_digest(DigestBytes::from_array([159; 32]));
-        let InvocationFailure::Execution {
-            error,
-            last_observed: Some(observed),
-            ..
-        } = runtime
-            .start(run.clone(), program, input)
-            .await
-            .err()
+    let runtime = Runtime::new(builder.finish(), store.clone());
+    let input = Input {
+        value: 9,
+        continuation: "actual size rejection".into(),
+    };
+    let program = mfm_program::expand_program(
+        EntryPointId::new("mfm.test/current-oversize@1").unwrap(),
+        &LargeFlow,
+        &input,
+        ProgramLimits::new(1),
+    )
+    .unwrap();
+    let run = RunId::from_digest(DigestBytes::from_array([159; 32]));
+    let InvocationFailure::Execution {
+        error,
+        last_observed: Some(observed),
+        ..
+    } = runtime
+        .start(run.clone(), program, input)
+        .await
+        .err()
+        .unwrap()
+    else {
+        panic!("execution stopped")
+    };
+    assert_eq!(observed.head_sequence(), 1);
+    let RuntimeError::Native {
+        operation: Operation::ReadAdapter,
+        stage: Stage::Encode,
+        cause,
+    } = error
+    else {
+        panic!("encoding is an ordinary internal failure")
+    };
+    assert_eq!(cause.operation(), "encode_failure");
+    assert_eq!(ORIGINAL_SERIALIZATIONS.load(Ordering::SeqCst), 1);
+    let _rendered = serde_json::to_value(&cause).unwrap();
+    assert_eq!(ORIGINAL_SERIALIZATIONS.load(Ordering::SeqCst), 1);
+    let fields = cause.details().as_value();
+    assert_eq!(fields["encoding_target"], "declared_failure");
+    assert_eq!(fields["original_detail"], "unavailable");
+    assert_eq!(fields["original_identity"], "unavailable");
+    assert_eq!(
+        fields["failure_contract"],
+        serde_json::to_value(mfm_program::nominal_contract_ref::<OversizedOriginal>().unwrap())
             .unwrap()
-        else {
-            panic!("execution stopped")
-        };
-        assert_eq!(observed.head_sequence(), 1);
-        if !panics {
-            assert!(matches!(
-                error.size_limit(),
-                Some(SizeViolation::SerializationBound {
-                    resource: SizeResource::CanonicalObject,
-                    ..
-                })
-            ));
-        }
-        let RuntimeError::Native {
-            operation: Operation::ReadAdapter,
-            stage: Stage::Encode,
-            cause,
-        } = error
-        else {
-            panic!("encoding is an ordinary internal failure")
-        };
-        assert_eq!(cause.operation(), "encode_failure");
-        assert_eq!(ORIGINAL_SERIALIZATIONS.load(Ordering::SeqCst), 1);
-        let _rendered = serde_json::to_value(&cause).unwrap();
-        assert_eq!(ORIGINAL_SERIALIZATIONS.load(Ordering::SeqCst), 1);
-        let fields = cause.details().as_value();
-        assert_eq!(fields["encoding_target"], "declared_failure");
-        assert_eq!(fields["original_detail"], "unavailable");
-        assert_eq!(fields["original_identity"], "unavailable");
-        assert_eq!(
-            fields["failure_contract"],
-            serde_json::to_value(mfm_program::nominal_contract_ref::<OversizedOriginal>().unwrap())
-                .unwrap()
-        );
-        assert!(fields["position"].is_object());
-        if panics {
-            assert_eq!(cause.code(), "task_failure");
-            assert_eq!(fields["encoding"], "panicked");
-        } else {
-            assert_eq!(cause.code(), "value_error");
-            assert!(
-                fields["encoding"]["canonical"]["serialization_limit"]["source"]["message"]
-                    .is_string()
-            );
-        }
-        let loaded = store.load_run(&run, None).await.unwrap().unwrap();
-        assert_eq!(loaded.head().head_sequence(), 1);
-        assert_eq!(loaded.head().head_digest(), observed.head_digest());
-    }
+    );
+    assert!(fields["position"].is_object());
+    assert_eq!(cause.code(), "task_failure");
+    assert_eq!(fields["encoding"], "panicked");
+    let loaded = store.load_run(&run, None).await.unwrap().unwrap();
+    assert_eq!(loaded.head().head_sequence(), 1);
+    assert_eq!(loaded.head().head_digest(), observed.head_digest());
 }
 
 #[tokio::test]

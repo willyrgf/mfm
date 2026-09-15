@@ -269,6 +269,3 @@ impl std::error::Error for InvocationFailure {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

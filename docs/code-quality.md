@@ -110,8 +110,9 @@ its own secrets, full requests or connection objects as diagnostic context.
 
 For each changed adapter, tests must inject distinguishable nested causes and assert retained
 layers/fields, unchanged classification semantics where applicable, hot/cold audit preservation,
-and exclusion of deliberately appended MFM secrets. Exercise actual size bounds and recording
-failure at the affected boundary.
+and exclusion of deliberately appended MFM secrets. Exercise recording failure at the affected
+boundary. Size-bound rejection uses the cheap comparison tests in Test Value, not a
+production-maximum payload.
 Document unresolved loss at the first lossy conversion, with affected callers and remediation;
 existing lossy implementations are gaps to fix within a coherent cutover, not allowed patterns.
 
@@ -130,6 +131,10 @@ counts, internal declaration indices, duplicated associated-type declarations, o
 the test reads from the implementation itself. A schema, wire, hash, or public error assertion is
 valuable only when it independently states an interoperability, hostile-input, redaction, or
 persistence contract.
+
+Do not allocate production size maxima to prove a hardcoded ceiling. `to_json_bounded` and
+`SizeLimitExceeded::check` own that comparison; test them with small explicit limits. Production
+constants remain the runtime policy.
 
 Keep setup visible in the scenario. Introduce a test helper only when it represents a reusable
 external boundary (for example a hostile Store or a loopback provider), not to shorten ordinary

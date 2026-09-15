@@ -43,7 +43,6 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
         ("a".repeat(257), 0),
         ("changed".into(), 1),
         ("malformed".into(), 2),
-        ("oversized".into(), 3),
         ("wrong-slot".into(), 4),
     ] {
         input["metadata"]["correlation"] = serde_json::json!(correlation);
@@ -84,7 +83,6 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
             match mutation {
                 1 => replacement["value_ref"] = serde_json::to_value(original.value_ref()).unwrap(),
                 2 => replacement["value_ref"] = serde_json::json!("malformed-reference"),
-                3 => replacement["canonical"] = serde_json::json!("a".repeat(33_554_431)),
                 4 => {
                     replacement =
                         serde_json::to_value(Object::from_value(&mfm_program::NoParams).unwrap())
@@ -161,9 +159,6 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
                 assert!(!reason.is_empty());
                 if mutation == 1 {
                     assert!(reason.contains("content_digest"));
-                }
-                if mutation == 3 {
-                    assert!(reason.contains("33554433"));
                 }
                 assert!(native["cause"]["details"]["line"].as_u64().unwrap() > 0);
                 assert!(native["cause"]["details"]["column"].as_u64().unwrap() > 0);

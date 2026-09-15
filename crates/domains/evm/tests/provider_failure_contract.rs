@@ -100,10 +100,6 @@ fn authority_and_signer_owners_keep_diagnostic_admission_and_reject_old_contract
             serde_json::json!({"ratio": 0.5})
         )))
         .is_err());
-        let oversized = owner(DiagnosticEvidence::from_value(
-            serde_json::json!({"message": "x".repeat(mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES)}),
-        ));
-        assert!(Object::from_value(&oversized).is_err());
         let old_ref = mfm_ids::ContentRef::new(
             mfm_ids::SchemaId::parse("schema:mfm.evm-transaction-operational-error:2:sha256-jcs-v1:6293c5ceeb0e9cc6329dfe21ea5d4001f9efce5114878ea77a6a0503b109ce45").unwrap(),
             object.value_ref().content_digest().clone(),

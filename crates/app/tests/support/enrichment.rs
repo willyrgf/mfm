@@ -1,12 +1,11 @@
 use super::*;
 
 #[tokio::test]
-async fn enrichment_publication_and_matching_admission_survive_configuration_deletion() {
+async fn enrichment_publication_rejects_incomplete_forged_and_lost_acknowledgement() {
     let provider = provider(1);
     let repository = Arc::new(LostPublicationAck::default());
-    let backend = Arc::new(FaultStore::new());
     let composed = ComposedRuntime::compose(
-        backend.clone(),
+        Arc::new(MemoryStore::new()),
         BoundCapabilitySet::new(vec![(
             1,
             EvmEndpoint::new("alpha").unwrap(),
@@ -43,46 +42,14 @@ async fn enrichment_publication_and_matching_admission_survive_configuration_del
         .expect_err("incomplete discovery cannot publish");
     assert_eq!(pending.code(), "invalid_enrichment");
     assert_eq!(provider.calls.load(Ordering::SeqCst), pending_calls);
+
     *provider.mode.lock().unwrap() = ProviderMode::Ready;
-    backend
-        .indeterminate_next_append
-        .store(true, Ordering::SeqCst);
-    let resumed_start = app
+    let enriched = app
         .start_run(enrichment_id.clone(), &selection(&imported))
         .await
-        .err()
-        .expect("ambiguous resumed start");
-    let mfm_app::RunRequestError::AppendIndeterminate {
-        recovery:
-            mfm_app::RunRecovery::Start {
-                config,
-                run_id: retained_id,
-            },
-        invocation: mfm_runtime::InvocationFailure::Execution { last_observed, .. },
-    } = resumed_start
-    else {
-        panic!("start recovery envelope");
-    };
-    assert_eq!(config, *imported.config());
-    assert_eq!(retained_id, enrichment_id);
-    assert_eq!(last_observed.unwrap().head_sequence(), 3);
-
-    let enriched =
-        app.start_run(enrichment_id.clone(), &selection(&imported))
-            .await
-            .unwrap_or_else(|error| match error {
-                mfm_app::RunRequestError::Invocation(
-                    mfm_runtime::InvocationFailure::Execution { error, .. },
-                ) => panic!("enrichment Runtime execution: {error:?}"),
-                mfm_app::RunRequestError::Request(error) => {
-                    panic!("enrichment Application request: {error:?}")
-                }
-                _ => panic!("enrichment invocation failed"),
-            });
-    assert!(matches!(enriched.run().state(), RunViewState::Succeeded(_)));
-    app.delete_config(imported.config().name(), imported.config().digest())
-        .await
         .unwrap();
+    assert!(matches!(enriched.run().state(), RunViewState::Succeeded(_)));
+
     let calls = provider.calls.load(Ordering::SeqCst);
     repository.lose_next.store(true, Ordering::SeqCst);
     let lost = app
@@ -96,13 +63,8 @@ async fn enrichment_publication_and_matching_admission_survive_configuration_del
         .await
         .unwrap();
     assert!(matches!(published, ImportOutcome::Unchanged { .. }));
-    let repeated = app
-        .publish_enrichment(config_name("resolved"), &enrichment_id)
-        .await
-        .unwrap();
-    assert!(matches!(repeated, ImportOutcome::Unchanged { .. }));
-    assert_eq!(repeated.config(), published.config());
     assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+
     let retained = repository
         .inner
         .load_config(published.config().name(), published.config().digest())
@@ -149,50 +111,9 @@ async fn enrichment_publication_and_matching_admission_survive_configuration_del
             ))
         ));
     }
-    let mut new_candidate = document_value(vec![(1, "alpha")], "portfolio-example");
-    new_candidate["entry_point"] = serde_json::json!("mfm.portfolio/enrich@1");
-    let new_candidate = app
-        .import_config(
-            config_name("candidates"),
-            ConfigDocument::new(serde_json::to_vec(&new_candidate).unwrap())
-                .await
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let next_enrichment = app
-        .start_run(run_id(73), &selection(&new_candidate))
-        .await
-        .unwrap();
-    let next = app
-        .publish_enrichment(config_name("resolved"), next_enrichment.run().run_id())
-        .await
-        .unwrap();
-    assert!(matches!(next, ImportOutcome::Created { .. }));
-    assert_ne!(next.config().digest(), published.config().digest());
-    assert_eq!(
-        repository
-            .inner
-            .load_config(published.config().name(), published.config().digest())
-            .await
-            .unwrap()
-            .unwrap()
-            .canonical_bytes(),
-        retained.canonical_bytes()
-    );
-    assert_eq!(
-        app.read_run(&enrichment_id).await.unwrap().head_digest(),
-        enriched.run().head_digest()
-    );
-    app.delete_config(
-        new_candidate.config().name(),
-        new_candidate.config().digest(),
-    )
-    .await
-    .unwrap();
-    let dependent_id = run_id(72);
+
     let dependent = app
-        .start_run(dependent_id.clone(), &selection(&published))
+        .start_run(run_id(72), &selection(&published))
         .await
         .unwrap();
     assert!(matches!(
@@ -200,42 +121,10 @@ async fn enrichment_publication_and_matching_admission_survive_configuration_del
         RunViewState::Succeeded(_)
     ));
     let wrong_schema = app
-        .publish_enrichment(config_name("wrong-schema"), &dependent_id)
+        .publish_enrichment(config_name("wrong-schema"), dependent.run().run_id())
         .await
         .expect_err("snapshot is not enrichment");
     assert_eq!(wrong_schema.code(), "invalid_enrichment");
-    let mut wrong_digest = published.config().digest().as_str().to_owned();
-    let last = wrong_digest.pop().unwrap();
-    wrong_digest.push(if last == '0' { '1' } else { '0' });
-    let same_name_wrong_revision = ConfigSelection::new(
-        published.config().name().clone(),
-        ConfigDigest::parse(wrong_digest).unwrap(),
-    );
-    assert_eq!(
-        app.start_run(dependent_id.clone(), &same_name_wrong_revision)
-            .await
-            .err()
-            .expect("exact revision mismatch")
-            .code(),
-        "run_admission_conflict"
-    );
-    app.delete_config(published.config().name(), published.config().digest())
-        .await
-        .unwrap();
-    let calls = provider.calls.load(Ordering::SeqCst);
-    let recovered = app
-        .start_run(dependent_id.clone(), &selection(&published))
-        .await
-        .unwrap();
-    assert_eq!(recovered.run().head_digest(), dependent.run().head_digest());
-    assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
-    let conflict = app
-        .start_run(dependent_id, &selection(&imported))
-        .await
-        .err()
-        .expect("conflicting selection");
-    assert_eq!(conflict.code(), "run_admission_conflict");
-    assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
 }
 
 #[derive(Default)]

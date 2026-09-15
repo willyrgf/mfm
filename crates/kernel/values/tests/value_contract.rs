@@ -67,24 +67,6 @@ fn canonicalization_proves_descriptor_bytes_secret_policy_and_exact_digest() {
 }
 
 #[test]
-fn exact_32_mib_object_is_accepted_and_one_more_byte_retains_encoding_bound() {
-    let exact = TextValue {
-        text: "a".repeat(33_554_432 - 11),
-    };
-    let (canonical, _) = canonicalize_mfm_value(&exact).expect("exact object limit");
-    assert_eq!(canonical.as_bytes().len(), 33_554_432);
-    drop(canonical);
-    let oversized = TextValue {
-        text: "a".repeat(33_554_432 - 10),
-    };
-    let error = canonicalize_mfm_value(&oversized).unwrap_err();
-    let ValueError::Canonical(cause) = error else {
-        panic!("expected bounded serialization rejection")
-    };
-    assert_eq!(cause.serialization_bound(), Some((33_554_432, 33_554_433)));
-}
-
-#[test]
 fn object_deserialize_checks_admission_and_reports_parser_errors() {
     use mfm_values::Object;
 
@@ -128,13 +110,4 @@ fn object_deserialize_checks_admission_and_reports_parser_errors() {
     assert_eq!(error.classify(), serde_json::error::Category::Syntax);
     assert_eq!(error.line(), 1);
     assert!(error.column() > 0);
-
-    let oversized = format!(
-        r#"{{"value_ref":{reference},"canonical":"{}"}}"#,
-        "a".repeat(33_554_431)
-    );
-    let error = decode(&oversized).unwrap_err();
-    assert_eq!(error.classify(), serde_json::error::Category::Data);
-    assert!(error.to_string().contains("33554433"));
-    assert!(error.to_string().contains("33554432"));
 }

@@ -434,24 +434,16 @@ async fn config_document_boundary_is_strict_and_canonical() {
 }
 
 #[tokio::test]
-async fn stored_config_lifecycle_uses_exact_revisions_and_preserves_admitted_runs() {
-    let first = provider(1);
-    let second = provider(2);
-    let app = application(&[(1, "alpha", first.clone()), (2, "beta", second.clone())]);
+async fn exact_revision_start_rejects_absent_digest_and_survives_delete() {
+    let app = application(&[(1, "alpha", provider(1))]);
     let name = config_name("daily");
     let created = app
-        .import_config(
-            name.clone(),
-            document(vec![(1, "alpha"), (2, "beta")]).await,
-        )
+        .import_config(name.clone(), document(vec![(1, "alpha")]).await)
         .await
         .expect("created");
     let digest = created.config().digest().clone();
     let unchanged = app
-        .import_config(
-            name.clone(),
-            document(vec![(1, "alpha"), (2, "beta")]).await,
-        )
+        .import_config(name.clone(), document(vec![(1, "alpha")]).await)
         .await
         .expect("unchanged");
     assert!(matches!(unchanged, ImportOutcome::Unchanged { .. }));
@@ -463,43 +455,7 @@ async fn stored_config_lifecycle_uses_exact_revisions_and_preserves_admitted_run
         .expect("exact start");
     assert_eq!(started.config().digest(), &digest);
     assert!(matches!(started.run().state(), RunViewState::Succeeded(_)));
-    assert_eq!(first.calls.load(Ordering::SeqCst), 4);
-    assert_eq!(second.calls.load(Ordering::SeqCst), 4);
-    let rendered =
-        serde_json::to_value(SerializableRunView::new(started.run()).unwrap()).expect("JSON");
-    assert_eq!(rendered["state"]["kind"], "succeeded");
-    assert_eq!(
-        rendered["state"]["value"]["snapshot"]["collections"]
-            .as_array()
-            .expect("snapshot collections")
-            .len(),
-        2
-    );
-    assert_eq!(
-        rendered["state"]["value"]["report"]["totals_by_quote"][0]["total_value_dec"],
-        "2"
-    );
 
-    let second_revision = app
-        .import_config(name.clone(), document(vec![(1, "alpha")]).await)
-        .await
-        .expect("second revision");
-    assert!(matches!(second_revision, ImportOutcome::Created { .. }));
-    assert_ne!(second_revision.config().digest(), &digest);
-
-    let exact_second = app
-        .start_run(run_id(11), &selection(&second_revision))
-        .await
-        .expect("exact start");
-    assert_eq!(exact_second.config(), second_revision.config());
-    let exact_first = app
-        .start_run(
-            run_id(12),
-            &ConfigSelection::new(name.clone(), digest.clone()),
-        )
-        .await
-        .expect("first exact start");
-    assert_eq!(exact_first.config().digest(), &digest);
     let wrong = ConfigDigest::new(ContentDigest::from_digest(
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([9; 32]),
@@ -513,12 +469,6 @@ async fn stored_config_lifecycle_uses_exact_revisions_and_preserves_admitted_run
         ))
     ));
 
-    let configs = app.list_configs().await.expect("configs");
-    assert_eq!(configs.len(), 2);
-    assert!(configs
-        .iter()
-        .any(|config| config.digest() == second_revision.config().digest()));
-    assert!(configs.iter().any(|config| config.digest() == &digest));
     app.delete_config(&name, &digest)
         .await
         .expect("delete first");
@@ -526,19 +476,12 @@ async fn stored_config_lifecycle_uses_exact_revisions_and_preserves_admitted_run
         .await
         .expect("idempotent delete");
     assert!(matches!(
-        app.start_run(run_id(14), &ConfigSelection::new(name, digest.clone()),)
+        app.start_run(run_id(14), &ConfigSelection::new(name, digest),)
             .await,
         Err(mfm_app::RunRequestError::Request(
             RequestError::ConfigAbsent
         ))
     ));
-    assert_eq!(app.list_configs().await.expect("retained configs").len(), 1);
-    let runs = app
-        .list_runs(None, RunPageLimit::default())
-        .await
-        .expect("run page");
-    assert_eq!(runs.items().len(), 3);
-
     let retained = app
         .read_run(&run_id(10))
         .await

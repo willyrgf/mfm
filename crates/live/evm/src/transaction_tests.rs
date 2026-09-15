@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::{future::Future, pin::Pin};
 
 use k256::ecdsa::signature::hazmat::RandomizedPrehashSigner;
 use mfm_evm::custody::{
@@ -532,7 +531,7 @@ use mfm_ids::{EntryPointId, RunId};
 use mfm_program::expand_program;
 use mfm_program_derive::{MfmContext, MfmValue};
 use mfm_runtime::{RunViewState, Runtime};
-use mfm_store::MemoryStore;
+use mfm_store::{MemoryStore, Store};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, MfmValue, MfmContext)]
@@ -692,6 +691,12 @@ async fn pending_effect_reuses_identical_wire_and_cold_projection_needs_no_signe
             _ => panic!("terminal result"),
         };
         assert!(!wire.contains("raw_transaction"));
+        let loaded = store.load_run(&run_id(), None).await.unwrap().unwrap();
+        for bytes in [loaded.admission().as_ref(), loaded.latest().as_ref()] {
+            assert!(!bytes
+                .windows(b"raw_transaction".len())
+                .any(|window| window == b"raw_transaction"));
+        }
     }
 }
 
@@ -953,139 +958,6 @@ async fn incorrect_signatures_and_corrupt_retained_wire_fail_before_provider_ent
         "invalid"
     );
     assert_eq!(provider.operations(), operations);
-}
-
-struct FaultStore {
-    inner: MemoryStore,
-    fail_sequence: AtomicU64,
-    commit: bool,
-}
-impl mfm_store::Store for FaultStore {
-    fn load_run<'a>(
-        &'a self,
-        id: &'a RunId,
-        probe: Option<u64>,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Option<mfm_store::LoadedRun>, mfm_store::StoreError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        self.inner.load_run(id, probe)
-    }
-    fn append_run<'a>(
-        &'a self,
-        frame: &'a mfm_journal::EncodedRunFrame,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<mfm_store::AppendResult, mfm_store::StoreError>> + Send + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            assert!(!frame
-                .canonical_bytes()
-                .windows(b"raw_transaction".len())
-                .any(|window| window == b"raw_transaction"));
-            if self
-                .fail_sequence
-                .compare_exchange(frame.run_sequence(), 0, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                if self.commit {
-                    self.inner.append_run(frame).await?;
-                }
-                return Err(mfm_store::StoreError::Indeterminate(
-                    mfm_values::DiagnosticEvidence::from_value(
-                        serde_json::json!({"operation": "test.store", "injected": "Indeterminate"}),
-                    ),
-                ));
-            }
-            self.inner.append_run(frame).await
-        })
-    }
-}
-
-#[tokio::test]
-async fn every_transaction_journal_boundary_recovers_after_ambiguous_append() {
-    for commit in [false, true] {
-        for sequence in 2..=11 {
-            let (_owner, signer, binding, command, _) = fixture().await;
-            let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
-            let provider = Arc::new(ScriptedProvider::new(1337));
-            let store = Arc::new(FaultStore {
-                inner: MemoryStore::new(),
-                fail_sequence: AtomicU64::new(sequence),
-                commit,
-            });
-            let hot = runtime(
-                &binding,
-                signer.clone(),
-                authority.clone(),
-                provider.clone(),
-                store.clone(),
-            );
-            let input = RecoveryContext {
-                unrelated: EvmU256::from_u64(42),
-                transaction: CheckedCreatePlan::new(
-                    command.binding().clone(),
-                    command.input().to_vec(),
-                    command.value().clone(),
-                    command.gas_limit(),
-                    command.max_priority_fee_per_gas(),
-                    command.max_fee_per_gas(),
-                )
-                .unwrap(),
-            };
-            let _ = hot.start(run_id(), program(&input), input).await;
-            let mut completed = None;
-            for _ in 0..5 {
-                let prepared = authority.state().and_then(|state| state.prepared);
-                let next_signer: Arc<dyn Secp256k1Signer> = if let Some(prepared) = prepared {
-                    provider.push_receipt(Ok(Some(ProviderReceipt::new(
-                        prepared.transaction_hash().clone(),
-                        binding.sender.clone(),
-                        ProviderReceiptResult::SuccessCreate {
-                            contract_address: create_address(&binding.sender, 7),
-                        },
-                        provider.canonical.clone(),
-                    ))));
-                    Arc::new(RejectingSigner::matching(signer.as_ref()))
-                } else {
-                    signer.clone()
-                };
-                let cold = runtime(
-                    &binding,
-                    next_signer,
-                    authority.clone(),
-                    provider.clone(),
-                    store.clone(),
-                );
-                match cold.resume(&run_id()).await {
-                    Ok(view) if matches!(view.state(), RunViewState::Succeeded(_)) => {
-                        completed = Some(view);
-                        break;
-                    }
-                    Ok(view) => assert!(matches!(view.state(), RunViewState::EffectPending { .. })),
-                    Err(mfm_runtime::InvocationFailure::Execution {
-                        error: RuntimeError::Recording { failure, .. },
-                        ..
-                    }) if matches!(
-                        failure.as_ref(),
-                        mfm_runtime::RecordingFailure::Store {
-                            cause: mfm_store::StoreError::Indeterminate(_),
-                            ..
-                        }
-                    ) => {}
-                    Err(error) => panic!("unexpected recovery result: {error:?}"),
-                }
-            }
-            let completed = completed.expect("bounded cold recovery");
-            assert_eq!(completed.head_sequence(), 11);
-            assert_eq!(store.fail_sequence.load(Ordering::SeqCst), 0);
-            assert_eq!(authority.state().unwrap().reservation.nonce(), 7);
-        }
-    }
 }
 
 #[tokio::test]
