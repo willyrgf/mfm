@@ -12,6 +12,7 @@ lifecycle, a max-width fixture, or a 32 MiB payload that only proves a hardcoded
 | Enrichment publication | Incomplete publish, lost publication ack, forged head/value/route, snapshot is not enrichment | CLI/REST e2e already deletes configs, publishes, retries, and starts a dependent snapshot. |
 | Stored config lifecycle | Unchanged import, absent digest, idempotent delete, admitted run after delete, one exact start | Transport e2e already uses two revisions and resumes after delete. |
 | 32 MiB object/report payloads | `to_json_bounded` and `SizeLimitExceeded::check` with small limits; Runtime size projection | Production constants stay 32 MiB. Tests do not allocate that maximum. |
+| Type-restating and parallel-model tests | Application use cases through public methods; one collection-restart policy; frozen public wires; one representative RunRecord roundtrip | Deleted Parent/Child policy scaffolding, constructor field-equals-input asserts, Program declaration-index freezes, RecoveryOutcome cartesian expansion, and same-crate SQL `contains` table-name checks. |
 
 ## Retained unique tests
 

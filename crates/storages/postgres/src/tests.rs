@@ -171,20 +171,11 @@ fn migration_and_classifier_contracts_are_exact() {
     static_assertions::assert_not_impl_any!(PostgresBackend: EvmTransactionAuthority);
     static_assertions::assert_not_impl_any!(PostgresEvmTransactionAuthority: Store, RunIndex, ConfigRepository);
     assert_eq!(SCHEMA_CONTRACT, "mfm.run-history-postgres.v2");
-    assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_store_schema"));
-    assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_frames"));
-    assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_heads"));
-    assert!(CONFIG_SCHEMA_SQL.contains("CREATE SCHEMA mfm_config"));
-    assert!(CONFIG_SCHEMA_SQL.contains("CREATE TABLE mfm_config.config_revisions"));
-    assert!(CONFIG_SCHEMA_SQL.contains("mfm.config-postgres.v2"));
-    assert!(evm_tx::EVM_TX_SCHEMA_SQL.contains("CREATE SCHEMA mfm_evm_tx"));
     assert_eq!(
         evm_tx::EVM_TX_SCHEMA_CONTRACT,
         "mfm.evm-transaction-postgres.v2"
     );
     assert!(!evm_tx::EVM_TX_SCHEMA_SQL.contains("nonce_domains"));
-    assert!(evm_tx::EVM_TX_SCHEMA_SQL.contains("CREATE TABLE mfm_evm_tx.nonce_reservations"));
-    assert!(evm_tx::EVM_TX_SCHEMA_SQL.contains("CREATE TABLE mfm_evm_tx.prepared_transactions"));
     assert!(!evm_tx::EVM_TX_SCHEMA_SQL.contains("transaction_settlements"));
     assert!(!evm_tx::EVM_TX_SCHEMA_SQL.contains("INSERT INTO"));
     assert!(!CONFIG_SCHEMA_SQL.contains("current"));

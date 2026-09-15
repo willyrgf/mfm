@@ -82,16 +82,6 @@ fn emitted_linear_program_binds_recovery_and_relocates_inherited_checkpoints() {
         ProgramLimits::new(2),
     )
     .unwrap();
-    let target = program.declarations()[1].recovery_targets()[0];
-    assert_eq!(target.position().index(), 1);
-    assert_eq!(
-        program.declarations()[1].allowances(),
-        RecoveryAllowances::new(2, 1)
-    );
-    assert_eq!(
-        program.declarations()[1].handler().abi(),
-        &HandlerAbi::of::<Stop>().unwrap()
-    );
     let cold = Program::decode_canonical(program.canonical_bytes()).unwrap();
     assert_eq!(cold, program);
     let wire: serde_json::Value = serde_json::from_slice(program.canonical_bytes()).unwrap();
