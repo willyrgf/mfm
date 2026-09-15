@@ -120,27 +120,32 @@ See [the adapter review](adapter-error-audit.md) for the current inventory and i
 
 ## Test Value
 
-Every test must be able to fail because an observable capability regressed. Prefer one scenario
-through a crate's public API that covers a useful success path and its material boundary failures.
-Cross-crate tests should exercise the same entry points and concrete domain types that a consumer
-uses; do not rebuild a parallel model of the implementation in test-only fixtures.
+Every test must be able to fail because an observable capability regressed.
+
+Prefer one scenario through a crate public API that a consumer can call. Cover one useful success
+path and its material boundary failures. Product tests call Application methods and production
+domain types. They do not rebuild a parallel Operation, State, or adapter model.
 
 Do not add runtime assertions for facts already proved by Rust's type checker, trait bounds, private
-fields, or an infallible constructor. Do not freeze implementation detail such as helper call
-counts, internal declaration indices, duplicated associated-type declarations, or constants that
-the test reads from the implementation itself. A schema, wire, hash, or public error assertion is
-valuable only when it independently states an interoperability, hostile-input, redaction, or
-persistence contract.
+fields, or an infallible constructor. Do not freeze helper call counts, internal declaration
+indices, duplicated associated-type declarations, or constants that the test reads from the
+implementation itself. A schema, wire, hash, or public error assertion is valuable only when it
+independently states an interoperability, hostile-input, redaction, or persistence contract.
 
 Do not allocate production size maxima to prove a hardcoded ceiling. `to_json_bounded` and
 `SizeLimitExceeded::check` own that comparison; test them with small explicit limits. Production
 constants remain the runtime policy.
 
-Keep setup visible in the scenario. Introduce a test helper only when it represents a reusable
-external boundary (for example a hostile Store or a loopback provider), not to shorten ordinary
-value construction or assertions. Prefer production constructors and functions over fixture files.
-Retain small unit tests for complex deterministic algorithms when their input/output table is the
+Keep setup visible in the scenario. Inline ordinary value construction with production constructors.
+A helper is valid only when it stands in for an external boundary: a hostile Store, a hostile
+config repository, a scripted or loopback provider, a compile-fail UI case, or a managed e2e
+service. Do not add wrappers that only shorten construction or assertions.
+
+Retain small unit tests for complex deterministic algorithms when an input/output table is the
 clearest contract. Retain compile-fail tests for deliberate authority and ownership exclusions.
+
+Kernel Runtime may keep one minimal synthetic program because `mfm-runtime` cannot depend on domain
+crates. Product tests never use that program. Each unique engine fact has one owner.
 
 ## Commits and Reporting
 
