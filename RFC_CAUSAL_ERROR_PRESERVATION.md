@@ -360,7 +360,10 @@ do not store an operation context or introduce an operation enum.
 | ensure_reservation and local predicates | fixed violated contract: epoch/binding, missing/partial reservation or prepared record, marker count, zero chain ID, nonce overflow/exhaustion |
 | parse_content_ref, EffectId::parse, Reservation::new | helper/field plus section 4.2's IdentityError leaf or the existing serialized EvmDomainError kind; no upstream constructor changes |
 | parse_u64; epoch/hash/address byte helpers | parse kind/message or local syntax reason; field and expected/observed length for byte conversion, no rejected bytes |
-| nonce_domain_lock_key; ExactRawTransaction::new | local conversion/length failure, existing expected/observed lengths, no raw signed wire |
+| ExactRawTransaction::new | local length failure, existing expected/observed lengths, no raw signed wire |
+
+The nonce-domain lock key reads eight bytes directly from its statically sized 32-byte digest.
+This extraction is infallible and adds no diagnostic branch.
 
 SQLx failures remain Unavailable, including ambiguous authority COMMIT. Existing nonce exhaustion
 remains Unavailable with its own reason. Other local/retained-data failures remain Internal.
@@ -636,6 +639,33 @@ R1–R3 and B1–B8 are complete within this RFC's finite scope. The completion 
 owning documentation; local link/command review and `git diff --check` pass. No additional Rust gate
 is required for that record. No deployment, existing-run rewrite or excluded producer enrichment
 is claimed. Section 8 retains the explicit pre-rollout inventory obligation.
+
+### Review corrections — 2026-09-15
+
+Follow-up review found that the byte decoders retained length facts without identifying the
+failing field. Their existing private helpers now accept a static field name: admitted_epoch,
+reservation_epoch, genesis_hash, transaction_hash or sender at the executing call sites. The
+bootstrap caller supplies authority_epoch while keeping its excluded GateError conversion.
+Focused malformed-byte assertions distinguish all five executing fields and retain Internal
+classification, expected/observed length and the supplied conversion message.
+
+The nonce-domain lock key now extracts eight bytes directly from the fixed 32-byte digest and
+returns i64. Its impossible conversion-error branch and caller's question mark are removed;
+section 5 no longer requires that diagnostic. An independently calculated frozen SHA-256 fixture
+checks the unchanged lock key. MemoryStore's successful append path now constructs its byte-total
+error lazily with ok_or_else (commit `8616d1e6`). No new abstraction or public API is introduced.
+
+Focused Store/PostgreSQL library tests, the two new authority tests and scoped all-target Clippy
+pass under the default Nix shell. Managed PostgreSQL run `run-3542510-1789464048033613475` passed
+in 13.65 seconds, including the authority/COMMIT contract. Formatting and `git diff --check` pass.
+These local corrections do not change the wire schema, SQL, persistence or concurrency semantics;
+verification is scoped to the affected owners. No new full CI run is claimed; the earlier complete
+CI evidence remains tied to its named source candidate.
+
+Against completion `8f65db70`, production decreases by nine lines and tests add 59 counted lines.
+Production is now 27,854: +828 against Part 1 and +1,023 against the original baseline. The earlier
+aggregate table records the September 14 completion snapshot. The net reduction removes the
+impossible error construction while adding the required static field provenance.
 
 ### Finite acceptance cases
 
