@@ -626,11 +626,11 @@ fn plan_append(
     mfm_journal::SizeLimitExceeded::check(candidate.sequence, MAX_RUN_FRAMES)
         .map_err(StoreError::FrameCount)?;
     let current_total = head.as_ref().map_or(0, |current| current.total_bytes);
-    let remaining = MAX_RUN_BYTES.checked_sub(current_total).ok_or(
+    let remaining = MAX_RUN_BYTES.checked_sub(current_total).ok_or_else(|| {
         StoreError::CorruptPhysicalState(DiagnosticEvidence::from_value(
             json!({"operation": "plan_append", "check": "current byte total exceeds bound"}),
-        )),
-    )?;
+        ))
+    })?;
     if frame_len > remaining {
         let total = current_total
             .checked_add(frame_len)
