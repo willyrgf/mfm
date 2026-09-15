@@ -13,6 +13,7 @@ lifecycle, a max-width fixture, or a 32 MiB payload that only proves a hardcoded
 | Stored config lifecycle | Unchanged import, absent digest, idempotent delete, admitted run after delete, one exact start | Transport e2e already uses two revisions and resumes after delete. |
 | 32 MiB object/report payloads | `to_json_bounded` and `SizeLimitExceeded::check` with small limits; Runtime size projection | Production constants stay 32 MiB. Tests do not allocate that maximum. |
 | Type-restating and parallel-model tests | Application use cases through public methods; one collection-restart policy; frozen public wires; one representative RunRecord roundtrip | Deleted Parent/Child policy scaffolding, constructor field-equals-input asserts, Program declaration-index freezes, RecoveryOutcome cartesian expansion, and same-crate SQL `contains` table-name checks. |
+| Runtime contract fixtures | One synthetic program in `crates/kernel/runtime/tests/support/program.rs`; unique Effect/Read/assembly facts stay in `runtime_contract.rs` | The scenario file no longer rebuilds the program types inline. Hostile Store helpers live with `ScriptedStore`. |
 
 ## Retained unique tests
 
