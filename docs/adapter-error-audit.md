@@ -1,14 +1,10 @@
 # Adapter error-chain audit
 
-This inventory follows the current-state auditability cutover. It distinguishes the completed
-Part 1 boundaries below from remaining source-owner gaps. Only the producers explicitly selected
-in [Part 2](../RFC_CAUSAL_ERROR_PRESERVATION.md) belong to its separate implementation scope. This inventory does
-not claim that preserving an error received by Runtime repairs a cause discarded upstream.
-
-Part 1 is accepted at production `87f198a9`, recorded in `0a7543ec`. Part 2 implements
-three selected cutovers: run Store, execution authority, and executing keystore signing. Its
-sections 2–6 freeze producers, fields and stopping boundaries. The findings and remediation ideas
-below distinguish implemented R1–R3 from excluded source-owner gaps; they do not expand those cutovers.
+This inventory distinguishes current causal guarantees from remaining source-owner gaps.
+The current contracts live in [design](design.md), [architecture](architecture.md) and the owning
+crate documentation. Preserving an error received by Runtime does not repair a cause discarded
+upstream. The remaining findings are scoped problem statements, not an implementation backlog
+authorized by this document.
 
 ## Result
 
@@ -17,11 +13,10 @@ interpretation. Native callback, checked Object admission, recording, and report
 retain reviewed causes through Application and the run transport surfaces. Journal seals opaque
 frames and Store loads admission/latest/optional-probe snapshots; neither reconstructs run semantics.
 
-The repository still has first-loss gaps in excluded PostgreSQL, keystore startup/import, general
-cryptographic construction, bootstrap, and non-run transport paths. These are not Part 1 completion
-conditions; bootstrap and non-run transport enrichment are outside both RFCs. Core acceptance
-and its limits are recorded in the
-[core evidence](measurements/auditability-core-acceptance.md).
+Run Store, execution authority and executing keystore signing preserve their selected producing
+causes. The repository still has first-loss gaps in other PostgreSQL paths, keystore startup/import,
+general cryptographic construction, bootstrap and non-run transports. These gaps are outside the
+current preservation guarantees described below.
 
 The requirements are in [AGENTS.md](../AGENTS.md) and
 [code quality](code-quality.md#error-provenance-and-auditability). Classification and public codes
@@ -109,7 +104,7 @@ Source: [transaction.rs](../crates/live/evm/src/transaction.rs), `reserve_nonce`
 - `map_provider_error` retains the complete reviewed provider carrier alongside the originating
   chain-verification, nonce-observation, receipt, canonical-block or submission operation. The
   transaction classification remains OutcomeUnknown.
-- R2 `map_authority_error` moves unavailable evidence into the v3 durable transaction owner and
+- `map_authority_error` moves unavailable evidence into the v3 durable transaction owner and
   forwards internal InvocationDiagnostic unchanged. No receiver recapture or authority serializer remains.
 - Signer Invalid/Failed now enter SignerUnavailable with their actual unit kind and sign/signer
   context. SignFailed evidence moves unchanged from executing keystore/channel/primitive producers.
@@ -122,7 +117,7 @@ the owning boundary. Keep the same prepared command/EffectId, no renonce or repl
 the existing operational-versus-invariant distinction. Classification remains independent of the
 diagnostic payload. Avoid a separate generic exception framework for each transaction stage.
 
-### 4. PostgreSQL run Store retains selected producing causes (R1)
+### 4. PostgreSQL run Store retains selected producing causes
 
 [Run storage](../crates/storages/postgres/src/lib.rs) retains mandatory diagnostic data on
 Unavailable, CorruptPhysicalState and Indeterminate. The private
@@ -142,14 +137,15 @@ Run Store errors remain invocation-only and cannot prove they were recorded thro
 Store. Comparison-only/local-rejection rollback, background cleanup, connection gates,
 configuration and index enrichment remain outside this selected guarantee.
 
-### 5. PostgreSQL execution authority retains selected causes (R2)
+### 5. PostgreSQL execution authority retains selected causes
 
 [Authority](../crates/storages/postgres/src/evm_tx.rs) uses the private PostgreSQL SQLx recipe for
 load, reserve_or_compare and retain_prepared. Static operation/stage fields distinguish SQL calls;
 ambiguous COMMIT remains Unavailable/OutcomeUnknown. The input-discarding unavailable/internal
 helpers and AuthorityError's serializer are deleted. Local retained facts and selected identity,
 domain, scalar and byte-length errors become one authority_internal invocation diagnostic, then
-Live forwards it unchanged without append. No rejected bytes, signed wire or connection data is added.
+Live forwards it unchanged without append. Byte errors identify the failing field and expected/observed
+length. No rejected bytes, signed wire or connection data is added.
 
 AuthorityUnavailable and SignerUnavailable now carry mandatory DiagnosticEvidence in the v3
 transaction error owner. Typed classification remains OutcomeUnknown/Retryable respectively.
@@ -187,7 +183,7 @@ before any run or usable Store exists; do not promise their errors already have 
 Replace string-marker routing only as part of a concrete pool/open error cutover that preserves the
 gate contract, not by adding an additional shadow connection registry.
 
-### 8. Executing keystore signing retains selected producing causes (R3)
+### 8. Executing keystore signing retains selected producing causes
 
 Sources: [keystore/lib.rs](../crates/keystore/src/lib.rs), `KeystoreSigner::sign` and private
 `Keystore::sign`; [signing/lib.rs](../crates/signing/src/lib.rs).
@@ -210,7 +206,7 @@ missing-slot and primitive tests accompany valid-signing and thread-affine custo
 Sources: [MemoryStore](../crates/kernel/store/src/lib.rs), allocation/ownership helpers and
 blocking joins; [memory configuration](../crates/config/src/memory.rs).
 
-R1 MemoryStore retains allocation messages/requested bytes, runtime-handle messages, task
+MemoryStore retains allocation messages/requested bytes, runtime-handle messages, task
 cancelled/panicked facts and local physical-check reasons on its existing dispositions. Numeric
 capacity errors are unchanged. RunIndex enrichment remains excluded. The
 in-memory configuration backend has no network/client error chain to preserve; ordinary absent or
@@ -273,8 +269,10 @@ projection carries an acknowledged head.
 App and transports borrow existing results through one final presentation. Invocation field
 conversion has exactly two fallback markers, encoding_failed and panicked, while retaining supplied
 code/operation/primary size. No native projector, diagnostic quota or generic reporting tree remains.
-These changes do not repair layers already erased by remaining PostgreSQL, signer or other source
-owners. The [core evidence](measurements/auditability-core-acceptance.md) tracks consuming verification.
+These guarantees do not repair layers already erased by remaining PostgreSQL, signer or other source
+owners. [Runtime contract tests](../crates/kernel/runtime/tests/runtime_contract.rs) and
+[callback error tests](../crates/kernel/runtime/tests/support/callback_errors.rs) exercise the
+producing execution and recording boundaries.
 
 ### 12. Development-only funding shares the reviewed RPC boundary
 
@@ -300,21 +298,20 @@ funded readiness, and lost acknowledgement never authorizes blind resubmission.
 
 ## Deferred work and verification
 
-The remaining inventory identifies first-loss sites, not authorization for a repository-wide
-migration. Part 1 implements only its E1–E6/shared-data recipes; the separately refined Part 2
-selects additional producers. Follow those RFC contracts and current code-quality policy rather
-than the superseded generic remediation directions from this audit. In particular, selected
-upstream diagnostic text follows the explicit trust boundary, not a generic sanitizer or omission
-ledger. Expected absence and Pending remain protocol outcomes, not invented errors.
+Future work must select finite producing boundaries, required facts and consuming observations
+before changing an owner. Discovering another upstream loss does not automatically extend that
+scope. Remediation ideas here remain subject to the current [design](design.md) and
+[code-quality policy](code-quality.md#error-provenance-and-auditability), including the explicit
+trust boundary for selected dependency text. Expected absence and Pending remain protocol outcomes.
 
-Use [build and verification](build-and-verification.md) for scope-selected tests. The
-[Part 1 acceptance packet](measurements/auditability-core-acceptance.md) records its corrected core,
-focused evidence, G1 disposition and final CI. Future owner changes require their own affected
-verification; they neither block nor supply deletion credit for Part 1.
+Use [build and verification](build-and-verification.md) for scope-selected tests. Tests linked in
+each boundary above retain the current guarantees; future owner changes require their own affected
+verification.
 
 ## Material uncertainties
 
-None for the Part 1 boundary. Remaining upstream evidence availability and producer designs belong
-to the separate Part 2 refinement gate. A dependency may discard details before MFM receives them;
-its selected owner must establish what is actually available. No inventory entry establishes
-post-crash delivery or proves that a failed persistence operation was durably audited.
+For unresolved owners, assume only facts exposed by their source APIs can be retained. Their
+available evidence is not established by this inventory; a dependency may discard details before
+MFM receives them. Such loss limits any future preservation guarantee. Inspect the selected source
+APIs and test the producing boundaries before defining their conversions. No inventory entry
+establishes post-crash delivery or proves that a failed persistence operation was durably audited.

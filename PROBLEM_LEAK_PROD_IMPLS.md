@@ -33,11 +33,10 @@ rather than asserting that today's contracts already provide it.
 
 ## Scope and evidence
 
-The initial review examined `b1c26a19`, following the
-[accumulating-context cutover](docs/rfc-ctx-acc-implementation.md). This revision incorporates the
-user's configuration-driven consumer requirements against `14b6141c`. Subsequent cleanup has
-changed report representation and reduced duplication, but the consumer obligations below remain.
-The findings do not depend on historical line counts or retaining old report types.
+The inventory covers the managed Effect E2E and the production boundaries below. Current
+accumulating-context contracts live in [design](docs/design.md) and
+[architecture](docs/architecture.md). Reusable typed execution primitives do not yet provide
+the complete configuration-driven consumer experience described here.
 
 The whole harness includes:
 
