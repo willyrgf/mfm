@@ -56,7 +56,7 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
                 )));
             }
             let mut transaction = begin_authority(operation, &self.pool).await?;
-            let lock_key = nonce_domain_lock_key(domain)?;
+            let lock_key = nonce_domain_lock_key(domain);
             sqlx::Executor::execute(
                 &mut *transaction,
                 sqlx::query!(
@@ -391,7 +391,7 @@ async fn load_state(
             None,
         ))
     })?;
-    let admitted_epoch = epoch_from_bytes(&row.admitted_epoch)?;
+    let admitted_epoch = epoch_from_bytes("admitted_epoch", &row.admitted_epoch)?;
     if row.schema_contract != EVM_TX_SCHEMA_CONTRACT || &admitted_epoch != captured_epoch {
         return Err(AuthorityError::Internal(InvocationDiagnostic::from_fields(
             "authority_internal",
@@ -465,7 +465,7 @@ async fn load_state(
         ))
     })?;
     let command_value_ref = parse_content_ref(command_schema, command_digest)?;
-    let epoch = epoch_from_bytes(&reservation_epoch)?;
+    let epoch = epoch_from_bytes("reservation_epoch", &reservation_epoch)?;
     if epoch != admitted_epoch {
         return Err(AuthorityError::Internal(InvocationDiagnostic::from_fields(
             "authority_internal",
@@ -482,8 +482,8 @@ async fn load_state(
             None,
         ))
     })?;
-    let genesis = evm_hash_from_bytes(&genesis_hash)?;
-    let sender = evm_address_from_bytes(&sender)?;
+    let genesis = evm_hash_from_bytes("genesis_hash", &genesis_hash)?;
+    let sender = evm_address_from_bytes("sender", &sender)?;
     let nonce = parse_u64(&reserved_nonce)?;
     let domain = NonceDomain {
         authority_epoch: epoch,
@@ -505,7 +505,7 @@ async fn load_state(
     let prepared = match (row.transaction_hash, row.raw_transaction) {
         (None, None) => None,
         (Some(hash), Some(raw)) => Some(PreparedRecord::new(
-            evm_hash_from_bytes(&hash)?,
+            evm_hash_from_bytes("transaction_hash", &hash)?,
             ExactRawTransaction::new(raw)?,
         )),
         _ => {
@@ -655,7 +655,10 @@ fn parse_u64(value: &str) -> Result<u64, AuthorityError> {
     })
 }
 
-fn epoch_from_bytes(bytes: &[u8]) -> Result<EvmAuthorityEpoch, AuthorityError> {
+fn epoch_from_bytes(
+    field: &'static str,
+    bytes: &[u8],
+) -> Result<EvmAuthorityEpoch, AuthorityError> {
     let exact: [u8; 32] = bytes
         .try_into()
         .map_err(|error: std::array::TryFromSliceError| {
@@ -664,6 +667,7 @@ fn epoch_from_bytes(bytes: &[u8]) -> Result<EvmAuthorityEpoch, AuthorityError> {
                 "epoch_from_bytes",
                 &json!({
                     "check": "byte length",
+                    "field": field,
                     "expected": 32,
                     "observed": bytes.len(),
                     "message": error.to_string()
@@ -674,7 +678,7 @@ fn epoch_from_bytes(bytes: &[u8]) -> Result<EvmAuthorityEpoch, AuthorityError> {
     Ok(EvmAuthorityEpoch::new(exact))
 }
 
-fn evm_hash_from_bytes(bytes: &[u8]) -> Result<EvmHash, AuthorityError> {
+fn evm_hash_from_bytes(field: &'static str, bytes: &[u8]) -> Result<EvmHash, AuthorityError> {
     let exact: [u8; 32] = bytes
         .try_into()
         .map_err(|error: std::array::TryFromSliceError| {
@@ -683,6 +687,7 @@ fn evm_hash_from_bytes(bytes: &[u8]) -> Result<EvmHash, AuthorityError> {
                 "evm_hash_from_bytes",
                 &json!({
                     "check": "byte length",
+                    "field": field,
                     "expected": 32,
                     "observed": bytes.len(),
                     "message": error.to_string()
@@ -693,7 +698,7 @@ fn evm_hash_from_bytes(bytes: &[u8]) -> Result<EvmHash, AuthorityError> {
     Ok(EvmHash::from_bytes(exact))
 }
 
-fn evm_address_from_bytes(bytes: &[u8]) -> Result<EvmAddress, AuthorityError> {
+fn evm_address_from_bytes(field: &'static str, bytes: &[u8]) -> Result<EvmAddress, AuthorityError> {
     let exact: [u8; 20] = bytes
         .try_into()
         .map_err(|error: std::array::TryFromSliceError| {
@@ -702,6 +707,7 @@ fn evm_address_from_bytes(bytes: &[u8]) -> Result<EvmAddress, AuthorityError> {
                 "evm_address_from_bytes",
                 &json!({
                     "check": "byte length",
+                    "field": field,
                     "expected": 20,
                     "observed": bytes.len(),
                     "message": error.to_string()
@@ -712,7 +718,7 @@ fn evm_address_from_bytes(bytes: &[u8]) -> Result<EvmAddress, AuthorityError> {
     Ok(EvmAddress::from_bytes(exact))
 }
 
-fn nonce_domain_lock_key(key: &NonceDomain) -> Result<i64, AuthorityError> {
+fn nonce_domain_lock_key(key: &NonceDomain) -> i64 {
     let mut preimage = Vec::with_capacity(119);
     preimage.extend_from_slice(b"mfm.evm.nonce-domain-lock.v1\0");
     preimage.extend_from_slice(key.authority_epoch.as_bytes());
@@ -720,23 +726,8 @@ fn nonce_domain_lock_key(key: &NonceDomain) -> Result<i64, AuthorityError> {
     preimage.extend_from_slice(key.chain_instance.expected_genesis_hash.as_bytes());
     preimage.extend_from_slice(key.sender.as_bytes());
     let digest = sha256_digest_bytes(&preimage);
-    let first: [u8; 8] =
-        digest.as_bytes()[..8]
-            .try_into()
-            .map_err(|error: std::array::TryFromSliceError| {
-                AuthorityError::Internal(InvocationDiagnostic::from_fields(
-                    "authority_internal",
-                    "nonce_domain_lock_key",
-                    &json!({
-                        "check": "digest prefix length",
-                        "expected": 8,
-                        "observed": digest.as_bytes()[..8].len(),
-                        "message": error.to_string()
-                    }),
-                    None,
-                ))
-            })?;
-    Ok(i64::from_be_bytes(first))
+    let [a, b, c, d, e, f, g, h, ..] = *digest.as_bytes();
+    i64::from_be_bytes([a, b, c, d, e, f, g, h])
 }
 
 pub(crate) async fn load_evm_tx_epoch(
@@ -763,5 +754,67 @@ pub(crate) async fn load_evm_tx_epoch(
     if markers.len() != 1 || markers[0].0 != EVM_TX_SCHEMA_CONTRACT {
         return Err(GateError::Incompatible);
     }
-    epoch_from_bytes(&markers[0].1).map_err(|_| GateError::Incompatible)
+    epoch_from_bytes("authority_epoch", &markers[0].1).map_err(|_| GateError::Incompatible)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_authority_bytes_retain_the_failing_field() {
+        for (field, expected, error) in [
+            (
+                "admitted_epoch",
+                32,
+                epoch_from_bytes("admitted_epoch", &[1]).unwrap_err(),
+            ),
+            (
+                "reservation_epoch",
+                32,
+                epoch_from_bytes("reservation_epoch", &[1]).unwrap_err(),
+            ),
+            (
+                "genesis_hash",
+                32,
+                evm_hash_from_bytes("genesis_hash", &[1]).unwrap_err(),
+            ),
+            (
+                "transaction_hash",
+                32,
+                evm_hash_from_bytes("transaction_hash", &[1]).unwrap_err(),
+            ),
+            (
+                "sender",
+                20,
+                evm_address_from_bytes("sender", &[1]).unwrap_err(),
+            ),
+        ] {
+            let AuthorityError::Internal(cause) = error else {
+                panic!("malformed retained bytes remain internal")
+            };
+            let details = cause.details().as_value();
+            assert_eq!(cause.code(), "authority_internal");
+            assert_eq!(details["field"], field);
+            assert_eq!(details["check"], "byte length");
+            assert_eq!(details["expected"], expected);
+            assert_eq!(details["observed"], 1);
+            assert!(details["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()));
+        }
+    }
+
+    #[test]
+    fn nonce_domain_lock_key_preserves_its_signed_big_endian_prefix() {
+        let domain = NonceDomain {
+            authority_epoch: EvmAuthorityEpoch::new([1; 32]),
+            chain_instance: EvmChainInstance {
+                chain_id: NonZeroU64::new(1337).unwrap(),
+                expected_genesis_hash: EvmHash::from_bytes([2; 32]),
+            },
+            sender: EvmAddress::from_bytes([3; 20]),
+        };
+        assert_eq!(nonce_domain_lock_key(&domain), 905_699_031_090_943_332);
+    }
 }
