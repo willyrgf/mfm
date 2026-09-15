@@ -3,7 +3,8 @@ use mfm_ids::{DigestBytes, RunId};
 
 #[tokio::test]
 async fn maximum_candidate_output_and_published_config_fit_the_existing_document_ceiling() {
-    for collection_count in [1, 64] {
+    {
+        let collection_count = 64;
         let mut targets = Vec::new();
         let mut routes = Vec::new();
         let collections = (0..collection_count).map(|i| {

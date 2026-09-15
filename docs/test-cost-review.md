@@ -19,10 +19,10 @@ lifecycle, a max-width fixture, or a 32 MiB payload that only proves a hardcoded
 - [`custody_acknowledgement_loss_recovers_each_stage`](../crates/live/evm/src/transaction_tests.rs)
 - [`selecting_another_same_typed_source_requires_its_own_assembly_before_io`](../crates/live/evm/tests/generic_transaction_runtime.rs)
 - [`one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_cold`](../crates/live/evm/tests/generic_transaction_runtime.rs)
-- [`planned_native_and_token_collections_execute_and_reconstruct_typed_failures`](../crates/app/tests/support/portfolio_contract.rs)
-- [`enrichment_retains_native_and_nonzero_candidates_and_never_filters_provider_failure`](../crates/app/tests/support/portfolio_contract.rs)
-- [`enrichment_publication_rejects_incomplete_forged_and_lost_acknowledgement`](../crates/app/tests/support/enrichment.rs)
-- [`exact_revision_start_rejects_absent_digest_and_survives_delete`](../crates/app/tests/portfolio_runtime.rs)
+- [`snapshot_token_holdings_and_typed_read_failures`](../crates/app/tests/use_cases.rs)
+- [`enrichment_keeps_native_and_nonzero_candidates`](../crates/app/tests/use_cases.rs)
+- [`enrichment_publish_rejects_incomplete_forged_and_lost_ack`](../crates/app/tests/use_cases.rs)
+- [`config_delete_does_not_revoke_an_admitted_run`](../crates/app/tests/use_cases.rs)
 - [`exact_bound_and_first_rejected_write_preserve_sources_without_traversing_suffix`](../crates/kernel/canonical/src/bounded.rs)
 
 ## Earlier reduction

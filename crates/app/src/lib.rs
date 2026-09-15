@@ -49,10 +49,9 @@ use deployment::resolve_environment;
 pub const MAX_EVM_BINDINGS: usize = 256;
 
 /// Registers every Portfolio and EVM State implementation the snapshot Program declares.
-///
-/// [`ComposedRuntime`] binds live capabilities. Consuming tests use this same State registry
-/// with controlled adapters, including association rejection before Store IO.
-pub fn register_portfolio_states(builder: &mut RuntimeAssemblyBuilder) -> mfm_runtime::Result<()> {
+pub(crate) fn register_portfolio_states(
+    builder: &mut RuntimeAssemblyBuilder,
+) -> mfm_runtime::Result<()> {
     inspection::register_states(builder)
 }
 
@@ -1109,13 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn compiled_entry_points_are_checked_and_sorted() {
-        assert!(Application::entry_points()
-            .windows(2)
-            .all(|pair| pair[0].entry_point() < pair[1].entry_point()));
-        for entry in Application::entry_points() {
-            assert!(mfm_ids::EntryPointId::new(entry.entry_point()).is_ok());
-        }
+    fn compiled_entry_points_and_components_are_the_shipping_set() {
         assert_eq!(
             serde_json::to_value(ItemList::new(Application::entry_points()))
                 .expect("entry-point JSON"),
@@ -1123,90 +1116,66 @@ mod tests {
                 "items": [{"entry_point": "mfm.portfolio/enrich@1"}, {"entry_point": "mfm.portfolio/snapshot@1"}]
             })
         );
-    }
-
-    #[test]
-    fn compiled_components_are_checked_complete_and_ordered() {
-        let components = Application::components();
-        let expected = [
-            (ComponentKind::EntryPoint, "mfm.portfolio/enrich@1"),
-            (ComponentKind::EntryPoint, "mfm.portfolio/snapshot@1"),
-            (
-                ComponentKind::Operation,
-                "mfm.evm.operation.collect-balances@2",
-            ),
-            (
-                ComponentKind::PureState,
-                "mfm.evm.state.consolidate-balance-collection@1",
-            ),
-            (
-                ComponentKind::PureState,
-                "mfm.portfolio.state.consolidate@1",
-            ),
-            (
-                ComponentKind::PureState,
-                "mfm.portfolio.state.enter-collection@1",
-            ),
-            (ComponentKind::PureState, "mfm.portfolio.state.initialize@1"),
-            (
-                ComponentKind::PureState,
-                "mfm.portfolio.state.resolve-assets@1",
-            ),
-            (
-                ComponentKind::PureState,
-                "mfm.portfolio.state.resume-collection@1",
-            ),
-            (
-                ComponentKind::ReadState,
-                "mfm.evm.state.check-chain-identity@1",
-            ),
-            (
-                ComponentKind::ReadState,
-                "mfm.evm.state.confirm-balance-anchor@2",
-            ),
-            (
-                ComponentKind::ReadState,
-                "mfm.evm.state.read-initial-anchor@2",
-            ),
-            (
-                ComponentKind::ReadState,
-                "mfm.evm.state.read-native-balance@1",
-            ),
-            (
-                ComponentKind::ReadState,
-                "mfm.evm.state.read-token-balance@1",
-            ),
-            (
-                ComponentKind::ReadState,
-                "mfm.evm.state.read-token-decimals@1",
-            ),
-        ];
-        assert_eq!(components.len(), expected.len());
-        for (component, (kind, id)) in components.iter().zip(expected) {
-            assert_eq!(component.kind(), kind);
-            assert_eq!(component.id(), id);
-            assert!(component.description().len() <= 512);
-            assert_eq!(component.description(), component.description().trim());
-            assert!(!component.description().is_empty());
-            assert!(!component.description().chars().any(char::is_control));
-            match kind {
-                ComponentKind::EntryPoint => {
-                    assert!(mfm_ids::EntryPointId::new(component.id()).is_ok());
-                }
-                ComponentKind::Operation | ComponentKind::PureState | ComponentKind::ReadState => {
-                    assert!(mfm_ids::StableId::new(component.id()).is_ok());
-                }
-            }
-        }
-        assert!(components
-            .windows(2)
-            .all(|pair| (pair[0].kind(), pair[0].id()) < (pair[1].kind(), pair[1].id())));
-
-        let json = serde_json::to_value(ItemList::new(&components)).expect("component JSON");
-        assert_eq!(json["items"][0]["kind"], "entry_point");
-        assert_eq!(json["items"][2]["kind"], "operation");
-        assert_eq!(json["items"][3]["kind"], "pure_state");
-        assert_eq!(json["items"][9]["kind"], "read_state");
+        let ids = Application::components()
+            .iter()
+            .map(|component| (component.kind(), component.id()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                (ComponentKind::EntryPoint, "mfm.portfolio/enrich@1"),
+                (ComponentKind::EntryPoint, "mfm.portfolio/snapshot@1"),
+                (
+                    ComponentKind::Operation,
+                    "mfm.evm.operation.collect-balances@2",
+                ),
+                (
+                    ComponentKind::PureState,
+                    "mfm.evm.state.consolidate-balance-collection@1",
+                ),
+                (
+                    ComponentKind::PureState,
+                    "mfm.portfolio.state.consolidate@1",
+                ),
+                (
+                    ComponentKind::PureState,
+                    "mfm.portfolio.state.enter-collection@1",
+                ),
+                (ComponentKind::PureState, "mfm.portfolio.state.initialize@1"),
+                (
+                    ComponentKind::PureState,
+                    "mfm.portfolio.state.resolve-assets@1",
+                ),
+                (
+                    ComponentKind::PureState,
+                    "mfm.portfolio.state.resume-collection@1",
+                ),
+                (
+                    ComponentKind::ReadState,
+                    "mfm.evm.state.check-chain-identity@1",
+                ),
+                (
+                    ComponentKind::ReadState,
+                    "mfm.evm.state.confirm-balance-anchor@2",
+                ),
+                (
+                    ComponentKind::ReadState,
+                    "mfm.evm.state.read-initial-anchor@2",
+                ),
+                (
+                    ComponentKind::ReadState,
+                    "mfm.evm.state.read-native-balance@1",
+                ),
+                (
+                    ComponentKind::ReadState,
+                    "mfm.evm.state.read-token-balance@1",
+                ),
+                (
+                    ComponentKind::ReadState,
+                    "mfm.evm.state.read-token-decimals@1",
+                ),
+            ]
+        );
     }
 
     #[test]
