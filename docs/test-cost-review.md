@@ -50,6 +50,69 @@ replaces another only for the guarantees it actually checks.
 | Config deletion, repeat publication and dependent execution across transports | Managed [client e2e](../bin/rest-api/tests/client_execution_e2e.rs) | App scenarios own hostile provenance and lost repository acknowledgement, not another full transport lifecycle. |
 | Bounded serialization and physical append limits | [Bounded JSON](../crates/kernel/canonical/src/bounded.rs), [Journal frames](../crates/kernel/journal/tests/frame_contract.rs), [Store scenarios](../crates/kernel/store/tests/support/scenarios.rs) | [Runtime size projection](../crates/kernel/runtime/tests/current_state/sizes.rs) owns caller-visible size classification; small-limit comparison tests alone do not prove every caller's wiring. |
 
+## Local cost measurements
+
+Measured on 2026-09-16 in the default Nix shell, with warm build artifacts and the default
+unoptimized test profile. Each test ran alone twice; the table reports libtest execution seconds,
+excluding compilation and Nix startup. Other workspace tasks were active. These are local
+comparisons, not uncontended benchmarks. A dash means the unchanged scenario was not individually
+remeasured after setup reuse.
+
+| Test | Before setup reuse (seconds) | After setup reuse (seconds) |
+| --- | --- | --- |
+| `bound_routes_reject_duplicates_and_over_capacity` | 0.00, 0.00 | — |
+| `snapshot_starts_from_exact_revision_and_returns_holdings` | 12.60, 12.84 | — |
+| `snapshot_progresses_after_an_interrupted_read` | 10.29, 10.43 | — |
+| `snapshot_records_a_durable_provider_failure` | 9.43, 9.39 | — |
+| `snapshot_token_holdings_and_typed_read_failures` | 32.87, 31.92 | 21.40, 22.83 |
+| `config_rejects_malformed_unbound_and_forged_rows_before_admission` | 18.70, 18.37 | — |
+| `config_delete_does_not_revoke_an_admitted_run` | 10.22, 10.20 | — |
+| `indeterminate_start_and_progress_carry_recovery_identity` | 18.84, 18.57 | 12.34, 12.71 |
+| `enrichment_keeps_native_and_nonzero_candidates` | 43.39, 43.15 | 34.44, 34.08 |
+| `enrichment_publish_rejects_incomplete_forged_and_lost_ack` | 28.04, 27.35 | — |
+| `shipping_metadata_constructor_cases_reach_native_materialization_after_schema_admission` | 29.32, 28.74 | — |
+
+Repeat a measurement with:
+
+```bash
+nix develop -c cargo test -p mfm-app --test use_cases <test-name> -- --exact
+```
+
+A temporary probe timed the public API phases of one native snapshot twice:
+
+| Phase | Seconds |
+| --- | --- |
+| Compose Application and bind provider | 3.76, 3.77 |
+| Parse config document | 0.00091, 0.00094 |
+| Import config, including planning | 2.60, 2.67 |
+| Start run, including planning and execution | 3.73, 3.81 |
+
+The probe was removed after measurement. The result supports reusing one Application and imported
+revision inside a scenario when only the provider outcome changes. Each run still has its own
+RunId, and separate tests retain separate mutable backends and providers. No test was removed.
+The enrichment scenario now reaches a later balance failure and checks publication rejection, so
+its comparison includes stronger coverage. Production caching or schema changes need separate
+profiling; these phase measurements do not identify an internal algorithm to change.
+
+Verification: all 11 tests passed together with `nix develop -c cargo test -p mfm-app --test
+use_cases` (34.52 seconds), and the three changed scenarios each passed twice individually. Format
+and `nix develop -c cargo clippy -p mfm-app --test use_cases -- -D warnings` passed. No production
+code, public API, persistence, manifest or task-graph change selects a composed CI run here.
+
+## Organization assessment
+
+Keep one `use_cases` Cargo test target. A module split into config, snapshot, enrichment and
+hostile restoration scenarios would improve navigation without compiling shared fixtures into
+multiple integration-test binaries. Keep the common provider in one support module and each
+hostile Store or repository beside its scenarios; do not introduce a generic fixture framework.
+
+The file split is deferred while concurrent edits are coordinated. The current test names and
+file links remain valid. Setup reuse and more precise failure placement do not depend on the split.
+
 ## Material uncertainties
 
-none
+Local timings include concurrent workspace activity and are not CI budgets or production latency
+estimates. The assumption is that repeated local measurements identify worthwhile setup reductions;
+contention and the unoptimized test profile make the absolute costs uncertain. If that assumption
+is wrong, the measured speedup will not transfer to CI. Validate CI impact with comparable
+before/after task evidence before changing verification budgets.
