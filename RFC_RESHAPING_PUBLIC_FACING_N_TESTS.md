@@ -5,10 +5,11 @@
 The three public usage paths below are the agreed framing for MFM as a platform and framework.
 One representative E2E scenario per path is the agreed replacement for the current E2E organization.
 Each scenario can grow named case runs for recovery, durability, and error handling.
-This RFC proposes requirements and acceptance scenarios for improving those paths. Exact Rust
-signatures, configuration schemas, executable-registration mechanics, and implementation placement
-within the existing crate boundaries remain to be designed. No proposed API is available merely
-because it appears here.
+This RFC proposes requirements and acceptance scenarios for improving those paths. The linked
+architect designs now specify concrete target journeys and proposed caller APIs. They start from
+the desired public experience; current API limitations are evidence for production changes, not
+constraints on the tests. Exact signatures and the implementation proofs identified in those designs
+remain to be settled. No proposed API is available merely because it appears here.
 
 [Design](docs/design.md) remains authoritative for execution and persistence contracts;
 [architecture](docs/architecture.md) owns current responsibility placement. This RFC replaces the
@@ -105,9 +106,11 @@ A caller selects a maintained operation, supplies checked input/options, binds e
 and obtains access to execution and typed results. The caller need not know the selected operation's
 internal State list, intermediate contexts, ordinary failure maps, or codec registrations.
 
-Acceptance example: select one supported EVM transaction operation with its checked plan, then
-inspect its retained transaction facts. A product may also expose a maintained deployment-and-call
-workflow. Selecting that product must not require reauthoring its implementation.
+The selected E2E journey is a Portfolio snapshot through both CLI and REST, with independently
+checked balances. It isolates selection of maintained behavior without requiring authoring or
+transaction custody. A library caller can similarly select a supported EVM transaction operation;
+a future product may expose a maintained deployment-and-call workflow. Selecting such behavior
+must not require reauthoring its implementation.
 
 The existing Portfolio entry points remain useful evidence for this path. A new EVM product must
 explicitly retain its development-only settlement scope rather than appear in shipping composition
@@ -290,20 +293,51 @@ The managed Effect E2E rebuilds Runtime and IO handles while retaining the same 
 does not prove host-process key recovery. Its terminal checks establish unchanged history/output/
 nonce, not absence of provider calls. Preserve these limits in replacement cases.
 
-### Next design deliverable
+### Concrete architect designs
 
-Design the three tests before choosing convenience API signatures. For each scenario, write down:
+One architect designed each scenario from its objective. These documents specify the intended
+public calls, independent oracles, named case runs, production responsibilities, and cutover scope:
 
-1. The concrete user story, chosen components, inputs/options, and independent expected result.
-2. The public calls the caller should make, including explicit capabilities, RunId, execution policy,
-   and typed result access. Distinguish existing APIs from proposed improvements.
-3. The caller-owned declarations and any reusable machinery currently supplied by test code.
-4. The real services/artifacts required and the boundary of fixture or fault infrastructure.
-5. The baseline run, cases required to preserve current coverage, and optional future case runs.
-6. The old guarantees it replaces, their assertion locations, and intended managed selection.
+| Scenario | Target journey | Detailed design |
+| --- | --- | --- |
+| Selection | Select a Portfolio snapshot through both real transports; execute independently and verify fixture balances, then cold-observe through the other client. | [CLI/REST selection](docs/e2e-selection-design.md) |
+| Composition | Deploy, configure the created contract, and observe its value at the call's receipt anchor using existing Operations and a Read State. | [Compose existing components](docs/e2e-composition-design.md) |
+| Extension | Introduce one meaningful deterministic policy State and compose it with maintained components; prove typed success and rejection. | [Implement and compose a State](docs/e2e-extension-design.md) |
 
-Use those designs to identify the smallest public API changes. A product wrapper that only makes
-scenario 1 concise cannot substitute for successful composition and extension in scenarios 2 and 3.
+These are target test designs, not descriptions of tests already implemented. Their caller sketches
+are reviewable API proposals. Production must supply the machinery they require; test helpers must
+not hide missing composition, registration, execution, or decoding support. Existing implementation
+shape may change where necessary, with authoritative contracts updated in the same code cutover.
+
+The common direction is source-authored typed composition with explicit capabilities and one
+maintained driver around the existing Runtime. Operation selection must carry exact executable
+requirements through the same authoring/lowering path. Ordinary composed domain failures retain
+typed payloads; custom product maps remain intentional authoring. CLI/REST Application execution
+and library callers share the driver rather than acquire separate progress loops. Driver wait
+budgets govern attempts, not admitted recovery authority.
+
+The proposed driver follows one shared action contract; its exact types and transport spellings
+must be implemented together:
+
+| Observed condition | Driver behavior |
+| --- | --- |
+| Runnable, awaiting recovery, or awaiting interpretation | Continue eligible Runtime progression within the invocation budget; Runtime authorizes each transition. |
+| Pending Effect without a stopped recovery decision | Poll the same retained command within the budget; never prepare a replacement. |
+| Durable success or failure | Return the existing terminal result with checked output or failure access. |
+| `RecoveryStopped` | Return the unresolved observation; do not bypass the selected handler by automatically resuming it. |
+| Store/invocation failure or ambiguous append acknowledgement | Return the preserved causal failure and exact available recovery identity; no invisible fresh admission or assumed commit. |
+| Invocation deadline | Stop driving and report the exact RunId and last qualified observation if available. Do not claim that historical observation is the current head or invent a terminal failure. |
+| Cancellation or lost client/process | Preserve Runtime cancellation guarantees; a disconnected caller may receive no response. Explicit recovery uses the retained identity, not a promised cancellation record. |
+
+Before implementing, reconcile exact signatures and validate the proposed registration mechanism
+with nested Operations, individual States, capability injection, custom maps/handlers, and distinct
+context types. Resolve the shared driver's outcome/action contract for deadline, cancellation,
+ambiguous append, durable failure, and stopped pending Effects. These feasibility checks must not
+relax the three public objectives to fit current APIs.
+
+Each design distinguishes baseline/new-behavior cases, coverage required when replacing current
+tests, and optional future cases. Complete the assertion-to-case and managed-task mapping before
+removing old tests. Keep desired behavior and independent expected results visible in the test.
 
 ## Related capabilities retained as separate work
 
@@ -334,11 +368,11 @@ These goals remain relevant, but they do not gate agreeing or improving the thre
 
 ## Decision sequence and complete cutovers
 
-1. Design the three public-usage E2Es using the deliverable above and current primitives as the
-   baseline. Inventory caller declarations, repeated assembly work, and result handling; map current
-   guarantees to replacement cases or focused tests. Select exact API and
-   registration ownership only after the composition and extension examples work independently of
-   a fixed EVM product. Resolve the material design uncertainties below before implementing them.
+1. Validate the linked target designs and settle their shared public signatures and ownership
+   mechanisms. Use current primitives as implementation evidence, not as limits on the caller
+   experience. Map current guarantees to replacement cases or focused tests. Prove composition and
+   extension independently of a fixed EVM product, and resolve the relevant material uncertainties
+   before implementing the production cutover.
 2. Implement one coherent authoring/association improvement with consuming tests and documentation.
    Preserve inward crate dependencies. Cut over affected callers and delete superseded registration
    or mapping machinery in the same logical commit; do not leave an older path under a wrapper.
@@ -366,8 +400,8 @@ alone is not sufficient evidence.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation before implementation |
 | --- | --- | --- | --- |
-| Current E2E guarantees can be assigned to the three scenarios or focused tests without loss. | The assertion-to-case inventory and concrete scenario designs are not complete. | Premature replacement could drop unique behavior or create oversized scenarios that obscure failures. | Complete the coverage map, name required case runs and managed tasks, and distinguish preserved coverage from optional future additions before deleting tests. |
-| Composition can couple semantic selection to exact executable requirements without duplicate lists. | Program/domain crates cannot depend on Runtime; generic context replacement changes exact State ABIs. | A convenience layer could add another registry/lowering path or break crate boundaries. | Architect one concrete ownership design using two contexts, nested Operations, individual States, maps, and capability injection; enumerate the deleted machinery. |
+| Current E2E guarantees can be assigned to the three scenarios or focused tests without loss. | Concrete target stories are specified, but the exhaustive assertion-to-case inventory is incomplete. | Premature replacement could drop unique behavior or create oversized scenarios that obscure failures. | Complete the coverage map, name required case runs and managed tasks, and distinguish preserved coverage from optional future additions before deleting tests. |
+| Composition can couple semantic selection to exact executable requirements without duplicate lists. | Program/domain crates cannot depend on Runtime; generic context replacement changes exact State ABIs. | A convenience layer could add another registry/lowering path or break crate boundaries. | Validate the proposed Program-owned authoring sink with two contexts, nested Operations, individual States, maps, and capability injection; enumerate the deleted machinery. |
 | Supported ordinary failure propagation can be simpler while preserving custom maps. | Products choose different root schemas and fact retention. | A generic shortcut could erase causes, lose facts, or hide meaningful product policy. | Specify ordinary and custom-root examples, operational failure without a root, report overflow, and cold decoding. |
 | A bounded configured EVM surface can share framework components. | Runtime-selected step counts/order and ABI types do not map automatically to current monomorphized contexts. | The product could require a parallel execution model or expose an unbounded expression system. | Specify supported step/result representation and ABI rejection cases, then compare two distinct workflows. Keep this separate from Rust composition acceptance. |
 | One reusable driver can express supported attempt policy honestly. | Admission ambiguity, pending Effects, cancellation, deadlines, reconnection, and key lifetime interact. | Retry could change authority or stopped attempts could be reported as durable failures. | Define the outcome/action matrix and test exact start/resume identity and each affected interruption boundary. |
@@ -375,8 +409,8 @@ alone is not sufficient evidence.
 
 ## Verification of this RFC revision
 
-This revision records the three-scenario E2E decision and aligns related gap guidance; it changes
-no executable tests or task selection. Review local links/anchors, cited public symbols,
+This revision links concrete architect designs for the three public-usage E2Es; it changes no
+executable tests, public APIs, or task selection. Review local links/anchors, cited public symbols,
 consistency with authoritative contracts, absence of stale references, and `git diff --check`.
 Production-code LOC change is zero. No Rust tests, managed E2E, or CI run is selected by the
 [build guide](docs/build-and-verification.md) for this revision. Subsequent code/task changes must
