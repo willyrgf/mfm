@@ -117,13 +117,14 @@ durably failed run: CLI exit 1, REST 200 with a tagged failed state.
 
 ### Common execution and stopped outcomes
 
-Application delegates ordinary waiting to the proposed `RuntimeDriver`, the same maintained
-Runtime driver used directly by scenarios 2 and 3. Binaries still perform one Application call.
+Application delegates ordinary waiting to Runtime's proposed execution surface, also used directly
+by scenarios 2 and 3. There is one public Runtime, with a builder for explicit dependencies/options;
+no separate public driver is constructed. Binaries still perform one Application call.
 The test must not implement its own poll/progress/retry loop. Process supervision timeouts remain
 test infrastructure and are distinct from the requested execution budget.
 
 The wait budget is invocation policy, not persisted recovery authorization. It does not change
-Program identity, recovery allowances, command identity, or the admitted input. The driver may
+Program identity, recovery allowances, command identity, or the admitted input. Runtime may
 continue only progression authorized by Runtime; it cannot turn an unresolved outcome into a
 replacement command or silently start with a fresh RunId.
 
@@ -136,10 +137,10 @@ terminal failure or claim an interrupted physical attempt was recorded. The exac
 code and HTTP status remain a contract decision; resolve them before implementing `--wait`.
 
 `RecoveryStopped`, Store/invocation failures, and indeterminate appends stop automatic driving.
-The driver must not repeatedly resume past a stopped recovery decision. Indeterminate append
+Runtime must not repeatedly resume past a stopped recovery decision. Indeterminate append
 retains exact start/progress recovery identity and causal facts.
 Any subsequent recovery is explicit and uses the same identity. A proposed bounded wait option on
-`run progress` / the progress request delegates to the same driver. Deliberate single-invocation
+`run progress` / the progress request delegates to the same Runtime execution surface. Deliberate single-invocation
 progress remains available for boundary cases; it is not the baseline consumer workflow.
 
 ## Baseline run and independent assertions
@@ -202,7 +203,7 @@ Delete superseded orchestration and ordinary driver duplication in the same cuto
 legitimate process/socket/fault helpers. Do not freeze raw JSON traversal where checked public
 models can express the assertion, or move expected answers into production.
 
-1. Settle the common driver action/outcome and timeout contracts with the library scenarios.
+1. Settle the common Runtime action/outcome and timeout contracts with the library scenarios.
    Implement shared behavior with focused Runtime/Application/client tests and update relevant
    design, architecture, and transport documentation in the same logical change.
 2. Replace the old client E2E organization with these named cases and explicit coverage mapping.
@@ -217,7 +218,7 @@ models can express the assertion, or move expected answers into production.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
-| One bounded wait option serves all three usage paths. | The common driver and timeout code/status are not yet selected. | Divergent drivers or misleading timeout authority. | Agree one action/outcome matrix and timeout wire contract; test ambiguity, failure, cancellation, and same-identity resume before shipping. |
+| One bounded wait option serves all three usage paths. | The Runtime execution and timeout code/status are not yet selected. | Divergent drivers or misleading timeout authority. | Agree one action/outcome matrix and timeout wire contract; test ambiguity, failure, cancellation, and same-identity resume before shipping. |
 | Fixture executions can share one anchor. | Node mining or concurrent activity may advance it. | Incorrect full-equality assertions become flaky. | Isolate fixture activity or validate each reported anchor and compare semantic holdings. |
 | Every retained configuration field represents a caller choice. | Current request repeats route/identity information. | Freezing it perpetuates assembly burden. | Review the smallest complete request and justify each retained field before implementation. |
 | Splitting existing cases retains process-level recovery evidence. | Their current order combines blocking, listing, deletion, and restart. | Simplification could stop proving cold recovery after response loss. | Map every retained assertion to a named case and preserve durable prefix, identity lookup, and deleted-revision evidence. |

@@ -130,27 +130,28 @@ source-preserving diagnostic conventions rather than flattening errors to string
 
 ## Shared composition and execution surface
 
-Use the same proposed typed sequence and execution surface as the composition E2E. Existing
-components carry the admitted policy as a context sibling. The final `Observed` contract exactly
-matches the new State's input; no helper State or arbitrary closure connects them.
+Use the same current `OperationExpansion` DSL and single Runtime execution surface as the
+composition E2E. This case reuses the unchanged maintained operation (observed value `42`), then
+adds the new semantic State; it does not insert scenario 2's `+42` State. Existing components carry
+the admitted policy as a context sibling. The final `Observed` contract matches the State input.
+
+As in the composition sketch, exact generic/map arguments below are abbreviated. Production
+component descriptors supply ordinary requirements; the extension author owns any intentional
+new business failure projection. The closure authors a sequence and performs no runtime work.
 
 ```rust
-let workflow = operation(Deploy::new(binding.clone()))
-    .then(operation(Configure::new(binding)))
-    .then(read::<Observe, EvmAnchoredContractCallRead>(route))
-    .then(pure::<AssessIncrease>());
+let original = ContractWorkflow::new(&config)?;
+let workflow = config.author_extension(|body| {
+    body.operation(&original)?;
+    body.pure::<AssessIncrease>()
+})?;
 
-let prepared = Runtime::prepare(
-    entry_point,
-    workflow,
-    input,                 // configure(42), increment 8, ceiling 100
-    admitted_policy,       // terminal handling for Permanent
-    adapters,
-)?;
-
-let runtime = Runtime::new(prepared.assembly(), store);
-let outcome = RuntimeDriver::new(runtime)
-    .execute(run_id, &prepared, attempt_policy)
+let runtime = Runtime::builder(store)
+    .capabilities(capabilities)
+    .execution_policy(attempt_policy)
+    .build()?;
+let outcome = runtime
+    .execute(run_id, workflow, config.initial_input())
     .await?;
 
 match outcome {
@@ -164,20 +165,21 @@ match outcome {
 }
 ```
 
-`Prepared` owns the checked input and exact associated Program. Preparation performs no external
-execution. `then` checks exact adjacent input/output contracts. Sequence failure sums preserve
-original branch values and classification; intentional product remapping remains possible.
+`author_extension` is an illustrative facade for the current authoring DSL, not a second compiler.
+Unlike scenario 2's same-contract recomposition, this extension declares its new output/failure
+contracts. Exact signatures and root-map selection must be validated in the consuming example.
+Runtime qualifies the input, Program and exact implementation requirements before external execution.
+Existing lowering validates adjacent contracts; failure projections preserve originals and intentional
+product semantics. No new chaining algebra or universal failure representation is required.
 
-One Program-owned typed authoring traversal lowers the sequence and exposes exact generic
-State/map/capability selections to a Runtime-owned registration sink. Domain crates acquire no
-Runtime dependency. Selecting the custom State includes its executable requirements without a
-second manually maintained registration list or a second lowering engine.
+One authoring traversal must supply exact generic State/map/capability selections to Runtime
+association. A Program-owned implementation sink remains a candidate; domain crates acquire no
+Runtime dependency and callers maintain no second registration list.
 
-The shared `RuntimeDriver` follows the [RFC action contract](../RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md#concrete-architect-designs)
-and implements bounded waiting around Runtime. It never grants recovery
-allowances or changes admitted policy. A stopped attempt differs from durable failure. A deadline
-returns the last qualified observation with its recovery identity, which is not guaranteed to be
-the current head if an in-flight append had an ambiguous acknowledgement.
+Runtime follows the [RFC action contract](../RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md#concrete-architect-designs)
+and owns bounded ordinary progression. It never grants extra recovery allowances or changes admitted
+policy. Deadline returns the last qualified observation with available recovery identity, which need
+not be the current head after an ambiguous append. A stopped attempt differs from durable failure.
 
 ## Real infrastructure and independent oracle
 
@@ -195,7 +197,7 @@ The test independently establishes:
 - The approval contains current `42`, increment `8`, ceiling `100`, proposed `50`, and headroom `50`.
 - The retained observation target, anchor, and evidence linkage agree with the transaction facts.
 - The ceiling-`49` run ends with the original typed `CeilingExceeded` failure, including the
-  complete policy and observation, retained through the sequence failure projection.
+  complete policy and observation, retained through the declared root failure projection.
 - Rebuilt Runtime and Store handles decode the same checked terminal result and failure.
 - Repeated terminal observation/resume preserves the head, output identity, and sender nonce.
 
@@ -232,7 +234,7 @@ exact association, ordinary failure injection, maintained ABI decoding, capabili
 Runtime progression, persistence, recovery, and checked result delivery.
 
 Implement shared composition/association first with the composition E2E, deleting superseded
-parallel registration paths in that cutover. Implement the maintained driver and ABI/result
+parallel registration paths in that cutover. Implement the Runtime execution surface and ABI/result
 support once, deleting replaced fixture polling/decoding when callers switch. Then add this
 public-import-only extension example, focused contract tests, managed selection, and documentation.
 Remove the predecessor E2E organization only after its complete coverage mapping is satisfied.
