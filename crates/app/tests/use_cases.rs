@@ -58,7 +58,8 @@ enum ProviderMode {
     Blocked,
     Timeout,
     RejectBalance,
-    TimeoutBalance,
+    TimeoutTokenDecimals,
+    TimeoutTokenBalance(&'static str),
 }
 
 struct Provider {
@@ -80,29 +81,6 @@ impl EvmReadProvider for Provider {
                     self.entered.notify_one();
                     return std::future::pending().await;
                 }
-                (ProviderMode::Timeout, _)
-                | (
-                    ProviderMode::TimeoutBalance,
-                    EvmReadSubject::NativeBalance { .. }
-                    | EvmReadSubject::TokenDecimals { .. }
-                    | EvmReadSubject::TokenBalance { .. },
-                ) => {
-                    return Err(AdapterError::Operational(EvmOperationalError::new(
-                        EvmOperationalKind::Timeout,
-                        serde_json::from_value(serde_json::json!({
-                            "method": "chain_id",
-                            "stage": "send",
-                            "failure": {"kind": "client"},
-                            "diagnostics": {
-                                "response": null,
-                                "sources": {"layers": [], "end": "unavailable"},
-                                "omissions": [],
-                                "omissions_truncated": false
-                            }
-                        }))
-                        .unwrap(),
-                    )));
-                }
                 (
                     ProviderMode::RejectBalance,
                     EvmReadSubject::NativeBalance { .. } | EvmReadSubject::TokenBalance { .. },
@@ -110,6 +88,34 @@ impl EvmReadProvider for Provider {
                     return Ok(EvmReadEvidence::rejected(intent_value_ref.clone()));
                 }
                 _ => {}
+            }
+            let times_out = match (mode, intent.subject()) {
+                (ProviderMode::Timeout, _)
+                | (ProviderMode::TimeoutTokenDecimals, EvmReadSubject::TokenDecimals { .. }) => {
+                    true
+                }
+                (
+                    ProviderMode::TimeoutTokenBalance(expected),
+                    EvmReadSubject::TokenBalance { source, .. },
+                ) => source.source_id() == expected,
+                _ => false,
+            };
+            if times_out {
+                return Err(AdapterError::Operational(EvmOperationalError::new(
+                    EvmOperationalKind::Timeout,
+                    serde_json::from_value(serde_json::json!({
+                        "method": if matches!(intent.subject(), EvmReadSubject::ChainIdentity) { "chain_id" } else { "call" },
+                        "stage": "send",
+                        "failure": {"kind": "client"},
+                        "diagnostics": {
+                            "response": null,
+                            "sources": {"layers": [], "end": "unavailable"},
+                            "omissions": [],
+                            "omissions_truncated": false
+                        }
+                    }))
+                    .unwrap(),
+                )));
             }
             let value = match intent.subject() {
                 EvmReadSubject::ChainIdentity => {
@@ -558,13 +564,13 @@ async fn snapshot_token_holdings_and_typed_read_failures() {
         }
     });
 
-    let token_provider = provider(1);
-    let token_app = open(
-        &[(1, "alpha", token_provider)],
+    let provider = provider(1);
+    let app = open(
+        &[(1, "alpha", provider.clone())],
         Arc::new(MemoryStore::new()),
         Arc::new(MemoryConfigRepository::default()),
     );
-    let token_imported = token_app
+    let token_imported = app
         .import_config(
             ConfigName::new("token").expect("name"),
             ConfigDocument::new(serde_json::to_vec(&token_document).unwrap())
@@ -573,7 +579,7 @@ async fn snapshot_token_holdings_and_typed_read_failures() {
         )
         .await
         .expect("import");
-    let token_started = token_app
+    let token_started = app
         .start_run(
             RunId::from_digest(DigestBytes::from_array([2; 32])),
             &ConfigSelection::new(
@@ -596,14 +602,8 @@ async fn snapshot_token_holdings_and_typed_read_failures() {
         "token"
     );
 
-    let reject_provider = provider(1);
-    *reject_provider.mode.lock().unwrap() = ProviderMode::RejectBalance;
-    let reject_app = open(
-        &[(1, "alpha", reject_provider)],
-        Arc::new(MemoryStore::new()),
-        Arc::new(MemoryConfigRepository::default()),
-    );
-    let reject_imported = reject_app
+    *provider.mode.lock().unwrap() = ProviderMode::RejectBalance;
+    let reject_imported = app
         .import_config(
             ConfigName::new("reject").expect("name"),
             ConfigDocument::new(NATIVE_SNAPSHOT.as_bytes().to_vec())
@@ -612,7 +612,7 @@ async fn snapshot_token_holdings_and_typed_read_failures() {
         )
         .await
         .expect("import");
-    let rejected = reject_app
+    let rejected = app
         .start_run(
             RunId::from_digest(DigestBytes::from_array([3; 32])),
             &ConfigSelection::new(
@@ -643,7 +643,7 @@ async fn snapshot_token_holdings_and_typed_read_failures() {
             .unwrap(),
         PortfolioSnapshotFailure::CollectionFailed { ordinal: 0, .. }
     ));
-    let cold = reject_app
+    let cold = app
         .read_run(&RunId::from_digest(DigestBytes::from_array([3; 32])))
         .await
         .expect("cold");
@@ -652,28 +652,13 @@ async fn snapshot_token_holdings_and_typed_read_failures() {
     };
     assert_eq!(cold_report.value_ref(), report.value_ref());
 
-    let timeout_provider = provider(1);
-    *timeout_provider.mode.lock().unwrap() = ProviderMode::TimeoutBalance;
-    let timeout_app = open(
-        &[(1, "alpha", timeout_provider)],
-        Arc::new(MemoryStore::new()),
-        Arc::new(MemoryConfigRepository::default()),
-    );
-    let timeout_imported = timeout_app
-        .import_config(
-            ConfigName::new("timeout-token").expect("name"),
-            ConfigDocument::new(serde_json::to_vec(&token_document).unwrap())
-                .await
-                .expect("document"),
-        )
-        .await
-        .expect("import");
-    let timed_out = timeout_app
+    *provider.mode.lock().unwrap() = ProviderMode::TimeoutTokenDecimals;
+    let timed_out = app
         .start_run(
             RunId::from_digest(DigestBytes::from_array([4; 32])),
             &ConfigSelection::new(
-                timeout_imported.config().name().clone(),
-                timeout_imported.config().digest().clone(),
+                token_imported.config().name().clone(),
+                token_imported.config().digest().clone(),
             ),
         )
         .await
@@ -940,13 +925,14 @@ async fn config_delete_does_not_revoke_an_admitted_run() {
 
 #[tokio::test]
 async fn indeterminate_start_and_progress_carry_recovery_identity() {
-    let start_backend = Arc::new(FaultStore::new());
-    let start_app = open(
-        &[(1, "alpha", provider(1))],
-        Arc::clone(&start_backend),
+    let backend = Arc::new(FaultStore::new());
+    let provider = provider(1);
+    let app = open(
+        &[(1, "alpha", provider.clone())],
+        Arc::clone(&backend),
         Arc::new(MemoryConfigRepository::default()),
     );
-    let imported = start_app
+    let imported = app
         .import_config(
             ConfigName::new("start-recovery").expect("name"),
             ConfigDocument::new(NATIVE_SNAPSHOT.as_bytes().to_vec())
@@ -955,9 +941,9 @@ async fn indeterminate_start_and_progress_carry_recovery_identity() {
         )
         .await
         .expect("import");
-    start_backend.fail_next_append();
+    backend.fail_next_append();
     let run_id = RunId::from_digest(DigestBytes::from_array([40; 32]));
-    let Err(error) = start_app
+    let Err(error) = app
         .start_run(
             run_id.clone(),
             &ConfigSelection::new(
@@ -985,42 +971,26 @@ async fn indeterminate_start_and_progress_carry_recovery_identity() {
             if retained == &run_id && config == imported.config()
     ));
 
-    let progress_backend = Arc::new(FaultStore::new());
-    let progress_provider = provider(1);
-    *progress_provider.mode.lock().unwrap() = ProviderMode::Blocked;
-    let progress_app = open(
-        &[(1, "alpha", Arc::clone(&progress_provider))],
-        Arc::clone(&progress_backend),
-        Arc::new(MemoryConfigRepository::default()),
-    );
-    let progress_config = progress_app
-        .import_config(
-            ConfigName::new("progress-recovery").expect("name"),
-            ConfigDocument::new(NATIVE_SNAPSHOT.as_bytes().to_vec())
-                .await
-                .expect("document"),
-        )
-        .await
-        .expect("import");
+    *provider.mode.lock().unwrap() = ProviderMode::Blocked;
     let progress_id = RunId::from_digest(DigestBytes::from_array([41; 32]));
     {
         let selected = ConfigSelection::new(
-            progress_config.config().name().clone(),
-            progress_config.config().digest().clone(),
+            imported.config().name().clone(),
+            imported.config().digest().clone(),
         );
-        let start = progress_app.start_run(progress_id.clone(), &selected);
+        let start = app.start_run(progress_id.clone(), &selected);
         tokio::pin!(start);
         tokio::select! {
             result = &mut start => panic!("blocked Read completed: {}", result.is_ok()),
-            _ = progress_provider.entered.notified() => {}
+            _ = provider.entered.notified() => {}
             _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => panic!("Read was not entered"),
         }
     }
-    let retained = progress_app.read_run(&progress_id).await.unwrap();
+    let retained = app.read_run(&progress_id).await.unwrap();
     assert!(matches!(retained.state(), RunViewState::Runnable { .. }));
-    *progress_provider.mode.lock().unwrap() = ProviderMode::Ready;
-    progress_backend.fail_next_append();
-    let Err(error) = progress_app.progress_run(&progress_id).await else {
+    *provider.mode.lock().unwrap() = ProviderMode::Ready;
+    backend.fail_next_append();
+    let Err(error) = app.progress_run(&progress_id).await else {
         panic!("progress append must be ambiguous");
     };
     assert!(matches!(
@@ -1076,8 +1046,9 @@ async fn enrichment_keeps_native_and_nonzero_candidates() {
             }
         }
     });
+    let provider = provider(1);
     let app = open(
-        &[(1, "alpha", provider(1))],
+        &[(1, "alpha", provider.clone())],
         Arc::new(MemoryStore::new()),
         Arc::new(MemoryConfigRepository::default()),
     );
@@ -1115,28 +1086,14 @@ async fn enrichment_keeps_native_and_nonzero_candidates() {
     assert_eq!(sources[0]["source_id"], "funded");
     assert_eq!(sources[1]["source_id"], "native");
 
-    let timeout_provider = provider(1);
-    *timeout_provider.mode.lock().unwrap() = ProviderMode::TimeoutBalance;
-    let timeout_app = open(
-        &[(1, "alpha", timeout_provider)],
-        Arc::new(MemoryStore::new()),
-        Arc::new(MemoryConfigRepository::default()),
-    );
-    let timeout_imported = timeout_app
-        .import_config(
-            ConfigName::new("failing-candidates").expect("name"),
-            ConfigDocument::new(serde_json::to_vec(&document).unwrap())
-                .await
-                .expect("document"),
-        )
-        .await
-        .expect("import");
-    let failed = timeout_app
+    *provider.mode.lock().unwrap() = ProviderMode::TimeoutTokenBalance("empty");
+    let failed_id = RunId::from_digest(DigestBytes::from_array([91; 32]));
+    let failed = app
         .start_run(
-            RunId::from_digest(DigestBytes::from_array([91; 32])),
+            failed_id.clone(),
             &ConfigSelection::new(
-                timeout_imported.config().name().clone(),
-                timeout_imported.config().digest().clone(),
+                imported.config().name().clone(),
+                imported.config().digest().clone(),
             ),
         )
         .await
@@ -1153,6 +1110,26 @@ async fn enrichment_keeps_native_and_nonzero_candidates() {
             .kind(),
         EvmOperationalKind::Timeout
     );
+    let Failure::Read { call, intent, .. } = report.failure() else {
+        panic!("the later candidate's balance lookup must fail");
+    };
+    assert!(matches!(
+        intent.decode::<EvmReadIntent>().unwrap().subject(),
+        EvmReadSubject::TokenBalance { source, .. } if source.source_id() == "empty"
+    ));
+    let context: serde_json::Value =
+        serde_json::from_slice(call.input().canonical_bytes()).unwrap();
+    let completed = context["completed"].as_array().unwrap();
+    assert_eq!(completed.len(), 2);
+    assert_eq!(completed[0]["source"]["source_id"], "funded");
+    assert_eq!(completed[0]["raw_units"], "1");
+    assert_eq!(completed[1]["source"]["source_id"], "native");
+    assert_eq!(completed[1]["raw_units"], "0");
+    let rejected = app
+        .publish_enrichment(ConfigName::new("partial-candidates").unwrap(), &failed_id)
+        .await
+        .expect_err("partial observations cannot be published as successful enrichment");
+    assert_eq!(rejected.code(), "invalid_enrichment");
 }
 
 #[tokio::test]
