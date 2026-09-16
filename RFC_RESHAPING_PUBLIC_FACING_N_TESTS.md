@@ -138,8 +138,9 @@ assertion owned by test: result differs from the unchanged operation's independe
 ```
 
 For this E2E, production owns the context, config, component types and ordinary failure maps.
-The caller obtains documented parts of the maintained operation and rebuilds its source expansion;
-it defines no structs, type aliases or new States. Recomposition validates a new immutable Program,
+The caller obtains production step selections directly and declares a new operation through the
+same authoring constructor used by the maintained lifecycle; no original instance or separate
+transformation constructor is needed. It defines no structs, type aliases or new States. Recomposition validates a new immutable Program,
 not an edit of lowered or admitted history. General framework extension can still define new types.
 Deploy and Configure are business Effect States, Observe is a Read State, and Validate/Report are
 Pure States. Their typed selections carry capability setup and trigger the existing capability-owned
