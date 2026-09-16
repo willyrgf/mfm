@@ -59,6 +59,35 @@ creation/call/observation connections, and transaction-family registration reusa
 scope did not solve general composition, execution policy, failure authoring, or typed result
 consumption. Completing that cutover therefore did not complete this consumer experience.
 
+## Changes incorporated from the dev merge
+
+Reviewed against merge `f2182721`. The consumer goal remains open, but these responsibilities
+already have production owners and must not be implemented again:
+
+- Program v8 is a linear State sequence. `OperationExpansion` selects handlers, allowances,
+  checkpoints, and typed root maps; failure-routing States and failure regions are gone.
+  The fixture now supplies `MapFailure` and its registrations instead of `Abort` States.
+- Runtime owns intrinsic classification, bounded retry/checkpoint restart, Effect barriers,
+  canonical `FailureReport`, and `RecoveryStopped` observations. The remaining recovery gap is
+  configurable product orchestration around those primitives, not another recovery engine.
+- Funding RPC moved into `JsonRpcEvmProvider::fund_development_sender`, sharing bounded transport
+  and causal error handling. The E2E retains a small wrapper; replay-safe funding and readiness
+  are still missing.
+- `Object::decode` checks exact contracts, and `FailureReport` exposes retained failure/root data.
+  The fixture's `root_failure` already uses this path. Success and wallet results still decode
+  JSON directly; reusable product report schemas and delivery remain missing.
+- The managed E2E now also checks authority SQL failure, retained-epoch rejection without append,
+  and closed-owner signing failure through Live/Runtime and cold Application observation.
+  Preserve these scenarios when separating consumer coverage from fault tests. Removed
+  accumulating-context/capacity support modules are not current extraction targets; use the
+  current capacity owners in the [build guide](docs/build-and-verification.md).
+
+The transaction adapter still uses the pinned non-reorging development settlement policy and is
+excluded from shipping Application composition. Reusable workflow support must keep that scope
+explicit; general-chain submission requires a separately reviewed finality capability. Runtime/IO
+reconstruction in the managed test retains the same keystore owner and does not prove recovery
+after host-process termination.
+
 ## Inventory against the five-step consumer flow
 
 The table states the target consumer contract. Production owns the implementations below; the
@@ -68,20 +97,15 @@ that the capabilities already exist. Detailed fault verification belongs in sepa
 | Consumer step / concern | What the harness implements today | What reusable production code must own | What the consumer configures or checks |
 | --- | --- | --- | --- |
 | **1. Obtain a wallet** | `generated_signer`: entropy, checked scalar construction, rejected-candidate retries, and import | Reviewed wallet creation and key-handle lifecycle, reusing checked keystore primitives | Request an ephemeral wallet or supply a key through the supported import API; secrets stay outside persisted workflow configuration |
-| **1. Fund the wallet** | `fund_sender`, `funding_rpc`, `funding_response_body`, `FundingResponse<T>`, `FundingError` | A reusable **`DevNodeFundWallet` Effect State** with a dev-node adapter and shared bounded RPC transport. No separate general faucet-authority subsystem is required. Define funded readiness and retry behavior that cannot accidentally fund twice | Select the dev node, recipient, amount, and supported funding options; inspect funding evidence in the report |
+| **1. Fund the wallet** | `fund_sender` and `FundingError` wrap production `JsonRpcEvmProvider::fund_development_sender` | A reusable **`DevNodeFundWallet` Effect State** with a dev-node adapter reusing the existing bounded RPC transport. No separate general faucet-authority subsystem is required. Define funded readiness and retry behavior that cannot accidentally fund twice | Select the dev node, recipient, amount, and supported funding options; inspect funding evidence in the report |
 | **2. Import the key and supply capabilities** | The test's `runtime(...)` opens Store/authority/provider, installs State and adapter families, and reconstructs handles | A production entry point owns import, dependency construction/lifecycle, exact registrations, and use of the **existing sole Runtime**. The local factory duplicates composition work, not the Runtime engine. Fault wrappers and deliberate reconstruction move to dedicated integration infrastructure | Select deployment and explicit capabilities. No test-owned Runtime factory, assembly builder, resource-recovery implementation, or fault wrapper |
-<<<<<<< HEAD
-| **3. Select workflow, ABI, and inputs** | `EffectFixtureOperation`, recipe aliases, ABI helpers, `DecodeValue`, and `register_fixture_states` | Checked configuration of supported operation order, ABI/function or selector, and **static typed arguments**; production encoding/decoding, graph construction, and executable registration | Configure which operations run, which ABI/function to invoke, and values such as `configure(42)`. No custom fixture State, codec, or registration list |
-| **3. Select/discover fees** | Fixed fee constants and manually constructed transaction plans | Reusable **RPC fee-discovery Read States**, retained fee evidence, and deterministic application of configured fee rules/bounds. Recovery of an acknowledged prepare reuses its original command and fees | Configure fixed fee values or select RPC fee discovery, optionally with a maximum acceptable fee. Production States query RPC and calculate fees; the E2E checks the fees recorded in the report |
-=======
 | **3. Select workflow, ABI, and inputs** | `EffectFixtureOperation`, recipe aliases, ABI helpers, `DecodeValue`, and `register_fixture_states` | Checked configuration of supported operation order, ABI/function or selector, and **static typed arguments**; production encoding/decoding, sequence construction, and executable registration | Configure which operations run, which ABI/function to invoke, and values such as `configure(42)`. No custom fixture State, codec, or registration list |
-| **3. Select/discover fees** | Fixed fee constants and manually constructed transaction plans | Reusable **RPC fee-discovery Read States**, retained fee evidence, and deterministic application of configured fee rules/bounds. Recovery of an acknowledged prepare reuses its original command and fees | Select fixed fees or discovery and its supported policy/bounds; no fee-query or calculation implementation |
->>>>>>> origin/dev
+| **3. Select/discover fees** | Fixed fee constants and manually constructed transaction plans | Reusable **RPC fee-discovery Read States**, retained fee evidence, and deterministic application of configured fee rules/bounds. Recovery of an acknowledged prepare reuses its original command and fees | Configure fixed fees or RPC discovery with supported rules and optional maximum fees; check retained fee evidence without implementing queries or calculations |
 | **3. Connect prior outputs — future gap** | Specialized production `CallCreatedAt` and `ObserveAt` recipes; no general configurable output-to-argument mapping | Future checked references such as **“argument X takes output Y from State Z”**, including type, dependency-order, branch-availability, and identity checks. Tracked in [known gaps](docs/known-gaps.md#configuration-driven-workflows); not required for the initial static-input surface | Initially use static inputs and supported built-in connections. Later select named output references through configuration, not new forwarding States |
-| **3. Define terminal failure classes** | `Abort`, its State implementations/registrations, failure regions, and `TryFrom` conversions | Simple supported class-based terminal/retry policy with production classification and propagation. **Configured product orchestration remains a [known gap](docs/known-gaps.md#general-execution-and-recovery-policy)**. Stopping on a deadline or infrastructure error must not fabricate a durable domain failure | Configure which supported failure classes terminate the operation and which permit supported retries; no custom failure converter or recovery policy for ordinary policy |
-| **3 / 5. Define and retain report content** | `FixtureFailure` construction/decoding, context-to-report conversion, and analogous capacity code | Complete checked **success and failure reports** containing configured product/step names and order, selected public inputs/plans, retained facts, available outputs, failure classes, and supported consistency-check results. Preserve declared facts within capacity limits | Configure names, chosen report content, and supported expectation rules. These are report configuration/data, not test-owned schemas, converters, or validators |
+| **3. Define terminal failure classes** | `MapFailure`, its registrations, `TryFrom` conversions, and fixture `ClassifyError` | Configuration over existing intrinsic classification, handler selection, bounded recovery, and root maps, with product-owned propagation. **Configured product orchestration remains a [known gap](docs/known-gaps.md#general-execution-and-recovery-policy)**. Stopping on a deadline or infrastructure error must not fabricate a durable domain failure | Configure which supported failure classes terminate the operation and which permit supported retries; no custom failure converter or recovery policy for ordinary policy |
+| **3 / 5. Define and retain report content** | `FixtureReport`/`FixtureFailure` construction/decoding and context-to-root-report conversion | Complete checked **success and failure reports** containing configured product/step names and order, selected public inputs/plans, retained facts, available outputs, failure classes, and supported consistency-check results. Preserve declared facts within capacity limits | Configure names, chosen report content, and supported expectation rules. These are report configuration/data, not test-owned schemas, converters, or validators |
 | **4. Execute under policy** | `drive_to_success`, resume-before-start logic, polling/deadline handling, and repeated reconstruction | Production owns admission, execution, progress/deadline/retry policy, lifecycle, supported recovery, and typed result delivery over the existing Runtime. Optional injected-fault schedules are configuration of dedicated dev/test infrastructure, not ordinary operation semantics | Supply execution policy as configuration. No local driver, forced interruption, or intermediate head/nonce assertions in the consumer E2E; those belong to focused unit/integration tests |
-| **5. Inspect the typed terminal report** | `terminal_value`, failure/wallet JSON decoding, and mixed terminal/intermediate assertions | Exact-contract-checked typed result access; distinguish durable success/failure reports from a stopped attempt with resumable history | **Check final report results against the configured scenario.** No manual JSON decoding or reconstruction of execution history; independent wire/recovery assertions remain in dedicated tests |
+| **5. Inspect the typed terminal report** | `terminal_value`/wallet JSON decoding, `root_failure` using `Object::decode`, and mixed terminal/intermediate assertions | Product result delivery reusing `Object::decode` and Runtime report accessors; distinguish durable success/failure reports from a stopped attempt with resumable history | **Check final report results against the configured scenario.** No manual JSON decoding or reconstruction of execution history; independent wire/recovery assertions remain in dedicated tests |
 
 The consumer can pass one request containing both operation and execution configuration. Their
 meanings differ: operation configuration determines admitted semantics; execution configuration
@@ -108,10 +132,11 @@ The minimal implementation must define completion evidence, readiness, and recov
 handling. The exact dev-node command/replay mechanism remains an implementation design question;
 this requirement does not prescribe an additional authority service.
 
-The funding code also repeats HTTP policy, bounded response collection, JSON-RPC checks, and
-redacted errors already owned privately by `JsonRpcEvmProvider`. Sharing `FundingResponse<T>` and
-`funding_rpc` within tests reduces local duplication but leaves that production responsibility in
-the harness. Reusable funding should consume shared transport behavior.
+The transport duplication is resolved: `fund_development_sender` owns unlocked-account discovery
+and submission through the provider's shared bounded, causal RPC path, without automatic retry.
+The harness wrapper selects funding values and discards the returned hash. Reusable funding should
+build on that transport owner while adding the missing Effect authority and completion contract;
+the helper itself has no Program or transaction-custody authority.
 
 ## 2. Wallet creation and dependency lifecycle belong to production
 
@@ -131,7 +156,8 @@ lifecycle. The earlier phrase “composition boundary” means a concrete produc
 The test's `runtime(...)` helper is not a second implementation of the Runtime engine: it calls
 `Runtime::new`. The missing reuse is the assembly/bootstrap/lifecycle implementation around that
 engine. The target removes the test-owned factory and driver, not the use of a real production
-Runtime instance internally. Runtime retains the sole semantic fold.
+Runtime instance internally. Runtime owns continuation transitions and local validation. Store
+loads only admission/latest/optional-probe rows; Runtime does not replay the full history.
 
 Deliberate teardown and reconstruction for fault verification belong in dedicated integration
 coverage. Normal lifecycle and recovery supported for users must be production behavior. The
@@ -168,8 +194,8 @@ stable identity; it must not become a dynamic untyped context bag. See
 ## 4. Failure classes should be simple configuration
 
 Consumers should select which supported failure classes terminate an operation and which admit
-supported retry/recovery behavior. The implementation must not require consumer-written `Abort`
-States, `TryFrom` report conversions, policy registration, or a new recovery policy merely
+supported retry/recovery behavior. The implementation must not require consumer-written `MapFailure`
+implementations, `TryFrom` report conversions, or map/handler registration merely
 to express ordinary policy.
 
 Production components own reviewed failure classes, classification, and typed propagation. The
@@ -181,9 +207,18 @@ reversion can be a durable domain outcome. Unavailable dependencies, cancellatio
 and Indeterminate acknowledgement do not automatically prove a durable failed workflow. Production
 policy/result APIs must preserve that distinction while presenting a simple consumer interface.
 
-General recovery is unfinished and is explicitly tracked in
-[known gaps](docs/known-gaps.md#general-execution-and-recovery-policy). Existing boundary tests are
-valuable evidence for specific guarantees, not a complete configurable recovery product.
+Runtime already supplies `ClassifyError`, selected handlers, finite recovery allowances,
+checkpoint restart, and Effect barriers. Framework and shipping Portfolio defaults are Stop with
+zero allowances. Product configuration must select supported behavior through those owners.
+Configurable orchestration remains unfinished and is tracked in
+[known gaps](docs/known-gaps.md#general-execution-and-recovery-policy); boundary tests do not
+establish a complete recovery product.
+
+A stopped Read can produce a durable operational failure report without a mapped domain root.
+A stopped pending Effect returns `RecoveryStopped` with its retained command still unresolved.
+Store failures and internal invocation diagnostics do not become durable operational originals.
+The fixture driver currently retries `RecoveryStopped` and Store Unavailable/Indeterminate under
+its deadline; that caller policy is not a Runtime recovery grant or permission to replace a command.
 
 ## 5. Success and failure reports should be production results
 
@@ -204,8 +239,10 @@ failure. Adding an unrelated retained field must not silently lose it in a handw
 conversion. Representation must fit the schema/object/frame/run limits without duplicating whole
 prefixes per failure variant or introducing an implicit Journal lookup.
 
-Typed report access should check the exact contract and return structured results. Consumers should
-not repeat JSON decoding or reconstruct failure reasons from erased `RunView` bytes. Public result
+Typed report delivery should use existing `Object::decode` exact-contract checks and
+`FailureReport` accessors. The fixture already decodes domain roots this way; `terminal_value` and
+the wallet success path still use raw JSON decoding. The missing product layer owns report types
+and delivery, not a second generic codec or framework failure envelope. Public result
 metadata must distinguish a durable terminal report from a stopped attempt with resumable history;
 a deadline must not manufacture a persisted failure report that the workflow never produced.
 
@@ -214,7 +251,7 @@ a deadline must not manufacture a persisted failure report that the workflow nev
 The consumer supplies progress, deadline, polling, and supported retry/recovery configuration to a
 production execution entry point. Production code handles admission, resume, dependency lifecycle,
 policy enforcement, and typed result delivery. It preserves one caller-supplied RunId, exact
-admission and pending command identity, append atomicity, and the existing sole Runtime fold.
+admission and pending command identity, append atomicity, and Runtime-owned continuation transitions.
 
 The consumer E2E should not contain `drive_to_success`, resume-before-start logic, manually rebuilt
 Runtime handles, forced interruption points, or assertions about internal frame progression. Its
@@ -235,13 +272,13 @@ prepared-wire recovery, external nonce advancement, cold history, or capacity gu
 
 | Existing harness code | Intended destination or treatment |
 | --- | --- |
-| `ReservationAcknowledgementFault`, `RecordingStore`, `ScriptedEvidence`, `Fault` | Reusable dev/test infrastructure and dedicated fault/recovery integration tests; no local copies in the consumer E2E |
+| `ReservationAcknowledgementFault` and managed SQL/epoch/closed-owner fault scenarios | Reusable dev/test infrastructure and dedicated fault/recovery integration tests; no local copies in the consumer E2E |
 | `external_wallet_transfer` | Dedicated external-nonce integration scenario, retaining an actor outside MFM custody |
 | Runtime/database teardown and reconstruction | Production lifecycle where supported for users; deliberate boundary manipulation in dedicated recovery tests |
 | Solidity fixture source/compiler task and managed service provisioning | Managed test infrastructure; E2E receives the artifact and deployment configuration |
 | ABI selectors, setter values, fee choices, operation order, report selections | Checked consumer configuration interpreted by production components |
 | Calldata codecs, `DecodeValue`, sequence/registration assembly, failure/report conversion | Reusable production implementation for the supported configurable operations |
-| Capacity sequences, hostile report wires, exact head/append assertions | Focused unit/integration/capacity suites |
+| Current capacity checks, hostile report wires, exact head/append assertions | Focused unit/integration/capacity suites |
 | Final expected report values | Consumer E2E assertions |
 
 Resource provisioning can remain part of the managed test environment. That does not imply the
@@ -271,7 +308,8 @@ workflow consumers.
 9. Improvements reduce total caller obligations and independent implementations. Moving a fixture
    helper or wrapping unchanged test-only machinery behind a new function is insufficient.
 
-This documentation revision is one coherent change: update this problem statement and known gaps.
+This documentation revision is one coherent change: reconcile this problem statement with the
+merged implementation and the existing known-gap inventory.
 Subsequent implementation needs a concrete target API and logical cutovers covering production
 components, consumers, authoritative contracts, and tests together. The configuration-driven
 consumer direction is selected; exact schemas and APIs are not implemented by this document.
@@ -282,7 +320,7 @@ consumer direction is selected; exact schemas and APIs are not implemented by th
 | --- | --- | --- | --- |
 | Dev-node funding can fit a small replay-safe Effect contract. | The existing unlocked-account submission does not itself provide duplicate suppression after lost acknowledgement. | A simple RPC wrapper could fund twice or report completion too early. | Select and test the supported dev-node mechanism, retained evidence, readiness, and acknowledgement-loss behavior before implementation. |
 | The first configurable ABI/input surface can remain bounded. | Supported ABI types, overload selection, and expectation rules are not yet enumerated. | A supposedly small change could become a general expression/schema engine or leave common inputs unsupported. | Specify complete static setter/getter examples and rejection cases, then validate an additional ABI/context shape. |
-| General recovery can be presented as simple class-based policy. | Supported actions and interactions with pending Effects, deadlines, and process/key lifetime are unfinished. | Treating every stopped attempt as terminal failure could misstate history or retry external mutation incorrectly. | Define the supported class/action matrix and test ambiguous admission, cancellation, pending prepare, reconnect, and restart boundaries. |
+| Product orchestration can expose existing recovery primitives as simple class-based policy. | Runtime actions are defined, but their product configuration and interactions with caller deadlines, reconnection, and process/key lifetime are unfinished. | Treating every stopped attempt as terminal failure could misstate history or retry external mutation incorrectly. | Define the supported class/action matrix and test ambiguous admission, cancellation, pending prepare, reconnect, and restart boundaries. |
 
 ## Verification
 
