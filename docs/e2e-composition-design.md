@@ -1,5 +1,12 @@
 # E2E design: compose existing Operations and States
 
+The [DSL refactoring RFC](../RFC_REFACTOR_DSL.md) supersedes this document's authoring and execution
+API sketches. It specifies typed State/Operation construction, capability-owned typed injection,
+compilation to Program, automatic executable association, and original failures without mandatory
+root maps. In particular, `author_operation`, `config.contracts()`, the mutable construction DSL,
+and direct execution of a selection/Operation below are superseded proposals. The product story,
+independent assertions, infrastructure, and required recovery coverage remain requirements.
+
 This is the target design for public usage 2 in the
 [public interfaces RFC](../RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md). It specifies the experience to
 implement, not a claim that the proposed APIs already exist. Current API limitations must not

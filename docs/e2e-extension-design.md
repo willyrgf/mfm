@@ -1,5 +1,11 @@
 # E2E design: extend MFM with a new State
 
+The [DSL refactoring RFC](../RFC_REFACTOR_DSL.md) supersedes the authoring/execution API sketches
+and mandatory root-projection assumptions below. Extension uses the same typed construction and
+compiled Program execution as existing components; the new State retains its exact original
+failure contract without an enclosing mapper. This document continues to own its business-rule
+scenario, independent assertions, and required coverage, not a competing DSL.
+
 This is the third public usage acceptance design in the
 [public interfaces and tests RFC](../RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md).
 It specifies the desired experience, not interfaces already implemented. Proposed Rust names
