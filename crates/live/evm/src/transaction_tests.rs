@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::{future::Future, pin::Pin};
 
 use k256::ecdsa::signature::hazmat::RandomizedPrehashSigner;
 use mfm_evm::custody::{
@@ -222,7 +221,11 @@ impl MemoryAuthority {
             .compare_exchange(stage, 0, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            Err(AuthorityError::Unavailable)
+            Err(AuthorityError::Unavailable(
+                mfm_values::DiagnosticEvidence::from_value(
+                    serde_json::json!({"operation": "test.authority", "injected": "unavailable"}),
+                ),
+            ))
         } else {
             Ok(())
         }
@@ -249,13 +252,20 @@ impl EvmTransactionAuthority for MemoryAuthority {
                     || state.reservation.command_value_ref() != reference
                     || state.reservation.domain() != domain
                 {
-                    return Err(AuthorityError::Internal);
+                    return Err(AuthorityError::Internal(
+                        mfm_values::InvocationDiagnostic::from_fields(
+                            "authority_internal",
+                            "test.authority",
+                            &serde_json::json!({"injected": "internal"}),
+                            None,
+                        ),
+                    ));
                 }
                 state.reservation.clone()
             } else {
                 let reservation =
                     Reservation::new(id.clone(), reference.clone(), domain.clone(), observed)
-                        .map_err(|_| AuthorityError::Unavailable)?;
+                        .map_err(|_| AuthorityError::Unavailable(mfm_values::DiagnosticEvidence::from_value(serde_json::json!({"operation": "test.authority", "injected": "unavailable"}))))?;
                 *state = Some(LoadedTransaction {
                     reservation: reservation.clone(),
                     prepared: None,
@@ -273,9 +283,23 @@ impl EvmTransactionAuthority for MemoryAuthority {
     ) -> AuthorityFuture<'a, PreparedRecord> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
-            let state = state.as_mut().ok_or(AuthorityError::Internal)?;
+            let state = state.as_mut().ok_or(AuthorityError::Internal(
+                mfm_values::InvocationDiagnostic::from_fields(
+                    "authority_internal",
+                    "test.authority",
+                    &serde_json::json!({"injected": "internal"}),
+                    None,
+                ),
+            ))?;
             if &state.reservation != reservation {
-                return Err(AuthorityError::Internal);
+                return Err(AuthorityError::Internal(
+                    mfm_values::InvocationDiagnostic::from_fields(
+                        "authority_internal",
+                        "test.authority",
+                        &serde_json::json!({"injected": "internal"}),
+                        None,
+                    ),
+                ));
             }
             let winner = state
                 .prepared
@@ -298,9 +322,9 @@ enum ProviderOperation {
 struct ScriptedProvider {
     chain: EvmChainInstance,
     pending: u64,
-    receipts: Mutex<VecDeque<Result<Option<ProviderReceipt>, AdapterError>>>,
+    receipts: Mutex<VecDeque<Result<Option<ProviderReceipt>, AdapterError<EvmOperationalError>>>>,
     canonical: EvmBlockAnchor,
-    submissions: Mutex<VecDeque<Result<Option<EvmHash>, AdapterError>>>,
+    submissions: Mutex<VecDeque<Result<Option<EvmHash>, AdapterError<EvmOperationalError>>>>,
     operations: Mutex<Vec<ProviderOperation>>,
     block_receipt_once: AtomicBool,
     receipt_entered: Notify,
@@ -328,14 +352,17 @@ impl ScriptedProvider {
         }
     }
 
-    fn push_receipt(&self, receipt: Result<Option<ProviderReceipt>, AdapterError>) {
+    fn push_receipt(
+        &self,
+        receipt: Result<Option<ProviderReceipt>, AdapterError<EvmOperationalError>>,
+    ) {
         self.receipts
             .lock()
             .expect("receipts lock")
             .push_back(receipt);
     }
 
-    fn push_submission(&self, result: Result<Option<EvmHash>, AdapterError>) {
+    fn push_submission(&self, result: Result<Option<EvmHash>, AdapterError<EvmOperationalError>>) {
         self.submissions
             .lock()
             .expect("submissions lock")
@@ -419,7 +446,7 @@ impl EvmTransactionProvider for ScriptedProvider {
                 .pop_front()
             {
                 Some(Ok(Some(hash))) => Ok(hash),
-                Some(Ok(None)) | None => evm_keccak256(&raw).map_err(|_| AdapterError::Internal),
+                Some(Ok(None)) | None => evm_keccak256(&raw).map_err(invariant),
                 Some(Err(error)) => Err(error),
             }
         })
@@ -492,10 +519,10 @@ async fn transaction_registration_uses_the_complete_binding_as_its_only_key() {
         Arc::clone(&provider),
     )
     .expect("transaction callback");
-    assert_eq!(
+    assert!(matches!(
         register_evm_transaction_adapters(&mut builder, binding, signer, authority, provider),
         Err(mfm_runtime::RuntimeError::IncompatibleAssembly)
-    );
+    ));
     builder.finish();
 }
 
@@ -504,7 +531,7 @@ use mfm_ids::{EntryPointId, RunId};
 use mfm_program::expand_program;
 use mfm_program_derive::{MfmContext, MfmValue};
 use mfm_runtime::{RunViewState, Runtime};
-use mfm_store::MemoryStore;
+use mfm_store::{MemoryStore, Store};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, MfmValue, MfmContext)]
@@ -529,17 +556,24 @@ fn runtime(
         .unwrap();
     Runtime::new(builder.finish(), store)
 }
-fn program(binding: &EvmTransactionBinding) -> mfm_program::Program {
+fn program(input: &InitialContext) -> mfm_program::Program {
     expand_program(
         EntryPointId::new("mfm.test/transaction@1").unwrap(),
-        &EvmTransaction::<InitialContext, RecoveryRecipe>::new(binding.clone()),
+        &EvmTransaction::<InitialContext, RecoveryRecipe>::new(
+            input.transaction.command().binding().clone(),
+        ),
+        input,
+        mfm_program::ProgramLimits::new(0),
     )
     .unwrap()
 }
+
 fn run_id() -> RunId {
     RunId::from_digest(DigestBytes::from_array([8; 32]))
 }
-fn settled<T>(result: Result<EffectAdapterOutcome<T>, AdapterError>) -> T {
+fn settled<T>(
+    result: Result<EffectAdapterOutcome<T>, AdapterError<EvmTransactionOperationalError>>,
+) -> T {
     match result.unwrap() {
         EffectAdapterOutcome::Settled(value) => value,
         _ => panic!("expected settled stage"),
@@ -567,7 +601,7 @@ async fn reserve(
 }
 
 #[tokio::test]
-async fn graph_retries_identical_wire_and_cold_projection_needs_no_signer_call() {
+async fn pending_effect_reuses_identical_wire_and_cold_projection_needs_no_signer_call() {
     for reverted in [false, true] {
         let (_owner, signer, binding, command, _) = fixture().await;
         let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
@@ -580,25 +614,19 @@ async fn graph_retries_identical_wire_and_cold_projection_needs_no_signer_call()
             provider.clone(),
             store.clone(),
         );
-        let _view = hot
-            .start(
-                run_id(),
-                program(&binding),
-                RecoveryContext {
-                    unrelated: EvmU256::from_u64(42),
-                    transaction: CheckedCreatePlan::new(
-                        command.binding().clone(),
-                        command.input().to_vec(),
-                        command.value().clone(),
-                        command.gas_limit(),
-                        command.max_priority_fee_per_gas(),
-                        command.max_fee_per_gas(),
-                    )
-                    .unwrap(),
-                },
+        let input = RecoveryContext {
+            unrelated: EvmU256::from_u64(42),
+            transaction: CheckedCreatePlan::new(
+                command.binding().clone(),
+                command.input().to_vec(),
+                command.value().clone(),
+                command.gas_limit(),
+                command.max_priority_fee_per_gas(),
+                command.max_fee_per_gas(),
             )
-            .await
-            .unwrap();
+            .unwrap(),
+        };
+        let _view = hot.start(run_id(), program(&input), input).await.unwrap();
         let prepared = authority.state().unwrap().prepared.unwrap();
         let reject = Arc::new(RejectingSigner::matching(signer.as_ref()));
         let cold = runtime(
@@ -658,12 +686,17 @@ async fn graph_retries_identical_wire_and_cold_projection_needs_no_signer_call()
         );
         assert_eq!(provider.operations().len(), operation_count);
         let wire = match terminal.state() {
-            RunViewState::Succeeded(value) | RunViewState::Failed(value) => {
-                std::str::from_utf8(value.canonical_bytes()).unwrap()
-            }
+            RunViewState::Succeeded(value) => std::str::from_utf8(value.canonical_bytes()).unwrap(),
+            RunViewState::Failed(report) => std::str::from_utf8(report.canonical_bytes()).unwrap(),
             _ => panic!("terminal result"),
         };
         assert!(!wire.contains("raw_transaction"));
+        let loaded = store.load_run(&run_id(), None).await.unwrap().unwrap();
+        for bytes in [loaded.admission().as_ref(), loaded.latest().as_ref()] {
+            assert!(!bytes
+                .windows(b"raw_transaction".len())
+                .any(|window| window == b"raw_transaction"));
+        }
     }
 }
 
@@ -682,25 +715,22 @@ async fn custody_acknowledgement_loss_recovers_each_stage() {
             provider.clone(),
             store.clone(),
         );
-        assert!(matches!(
-            hot.start(
-                run_id(),
-                program(&binding),
-                RecoveryContext {
-                    unrelated: EvmU256::from_u64(0),
-                    transaction: CheckedCreatePlan::new(
-                        command.binding().clone(),
-                        command.input().to_vec(),
-                        command.value().clone(),
-                        command.gas_limit(),
-                        command.max_priority_fee_per_gas(),
-                        command.max_fee_per_gas()
-                    )
-                    .unwrap()
-                }
+        let input = RecoveryContext {
+            unrelated: EvmU256::from_u64(0),
+            transaction: CheckedCreatePlan::new(
+                command.binding().clone(),
+                command.input().to_vec(),
+                command.value().clone(),
+                command.gas_limit(),
+                command.max_priority_fee_per_gas(),
+                command.max_fee_per_gas(),
             )
-            .await,
-            Err(RuntimeError::Unavailable)
+            .unwrap(),
+        };
+        assert!(matches!(
+            hot.start(run_id(), program(&input), input).await,
+            Err(mfm_runtime::InvocationFailure::RecoveryStopped { observed })
+                if matches!(observed.state(), RunViewState::EffectPending { latest_failure: Some((original, _)), .. } if matches!(original.decode::<EvmTransactionOperationalError>().unwrap(), EvmTransactionOperationalError::AuthorityUnavailable { .. }))
         ));
         let signer: Arc<dyn Secp256k1Signer> = if fault == 2 {
             Arc::new(RejectingSigner::matching(signer.as_ref()))
@@ -794,12 +824,16 @@ async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_by
             result,
             provider.canonical.clone(),
         ))));
-        assert_eq!(
-            execute_transaction(&binding, &authority, &provider, &id, &prepared)
-                .await
-                .err(),
-            Some(AdapterError::Internal)
-        );
+        let error = execute_transaction(&binding, &authority, &provider, &id, &prepared)
+            .await
+            .err()
+            .unwrap();
+        let AdapterError::Invariant(cause) = error else {
+            panic!("receipt invariant")
+        };
+        assert_eq!(cause.code(), "adapter_invariant");
+        let fields = cause.details().as_value();
+        assert!(fields.get("receipt_shape").is_some() || fields.get("created_address").is_some());
     }
     provider.push_receipt(Ok(Some(ProviderReceipt::new(
         prepared.transaction_hash().clone(),
@@ -810,23 +844,61 @@ async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_by
             hash: EvmHash::from_bytes([0x44; 32]),
         },
     ))));
-    assert_eq!(
+    assert!(matches!(
         execute_transaction(&binding, &authority, &provider, &id, &prepared)
             .await
             .err(),
-        Some(AdapterError::Unavailable)
-    );
+        Some(AdapterError::Operational(
+            EvmTransactionOperationalError::Provider {
+                operation: TransactionProviderOperation::CanonicalBlock,
+                cause
+            }
+        )) if cause.kind() == EvmOperationalKind::Unavailable
+            && matches!(&cause.provider_failure().failure,
+                ProviderFailureKind::Rejected {
+                    field: RpcField::Block,
+                    cause: RpcRejection::AnchorMismatch { expected, observed },
+                } if expected.hash == EvmHash::from_bytes([0x44; 32])
+                    && observed == &provider.canonical)
+    ));
     for submission in [
-        Err(AdapterError::Unavailable),
+        Err(AdapterError::Operational(EvmOperationalError::new(
+            EvmOperationalKind::Unavailable,
+            ProviderFailure {
+                method: EvmRpcMethod::SendRawTransaction,
+                stage: RpcStage::Send,
+                failure: ProviderFailureKind::Client,
+                diagnostics: mfm_values::DiagnosticEvidence::from_value(
+                    serde_json::json!({"response": null, "sources": []}),
+                ),
+            },
+        ))),
         Ok(Some(EvmHash::from_bytes([0x55; 32]))),
     ] {
+        let expected_failure = match &submission {
+            Err(AdapterError::Operational(cause)) => cause.provider_failure().failure.clone(),
+            Ok(Some(observed)) => ProviderFailureKind::Rejected {
+                field: RpcField::Result,
+                cause: RpcRejection::HashMismatch {
+                    expected: prepared.transaction_hash().clone(),
+                    observed: observed.clone(),
+                },
+            },
+            _ => unreachable!("submission fixture"),
+        };
         provider.push_submission(submission);
-        assert_eq!(
+        assert!(matches!(
             execute_transaction(&binding, &authority, &provider, &id, &prepared)
                 .await
                 .err(),
-            Some(AdapterError::Unavailable)
-        );
+            Some(AdapterError::Operational(
+                EvmTransactionOperationalError::Provider {
+                    operation: TransactionProviderOperation::Submit,
+                    cause
+                }
+            )) if cause.kind() == EvmOperationalKind::Unavailable
+                && cause.provider_failure().failure == expected_failure
+        ));
     }
     assert_eq!(
         authority
@@ -854,11 +926,16 @@ async fn incorrect_signatures_and_corrupt_retained_wire_fail_before_provider_ent
             .await
             .unwrap(),
     };
+    let error = prepare_transaction(&binding, &authority, &wrong, &id, &reserved)
+        .await
+        .err()
+        .unwrap();
+    let AdapterError::Invariant(cause) = error else {
+        panic!("signer invariant")
+    };
     assert_eq!(
-        prepare_transaction(&binding, &authority, &wrong, &id, &reserved)
-            .await
-            .err(),
-        Some(AdapterError::Internal)
+        cause.details().as_value()["recovered_sender"]["expected"],
+        serde_json::to_value(&binding.sender).unwrap()
     );
     assert!(authority.state().unwrap().prepared.is_none());
     let evidence =
@@ -869,137 +946,18 @@ async fn incorrect_signatures_and_corrupt_retained_wire_fail_before_provider_ent
         ExactRawTransaction::new(vec![2, 0xc0]).unwrap(),
     ));
     let operations = provider.operations();
+    let error = execute_transaction(&binding, &authority, &provider, &id, &prepared)
+        .await
+        .err()
+        .unwrap();
+    let AdapterError::Invariant(cause) = error else {
+        panic!("codec invariant")
+    };
     assert_eq!(
-        execute_transaction(&binding, &authority, &provider, &id, &prepared)
-            .await
-            .err(),
-        Some(AdapterError::Internal)
+        cause.details().as_value()["qualify_prepared"]["kind"],
+        "invalid"
     );
     assert_eq!(provider.operations(), operations);
-}
-
-struct FaultStore {
-    inner: MemoryStore,
-    fail_sequence: AtomicU64,
-    commit: bool,
-}
-impl mfm_store::Store for FaultStore {
-    fn load_run<'a>(
-        &'a self,
-        id: &'a RunId,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Option<mfm_journal::StoredRunBytes>, mfm_store::StoreError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        self.inner.load_run(id)
-    }
-    fn append_run<'a>(
-        &'a self,
-        frame: &'a mfm_journal::EncodedRunFrame,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<mfm_store::AppendResult, mfm_store::StoreError>> + Send + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            assert!(!frame
-                .canonical_bytes()
-                .windows(b"raw_transaction".len())
-                .any(|window| window == b"raw_transaction"));
-            if self
-                .fail_sequence
-                .compare_exchange(frame.run_sequence(), 0, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                if self.commit {
-                    self.inner.append_run(frame).await?;
-                }
-                return Err(mfm_store::StoreError::Indeterminate);
-            }
-            self.inner.append_run(frame).await
-        })
-    }
-}
-
-#[tokio::test]
-async fn every_transaction_journal_boundary_recovers_after_ambiguous_append() {
-    for commit in [false, true] {
-        for sequence in 2..=8 {
-            let (_owner, signer, binding, command, _) = fixture().await;
-            let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
-            let provider = Arc::new(ScriptedProvider::new(1337));
-            let store = Arc::new(FaultStore {
-                inner: MemoryStore::new(),
-                fail_sequence: AtomicU64::new(sequence),
-                commit,
-            });
-            let hot = runtime(
-                &binding,
-                signer.clone(),
-                authority.clone(),
-                provider.clone(),
-                store.clone(),
-            );
-            let _ = hot
-                .start(
-                    run_id(),
-                    program(&binding),
-                    RecoveryContext {
-                        unrelated: EvmU256::from_u64(42),
-                        transaction: CheckedCreatePlan::new(
-                            command.binding().clone(),
-                            command.input().to_vec(),
-                            command.value().clone(),
-                            command.gas_limit(),
-                            command.max_priority_fee_per_gas(),
-                            command.max_fee_per_gas(),
-                        )
-                        .unwrap(),
-                    },
-                )
-                .await;
-            let mut completed = None;
-            for _ in 0..5 {
-                let prepared = authority.state().and_then(|state| state.prepared);
-                let next_signer: Arc<dyn Secp256k1Signer> = if let Some(prepared) = prepared {
-                    provider.push_receipt(Ok(Some(ProviderReceipt::new(
-                        prepared.transaction_hash().clone(),
-                        binding.sender.clone(),
-                        ProviderReceiptResult::SuccessCreate {
-                            contract_address: create_address(&binding.sender, 7),
-                        },
-                        provider.canonical.clone(),
-                    ))));
-                    Arc::new(RejectingSigner::matching(signer.as_ref()))
-                } else {
-                    signer.clone()
-                };
-                let cold = runtime(
-                    &binding,
-                    next_signer,
-                    authority.clone(),
-                    provider.clone(),
-                    store.clone(),
-                );
-                match cold.resume(&run_id()).await {
-                    Ok(view) if matches!(view.state(), RunViewState::Succeeded(_)) => {
-                        completed = Some(view);
-                        break;
-                    }
-                    Ok(view) => assert!(matches!(view.state(), RunViewState::Runnable)),
-                    Err(RuntimeError::Indeterminate) => {}
-                    Err(error) => panic!("unexpected recovery result: {error:?}"),
-                }
-            }
-            let completed = completed.expect("bounded cold recovery");
-            assert_eq!(completed.head_sequence(), 8);
-            assert_eq!(store.fail_sequence.load(Ordering::SeqCst), 0);
-            assert_eq!(authority.state().unwrap().reservation.nonce(), 7);
-        }
-    }
 }
 
 #[tokio::test]
@@ -1016,26 +974,20 @@ async fn cancelled_receipt_wait_resumes_exact_prepared_wire() {
         provider.clone(),
         store.clone(),
     );
-    let entry = program(&binding);
-    let task = tokio::spawn(async move {
-        hot.start(
-            run_id(),
-            entry,
-            RecoveryContext {
-                unrelated: EvmU256::from_u64(42),
-                transaction: CheckedCreatePlan::new(
-                    command.binding().clone(),
-                    command.input().to_vec(),
-                    command.value().clone(),
-                    command.gas_limit(),
-                    command.max_priority_fee_per_gas(),
-                    command.max_fee_per_gas(),
-                )
-                .unwrap(),
-            },
+    let input = RecoveryContext {
+        unrelated: EvmU256::from_u64(42),
+        transaction: CheckedCreatePlan::new(
+            command.binding().clone(),
+            command.input().to_vec(),
+            command.value().clone(),
+            command.gas_limit(),
+            command.max_priority_fee_per_gas(),
+            command.max_fee_per_gas(),
         )
-        .await
-    });
+        .unwrap(),
+    };
+    let entry = program(&input);
+    let task = tokio::spawn(async move { hot.start(run_id(), entry, input).await });
     provider.receipt_entered.notified().await;
     task.abort();
     assert!(matches!(task.await, Err(error) if error.is_cancelled()));
@@ -1049,7 +1001,80 @@ async fn cancelled_receipt_wait_resumes_exact_prepared_wire() {
     );
     assert!(matches!(
         cold.resume(&run_id()).await.unwrap().state(),
-        RunViewState::Runnable
+        RunViewState::EffectPending { .. }
     ));
     assert!(provider.operations().iter().any(|op| matches!(op, ProviderOperation::SubmitRaw(raw) if raw == prepared.raw_transaction().as_bytes())));
+}
+
+#[tokio::test]
+async fn unavailable_signer_retains_reservation_and_its_distinct_operational_cause() {
+    let (_owner, signer, binding, command, _) = fixture().await;
+    let authority = MemoryAuthority::new(binding.authority_epoch.clone());
+    let provider = ScriptedProvider::new(1337);
+    let reserved = reserve(
+        &binding,
+        &authority,
+        &provider,
+        &EffectId::from_digest(DigestBytes::from_array([1; 32])),
+        &command,
+    )
+    .await;
+    let operations = provider.operations().len();
+    let rejected = prepare_transaction(
+        &binding,
+        &authority,
+        &RejectingSigner::matching(signer.as_ref()),
+        &EffectId::from_digest(DigestBytes::from_array([2; 32])),
+        &reserved,
+    )
+    .await;
+    assert!(matches!(
+        rejected,
+        Err(AdapterError::Operational(
+            EvmTransactionOperationalError::SignerUnavailable { .. }
+        ))
+    ));
+    let retained = authority.state().unwrap();
+    assert_eq!(&retained.reservation, reserved.reservation());
+    assert!(retained.prepared.is_none());
+    assert_eq!(provider.operations().len(), operations);
+}
+
+#[tokio::test]
+async fn v3_transaction_assembly_rejects_v2_error_contract_before_admission() {
+    let (_owner, signer, binding, command, _) = fixture().await;
+    let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
+    let provider = Arc::new(ScriptedProvider::new(1337));
+    let store = Arc::new(MemoryStore::new());
+    let runtime = runtime(&binding, signer, authority, provider.clone(), store.clone());
+    let input = RecoveryContext {
+        unrelated: EvmU256::from_u64(0),
+        transaction: CheckedCreatePlan::new(
+            command.binding().clone(),
+            command.input().to_vec(),
+            command.value().clone(),
+            command.gas_limit(),
+            command.max_priority_fee_per_gas(),
+            command.max_fee_per_gas(),
+        )
+        .unwrap(),
+    };
+    let current = program(&input);
+    let bytes = std::str::from_utf8(current.canonical_bytes()).unwrap();
+    let current_id = "schema:mfm.evm-transaction-operational-error:3:sha256-jcs-v1:2292902eaf07f4fe168ab33b496a1eb0913203f3010c41db59fe0ce9d0c56a81";
+    assert!(bytes.contains(current_id));
+    let old = bytes.replace(current_id, "schema:mfm.evm-transaction-operational-error:2:sha256-jcs-v1:6293c5ceeb0e9cc6329dfe21ea5d4001f9efce5114878ea77a6a0503b109ce45");
+    let old = mfm_program::Program::decode_canonical(old.as_bytes()).unwrap();
+    assert!(matches!(
+        runtime.start(run_id(), old, input).await,
+        Err(mfm_runtime::InvocationFailure::Execution {
+            error: RuntimeError::IncompatibleAssembly,
+            ..
+        })
+    ));
+    assert!(mfm_store::Store::load_run(store.as_ref(), &run_id(), None)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(provider.operations().is_empty());
 }

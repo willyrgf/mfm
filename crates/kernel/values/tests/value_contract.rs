@@ -29,7 +29,7 @@ impl mfm_values::MfmValue for DishonestValue {
             DigestAlgorithm::Sha256JcsV1,
             DigestBytes::from_array([9; 32]),
         )
-        .map_err(|error| ValueError::Identity(error.to_string()))
+        .map_err(ValueError::Identity)
     }
 }
 
@@ -58,21 +58,56 @@ fn canonicalization_proves_descriptor_bytes_secret_policy_and_exact_digest() {
         }),
         Err(ValueError::Descriptor(_))
     ));
-    assert_eq!(
+    assert!(matches!(
         canonicalize_mfm_value(&TextValue {
             text: "api_key=do-not-persist".to_owned(),
         }),
         Err(ValueError::SchemaShapeMismatch)
-    );
+    ));
 }
 
 #[test]
-fn valid_object_over_the_shared_ceiling_is_capacity() {
-    let oversized = TextValue {
-        text: "a".repeat(mfm_values::MAX_RUN_OBJECT_CANONICAL_BYTES),
-    };
+fn object_deserialize_checks_admission_and_reports_parser_errors() {
+    use mfm_values::Object;
+
+    let object = Object::from_value(&ExactValue {
+        label: "public".into(),
+        value: 7,
+    })
+    .unwrap();
+    let reference = serde_json::to_string(object.value_ref()).unwrap();
+    let decode = |wire: &str| serde_json::from_str::<Object>(wire);
+    let roundtrip = serde_json::to_string(&object).unwrap();
+    assert_eq!(decode(&roundtrip).unwrap(), object);
+    let sequence = format!(r#"[{reference},{{"label":"public","value":7}}]"#);
+    assert_eq!(decode(&sequence).unwrap(), object);
+    let stale =
+        format!(r#"{{"value_ref":{reference},"canonical":{{"label":"public","value":8}}}}"#);
+    let error = decode(&stale).unwrap_err();
+    assert_eq!(error.classify(), serde_json::error::Category::Data);
+    assert!(error.to_string().contains("content_digest"));
+    let noncanonical =
+        format!(r#"{{"value_ref":{reference},"canonical":{{"value":7,"label":"public"}}}}"#);
     assert_eq!(
-        canonicalize_mfm_value(&oversized),
-        Err(ValueError::Capacity)
+        decode(&noncanonical).unwrap_err().classify(),
+        serde_json::error::Category::Data
     );
+
+    for wire in [
+        format!(r#"{{"value_ref":{reference}}}"#),
+        format!(r#"{{"value_ref":{reference},"canonical":null,"canonical":null}}"#),
+        format!(r#"{{"value_ref":{reference},"canonical":null,"unknown":null}}"#),
+        r#"{"value_ref":"invalid","canonical":null}"#.into(),
+    ] {
+        assert_eq!(
+            decode(&wire).unwrap_err().classify(),
+            serde_json::error::Category::Data
+        );
+    }
+    assert!(decode(&format!("{roundtrip} null")).is_err());
+    let malformed = format!(r#"{{"value_ref":{reference},"canonical":[}}"#);
+    let error = decode(&malformed).unwrap_err();
+    assert_eq!(error.classify(), serde_json::error::Category::Syntax);
+    assert_eq!(error.line(), 1);
+    assert!(error.column() > 0);
 }

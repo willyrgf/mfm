@@ -1,6 +1,6 @@
 use mfm_ids::{ContentRef, StableId};
 use mfm_program::{
-    CapabilityInjection, MatchJoin, Never, Operation, OperationExpansion,
+    CapabilityInjection, Identity, Never, NoParams, Operation, OperationExpansion,
     ProgramError, State,
 };
 
@@ -16,32 +16,16 @@ impl Operation for EscapingExpansion {
     type Output = Never;
     type Failure = Never;
 
+    fn validate_input(&self, _input: &Self::Input) -> mfm_program::Result<()> {
+        Ok(())
+    }
+
     fn expand(
         &self,
         expansion: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
         require_static_expansion(expansion);
         Ok(())
-    }
-}
-
-fn require_static_join(_join: &'static mut MatchJoin<Never, Never, Never>) {}
-
-struct EscapingJoin;
-
-impl Operation for EscapingJoin {
-    type Input = Never;
-    type Output = Never;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        expansion: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        expansion.match_join::<Never, Never>(|join| {
-            require_static_join(join);
-            Ok(())
-        })
     }
 }
 
@@ -67,6 +51,12 @@ impl CapabilityInjection<HookState> for EscapingCapability {
     type ExpandedInput = Never;
     type ExpandedOutput = Never;
     type ExpandedFailure = <HookState as mfm_program::State>::Failure;
+
+    type FailureMap = Identity<Never>;
+
+    fn failure_map_params(_setup: &Self::Setup) -> mfm_program::Result<NoParams> {
+        Ok(NoParams)
+    }
 
     fn original_binding_ref(_setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
         Err(ProgramError::InvalidContract)

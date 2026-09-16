@@ -21,5 +21,6 @@ where
     builder.register_effect::<ReserveEvmNonce<C, R>, EvmNonceReservationEffect>()?;
     builder.register_effect::<PrepareEvmTransaction<C, R>, EvmTransactionPreparationEffect>()?;
     builder.register_effect::<ExecuteEvmTransaction<C, R>, EvmTransactionEffect>()?;
-    builder.register_pure::<ProjectEvmTransactionOutcome<C, R>>()
+    builder.register_pure::<ProjectEvmTransactionOutcome<C, R>>()?;
+    builder.register_map::<mfm_program::FromNever<<ProjectEvmTransactionOutcome<C, R> as mfm_program::State>::Failure>>()
 }

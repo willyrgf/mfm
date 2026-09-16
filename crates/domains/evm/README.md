@@ -19,15 +19,15 @@ accumulates the exact command and reservation, full preparation evidence, full s
 sealed `Created` or `Called` projection. `ReservedEvmTransaction` and `PreparedEvmTransaction`
 remain live capability command descriptors. Cumulative fact constructors and decoding preserve
 command/reference, nonce-domain, settlement-nonce/hash/action, and projection agreement. Runtime
-and Journal establish the provenance of Effect identities. Only authenticated reversion reaches
-the typed failure carrying the executed context; internal mismatches return `StateExecutionError`.
+establishes the provenance of Effect identities. Only authenticated reversion reaches
+the typed failure carrying the executed context; internal mismatches retain native causes.
 Executable identity commits to stage, implementation version, explicit recipe identity, ordered
 slot identities, and outcome mode. Changing a selected same-typed source changes identity.
 
 `custody` owns the reusable asynchronous nonce-reservation and opaque signed-byte retention port.
 The live adapter supplies signer/provider IO and PostgreSQL supplies atomic persistence. Custody
-returns immutable first prepared winners; Journal alone retains transaction settlement. The reserve
-State EffectId identifies custody throughout the graph. Raw signed bytes have no serde or debug
+returns immutable first prepared winners; Runtime commits transaction settlement before interpretation. The reserve
+State EffectId identifies custody throughout the sequence. Raw signed bytes have no serde or debug
 surface. No State performs IO, and Runtime has no EVM-specific logic.
 
 Products own named context records, selected recipe connections, ABI decoding, and terminal
@@ -43,10 +43,20 @@ constructs intent during prepare and retains the exact intent and accepted evide
 `AnchoredObservationFacts`. Failure contexts also retain rejected, safe-failure, or
 integrity-blocked evidence. The live provider algorithm remains outside this crate.
 
-Six balance Read States and two Pure States continue to implement the cumulative balance contract.
-`CollectEvmBalances<K>` deterministically unrolls the native/token topology per source without
-exposing declaration counts or indices. Its work cursor derives the active source from the completed
-prefix instead of duplicating source values in every stage.
+Six balance Read States and one consolidation Pure State implement the cumulative balance contract.
+`CollectEvmBalances<K>::new(binding, request)` authors native/token State sequences
+from the complete checked request. Root validation compares the request, route and initial work state
+with the supplied input before Program construction. There is no runtime selector State or Match
+payload. Initial-anchor interpretation advances the ordinary data stage using the checked active
+source; the work cursor derives that source from the completed prefix.
+
+Planning retains semantic recovery allowances only. Actual values, complete frames and accumulated
+run sizes are checked by their owning boundaries; domain planners provide no lifecycle estimate.
+
+Operational failures retain typed causes and the complete executed State input, including caller
+continuations. Read failures retain the exact intent; pending Effect views retain the prepared
+command and EffectId. Operational causes distinguish provider, authority and signer unavailability.
+Runtime owns phase and settlement authority; States provide no separate failure contextualizer.
 
 The State definitions and public reusable `CollectEvmBalances<K>` Operation own their
 compiled-product inspection IDs and descriptions. This source metadata is not lowered into Program
@@ -75,3 +85,26 @@ Checked identity products expose named fields; commands and correlated facts ret
 
 Transaction factories accept `u128` fees. Plans and complete commands share nested `parameters`
 with `binding`, `value`, `gas_limit`, and checked `fees` (`priority` and `maximum` decimal strings).
+
+Exact EVM errors implement `ClassifyError`: duplicate-safe Read timeouts, rate limits and unavailable
+observations are Retryable; AnchorChanged is InputInvalidated; authenticated integrity blocks and
+unavailable sources are Permanent. Transaction provider/authority failures remain OutcomeUnknown,
+while signer unavailability before wire retention is Retryable. Authenticated reversion stays a
+Permanent domain settlement failure. Classification does not authorize another command.
+
+Callers own handler selection, checkpoint regions and finite allowances. `AnchorChanged` retains
+the previous and observed anchors and rejects equal anchors during qualification.
+
+Balance metadata has one checked correlation constructor. `EvmBalanceContext::new` and its native
+Runtime decoder retain constructor errors with their metadata location and reviewed cause. Empty
+and overlong correlations remain distinct; rejected text is withheld. Ordinary Serde and native
+decoding share construction, while the native route avoids Serde's custom-error conversion.
+Other checked value families still use their existing decoder boundaries pending their owner cutovers.
+
+Transaction operational error v3 requires persisted diagnostic evidence on authority and signer
+unavailability, retaining OutcomeUnknown and Retryable classifications without reading JSON.
+AuthorityError itself has no wire schema: Unavailable carries DiagnosticEvidence, Internal carries
+InvocationDiagnostic for direct forwarding. ExactRawTransaction length rejection supplies its
+bounds and observed length without signed bytes. v3 changes dependent capability/State ABIs;
+old contracts are rejected, with no compatibility decoder or history rewrite. Existing v2 runs
+must be inventoried and handled explicitly before replacing any deployed assembly.

@@ -1,6 +1,4 @@
-use mfm_canonical::raw_content_digest;
-use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId};
-use mfm_journal::EncodedRunFrame;
+use mfm_ids::{DigestAlgorithm, DigestBytes, RunId};
 use mfm_store::{AppendResult, MemoryStore, RunIndex, RunPageLimit, Store};
 
 #[path = "support/scenarios.rs"]
@@ -8,20 +6,6 @@ mod scenarios;
 
 fn run_with_byte(byte: u8) -> RunId {
     RunId::from_digest(DigestBytes::from_array([byte; 32]))
-}
-
-fn reference(name: &str, bytes: &[u8]) -> ContentRef {
-    ContentRef::new(
-        SchemaId::new(
-            name,
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([0; 32]),
-        )
-        .expect("schema"),
-        raw_content_digest(bytes),
-    )
-    .expect("reference")
 }
 
 #[tokio::test]
@@ -41,16 +25,7 @@ async fn memory_run_index_pages_only_mechanical_heads_in_run_id_order() {
     let store = MemoryStore::new();
     for byte in [5, 1, 3] {
         let run_id = run_with_byte(byte);
-        let program = b"{}";
-        let context = b"[]";
-        let frame = EncodedRunFrame::admission(
-            &run_id,
-            &reference("mfm.test.program", program),
-            program,
-            &reference("mfm.test.context", context),
-            context,
-        )
-        .expect("genesis");
+        let frame = scenarios::genesis(&run_id, b"[]");
         assert_eq!(
             store.append_run(&frame).await.expect("append"),
             AppendResult::Inserted

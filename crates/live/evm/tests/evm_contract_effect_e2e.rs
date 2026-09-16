@@ -44,16 +44,15 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 const MAX_INITCODE_BYTES: usize = 49_152;
-const MAX_FUNDING_RESPONSE_BYTES: usize = 16 * 1024;
-const PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
+// Cold progress requalifies the complete accumulating history on every invocation.
+const PROGRESS_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 const CONFIGURED_VALUE: u64 = 42;
 const DEPLOYMENT_GAS: u64 = 2_000_000;
 const CONFIGURATION_GAS: u64 = 200_000;
 const PRIORITY_FEE: u64 = 1_000_000_000;
 const MAX_FEE: u64 = 10_000_000_000;
-const FUNDING_WEI_HEX: &str = "0xde0b6b3a7640000";
+const FUNDING_WEI: u64 = 1_000_000_000_000_000_000;
 const CONFIGURE_SELECTOR: [u8; 4] = [0x1e, 0xb2, 0x5e, 0x0a];
 const VALUE_SELECTOR: [u8; 4] = [0x3f, 0xa4, 0xf2, 0x45];
 
@@ -95,7 +94,11 @@ impl EvmTransactionAuthority for ReservationAcknowledgementFault {
                 .reserve_or_compare(effect_id, command_value_ref, domain, observed_pending_nonce)
                 .await?;
             if !self.consumed.swap(true, Ordering::SeqCst) {
-                return Err(AuthorityError::Unavailable);
+                return Err(AuthorityError::Unavailable(
+                    mfm_values::DiagnosticEvidence::from_value(
+                        serde_json::json!({"operation": "test.authority", "injected": "unavailable"}),
+                    ),
+                ));
             }
             Ok(retained)
         })
@@ -201,87 +204,26 @@ fn decode_fixture_value(return_bytes: &[u8]) -> Option<EvmU256> {
     EvmU256::new(U256::from_be_bytes(word).to_string()).ok()
 }
 
-#[derive(Debug, Clone, Copy, thiserror::Error)]
-#[error("Reth development funding is unavailable")]
-struct FundingError;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FundingResponse<T> {
-    jsonrpc: String,
-    id: u64,
-    result: T,
-}
-
-async fn funding_rpc<T: serde::de::DeserializeOwned>(
-    client: &reqwest::Client,
-    url: &reqwest::Url,
-    method: &str,
-    params: serde_json::Value,
-) -> Result<T, FundingError> {
-    let response = client
-        .post(url.clone())
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
-        }))
-        .send()
-        .await
-        .map_err(|_| FundingError)?;
-    let response: FundingResponse<T> =
-        serde_json::from_slice(&funding_response_body(response).await?)
-            .map_err(|_| FundingError)?;
-    if response.jsonrpc != "2.0" || response.id != 1 {
-        return Err(FundingError);
-    }
-    Ok(response.result)
+#[derive(Debug, thiserror::Error)]
+enum FundingError {
+    #[error("Reth development funding is unavailable")]
+    Build(#[from] mfm_evm_live::EvmProviderBuildError),
+    #[error("Reth development funding is unavailable")]
+    Provider(#[from] mfm_capabilities::AdapterError<mfm_evm::EvmOperationalError>),
 }
 
 async fn fund_sender(locator: &str, sender: &EvmAddress) -> Result<(), FundingError> {
-    let url = reqwest::Url::parse(locator).map_err(|_| FundingError)?;
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .referer(false)
-        .retry(reqwest::retry::never())
-        .timeout(RPC_TIMEOUT)
-        .build()
-        .map_err(|_| FundingError)?;
-    let accounts: Vec<EvmAddress> =
-        funding_rpc(&client, &url, "eth_accounts", serde_json::json!([])).await?;
-    let source = accounts.first().ok_or(FundingError)?;
-    let _transaction_hash: EvmHash = funding_rpc(
-        &client,
-        &url,
-        "eth_sendTransaction",
-        serde_json::json!([{
-            "from": source,
-            "gas": format!("{:#x}", 21_000_u64),
-            "maxFeePerGas": format!("{MAX_FEE:#x}"),
-            "maxPriorityFeePerGas": format!("{PRIORITY_FEE:#x}"),
-            "to": sender,
-            "value": FUNDING_WEI_HEX,
-        }]),
-    )
-    .await?;
+    let locator = EvmAdapterLocator::parse(locator)?;
+    let provider = JsonRpcEvmProvider::connect(&locator)?;
+    provider
+        .fund_development_sender(
+            sender,
+            &EvmU256::from_u64(FUNDING_WEI),
+            u128::from(MAX_FEE),
+            u128::from(PRIORITY_FEE),
+        )
+        .await?;
     Ok(())
-}
-
-async fn funding_response_body(mut response: reqwest::Response) -> Result<Vec<u8>, FundingError> {
-    if !response.status().is_success()
-        || response
-            .content_length()
-            .is_some_and(|length| length > MAX_FUNDING_RESPONSE_BYTES as u64)
-    {
-        return Err(FundingError);
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| FundingError)? {
-        if body.len() + chunk.len() > MAX_FUNDING_RESPONSE_BYTES {
-            return Err(FundingError);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 // This transfer deliberately bypasses Program and custody, like another wallet application.
@@ -343,8 +285,8 @@ async fn generated_signer(owner: &KeystoreOwner) -> Arc<dyn Secp256k1Signer> {
     panic!("four entropy candidates did not contain a valid secp256k1 scalar")
 }
 
-async fn drive_to_success<F: serde::de::DeserializeOwned + std::fmt::Debug>(
-    mut step: impl AsyncFnMut() -> mfm_runtime::Result<RunView>,
+async fn drive_to_success<F: mfm_values::MfmValue + std::fmt::Debug>(
+    mut step: impl AsyncFnMut() -> Result<RunView, mfm_runtime::InvocationFailure>,
 ) -> RunView {
     let mut last_progress = String::from("no completed invocation");
     tokio::time::timeout(PROGRESS_TIMEOUT, async {
@@ -353,20 +295,29 @@ async fn drive_to_success<F: serde::de::DeserializeOwned + std::fmt::Debug>(
                 Ok(view) => match view.state() {
                     RunViewState::Succeeded(_) => return view,
                     RunViewState::Failed(value) => {
-                        let failure: F = serde_json::from_slice(value.canonical_bytes())
-                            .expect("typed fixture failure");
+                        let failure: F = root_failure(value);
                         panic!(
                             "fixture failed at frame {}: {failure:?}",
                             view.head_sequence()
                         );
                     }
-                    RunViewState::Runnable => {
-                        last_progress = format!("runnable at frame {}", view.head_sequence())
+                    RunViewState::Runnable { .. }
+                    | RunViewState::EffectPending { .. }
+                    | RunViewState::AwaitingRecovery { .. }
+                    | RunViewState::AwaitingInterpretation { .. } => {
+                        last_progress = format!("runnable at frame {}", view.head_sequence());
+                        eprintln!("{last_progress}");
                     }
                 },
-                Err(RuntimeError::Unavailable) => {
-                    last_progress = String::from("dependency unavailable")
-                }
+                Err(mfm_runtime::InvocationFailure::RecoveryStopped { .. })
+                | Err(mfm_runtime::InvocationFailure::Execution {
+                    error:
+                        RuntimeError::Store(
+                            mfm_store::StoreError::Unavailable(_)
+                            | mfm_store::StoreError::Indeterminate(_),
+                        ),
+                    ..
+                }) => last_progress = String::from("dependency unavailable"),
                 Err(error) => panic!("unexpected fixture progress error: {error:?}"),
             }
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -438,6 +389,180 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         0
     );
 
+    // Reuse the managed wallet fixture to observe actual authority failures before any reservation.
+    use mfm_program::ClassifyError;
+    use sqlx::{ConnectOptions, Connection};
+    let options = admin_raw
+        .parse::<sqlx::postgres::PgConnectOptions>()
+        .unwrap_or_else(|_| panic!("managed admin options"))
+        .disable_statement_logging();
+    let mut admin = sqlx::PgConnection::connect_with(&options)
+        .await
+        .unwrap_or_else(|_| panic!("managed admin connection"));
+    let diagnostic_run = RunId::from_digest(DigestBytes::from_array([0x59; 32]));
+    let diagnostic_input = WalletContext {
+        transaction: CheckedTargetCallPlan::new(
+            CheckedCallPlan::new(
+                binding.clone(),
+                Vec::new(),
+                EvmU256::from_u64(0),
+                nonzero(21_000),
+                PRIORITY_FEE as u128,
+                MAX_FEE as u128,
+            )
+            .unwrap(),
+            sender.clone(),
+        ),
+        label: 19,
+    };
+    let diagnostic_program = expand_program(
+        EntryPointId::new("mfm.test.evm-effect/authority-diagnostic@1").unwrap(),
+        &WalletTransaction::new(binding.clone()),
+        &diagnostic_input,
+        mfm_program::ProgramLimits::new(0),
+    )
+    .unwrap();
+    let hot = runtime(
+        &runtime_locator,
+        &rpc_locator,
+        &binding,
+        signer.clone(),
+        Arc::new(AtomicBool::new(true)),
+    )
+    .await;
+    sqlx::query("REVOKE SELECT ON mfm_evm_tx.nonce_reservations FROM mfm_runtime")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let failure = hot
+        .start(diagnostic_run.clone(), diagnostic_program, diagnostic_input)
+        .await;
+    sqlx::query("GRANT SELECT ON mfm_evm_tx.nonce_reservations TO mfm_runtime")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let Err(failure) = failure else {
+        panic!("durable authority failure")
+    };
+    let mfm_runtime::InvocationFailure::RecoveryStopped { observed } = &failure else {
+        panic!("durable authority failure")
+    };
+    let RunViewState::EffectPending {
+        latest_failure: Some((original, _)),
+        ..
+    } = observed.state()
+    else {
+        panic!("retained authority original")
+    };
+    let original = original
+        .decode::<mfm_evm::EvmTransactionOperationalError>()
+        .unwrap();
+    assert_eq!(
+        original.classify(),
+        mfm_program::Classification::OutcomeUnknown
+    );
+    let mfm_evm::EvmTransactionOperationalError::AuthorityUnavailable { cause } = &original else {
+        panic!("authority owner")
+    };
+    assert_eq!(cause.as_value()["operation"], "authority.load");
+    assert_eq!(cause.as_value()["stage"], "load_state");
+    assert_eq!(cause.as_value()["sources"][0]["kind"], "database");
+    assert_eq!(cause.as_value()["sources"][1]["sqlstate"], "42501");
+    let hot_wire =
+        serde_json::to_value(mfm_app::SerializableRunView::new(observed).unwrap()).unwrap();
+    assert_eq!(
+        hot_wire["state"]["latest_failure"]["error"]["value"],
+        serde_json::to_value(&original).unwrap()
+    );
+    let envelope = serde_json::to_value(
+        mfm_app::SerializableClientError::for_run(
+            &mfm_app::RunRequestError::Invocation(failure),
+            "recovery stopped",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(envelope["code"], "recovery_stopped");
+    assert_eq!(envelope["invocation"]["observed"], hot_wire);
+    assert_eq!(
+        envelope["invocation"]["error"],
+        hot_wire["state"]["latest_failure"]["error"]
+    );
+    drop(hot);
+    let cold = runtime(
+        &runtime_locator,
+        &rpc_locator,
+        &binding,
+        signer.clone(),
+        Arc::new(AtomicBool::new(true)),
+    )
+    .await;
+    let cold_view = cold.read(&diagnostic_run).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(mfm_app::SerializableRunView::new(&cold_view).unwrap()).unwrap(),
+        hot_wire
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM mfm_evm_tx.nonce_reservations")
+        .fetch_one(&mut admin)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "SQL failure must precede nonce reservation");
+
+    let saved_epoch = binding.authority_epoch.as_bytes();
+    let mut other_epoch = saved_epoch.to_vec();
+    other_epoch[0] ^= 1;
+    sqlx::query("UPDATE mfm_evm_tx.mfm_evm_tx_schema SET authority_epoch = $1")
+        .bind(other_epoch.as_slice())
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let internal = cold.resume(&diagnostic_run).await;
+    sqlx::query("UPDATE mfm_evm_tx.mfm_evm_tx_schema SET authority_epoch = $1")
+        .bind(saved_epoch)
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let Err(failure) = internal else {
+        panic!("retained epoch mismatch")
+    };
+    let mfm_runtime::InvocationFailure::Execution {
+        error: RuntimeError::Native { cause, .. },
+        last_observed: Some(previous),
+        ..
+    } = &failure
+    else {
+        panic!("internal invocation with previous observation")
+    };
+    assert_eq!(cause.code(), "authority_internal");
+    assert_eq!(cause.operation(), "authority.load");
+    assert_eq!(
+        cause.details().as_value()["check"],
+        "schema or epoch binding"
+    );
+    assert_eq!(previous.head_digest(), cold_view.head_digest());
+    assert_eq!(previous.head_sequence(), cold_view.head_sequence());
+    let wire = serde_json::to_value(
+        mfm_app::SerializableClientError::for_run(
+            &mfm_app::RunRequestError::Invocation(failure),
+            "authority invocation",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        wire["invocation"]["cause"]["native"]["cause"]["code"],
+        "authority_internal"
+    );
+    let after = cold.read(&diagnostic_run).await.unwrap();
+    assert_eq!(after.head_sequence(), cold_view.head_sequence());
+    assert_eq!(after.head_digest(), cold_view.head_digest());
+    assert_eq!(
+        serde_json::to_value(mfm_app::SerializableRunView::new(&after).unwrap()).unwrap(),
+        hot_wire
+    );
+    drop(cold);
+    drop(admin);
+
     let deployment = CheckedCreatePlan::new(
         binding.clone(),
         initcode,
@@ -470,6 +595,8 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         &EffectFixtureOperation {
             binding: binding.clone(),
         },
+        &input,
+        mfm_program::ProgramLimits::new(1),
     )
     .expect("fixture Program");
     let run_id = RunId::from_digest(DigestBytes::from_array([0x5a; 32]));
@@ -488,7 +615,10 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     )
     .await
     .expect("initial reservation deadline");
-    assert!(matches!(initial, Err(RuntimeError::Unavailable)));
+    assert!(matches!(
+        initial,
+        Err(mfm_runtime::InvocationFailure::RecoveryStopped { .. })
+    ));
     assert!(consumed.load(Ordering::SeqCst));
     assert_eq!(
         setup_provider
@@ -590,25 +720,38 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         .unwrap(),
         sender.clone(),
     );
-    let cold_runtime = runtime(&runtime_locator, &rpc_locator, &binding, signer, consumed).await;
+    let cold_runtime = runtime(
+        &runtime_locator,
+        &rpc_locator,
+        &binding,
+        signer.clone(),
+        consumed,
+    )
+    .await;
     let fresh_run = RunId::from_digest(DigestBytes::from_array([0x5b; 32]));
+    let fresh_input = WalletContext {
+        transaction: fresh_plan.clone(),
+        label: 18,
+    };
     let fresh_program = expand_program(
         EntryPointId::new("mfm.test.evm-effect/wallet-call@1").unwrap(),
         &WalletTransaction::new(binding.clone()),
+        &fresh_input,
+        mfm_program::ProgramLimits::new(1),
     )
     .unwrap();
     // Resume first so Unavailable from admission is retried without assuming genesis committed.
     let wallet_terminal =
         drive_to_success::<WalletFailure>(async || match cold_runtime.resume(&fresh_run).await {
-            Err(RuntimeError::Absent) => {
+            Err(mfm_runtime::InvocationFailure::Execution {
+                error: RuntimeError::Absent,
+                ..
+            }) => {
                 cold_runtime
                     .start(
                         fresh_run.clone(),
                         fresh_program.clone(),
-                        WalletContext {
-                            transaction: fresh_plan.clone(),
-                            label: 18,
-                        },
+                        fresh_input.clone(),
                     )
                     .await
             }
@@ -645,9 +788,58 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     );
 
     owner.shutdown().await.expect("keystore shutdown");
+    let signing_run = RunId::from_digest(DigestBytes::from_array([0x5c; 32]));
+    let hot = runtime(
+        &runtime_locator,
+        &rpc_locator,
+        &binding,
+        signer.clone(),
+        Arc::new(AtomicBool::new(true)),
+    )
+    .await;
+    let failed = hot
+        .start(signing_run.clone(), fresh_program, fresh_input)
+        .await;
+    let Err(mfm_runtime::InvocationFailure::RecoveryStopped { observed }) = failed else {
+        panic!("durable closed signer failure")
+    };
+    let RunViewState::EffectPending {
+        latest_failure: Some((original, _)),
+        ..
+    } = observed.state()
+    else {
+        panic!("retained signer original")
+    };
+    let original = original
+        .decode::<mfm_evm::EvmTransactionOperationalError>()
+        .unwrap();
+    assert_eq!(original.classify(), mfm_program::Classification::Retryable);
+    let mfm_evm::EvmTransactionOperationalError::SignerUnavailable { cause } = &original else {
+        panic!("signer owner")
+    };
+    assert_eq!(
+        cause.as_value(),
+        &serde_json::json!({"operation": "sign", "stage": "request_send", "kind": "channel_closed", "message": "channel closed"})
+    );
+    let hot_wire =
+        serde_json::to_value(mfm_app::SerializableRunView::new(&observed).unwrap()).unwrap();
+    assert_eq!(
+        hot_wire["state"]["latest_failure"]["error"]["value"],
+        serde_json::to_value(&original).unwrap()
+    );
+    drop(hot);
+    let cold = runtime(
+        &runtime_locator,
+        &rpc_locator,
+        &binding,
+        signer,
+        Arc::new(AtomicBool::new(true)),
+    )
+    .await;
+    let cold_view = cold.read(&signing_run).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(mfm_app::SerializableRunView::new(&cold_view).unwrap()).unwrap(),
+        hot_wire
+    );
+    assert_eq!(setup_provider.pending_nonce(&sender).await.unwrap(), 4);
 }
-
-#[path = "support/accumulating_contract.rs"]
-mod accumulating_contract;
-#[path = "support/context_capacity.rs"]
-mod context_capacity;

@@ -1,5 +1,6 @@
 use std::num::NonZeroU64;
 
+use crate::diagnostic::sqlx_fields;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_evm::custody::{
     AuthorityError, AuthorityFuture, EvmTransactionAuthority, ExactRawTransaction,
@@ -7,6 +8,8 @@ use mfm_evm::custody::{
 };
 use mfm_evm::{EvmAddress, EvmAuthorityEpoch, EvmChainInstance, EvmHash};
 use mfm_ids::{ContentDigest, ContentRef, EffectId, SchemaId};
+use mfm_values::{DiagnosticEvidence, InvocationDiagnostic};
+use serde_json::json;
 use sqlx::PgConnection;
 
 use crate::{GateError, PostgresEvmTransactionAuthority};
@@ -25,8 +28,13 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
         effect_id: &'a EffectId,
     ) -> AuthorityFuture<'a, Option<LoadedTransaction>> {
         Box::pin(async move {
-            let mut connection = self.pool.acquire().await.map_err(unavailable)?;
-            load_state(&mut connection, effect_id, &self.authority_epoch).await
+            let operation = "authority.load";
+            let mut connection = self.pool.acquire().await.map_err(|error| {
+                AuthorityError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                    operation, "acquire", &error,
+                )))
+            })?;
+            load_state(operation, &mut connection, effect_id, &self.authority_epoch).await
         })
     }
 
@@ -38,11 +46,17 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
         observed_pending_nonce: u64,
     ) -> AuthorityFuture<'a, Reservation> {
         Box::pin(async move {
+            let operation = "authority.reserve_or_compare";
             if domain.authority_epoch != self.authority_epoch {
-                return Err(AuthorityError::Internal);
+                return Err(AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                    "authority_internal",
+                    operation,
+                    &json!({"check": "epoch binding"}),
+                    None,
+                )));
             }
-            let mut transaction = begin_authority(&self.pool).await?;
-            let lock_key = nonce_domain_lock_key(domain)?;
+            let mut transaction = begin_authority(operation, &self.pool).await?;
+            let lock_key = nonce_domain_lock_key(domain);
             sqlx::Executor::execute(
                 &mut *transaction,
                 sqlx::query!(
@@ -51,29 +65,51 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
                 ),
             )
             .await
-            .map_err(unavailable)?;
+            .map_err(|error| {
+                AuthorityError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                    operation,
+                    "advisory_lock",
+                    &error,
+                )))
+            })?;
 
-            if let Some(state) =
-                load_state(&mut transaction, effect_id, &self.authority_epoch).await?
+            if let Some(state) = load_state(
+                operation,
+                &mut transaction,
+                effect_id,
+                &self.authority_epoch,
+            )
+            .await?
             {
                 let reservation = &state.reservation;
                 ensure_reservation(reservation, effect_id, command_value_ref, domain)?;
                 let retained = reservation.clone();
-                commit_authority(self, transaction).await?;
+                commit_authority(operation, self, transaction).await?;
                 return Ok(retained);
             }
 
             // The domain lock precedes this statement's READ COMMITTED snapshot.
-            let local_next = match latest_reserved_nonce(&mut transaction, domain).await? {
-                Some(nonce) => nonce.checked_add(1).ok_or(AuthorityError::Internal)?,
-                None => 0,
-            };
+            let local_next =
+                match latest_reserved_nonce(operation, &mut transaction, domain).await? {
+                    Some(nonce) => nonce.checked_add(1).ok_or_else(|| {
+                        AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                            "authority_internal",
+                            operation,
+                            &json!({"check": "nonce overflow"}),
+                            None,
+                        ))
+                    })?,
+                    None => 0,
+                };
             let nonce = observed_pending_nonce.max(local_next);
             if nonce == u64::MAX {
-                return Err(AuthorityError::Unavailable);
+                return Err(AuthorityError::Unavailable(DiagnosticEvidence::from_value(
+                    json!({"operation": operation, "stage": "reservation", "check": "nonce exhaustion"}),
+                )));
             }
 
             let inserted = insert_reservation(
+                operation,
                 &mut transaction,
                 effect_id,
                 command_value_ref,
@@ -88,16 +124,35 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
                     domain.clone(),
                     nonce,
                 )
-                .map_err(internal)?
+                .map_err(|error| {
+                    AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                        "authority_internal",
+                        operation,
+                        &json!({"stage": "reservation", "source": error}),
+                        None,
+                    ))
+                })?
             } else {
-                let state = load_state(&mut transaction, effect_id, &self.authority_epoch)
-                    .await?
-                    .ok_or(AuthorityError::Internal)?;
+                let state = load_state(
+                    operation,
+                    &mut transaction,
+                    effect_id,
+                    &self.authority_epoch,
+                )
+                .await?
+                .ok_or_else(|| {
+                    AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                        "authority_internal",
+                        operation,
+                        &json!({"check": "missing reservation after conflict"}),
+                        None,
+                    ))
+                })?;
                 let reservation = &state.reservation;
                 ensure_reservation(reservation, effect_id, command_value_ref, domain)?;
                 reservation.clone()
             };
-            commit_authority(self, transaction).await?;
+            commit_authority(operation, self, transaction).await?;
             Ok(retained)
         })
     }
@@ -108,13 +163,31 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
         candidate: &'a PreparedRecord,
     ) -> AuthorityFuture<'a, PreparedRecord> {
         Box::pin(async move {
+            let operation = "authority.retain_prepared";
             let effect_id = reservation.effect_id();
-            let mut transaction = begin_authority(&self.pool).await?;
-            let state = load_state(&mut transaction, effect_id, &self.authority_epoch)
-                .await?
-                .ok_or(AuthorityError::Internal)?;
+            let mut transaction = begin_authority(operation, &self.pool).await?;
+            let state = load_state(
+                operation,
+                &mut transaction,
+                effect_id,
+                &self.authority_epoch,
+            )
+            .await?
+            .ok_or_else(|| {
+                AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                    "authority_internal",
+                    operation,
+                    &json!({"check": "missing reservation"}),
+                    None,
+                ))
+            })?;
             if &state.reservation != reservation {
-                return Err(AuthorityError::Internal);
+                return Err(AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                    "authority_internal",
+                    operation,
+                    &json!({"check": "reservation binding"}),
+                    None,
+                )));
             }
             let retained = if let Some(prepared) = state.prepared {
                 prepared
@@ -130,37 +203,75 @@ impl EvmTransactionAuthority for PostgresEvmTransactionAuthority {
                 )
                 .execute(&mut *transaction)
                 .await
-                .map_err(unavailable)?;
+                .map_err(|error| {
+                    AuthorityError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                        operation,
+                        "retain_prepared",
+                        &error,
+                    )))
+                })?;
                 // ON CONFLICT may wait for a concurrent winner. This new statement sees it.
-                load_state(&mut transaction, effect_id, &self.authority_epoch)
-                    .await?
-                    .ok_or(AuthorityError::Internal)?
-                    .prepared
-                    .ok_or(AuthorityError::Internal)?
+                load_state(
+                    operation,
+                    &mut transaction,
+                    effect_id,
+                    &self.authority_epoch,
+                )
+                .await?
+                .ok_or_else(|| {
+                    AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                        "authority_internal",
+                        operation,
+                        &json!({"check": "missing reservation after prepared conflict"}),
+                        None,
+                    ))
+                })?
+                .prepared
+                .ok_or_else(|| {
+                    AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                        "authority_internal",
+                        operation,
+                        &json!({"check": "missing prepared after conflict"}),
+                        None,
+                    ))
+                })?
             };
-            commit_authority(self, transaction).await?;
+            commit_authority(operation, self, transaction).await?;
             Ok(retained)
         })
     }
 }
 
 async fn begin_authority(
+    operation: &'static str,
     pool: &sqlx::PgPool,
 ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, AuthorityError> {
-    let mut transaction = pool.begin().await.map_err(unavailable)?;
+    let mut transaction = pool.begin().await.map_err(|error| {
+        AuthorityError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+            operation, "begin", &error,
+        )))
+    })?;
     sqlx::query!("SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE")
         .execute(&mut *transaction)
         .await
-        .map_err(unavailable)?;
+        .map_err(|error| {
+            AuthorityError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                operation,
+                "isolation",
+                &error,
+            )))
+        })?;
     sqlx::query!("SET LOCAL synchronous_commit = on")
         .execute(&mut *transaction)
         .await
-        .map_err(unavailable)?;
+        .map_err(|error| {
+            AuthorityError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                operation,
+                "synchronous_commit",
+                &error,
+            )))
+        })?;
     Ok(transaction)
-}
-
-fn unavailable(_: impl Sized) -> AuthorityError {
-    AuthorityError::Unavailable
 }
 
 #[cfg(test)]
@@ -184,6 +295,7 @@ impl PostgresEvmTransactionAuthority {
 }
 
 async fn commit_authority(
+    operation: &'static str,
     backend: &PostgresEvmTransactionAuthority,
     transaction: sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), AuthorityError> {
@@ -193,19 +305,35 @@ async fn commit_authority(
 
         match backend.authority_commit_fault.swap(0, Ordering::SeqCst) {
             1 => {
-                transaction.rollback().await.map_err(unavailable)?;
-                return Err(AuthorityError::Unavailable);
+                transaction.rollback().await.map_err(|error| {
+                    AuthorityError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                        operation, "rollback", &error,
+                    )))
+                })?;
+                return Err(AuthorityError::Unavailable(DiagnosticEvidence::from_value(
+                    json!({"operation": operation, "stage": "commit", "injected": "unknown_rolled_back"}),
+                )));
             }
             2 => {
-                transaction.commit().await.map_err(unavailable)?;
-                return Err(AuthorityError::Unavailable);
+                transaction.commit().await.map_err(|error| {
+                    AuthorityError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+                        operation, "commit", &error,
+                    )))
+                })?;
+                return Err(AuthorityError::Unavailable(DiagnosticEvidence::from_value(
+                    json!({"operation": operation, "stage": "commit", "injected": "unknown_committed"}),
+                )));
             }
             _ => {}
         }
     }
     #[cfg(not(test))]
     let _ = backend;
-    transaction.commit().await.map_err(unavailable)
+    transaction.commit().await.map_err(|error| {
+        AuthorityError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+            operation, "commit", &error,
+        )))
+    })
 }
 
 fn ensure_reservation(
@@ -218,10 +346,18 @@ fn ensure_reservation(
         && reservation.command_value_ref() == command_value_ref
         && reservation.domain() == domain)
         .then_some(())
-        .ok_or(AuthorityError::Internal)
+        .ok_or_else(|| {
+            AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                "authority_internal",
+                "ensure_reservation",
+                &json!({"check": "reservation binding"}),
+                None,
+            ))
+        })
 }
 
 async fn load_state(
+    operation: &'static str,
     connection: &mut PgConnection,
     effect_id: &EffectId,
     captured_epoch: &EvmAuthorityEpoch,
@@ -241,11 +377,28 @@ async fn load_state(
         )
     .fetch_all(connection)
     .await
-    .map_err(unavailable)?;
-    let [row]: [_; 1] = rows.try_into().map_err(internal)?;
-    let admitted_epoch = epoch_from_bytes(&row.admitted_epoch)?;
+    .map_err(|error| AuthorityError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(operation, "load_state", &error))))?;
+    let [row]: [_; 1] = rows.try_into().map_err(|rows: Vec<_>| {
+        AuthorityError::Internal(InvocationDiagnostic::from_fields(
+            "authority_internal",
+            operation,
+            &json!({
+                "stage": "load_state",
+                "check": "marker count",
+                "expected": 1,
+                "observed": rows.len()
+            }),
+            None,
+        ))
+    })?;
+    let admitted_epoch = epoch_from_bytes("admitted_epoch", &row.admitted_epoch)?;
     if row.schema_contract != EVM_TX_SCHEMA_CONTRACT || &admitted_epoch != captured_epoch {
-        return Err(AuthorityError::Internal);
+        return Err(AuthorityError::Internal(InvocationDiagnostic::from_fields(
+            "authority_internal",
+            operation,
+            &json!({"check": "schema or epoch binding"}),
+            None,
+        )));
     }
     let reservation_absent = row.effect_id.is_none()
         && row.command_schema_id.is_none()
@@ -259,7 +412,12 @@ async fn load_state(
         return if row.transaction_hash.is_none() && row.raw_transaction.is_none() {
             Ok(None)
         } else {
-            Err(AuthorityError::Internal)
+            Err(AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                "authority_internal",
+                operation,
+                &json!({"check": "prepared without reservation"}),
+                None,
+            )))
         };
     }
 
@@ -283,18 +441,49 @@ async fn load_state(
         row.reserved_nonce,
     )
     else {
-        return Err(AuthorityError::Internal);
+        return Err(AuthorityError::Internal(InvocationDiagnostic::from_fields(
+            "authority_internal",
+            operation,
+            &json!({"check": "partial reservation"}),
+            None,
+        )));
     };
 
-    let retained_effect = EffectId::parse(retained_effect).map_err(internal)?;
+    let retained_effect = EffectId::parse(retained_effect).map_err(|error| {
+        AuthorityError::Internal(InvocationDiagnostic::from_fields(
+            "authority_internal",
+            operation,
+            &json!({
+                "stage": "load_state",
+                "field": "effect_id",
+                "source": {
+                    "kind": "identity_error",
+                    "message": error.to_string()
+                }
+            }),
+            None,
+        ))
+    })?;
     let command_value_ref = parse_content_ref(command_schema, command_digest)?;
-    let epoch = epoch_from_bytes(&reservation_epoch)?;
+    let epoch = epoch_from_bytes("reservation_epoch", &reservation_epoch)?;
     if epoch != admitted_epoch {
-        return Err(AuthorityError::Internal);
+        return Err(AuthorityError::Internal(InvocationDiagnostic::from_fields(
+            "authority_internal",
+            operation,
+            &json!({"check": "reservation epoch"}),
+            None,
+        )));
     }
-    let chain_id = NonZeroU64::new(parse_u64(&chain_id)?).ok_or(AuthorityError::Internal)?;
-    let genesis = evm_hash_from_bytes(&genesis_hash)?;
-    let sender = evm_address_from_bytes(&sender)?;
+    let chain_id = NonZeroU64::new(parse_u64(&chain_id)?).ok_or_else(|| {
+        AuthorityError::Internal(InvocationDiagnostic::from_fields(
+            "authority_internal",
+            operation,
+            &json!({"check": "zero chain ID"}),
+            None,
+        ))
+    })?;
+    let genesis = evm_hash_from_bytes("genesis_hash", &genesis_hash)?;
+    let sender = evm_address_from_bytes("sender", &sender)?;
     let nonce = parse_u64(&reserved_nonce)?;
     let domain = NonceDomain {
         authority_epoch: epoch,
@@ -305,14 +494,28 @@ async fn load_state(
         sender,
     };
     let reservation =
-        Reservation::new(retained_effect, command_value_ref, domain, nonce).map_err(internal)?;
+        Reservation::new(retained_effect, command_value_ref, domain, nonce).map_err(|error| {
+            AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                "authority_internal",
+                operation,
+                &json!({"stage": "load_state", "check": "reservation", "source": error}),
+                None,
+            ))
+        })?;
     let prepared = match (row.transaction_hash, row.raw_transaction) {
         (None, None) => None,
         (Some(hash), Some(raw)) => Some(PreparedRecord::new(
-            evm_hash_from_bytes(&hash)?,
+            evm_hash_from_bytes("transaction_hash", &hash)?,
             ExactRawTransaction::new(raw)?,
         )),
-        _ => return Err(AuthorityError::Internal),
+        _ => {
+            return Err(AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                "authority_internal",
+                operation,
+                &json!({"check": "partial prepared record"}),
+                None,
+            )))
+        }
     };
     Ok(Some(LoadedTransaction {
         reservation,
@@ -321,6 +524,7 @@ async fn load_state(
 }
 
 async fn latest_reserved_nonce(
+    operation: &'static str,
     connection: &mut PgConnection,
     key: &NonceDomain,
 ) -> Result<Option<u64>, AuthorityError> {
@@ -338,11 +542,18 @@ async fn latest_reserved_nonce(
     )
     .fetch_optional(connection)
     .await
-    .map_err(unavailable)?;
+    .map_err(|error| {
+        AuthorityError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+            operation,
+            "latest_reserved_nonce",
+            &error,
+        )))
+    })?;
     retained.map(|value| parse_u64(&value)).transpose()
 }
 
 async fn insert_reservation(
+    operation: &'static str,
     connection: &mut PgConnection,
     effect_id: &EffectId,
     command_value_ref: &ContentRef,
@@ -368,41 +579,146 @@ async fn insert_reservation(
     )
     .execute(connection)
     .await
-    .map_err(unavailable)?;
+    .map_err(|error| {
+        AuthorityError::Unavailable(DiagnosticEvidence::from_value(sqlx_fields(
+            operation,
+            "insert_reservation",
+            &error,
+        )))
+    })?;
     Ok(result.rows_affected() == 1)
 }
 
 fn parse_content_ref(schema: String, digest: String) -> Result<ContentRef, AuthorityError> {
     ContentRef::new(
-        SchemaId::parse(schema).map_err(internal)?,
-        ContentDigest::parse(digest).map_err(internal)?,
+        SchemaId::parse(schema).map_err(|error| {
+            AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                "authority_internal",
+                "parse_content_ref",
+                &json!({
+                    "field": "schema_id",
+                    "source": {
+                        "kind": "identity_error",
+                        "message": error.to_string()
+                    }
+                }),
+                None,
+            ))
+        })?,
+        ContentDigest::parse(digest).map_err(|error| {
+            AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                "authority_internal",
+                "parse_content_ref",
+                &json!({
+                    "field": "content_digest",
+                    "source": {
+                        "kind": "identity_error",
+                        "message": error.to_string()
+                    }
+                }),
+                None,
+            ))
+        })?,
     )
-    .map_err(internal)
+    .map_err(|error| {
+        AuthorityError::Internal(InvocationDiagnostic::from_fields(
+            "authority_internal",
+            "parse_content_ref",
+            &json!({
+                "check": "content_ref",
+                "source": {
+                    "kind": "identity_error",
+                    "message": error.to_string()
+                }
+            }),
+            None,
+        ))
+    })
 }
 
 fn parse_u64(value: &str) -> Result<u64, AuthorityError> {
     if value.is_empty() || value.len() > 20 || value.starts_with('0') && value != "0" {
-        return Err(AuthorityError::Internal);
+        return Err(AuthorityError::Internal(InvocationDiagnostic::from_fields(
+            "authority_internal",
+            "parse_u64",
+            &json!({"check": "canonical decimal syntax"}),
+            None,
+        )));
     }
-    value.parse().map_err(internal)
+    value.parse::<u64>().map_err(|error| {
+        AuthorityError::Internal(InvocationDiagnostic::from_fields(
+            "authority_internal",
+            "parse_u64",
+            &json!({"kind": "parse_int_error", "message": error.to_string()}),
+            None,
+        ))
+    })
 }
 
-fn epoch_from_bytes(bytes: &[u8]) -> Result<EvmAuthorityEpoch, AuthorityError> {
-    let exact: [u8; 32] = bytes.try_into().map_err(internal)?;
+fn epoch_from_bytes(
+    field: &'static str,
+    bytes: &[u8],
+) -> Result<EvmAuthorityEpoch, AuthorityError> {
+    let exact: [u8; 32] = bytes
+        .try_into()
+        .map_err(|error: std::array::TryFromSliceError| {
+            AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                "authority_internal",
+                "epoch_from_bytes",
+                &json!({
+                    "check": "byte length",
+                    "field": field,
+                    "expected": 32,
+                    "observed": bytes.len(),
+                    "message": error.to_string()
+                }),
+                None,
+            ))
+        })?;
     Ok(EvmAuthorityEpoch::new(exact))
 }
 
-fn evm_hash_from_bytes(bytes: &[u8]) -> Result<EvmHash, AuthorityError> {
-    let exact: [u8; 32] = bytes.try_into().map_err(internal)?;
+fn evm_hash_from_bytes(field: &'static str, bytes: &[u8]) -> Result<EvmHash, AuthorityError> {
+    let exact: [u8; 32] = bytes
+        .try_into()
+        .map_err(|error: std::array::TryFromSliceError| {
+            AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                "authority_internal",
+                "evm_hash_from_bytes",
+                &json!({
+                    "check": "byte length",
+                    "field": field,
+                    "expected": 32,
+                    "observed": bytes.len(),
+                    "message": error.to_string()
+                }),
+                None,
+            ))
+        })?;
     Ok(EvmHash::from_bytes(exact))
 }
 
-fn evm_address_from_bytes(bytes: &[u8]) -> Result<EvmAddress, AuthorityError> {
-    let exact: [u8; 20] = bytes.try_into().map_err(internal)?;
+fn evm_address_from_bytes(field: &'static str, bytes: &[u8]) -> Result<EvmAddress, AuthorityError> {
+    let exact: [u8; 20] = bytes
+        .try_into()
+        .map_err(|error: std::array::TryFromSliceError| {
+            AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                "authority_internal",
+                "evm_address_from_bytes",
+                &json!({
+                    "check": "byte length",
+                    "field": field,
+                    "expected": 20,
+                    "observed": bytes.len(),
+                    "message": error.to_string()
+                }),
+                None,
+            ))
+        })?;
     Ok(EvmAddress::from_bytes(exact))
 }
 
-fn nonce_domain_lock_key(key: &NonceDomain) -> Result<i64, AuthorityError> {
+fn nonce_domain_lock_key(key: &NonceDomain) -> i64 {
     let mut preimage = Vec::with_capacity(119);
     preimage.extend_from_slice(b"mfm.evm.nonce-domain-lock.v1\0");
     preimage.extend_from_slice(key.authority_epoch.as_bytes());
@@ -410,12 +726,8 @@ fn nonce_domain_lock_key(key: &NonceDomain) -> Result<i64, AuthorityError> {
     preimage.extend_from_slice(key.chain_instance.expected_genesis_hash.as_bytes());
     preimage.extend_from_slice(key.sender.as_bytes());
     let digest = sha256_digest_bytes(&preimage);
-    let first: [u8; 8] = digest.as_bytes()[..8].try_into().map_err(internal)?;
-    Ok(i64::from_be_bytes(first))
-}
-
-fn internal(_: impl Sized) -> AuthorityError {
-    AuthorityError::Internal
+    let [a, b, c, d, e, f, g, h, ..] = *digest.as_bytes();
+    i64::from_be_bytes([a, b, c, d, e, f, g, h])
 }
 
 pub(crate) async fn load_evm_tx_epoch(
@@ -442,5 +754,67 @@ pub(crate) async fn load_evm_tx_epoch(
     if markers.len() != 1 || markers[0].0 != EVM_TX_SCHEMA_CONTRACT {
         return Err(GateError::Incompatible);
     }
-    epoch_from_bytes(&markers[0].1).map_err(|_| GateError::Incompatible)
+    epoch_from_bytes("authority_epoch", &markers[0].1).map_err(|_| GateError::Incompatible)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_authority_bytes_retain_the_failing_field() {
+        for (field, expected, error) in [
+            (
+                "admitted_epoch",
+                32,
+                epoch_from_bytes("admitted_epoch", &[1]).unwrap_err(),
+            ),
+            (
+                "reservation_epoch",
+                32,
+                epoch_from_bytes("reservation_epoch", &[1]).unwrap_err(),
+            ),
+            (
+                "genesis_hash",
+                32,
+                evm_hash_from_bytes("genesis_hash", &[1]).unwrap_err(),
+            ),
+            (
+                "transaction_hash",
+                32,
+                evm_hash_from_bytes("transaction_hash", &[1]).unwrap_err(),
+            ),
+            (
+                "sender",
+                20,
+                evm_address_from_bytes("sender", &[1]).unwrap_err(),
+            ),
+        ] {
+            let AuthorityError::Internal(cause) = error else {
+                panic!("malformed retained bytes remain internal")
+            };
+            let details = cause.details().as_value();
+            assert_eq!(cause.code(), "authority_internal");
+            assert_eq!(details["field"], field);
+            assert_eq!(details["check"], "byte length");
+            assert_eq!(details["expected"], expected);
+            assert_eq!(details["observed"], 1);
+            assert!(details["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()));
+        }
+    }
+
+    #[test]
+    fn nonce_domain_lock_key_preserves_its_signed_big_endian_prefix() {
+        let domain = NonceDomain {
+            authority_epoch: EvmAuthorityEpoch::new([1; 32]),
+            chain_instance: EvmChainInstance {
+                chain_id: NonZeroU64::new(1337).unwrap(),
+                expected_genesis_hash: EvmHash::from_bytes([2; 32]),
+            },
+            sender: EvmAddress::from_bytes([3; 20]),
+        };
+        assert_eq!(nonce_domain_lock_key(&domain), 905_699_031_090_943_332);
+    }
 }

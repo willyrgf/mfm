@@ -2169,8 +2169,13 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "mfm-app",
+ "mfm-canonical",
  "mfm-ids",
+ "mfm-journal",
+ "mfm-program",
  "mfm-runtime",
+ "mfm-store",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
@@ -2183,6 +2188,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "mfm-canonical",
+ "mfm-capabilities",
  "mfm-config",
  "mfm-evm",
  "mfm-evm-live",
@@ -2193,6 +2199,7 @@ dependencies = [
  "mfm-runtime",
  "mfm-storage-postgres",
  "mfm-store",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
@@ -2217,6 +2224,7 @@ version = "0.1.0"
 dependencies = [
  "mfm-ids",
  "mfm-values",
+ "serde",
  "thiserror",
 ]
 
@@ -2256,6 +2264,7 @@ dependencies = [
  "alloy-primitives",
  "getrandom 0.3.4",
  "k256",
+ "mfm-app",
  "mfm-capabilities",
  "mfm-evm",
  "mfm-ids",
@@ -2271,6 +2280,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror",
  "tokio",
  "url",
@@ -2305,7 +2315,9 @@ dependencies = [
  "k256",
  "mfm-ids",
  "mfm-signing",
+ "mfm-values",
  "serde",
+ "serde_json",
  "static_assertions",
  "thiserror",
  "tokio",
@@ -2316,14 +2328,19 @@ dependencies = [
 name = "mfm-portfolio"
 version = "0.1.0"
 dependencies = [
+ "mfm-capabilities",
  "mfm-evm",
  "mfm-ids",
+ "mfm-journal",
  "mfm-program",
  "mfm-program-derive",
+ "mfm-runtime",
+ "mfm-store",
  "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -2364,16 +2381,22 @@ dependencies = [
  "clap",
  "libc",
  "mfm-app",
+ "mfm-canonical",
+ "mfm-capabilities",
  "mfm-config",
  "mfm-evm",
  "mfm-evm-live",
  "mfm-ids",
+ "mfm-journal",
  "mfm-runtime",
  "mfm-store",
+ "mfm-values",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tower",
 ]
 
@@ -2402,6 +2425,7 @@ version = "0.1.0"
 dependencies = [
  "k256",
  "mfm-ids",
+ "mfm-values",
  "serde",
  "static_assertions",
  "thiserror",
@@ -2417,6 +2441,7 @@ dependencies = [
  "mfm-evm",
  "mfm-ids",
  "mfm-journal",
+ "mfm-runtime",
  "mfm-store",
  "mfm-values",
  "percent-encoding",
@@ -2435,7 +2460,9 @@ dependencies = [
  "mfm-canonical",
  "mfm-ids",
  "mfm-journal",
+ "mfm-values",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

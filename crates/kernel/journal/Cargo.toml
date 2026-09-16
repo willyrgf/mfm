@@ -2,7 +2,7 @@
 name = "mfm-journal"
 version = "0.1.0"
 edition = "2021"
-description = "Canonical three-family run journal contracts for MFM"
+description = "Canonical opaque run frame contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"

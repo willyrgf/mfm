@@ -5,6 +5,11 @@
 //! collection is expanded into an ordinary sequential child State; there is no runtime collection
 //! loop, output map, parallel branch, or multi-result join.
 
+pub use enrichment::{
+    plan_enrichment, EnrichmentProvenance, PortfolioAdmission, PortfolioEnrichmentOutput,
+    ResolvePortfolioAssets, PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID,
+};
+
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 
@@ -131,12 +136,16 @@ pub struct PortfolioSnapshotInput {
     portfolio_id: PortfolioId,
     collections: Vec<PortfolioCollectionDemand>,
     quote: QuoteCode,
+    quotes: Vec<QuoteCode>,
+    admission: Option<PortfolioAdmission>,
 }
 
 impl_checked_deserialize!(PortfolioSnapshotInput {
     portfolio_id: PortfolioId,
     collections: Vec<PortfolioCollectionDemand>,
     quote: QuoteCode,
+    quotes: Vec<QuoteCode>,
+    admission: Option<PortfolioAdmission>,
 });
 
 impl PortfolioSnapshotInput {
@@ -144,11 +153,15 @@ impl PortfolioSnapshotInput {
         portfolio_id: PortfolioId,
         collections: Vec<PortfolioCollectionDemand>,
         quote: QuoteCode,
+        quotes: Vec<QuoteCode>,
+        admission: Option<PortfolioAdmission>,
     ) -> Result<Self, PortfolioError> {
         let value = Self {
             portfolio_id,
             collections,
             quote,
+            quotes,
+            admission,
         };
         value.validate()?;
         Ok(value)
@@ -156,7 +169,14 @@ impl PortfolioSnapshotInput {
 
     /// Validates a decoded snapshot input and every declaration-ordered child request.
     fn validate(&self) -> Result<(), PortfolioError> {
-        if !valid_public_text(&self.portfolio_id.value, 256)
+        if !self.quotes.contains(&self.quote)
+            || self.quotes.len() > 2
+            || self
+                .quotes
+                .iter()
+                .enumerate()
+                .any(|(i, q)| self.quotes[..i].contains(q))
+            || !valid_public_text(&self.portfolio_id.value, 256)
             || self.collections.is_empty()
             || self.collections.len() > PORTFOLIO_COLLECTION_LIMIT
             || self
@@ -182,6 +202,11 @@ impl PortfolioSnapshotInput {
             return Err(PortfolioError::InvalidValue);
         }
         Ok(())
+    }
+
+    /// Returns the immutable caller admission identity and enrichment linkage, if supplied.
+    pub fn admission(&self) -> Option<&PortfolioAdmission> {
+        self.admission.as_ref()
     }
 
     fn collection(&self, ordinal: usize) -> Option<&PortfolioCollectionDemand> {
@@ -523,7 +548,7 @@ pub struct EnterPortfolioCollection;
 /// Resumes Portfolio aggregation after one EVM balance collection.
 pub struct ResumePortfolioCollection;
 
-/// Maps an EVM balance failure into the Portfolio failure contract.
+/// Maps an original EVM balance failure into the Portfolio root failure contract.
 pub struct MapEvmBalanceFailure;
 
 /// Consolidates all completed collections into the Portfolio snapshot output.
@@ -551,6 +576,8 @@ macro_rules! impl_portfolio_state {
     };
 }
 
+mod enrichment;
+
 impl_portfolio_state!(
     InitializePortfolio,
     PortfolioSnapshotInput,
@@ -573,13 +600,6 @@ impl_portfolio_state!(
     "Resumes Portfolio aggregation after one EVM balance collection."
 );
 impl_portfolio_state!(
-    MapEvmBalanceFailure,
-    EvmBalanceFailure,
-    PortfolioSnapshotOutput,
-    "mfm.portfolio.state.map-evm-failure@1",
-    "Maps an EVM balance failure into the Portfolio failure contract."
-);
-impl_portfolio_state!(
     ConsolidatePortfolio,
     PortfolioContinuation,
     PortfolioSnapshotOutput,
@@ -595,25 +615,34 @@ fn initialize_portfolio(
     }
 }
 
-fn enter_portfolio_collection(
-    input: PortfolioContinuation,
-) -> ProposedStateOutcome<EvmBalanceContext<PortfolioContinuation>, PortfolioSnapshotFailure> {
-    let Some(ordinal) = input.next_collection_ordinal() else {
-        return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed);
-    };
-    let demand = match input.input.collection(ordinal as usize).cloned() {
-        Some(demand) => demand,
-        None => return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed),
-    };
-    match EvmBalanceContext::new(
-        demand.request,
-        input,
-        ordinal,
-        demand.correlation,
-        demand.route_ref,
-    ) {
-        Ok(output) => portfolio_success(output),
-        Err(_) => portfolio_failure(PortfolioSnapshotFailure::InvalidInput),
+impl PureState for EnterPortfolioCollection {
+    fn evaluate(
+        input: PortfolioContinuation,
+    ) -> Result<
+        ProposedStateOutcome<EvmBalanceContext<PortfolioContinuation>, PortfolioSnapshotFailure>,
+        mfm_values::InvocationDiagnostic,
+    > {
+        let Some(ordinal) = input.next_collection_ordinal() else {
+            return Ok(portfolio_failure(
+                PortfolioSnapshotFailure::ConsolidationFailed,
+            ));
+        };
+        let demand = match input.input.collection(ordinal as usize).cloned() {
+            Some(demand) => demand,
+            None => {
+                return Ok(portfolio_failure(
+                    PortfolioSnapshotFailure::ConsolidationFailed,
+                ))
+            }
+        };
+        EvmBalanceContext::new(
+            demand.request,
+            input,
+            ordinal,
+            demand.correlation,
+            demand.route_ref,
+        )
+        .map(portfolio_success)
     }
 }
 
@@ -674,10 +703,27 @@ fn resume_portfolio_collection(
     }
 }
 
-fn map_evm_balance_failure(
-    input: EvmBalanceFailure,
-) -> ProposedStateOutcome<PortfolioSnapshotOutput, PortfolioSnapshotFailure> {
+impl mfm_program::ValueMap for MapEvmBalanceFailure {
+    type Input = EvmBalanceFailure;
+    type Output = PortfolioSnapshotFailure;
+    type Params = mfm_program::NoParams;
+    fn implementation_id() -> mfm_program::Result<StableId> {
+        StableId::new("mfm.portfolio.map.evm-failure@1")
+            .map_err(|_| mfm_program::ProgramError::InvalidContract)
+    }
+    fn apply(
+        _: &Self::Params,
+        input: EvmBalanceFailure,
+    ) -> Result<PortfolioSnapshotFailure, mfm_values::InvocationDiagnostic> {
+        Ok(map_evm_balance_failure(input))
+    }
+}
+
+fn map_evm_balance_failure(input: EvmBalanceFailure) -> PortfolioSnapshotFailure {
     let (collection_ordinal, code) = match input {
+        EvmBalanceFailure::AnchorChanged {
+            collection_ordinal, ..
+        } => (collection_ordinal, "anchor_changed".to_owned()),
         EvmBalanceFailure::SourceUnavailable {
             collection_ordinal,
             code,
@@ -689,11 +735,10 @@ fn map_evm_balance_failure(
             ..
         } => (collection_ordinal, code),
     };
-    let failure = match u16::try_from(collection_ordinal) {
+    match u16::try_from(collection_ordinal) {
         Ok(ordinal) => PortfolioSnapshotFailure::CollectionFailed { ordinal, code },
         Err(_) => PortfolioSnapshotFailure::ConsolidationFailed,
-    };
-    portfolio_failure(failure)
+    }
 }
 
 fn consolidate_portfolio(
@@ -759,7 +804,7 @@ macro_rules! impl_portfolio_pure {
                 input: Self::Input,
             ) -> std::result::Result<
                 ProposedStateOutcome<Self::Output, Self::Failure>,
-                mfm_program::StateExecutionError,
+                mfm_values::InvocationDiagnostic,
             > {
                 Ok($evaluate(input))
             }
@@ -768,9 +813,8 @@ macro_rules! impl_portfolio_pure {
 }
 
 impl_portfolio_pure!(InitializePortfolio, initialize_portfolio);
-impl_portfolio_pure!(EnterPortfolioCollection, enter_portfolio_collection);
 impl_portfolio_pure!(ResumePortfolioCollection, resume_portfolio_collection);
-impl_portfolio_pure!(MapEvmBalanceFailure, map_evm_balance_failure);
+
 impl_portfolio_pure!(ConsolidatePortfolio, consolidate_portfolio);
 
 fn portfolio_success<O, F>(output: O) -> ProposedStateOutcome<O, F> {
@@ -892,7 +936,7 @@ fn sum_unsigned(values: &[String]) -> Option<String> {
 }
 
 /// Selector for selecting an admitted Portfolio target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioSnapshotSelector {
     target: PortfolioId,
@@ -912,7 +956,7 @@ impl PortfolioSnapshotSelector {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 struct PortfolioCollectionConfig {
     pub correlation: String,
@@ -920,7 +964,7 @@ struct PortfolioCollectionConfig {
 }
 
 /// Checked secret-free Portfolio snapshot authoring input.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioConfig {
     portfolio_id: PortfolioId,
@@ -928,63 +972,42 @@ pub struct PortfolioConfig {
     collections: Vec<PortfolioCollectionConfig>,
 }
 
-impl<'de> Deserialize<'de> for PortfolioConfig {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            portfolio_id: PortfolioId,
-            quotes: Vec<QuoteCode>,
-            collections: Vec<PortfolioCollectionConfig>,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let config = Self {
-            portfolio_id: wire.portfolio_id,
-            quotes: wire.quotes,
-            collections: wire.collections,
-        };
-        validate_portfolio_config(&config)
-            .map(|_| config)
-            .map_err(de::Error::custom)
+impl_checked_deserialize!(PortfolioConfig {
+    portfolio_id: PortfolioId,
+    quotes: Vec<QuoteCode>,
+    collections: Vec<PortfolioCollectionConfig>,
+});
+impl PortfolioConfig {
+    fn validate(&self) -> Result<(), PortfolioError> {
+        validate_config_parts(&self.portfolio_id, &self.quotes, self.collections.iter())
     }
 }
 
-fn validate_portfolio_config(config: &PortfolioConfig) -> Result<(), PortfolioError> {
-    if !valid_public_text(&config.portfolio_id.value, 256)
-        || config.quotes.is_empty()
-        || config.collections.is_empty()
-        || config.collections.len() > PORTFOLIO_COLLECTION_LIMIT
-        || config.collections.iter().any(|collection| {
+fn validate_config_parts<'a>(
+    portfolio_id: &PortfolioId,
+    quotes: &[QuoteCode],
+    collections: impl ExactSizeIterator<Item = &'a PortfolioCollectionConfig> + Clone,
+) -> Result<(), PortfolioError> {
+    if !valid_public_text(&portfolio_id.value, 256)
+        || quotes.is_empty()
+        || collections.len() == 0
+        || collections.len() > PORTFOLIO_COLLECTION_LIMIT
+        || collections.clone().any(|collection| {
             !valid_public_text(&collection.correlation, 256)
                 || collection.request.validate().is_err()
         })
-        || config
-            .quotes
+        || quotes
             .iter()
             .enumerate()
-            .any(|(index, quote)| config.quotes[..index].contains(quote))
+            .any(|(index, quote)| quotes[..index].contains(quote))
         || duplicate_text(
-            config
-                .collections
-                .iter()
+            collections
+                .clone()
                 .map(|collection| collection.correlation.as_str()),
         )
-        || total_sources(
-            config
-                .collections
-                .iter()
-                .map(|collection| &collection.request),
-        ) > mfm_evm::EVM_BALANCE_SOURCE_LIMIT
-        || duplicate_source_ids(
-            config
-                .collections
-                .iter()
-                .map(|collection| &collection.request),
-        )
+        || total_sources(collections.clone().map(|collection| &collection.request))
+            > mfm_evm::EVM_BALANCE_SOURCE_LIMIT
+        || duplicate_source_ids(collections.map(|collection| &collection.request))
     {
         return Err(PortfolioError::InvalidValue);
     }
@@ -996,8 +1019,28 @@ pub fn plan_snapshot(
     selector: PortfolioSnapshotSelector,
     config: &PortfolioConfig,
     targets: &[EvmPhysicalTarget],
+    admission: Option<PortfolioAdmission>,
 ) -> Result<(Program, PortfolioSnapshotInput), PortfolioError> {
-    validate_portfolio_config(config).map_err(|_| PortfolioError::Program)?;
+    plan::<ConsolidatePortfolio>(selector, config, targets, admission, entry_point_id()?)
+}
+
+fn plan<S>(
+    selector: PortfolioSnapshotSelector,
+    config: &PortfolioConfig,
+    targets: &[EvmPhysicalTarget],
+    admission: Option<PortfolioAdmission>,
+    entry: EntryPointId,
+) -> Result<(Program, PortfolioSnapshotInput), PortfolioError>
+where
+    S: PureState<Input = PortfolioContinuation, Failure = PortfolioSnapshotFailure>,
+{
+    if admission
+        .as_ref()
+        .is_some_and(|identity| identity.entry_point() != &entry)
+    {
+        return Err(PortfolioError::InvalidValue);
+    }
+    config.validate().map_err(|_| PortfolioError::Program)?;
     selector.validate()?;
     if selector.target != config.portfolio_id || !config.quotes.contains(&selector.quote) {
         return Err(PortfolioError::InvalidValue);
@@ -1026,7 +1069,6 @@ pub fn plan_snapshot(
     }
 
     let mut demand = Vec::with_capacity(config.collections.len());
-    let mut checked_collections = Vec::with_capacity(config.collections.len());
     for collection in &config.collections {
         let chain_id = collection
             .request
@@ -1044,48 +1086,82 @@ pub fn plan_snapshot(
             collection.request.clone(),
             route_ref.clone(),
         )?);
-        checked_collections.push(
-            CollectEvmBalances::<PortfolioContinuation>::new(
-                route_ref,
-                collection.request.sources().len(),
-            )
-            .map_err(|_| PortfolioError::Program)?,
-        );
     }
-    let input =
-        PortfolioSnapshotInput::from_demand(config.portfolio_id.clone(), demand, selector.quote)?;
-    let root = PortfolioSnapshotOperation {
+    let input = PortfolioSnapshotInput::from_demand(
+        config.portfolio_id.clone(),
+        demand,
+        selector.quote,
+        config.quotes.clone(),
+        admission,
+    )?;
+    let checked_collections = input
+        .collections
+        .iter()
+        .map(|demand| {
+            CollectEvmBalances::<PortfolioContinuation>::new(
+                demand.route_ref.clone(),
+                demand.request.clone(),
+            )
+            .map_err(|_| PortfolioError::Program)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let root = PortfolioOperation::<S> {
+        terminal: std::marker::PhantomData,
         checked_collections,
     };
-    let program = expand_program(entry_point_id()?, &root).map_err(|_| PortfolioError::Program)?;
+    let program = expand_program(entry, &root, &input, mfm_program::ProgramLimits::new(0))
+        .map_err(|_| PortfolioError::Program)?;
     Ok((program, input))
 }
 
-struct PortfolioSnapshotOperation {
+struct PortfolioOperation<S> {
+    terminal: std::marker::PhantomData<fn() -> S>,
     checked_collections: Vec<CollectEvmBalances<PortfolioContinuation>>,
 }
 
-impl Operation for PortfolioSnapshotOperation {
+impl<S> Operation for PortfolioOperation<S>
+where
+    S: PureState<Input = PortfolioContinuation, Failure = PortfolioSnapshotFailure>,
+{
     type Input = PortfolioSnapshotInput;
-    type Output = PortfolioSnapshotOutput;
+    type Output = S::Output;
     type Failure = PortfolioSnapshotFailure;
 
+    fn validate_input(&self, input: &Self::Input) -> mfm_program::Result<()> {
+        input
+            .validate()
+            .map_err(|_| mfm_program::ProgramError::InvalidContract)?;
+        if input.collections.len() != self.checked_collections.len()
+            || !input
+                .collections
+                .iter()
+                .zip(&self.checked_collections)
+                .all(|(demand, child)| child.matches_request(&demand.request, &demand.route_ref))
+        {
+            return Err(mfm_program::ProgramError::InvalidContract);
+        }
+        Ok(())
+    }
     fn expand(
         &self,
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
-        body.pure::<InitializePortfolio>()?;
+        use mfm_program::{Identity, NoParams, Occurrence};
+        body.pure::<InitializePortfolio, Identity<Self::Failure>>(NoParams, Occurrence::new())?;
         for child in &self.checked_collections {
-            body.pure::<EnterPortfolioCollection>()?;
-            body.with_failure_handler::<EvmBalanceFailure, PortfolioContinuation>(
-                |protected| {
-                    protected.operation(child)?;
-                    protected.pure::<ResumePortfolioCollection>()
-                },
-                |handler| handler.pure::<MapEvmBalanceFailure>(),
+            body.pure::<EnterPortfolioCollection, Identity<Self::Failure>>(
+                NoParams,
+                Occurrence::new(),
+            )?;
+            body.operation::<CollectEvmBalances<PortfolioContinuation>, MapEvmBalanceFailure>(
+                child, NoParams,
+            )?;
+            body.pure::<ResumePortfolioCollection, Identity<Self::Failure>>(
+                NoParams,
+                Occurrence::new(),
             )?;
         }
-        body.pure::<ConsolidatePortfolio>()
+        body.pure::<S, Identity<Self::Failure>>(NoParams, Occurrence::new())
     }
 }
 
@@ -1139,3 +1215,16 @@ fn duplicate_source_ids<'a>(requests: impl Iterator<Item = &'a EvmBalanceRequest
         .flat_map(EvmBalanceRequest::sources)
         .any(|source| !source_ids.insert(source.source_id()))
 }
+
+impl mfm_program::ClassifyError for PortfolioSnapshotFailure {
+    fn classify(&self) -> mfm_program::Classification {
+        match self {
+            Self::InvalidInput | Self::CollectionFailed { .. } | Self::ConsolidationFailed => {
+                mfm_program::Classification::Permanent
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod snapshot_extremes;

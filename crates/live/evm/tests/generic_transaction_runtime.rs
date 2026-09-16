@@ -8,7 +8,7 @@ use mfm_evm_live::register_evm_transaction_states;
 use mfm_ids::{
     ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, EntryPointId, RunId, SchemaId,
 };
-use mfm_program::expand_program;
+use mfm_program::{expand_program, ProgramLimits};
 use mfm_program_derive::{MfmContext, MfmValue};
 use mfm_runtime::{EffectAdapterOutcome, RunViewState, Runtime, RuntimeAssemblyBuilder};
 use mfm_store::MemoryStore;
@@ -157,6 +157,10 @@ async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_col
     let store = Arc::new(MemoryStore::new());
     let hot_runtime = runtime(&binding, Arc::clone(&store));
     let first_run_id = RunId::from_digest(DigestBytes::from_array([11; 32]));
+    let first_input = FirstContext {
+        first: 12,
+        transaction: plan(binding.clone()),
+    };
     let first_hot = hot_runtime
         .start(
             first_run_id.clone(),
@@ -164,12 +168,11 @@ async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_col
                 EntryPointId::new("mfm.test.evm-live/first-generic-transaction@1")
                     .expect("first entry point"),
                 &EvmTransaction::<FirstInitial, FirstRecipe>::new(binding.clone()),
+                &first_input,
+                ProgramLimits::new(0),
             )
             .expect("first Program"),
-            FirstContext {
-                first: 12,
-                transaction: plan(binding.clone()),
-            },
+            first_input,
         )
         .await
         .expect("first hot execution");
@@ -177,8 +180,8 @@ async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_col
         panic!("first transaction did not succeed")
     };
     assert_eq!(
-        first_hot_value.contract_ref(),
-        &mfm_program::nominal_contract_ref::<CompletedContext<FirstInitial, FirstRecipe>>()
+        first_hot_value.contract_ref().unwrap(),
+        mfm_program::nominal_contract_ref::<CompletedContext<FirstInitial, FirstRecipe>>()
             .expect("first completion contract")
     );
 
@@ -204,6 +207,10 @@ async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_col
     );
 
     let second_run_id = RunId::from_digest(DigestBytes::from_array([13; 32]));
+    let second_input = SecondContext {
+        second: "two".to_owned(),
+        transaction: plan(binding.clone()),
+    };
     let second_hot = hot_runtime
         .start(
             second_run_id.clone(),
@@ -211,12 +218,11 @@ async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_col
                 EntryPointId::new("mfm.test.evm-live/second-generic-transaction@1")
                     .expect("second entry point"),
                 &EvmTransaction::<SecondInitial, SecondRecipe>::new(binding.clone()),
+                &second_input,
+                ProgramLimits::new(0),
             )
             .expect("second Program"),
-            SecondContext {
-                second: "two".to_owned(),
-                transaction: plan(binding.clone()),
-            },
+            second_input,
         )
         .await
         .expect("second hot execution");
@@ -224,8 +230,8 @@ async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_col
         panic!("second transaction did not succeed")
     };
     assert_eq!(
-        second_hot_value.contract_ref(),
-        &mfm_program::nominal_contract_ref::<CompletedContext<SecondInitial, SecondRecipe>>()
+        second_hot_value.contract_ref().unwrap(),
+        mfm_program::nominal_contract_ref::<CompletedContext<SecondInitial, SecondRecipe>>()
             .expect("second completion contract")
     );
     assert_ne!(
@@ -284,48 +290,21 @@ impl mfm_evm::TransactionRecipe<FirstInitial> for WrongMode {
     }
 }
 
-#[tokio::test]
-async fn an_incompatible_recipe_mode_is_internal_before_prepare_append_or_adapter_entry() {
-    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-    register_evm_transaction_states::<FirstInitial, WrongMode>(&mut builder).unwrap();
-    builder
-        .register_effect_adapter::<EvmNonceReservationEffect, _, _>(binding(), |_, _, _| {
-            panic!("invalid recipe entered reservation IO")
-        })
-        .unwrap();
-    builder
-        .register_effect_adapter::<EvmTransactionPreparationEffect, _, _>(binding(), |_, _, _| {
-            panic!("invalid recipe entered preparation IO")
-        })
-        .unwrap();
-    builder
-        .register_effect_adapter::<EvmTransactionEffect, _, _>(binding(), |_, _, _| {
-            panic!("invalid recipe entered execution IO")
-        })
-        .unwrap();
-    let runtime = Runtime::new(builder.finish(), Arc::new(MemoryStore::new()));
-    let id = RunId::from_digest(DigestBytes::from_array([50; 32]));
-    let program = expand_program(
-        EntryPointId::new("mfm.test/wrong-mode@1").unwrap(),
-        &EvmTransaction::<FirstInitial, WrongMode>::new(binding()),
-    )
-    .unwrap();
+#[test]
+fn an_incompatible_recipe_mode_is_rejected_before_program_admission() {
+    let input = FirstContext {
+        first: 1,
+        transaction: plan(binding()),
+    };
     assert!(matches!(
-        runtime
-            .start(
-                id.clone(),
-                program,
-                FirstContext {
-                    first: 1,
-                    transaction: plan(binding())
-                }
-            )
-            .await,
-        Err(mfm_runtime::RuntimeError::Internal)
+        expand_program(
+            EntryPointId::new("mfm.test/wrong-mode@1").unwrap(),
+            &EvmTransaction::<FirstInitial, WrongMode>::new(binding()),
+            &input,
+            ProgramLimits::new(0),
+        ),
+        Err(mfm_program::ProgramError::InvalidContract)
     ));
-    let retained = runtime.read(&id).await.unwrap();
-    assert_eq!(retained.head_sequence(), 1);
-    assert!(matches!(retained.state(), RunViewState::Runnable));
 }
 
 #[derive(Serialize, Deserialize, MfmValue, MfmContext)]
@@ -450,15 +429,25 @@ async fn selecting_another_same_typed_source_requires_its_own_assembly_before_io
     let program = expand_program(
         EntryPointId::new("mfm.test/selected-source@1").unwrap(),
         &EvmTransaction::<Sources, FromB>::new(binding()),
+        &input,
+        ProgramLimits::new(0),
     )
     .unwrap();
     assert!(matches!(
         runtime.start(id.clone(), program, input).await,
-        Err(mfm_runtime::RuntimeError::IncompatibleAssembly)
+        Err(mfm_runtime::InvocationFailure::Execution {
+            error: mfm_runtime::RuntimeError::IncompatibleAssembly,
+            last_observed: None,
+            ..
+        })
     ));
     assert!(matches!(
         runtime.read(&id).await,
-        Err(mfm_runtime::RuntimeError::Absent)
+        Err(mfm_runtime::InvocationFailure::Execution {
+            error: mfm_runtime::RuntimeError::Absent,
+            last_observed: None,
+            ..
+        })
     ));
 }
 

@@ -30,6 +30,8 @@ tokio = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+mfm-app = { path = "../../app" }
+sqlx = { workspace = true }
 getrandom = { workspace = true }
 k256 = { workspace = true }
 mfm-journal = { path = "../../kernel/journal" }

@@ -2,12 +2,14 @@ use std::fmt;
 use std::num::NonZeroU64;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_config::{ConfigDigest, ConfigName, ConfigRevision, MAX_CONFIG_DOCUMENT_BYTES};
+use mfm_config::{ConfigDigest, ConfigRevision, MAX_CONFIG_DOCUMENT_BYTES};
 use mfm_evm::{EvmEndpoint, EvmPhysicalTarget, EVM_BALANCE_SOURCE_LIMIT};
+use mfm_ids::ConfigName;
 use mfm_ids::EntryPointId;
 use mfm_portfolio::{
-    plan_snapshot, PortfolioConfig, PortfolioError, PortfolioSnapshotInput,
-    PortfolioSnapshotSelector, PORTFOLIO_SNAPSHOT_ENTRY_POINT_DESCRIPTION,
+    plan_enrichment, plan_snapshot, EnrichmentProvenance, PortfolioAdmission, PortfolioConfig,
+    PortfolioEnrichmentOutput, PortfolioError, PortfolioSnapshotInput, PortfolioSnapshotSelector,
+    PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID, PORTFOLIO_SNAPSHOT_ENTRY_POINT_DESCRIPTION,
     PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
 };
 use mfm_program::Program;
@@ -100,29 +102,91 @@ impl ConfigDocument {
         })
     }
 
-    pub(crate) fn plan(&self) -> Result<(Program, PortfolioSnapshotInput), PortfolioError> {
-        match &self.wire {
-            ConfigDocumentWire::PortfolioSnapshot {
-                targets,
-                selector,
-                portfolio,
-            } => plan_snapshot(selector.clone(), portfolio, targets),
+    pub(crate) fn from_enrichment(
+        output: PortfolioEnrichmentOutput,
+        provenance: EnrichmentProvenance,
+        routes: Vec<(u64, String)>,
+    ) -> Result<Self, ConfigDocumentError> {
+        let routes = routes
+            .into_iter()
+            .map(|(chain_id, endpoint_id)| EvmRouteWire {
+                chain_id,
+                endpoint_id,
+            })
+            .collect::<Vec<_>>();
+        let (portfolio, selector) = output.into_snapshot_config();
+        let wire = ConfigDocumentWireUnchecked::PortfolioSnapshot(ConfigInputWire {
+            routes,
+            selector,
+            portfolio,
+            provenance: Some(provenance),
+        });
+        let encoded = serde_json::to_vec(&wire).map_err(|_| ConfigDocumentError::Internal)?;
+        Self::parse(encoded, false)
+    }
+
+    pub(crate) fn plan(
+        &self,
+        admission: Option<PortfolioAdmission>,
+    ) -> Result<(Program, PortfolioSnapshotInput), PortfolioError> {
+        match self.wire.entry {
+            ConfigEntry::Snapshot { .. } => plan_snapshot(
+                self.wire.selector.clone(),
+                &self.wire.portfolio,
+                &self.wire.targets,
+                admission,
+            ),
+            ConfigEntry::Enrichment => plan_enrichment(
+                self.wire.selector.clone(),
+                &self.wire.portfolio,
+                &self.wire.targets,
+                admission,
+            ),
         }
     }
 
     pub(crate) fn targets(&self) -> &[EvmPhysicalTarget] {
-        match &self.wire {
-            ConfigDocumentWire::PortfolioSnapshot { targets, .. } => targets,
+        &self.wire.targets
+    }
+
+    pub(crate) fn enrichment(&self) -> Option<&EnrichmentProvenance> {
+        match &self.wire.entry {
+            ConfigEntry::Snapshot { provenance } => provenance.as_deref(),
+            ConfigEntry::Enrichment => None,
         }
     }
 
+    pub(crate) fn matches_enrichment(&self, output: PortfolioEnrichmentOutput) -> bool {
+        let routes_match = output.bindings().all(|(chain, reference)| {
+            self.wire.targets.iter().any(|target| {
+                target.chain_id == chain
+                    && target
+                        .binding_ref()
+                        .is_ok_and(|binding| &binding == reference)
+            })
+        });
+        let (portfolio, selector) = output.into_snapshot_config();
+        matches!(self.wire.entry, ConfigEntry::Snapshot { .. })
+            && self.wire.portfolio == portfolio
+            && self.wire.selector == selector
+            && routes_match
+    }
+
     pub(crate) fn entry_point(&self) -> EntryPointId {
-        match &self.wire {
-            ConfigDocumentWire::PortfolioSnapshot { .. } => {
-                EntryPointId::new(PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID)
-                    .expect("compiled entry-point id is checked by contract tests")
-            }
-        }
+        EntryPointId::new(match self.wire.entry {
+            ConfigEntry::Snapshot { .. } => PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
+            ConfigEntry::Enrichment => PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID,
+        })
+        .expect("compiled entry-point id is checked by contract tests")
+    }
+
+    pub(crate) fn admission(&self, name: &ConfigName) -> PortfolioAdmission {
+        PortfolioAdmission::new(
+            name.clone(),
+            self.digest.digest_bytes(),
+            self.entry_point(),
+            self.enrichment().cloned(),
+        )
     }
 
     pub(crate) fn summary(&self, name: ConfigName) -> ConfigSummary {
@@ -138,56 +202,74 @@ impl ConfigDocument {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "entry_point", content = "input", deny_unknown_fields)]
 enum ConfigDocumentWireUnchecked {
     #[serde(rename = "mfm.portfolio/snapshot@1")]
-    PortfolioSnapshot {
-        routes: Vec<EvmRouteWire>,
-        selector: PortfolioSnapshotSelector,
-        portfolio: PortfolioConfig,
-    },
+    PortfolioSnapshot(ConfigInputWire),
+    #[serde(rename = "mfm.portfolio/enrich@1")]
+    PortfolioEnrichment(ConfigInputWire),
 }
 
-enum ConfigDocumentWire {
-    PortfolioSnapshot {
-        targets: Vec<EvmPhysicalTarget>,
-        selector: PortfolioSnapshotSelector,
-        portfolio: PortfolioConfig,
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigInputWire {
+    routes: Vec<EvmRouteWire>,
+    selector: PortfolioSnapshotSelector,
+    portfolio: PortfolioConfig,
+    #[serde(default)]
+    provenance: Option<EnrichmentProvenance>,
+}
+
+enum ConfigEntry {
+    Snapshot {
+        provenance: Option<Box<EnrichmentProvenance>>,
     },
+    Enrichment,
+}
+
+struct ConfigDocumentWire {
+    entry: ConfigEntry,
+    targets: Vec<EvmPhysicalTarget>,
+    selector: PortfolioSnapshotSelector,
+    portfolio: PortfolioConfig,
 }
 
 impl ConfigDocumentWireUnchecked {
     fn check(self) -> Result<ConfigDocumentWire, ConfigDocumentError> {
-        match self {
-            Self::PortfolioSnapshot {
-                routes,
-                selector,
-                portfolio,
-            } => {
-                if routes.is_empty()
-                    || routes.len() > EVM_BALANCE_SOURCE_LIMIT
-                    || routes
-                        .windows(2)
-                        .any(|pair| pair[0].chain_id >= pair[1].chain_id)
-                {
-                    return Err(ConfigDocumentError::Invalid);
-                }
-                let targets = routes
-                    .into_iter()
-                    .map(EvmRouteWire::target)
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(ConfigDocumentWire::PortfolioSnapshot {
-                    targets,
-                    selector,
-                    portfolio,
-                })
+        let (entry, input) = match self {
+            Self::PortfolioSnapshot(mut input) => {
+                let provenance = input.provenance.take().map(Box::new);
+                (ConfigEntry::Snapshot { provenance }, input)
             }
+            Self::PortfolioEnrichment(input) if input.provenance.is_none() => {
+                (ConfigEntry::Enrichment, input)
+            }
+            Self::PortfolioEnrichment(_) => return Err(ConfigDocumentError::Invalid),
+        };
+        if input.routes.is_empty()
+            || input.routes.len() > EVM_BALANCE_SOURCE_LIMIT
+            || input
+                .routes
+                .windows(2)
+                .any(|pair| pair[0].chain_id >= pair[1].chain_id)
+        {
+            return Err(ConfigDocumentError::Invalid);
         }
+        Ok(ConfigDocumentWire {
+            entry,
+            targets: input
+                .routes
+                .into_iter()
+                .map(EvmRouteWire::target)
+                .collect::<Result<_, _>>()?,
+            selector: input.selector,
+            portfolio: input.portfolio,
+        })
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct EvmRouteWire {
     chain_id: u64,
@@ -229,10 +311,16 @@ impl EntryPointSummary {
     }
 }
 
-pub(crate) const ENTRY_POINTS: [EntryPointSummary; 1] = [EntryPointSummary {
-    entry_point: PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
-    description: PORTFOLIO_SNAPSHOT_ENTRY_POINT_DESCRIPTION,
-}];
+pub(crate) const ENTRY_POINTS: [EntryPointSummary; 2] = [
+    EntryPointSummary {
+        entry_point: PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID,
+        description: "Resolves configured asset candidates using anchored EVM observations.",
+    },
+    EntryPointSummary {
+        entry_point: PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
+        description: PORTFOLIO_SNAPSHOT_ENTRY_POINT_DESCRIPTION,
+    },
+];
 
 /// Public identity of one retained config revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -243,6 +331,14 @@ pub struct ConfigSummary {
 }
 
 impl ConfigSummary {
+    pub(crate) fn from_admission(admission: &PortfolioAdmission) -> Self {
+        Self {
+            name: admission.name().clone(),
+            digest: ConfigDigest::from_digest_bytes(admission.config_digest_hex()),
+            entry_point: admission.entry_point().clone(),
+        }
+    }
+
     /// Returns the configuration name.
     pub const fn name(&self) -> &ConfigName {
         &self.name
@@ -283,3 +379,6 @@ impl ImportOutcome {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

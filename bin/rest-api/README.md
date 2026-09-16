@@ -29,6 +29,7 @@ deployment environment.
 | GET | `/v1/entry-points` | none | shared `ItemList` |
 | GET | `/v1/bindings` | none | shared `ItemList` |
 | PUT | `/v1/configs/{name}` | raw config JSON | shared `ImportOutcome`; 201 created or 200 unchanged |
+| POST | `/v1/configs/{name}/publish-enrichment` | `{"run_id":"run:..."}` | shared `ImportOutcome`; 201 created or 200 unchanged |
 | GET | `/v1/configs` | none | complete retained-revision `ItemList` |
 | DELETE | `/v1/configs/{name}/revisions/{digest}` | none | empty; 204 whether present or absent |
 | GET | `/v1/runs?after=&limit=` | none | shared mechanical `RunPage` |
@@ -58,7 +59,7 @@ media types with a `+json` suffix.
 
 ## Bounds and failures
 
-Config request bodies are limited to 256 KiB and checked again by `ConfigDocument`. Run action
+Config request bodies are limited to 256 KiB and checked again by `ConfigDocument`. Run and publication action
 bodies are limited to 4 KiB. Config listing accepts no query fields and returns every retained
 revision as one unpaginated aggregate; each document remains independently bounded. Typed run-list
 extraction accepts only one `after` RunId and one `limit`, rejects unknown
@@ -66,19 +67,88 @@ or duplicate fields, and uses the shared 1–200 page bound with default 50.
 
 Ordinary routed errors are exactly `{"code":"...","message":"..."}` with the shared stable
 Application error serializer, except that a start request after identity selection also carries its
-`run_id`. Ambiguous run appends add the shared tagged `recovery` object. REST-local errors cover
+`run_id`. Ambiguous run appends add the shared tagged `recovery` object and complete `invocation`, whose
+`last_observed` may be null. They retain HTTP 503. This attempt's known noninsertion uses
+`run_append_not_inserted` and HTTP 409 even if a later probe fails for a different reason.
+Other stopped Runtime calls add a tagged `invocation` containing their RunId and last observation,
+or the unresolved Effect observation, typed operational cause, complete input and retained command facts and stop reason. These
+are request failures, not newly appended terminal run states. Stopped recovery returns 503;
+execution faults use their reviewed request status. REST-local errors cover
 invalid body/query/media/path/header, fallback 404/405, body size, and RunId entropy failure. HTTP
 parser failures before Axum routing are outside that JSON contract. A durably failed run remains a
 successful HTTP request with status 200 and tagged `state.kind:"failed"`.
 
 The CLI-only `postgres init` retains schema authority outside the daemon. Both client surfaces may
 generate a RunId before their one Application call. HTTP status represents request success, while
-CLI exit 1 may represent a runnable or durably failed run.
+CLI exit 1 represents a runnable, Effect-pending, awaiting-recovery, awaiting-interpretation or
+durably failed run. REST returns 200 for each successfully observed phase. Runnable views carry
+position/visit and tagged reason; pending views carry the exact EffectId. Failed views embed the
+canonical `report` and its reference, while successful views embed the canonical `value`.
+Provider failures retain method, stage, status/code, ordered source messages and selected fields
+under the upstream diagnostic trust contract. MFM does not append its own secrets or full
+requests/connections; dependency-supplied text is retained without a diagnostic quota.
 
 `nix run .#run -- --task client-e2e` builds the CLI and REST binaries explicitly. It admits an exact
-historical run with a generated REST identity through a deliberately unavailable live Read, proves
+historical run with a generated REST identity by interrupting an in-flight live Read, proves
 the durable runnable prefix, deletes the selected config, cold-resumes the admitted Program through
 this listener against Reth, validates the complete snapshot, and reloads the identical RunView
 through the CLI. It then reimports the same revision and requires a fresh CLI-generated run to
-produce the same semantic result. The two renderers also match the same frozen start/progress
+produce the same semantic result. One supplied JSON-RPC error is then durably retained and compared
+with exact code/message/data through a fresh REST process and CLI; HTTP remains 200 and CLI exits 1.
+The two renderers also match the same frozen start/progress
 indeterminate recovery fixtures under `docs/contracts/client-surface/`.
+
+Enrichment uses the ordinary run routes with an exact `mfm.portfolio/enrich@1` config revision.
+Publication requires its successful exact-schema result and accepts only the destination name and
+RunId. `invalid_enrichment` returns 400 for incomplete, wrong-schema, or inconsistent linkage.
+Repeated publication has no discovery IO. New dependent admission verifies retained provenance;
+matching start recovery and ordinary read/progress survive configuration deletion.
+
+Size-limit invocation failures use `size_limit_exceeded` and include
+`invocation.size_limit` with `resource` and `limit` (bytes, or frames for
+`frame_count`). A measured violation carries `actual`; a serializer stopped at its ceiling carries
+`observed_at_least` because the unvisited suffix has no measured size. The last observation remains historical; oversized inline reports do not
+append a terminal conclusion or discard pending Effect authority. Capacity arithmetic overflow
+uses `capacity_arithmetic_overflow` without fabricated measurements. CLI uses exit 2; REST uses
+422 for these stopped invocations. Response payloads retain the shared full inline report; request
+body limits do not impose a response-size limit.
+
+Pending Effect views include `latest_failure`: null before the first audited failure, otherwise
+`mode: "effect"`, qualified `error`, complete `input`, retained `command`, `effect_id`, and `decision` (`"retry"` or
+`{"stop":{"reason":"requested"}}`, with other reviewed stop codes). Every acknowledged
+pending operational outcome advances the durable head. Retry preserves the command/EffectId and
+spends recovery allowance; Stop ends the invocation while explicit progress may resume it.
+There is no separate pending-failure quota; actual frame and run limits govern recording.
+Cancellation can interrupt a physical
+attempt before its result is recorded; the audit covers acknowledged qualified failures.
+
+
+Run responses are prepared and encoded before handoff to Axum. A preparation or encoding failure
+uses one shared [App failure presentation](../../crates/app/README.md#report-preparation-failures),
+retaining primary request status, recovery identity and available head/candidate/size facts.
+Failure to render a successful observation returns 500, or 422 for an actual representation limit.
+`last_observed` is historical; only explicit insertion evidence is labelled `acknowledged`.
+The supplied diagnostic is forwarded unchanged and `original_report` is null when normal encoding
+never completed. No native projector or normal serializer is retried.
+
+If the final presentation also fails to encode, the one-shot body-error channel retains its concrete
+`JsonError`, with no further JSON response. The direct Canonical dependency names that concrete
+error; `tokio-stream` supplies the existing one-shot body channel. The handler establishes response
+handoff only; neither status nor prepared body proves socket completion or peer receipt.
+
+Malformed stored framework Objects are reported as `internal`, with restore/decode parser category,
+available line/column and rejection reason. This includes nested Object-size rejection: no structured
+size violation is inferred from parser text. CLI exits 2 and REST returns 500. Direct typed size
+failures retain their structured fields and REST 422 treatment; postdecode slot mismatches retain
+identity fields. JSON diagnostics preserve dependency-supplied text without adding secret inputs.
+
+Runtime persists one current operation and derives its public phase. Terminal reports borrow the
+retained original and mapped domain root; pending recovery reports borrow the unchanged input,
+command and original from their observed Effect. Their JSON field names and status rules remain
+unchanged. There is no duplicate owned incident or terminal cause tree in the public library API.
+
+Run Store failures inside the shared invocation payload now carry mandatory diagnostic data, for
+example `{"unavailable":{"operation":"run.load","stage":"begin","sources":[...]}}`.
+The existing public code/status and acknowledgement meaning remain unchanged. Clients forward
+these producer facts through the shared Application presentation; they do not recapture sources
+or claim the failed Store durably recorded the invocation.

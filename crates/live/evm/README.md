@@ -21,12 +21,35 @@ value ref and returns evidence carrying that same ref. No operation ID, serializ
 transport, adapter recanonicalization, or provider-side domain decode remains. The confirmation
 subject re-observes the committed block its intent names and never the head.
 
-Every JSON-RPC error, unexpected null, malformed field, oversize body, and transport failure is
-Unavailable. An empty broad token-call result alone is SafeFailure where the balance contract
+Provider failures retain an `EvmOperationalError` with one closed kind and one boxed
+`ProviderFailure`. Its exact wire has `kind` and `source`; the box is transparent. The source owns
+the RPC method, stage, local checked rejection facts and Values' `DiagnosticEvidence`. Capture
+retains exposed source messages, parser category/location, transport kind and OS kind/code.
+Response status/code and RPC message/data remain outside ancestry; `data_json` preserves the
+original numeric spelling as text. Unknown source types retain their exposed message and child
+links. Whole-owner admission
+applies the ordinary canonical/object limits without a separate diagnostic budget. Dependency text
+is trusted diagnostic input; MFM does not deliberately add requests or credentials to that context.
+
+`source_cycle: true` means exactly “traversal stopped on a repeated interface pointer.” The local
+source walker compares complete `dyn Error` pointers with `std::ptr::eq`; it does not establish
+concrete-object identity. An inline child may share its parent's data address, and one concrete
+error can have different interface representations. The latter may produce repeated cause entries
+before termination; no exact cyclic-object visit count is promised across compiler configurations.
+There is no identity registry, message comparison or diagnostic budget.
+
+Request/body deadlines are Timeout,
+HTTP 429 is RateLimited, and other transport, JSON-RPC, unexpected-null, malformed-field and
+oversize-body failures are Unavailable. An empty broad token-call result alone is SafeFailure where the balance contract
 admits a missing token interface; receipt null alone means not yet mined.
 Anchored block absence is SafeFailure, codeless target is Rejected, and replacement of the authored
 block is authenticated IntegrityBlocked evidence. Local capability, route, binding, signer purpose,
 public-key-derived sender, or retained-authority mismatch is Internal before authority/provider IO.
+
+`fund_development_sender` uses the same bounded transport and exact decoder for unlocked-account
+discovery and one funding submission, with the existing 16 KiB funding response bound. It has no
+Program/custody authority and does not retry an ambiguous submission. The managed E2E owns its
+funding amount and fees and retains build/provider causes through its helper.
 
 The pure codec maps the checked domain command into pinned `alloy-consensus` 1.6.1 `TxEip1559`
 values. Alloy owns signed EIP-2718 encoding, exact decoding, transaction hashing, and CREATE-address
@@ -37,13 +60,17 @@ remains in `mfm-keystore`.
 
 `register_evm_transaction_adapters` registers reservation, preparation, and execution callbacks.
 `register_evm_transaction_states::<C, R>` separately installs the four exact executable State
-ABIs for an accumulated context and recipe; it binds no IO and performs no graph planning. Reservation captures binding,
+ABIs and injected failure map for an accumulated context and recipe; it binds no IO and performs no Program planning. Reservation captures binding,
 custody, and provider; preparation captures binding, custody, and signer; execution captures no
 signer. Reservation loads first, then observes pending nonce if absent. Preparation loads first,
 signs only when necessary, and validates the immutable first winner returned by custody.
 Execution decodes exact retained wire, recovers sender, checks receipt before submission, and
 submits at most once per invocation. CPU work runs in immediately awaited blocking closures;
 provider, signer, and custody IO stay outside them.
+
+Transaction adapter errors retain provider causes inside `EvmTransactionOperationalError::Provider`;
+custody and signer failures are AuthorityUnavailable and SignerUnavailable respectively. Local
+invariants bypass recovery classification and carry no external detail.
 
 A matching submission returns Pending. Transport failures, missing acknowledgements, malformed
 ingress, or mismatched returned hashes are Unavailable. A validated receipt and matching canonical
@@ -73,3 +100,12 @@ applied before Runtime sees the Program. This crate never invokes Operation or i
 Success envelopes require an explicit `result` field even for nullable receipt and block results.
 An omitted field is Unavailable; explicit null alone represents absence. Malformed receipt ingress
 retains Prepared without submission, and a later caller resumes the same exact bytes.
+
+Authority unavailable evidence moves unchanged into EvmTransactionOperationalError v3; internal
+InvocationDiagnostic moves unchanged into AdapterError::Invariant. The v3 owner also carries signer
+cause data. Existing SigningError::Invalid/Failed produce only their actual kind and sign/signer
+context, without invented deeper causes. SigningError::SignFailed moves its executing keystore
+operation/stage/cause evidence unchanged into SignerUnavailable, classified Retryable.
+The new owner schema changes dependent assembly contracts. This implementation performs no deployed
+assembly replacement; v2 runs require an explicit handling decision before rollout, without rewriting
+acknowledged history or adding a dual decoder.

@@ -17,6 +17,7 @@ name = "mfm_capabilities"
 path = "src/lib.rs"
 
 [dependencies]
+serde = { workspace = true }
 thiserror = { workspace = true }
 mfm-ids = { path = "../ids" }
 mfm-values = { path = "../values" }

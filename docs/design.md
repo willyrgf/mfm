@@ -1,23 +1,90 @@
 # Design
 
-MFM durably proves a caller-driven execution of one immutable typed Program. A Program contains an
-ordered array of State or Match declarations. Index zero is the root; every successor is a forward
-`u16` index, and array order is the only control identity. A State has exact input, output, and
-failure contracts. Missing success/failure successors mean the corresponding exact root result;
-`Never` is the reserved uninhabited failure contract and can never be encoded as a value.
+MFM durably proves caller-driven execution of an immutable typed Program. Program contains an
+ordered sequence of State declarations with exact input, output and original failure contracts,
+selected recovery policies and parameters, explicit root failure maps, scoped checkpoint positions,
+and finite recovery allowances. Success advances linearly; recovery is a Runtime transition.
+`Never` remains the uninhabited failure contract.
 
-Source code authors the graph through one deterministic typed `Operation`. Product-inspection IDs
-and descriptions on admitted Operations and States are source metadata only: they are not lowered,
-hashed, or persisted. `expand_program` gives
-the root Operation the sole `OperationExpansion` compiler context, which flattens Pure States,
-exact-pair Reads and Effects, child Operations, structured Match joins, and exact failure handlers
-into one private symbolic draft before constructing Program v3. Operations, callbacks, injection
-setup, and scope boundaries are erased; only the immutable State/Match graph is persisted.
+Source code authors the sequence through a deterministic `Operation`. Its required `validate_input`
+check establishes agreement between root planning assumptions and the initial value before expansion.
+`expand_program(entry, operation, input, limits)` qualifies that input and commits its exact value
+reference into Program v8. Runtime rejects input substitution before genesis or provider entry;
+cold reconstruction checks genesis against the same commitment. Parent planning and deterministic
+States establish future child input agreement. No authoring callback enters Runtime. Multiple RunIds
+may reuse the same exact Program/input pair.
+
+OperationExpansion lowers Pure/Read/Effect States and child Operations through one private symbolic
+draft. Scoped checkpoint tokens cannot be captured for direct installation in another scope, while
+inherited installed bindings retain their owning scope for final relocation. Operations, callbacks,
+and injection setup remain authoring-only. Program retains one selected handler implementation,
+its exact parameter contract and qualified immutable parameters, checked target list, and allowances.
+Selection is occurrence override, nearest explicit enclosing Operation, then framework Stop.
+Replacement changes parameters and targets together; allowances inherit independently, including
+explicit zero. Program v8 rejects superseded descriptors.
+
+Changes to intrinsic classification semantics require revision of the exact error contract identity.
+Errors implement the pure `ClassifyError` projection into `Retryable`, `OutcomeUnknown`,
+`InputInvalidated` or `Permanent`. Typed Runtime runners classify each retained original cause directly. One static handler receives
+that `Classification` and the derived `RecoveryContext`; original causes, complete executed inputs
+and exact requests remain separately retained. There is no classifier registry,
+policy-facing mapped incident, or classifier veto. Runtime alone authorizes the handler request.
+`StandardRecovery` retries Retryable Reads/pending Effects and restarts invalidated Pure/Read input
+only with exactly one declared target that is eligible; all other combinations stop. Custom handlers
+may request retry of an unknown pending outcome under retained-command policy, without establishing
+nonacceptance or authorizing a replacement command.
+
+EVM provider errors retain one owner category and one reviewed provider source. The source owns
+method, stage, local checked facts and Values-owned diagnostic data. Response status, RPC code,
+message and original RPC data text are observations separate from ordered exposed source ancestry.
+Diagnostic text uses the `diagnostic_float_free` persisted profile: ordinary numeric, structural
+and actual-size limits apply, while dependency-supplied text bypasses the generic secret-marker
+check. Ordinary Program/context strings retain that check. The derived FailureReport v5 uses the
+same diagnostic profile for its already admitted Objects. No independent diagnostic quota applies. Runtime commits this exact original before classification or policy and retains it through cold
+observation. Remaining upstream first-loss gaps are tracked in the owner audit inventory.
+
+Run Store's Unavailable, CorruptPhysicalState and Indeterminate each carry mandatory
+DiagnosticEvidence in their existing externally tagged snake_case wire. Runtime retains the
+concrete Store error and App/clients forward its data without recapture; no Store failure becomes
+a durable operational original. Size/arithmetic variants and acknowledgement semantics are unchanged.
+Selected PostgreSQL run calls retain operation/stage, SQLx layers and reviewed database/IO fields;
+failed precommit writes keep an observed rollback error separate from the primary sources.
+Selected SQLx dependency text follows the same diagnostic trust boundary. Local physical checks,
+allocation and task failures retain their facts without rejected rows, queries, arguments,
+connection objects or panic payloads. Configuration, gates and index errors remain separately scoped.
+
+`source_cycle: true` means exactly “traversal stopped on a repeated interface pointer.” The local
+source walker compares complete `dyn Error` pointers with `std::ptr::eq`; it does not establish
+concrete-object identity. An inline child may share its parent's data address, and one concrete
+error can have different interface representations. The latter may produce repeated cause entries
+before termination; no exact cyclic-object visit count is promised across compiler configurations.
+There is no identity registry, message comparison or diagnostic budget.
+
+
+Transaction operational error v3 retains required diagnostic evidence on AuthorityUnavailable and
+SignerUnavailable. The provider variant and typed classifications are unchanged. Authority's port
+returns either unavailable evidence or the final internal invocation diagnostic; Live moves these
+through the existing operational/invariant routes. PostgreSQL owns extraction of selected execution
+SQL and retained-fact causes. Executing keystore failures carry SignFailed evidence directly through
+the owner reply and into SignerUnavailable. Existing signer Invalid/Failed values retain their unit
+kind honestly; checked primitive constructors remain outside this enrichment.
+
+The v3 error changes the content-addressed capability/State ABIs of Programs using it. Current
+assemblies reject v2 contracts before admission; no old decoder or history rewrite is provided.
+No deployment replacement is performed by this implementation. Before rollout, inventory existing
+v2 runs and decide their handling explicitly; this source change does not authorize their deletion
+or promise continuation under the v3-only assembly. Journal v6 and unaffected value schemas stay current.
+
+The framework and shipping Portfolio default to Stop with zero global/local allowances. EVM's
+Read operational causes are Retryable; `AnchorChanged` is InputInvalidated. Transaction provider and
+authority failures are OutcomeUnknown; signer unavailability before prepared-wire retention is
+Retryable. Authenticated transaction reversion is a Permanent domain settlement failure.
+`CollectEvmBalances` inherits its caller's selected handler.
 
 Pure States deterministically map typed input to typed success/failure. Read States deterministically
 prepare typed intent, then interpret typed evidence. Effect States deterministically prepare a
 complete command and interpret typed settlement evidence. Runtime associates all values,
-mode-specific State executables, Match projections, and exact `(capability contract, binding ref)`
+mode-specific State executables, recovery callbacks, and exact `(capability contract, binding ref)`
 adapters before execution. A semantic type ID names a value family and may have multiple exact
 generic schemas; only the exact content ref selects a codec. State association likewise uses the
 exact implementation/input/output/failure ABI, so one implementation identity may own multiple
@@ -32,47 +99,121 @@ it introduces no Runtime context service, codec, or scheduler. Slot identity use
 context namespace and stable field name. Domain stage types and checked fact constructors, not
 the mechanical slot primitive, own preservation of preceding facts.
 
-Pure evaluation and Read/Effect interpretation return a proposed domain outcome or the
-Program-owned redaction-safe `StateExecutionError`. Runtime maps this internal implementation
-failure to `RuntimeError::Internal` before qualifying or appending a conclusion. Pure and Read
-errors preserve the current head; an Effect interpretation error preserves its acknowledged
-prepare even if external execution has occurred. Retrying uses that same retained command and
-EffectId. Cold fold never reinterprets completed conclusions. `PreparationError` remains the
-separate internal failure of deterministic intent/command preparation, before adapter entry.
+Pure evaluation and Read/Effect interpretation return a proposed domain outcome or a reviewed
+Values-owned `InvocationDiagnostic`. Preparation, typed decoding, handlers and maps forward the same
+immutable data. Runtime retains the actual operation/stage in `InvocationFailure`; internal errors
+never become persisted Program values or fault records. Pure and Read internal failures preserve
+the current head. Effect interpretation runs only after accepted settlement is committed, so its
+failure preserves `AwaitingInterpretation` and does not repeat external reconciliation. Owner field
+conversion happens once; its two fixed failure markers retain the supplied code/operation/primary
+size. There is no native error custody, reporting quota, source downcast or receiver recapture.
 Only authenticated transaction reversion produces a reversion outcome; local action mismatches
-are internal execution errors.
+remain internal execution errors.
 
 Each Read or Effect occurrence applies the exact capability/State pair's authoring-time injection
-policy. Before and after hooks use typed `OperationExpansion` scopes and the same Pure, Read,
-Effect, child Operation, Match, and failure-handler authoring as Operations. The kernel inserts the
-designated occurrence once between them. Hooks perform no IO or adapter registration and have no
-handle for modifying the designated occurrence. Nested hooks share the existing callback-depth and
-graph bounds. Empty hooks require identical input/output contracts; local successful scope exits
-rejoin the designated occurrence or caller continuation. The complete expansion owns its input,
-output, and failure contracts. Original failures skip the after hook: it is a success continuation,
-not a finally handler. Every suffix is checked completely before merging into its caller.
+policy. Before and after hooks use typed `OperationExpansion` scopes with the same linear State,
+child Operation, handler and checkpoint authoring as Operations. The kernel inserts the
+designated occurrence once between them. Hooks perform no IO or adapter registration and cannot
+modify the designated occurrence. Nested hooks share a 16-level callback bound, counting the root as one, and the declaration
+bounds. Before/after hooks are sibling levels. Nested entry is checked before descriptor
+construction; suspended occurrence descriptors remain boxed during prefix authoring. Failed
+expansions leave the parent draft unchanged. Trusted callbacks compose through OperationExpansion;
+this is not a sandbox for unrestricted Rust recursion or stack allocation.
+Empty hooks require identical input/output contracts. The complete expansion owns its input,
+output, expanded failure contract and explicit designated-to-expanded failure map. Original failures
+skip the after hook, which is a success continuation. Every suffix is checked before merging.
 
-Runtime admits `(RunId, Program, C0)`, appends genesis, folds the qualified history, and executes only
-the selected declaration. Pure and Read append one fused conclusion; a Read frame contains intent,
-accepted evidence, and outcome together. Effect execution first appends the complete command and
-derived `EffectId`, and enters the adapter only after known insertion. `Settled(evidence)` binds and
-interprets the evidence before appending the adjacent conclusion. `Pending` retains the identical
-prepare, appends nothing, and returns a Runnable view without re-entering the adapter in that
-invocation. An adapter error also leaves the prepare pending and appends no conclusion, but returns
-its distinct Runtime error. Match is a pure projection and adds no frame. Zero-State Programs
-terminate at genesis. Hot advancement and cold reload use the same fold. Cold fold re-prepares only
-a retained Effect command to validate its exact bytes and identity; retained Pure/Read conclusions
-remain authoritative event-log outcomes.
+Runtime admits `(RunId, Program, C0)` and persists one complete `RunRecord`: `program_ref`,
+`checkpoints`, `usage`, `effect_barrier`, and `operation`. `RecordedOperation` retains admission,
+State success/failure, Effect preparation/settlement, or recovery. Its operation is the sole source
+of the current input, cursor and phase. A private borrowed selector computes the permitted next
+work for dispatch, validation and public observation; it is neither stored nor cached. A zero-State
+Program succeeds in admission. Other Programs start at State 0/visit 0; a success selects the next
+State with its output and a fresh visit, or becomes terminal success at the final declaration.
 
-Journal owns the exact `mfm.run.frame.v2` canonical wire, recursive exact-byte SHA-256 heads, strict
-frame-local object closure, Effect prepare/conclusion adjacency, and history qualification. Store
-sees only sealed frames and opaque complete transfers. It atomically inserts at the exact head or
-writes nothing and has no Effect semantics.
+Every declared domain or operational failure is committed as `Failed(Failure)` before
+classification, handler invocation, authorization, or root mapping. `Failure` owns its Pure/Read/
+Effect operation and original once. A separate `Recovered` operation retains that failure,
+classification, request and `RecoveryOutcome`. Retry/restart spend the applicable allowance once
+and yield. Restart restores the selected checkpoint at a fresh visit and prunes later checkpoint
+inputs without resetting accumulated usage. Stop stores a mapped root only for domain failures;
+Read and pending-Effect Stop forbid a root. Terminal reports derive from that failure and outcome.
+A policy, mapping or recording failure leaves the committed original authoritative. Restoration
+selects authorized work without repeating classification, mapping or charging a grant.
 
-The fixed limits are 8 MiB per canonical run object, 65,536 non-payload envelope bytes, 25,231,360
-bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. Program validates the
-conservative bound `1 + Pure + Read + 2*Effect <= 65,536` across every declaration. These are format
-bounds, not tunable runtime policy.
+Current validation checks operation contracts, positions, recovery authorization, sorted active
+checkpoints and Effect identity/barriers. It does not compare a second phase or scan historical
+transitions. Typed operation entry owns native input/intent/command/evidence consistency; a locally
+valid substituted input is not authenticated by historical agreement. Public `FailureReport` owns
+`Failure`, reason, usage and optional root, with borrowing typed accessors and its bounded canonical
+artifact. Pending views own the unchanged `EffectCall` and optional original/outcome pair.
+`RecoveryStopped` owns only its observed view; serializers borrow the pending facts for its existing
+wire fields and status.
+
+Effect execution commits the complete input, command and derived EffectId before adapter entry.
+Pending returns the unchanged view without a record. Operational failure first commits the original
+while retaining that authority, then a separate recovery decision returns to EffectPending. Retry
+spends allowance and yields; Stop ends the invocation with `RecoveryStopped`, but explicit resume
+may reconcile the same command. Accepted evidence is bound and committed as `EffectSettled` before
+interpretation. `AwaitingInterpretation` resumes deterministic interpretation without adapter IO.
+Settled Effects cannot retry or restart, and retained Effect barriers prevent restart across their
+position. There is no pending-failure quota or future-capacity reservation.
+
+Journal owns only the canonical `mfm.run.frame.v6` envelope: RunId, sequence, previous head and
+opaque canonical payload. Its recursive head is SHA-256 over exact frame bytes. Runtime owns the
+payload and current-operation relationships; Values owns each Object's exact value ref and canonical bytes.
+Objects carry neither duplicated contract refs nor native caches. Public contract refs are derived
+when needed. Frames have no object table, back-reference resolver, or Journal lifecycle sum.
+Values implements checked `Object::Deserialize`; Runtime derives decoding on its current payload
+and requires complete input consumption. Object decoding rejects invalid checked identities,
+canonical bytes, hashes and bounds before returning an Object. Enclosing records reject unknown
+or duplicate fields and unknown variants, while accepting ordinary Serde structural forms,
+including supported sequence forms. No record re-encoding comparison or decoder seeds are needed.
+Stored-data rejection reports restore/decode with parser category, available line/column and the
+rejection reason. Nested constructor ancestry, structured expected/actual identities and size
+facts are outside this decoding contract; oversized nested Objects remain internal errors (500),
+not typed size failures (422). Subsequent slot admission and direct typed construction keep their
+structured identity/size diagnostics. Declared execution originals and selected native constructor
+hooks retain their separate causal contracts.
+
+Store loads one mechanical snapshot containing the head, admission row, latest row, and optionally
+one requested candidate-sequence row. Identical selected rows share ownership. PostgreSQL uses one
+repeatable-read transaction and bounded row selection; memory Store takes one lock-protected
+snapshot. Runtime binds selected headers and Objects, associates the admitted Program, and checks
+current operation, contracts, positions, usage limits, checkpoints and Effect authority.
+It does not replay or prove historical counter increments from earlier frames. Immutable acknowledged
+history and Store's atomic exact-head append remain required trust contracts.
+
+Known insertion adopts the candidate continuation locally. This attempt's `NotInserted` result
+performs one exact candidate probe: presence can adopt a checked current observation; exclusion or
+absence remains a noninsertion failure. Candidate presence is independent of later payload/view
+projection, and any reload failure remains secondary. These paths yield without executing another
+visit. Store errors return immediately without a probe. Indeterminate never becomes a claim of
+insertion or noninsertion. BeforeAppend requires an admitted Failure and retains its separate
+concrete Runtime cause without unsent candidate bytes. Store and NotInserted retain the admitted
+original when present, independent causes and exact submitted bytes. Failed first-original encoding
+reports known position/contract and unavailable original detail/identity, without retry or append.
+Public reports expose candidate identity,
+not its complete frame. Known insertion followed by projection failure retains the acknowledged
+RunSummary separately from any older last-observed view.
+
+No operational result is acknowledged before its original is durably inserted. Cancellation or
+crash between provider IO and append may leave an unrecorded physical attempt. The audit guarantee
+covers acknowledged originals; there is no fallback record through the failed Store, background
+finalizer, or claim that an interrupted physical attempt was recorded.
+
+The fixed limits are 32 MiB per canonical run object, 65,536 non-payload envelope bytes, 134,283,264
+bytes per frame, 65,536 frames, and 512 MiB of frame bytes per run. Values enforces actual object
+bounds, Runtime checks actual non-payload metadata, Journal checks complete frames, and Store checks
+actual accumulated count and bytes with checked arithmetic. Recovery allowances govern semantic
+decisions only. Actual results can exceed these limits after IO; rejection preserves the
+acknowledged continuation and any unresolved command authority.
+
+Hot advancement and cold restore use the same current-state checks. Native materialization occurs
+at the selected typed callback. Before reconciling an unresolved Effect, Runtime deterministically
+re-prepares and compares its exact command and identity. It does not rerun completed interpretations,
+classifiers, handlers or maps merely to read a run. Public RunView derives from admission, current
+commit and head; it does not expose the private checkpoint/usage representation wholesale.
 
 Signing owns the checked transient recoverable-secp256k1 public key, 32-byte digest, low-S compact
 recoverable signature, public recovery, and key- and purpose-bound `Secp256k1Signer` contract.
@@ -83,6 +224,22 @@ the owner channel. Duplicate same-key imports return handles with the same publi
 carry different purposes without consuming another key slot. Explicit async shutdown requests exit
 and immediately awaits an OS-thread join in blocking work; dropping the final sender also ends the
 owner loop.
+
+Portfolio admission retains checked `ConfigName` and `DigestBytes` identities. Their named value
+grammars delegate to IDs; raw strings are checked at ingress, not re-parsed by Application.
+
+Inline failure reports retain original and mapped payloads even when identical. Each report is
+limited to 32 MiB independently of its individually qualified cause values. Admission reserves
+neither future frames nor combined reports. Report overflow returns `size_limit_exceeded`
+before the terminal append, preserving the acknowledged AwaitingRecovery head and its original facts and any
+pending command authority; repeated explicit progress can encounter the same limit. No report is
+persisted separately. Size errors identify the resource and limit without payload contents, distinguishing actual
+measurements from lower bounds when serialization stopped before visiting the suffix; unrepresentable capacity arithmetic is a distinct invocation error.
+
+The generic canonical JSON syntax ceiling is 256 MiB so complete frames fit; it does not replace
+Values' object or Journal's frame limits. Run-history PostgreSQL baseline v2 enforces the larger
+frame limit and rejects v1 installations. Provision a fresh development schema; no existing history
+or acknowledged head is migrated, rewritten or truncated.
 
 EVM Program values use byte-backed checked lowercase `EvmAddress` and `EvmHash`, canonical decimal
 `EvmU256`, exact `CanonicalBytes`, and `NonZeroU64` chain IDs and gas limits. A transaction binding
@@ -110,16 +267,16 @@ the complete command and reservation; `PreparedTransactionFacts` retains those p
 preparation evidence; `ExecutedTransactionFacts` retains those plus full settlement;
 `CompletedTransactionFacts<Created/Called>` adds the checked address or target. No fact nests a
 preceding workflow context. Fact constructors and decoders check command reference, nonce domain,
-settlement nonce/hash/action, and projection agreement. Runtime and Journal establish EffectId
-provenance; decoding arbitrary JSON does not establish that a transaction ran. The reserved and
+settlement nonce/hash/action, and projection agreement. Runtime binds EffectId provenance in its opaque Journal payload; decoding arbitrary JSON does not establish that a transaction ran. The reserved and
 prepared capability command descriptors remain separate from these report records. Pending
 execution manufactures no completed facts. Signed wire never enters Program or Journal.
 
 Executable identity hashes a canonical domain-separated descriptor containing implementation
 version, stage, explicit recipe identity, ordered selected slots, and outcome mode. Exact value
-schemas remain additional ABI association keys. Cold fold re-prepares retained commands from
-exact snapshots and does not rerun completed interpretation. A completed transaction adds seven
-frames after admission; Program v3, Journal wire, and the Runtime fold remain unchanged.
+schemas remain additional ABI association keys. Cold reconciliation re-prepares unresolved commands
+from exact inputs without rerunning completed interpretation. A successful three-Effect transaction
+and final Pure projection add ten frames after admission under Program v8 and Journal frame v6: each
+Effect prepares, commits settlement, and commits interpretation separately.
 
 Terminal reporting uses existing checked execution facts and settlement outcomes; there is no
 separate persisted outcome projection. Products own root failure policy. The fixture reports retain
@@ -156,7 +313,8 @@ run in immediately awaited blocking work; IO and custody handles stay outside th
 Execution checks receipt before submitting at most once per invocation. A matching submission
 returns Pending; transport failure, dropped acknowledgement, malformed response, or hash mismatch
 is Unavailable. Settlement requires a validated receipt and matching canonical block identity.
-Journal alone retains settlement; cold completed histories need no provider or signer call. This
+Runtime retains settlement in the opaque Journal payload before interpretation; cold completed
+runs need no provider or signer call. This
 canonical-receipt policy is limited to the pinned non-reorging development fixture and is not
 registered by production composition. Displaced old transactions stay unresolved; there is no
 automatic renonce, replacement, or terminal conflict policy.
@@ -191,7 +349,7 @@ authority, and exact configuration deletion cannot remove their rows. Admission 
 qualify the owned objects; it does not police unrelated inheritance descendants.
 
 
-Loads use one read-only repeatable snapshot. Appends take the per-RunId advisory transaction lock
+Loads use one read-only repeatable snapshot of admission/latest and any requested probe row. Appends take the per-RunId advisory transaction lock
 before observing state and force synchronous COMMIT. Configuration imports use the `(name, digest)`
 primary key to create or compare immutable revisions. Import and exact idempotent delete force
 synchronous COMMIT and preserve ambiguous acknowledgement. There is no revision-count limit. A
@@ -244,14 +402,31 @@ automatic retry.
 
 The configuration repository retains complete, individually bounded canonical documents tagged by
 the exact entry point. Import validates and plans the document before atomically creating or
-comparing one immutable revision. Run start requires an exact retained name and `sha256-jcs-v1`
-digest, checks every requested binding before Runtime Store IO, and returns the selected config
-summary with the run view. The management surface exposes import, complete unpaginated listing, and
+comparing one immutable revision. New admission requires an exact retained name and `sha256-jcs-v1`
+digest and checks every requested binding before appending genesis. Start first reads the requested
+RunId: a matching retained source identity resumes without requiring configuration custody; a
+conflicting selection is rejected. Uncertain reads stop admission. The result includes the selected
+config summary and run view. The management surface exposes import, complete unpaginated listing, and
 idempotent exact delete. Deletion does not revoke runs already admitted from that revision. The shared
 surface also owns compiled component, entry-point, and binding discovery, run progress/read, and
 mechanical run-head listing. Compiled component discovery is an unexpanded inventory of the public
 entry points and reusable Operations admitted by Application composition plus the exact States that
 the same composition registers with Runtime.
+
+Candidate enrichment uses ordinary anchored balance Reads and a final Pure selection State. It
+retains every native source and tokens with nonzero raw balance, preserving candidate order,
+configuration quotes, and route identities. Each collection requires a native source. Provider
+failure fails the run; it does not remove candidates. Publication explicitly reads a successful
+exact-schema enrichment output, resolves its bindings against the immutable composition inventory,
+and imports an immutable snapshot config. It never executes discovery or admits another run.
+
+New dependent admission verifies the enrichment RunId, terminal head, output ref, resolved values,
+and bindings against that retained successful run. C0 retains complete resolved demand and the
+bounded linkage, plus the selected source revision name, entry point, and 64 lowercase hex digits
+of its canonical-document SHA-256 digest. This fixed revision field does not change the raw
+ContentDigest grammar. RunView exposes its already-qualified genesis input and Program entry point
+for matching admission recovery. Configuration deletion is not revocation; read/progress never
+reload configuration or enrichment history. Re-enrichment is an explicit new run and revision.
 Every execution receives an explicit transport-selected RunId. Both client surfaces accept one or
 use the same Application client primitive to derive one from OS cryptographic entropy before the
 start use case. Ambiguous append acknowledgement carries the exact start or progress recovery
@@ -275,3 +450,10 @@ fresh external authority and fresh RunIds.
 ## Material uncertainties
 
 none
+
+Enrichment output pairs every resolved collection configuration with its route and observed anchor.
+Portfolio identity and selected quote are stored once; consuming projection produces the existing
+snapshot configuration and selector. Publication retains the exact output ref in provenance: a
+changed output identity changes the configuration revision, while repeated publication of the
+same qualified terminal output is idempotent. Superseded output schemas are rejected; histories
+and existing revisions are never rewritten.

@@ -1,444 +1,29 @@
-use std::collections::VecDeque;
-use std::future::Future;
 use std::marker::PhantomData;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use mfm_capabilities::{CapabilityError, EffectCapabilityContract, ReadCapabilityContract};
-use mfm_ids::{ContentRef, DigestBytes, EffectId, EntryPointId, RunId, SemanticTypeId, StableId};
-use mfm_journal::{EncodedRunFrame, JournalHistory, OutcomeKind, StoredRunBytes};
-use mfm_program::{
-    expand_program, CapabilityInjection, EffectState, Never, Operation, OperationExpansion,
-    PreparationError, ProgramError, ProposedStateOutcome, PureState, ReadState, State,
-};
-use mfm_program_derive::MfmValue;
+use mfm_capabilities::AdapterError;
+use mfm_ids::{DigestBytes, EffectId, EntryPointId, RunId};
+use mfm_journal::{decode_frame, seal_frame};
+use mfm_program::{expand_program, ProgramLimits};
 use mfm_runtime::{
-    AdapterError, EffectAdapterOutcome, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError,
+    EffectAdapterOutcome, InvocationFailure, RunViewState, Runtime, RuntimeAssemblyBuilder,
+    RuntimeError,
 };
-use mfm_store::{AppendResult, MemoryStore, Store, StoreError};
-use mfm_values::{
-    canonicalize_mfm_value, MfmValue as MfmValueTrait, SchemaAudit, SchemaDescriptor,
-};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-struct Number {
-    value: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NumberAlias {
-    value: u64,
-}
-
-impl MfmValueTrait for NumberAlias {
-    fn schema_descriptor() -> mfm_values::Result<SchemaDescriptor> {
-        Number::schema_descriptor()
-    }
-
-    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
-        Number::semantic_id()
-    }
-}
-
-static ALTERNATE_DESCRIPTOR_AUDIT: AtomicBool = AtomicBool::new(false);
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MutableDescriptorNumber {
-    value: u64,
-}
-
-impl MfmValueTrait for MutableDescriptorNumber {
-    fn schema_descriptor() -> mfm_values::Result<SchemaDescriptor> {
-        let mut descriptor = Number::schema_descriptor()?;
-        let rust_type = if ALTERNATE_DESCRIPTOR_AUDIT.load(Ordering::SeqCst) {
-            "MutableDescriptorNumber::alternate"
-        } else {
-            "MutableDescriptorNumber"
-        };
-        descriptor.audit =
-            SchemaAudit::__derive_generated("mfm-runtime-tests", rust_type, "test-only");
-        Ok(descriptor)
-    }
-
-    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
-        Number::semantic_id()
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-struct FirstGenericValue {
-    first: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-struct SecondGenericValue {
-    second: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.test.runtime",
-    name = "generic-state-value",
-    version = "1",
-    schema = "mfm.test.runtime-generic-state-value"
-)]
-struct GenericStateValue<K> {
-    value: K,
-}
-
-struct GenericState<K>(PhantomData<fn() -> K>);
-
-impl<K: MfmValueTrait> State for GenericState<K> {
-    type Input = GenericStateValue<K>;
-    type Output = GenericStateValue<K>;
-    type Failure = Never;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.runtime/generic-state@1").map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl<K: MfmValueTrait> PureState for GenericState<K> {
-    fn evaluate(
-        input: Self::Input,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        Ok(ProposedStateOutcome::Success { output: input })
-    }
-}
-
-struct ConflictingGenericState<K>(PhantomData<fn() -> K>);
-
-impl<K: MfmValueTrait> State for ConflictingGenericState<K> {
-    type Input = GenericStateValue<K>;
-    type Output = GenericStateValue<K>;
-    type Failure = Never;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        GenericState::<K>::state_id()
-    }
-}
-
-impl<K: MfmValueTrait> PureState for ConflictingGenericState<K> {
-    fn evaluate(
-        input: Self::Input,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        Ok(ProposedStateOutcome::Success { output: input })
-    }
-}
-
-struct GenericProgram<K>(PhantomData<fn() -> K>);
-
-impl<K: MfmValueTrait> Operation for GenericProgram<K> {
-    type Input = GenericStateValue<K>;
-    type Output = GenericStateValue<K>;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.pure::<GenericState<K>>()
-    }
-}
-
-struct Increment;
-
-impl State for Increment {
-    type Input = Number;
-    type Output = Number;
-    type Failure = Never;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.runtime/increment@1").map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl PureState for Increment {
-    fn evaluate(
-        input: Self::Input,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        Ok(ProposedStateOutcome::Success {
-            output: Number {
-                value: input.value + 1,
-            },
-        })
-    }
-}
-
-struct PureProgram;
-
-impl Operation for PureProgram {
-    type Input = Number;
-    type Output = Number;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.pure::<Increment>()
-    }
-}
-
-struct EmptyProgram;
-
-impl Operation for EmptyProgram {
-    type Input = Number;
-    type Output = Number;
-    type Failure = Never;
-
-    fn expand(
-        &self,
-        _body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-struct Intent {
-    value: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-struct Evidence {
-    intent_value_ref: ContentRef,
-    value: u64,
-    accepted: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-struct Binding {
-    route: u64,
-}
-
-struct Observation;
-
-impl ReadCapabilityContract for Observation {
-    type Intent = Intent;
-    type Evidence = Evidence;
-
-    fn contract_id() -> mfm_capabilities::Result<StableId> {
-        StableId::new("mfm.test.runtime/observation@1")
-            .map_err(|_| CapabilityError::InvalidContract)
-    }
-
-    fn bind_evidence(
-        intent_value_ref: &ContentRef,
-        intent: &Self::Intent,
-        evidence: &Self::Evidence,
-    ) -> mfm_capabilities::Result<()> {
-        let expected_value_ref = canonicalize_mfm_value(intent)
-            .map(|(_, value_ref)| value_ref)
-            .map_err(|_| CapabilityError::EvidenceBinding)?;
-        (intent_value_ref == &expected_value_ref
-            && intent_value_ref == &evidence.intent_value_ref
-            && intent.value == evidence.value)
-            .then_some(())
-            .ok_or(CapabilityError::EvidenceBinding)
-    }
-}
-
-struct Observe;
-
-impl State for Observe {
-    type Input = Number;
-    type Output = Number;
-    type Failure = Number;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.runtime/observe@1").map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl ReadState<Observation> for Observe {
-    fn prepare(input: &Self::Input) -> Result<Intent, PreparationError> {
-        Ok(Intent { value: input.value })
-    }
-
-    fn interpret(
-        input: Self::Input,
-        evidence: &Evidence,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        if evidence.accepted {
-            Ok(ProposedStateOutcome::Success { output: input })
-        } else {
-            Ok(ProposedStateOutcome::Failure { failure: input })
-        }
-    }
-}
-
-impl CapabilityInjection<Observe> for Observation {
-    type Setup = Binding;
-    type ExpandedInput = Number;
-    type ExpandedOutput = Number;
-    type ExpandedFailure = <Observe as mfm_program::State>::Failure;
-
-    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<mfm_ids::ContentRef> {
-        canonicalize_mfm_value(setup)
-            .map(|(_, reference)| reference)
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-struct ReadProgram;
-
-impl Operation for ReadProgram {
-    type Input = Number;
-    type Output = Number;
-    type Failure = Number;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.read::<Observe, Observation>(&Binding { route: 7 })
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-struct Command {
-    value: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-struct EffectEvidence {
-    effect_id: EffectId,
-    value: u64,
-    accepted: bool,
-}
-
-struct Mutation;
-
-impl EffectCapabilityContract for Mutation {
-    type Command = Command;
-    type Evidence = EffectEvidence;
-
-    fn contract_id() -> mfm_capabilities::Result<StableId> {
-        StableId::new("mfm.test.runtime/mutation@1").map_err(|_| CapabilityError::InvalidContract)
-    }
-
-    fn bind_evidence(
-        effect_id: &EffectId,
-        command: &Self::Command,
-        evidence: &Self::Evidence,
-    ) -> mfm_capabilities::Result<()> {
-        (effect_id == &evidence.effect_id && command.value == evidence.value)
-            .then_some(())
-            .ok_or(CapabilityError::EvidenceBinding)
-    }
-}
-
-struct ConflictingReadCapability;
-
-impl ReadCapabilityContract for ConflictingReadCapability {
-    type Intent = Command;
-    type Evidence = EffectEvidence;
-
-    fn contract_id() -> mfm_capabilities::Result<StableId> {
-        Mutation::contract_id()
-    }
-
-    fn bind_evidence(
-        _intent_value_ref: &ContentRef,
-        intent: &Self::Intent,
-        evidence: &Self::Evidence,
-    ) -> mfm_capabilities::Result<()> {
-        (intent.value == evidence.value)
-            .then_some(())
-            .ok_or(CapabilityError::EvidenceBinding)
-    }
-}
-
-struct Mutate;
-
-const PREPARATION_FAILURE_SENTINEL: u64 = u64::MAX;
-
-impl State for Mutate {
-    type Input = Number;
-    type Output = Number;
-    type Failure = Number;
-
-    fn state_id() -> mfm_program::Result<StableId> {
-        StableId::new("mfm.test.runtime/mutate@1").map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-impl EffectState<Mutation> for Mutate {
-    fn prepare(input: &Self::Input) -> Result<Command, PreparationError> {
-        if input.value == PREPARATION_FAILURE_SENTINEL {
-            return Err(PreparationError);
-        }
-        Ok(Command { value: input.value })
-    }
-
-    fn interpret(
-        input: Self::Input,
-        evidence: &EffectEvidence,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        if evidence.accepted {
-            Ok(ProposedStateOutcome::Success { output: input })
-        } else {
-            Ok(ProposedStateOutcome::Failure { failure: input })
-        }
-    }
-}
-
-impl CapabilityInjection<Mutate> for Mutation {
-    type Setup = Binding;
-    type ExpandedInput = Number;
-    type ExpandedOutput = Number;
-    type ExpandedFailure = <Mutate as mfm_program::State>::Failure;
-
-    fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<mfm_ids::ContentRef> {
-        canonicalize_mfm_value(setup)
-            .map(|(_, reference)| reference)
-            .map_err(|_| ProgramError::InvalidContract)
-    }
-}
-
-struct EffectProgram;
-
-impl Operation for EffectProgram {
-    type Input = Number;
-    type Output = Number;
-    type Failure = Number;
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-    ) -> mfm_program::Result<()> {
-        body.effect::<Mutate, Mutation>(&Binding { route: 8 })
-    }
-}
+use mfm_store::{MemoryStore, Store, StoreError};
+use mfm_values::{canonicalize_mfm_value, InvocationDiagnostic, MfmValue as MfmValueTrait};
+
+#[path = "support/callback_errors.rs"]
+mod callback_errors;
+#[path = "support/injection.rs"]
+mod injection;
+#[path = "support/program.rs"]
+mod program;
+#[path = "support/scripted_store.rs"]
+mod scripted_store;
+
+use program::*;
+use scripted_store::*;
 
 #[test]
 fn exact_value_and_state_abi_collisions_are_rejected() {
@@ -446,10 +31,10 @@ fn exact_value_and_state_abi_collisions_are_rejected() {
     different_type
         .register_value::<Number>()
         .expect("number codec");
-    assert_eq!(
+    assert!(matches!(
         different_type.register_value::<NumberAlias>(),
         Err(RuntimeError::IncompatibleAssembly)
-    );
+    ));
     different_type
         .register_value::<Number>()
         .expect("failed registration does not poison the builder");
@@ -461,20 +46,20 @@ fn exact_value_and_state_abi_collisions_are_rejected() {
         .register_value::<MutableDescriptorNumber>()
         .expect("first descriptor");
     ALTERNATE_DESCRIPTOR_AUDIT.store(true, Ordering::SeqCst);
-    assert_eq!(
+    assert!(matches!(
         different_descriptor.register_value::<MutableDescriptorNumber>(),
         Err(RuntimeError::IncompatibleAssembly)
-    );
+    ));
     ALTERNATE_DESCRIPTOR_AUDIT.store(false, Ordering::SeqCst);
 
     let mut different_state_type = RuntimeAssemblyBuilder::new().expect("builder");
     different_state_type
         .register_pure::<GenericState<FirstGenericValue>>()
         .expect("generic state");
-    assert_eq!(
+    assert!(matches!(
         different_state_type.register_pure::<ConflictingGenericState<FirstGenericValue>>(),
         Err(RuntimeError::IncompatibleAssembly)
-    );
+    ));
 }
 
 #[tokio::test]
@@ -507,6 +92,10 @@ async fn one_semantic_family_executes_multiple_exact_schemas_hot_and_cold() {
             expand_program(
                 EntryPointId::new("mfm.test.runtime/generic-first@1").expect("first entry point"),
                 &GenericProgram::<FirstGenericValue>(PhantomData),
+                &GenericStateValue {
+                    value: FirstGenericValue { first: 11 },
+                },
+                ProgramLimits::new(0),
             )
             .expect("first Program"),
             GenericStateValue {
@@ -530,6 +119,12 @@ async fn one_semantic_family_executes_multiple_exact_schemas_hot_and_cold() {
             expand_program(
                 EntryPointId::new("mfm.test.runtime/generic-second@1").expect("second entry point"),
                 &GenericProgram::<SecondGenericValue>(PhantomData),
+                &GenericStateValue {
+                    value: SecondGenericValue {
+                        second: "two".to_owned(),
+                    },
+                },
+                ProgramLimits::new(0),
             )
             .expect("second Program"),
             GenericStateValue {
@@ -585,7 +180,7 @@ async fn one_semantic_family_executes_multiple_exact_schemas_hot_and_cold() {
 }
 
 #[test]
-fn effect_registration_rejects_duplicate_and_wrong_kind_capability_entries() {
+fn effect_registration_rejects_duplicates_and_distinguishes_capability_modes() {
     let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder
         .register_effect::<Mutate, Mutation>()
@@ -606,7 +201,7 @@ fn effect_registration_rejects_duplicate_and_wrong_kind_capability_entries() {
             },
         )
         .expect("Effect adapter");
-    assert_eq!(
+    assert!(matches!(
         builder.register_effect_adapter::<Mutation, _, _>(
             Binding { route: 8 },
             |effect_id, _command_value_ref, command| {
@@ -622,14 +217,19 @@ fn effect_registration_rejects_duplicate_and_wrong_kind_capability_entries() {
             },
         ),
         Err(RuntimeError::IncompatibleAssembly)
-    );
-    assert_eq!(
-        builder.register_adapter::<ConflictingReadCapability, _, _>(
-            Binding { route: 8 },
-            |_, _intent| { Box::pin(async { Err(AdapterError::Internal) }) },
-        ),
-        Err(RuntimeError::IncompatibleAssembly)
-    );
+    ));
+    builder
+        .register_adapter::<ConflictingReadCapability, _, _>(Binding { route: 8 }, |_, _| {
+            Box::pin(async {
+                Err(AdapterError::Invariant(InvocationDiagnostic::from_fields(
+                    "state_internal",
+                    "effect_registration_rejects_duplicates_and_distinguishes_capability_modes",
+                    &(AdapterRejected),
+                    None,
+                )))
+            })
+        })
+        .expect("mode participates in the capability contract identity");
 }
 
 #[tokio::test]
@@ -648,21 +248,29 @@ async fn missing_effect_adapter_is_rejected_before_store_io() {
                     EntryPointId::new("mfm.test.runtime/missing-effect-adapter@1")
                         .expect("entry point"),
                     &EffectProgram,
+                    &Number { value: 1 },
+                    ProgramLimits::new(0),
                 )
                 .expect("Program"),
                 Number { value: 1 },
             )
             .await,
-        Err(RuntimeError::IncompatibleAssembly)
+        Err(InvocationFailure::Execution {
+            error: RuntimeError::IncompatibleAssembly,
+            ..
+        })
     ));
     assert!(matches!(
         runtime.read(&run_id).await,
-        Err(RuntimeError::Absent)
+        Err(InvocationFailure::Execution {
+            error: RuntimeError::Absent,
+            ..
+        })
     ));
 }
 
 #[tokio::test]
-async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
+async fn pure_and_zero_state_programs_restore_without_reserving_future_recovery_capacity() {
     let store = Arc::new(MemoryStore::new());
     let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
     builder.register_pure::<Increment>().expect("Pure State");
@@ -671,6 +279,8 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
     let program = expand_program(
         EntryPointId::new("mfm.test.runtime/pure@1").expect("entry point"),
         &PureProgram,
+        &Number { value: 4 },
+        ProgramLimits::new(u32::MAX),
     )
     .expect("Program");
 
@@ -682,15 +292,32 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
         panic!("Pure Program did not succeed");
     };
     assert_eq!(hot.head_sequence(), 2);
+    assert_eq!(hot.admitted_context().decode::<Number>().unwrap().value, 4);
     assert_eq!(hot_value.canonical_bytes(), br#"{"value":5}"#);
+    assert_eq!(hot_value.decode::<Number>().unwrap().value, 5);
+    let mismatch = hot_value.decode::<FirstGenericValue>().err().unwrap();
+    assert_eq!(mismatch.code(), "value_error");
+    assert_eq!(
+        mismatch.details().as_value(),
+        &serde_json::json!("invalid_schema_identity")
+    );
 
     let cold = runtime.read(&run_id).await.expect("cold read");
     let RunViewState::Succeeded(cold_value) = cold.state() else {
         panic!("cold Program did not succeed");
     };
     assert_eq!(cold.head_sequence(), hot.head_sequence());
+    assert_eq!(
+        cold.admitted_context().value_ref(),
+        hot.admitted_context().value_ref()
+    );
+    assert_eq!(
+        cold.admitted_context().canonical_bytes(),
+        hot.admitted_context().canonical_bytes()
+    );
     assert_eq!(cold.head_digest(), hot.head_digest());
     assert_eq!(cold_value.canonical_bytes(), hot_value.canonical_bytes());
+    assert_eq!(cold_value.decode::<Number>().unwrap().value, 5);
 
     let mut empty_builder = RuntimeAssemblyBuilder::new().expect("builder");
     empty_builder
@@ -700,6 +327,8 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
     let empty_program = expand_program(
         EntryPointId::new("mfm.test.runtime/empty@1").expect("entry point"),
         &EmptyProgram,
+        &Number { value: 9 },
+        ProgramLimits::new(0),
     )
     .expect("empty Program");
     let empty_view = empty
@@ -718,7 +347,7 @@ async fn pure_and_zero_state_programs_are_identical_hot_and_cold() {
 }
 
 #[tokio::test]
-async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
+async fn read_success_and_separate_failure_recovery_are_restorable_without_repeating_io() {
     let calls = Arc::new(AtomicUsize::new(0));
     let store = Arc::new(MemoryStore::new());
     let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
@@ -746,6 +375,8 @@ async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
     let program = expand_program(
         EntryPointId::new("mfm.test.runtime/read@1").expect("entry point"),
         &ReadProgram,
+        &Number { value: 12 },
+        ProgramLimits::new(0),
     )
     .expect("Program");
     let hot = runtime
@@ -765,7 +396,9 @@ async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
         .expect("Read State");
     unavailable_builder
         .register_adapter::<Observation, _, _>(Binding { route: 7 }, |_, _| {
-            Box::pin(async { Err(AdapterError::Unavailable) })
+            Box::pin(async {
+                Err(AdapterError::Invariant(InvocationDiagnostic::from_fields("state_internal", "read_success_and_separate_failure_recovery_are_restorable_without_repeating_io", &(AdapterRejected), None)))
+            })
         })
         .expect("unavailable adapter");
     let unavailable = Runtime::new(unavailable_builder.finish(), unavailable_store.clone());
@@ -773,6 +406,8 @@ async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
     let interrupted_program = expand_program(
         EntryPointId::new("mfm.test.runtime/read@1").expect("entry point"),
         &ReadProgram,
+        &Number { value: 21 },
+        ProgramLimits::new(0),
     )
     .expect("Program");
     assert!(matches!(
@@ -783,14 +418,21 @@ async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
                 Number { value: 21 },
             )
             .await,
-        Err(RuntimeError::Unavailable)
+        Err(InvocationFailure::Execution {
+            error: RuntimeError::Native {
+                operation: mfm_runtime::Operation::ReadAdapter,
+                stage: mfm_runtime::Stage::Execute,
+                cause,
+            },
+            ..
+        }) if cause.details().as_value() == &serde_json::json!(null)
     ));
     let prefix = unavailable
         .read(&interrupted_run_id)
         .await
         .expect("durable prefix");
     assert_eq!(prefix.head_sequence(), 1);
-    assert!(matches!(prefix.state(), RunViewState::Runnable));
+    assert!(matches!(prefix.state(), RunViewState::Runnable { .. }));
 
     let mut resumed_builder = RuntimeAssemblyBuilder::new().expect("builder");
     resumed_builder
@@ -815,8 +457,13 @@ async fn a_fused_read_is_replayable_and_a_failed_observation_is_resumable() {
     let RunViewState::Failed(value) = resumed.state() else {
         panic!("rejected observation did not follow the Program failure path");
     };
-    assert_eq!(resumed.head_sequence(), 2);
-    assert_eq!(value.canonical_bytes(), br#"{"value":21}"#);
+    assert_eq!(resumed.head_sequence(), 3);
+    let mfm_runtime::Failure::Domain { original, .. } = value.failure() else {
+        panic!("domain result")
+    };
+    let root = value.root().unwrap();
+    assert_eq!(original.decode::<Number>().unwrap().value, 21);
+    assert_eq!(root.decode::<Number>().unwrap().value, 21);
 }
 
 #[tokio::test]
@@ -860,6 +507,8 @@ async fn cancellation_during_observation_preserves_a_runnable_prefix() {
                     expand_program(
                         EntryPointId::new("mfm.test.runtime/cancel@1").expect("entry point"),
                         &ReadProgram,
+                        &Number { value: 8 },
+                        ProgramLimits::new(0),
                     )
                     .expect("Program"),
                     Number { value: 8 },
@@ -877,7 +526,7 @@ async fn cancellation_during_observation_preserves_a_runnable_prefix() {
 
     let prefix = runtime.read(&run_id).await.expect("durable prefix");
     assert_eq!(prefix.head_sequence(), 1);
-    assert!(matches!(prefix.state(), RunViewState::Runnable));
+    assert!(matches!(prefix.state(), RunViewState::Runnable { .. }));
 }
 
 #[tokio::test]
@@ -930,6 +579,8 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
                     expand_program(
                         EntryPointId::new("mfm.test.runtime/effect@1").expect("entry point"),
                         &EffectProgram,
+                        &Number { value: 34 },
+                        ProgramLimits::new(0),
                     )
                     .expect("Program"),
                     Number { value: 34 },
@@ -941,7 +592,10 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
 
     let pending = runtime.read(&run_id).await.expect("pending view");
     assert_eq!(pending.head_sequence(), 2);
-    assert!(matches!(pending.state(), RunViewState::Runnable));
+    assert!(matches!(
+        pending.state(),
+        RunViewState::EffectPending { .. }
+    ));
     task.abort();
     match task.await {
         Err(error) => assert!(error.is_cancelled()),
@@ -987,7 +641,7 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
         .expect("Effect adapter");
     let resumed_runtime = Runtime::new(resumed_builder.finish(), store);
     let resumed = resumed_runtime.resume(&run_id).await.expect("cold resume");
-    assert_eq!(resumed.head_sequence(), 3);
+    assert_eq!(resumed.head_sequence(), 4);
     assert!(matches!(resumed.state(), RunViewState::Succeeded(_)));
     {
         let resumed_calls = resumed_observed.lock().expect("resumed observations");
@@ -1043,6 +697,8 @@ async fn pending_yields_once_and_a_later_settlement_closes_the_same_prepare() {
             expand_program(
                 EntryPointId::new("mfm.test.runtime/pending-effect@1").expect("entry point"),
                 &EffectProgram,
+                &Number { value: 21 },
+                ProgramLimits::new(0),
             )
             .expect("Program"),
             Number { value: 21 },
@@ -1050,16 +706,19 @@ async fn pending_yields_once_and_a_later_settlement_closes_the_same_prepare() {
         .await
         .expect("pending is normal progress");
     assert_eq!(pending.head_sequence(), 2);
-    assert!(matches!(pending.state(), RunViewState::Runnable));
+    assert!(matches!(
+        pending.state(),
+        RunViewState::EffectPending { .. }
+    ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let cold = runtime.read(&run_id).await.expect("cold pending view");
     assert_eq!(cold.head_digest(), pending.head_digest());
-    assert!(matches!(cold.state(), RunViewState::Runnable));
+    assert!(matches!(cold.state(), RunViewState::EffectPending { .. }));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let settled = runtime.resume(&run_id).await.expect("later settlement");
-    assert_eq!(settled.head_sequence(), 3);
+    assert_eq!(settled.head_sequence(), 4);
     assert!(matches!(settled.state(), RunViewState::Succeeded(_)));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
@@ -1098,6 +757,10 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
                 expand_program(
                     EntryPointId::new("mfm.test.runtime/reject-effect@1").expect("entry point"),
                     &EffectProgram,
+                    &Number {
+                        value: PREPARATION_FAILURE_SENTINEL
+                    },
+                    ProgramLimits::new(0),
                 )
                 .expect("Program"),
                 Number {
@@ -1105,7 +768,14 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
                 },
             )
             .await,
-        Err(RuntimeError::Internal)
+        Err(InvocationFailure::Execution {
+            error: RuntimeError::Native {
+                operation: mfm_runtime::Operation::EffectPrepare,
+                stage: mfm_runtime::Stage::Execute,
+                cause,
+            },
+            ..
+        }) if cause.details().as_value()["input"] == PREPARATION_FAILURE_SENTINEL
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -1146,12 +816,21 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
                 expand_program(
                     EntryPointId::new("mfm.test.runtime/invalid-evidence@1").expect("entry point"),
                     &EffectProgram,
+                    &Number { value: 2 },
+                    ProgramLimits::new(0),
                 )
                 .expect("Program"),
                 Number { value: 2 },
             )
             .await,
-        Err(RuntimeError::Internal)
+        Err(InvocationFailure::Execution {
+            error: RuntimeError::Native {
+                operation: mfm_runtime::Operation::EffectBind,
+                stage: mfm_runtime::Stage::Execute,
+                cause,
+            },
+            ..
+        }) if cause.details().as_value() == &serde_json::json!("evidence_binding")
     ));
     assert_eq!(
         invalid
@@ -1161,117 +840,6 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
             .head_sequence(),
         2
     );
-}
-
-#[derive(Clone, Copy)]
-enum AppendAction {
-    RetainThenNotInserted,
-    Indeterminate,
-    RetainThenIndeterminate,
-}
-
-struct ScriptedStore {
-    inner: MemoryStore,
-    actions: std::sync::Mutex<VecDeque<(u64, AppendAction)>>,
-    frames: std::sync::Mutex<Vec<Vec<u8>>>,
-}
-
-impl ScriptedStore {
-    fn new(actions: impl IntoIterator<Item = (u64, AppendAction)>) -> Self {
-        Self {
-            inner: MemoryStore::new(),
-            actions: std::sync::Mutex::new(actions.into_iter().collect()),
-            frames: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    fn recording() -> Self {
-        Self::new([])
-    }
-
-    fn snapshot(&self) -> Vec<Vec<u8>> {
-        self.frames.lock().expect("recorded frames").clone()
-    }
-
-    fn record_if_inserted(&self, frame: &EncodedRunFrame, result: AppendResult) {
-        if result == AppendResult::Inserted {
-            self.frames
-                .lock()
-                .expect("recorded frames")
-                .push(frame.canonical_bytes().to_vec());
-        }
-    }
-}
-
-impl Store for ScriptedStore {
-    fn load_run<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        self.inner.load_run(run_id)
-    }
-
-    fn append_run<'a>(
-        &'a self,
-        frame: &'a EncodedRunFrame,
-    ) -> Pin<Box<dyn Future<Output = Result<AppendResult, StoreError>> + Send + 'a>> {
-        Box::pin(async move {
-            let action = {
-                let mut actions = self.actions.lock().expect("append actions");
-                actions
-                    .iter()
-                    .position(|(sequence, _)| *sequence == frame.run_sequence())
-                    .and_then(|index| actions.remove(index))
-                    .map(|(_, action)| action)
-            };
-            match action {
-                Some(AppendAction::RetainThenNotInserted) => {
-                    let result = self.inner.append_run(frame).await?;
-                    self.record_if_inserted(frame, result);
-                    Ok(AppendResult::NotInserted)
-                }
-                Some(AppendAction::Indeterminate) => Err(StoreError::Indeterminate),
-                Some(AppendAction::RetainThenIndeterminate) => {
-                    let result = self.inner.append_run(frame).await?;
-                    self.record_if_inserted(frame, result);
-                    Err(StoreError::Indeterminate)
-                }
-                None => {
-                    let result = self.inner.append_run(frame).await?;
-                    self.record_if_inserted(frame, result);
-                    Ok(result)
-                }
-            }
-        })
-    }
-}
-
-struct RetainedStore(Vec<Vec<u8>>);
-
-impl Store for RetainedStore {
-    fn load_run<'a>(
-        &'a self,
-        _run_id: &'a RunId,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<StoredRunBytes>, StoreError>> + Send + 'a>> {
-        Box::pin(async move {
-            StoredRunBytes::new(self.0.clone())
-                .map(Some)
-                .map_err(|_| StoreError::CorruptPhysicalState)
-        })
-    }
-
-    fn append_run<'a>(
-        &'a self,
-        _frame: &'a EncodedRunFrame,
-    ) -> Pin<Box<dyn Future<Output = Result<AppendResult, StoreError>> + Send + 'a>> {
-        Box::pin(async { Err(StoreError::CorruptPhysicalState) })
-    }
 }
 
 fn effect_runtime_with_counting_adapter(
@@ -1315,14 +883,6 @@ fn retained_effect_reader(frames: Vec<Vec<u8>>, calls: Arc<AtomicUsize>) -> Runt
     )
 }
 
-fn qualify_recorded_prefix(run_id: &RunId, frames: &[Vec<u8>]) -> JournalHistory {
-    JournalHistory::qualify(
-        run_id,
-        StoredRunBytes::new(frames.to_vec()).expect("recorded Store prefix"),
-    )
-    .expect("qualified recorded prefix")
-}
-
 #[tokio::test]
 async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
     // Expected retained heads and adapter counts are independent of the Store script.
@@ -1336,12 +896,28 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
             0,
             1,
         ),
-        ("conclusion-absent", 3, AppendAction::Indeterminate, 2, 1, 2),
+        ("settlement-absent", 3, AppendAction::Indeterminate, 2, 1, 2),
         (
-            "conclusion-retained",
+            "settlement-retained",
             3,
             AppendAction::RetainThenIndeterminate,
             3,
+            1,
+            1,
+        ),
+        (
+            "interpretation-absent",
+            4,
+            AppendAction::Indeterminate,
+            3,
+            1,
+            1,
+        ),
+        (
+            "interpretation-retained",
+            4,
+            AppendAction::RetainThenIndeterminate,
+            4,
             1,
             1,
         ),
@@ -1373,10 +949,14 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
             EntryPointId::new(format!("mfm.test.runtime/ambiguous-{}@1", name))
                 .expect("entry point"),
             &EffectProgram,
+            &Number {
+                value: u64::try_from(offset + 3).expect("input value"),
+            },
+            ProgramLimits::new(0),
         )
         .expect("Program");
 
-        assert!(matches!(
+        assert_store_recording(
             runtime
                 .start(
                     run_id.clone(),
@@ -1385,9 +965,14 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
                         value: u64::try_from(offset + 3).expect("input value"),
                     },
                 )
-                .await,
-            Err(RuntimeError::Indeterminate)
-        ));
+                .await
+                .err()
+                .unwrap(),
+            StoreError::Indeterminate(mfm_values::DiagnosticEvidence::from_value(
+                serde_json::json!({"operation": "test.store", "injected": "Indeterminate"}),
+            )),
+            sequence,
+        );
         assert_eq!(
             calls.load(Ordering::SeqCst),
             expected_calls_after_start,
@@ -1401,14 +986,22 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
             "{} retained head after start",
             name
         );
-        if expected_head_after_start == 3 {
-            assert!(matches!(after_start.state(), RunViewState::Succeeded(_)));
-        } else {
-            assert!(matches!(after_start.state(), RunViewState::Runnable));
+        match expected_head_after_start {
+            1 => assert!(matches!(after_start.state(), RunViewState::Runnable { .. })),
+            2 => assert!(matches!(
+                after_start.state(),
+                RunViewState::EffectPending { .. }
+            )),
+            3 => assert!(matches!(
+                after_start.state(),
+                RunViewState::AwaitingInterpretation { .. }
+            )),
+            4 => assert!(matches!(after_start.state(), RunViewState::Succeeded(_))),
+            _ => unreachable!("fixture head"),
         }
 
         let completed = runtime.resume(&run_id).await.expect("ambiguous recovery");
-        assert_eq!(completed.head_sequence(), 3, "{} terminal head", name);
+        assert_eq!(completed.head_sequence(), 4, "{} terminal head", name);
         assert!(
             matches!(completed.state(), RunViewState::Succeeded(_)),
             "{} terminal state",
@@ -1426,8 +1019,8 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
 }
 
 #[tokio::test]
-async fn effect_not_inserted_reloads_the_committed_prepare_or_conclusion() {
-    for (offset, sequence) in [2_u64, 3].into_iter().enumerate() {
+async fn effect_not_inserted_returns_the_winner_without_entering_its_new_visit() {
+    for (offset, sequence) in [2_u64, 3, 4].into_iter().enumerate() {
         let calls = Arc::new(AtomicUsize::new(0));
         let store = Arc::new(ScriptedStore::new([(
             sequence,
@@ -1443,25 +1036,46 @@ async fn effect_not_inserted_reloads_the_committed_prepare_or_conclusion() {
         ));
         let completed = runtime
             .start(
-                run_id,
+                run_id.clone(),
                 expand_program(
                     EntryPointId::new(format!("mfm.test.runtime/not-inserted-{sequence}@1"))
                         .expect("entry point"),
                     &EffectProgram,
+                    &Number { value: 8 },
+                    ProgramLimits::new(0),
                 )
                 .expect("Program"),
                 Number { value: 8 },
             )
             .await
             .expect("converged Effect");
-        assert_eq!(completed.head_sequence(), 3);
-        assert!(matches!(completed.state(), RunViewState::Succeeded(_)));
+        assert_eq!(completed.head_sequence(), sequence);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            if sequence == 2 { 0 } else { 1 }
+        );
+        if sequence == 2 {
+            assert!(matches!(
+                completed.state(),
+                RunViewState::EffectPending { .. }
+            ));
+        } else if sequence == 3 {
+            assert!(matches!(
+                completed.state(),
+                RunViewState::AwaitingInterpretation { .. }
+            ));
+        } else {
+            assert!(matches!(completed.state(), RunViewState::Succeeded(_)));
+        }
+        let resumed = runtime.resume(&run_id).await.unwrap();
+        assert_eq!(resumed.head_sequence(), 4);
+        assert!(matches!(resumed.state(), RunViewState::Succeeded(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
 
 #[tokio::test]
-async fn every_adapter_failure_leaves_one_pending_prepare() {
+async fn operational_failures_are_audited_while_internal_failures_preserve_prepare() {
     #[derive(Clone, Copy)]
     enum FailureMode {
         Unavailable,
@@ -1489,10 +1103,12 @@ async fn every_adapter_failure_leaves_one_pending_prepare() {
                 move |_effect_id, _command_value_ref, _command| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     match mode {
-                        FailureMode::Unavailable => {
-                            Box::pin(async { Err(AdapterError::Unavailable) })
-                        }
-                        FailureMode::Internal => Box::pin(async { Err(AdapterError::Internal) }),
+                        FailureMode::Unavailable => Box::pin(async {
+                            Err(AdapterError::Operational(OperationalFailure::Unavailable))
+                        }),
+                        FailureMode::Internal => Box::pin(async {
+                            Err(AdapterError::Invariant(InvocationDiagnostic::from_fields("state_internal", "operational_failures_are_audited_while_internal_failures_preserve_prepare", &(AdapterRejected), None)))
+                        }),
                         FailureMode::Panic => panic!("adapter panic"),
                     }
                 }
@@ -1509,223 +1125,150 @@ async fn every_adapter_failure_leaves_one_pending_prepare() {
                     EntryPointId::new(format!("mfm.test.runtime/adapter-failure-{offset}@1"))
                         .expect("entry point"),
                     &EffectProgram,
+                    &Number { value: 9 },
+                    ProgramLimits::new(0),
                 )
                 .expect("Program"),
                 Number { value: 9 },
             )
             .await;
-        let expected = match mode {
-            FailureMode::Unavailable => RuntimeError::Unavailable,
-            FailureMode::Internal | FailureMode::Panic => RuntimeError::Internal,
-        };
-        assert!(matches!(result, Err(error) if error == expected));
+        match mode {
+            FailureMode::Unavailable => assert!(matches!(
+                result,
+                Err(InvocationFailure::RecoveryStopped { .. })
+            )),
+            FailureMode::Internal | FailureMode::Panic => {
+                let Err(InvocationFailure::Execution {
+                    error:
+                        RuntimeError::Native {
+                            operation: mfm_runtime::Operation::EffectAdapter,
+                            stage: mfm_runtime::Stage::Execute,
+                            cause,
+                        },
+                    ..
+                }) = result
+                else {
+                    panic!("adapter failure context")
+                };
+                match mode {
+                    FailureMode::Internal => {
+                        assert!(cause.details().as_value() == &serde_json::json!(null))
+                    }
+                    FailureMode::Panic => {
+                        assert_eq!(cause.details().as_value(), &serde_json::json!("panicked"))
+                    }
+                    FailureMode::Unavailable => unreachable!(),
+                }
+            }
+        }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let pending = runtime.read(&run_id).await.expect("pending view");
-        assert_eq!(pending.head_sequence(), 2);
-        assert!(matches!(pending.state(), RunViewState::Runnable));
+        assert_eq!(
+            pending.head_sequence(),
+            if matches!(mode, FailureMode::Unavailable) {
+                4
+            } else {
+                2
+            }
+        );
+        assert!(matches!(
+            pending.state(),
+            RunViewState::EffectPending { .. }
+        ));
     }
 }
 
 #[tokio::test]
 async fn retained_effect_facts_are_validated_without_adapter_io() {
-    let pending_store = Arc::new(ScriptedStore::recording());
-    let pending_effect_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut pending_builder = RuntimeAssemblyBuilder::new().expect("builder");
-    pending_builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    pending_builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-            let pending_effect_ids = Arc::clone(&pending_effect_ids);
-            move |effect_id, _, _| {
-                pending_effect_ids
-                    .lock()
-                    .expect("pending effect ids")
-                    .push(effect_id.clone());
-                Box::pin(async { Err(AdapterError::Unavailable) })
-            }
-        })
-        .expect("adapter");
-    let pending_runtime = Runtime::new(pending_builder.finish(), pending_store.clone());
-    let run_id = RunId::from_digest(DigestBytes::from_array([36; 32]));
-    assert!(matches!(
-        pending_runtime
-            .start(
-                run_id.clone(),
-                expand_program(
-                    EntryPointId::new("mfm.test.runtime/retained-effect@1").expect("entry point"),
-                    &EffectProgram,
-                )
-                .expect("Program"),
-                Number { value: 7 },
-            )
-            .await,
-        Err(RuntimeError::Unavailable)
-    ));
-    let pending_frames = pending_store.snapshot();
-    assert_eq!(pending_frames.len(), 2);
-    let retained_effect_id = pending_effect_ids
-        .lock()
-        .expect("pending effect ids")
-        .first()
-        .expect("retained effect id")
-        .clone();
-
-    let read_calls = Arc::new(AtomicUsize::new(0));
-    let read_runtime = retained_effect_reader(pending_frames.clone(), Arc::clone(&read_calls));
-    let pending = read_runtime.read(&run_id).await.expect("pending view");
-    assert_eq!(pending.head_sequence(), 2);
-    assert!(matches!(pending.state(), RunViewState::Runnable));
-    assert_eq!(read_calls.load(Ordering::SeqCst), 0);
-
-    let genesis = qualify_recorded_prefix(&run_id, &pending_frames[..1]);
-    let (command, command_ref) =
-        canonicalize_mfm_value(&Command { value: 7 }).expect("retained command");
-    let wrong_id = genesis
-        .encode_effect_prepare(
-            &EffectId::from_digest(DigestBytes::from_array([88; 32])),
-            &command_ref,
-            command.as_bytes(),
+    for settled in [false, true] {
+        let actions = if settled {
+            vec![]
+        } else {
+            vec![(2, AppendAction::RetainThenNotInserted)]
+        };
+        let store = Arc::new(if settled {
+            ScriptedStore::recording()
+        } else {
+            ScriptedStore::new(actions)
+        });
+        let runtime = effect_runtime_with_counting_adapter(
+            store.clone(),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let run_id =
+            RunId::from_digest(DigestBytes::from_array([if settled { 37 } else { 36 }; 32]));
+        let program = expand_program(
+            EntryPointId::new("mfm.test.runtime/retained-effect@1").unwrap(),
+            &EffectProgram,
+            &Number { value: 7 },
+            ProgramLimits::new(0),
         )
-        .expect("wrong-id prepare")
-        .canonical_bytes()
-        .to_vec();
-    let wrong_id_frames = vec![pending_frames[0].clone(), wrong_id];
-
-    let (replacement_command, replacement_command_ref) =
-        canonicalize_mfm_value(&Command { value: 99 }).expect("replacement command");
-    let wrong_command = genesis
-        .encode_effect_prepare(
-            &retained_effect_id,
-            &replacement_command_ref,
-            replacement_command.as_bytes(),
-        )
-        .expect("wrong-command prepare")
-        .canonical_bytes()
-        .to_vec();
-    let wrong_command_frames = vec![pending_frames[0].clone(), wrong_command];
-
-    let settled_store = Arc::new(ScriptedStore::recording());
-    let settled_calls = Arc::new(AtomicUsize::new(0));
-    let settled_effect_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let settled_runtime = effect_runtime_with_counting_adapter(
-        settled_store.clone(),
-        Arc::clone(&settled_calls),
-        Arc::clone(&settled_effect_ids),
-    );
-    let settled_run_id = RunId::from_digest(DigestBytes::from_array([37; 32]));
-    settled_runtime
-        .start(
-            settled_run_id.clone(),
-            expand_program(
-                EntryPointId::new("mfm.test.runtime/retained-settlement@1").expect("entry point"),
-                &EffectProgram,
-            )
-            .expect("Program"),
-            Number { value: 7 },
-        )
-        .await
-        .expect("settled Effect");
-    assert_eq!(settled_calls.load(Ordering::SeqCst), 1);
-    let settled_frames = settled_store.snapshot();
-    assert_eq!(settled_frames.len(), 3);
-    let settled_effect_id = settled_effect_ids
-        .lock()
-        .expect("settled effect ids")
-        .first()
-        .expect("settled effect id")
-        .clone();
-
-    let settled_read_calls = Arc::new(AtomicUsize::new(0));
-    let settled_reader =
-        retained_effect_reader(settled_frames.clone(), Arc::clone(&settled_read_calls));
-    let settled = settled_reader
-        .read(&settled_run_id)
-        .await
-        .expect("settled view");
-    assert_eq!(settled.head_sequence(), 3);
-    assert!(matches!(settled.state(), RunViewState::Succeeded(_)));
-    assert_eq!(settled_read_calls.load(Ordering::SeqCst), 0);
-
-    let prepared = qualify_recorded_prefix(&settled_run_id, &settled_frames[..2]);
-    let (outcome, outcome_ref) =
-        canonicalize_mfm_value(&Number { value: 7 }).expect("valid outcome");
-    let (swapped_evidence, swapped_evidence_ref) = canonicalize_mfm_value(&EffectEvidence {
-        effect_id: EffectId::from_digest(DigestBytes::from_array([89; 32])),
-        value: 7,
-        accepted: true,
-    })
-    .expect("swapped evidence");
-    let swapped_evidence = prepared
-        .encode_effect_conclusion(
-            &swapped_evidence_ref,
-            swapped_evidence.as_bytes(),
-            OutcomeKind::Success,
-            &outcome_ref,
-            outcome.as_bytes(),
-        )
-        .expect("swapped-evidence conclusion")
-        .canonical_bytes()
-        .to_vec();
-    let swapped_evidence_frames = vec![
-        settled_frames[0].clone(),
-        settled_frames[1].clone(),
-        swapped_evidence,
-    ];
-
-    let (valid_evidence, valid_evidence_ref) = canonicalize_mfm_value(&EffectEvidence {
-        effect_id: settled_effect_id,
-        value: 7,
-        accepted: true,
-    })
-    .expect("valid evidence");
-    let (wrong_outcome, wrong_outcome_ref) =
-        canonicalize_mfm_value(&Command { value: 7 }).expect("wrong outcome type");
-    let wrong_outcome = prepared
-        .encode_effect_conclusion(
-            &valid_evidence_ref,
-            valid_evidence.as_bytes(),
-            OutcomeKind::Success,
-            &wrong_outcome_ref,
-            wrong_outcome.as_bytes(),
-        )
-        .expect("wrong-outcome conclusion")
-        .canonical_bytes()
-        .to_vec();
-    let wrong_outcome_frames = vec![
-        settled_frames[0].clone(),
-        settled_frames[1].clone(),
-        wrong_outcome,
-    ];
-
-    for (name, corrupt_run_id, frames) in [
-        ("wrong prepare effect id", run_id.clone(), wrong_id_frames),
-        ("replaced command", run_id, wrong_command_frames),
-        (
-            "swapped evidence effect id",
-            settled_run_id.clone(),
-            swapped_evidence_frames,
-        ),
-        (
-            "wrong conclusion outcome schema",
-            settled_run_id,
-            wrong_outcome_frames,
-        ),
-    ] {
+        .unwrap();
+        let hot = runtime
+            .start(run_id.clone(), program, Number { value: 7 })
+            .await
+            .unwrap();
+        let frames = store.snapshot();
         let calls = Arc::new(AtomicUsize::new(0));
-        let runtime = retained_effect_reader(frames, Arc::clone(&calls));
-        assert!(
-            matches!(
-                runtime.read(&corrupt_run_id).await,
-                Err(RuntimeError::InvalidHistory),
-            ),
-            "{name}"
-        );
+        let reader = retained_effect_reader(frames.clone(), calls.clone());
         assert_eq!(
-            calls.load(Ordering::SeqCst),
-            0,
-            "{name} must not enter the adapter"
+            reader.read(&run_id).await.unwrap().head_digest(),
+            hot.head_digest()
         );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let latest = decode_frame(frames.last().unwrap()).unwrap();
+        let original: serde_json::Value =
+            serde_json::from_slice(latest.payload().as_bytes()).unwrap();
+        for mutation in 0..if settled { 1 } else { 2 } {
+            let mut payload = original.clone();
+            if settled {
+                let wrong_output = serde_json::to_value(
+                    mfm_values::Object::from_value(&Command { value: 7 }).unwrap(),
+                )
+                .unwrap();
+                payload["operation"]["succeeded"]["output"] = wrong_output;
+            } else {
+                let (name, replacement) = if mutation == 0 {
+                    (
+                        "effect_id",
+                        serde_json::to_value(EffectId::from_digest(DigestBytes::from_array(
+                            [88; 32],
+                        )))
+                        .unwrap(),
+                    )
+                } else {
+                    (
+                        "command",
+                        serde_json::to_value(
+                            mfm_values::Object::from_value(&Command { value: 99 }).unwrap(),
+                        )
+                        .unwrap(),
+                    )
+                };
+                payload["operation"]["effect_prepared"][name] = replacement;
+            }
+            let payload = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+                &serde_json::to_string(&payload).unwrap(),
+            )
+            .unwrap();
+            let changed = seal_frame(
+                &run_id,
+                latest.run_sequence(),
+                latest.previous_head_digest(),
+                &payload,
+            )
+            .unwrap();
+            let mut changed_frames = frames.clone();
+            *changed_frames.last_mut().unwrap() = changed.canonical_bytes().to_vec();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let reader = retained_effect_reader(changed_frames, calls.clone());
+            assert!(
+                reader.read(&run_id).await.is_err(),
+                "settled={settled}, mutation={mutation}"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
     }
 }
 
@@ -1738,7 +1281,7 @@ async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
         .expect("Effect State");
     unavailable_builder
         .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, |_, _, _| {
-            Box::pin(async { Err(AdapterError::Unavailable) })
+            Box::pin(async { Err(AdapterError::Operational(OperationalFailure::Unavailable)) })
         })
         .expect("adapter");
     let unavailable = Runtime::new(unavailable_builder.finish(), store.clone());
@@ -1750,12 +1293,14 @@ async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
                 expand_program(
                     EntryPointId::new("mfm.test.runtime/concurrent-effect@1").expect("entry point"),
                     &EffectProgram,
+                    &Number { value: 5 },
+                    ProgramLimits::new(0),
                 )
                 .expect("Program"),
                 Number { value: 5 },
             )
             .await,
-        Err(RuntimeError::Unavailable)
+        Err(InvocationFailure::RecoveryStopped { .. })
     ));
 
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -1797,90 +1342,91 @@ async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
     };
     let left = left.await.expect("left task").expect("left resume");
     let right = right.await.expect("right task").expect("right resume");
-    assert_eq!(left.head_sequence(), 3);
-    assert_eq!(right.head_digest(), left.head_digest());
+    for view in [&left, &right] {
+        assert!(matches!(view.head_sequence(), 5 | 6));
+        if view.head_sequence() == 5 {
+            assert!(matches!(
+                view.state(),
+                RunViewState::AwaitingInterpretation { .. }
+            ));
+        } else {
+            assert!(matches!(view.state(), RunViewState::Succeeded(_)));
+        }
+    }
+    assert!(left.head_sequence() == 6 || right.head_sequence() == 6);
+    assert_eq!(runtime.read(&run_id).await.unwrap().head_sequence(), 6);
     let ids = ids.lock().expect("ids");
     assert_eq!(ids.len(), 2);
     assert_eq!(ids[0], ids[1]);
 }
 
-struct FaultStore {
-    failure: StoreError,
-}
-
-impl Store for FaultStore {
-    fn load_run<'a>(
-        &'a self,
-        _run_id: &'a RunId,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = std::result::Result<Option<StoredRunBytes>, StoreError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move { Err(self.failure) })
-    }
-
-    fn append_run<'a>(
-        &'a self,
-        _frame: &'a EncodedRunFrame,
-    ) -> Pin<Box<dyn Future<Output = Result<AppendResult, StoreError>> + Send + 'a>> {
-        Box::pin(async move { Err(self.failure) })
-    }
-}
-
 #[tokio::test]
-async fn store_failures_map_by_load_or_append_authority() {
-    for (offset, (failure, load_error, append_error)) in [
-        (
-            StoreError::Capacity,
-            RuntimeError::Internal,
-            RuntimeError::Capacity,
-        ),
-        (
-            StoreError::CorruptPhysicalState,
-            RuntimeError::InvalidHistory,
-            RuntimeError::InvalidHistory,
-        ),
-        (
-            StoreError::Unavailable,
-            RuntimeError::Unavailable,
-            RuntimeError::Unavailable,
-        ),
-        (
-            StoreError::Indeterminate,
-            RuntimeError::Internal,
-            RuntimeError::Indeterminate,
-        ),
+async fn store_failures_preserve_mechanical_source_and_unknown_observation() {
+    for (offset, failure) in [
+        StoreError::ArithmeticOverflow,
+        StoreError::CorruptPhysicalState(mfm_values::DiagnosticEvidence::from_value(
+            serde_json::json!({"operation": "test.store", "injected": "CorruptPhysicalState"}),
+        )),
+        StoreError::Unavailable(mfm_values::DiagnosticEvidence::from_value(
+            serde_json::json!({"operation": "test.store", "injected": "Unavailable"}),
+        )),
+        StoreError::Indeterminate(mfm_values::DiagnosticEvidence::from_value(
+            serde_json::json!({"operation": "test.store", "injected": "Indeterminate"}),
+        )),
     ]
     .into_iter()
     .enumerate()
     {
         let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
         builder.register_value::<Number>().expect("root value");
-        let runtime = Runtime::new(builder.finish(), Arc::new(FaultStore { failure }));
+        let runtime = Runtime::new(
+            builder.finish(),
+            Arc::new(FaultStore {
+                failure: failure.clone(),
+            }),
+        );
         let run_id = RunId::from_digest(DigestBytes::from_array(
             [u8::try_from(offset + 10).expect("RunId byte"); 32],
         ));
         assert!(matches!(
             runtime.read(&run_id).await,
-            Err(error) if error == load_error
+            Err(InvocationFailure::Execution { error: RuntimeError::Store(source), last_observed: None, .. }) if source == failure
         ));
         let program = expand_program(
             EntryPointId::new("mfm.test.runtime/fault@1").expect("entry point"),
             &EmptyProgram,
+            &Number { value: 1 },
+            ProgramLimits::new(0),
         )
         .expect("Program");
-        assert!(matches!(
-            runtime.start(run_id, program, Number { value: 1 }).await,
-            Err(error) if error == append_error
-        ));
+        assert_store_recording(
+            runtime
+                .start(run_id, program, Number { value: 1 })
+                .await
+                .err()
+                .unwrap(),
+            failure,
+            1,
+        );
     }
 }
 
-#[path = "support/injection.rs"]
-mod injection;
-
-#[path = "support/callback_errors.rs"]
-mod callback_errors;
+fn assert_store_recording(failure: InvocationFailure, expected: StoreError, sequence: u64) {
+    let InvocationFailure::Execution {
+        error: RuntimeError::Recording { failure, .. },
+        ..
+    } = failure
+    else {
+        panic!("recording custody")
+    };
+    let mfm_runtime::RecordingFailure::Store {
+        original: None,
+        candidate,
+        cause: source,
+    } = failure.as_ref()
+    else {
+        panic!("Store outcome without speculative probe")
+    };
+    assert_eq!(source, &expected);
+    assert_eq!(candidate.run_sequence(), sequence);
+}
