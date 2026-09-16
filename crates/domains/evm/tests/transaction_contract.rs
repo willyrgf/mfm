@@ -189,6 +189,8 @@ fn checked_evm_primitives_reject_every_noncanonical_boundary() {
     }
 }
 
+// Transaction decoding and direct construction must agree on fee, gas and payload constraints
+// and the canonical command format.
 #[test]
 fn fixed_eip1559_command_has_exact_wire_and_checked_factories() {
     let command = create_command();
@@ -241,6 +243,8 @@ fn fixed_eip1559_command_has_exact_wire_and_checked_factories() {
     .is_err());
 }
 
+// Independent wire and identity vectors protect the persisted transaction stages from accidental
+// contract changes.
 #[test]
 fn transaction_identity_and_wire_ledger_is_frozen() {
     let receipt = EvmTransactionReceipt {
@@ -358,6 +362,8 @@ fn transaction_identity_and_wire_ledger_is_frozen() {
     }
 }
 
+// A nonce reservation must belong to the exact command and sender domain, and leave room for the
+// next nonce.
 #[test]
 fn reservation_descriptors_reject_mismatched_commands_domains_and_exhaustion() {
     let command = create_command();
@@ -389,6 +395,8 @@ fn reservation_descriptors_reject_mismatched_commands_domains_and_exhaustion() {
     assert_closed_object(&reserved, "reservation");
 }
 
+// Persisted plans must enforce command constraints before execution so choosing a target later
+// cannot create an invalid command.
 #[test]
 fn checked_plans_share_command_boundaries_and_construct_totally_after_target_selection() {
     for size in [0, 49_152] {
@@ -546,6 +554,8 @@ fn checked_plans_share_command_boundaries_and_construct_totally_after_target_sel
     assert_closed_object(&call, "calldata");
 }
 
+// Completed transaction facts must retain matching reservation, preparation and settlement
+// evidence; loading mixed facts must fail.
 #[test]
 fn cumulative_facts_preserve_every_stage_and_reject_hostile_combinations() {
     for command in [create_command(), call_command()] {

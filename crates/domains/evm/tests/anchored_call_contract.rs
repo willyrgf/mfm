@@ -79,6 +79,7 @@ fn assert_contract<T: MfmValueTrait>(
     );
 }
 
+// The injected observation and its intent must resolve to the same transaction route.
 #[test]
 fn anchored_intent_route_and_capability_are_exact() {
     assert_eq!(
@@ -95,6 +96,8 @@ fn anchored_intent_route_and_capability_are_exact() {
     );
 }
 
+// A response for another block or intent must not be accepted as evidence for the requested
+// anchored call.
 #[test]
 fn anchored_capability_binds_only_the_exact_result_anchor() {
     let input = intent();
@@ -129,6 +132,8 @@ fn anchored_capability_binds_only_the_exact_result_anchor() {
     .is_err());
 }
 
+// Even unsuccessful anchored-call evidence must identify the request it answers in the persisted
+// wire.
 #[test]
 fn every_anchored_terminal_evidence_wire_carries_the_exact_intent_ref() {
     let (_, intent_value_ref) = canonicalize_mfm_value(&intent()).expect("intent ref");
@@ -156,6 +161,7 @@ fn every_anchored_terminal_evidence_wire_carries_the_exact_intent_ref() {
     }
 }
 
+// Evidence must not be reused after changing the route, block, target or calldata of a call.
 #[test]
 fn anchored_evidence_rejects_every_cross_intent_substitution() {
     let original = intent();
@@ -214,6 +220,8 @@ fn anchored_evidence_rejects_every_cross_intent_substitution() {
     }
 }
 
+// Deserialization must enforce call bounds and the current closed wire format instead of
+// bypassing typed validation.
 #[test]
 fn anchored_bytes_and_decode_paths_enforce_every_bound_and_closed_shape() {
     assert!(
@@ -253,6 +261,8 @@ fn anchored_bytes_and_decode_paths_enforce_every_bound_and_closed_shape() {
     assert!(serde_json::from_value::<AnchoredContractCallEvidence>(evidence).is_err());
 }
 
+// Fixed schema identities and canonical bytes protect the persisted anchored-call format from
+// accidental drift.
 #[test]
 fn anchored_value_contracts_are_exact() {
     let input = intent();
@@ -347,6 +357,8 @@ fn workflow() -> Initial {
     }
 }
 
+// Observation must preserve prior transaction facts and sibling context on success or failure,
+// and reject evidence that belongs to another call.
 #[test]
 fn observation_recipe_retains_success_and_each_failure_and_rejects_local_mismatches() {
     let input = workflow();
@@ -410,6 +422,8 @@ fn observation_recipe_retains_success_and_each_failure_and_rejects_local_mismatc
     }
 }
 
+// Loading a call plan must preserve its bounds so selecting the target and block later cannot
+// bypass them.
 #[test]
 fn checked_observation_plan_bounds_survive_deserialization_and_late_anchor_selection() {
     let plan = CheckedObservationPlan::new(route(), vec![0; 131_072]).unwrap();

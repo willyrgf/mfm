@@ -58,6 +58,8 @@ impl Operation for RecoveringCollection {
     }
 }
 
+// An anchor change must recollect balances at one coherent block while retaining the earlier
+// failure and acknowledged history.
 #[tokio::test]
 async fn changed_anchor_restarts_the_real_collection_and_preserves_its_acknowledged_prefix() {
     use mfm_store::Store;
