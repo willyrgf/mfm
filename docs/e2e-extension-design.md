@@ -145,9 +145,9 @@ component descriptors supply ordinary requirements; the extension author owns an
 new business failure projection. The closure authors a sequence and performs no runtime work.
 
 ```rust
-let original = ContractDeploymentLifecycle::new(&config)?;
-let workflow = author_operation(assessment_contracts, |body| {
-    body.operation(&original)?;
+let base_operation = ContractDeploymentLifecycle::new(&config)?;
+let operation = author_operation(assessment_contracts, |body| {
+    body.operation(&base_operation)?;
     body.pure::<AssessIncrease>()
 })?;
 
@@ -156,7 +156,7 @@ let runtime = Runtime::builder(store)
     .execution_policy(attempt_policy)
     .build()?;
 let outcome = runtime
-    .execute(run_id, workflow, config.initial_input())
+    .execute(run_id, operation, config.initial_input())
     .await?;
 
 match outcome {
