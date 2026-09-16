@@ -3,6 +3,8 @@
 ## Status and scope
 
 The three public usage paths below are the agreed framing for MFM as a platform and framework.
+One representative E2E scenario per path is the agreed replacement for the current E2E organization.
+Each scenario can grow named case runs for recovery, durability, and error handling.
 This RFC proposes requirements and acceptance scenarios for improving those paths. Exact Rust
 signatures, configuration schemas, executable-registration mechanics, and implementation placement
 within the existing crate boundaries remain to be designed. No proposed API is available merely
@@ -214,30 +216,94 @@ must be settled before implementation, with deletions identified alongside addit
 | `external_wallet_transfer`, exact heads/nonces, retained-wire checks | Preserve as tests of external activity and durable authority; do not replace them with only happy-path final reports. |
 | Expected getter value and business assertions | Independent test oracle. Do not move expected answers into production to make the test smaller. |
 
-## Test organization and acceptance
+## Three public-usage E2Es
 
-Tests should make the public use or boundary they prove apparent. This is a division of coverage
-responsibility, not a requirement for a new test framework, directory hierarchy, or scenario DSL.
+The target is one representative E2E scenario for each public usage path. Together they replace the
+current E2E organization and demonstrate the platform and framework experiences. This is a scenario
+boundary, not a fixed count of Rust functions, binaries, or managed tasks. Each scenario may contain
+multiple named, independently diagnosable case runs. No new test framework or scenario DSL is implied.
 
-| Test purpose | Required evidence |
-| --- | --- |
-| Existing-operation selection | Invoke supported production behavior through its public entry point; supply inputs/options and inspect typed results without rebuilding its internal model. |
-| Framework composition | Compose reusable Operations and individual States through public authoring APIs; prove useful results, context retention, rejected connections, and deliberate policy behavior. |
-| State extension | Implement minimal new semantics using public traits and consume it in a real composition; prove success and relevant failures without duplicating engine tests. |
-| Product/transport use case | Use Application and production domain types; preserve independent schema, mapping, rendering, and recovery-identity assertions at the consuming boundary. |
-| Fault/recovery integration | Inject faults and assert exact authority/history behavior, including intermediate states when those are the guarantee under test. |
+| E2E scenario | Public surface and caller-owned work | Baseline evidence |
+| --- | --- | --- |
+| 1. Select an existing operation through CLI/REST | Select supported production behavior and supply its inputs/options through the client transports. Use the shared Application surface and production domain types. | Execute the same representative use case through both CLI and REST, retaining transport-specific rendering and recovery-identity assertions. Inspect meaningful results without reconstructing the operation's internals. |
+| 2. Compose existing Operations and States | Use public Rust authoring APIs to declare order, valid connections, caller context, and intentional policy; bind explicit execution capabilities. | Compose both reusable Operations and individual existing States, execute through the public framework, and inspect checked results. Do not implement a new State to make the composition work. |
+| 3. Implement a new State and compose it | Define one small State's new semantics and typed contracts through public traits, then combine it with existing Operations/States. | Execute that composition through the public framework and assert the new behavior and integration result. The new State must express actual semantics, not hide missing composition machinery. |
 
-Before moving or deleting existing coverage, map each retained guarantee to its named replacement
-scenario and managed task. Preserve reservation acknowledgement loss, prepared-wire recovery with a
-rejecting signer, cancellation, ambiguous appends at transaction Journal boundaries, external nonce
-advancement, unchanged cold terminal history/output/nonce, SQL cause preservation through cold
-Application observation, retained-epoch rejection without append, and closed-owner signing failure.
-Capacity/report rejection remains covered by its current owners, using small explicit limits where
-appropriate. Do not restore removed redundant capacity matrices.
+The first scenario covers two transports over one Application surface; passing only CLI or only
+REST is insufficient. Its baseline can select a shipping Portfolio operation. It does not require
+adding EVM transaction submission to shipping composition. The second and third are library-facing
+framework tests and must remain usable without going through the CLI or an Application product.
+Any live transaction cases retain the explicit development settlement scope.
 
-The managed E2E rebuilds Runtime and IO handles while retaining the same keystore owner; it does not
-prove host-process key recovery. Its terminal checks establish unchanged history/output/nonce, not
-absence of provider calls. Preserve these limits when describing the reorganized tests.
+A test-owned Operation is legitimate in scenarios 2 and 3 because composition is their public use.
+Their surrounding execution, association, and result handling should consume maintained framework
+support. Scenario 2 must expose composition gaps rather than work around them with a custom glue
+State. Scenario 3 must demonstrate extension rather than duplicate an existing component.
+
+### Case runs and coverage growth
+
+Start by designing a clear baseline journey for each scenario. Additional named cases can then
+exercise rejection, failure, cancellation, stopped/resume behavior, acknowledgement loss, cold
+reconstruction, or other relevant boundaries inside the same public-usage scenario. These are
+specific runs with explicit setup, an injected condition where needed, an independently stated
+expectation, and a clear outcome; they need not become one long stateful test.
+
+The three scenarios cover the public usage paths. Their count alone does not establish every
+recovery, durability, or error-handling guarantee. Future cases can strengthen that coverage, while
+existing guarantees must retain an owner during replacement. Fault cases may use deliberate
+infrastructure and intermediate history/authority assertions when those are the behavior being
+proved. Keep fault setup distinguishable from the public journey, and keep expected answers in
+the test. Do not require faults to become production operation options.
+
+Focused unit, compile-fail, and integration tests remain useful for guarantees most directly tested
+at their owning boundary. A case does not have to move out of an E2E merely because it exercises a
+fault, nor does every low-level boundary need repetition in all three E2Es. Existing real-service
+requirements remain where the guarantee depends on PostgreSQL or the EVM node.
+
+### Replacing the current E2Es
+
+The current [client execution E2E](bin/rest-api/tests/client_execution_e2e.rs) and
+[contract Effect E2E](crates/live/evm/tests/evm_contract_effect_e2e.rs), together with their support
+code and managed task selection, are the starting inventory. Replace them through the three
+scenarios rather than keeping the old E2Es as a parallel acceptance suite. Reuse or reshape existing
+files where appropriate; their names do not determine the target coverage.
+
+Before deleting an old scenario or assertion, record its guarantee, the named replacement case or
+focused test that owns it, and the managed task that runs it. Future planned cases do not justify
+removing currently exercised guarantees. This mapping must include:
+
+- Client transport execution and cold resume after config deletion, exact snapshot observation,
+  independent CLI execution, retained provider causes through cold CLI/REST observations, and
+  enrichment/publication/dependent-start recovery with deleted source revisions.
+- Reservation acknowledgement loss, prepared-wire recovery with a rejecting signer, cancellation,
+  ambiguous appends at transaction Journal boundaries, external nonce advancement, unchanged cold
+  terminal history/output/nonce, SQL cause preservation through cold Application observation,
+  retained-epoch rejection without append, and closed-owner signing failure.
+- Existing capacity/report rejection at its current focused owners, using small explicit limits
+  where appropriate. Do not restore removed redundant capacity matrices.
+
+The [build guide](docs/build-and-verification.md) records the current managed guarantees. Its task
+coverage and `nixfied.nix` selection must change with the executable test cutover, not in advance of
+it. This RFC neither deletes tests nor claims that the replacements already exist.
+
+The managed Effect E2E rebuilds Runtime and IO handles while retaining the same keystore owner; it
+does not prove host-process key recovery. Its terminal checks establish unchanged history/output/
+nonce, not absence of provider calls. Preserve these limits in replacement cases.
+
+### Next design deliverable
+
+Design the three tests before choosing convenience API signatures. For each scenario, write down:
+
+1. The concrete user story, chosen components, inputs/options, and independent expected result.
+2. The public calls the caller should make, including explicit capabilities, RunId, execution policy,
+   and typed result access. Distinguish existing APIs from proposed improvements.
+3. The caller-owned declarations and any reusable machinery currently supplied by test code.
+4. The real services/artifacts required and the boundary of fixture or fault infrastructure.
+5. The baseline run, cases required to preserve current coverage, and optional future case runs.
+6. The old guarantees it replaces, their assertion locations, and intended managed selection.
+
+Use those designs to identify the smallest public API changes. A product wrapper that only makes
+scenario 1 concise cannot substitute for successful composition and extension in scenarios 2 and 3.
 
 ## Related capabilities retained as separate work
 
@@ -268,8 +334,9 @@ These goals remain relevant, but they do not gate agreeing or improving the thre
 
 ## Decision sequence and complete cutovers
 
-1. Specify reviewable public examples for all three paths, using current primitives as the baseline.
-   Inventory caller declarations, repeated assembly work, and result handling. Select exact API and
+1. Design the three public-usage E2Es using the deliverable above and current primitives as the
+   baseline. Inventory caller declarations, repeated assembly work, and result handling; map current
+   guarantees to replacement cases or focused tests. Select exact API and
    registration ownership only after the composition and extension examples work independently of
    a fixed EVM product. Resolve the material design uncertainties below before implementing them.
 2. Implement one coherent authoring/association improvement with consuming tests and documentation.
@@ -278,16 +345,19 @@ These goals remain relevant, but they do not gate agreeing or improving the thre
 3. Implement the reviewed reusable execution/result surface with exact identity, stopped-outcome,
    cancellation, and cold-result tests. Replace ordinary copied drivers/codecs in the same cutover,
    retaining direct Runtime use in boundary tests. Combine with step 2 if their APIs are inseparable.
-4. Reorganize consumer and fault scenarios with an explicit coverage map and managed-task selection.
-   Delete superseded fixture support only after its semantic and boundary guarantees have owners.
-   Product-specific ABI, wallet, funding, and fee additions can then proceed as separate capabilities.
+4. Replace the current E2E organization with the three public-usage scenarios and their required
+   case runs, using the coverage map and updated managed-task selection. Retain focused boundary
+   tests where appropriate. Delete superseded E2Es/support in the same cutover once their guarantees
+   have executable owners. Extend each scenario with additional cases as needed; product-specific
+   ABI, wallet, funding, and fee additions remain separate capabilities.
 
 Each implementation commit must leave one coherent current design and report simplified/removed
 machinery, necessary added complexity, and production-code LOC change. Changes to responsibility,
 Program, Runtime, or persistence contracts must update architecture/design and affected tests in
 the same cutover. No migration, compatibility wrapper, or second execution model is implied.
 
-Completion means all three public paths are demonstrated and documented, ordinary consumers no
+Completion means the three public-usage E2Es replace the prior organization and demonstrate all
+three paths, with both CLI and REST covered by selection. Ordinary consumers no
 longer duplicate supported machinery, framework authors retain expressive typed composition and
 extension, and existing durability/error guarantees retain independent coverage. A smaller EVM test
 alone is not sufficient evidence.
@@ -296,6 +366,7 @@ alone is not sufficient evidence.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation before implementation |
 | --- | --- | --- | --- |
+| Current E2E guarantees can be assigned to the three scenarios or focused tests without loss. | The assertion-to-case inventory and concrete scenario designs are not complete. | Premature replacement could drop unique behavior or create oversized scenarios that obscure failures. | Complete the coverage map, name required case runs and managed tasks, and distinguish preserved coverage from optional future additions before deleting tests. |
 | Composition can couple semantic selection to exact executable requirements without duplicate lists. | Program/domain crates cannot depend on Runtime; generic context replacement changes exact State ABIs. | A convenience layer could add another registry/lowering path or break crate boundaries. | Architect one concrete ownership design using two contexts, nested Operations, individual States, maps, and capability injection; enumerate the deleted machinery. |
 | Supported ordinary failure propagation can be simpler while preserving custom maps. | Products choose different root schemas and fact retention. | A generic shortcut could erase causes, lose facts, or hide meaningful product policy. | Specify ordinary and custom-root examples, operational failure without a root, report overflow, and cold decoding. |
 | A bounded configured EVM surface can share framework components. | Runtime-selected step counts/order and ABI types do not map automatically to current monomorphized contexts. | The product could require a parallel execution model or expose an unbounded expression system. | Specify supported step/result representation and ABI rejection cases, then compare two distinct workflows. Keep this separate from Rust composition acceptance. |
@@ -304,8 +375,8 @@ alone is not sufficient evidence.
 
 ## Verification of this RFC revision
 
-This is a documentation-only cutover: README positioning, this RFC, related gap/test guidance, and
-removal of the superseded problem statement. Review local links/anchors, cited public symbols,
+This revision records the three-scenario E2E decision and aligns related gap guidance; it changes
+no executable tests or task selection. Review local links/anchors, cited public symbols,
 consistency with authoritative contracts, absence of stale references, and `git diff --check`.
 Production-code LOC change is zero. No Rust tests, managed E2E, or CI run is selected by the
 [build guide](docs/build-and-verification.md) for this revision. Subsequent code/task changes must
