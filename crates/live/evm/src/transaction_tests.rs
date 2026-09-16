@@ -503,6 +503,8 @@ async fn fixture() -> (
     )
 }
 
+// Registering a second transaction adapter for the same binding must fail instead of replacing
+// its signer, authority or provider.
 #[tokio::test]
 async fn transaction_registration_uses_the_complete_binding_as_its_only_key() {
     let (_owner, signer, binding, _command, _effect_id) = fixture().await;
@@ -600,6 +602,8 @@ async fn reserve(
     ReservedEvmTransaction::new(command.clone(), reservation).unwrap()
 }
 
+// Reconciliation must reuse the retained signed bytes even with an unavailable signer, while
+// public results and Journal frames exclude the raw transaction.
 #[tokio::test]
 async fn pending_effect_reuses_identical_wire_and_cold_projection_needs_no_signer_call() {
     for reverted in [false, true] {
@@ -700,6 +704,8 @@ async fn pending_effect_reuses_identical_wire_and_cold_projection_needs_no_signe
     }
 }
 
+// Losing acknowledgement of reservation or preparation must recover from retained authority
+// facts without reserving another nonce.
 #[tokio::test]
 async fn custody_acknowledgement_loss_recovers_each_stage() {
     for fault in [1, 2] {
@@ -755,6 +761,8 @@ async fn custody_acknowledgement_loss_recovers_each_stage() {
     }
 }
 
+// Concurrent signers may produce different valid signatures, but all callers must use the first
+// transaction retained by the authority.
 #[tokio::test]
 async fn concurrent_varying_signatures_return_the_immutable_first_winner() {
     let (_owner, _, binding, command, id) = fixture().await;
@@ -798,6 +806,8 @@ async fn concurrent_varying_signatures_return_the_immutable_first_winner() {
     );
 }
 
+// Invalid receipts, block replacement and submission errors must not replace the transaction
+// already prepared for this command.
 #[tokio::test]
 async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_bytes() {
     let (_owner, signer, binding, command, id) = fixture().await;
@@ -911,6 +921,8 @@ async fn receipt_shape_canonicality_and_submission_failures_preserve_prepared_by
     );
 }
 
+// A signature from the wrong key or corrupt retained transaction must be rejected before it can
+// be submitted to the provider.
 #[tokio::test]
 async fn incorrect_signatures_and_corrupt_retained_wire_fail_before_provider_entry() {
     let (owner, signer, binding, command, id) = fixture().await;
@@ -960,6 +972,8 @@ async fn incorrect_signatures_and_corrupt_retained_wire_fail_before_provider_ent
     assert_eq!(provider.operations(), operations);
 }
 
+// Cancellation during receipt lookup must leave enough custody to resume with the exact signed
+// transaction without signing again.
 #[tokio::test]
 async fn cancelled_receipt_wait_resumes_exact_prepared_wire() {
     let (_owner, signer, binding, command, _) = fixture().await;
@@ -1006,6 +1020,8 @@ async fn cancelled_receipt_wait_resumes_exact_prepared_wire() {
     assert!(provider.operations().iter().any(|op| matches!(op, ProviderOperation::SubmitRaw(raw) if raw == prepared.raw_transaction().as_bytes())));
 }
 
+// A signer outage must preserve the nonce reservation and report its own cause without preparing
+// or submitting a transaction.
 #[tokio::test]
 async fn unavailable_signer_retains_reservation_and_its_distinct_operational_cause() {
     let (_owner, signer, binding, command, _) = fixture().await;
@@ -1040,6 +1056,8 @@ async fn unavailable_signer_retains_reservation_and_its_distinct_operational_cau
     assert_eq!(provider.operations().len(), operations);
 }
 
+// A Program declaring the obsolete transaction-error schema must fail before run admission or
+// provider IO.
 #[tokio::test]
 async fn v3_transaction_assembly_rejects_v2_error_contract_before_admission() {
     let (_owner, signer, binding, command, _) = fixture().await;

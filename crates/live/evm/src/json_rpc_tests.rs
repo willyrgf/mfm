@@ -270,6 +270,8 @@ fn conversions_and_calldata_are_exact() {
     assert_eq!(calldata.len(), 2 + 8 + 64);
 }
 
+// The live provider must send the expected chain-ID request and bind its decoded result to the
+// Read evidence.
 #[tokio::test]
 async fn chain_identity_reads_the_exact_json_rpc_envelope() {
     let stub = Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":"0x539"}"#.into()]);
@@ -297,6 +299,8 @@ async fn chain_identity_reads_the_exact_json_rpc_envelope() {
     );
 }
 
+// A balance must be queried at the block committed in the intent so a moving chain head cannot
+// change the requested observation.
 #[tokio::test]
 async fn native_balance_reads_the_committed_anchor_by_number() {
     let stub = Stub::new(vec![
@@ -324,6 +328,7 @@ async fn native_balance_reads_the_committed_anchor_by_number() {
     );
 }
 
+// Confirmation must revisit the original block height to detect replacement of that block.
 #[tokio::test]
 async fn anchor_confirmation_never_asks_for_the_moving_head() {
     let stub = Stub::new(vec![format!(
@@ -351,6 +356,8 @@ async fn anchor_confirmation_never_asks_for_the_moving_head() {
     );
 }
 
+// The decimals call has no address argument and must query the selected token at the committed
+// block.
 #[tokio::test]
 async fn token_decimals_splices_no_address_and_decodes_one_word() {
     let stub = Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":"0x0000000000000000000000000000000000000000000000000000000000000012"}"#.into()]);
@@ -376,6 +383,8 @@ async fn token_decimals_splices_no_address_and_decodes_one_word() {
     );
 }
 
+// An ERC-20 balance response is a full ABI word; the request must encode the holder and select
+// the committed block.
 #[tokio::test]
 async fn token_balance_decodes_a_zero_padded_abi_word() {
     let stub = Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":"0x0000000000000000000000000000000000000000000000000000000000000001"}"#.into()]);
@@ -404,6 +413,8 @@ async fn token_balance_decodes_a_zero_padded_abi_word() {
     );
 }
 
+// Malformed token return data must become an operational failure rather than a fabricated
+// balance.
 #[tokio::test]
 async fn malformed_or_wrong_sized_abi_data_is_unavailable() {
     for result in [
@@ -428,6 +439,8 @@ async fn malformed_or_wrong_sized_abi_data_is_unavailable() {
     }
 }
 
+// A provider error and a successful call returning no token data must remain distinct outcomes
+// for domain interpretation.
 #[tokio::test]
 async fn rpc_errors_are_unavailable_but_empty_token_data_is_safe_failure() {
     let token_intent = || {
@@ -459,6 +472,8 @@ async fn rpc_errors_are_unavailable_but_empty_token_data_is_safe_failure() {
     assert!(matches!(empty, EvmReadEvidence::SafeFailure { .. }));
 }
 
+// Invalid chain-ID responses and connection failure must not produce successful chain identity
+// evidence.
 #[tokio::test]
 async fn malformed_null_and_unreachable_ingress_is_unavailable() {
     for body in [
@@ -496,6 +511,8 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
     ));
 }
 
+// Malformed provider error objects must fail observation instead of being treated as valid
+// evidence.
 #[tokio::test]
 async fn incomplete_or_malformed_rpc_errors_are_unavailable() {
     for error in [
@@ -563,6 +580,8 @@ fn receipt_nullable_action_fields_are_present_even_when_null() {
     }
 }
 
+// A response with the wrong protocol version, request ID or envelope shape must not answer the
+// issued request.
 #[tokio::test]
 async fn rpc_envelope_version_id_and_fields_are_exact() {
     for body in [
@@ -588,6 +607,8 @@ async fn rpc_envelope_version_id_and_fields_are_exact() {
     }
 }
 
+// An HTTP redirect must not cause a provider request to reach an endpoint outside the selected
+// binding.
 #[tokio::test]
 async fn redirects_never_leave_the_selected_endpoint() {
     let target = TcpListener::bind("127.0.0.1:0").expect("bind redirect target");
@@ -640,6 +661,8 @@ async fn redirects_never_leave_the_selected_endpoint() {
     assert!(!target_worker.join().expect("target worker"));
 }
 
+// Losing the connection after the full transaction request was sent must report failure without
+// asserting nonacceptance.
 #[tokio::test]
 async fn loopback_submission_acknowledgement_drop_after_full_request_is_unavailable() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind drop server");
@@ -662,6 +685,8 @@ async fn loopback_submission_acknowledgement_drop_after_full_request_is_unavaila
     assert_eq!(request["params"], serde_json::json!(["0x02c0"]));
 }
 
+// Transaction RPC methods must use the expected parameters and distinguish an absent receipt
+// from malformed or failed responses.
 #[tokio::test]
 async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
     let genesis = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -773,6 +798,8 @@ async fn transaction_provider_uses_exact_calls_and_strict_checked_receipts() {
     }
 }
 
+// Returned call bytes must be bracketed by checks of the authored block and a code lookup at
+// that same block.
 #[tokio::test]
 async fn anchored_call_observes_code_and_same_anchor_before_returning_bytes() {
     let block =
@@ -828,6 +855,8 @@ async fn anchored_call_observes_code_and_same_anchor_before_returning_bytes() {
     );
 }
 
+// Missing blocks, missing contract code and replaced blocks must map to distinct domain evidence
+// rather than successful call bytes.
 #[tokio::test]
 async fn anchored_absence_codeless_and_anchor_replacement_are_closed_evidence() {
     let absent = observe_anchored(
@@ -909,6 +938,8 @@ fn locator_accepts_raw_http_urls_and_rejects_other_forms() {
     }
 }
 
+// An explicit null receipt means absence; an omitted result field is a malformed response and
+// must remain an operational failure.
 #[tokio::test]
 async fn nullable_rpc_results_require_the_result_field() {
     let hash = EvmHash::from_bytes([1; 32]);
@@ -954,6 +985,8 @@ async fn nullable_rpc_results_require_the_result_field() {
     );
 }
 
+// Timeouts and HTTP rate limits must keep their distinct classifications and identify the RPC
+// method and failing stage.
 #[tokio::test]
 async fn transport_deadline_and_http_rate_limit_preserve_typed_operational_causes() {
     for timeout in [false, true] {
@@ -1003,6 +1036,8 @@ async fn transport_deadline_and_http_rate_limit_preserve_typed_operational_cause
     }
 }
 
+// Different provider error codes must remain distinguishable after persistence, with the
+// supplied message and raw JSON data retained.
 #[tokio::test]
 async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
     use mfm_evm::{
@@ -1119,6 +1154,8 @@ async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
     assert_ne!(retained[0], retained[1]);
 }
 
+// Failure while reading the response body must retain the already received HTTP status and the
+// actual body rejection cause.
 #[tokio::test]
 async fn response_status_survives_body_failure_and_size_refusal() {
     for bounded in [false, true] {
@@ -1173,6 +1210,8 @@ async fn response_status_survives_body_failure_and_size_refusal() {
     }
 }
 
+// Development funding must use the expected transaction request and preserve provider rejection
+// details through the shared RPC path.
 #[tokio::test]
 async fn development_funding_uses_the_shared_causal_rpc_boundary() {
     let transaction_hash = EvmHash::from_bytes([7; 32]);
@@ -1227,6 +1266,8 @@ async fn development_funding_uses_the_shared_causal_rpc_boundary() {
     assert_eq!(rejected.observed_requests().len(), 2);
 }
 
+// Body timeouts must retain received headers; malformed JSON must retain parser location without
+// appending the response body.
 #[tokio::test]
 async fn body_deadline_retains_headers_and_parser_location_is_reviewed() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1284,6 +1325,8 @@ async fn body_deadline_retains_headers_and_parser_location_is_reviewed() {
     assert_eq!(stub.observed_requests().len(), 1);
 }
 
+// An out-of-range provider nonce must report the observed value and nonce bounds instead of
+// losing the validation reason.
 #[tokio::test]
 async fn local_range_failure_retains_field_and_checked_observation() {
     let stub = Stub::new(vec![
@@ -1319,6 +1362,8 @@ async fn local_range_failure_retains_field_and_checked_observation() {
     assert_eq!(stub.observed_requests().len(), 1);
 }
 
+// A refused connection must retain the exposed transport and OS causes without claiming that a
+// response was received.
 #[tokio::test]
 async fn send_failure_retains_exposed_os_ancestry() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1348,6 +1393,8 @@ async fn send_failure_retains_exposed_os_ancestry() {
     canonicalize_mfm_value(&error).unwrap();
 }
 
+// Stopping an oversized stream proves only a lower bound on its size and must not fabricate a
+// dependency error source.
 #[tokio::test]
 async fn streamed_body_overflow_records_a_lower_bound_without_an_invented_source() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
