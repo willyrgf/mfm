@@ -441,7 +441,10 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         .execute(&mut admin)
         .await
         .unwrap();
-    let Err(mfm_runtime::InvocationFailure::RecoveryStopped { observed }) = failure else {
+    let Err(failure) = failure else {
+        panic!("durable authority failure")
+    };
+    let mfm_runtime::InvocationFailure::RecoveryStopped { observed } = &failure else {
         panic!("durable authority failure")
     };
     let RunViewState::EffectPending {
@@ -466,10 +469,24 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     assert_eq!(cause.as_value()["sources"][0]["kind"], "database");
     assert_eq!(cause.as_value()["sources"][1]["sqlstate"], "42501");
     let hot_wire =
-        serde_json::to_value(mfm_app::SerializableRunView::new(&observed).unwrap()).unwrap();
+        serde_json::to_value(mfm_app::SerializableRunView::new(observed).unwrap()).unwrap();
     assert_eq!(
         hot_wire["state"]["latest_failure"]["error"]["value"],
         serde_json::to_value(&original).unwrap()
+    );
+    let envelope = serde_json::to_value(
+        mfm_app::SerializableClientError::for_run(
+            &mfm_app::RunRequestError::Invocation(failure),
+            "recovery stopped",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(envelope["code"], "recovery_stopped");
+    assert_eq!(envelope["invocation"]["observed"], hot_wire);
+    assert_eq!(
+        envelope["invocation"]["error"],
+        hot_wire["state"]["latest_failure"]["error"]
     );
     drop(hot);
     let cold = runtime(

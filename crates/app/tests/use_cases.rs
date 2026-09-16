@@ -851,6 +851,30 @@ async fn config_rejects_malformed_unbound_and_forged_rows_before_admission() {
             RequestError::InvalidRetainedConfig
         ))
     ));
+
+    let mut invalid = serde_json::from_str::<serde_json::Value>(NATIVE_SNAPSHOT).unwrap();
+    invalid["input"]["selector"]["target"] = serde_json::json!("other-portfolio");
+    let canonical =
+        PlainCanonicalJsonBytes::from_json_str(&invalid.to_string()).expect("canonical");
+    let digest = ConfigDigest::new(canonical.content_digest()).expect("digest");
+    let name = ConfigName::new("hostile-plan").expect("name");
+    let revision =
+        ConfigRevision::new(name.clone(), digest.clone(), canonical.to_vec()).expect("revision");
+    assert!(matches!(
+        open(
+            &[],
+            Arc::new(MemoryStore::new()),
+            Arc::new(HostileConfigRepository { revision }),
+        )
+        .start_run(
+            RunId::from_digest(DigestBytes::from_array([15; 32])),
+            &ConfigSelection::new(name, digest),
+        )
+        .await,
+        Err(mfm_app::RunRequestError::Request(
+            RequestError::InvalidRetainedConfig
+        ))
+    ));
 }
 
 #[tokio::test]

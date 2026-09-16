@@ -132,6 +132,11 @@ indices, duplicated associated-type declarations, or constants that the test rea
 implementation itself. A schema, wire, hash, or public error assertion is valuable only when it
 independently states an interoperability, hostile-input, redaction, or persistence contract.
 
+Judge the assertion, not the test category: an infallible constructor's public encoding or a
+roundtrip through an independently specified persisted wire can still protect behavior Rust does
+not prove. When deleting overlap, identify the retained scenario and the exact guarantee it owns;
+generic engine coverage does not replace a consuming boundary's mapping or rendering assertions.
+
 Do not allocate production size maxima to prove a hardcoded ceiling. `to_json_bounded` and
 `SizeLimitExceeded::check` own that comparison; test them with small explicit limits. Production
 constants remain the runtime policy.
