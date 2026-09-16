@@ -2,6 +2,12 @@
 
 ## Status and scope
 
+The [DSL refactoring RFC](RFC_REFACTOR_DSL.md) now owns the target authoring, compilation,
+executable-association, and Program execution model. Its decisions supersede conflicting API
+sketches here and in the linked E2E designs, including mutable `OperationExpansion` construction,
+mandatory root failure maps, and execution of authoring values. The scenarios, independent oracles,
+and required coverage below remain applicable; the refactor is not implemented by these documents.
+
 The three public usage paths below are the agreed framing for MFM as a platform and framework.
 One representative E2E scenario per path is the agreed replacement for the current E2E organization.
 Each scenario can grow named case runs for recovery, durability, and error handling.
