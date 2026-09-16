@@ -55,7 +55,7 @@ new State composed with maintained components must all use this same public path
 
 ## 2. Decisions
 
-1. A checked State selection is independently compilable. Root construction does not require an
+1. A typed State selection is independently compilable. Root construction does not require an
    Operation or a one-State Operation wrapper.
 2. Operations remain first-class functional abstractions: they group reusable behavior and own
    supported configuration, validation, and scoped recovery defaults.
@@ -77,6 +77,14 @@ new State composed with maintained components must all use this same public path
     cannot mutate admitted history or supersede unresolved command authority.
 11. One Runtime provides bounded ordinary progression and direct progression/read/resume access.
     Attempt limits remain separate from admitted recovery policy.
+12. Reusable Operations are Rust type definitions over typed tuples and default-policy types.
+    Caller construction uses the same tuple representation, without a universal closure or fluent DSL.
+13. Production exports State types directly. There is no required State-getter collection per Operation.
+14. Concrete public bindings are resolved at compilation from checked input/configuration, not
+    passed into each reusable definition. Live handles remain separately bound to Runtime.
+15. Preserve input/plan agreement without a public arbitrary root-only predicate. The concrete
+    coupling for input-dependent source shape is a required proof before removing existing checks.
+16. Retain Runtime's canonical Object representation for heterogeneous persistence and cold decoding.
 
 ## 3. Current evidence and what must change
 
@@ -110,143 +118,184 @@ construction boundary and remove superseded machinery in the same cutover.
 | Concept | Meaning and owner |
 | --- | --- |
 | State | One meaningful deterministic executable step. Domain/framework authors implement Pure, Read, or Effect semantics. Adapters perform IO. |
-| State selection | One occurrence of an existing State with checked immutable public setup and optional occurrence policy. Framework selection types carry its concrete State/capability types. |
-| `states` | An ordinary local variable containing production-provided reusable selections. It is not a registry, running State collection, global, or Operation. |
+| State selection | A typed definition of one State/capability occurrence and optional policy. Its public setup is resolved during compilation. |
+| `states` | An optional local name for a tuple of imported State selections. No collection type, constructor, or getter set is required. |
 | Operation | A reusable functional grouping of States or child Operations, with supported configuration, validation, and scoped policy. |
-| Typed sequence | A construction value connecting compatible selections or Operations. It adds no execution semantics or persistence boundary. |
+| Typed tuple | The sequence representation connecting compatible selections or Operations. It adds no execution semantics or persistence boundary. |
 | Program | The immutable, content-addressed expanded State sequence, input commitment, exact contracts, and resolved policy. |
 | Runtime | Association of exact implementations and live bindings, execution, continuation, authorized recovery, and checked observation. |
 
-Use `states` for the component collection and `operation` for an authored functional grouping.
-Do not shadow `states` with its own chained sequence. Concrete maintained names remain descriptive,
-such as `ContractDeploymentLifecycle` and `ConfigureAndObserve`.
+Use `operation` for an authored functional grouping and `states` when naming its tuple is useful.
+Concrete maintained names remain descriptive, such as ContractDeploymentLifecycle and
+ConfigureAndObserve. No getter collection or original Operation instance is needed to import States.
 
 An Operation does not execute as a hidden State. Its grouping affects construction, validation,
 and policy scope; it adds no Journal frame and creates no atomic transaction around its children.
 
-## 5. Typed construction
+## 5. Rust type definitions and tuple construction
 
-### 5.1 Neutral source protocol
+### 5.1 One representation
 
-The target protocol has the following essential shape:
+Use ordinary Rust types to define maintained Operations. The proposed representation is
+`Operation<Body, Defaults>`, where Body is a typed tuple of State selections or child Operations:
 
 ```rust
-pub trait AuthoringSource: Sized {
+pub type ContractDeploymentLifecycle = Operation<
+    (
+        Effect<Deploy, EvmTransactionEffect>,
+        Effect<Configure, EvmTransactionEffect>,
+        Read<Observe, EvmAnchoredContractCallRead>,
+        Pure<Validate>,
+        Pure<Report>,
+    ),
+    LifecycleDefaults,
+>;
+```
+
+These are production-owned types or specialized State aliases. `Effect`, `Read`, and `Pure` are
+framework selection types, not new State implementations or one-State Operations. The concrete
+capability parameter identifies the injection contract; it does not identify an account or endpoint.
+
+The consumer selects a maintained definition with:
+
+```rust
+let operation = ContractDeploymentLifecycle::default();
+```
+
+`default()` constructs an authoring value. It performs no IO, input parsing, capability lookup,
+State execution, or compilation. The recipe is defined once in source code and can be selected
+many times with different checked inputs. Neither the recipe nor the resulting input-specific
+Program needs to be a literal Rust `static`. A Program still commits one exact initial value.
+Selection defaults construct type markers; they must not require `S: Default` or instantiate the
+underlying executable State. The new-State author in section 12.5 implements no constructor.
+
+The framework-controlled source protocol retains only the essential endpoint relationship:
+
+```rust
+pub trait AuthoringSource: sealed::Sealed {
     type Input: MfmValue;
     type Output: MfmValue;
-
-    fn then<B>(self, next: B) -> Sequence<Self, B>
-    where
-        B: AuthoringSource<Input = Self::Output>;
 }
 ```
 
-The compiler traversal is framework-controlled. Seal this protocol; existing-component consumers
-never implement it, and new-State authors enter through their State selection. Extension points
-remain State, capability, and handler contracts. Do not expose unchecked arbitrary descriptor
-emission as an escape from typed adjacency.
+It has no aggregate failure associated type. Implement it for the framework's typed source
+representations; new-State authors enter through their State selection, not an unchecked arbitrary
+emitter. The tuple implementation requires each preceding expanded output to equal the next
+expanded input. Its endpoints are the first input and final output. Operations are valid tuple
+elements and retain their own policy scopes.
 
-`Sequence<A, B>` has `Input = A::Input` and `Output = B::Output`. It has no failure associated
-type and creates no aggregate failure value. Nesting or regrouping without changed policies must
-not introduce failure-contract changes merely because the construction tree is different.
+Tuple traits alone do not supply public capability setup or root-input projection bounds. Section
+9 specifies those additional compiler obligations. Do not claim the simplified trait above is a
+complete implementation signature.
 
-Mode-specific selection constructors are:
+### 5.2 Caller construction without a closure
 
-```rust
-pure::<S>() -> PureSelection<S>
-read::<S, C>(setup: C::Setup) -> Result<ReadSelection<S, C>, ProgramError>
-effect::<S, C>(setup: C::Setup) -> Result<EffectSelection<S, C>, ProgramError>
-```
-
-Pure selections expose the State's exact input/output. Read and Effect selections expose the
-capability's expanded input/output, while the compiler retains the designated raw State ABI.
-There is no required `ExpandedFailure` aggregation.
-
-### 5.2 One Operation constructor
-
-The proposed common constructor is:
+A caller uses the same representation without defining a struct, type alias, or trait implementation:
 
 ```rust
-Operation::new<S>(
-    build: impl FnOnce(&OperationScope) -> Result<S, ProgramError>,
-) -> Result<Operation<S>, ProgramError>
-where
-    S: AuthoringSource;
+let operation = Operation::new((
+    Effect::<Deploy, EvmTransactionEffect>::default(),
+    Pure::<CheckedAddConfigurationValue>::default(),
+    Effect::<Configure, EvmTransactionEffect>::default(),
+    Read::<Observe, EvmAnchoredContractCallRead>::default(),
+    Pure::<Validate>::default(),
+    Pure::<Report>::default(),
+));
 ```
 
-This replaces the existing Operation implementation requirement for declaring a sequence. It also
-replaces the speculative `author_operation` and `recompose` helpers. The closure runs once during
-construction and returns one concrete typed source. It does not receive a mutable emitter and
-cannot append erased States to a draft. Ordinary closures are sufficient because this closure is
-not stored as a callback generic over a future registration sink.
+`Operation::new(body)` is infallible construction of a well-typed source value, with unspecified
+policy fields inherited. Checked runtime values and their agreement are qualified before Program
+publication. Invalid adjacency fails trait checking; invalid configured values do not become valid
+merely because a definition value can be constructed.
+Define this constructor on `Operation<Body, Inherit>` so the caller need not infer an unconstrained
+Defaults parameter. Inherit is the framework policy marker for unspecified fields, not a new
+handler or a default that silently overrides the enclosing scope.
 
-For ordinary construction the scope is unused:
+This replaces the fluent `.then` algebra and the universal `Operation::new(|scope| ...)` closure.
+Do not keep them as parallel DSLs. The closure was introduced to obtain checkpoint scope; ordinary
+Operation definitions do not need it. Scoped boundary markers handle checkpoints as described in
+section 7.4. There is no `author_operation` or `recompose` constructor.
 
-```rust
-let operation = Operation::new(|_| {
-    Ok(states.deploy()
-        .then(states.add_configuration_value())
-        .then(states.configure())
-        .then(states.observe())
-        .then(states.validate())
-        .then(states.report()))
-})?;
-```
+Definition structure is reusable independently of checked per-run values. Production Operations
+own documented defaults and supported configuration choices. Custom composition may choose
+explicit policy overrides using the same typed policy representation; it does not silently inherit
+all the defaults of a maintained Operation merely by importing its constituent States.
 
-Maintained Operations use this same constructor internally. They expose their own descriptive
-factory and checked supported options, returning compositions of framework source types. Consumers
-do not supply aliases to make those return types usable. Opaque Rust returns do not automatically
-erase different source shapes. Where a supported configuration chooses between shapes, a
-framework-owned `Choice<A, B>` requires equal input/output endpoints and contains only the selected
-source. Compilation traverses that branch only. This is construction-time selection, not a
-failure sum, runtime branch State, or second execution model.
+### 5.3 Supported choices and bounded repetition
 
-An Operation can carry a typed root planning check:
+Where supported configuration selects different concrete source shapes, a framework-owned
+`Choice<A, B>` requires equal input/output endpoints. Compilation expands only the selected branch.
+This is construction-time choice, not a failure sum, runtime branching State, or second engine.
+Opaque Rust return types do not erase incompatible source shapes.
+A branch selected from input must be selected or qualified against the same checked input being
+committed, under section 5.4's coupling requirement. Construction-time choice is not permission
+to accept an independently selected incompatible plan.
 
-```rust
-operation.with_input_check(
-    check: impl Fn(&S::Input) -> Result<(), ProgramError>,
-)
-```
+Bounded homogeneous repetition is required for existing products, not deferred as an arbitrary
+new DSL. Portfolio currently repeats EnterCollection -> CollectEvmBalances -> ResumeCollection for
+its configured collections. Its repeated body must return the same exact context type it consumes.
+Specify and compile a typed repeated-body representation before migrating that product: checked
+count/source values, empty repetition as typed identity, cumulative expanded-State limits, and
+fresh policy/checkpoint scope for each occurrence. No State may disappear behind unchecked erasure.
 
-This modifier retains an authoring-only validator and its immutable public planning assumptions.
-It is needed when a maintained source has been selected from input-dependent facts, such as
-collection counts, route choices, or supported ABI choices. Production factories supply it where
-required; existing-component consumers do not reimplement validation. It performs no IO and is
-not an expansion callback, executable State, or Runtime-retained closure. Its concrete type may be
-an inferred Operation parameter; consumers need no validator aliases.
+An empty repeated body is typed identity because its body supplies the endpoint contract. Preserve
+zero-State Program behavior through an explicitly typed identity definition; a bare empty tuple
+cannot establish an arbitrary root contract by itself.
 
-Compilation validates every enclosing planning check on the root path, then the first selected
-component's input checks, before publishing a Program or registration delta. It does not skip an
-Operation's root check merely because the first leaf has the same Rust input type. For a nested
-Operation reached only after execution, its input is not available during compilation: parent
-planning and checked transitions must establish its assumptions, with value-dependent checks at
-the owning deterministic execution boundary. No validator simulates earlier States. Cold
-association installs implementations without running initial-input checks or reconstructing C0.
+Do not prescribe speculative tuple arity machinery or a heterogeneous dynamic list before the
+consuming proof. The proof must establish the supported finite tuple arities and nesting behavior,
+and preserve existing bounded product repetition. An arbitrary configuration-driven list remains
+outside this RFC; it is not needed to satisfy the current Portfolio case.
 
-### 5.3 What the type system proves
+### 5.4 Validation without an arbitrary input predicate
 
-Static construction excludes incompatible adjacent contracts in caller sequences, nested
-Operations, and injected prefixes/suffixes. Semantic stage types must encode meaningful
-prerequisites: a configuration State requires completed deployment facts, not a generic context
-in which those facts might be absent.
+Remove the proposed public `operation.with_input_check(...)` callback. A predicate that runs when
+an Operation is the root and disappears when it is nested is not a sound general precondition.
+There is no authoring closure retained for later validation or execution.
 
-It does not prove that execution succeeds, two binding values agree, a response is authentic, or
-a checkpoint remains eligible after an Effect. It cannot forbid an order that the declared types
-deliberately allow. For example, two transformations with the same input/output type can be
-repeated unless the product contract expresses a stronger restriction.
+The validation requirements themselves remain:
 
-Stored bytes and runtime-selected alternatives require exact admission checks. A future arbitrary
-configuration-driven component list requires its own bounded checked representation; this RFC
-does not disguise an untyped list as a statically verified Rust sequence.
+| Check | Owner |
+| --- | --- |
+| Value structure and local invariants | Checked input constructors and decoders |
+| Selected capability binding/action agreement | Typed public setup resolution and the owning deterministic execution boundary |
+| Execution-time semantic prerequisite | Checked State input/output contracts and deterministic State behavior |
+| Agreement between input-dependent source shape and admitted input | Planning and compilation from the same checked root input |
 
-Retain Program validation on decoding and compilation. Static Rust equality does not replace
-hostile-input validation, content identity, capacity checks, or exact Runtime association.
+Portfolio's current collection-count and route agreement checks are concrete migration obligations.
+The replacement must derive input-dependent construction from the actual input whose identity is
+committed, rather than accept unrelated independently planned source values. Removing the callback
+and retaining two unchecked independently supplied representations would not preserve those checks.
+The exact coupling for repeated/configured sources is a handoff gate; it is not solved by the
+fixed lifecycle tuple or by claiming that a factory validates everything.
 
-## 6. Capability-owned injection and root validation
+A semantic prerequisite such as an effective-value constraint must not vanish when its Operation
+follows an addition State. Establish it through a checked contract or a deterministic State check
+at the owning boundary. Compilation must not simulate preceding States to guess future values.
 
-Replace mutable before/after emission with typed construction of the capability's prefix and
-successful suffix. For an exact State/capability pair, the obligations are:
+### 5.5 Limits of static enforcement
+
+Static construction excludes incompatible adjacent contracts in tuples, nested Operations, and
+capability prefixes/suffixes. Semantic stage types must encode meaningful prerequisites, such as
+requiring completed deployment facts before configuration.
+
+It does not prove execution succeeds, two binding values agree, evidence is authentic, or a
+checkpoint remains eligible after an Effect. It cannot forbid an ordering that the declared types
+permit. Repeating two transformations with the same endpoints remains valid unless the product
+expresses a stronger contract.
+
+Retain Program validation during compilation and decoding. Static Rust equality does not replace
+hostile-input validation, exact schema admission, content identity, capacity limits, or Runtime
+association. Grouping alone must not introduce aggregate failure schemas or extra execution frames.
+
+## 6. Capability-owned injection and public setup
+
+A reusable definition declares the State/capability pair without embedding a sender, endpoint,
+authority epoch, or other concrete public binding. Those values belong to checked compilation
+input/configuration, not to the static Operation definition or every State occurrence constructor.
+They must still be resolved before Program admission; no implicit default account is introduced.
+
+Replace mutable before/after emission with typed prefix and successful suffix definitions:
 
 ```text
 prefix:      ExpandedInput -> State::Input
@@ -254,164 +303,174 @@ designated:  State::Input  -> State::Output
 suffix:      State::Output -> ExpandedOutput
 ```
 
-The capability supplies checked setup, binding identity, expanded-input validation, and the two
-typed sources. The framework inserts the designated occurrence exactly once. Prefix and suffix
-receive their own scoped construction authority; creating a scope does not require wrapping them
-in an Operation. An empty source is typed identity and is valid only for equal endpoints.
+The capability owns these typed definitions, designated binding qualification, and derivation of
+supporting setup from its checked public setup. The framework inserts the designated occurrence
+exactly once. Empty expansion is typed identity and is valid only for equal endpoints. Prefix and
+suffix have separate scopes without becoming one-State or scope-only Operations.
 
-Retain one capability protocol. Its implementation signature must carry the endpoint equalities
-above through associated source types or equivalent typed returns. The implementation proof must
-include a compile-fail prefix mismatch; keeping today's mutable callback with a final runtime
-check does not meet the target static guarantee.
-
-For Deploy and Configure the expanded execution remains:
+For Deploy and Configure the expanded sequence remains:
 
 ```text
 ReserveNonce -> PrepareTransaction -> designated Effect -> ProjectOutcome
 ```
 
-The caller supplies `DeploymentRequest` or `DeployedContract`, not prepared transaction facts.
-Every injected State has its own exact ABI, failure contract, handler selection, persistence
-boundary, and recovery eligibility. The suffix runs on success, not as a finally handler.
+The consumer supplies a deployment request or deployed-contract context, not prepared transaction
+facts. Every expanded State retains its own exact ABI, original failure contract, policy selection,
+persistence boundary, and recovery eligibility. The suffix runs on success, not as a finally handler.
 
-Move wrapper-owned root validation into the capability's checked selection contract:
+Retain one injection protocol with associated source types or equivalent typed definitions proving
+these endpoint equalities. A runtime adjacency check inside the old mutable callback does not meet
+this requirement. The cross-crate proof must include an invalid prefix that cannot compile and a
+valid injected State used both standalone and inside an Operation.
 
-```rust
-fn validate_expanded_input(
-    setup: &Self::Setup,
-    input: &Self::ExpandedInput,
-) -> Result<(), ProgramError>;
-```
+Root public setup is resolved as described in section 9.2. The capability derives the reservation
+and preparation setup from the designated transaction setup; callers must not implement separate
+projections for hidden framework stages. If supported workflows use multiple bindings of one
+capability, their definitions must identify the appropriate typed role or slot. Do not use a global
+fallback or an untyped context bag to choose among them.
 
-This retains binding agreement, transaction action mode, and input checks before admission when
-their inputs are available. Product configuration/input constructors own their cross-field checks.
-The first selected component validates the actual root input; later values do not yet exist at
-compile time. Their deterministic preparation and checked fact constructors retain the relevant
-checks at execution, before dependent IO or append. Local mismatch remains Internal and cannot
-become an authenticated integrity-block event.
+Move the existing EvmTransaction wrapper's binding, action-mode, and root input checks to checked
+setup resolution/capability qualification before deleting it. Later execution checks still reject
+local mismatches before dependent IO or append. An internal mismatch is not authenticated external
+evidence and cannot become an integrity-block event.
 
-Retain bounded expansion depth and State counts. Injection is not a sandbox for unrestricted Rust
-recursion. Failure must leave no usable partial Program or partially installed assembly.
+Keep expansion-depth and expanded-State limits. Typed definitions are not a sandbox for arbitrary
+Rust recursion. Failed compilation must publish neither a partial Program nor a registration delta.
 
 ## 7. Operations, defaults, and recovery scopes
 
-### 7.1 Functional ownership
+### 7.1 Operation-owned defaults
 
-`ContractDeploymentLifecycle::new(&config, binding)` owns the maintained lifecycle, validates its
-supported choices, obtains its reusable State selections, and applies documented recovery
-defaults. Selecting the maintained Operation does not require the consumer to construct `states`.
+An Operation is a reusable functional abstraction, not merely a named tuple. Its definition owns
+its supported choices, meaningful sequence, public endpoint contracts, and documented policy
+scope. `Operation<Body, Defaults>` makes that ownership explicit without a construction closure.
 
-`ContractLifecycleStates::new(&config, binding)` exposes the same reusable components independently.
-It checks supported public setup; it does not import the lifecycle Operation's enclosing policy.
-A caller creating a new Operation selects that policy intentionally.
+`LifecycleDefaults` is a production-owned policy provider type. It identifies the supported typed
+handler and supplies its checked parameters and default allowances, using supported compilation
+configuration where necessary. Numeric retry/restart limits are values, not const-generic type
+parameters. The handler's concrete type must remain available for automatic and cold association.
+A supported alternative handler is a typed choice, not a string naming a dynamic registry entry.
 
-The baseline retains framework Stop and zero allowances. A product may expose checked supported
-policy choices. It must not quietly install unbounded retries or alter its child's intrinsic error
-classification. All selected handler parameters and allowances are resolved into the Program.
+For example, an Operation could select StandardRecovery with three retries and no restarts per
+State occurrence. That illustrates supported policy, not a change to shipping defaults. Framework
+fallback remains Stop and zero allowances; the lifecycle baseline must document its selected
+defaults. Permission for three retries does not force three retries: the handler and Runtime still
+check classification, phase, evidence, and retained authority.
 
-### 7.2 Typed policy selection and precedence
+### 7.2 Inheritance and overrides
 
-The proposed typed modifiers are:
+Resolve defaults from outer scope to the occurrence:
 
-```rust
-source.with_handler::<H>(params: H::Params)
-source.with_allowances(allowances: RecoveryAllowances)
+```text
+framework fallback
+    -> enclosing Operation defaults
+    -> nearer child Operation or injection-scope defaults
+    -> explicit State-occurrence override
 ```
 
-They return authoring values retaining `H` until compiler emission. They must not first erase a
-handler into `HandlerBinding` and then require a separate registration call. Persisted descriptors
-remain compiler output.
+Every expanded State, including ReserveNonce and PrepareTransaction, inherits the applicable
+Operation defaults unless a more local declaration overrides them. Importing State types does
+not import the policy of every maintained Operation that uses them.
 
-Retain the current precedence: an explicit occurrence override, then the nearest explicitly
-configured Operation/injection scope, then framework defaults. A child Operation's explicit
-selection takes precedence over inherited outer defaults. Replacing a handler replaces its
-parameters and checkpoint targets together. Allowances inherit independently, including explicit
-zero. An outer setting does not secretly rewrite explicit policy inside a maintained child.
+Policy declarations distinguish unspecified from explicit zero. A more local declaration replaces
+only the fields it explicitly specifies. A selected handler, its parameters, and checkpoint targets
+form one replacement unit; allowances inherit independently. Outer defaults do not rewrite explicit
+policy inside a maintained child. Reusing a child twice creates two occurrence scopes.
 
-Intrinsic `ClassifyError` remains on each exact original error contract. Classification produces
-Retryable, OutcomeUnknown, InputInvalidated, or Permanent; Runtime passes the classification and
-recovery context to the selected handler and authorizes its request. A policy may stop a retryable
-failure without reclassifying it. Changed intrinsic semantics require a changed error contract
-identity. This RFC introduces no classifier registry or configurable reclassification layer.
+Use one typed policy representation for Operation defaults and occurrence overrides. An occurrence
+can carry a typed policy wrapper around its State selection; it is not another State, registry,
+or execution engine. Concrete modifier/associated-type spelling must be established by the compile
+proof, not a second fluent sequence DSL.
 
-### 7.3 Checkpoints without mutable sequence emission
+Per-occurrence allowances are separate from the Program-wide recovery budget. An inherited local
+retry count cannot increase the global budget or authorize a forbidden restart. Future settings
+extend the typed contract only when their concrete semantics and owner are defined; no unrestricted
+configuration bag is introduced for hypothetical options.
 
-Retain allocation-based scope ownership and compiler relocation. A scope constructs a typed
-checkpoint token whose boundary is a zero-State identity source:
+### 7.3 Classification is not redefined by an Operation
 
-```rust
-let operation = Operation::new(|scope| {
-    let checkpoint = scope.checkpoint::<ConfiguredContract>();
-    let recovery = scope.handler::<StandardRecovery>(NoParams)
-        .checkpoint(&checkpoint)?;
+Intrinsic `ClassifyError` belongs to the exact original error contract. Its classification is
+Retryable, OutcomeUnknown, InputInvalidated, or Permanent. The Operation chooses how its handler
+responds to that classification and recovery context; Runtime alone authorizes the request.
 
-    Ok(states.deploy()
-        .then(states.configure())
-        .then(checkpoint.boundary())
-        .then(states.observe()
-            .with_handler_selection(recovery)
-            .with_allowances(RecoveryAllowances::new(0, 1)))
-        .then(states.validate())
-        .then(states.report()))
-})?;
+A policy can stop a retryable failure without changing its classification. Changing intrinsic
+classification semantics requires a changed error contract identity. Operation-specific
+reclassification is a separate contract change, not an inherited default smuggled into this RFC.
+There is no classifier registry, discarded original, or policy-facing substitute error.
+
+### 7.4 Checkpoints without construction lambdas
+
+Use nominal typed boundary markers in tuple definitions, for example `Checkpoint<AfterConfigure>`.
+The marker's declared context is ConfiguredContract, so its authoring endpoints are identical and
+must connect to that exact boundary. It emits no executable State or Journal frame. A typed policy
+target refers to the marker, not a caller-supplied declaration index.
+
+```text
+Operation occurrence
+  Deploy
+  Configure
+  Checkpoint<AfterConfigure>
+  Observe [StandardRecovery, target AfterConfigure, one local restart]
+  Validate
+  Report
 ```
 
-`with_handler_selection` installs the same typed handler selection as `with_handler`; it is the
-form carrying checked targets, not a second recovery mechanism. The checkpoint is not a State,
-adds no frame, and owns no runtime mutation. Its token carries scope identity, not a caller-chosen
-declaration index. Construction tokens own their scope identity and do not require borrowed
-lifetimes to escape the ordinary construction closure.
+The compiler owns scope and relocation. Resolve a newly installed target only within its owning
+Operation/injection scope. Reject missing or duplicate markers, foreign installations, forward
+references, terminal markers without a following target State, and contract disagreement. An
+already-resolved inherited parent policy keeps its original target; it is not rebound to a child
+marker with the same nominal type.
 
-The compiler resolves the marker to the expanded input boundary. Reject absent or duplicate
-markers, foreign-scope installations, forward targets, and mismatched contracts. An installed
-handler cannot target a terminal marker with no following State. An installed
-parent handler can be inherited by a child, but the child cannot directly install a captured
-parent token. Reused source values receive fresh compilation scope identities so separate
-occurrences cannot alias checkpoint positions. Prefix and suffix retain separate scopes.
+Repeated or reused Operations get distinct occurrence scopes. A marker type is not a global
+TypeId-to-position mapping, and allocation/type identities do not enter Program hashing. Prefix
+and suffix preserve separate scopes. This uses the existing scope/relocation responsibility with
+new typed marker construction; it does not require an Operation wrapper just to create a scope.
 
-Runtime still checks eligibility, allowance usage, restored input, and Effect barriers. The
-checkpoint example marks observation after the configuration Effect; it does not permit restarting
-across that Effect. It grants one local restart; the Program's global recovery budget must also
-permit that decision. No marker or closure enters persisted Program data, and allocation
-identities never enter Program hashing.
+The example targets observation after the completed configuration Effect. It does not permit a
+restart across that Effect. Both local allowance and the global budget must authorize the decision.
+Exact marker/target trait signatures, inheritance, and reuse require a consuming proof before the
+current scope mechanism is removed.
 
 ## 8. Production lifecycle contracts and configuration
 
-### 8.1 Where `states` comes from
+### 8.1 Direct production exports
 
-The proposed production boundary is explicit:
+Production exports reusable State types directly from its domain module:
+
+```rust
+use mfm_evm::contract_lifecycle::{
+    Deploy, Configure, Observe, Validate, Report,
+    CheckedAddConfigurationValue,
+    ContractDeploymentLifecycle, ConfigureAndObserve,
+};
+```
+
+These exports are proposed. Production supplies concrete implementations or specialized State
+aliases fixing the supported internal context/recipe contracts. A consumer does not redefine those
+aliases. Neither import nor selection requires an existing Operation instance.
+
+Delete the proposed `ContractLifecycleStates` collection, its constructor, its stored setup, and
+its per-State forwarding getters. Do not replace it with generated per-Operation accessors or a
+component registry. States are reusable domain components independently of which Operations use
+them. Use `states` as an optional local name for a tuple, not a required collection object.
+
+The checked input boundary for the lifecycle examples is:
 
 ```rust
 let config = ContractWorkflowConfig::decode(&config_bytes)?;
-let states = ContractLifecycleStates::new(&config, binding.clone())?;
 let input = config.initial_input()?;
 ```
 
-The caller reads bytes through its configuration/IO boundary. `decode` is pure checked parsing.
-The configuration contains a complete checked public binding selection or public reference that
-the caller resolves before construction; the constructor compares it with the supplied binding.
-No environment lookup, provider request, signer access, or secret resolution occurs in these
-constructors. `initial_input` constructs production-owned typed values; it does not supply contract
-metadata through a hypothetical `config.contracts()` accessor.
+The caller loads the bytes through its IO boundary. `decode` and `initial_input` validate supported
+artifact/ABI choices, public transaction binding, scalar values, and transaction options. For these
+library examples the checked request contains the complete public binding, exposed through
+`input.transaction_binding()`. Products resolving named public binding references must complete
+that checked resolution at their IO/configuration boundary before this input is admitted.
 
-`ContractLifecycleStates` owns checked immutable public setup and returns selections. For example:
-
-```rust
-impl ContractLifecycleStates {
-    pub fn deploy(&self) -> EffectSelection<Deploy, EvmTransactionEffect>;
-    pub fn configure(&self) -> EffectSelection<Configure, EvmTransactionEffect>;
-    pub fn observe(&self) -> ReadSelection<Observe, EvmAnchoredContractCallRead>;
-    pub fn add_configuration_value(&self)
-        -> PureSelection<CheckedAddConfigurationValue>;
-    pub fn validate(&self) -> PureSelection<ValidateConfiguration>;
-    pub fn report(&self) -> PureSelection<BuildContractReport>;
-}
-```
-
-These are signature declarations, not an implementation. The production package supplies the
-concrete States, supported slot/recipe bindings, and constructor checks once. No accessor executes
-a State or returns an Operation masquerading as a single Effect. The collection is not a second
-executable catalogue: only selected occurrences contribute requirements during compilation.
+No credentials, provider handles, environment lookup, or signer access belong in the definition
+or admitted input. Configuration supplies values and supported choices, not contracts through a
+`config.contracts()` accessor. The compiler projects required public setup from this actual checked
+input; there is no repeated concrete binding argument on each State definition.
 
 ### 8.2 Public expanded contracts
 
@@ -453,11 +512,11 @@ configuration-driven program language.
 
 ## 9. Compilation and executable association
 
-### 9.1 One traversal and one compiler
+### 9.1 One structural traversal and one compiler
 
-The Program crate owns typed lowering into the existing private linear representation, resolved
-recovery descriptors, complete sequence qualification, and input commitment. It receives a
-statically dispatched requirements receiver defined in the Program layer:
+The Program crate owns traversal of typed definitions, injection expansion, policy lowering,
+checkpoint relocation, sequence qualification, and input commitment. At typed emission it supplies
+exact executable requirements to a Program-owned statically dispatched receiver:
 
 ```rust
 trait ExecutableRequirements {
@@ -482,19 +541,25 @@ trait ExecutableRequirements {
 }
 ```
 
-There is no map callback because mandatory root mapping is removed. Exact value requirements
-include input/output/original failures, intent/command/evidence, operational errors, and policy
-parameters. Injected States and selected handlers are emitted through this same receiver.
+There is no root-map callback. Requirements cover raw and expanded value contracts, original
+failures, intent/command/evidence, operational errors, and policy parameter codecs. The compiler
+retains concrete types until the requirement and corresponding descriptor have been emitted.
+Runtime implements the receiver using its existing exact ABI tables and conflict checks.
 
-Generic methods use static dispatch; do not attempt to make this a `dyn` visitor. There is no
-separate `register` method on a State, Operation, or source. Framework traversal retains concrete
-types until the requirement and corresponding descriptor have both been emitted.
+Generic methods use static dispatch, not a `dyn` visitor. A Program-only compiler uses a no-op
+receiver. Compile-time expansion and cold type inventory use the same framework-owned structural
+definition with explicit traversal modes. Components do not maintain independent compilation and
+registration trees or expose a second `register` method. The feasibility proof must demonstrate
+that the shared structure is sufficient for both modes, including injection and policy choices.
 
-Runtime's builder implements the receiver using existing exact ABI tables and conflict checks.
-A Program-only compiler invocation uses a no-op receiver and remains usable without Runtime.
-These are uses of one compiler, not parallel lowering implementations. Assembly errors preserve
-their source types through the receiver's associated error; they are not collapsed into
-`InvalidContract` or a formatted string.
+This mechanism removes duplicate executable-registration knowledge. It does not remove Runtime's
+canonical Object representation. Object retains canonical bytes and content identity across
+heterogeneous continuation and persistence boundaries; exact descriptor admission and native
+decoding still qualify values at execution and cold-load boundaries. Typed authoring and public
+results do not imply a second native continuation representation or an unchecked Any bag.
+
+Compilation and association errors retain concrete source information through the receiver's
+associated error. Do not collapse them into InvalidContract or a formatted string.
 
 ### 9.2 Runtime-builder compilation
 
@@ -510,7 +575,23 @@ fn compile<S: AuthoringSource>(
 ) -> Result<Program<S::Input, S::Output>, CompileError>;
 ```
 
-The builder stages requirements privately. It qualifies the complete Program, root validation,
+Before expansion, compilation derives public capability setup and supported policy values from
+the actual checked root input being committed. There is no additional concrete binding argument
+on the Operation definition. A selected leaf requires a typed projection from that root input,
+not from an unavailable future State input. Production owns projections for its supported public
+components; consumers do not write per-injected-stage plumbing.
+
+The private traversal must carry root-type-aware bounds for these projections. AuthoringSource's
+Input/Output types alone do not prove that every nested State's setup can be resolved. Injection
+then derives its supporting setup from the designated capability's resolved setup. If a binding
+can only be learned through execution, use discovery and compile a subsequent Program; do not
+leave an unresolved or mutable binding inside an admitted Program.
+
+Exact projection signatures, multi-binding typed roles, and input-dependent repetition coupling
+must be proved together. Do not fill this gap with a generic setup bag, a second config object
+that can disagree with C0, or the removed arbitrary input-check callback.
+
+The builder stages requirements privately. It qualifies the complete Program, root/input agreement,
 input commitment, exact executable associations, and required live bindings before publishing
 either the Program or new registrations. On failure, existing builder contents are unchanged.
 Preflight conflicts before committing a staged delta; do not leave half-installed implementations.
@@ -537,32 +618,47 @@ handles never enter selections, Program, admitted context, Journal, reports, or 
 
 ### 9.4 Cold association without configuration custody
 
-A fresh builder exposes `associate(&source)` for installing requirements without an initial input
-or new Program. It invokes the same typed lowering and qualification machinery, discarding the
-uncommitted draft. It is not a separately maintained visitor or list. The source contains code
-choices and public setup, not the deleted configuration document or initial scalar values.
-
-Maintained components expose construction from checked public setup independently of config
-repository custody:
+A fresh builder can install the executable types declared by a maintained definition:
 
 ```rust
-ContractLifecycleStates::from_setup(setup: ContractLifecycleSetup)
-ContractDeploymentLifecycle::from_setup(setup: ContractLifecycleSetup, recovery)
+builder.associate::<ContractDeploymentLifecycle>()?;
 ```
 
-Both constructors are fallible. `ContractLifecycleSetup` contains the checked public binding and
-supported code-shape choices; it contains no initial scalar, secret, provider, or configuration
-repository handle. `recovery` is the product's checked supported typed policy selection, not an
-erased descriptor requiring manual handler registration. The convenience `new(&config, binding)`
-derives this setup and delegates. The caller supplies setup and policy from available code and
-explicit deployment inputs independently of a deleted run configuration. The API cannot recover
-unavailable setup by magic. Application composition must establish this availability for its
-advertised cold-recovery surface.
+This is proposed type-inventory association. It requires no initial input, scalar values, concrete
+public setup, handler parameter values, or deleted run configuration. It installs exact State,
+capability, handler, and value implementations. Public live bindings remain explicit builder
+inputs; the retained Program supplies its acknowledged binding identities and parameter Objects.
+Cold read/resume qualify those retained descriptors against the installed implementations and
+available live bindings.
 
-Cold `read` and `resume` associate the retained Program against available exact implementations.
-They do not replace it with a freshly authored Program. Changed constructor order is not permission
-to reinterpret old history. If an exact implementation is unavailable, fail explicitly; content
-hashes cannot recover code. No compatibility decoder or automatic old-version support is implied.
+Inventory visits all supported typed Choice alternatives and a repeated body's types once.
+Normal compilation expands only selected alternatives and actual occurrences. Capability prefixes
+and suffixes, including supported setup-dependent alternatives, must expose their complete typed
+requirements without constructing fake input or setup values. This is a concrete cross-crate
+proof obligation for the one shared traversal, not permission for a hand-maintained registry.
+
+The assembly may contain supported implementations unused by one Program. That grants no extra
+execution authority: only the retained Program and Runtime's current-state checks select work.
+Unavailable exact ABIs remain explicit errors; type inventory cannot recover missing code.
+
+Cold continuation executes the retained Program, not a newly expanded replacement. No
+ContractLifecycleStates/from_setup object, fake C0, or reloaded configuration is required merely
+to discover its executable requirements. This does not imply a legacy decoder or automatic support
+for superseded contracts.
+
+### 9.5 Later compilation and immutable assembly
+
+The proposed Program-only entry compiles a later definition/input using the same compiler with a
+no-op requirements receiver. Runtime verifies all exact requirements before admitting that
+Program to an already-built assembly. A missing requirement is an explicit failure, not a request
+to mutate a running Runtime or silently install code.
+
+If a later supported definition requires additional implementations, construct a new immutable
+Runtime assembly through a fresh builder with explicitly retained/reacquired live handles and the
+same Store. Select definitions through the same type-inventory/compilation path; do not copy a
+manual registration list. Existing Runtime instances remain unchanged. Application and discovery
+workflows must exercise this boundary before the full cutover; exact public helper signatures
+remain part of that handoff gate.
 
 ## 10. Failure handling without aggregate roots
 
@@ -660,29 +756,32 @@ decoders as hot execution. Do not introduce `RuntimeDriver`, a second scheduler,
 
 ## 12. Caller examples
 
-These are complete authoring/execution bodies against the proposed API, not runnable current tests.
-Imports and the surrounding async function signature are omitted. The caller supplies explicit
-`run_id`, `entry_point`, `limits`, `attempt`, and `Arc<dyn Store>`. EVM bodies also receive a checked
-`EvmTransactionBinding`, `Arc<dyn Secp256k1Signer>`, `Arc<dyn EvmTransactionAuthority>`,
-`Arc<dyn EvmTransactionProvider>`, and `Arc<dyn EvmReadProvider>` where needed. Resource acquisition
-belongs to their IO/custody owners; no ambient discovery helper is implied.
+These are proposed authoring/execution bodies, not runnable current tests. Imports and surrounding
+async signatures are omitted. Callers supply explicit RunId, entry_point, limits, attempt, and
+Arc<dyn Store>. EVM bodies also receive explicit signer, authority, transaction-provider, and
+read-provider handles where needed. These handles come from their IO/custody owners; no implicit
+resource acquisition is hidden in a definition constructor.
 
-`config_bytes` is a public configuration document already loaded through the caller's IO boundary.
-It supplies requested value 42 and increment 42. Assertions express acceptance-test expectations;
-ordinary applications match the result's explicit terminal/incomplete outcome. All State, context,
-and selection names below except the extension in 12.5 are supplied by production.
+The proposed production exports in section 8.1 supply every State, Operation, context, and codec
+below except the new State in 12.5. All lifecycle examples load a checked request containing its
+complete public transaction binding, requested value 42, and increment 42. The binding used for
+live adapters is read from that same checked request. Compilation independently qualifies setup
+projections and live association before admission.
+
+Assertions are acceptance-test expectations. Application callers inspect the explicit outcome;
+absence of success is not itself a decoded failure or proof of terminal completion.
 
 ### 12.1 One existing Pure State
 
-Production supplies a checked scalar addition State and its input constructor. The shared checked
-arithmetic semantics are also used by the context-preserving lifecycle addition.
+Production supplies CheckedAddition, CheckedAdd, its checked scalar output, and overflow failure.
+The lifecycle addition reuses the same checked arithmetic while preserving its context.
 
 ```rust
 let input = CheckedAddition::new("42", "42")?;
-let selection = pure::<CheckedAdd>();
+let state = Pure::<CheckedAdd>::default();
 
 let mut builder = Runtime::builder(store)?;
-let program = builder.compile(entry_point, &selection, &input, limits)?;
+let program = builder.compile(entry_point, &state, &input, limits)?;
 let runtime = builder.build()?;
 let result = runtime.execute(run_id, program, input, attempt).await?;
 
@@ -690,16 +789,17 @@ let value = result.success().expect("expected terminal success");
 assert_eq!(value, &EvmU256::from_u64(84));
 ```
 
-`CheckedAddition::new` parses checked scalars; `CheckedAdd` returns `EvmU256` or its exact overflow
-failure. There are no capabilities, root maps, codecs, or registrations to supply.
+The definition has no binding or setup argument. Its input constructor parses checked scalars;
+compilation supplies exact State/value requirements. There are no root maps or separately
+maintained executable-State registration entries.
 
 ### 12.2 One existing injected Effect State
 
 ```rust
 let config = ContractWorkflowConfig::decode(&config_bytes)?;
-let states = ContractLifecycleStates::new(&config, binding.clone())?;
 let input = config.initial_input()?;
-let selection = states.deploy();
+let binding = input.transaction_binding().clone();
+let state = Effect::<Deploy, EvmTransactionEffect>::default();
 
 let mut builder = Runtime::builder(store)?;
 register_evm_transaction_adapters(
@@ -709,7 +809,7 @@ register_evm_transaction_adapters(
     authority,
     transaction_provider,
 )?;
-let program = builder.compile(entry_point, &selection, &input, limits)?;
+let program = builder.compile(entry_point, &state, &input, limits)?;
 let runtime = builder.build()?;
 let result = runtime.execute(run_id, program, input, attempt).await?;
 
@@ -718,16 +818,20 @@ assert_eq!(deployed.requested_value(), &EvmU256::from_u64(42));
 let created_address = deployed.deployment().created_address();
 ```
 
-The input is `DeploymentRequest`. Checked success is `DeployedContract` with required creation
-facts. Compilation automatically associates reservation, preparation, execution, and projection.
-Their separate failures retain their own exact contracts and original operation context.
+DeploymentRequest is the public input, not prepared facts. Compilation resolves its public setup
+and associates reservation, preparation, execution, and projection. No Operation wrapper, State
+getter object, or concrete binding in the State definition is required.
 
-### 12.3 One maintained Operation
+### 12.3 One maintained Operation definition
+
+ContractDeploymentLifecycle is the reusable type definition in section 5.1. It owns its fixed
+functional sequence and LifecycleDefaults; this caller does not redeclare either.
 
 ```rust
 let config = ContractWorkflowConfig::decode(&config_bytes)?;
 let input = config.initial_input()?;
-let operation = ContractDeploymentLifecycle::new(&config, binding.clone())?;
+let binding = input.transaction_binding().clone();
+let operation = ContractDeploymentLifecycle::default();
 
 let mut builder = Runtime::builder(store)?;
 register_evm_transaction_adapters(
@@ -752,29 +856,39 @@ assert_eq!(report.effective_value(), &EvmU256::from_u64(42));
 assert_eq!(report.observed_value(), &EvmU256::from_u64(42));
 ```
 
-The caller selects maintained behavior and its supported configuration. The constructor owns the
-sequence and policy defaults. It does not own live IO. The caller need not construct `states`.
+Supported configuration values specialize compilation, not the static definition's account or
+endpoint. Runtime receives Program, never the authoring definition as execution input.
 
-### 12.4 Existing Operations and States in one composition
+### 12.4 Existing Operations and States in one tuple
 
-Production also supplies `ConfigureAndObserve::new(&config, binding)`, a meaningful reusable child
-Operation with endpoints `DeployedContract -> ObservedConfiguration`. Its body uses the same
-`states.configure().then(states.observe())` selections and documented policy scope. The maintained
-lifecycle may reuse this child; no second implementation of its behavior is permitted.
+Production exposes ConfigureAndObserve as another definition:
+
+```rust
+pub type ConfigureAndObserve = Operation<
+    (
+        Effect<Configure, EvmTransactionEffect>,
+        Read<Observe, EvmAnchoredContractCallRead>,
+    ),
+    ConfigureAndObserveDefaults,
+>;
+```
+
+Its endpoints are DeployedContract -> ObservedConfiguration. Its explicit policy scope is retained
+when nested; it does not duplicate the underlying State implementations. The caller can insert
+this child directly into a larger tuple:
 
 ```rust
 let config = ContractWorkflowConfig::decode(&config_bytes)?;
-let states = ContractLifecycleStates::new(&config, binding.clone())?;
 let input = config.initial_input()?;
-let configure_and_observe = ConfigureAndObserve::new(&config, binding.clone())?;
+let binding = input.transaction_binding().clone();
 
-let operation = Operation::new(|_| {
-    Ok(states.deploy()
-        .then(states.add_configuration_value())
-        .then(configure_and_observe)
-        .then(states.validate())
-        .then(states.report()))
-})?;
+let operation = Operation::new((
+    Effect::<Deploy, EvmTransactionEffect>::default(),
+    Pure::<CheckedAddConfigurationValue>::default(),
+    ConfigureAndObserve::default(),
+    Pure::<Validate>::default(),
+    Pure::<Report>::default(),
+));
 
 let mut builder = Runtime::builder(store)?;
 register_evm_transaction_adapters(
@@ -799,14 +913,14 @@ assert_eq!(report.effective_value(), &EvmU256::from_u64(84));
 assert_eq!(report.observed_value(), &EvmU256::from_u64(84));
 ```
 
-The new Operation uses framework defaults where it supplies no override; the maintained child
-retains its explicit policy. Selecting all six States directly uses the constructor in section
-5.2. Neither form defines a State, context, alias, mapper, codec, or registration list.
+Unspecified outer policy fields inherit framework fallback; explicit child defaults and occurrence
+overrides resolve by section 7.2. The all-State variant in section 5.2 has the same acceptance
+result. Neither consumer defines a State, context, alias, mapper, codec, getter collection, or
+separately maintained executable-State registration list. Live adapter binding remains explicit.
 
-### 12.5 New semantics composed with existing components
+### 12.5 New semantics composed with maintained components
 
-The extension author introduces a rule requiring a nonzero effective configuration. It reuses
-the production context and defines only its new State and original failure contract:
+The extension author defines only its new State and original failure contract:
 
 ```rust
 #[derive(
@@ -854,25 +968,24 @@ impl PureState for RequireNonZeroConfiguration {
 }
 ```
 
-The proposed `ProgramError` conversion used by `state_id` must retain the identity-construction
-source; copying existing lossy `map_err` conversions is not acceptable. The original execution
-record retains the rejected input, so the empty domain failure does not discard the scalar or
-preceding deployment facts. Its classification is intrinsic to this new contract.
+The proposed ProgramError conversion preserves the identity-construction source. The retained
+original execution contains the rejected input and prior deployment facts; the empty failure
+value discards neither. Its classification belongs to this error contract, not its enclosing
+Operation defaults. The rule executes wherever this State is composed, not only at a root hook.
 
 ```rust
 let config = ContractWorkflowConfig::decode(&config_bytes)?;
-let states = ContractLifecycleStates::new(&config, binding.clone())?;
 let input = config.initial_input()?;
-let configure_and_observe = ConfigureAndObserve::new(&config, binding.clone())?;
+let binding = input.transaction_binding().clone();
 
-let operation = Operation::new(|_| {
-    Ok(states.deploy()
-        .then(states.add_configuration_value())
-        .then(pure::<RequireNonZeroConfiguration>())
-        .then(configure_and_observe)
-        .then(states.validate())
-        .then(states.report()))
-})?;
+let operation = Operation::new((
+    Effect::<Deploy, EvmTransactionEffect>::default(),
+    Pure::<CheckedAddConfigurationValue>::default(),
+    Pure::<RequireNonZeroConfiguration>::default(),
+    ConfigureAndObserve::default(),
+    Pure::<Validate>::default(),
+    Pure::<Report>::default(),
+));
 
 let mut builder = Runtime::builder(store)?;
 register_evm_transaction_adapters(
@@ -895,10 +1008,10 @@ let report = result.success().expect("expected terminal success");
 assert_eq!(report.observed_value(), &EvmU256::from_u64(84));
 ```
 
-A companion case uses zero initial value and zero increment, obtains the terminal original report,
-decodes exactly `ZeroConfiguration`, and verifies the retained rejected input and deployment facts.
-It must prove that no configuration command was prepared. The author adds no enclosing error
-conversion and no registration entry.
+A companion case uses zero initial value and zero increment, decodes exactly ZeroConfiguration
+from the terminal original report, and checks the retained input and deployment facts. It proves
+that no configuration command was prepared. No enclosing conversion or executable-State
+registration entry is added.
 
 ## 13. Discovery and subsequent Programs
 
@@ -965,7 +1078,10 @@ does not by itself make that policy suitable for shipping transaction compositio
 | Public mutable `OperationExpansion` DSL | Remove; retain useful private draft/relocation logic behind typed source traversal |
 | Mutable capability prefix/suffix emission | Replace with typed prefix/suffix sources; keep capability ownership and designated insertion |
 | Wrapper-only `EvmTransaction<C, R>` | Move validation to checked selection/capability ownership and delete the wrapper |
-| Handwritten sequence-only Operation implementations | Migrate to the common typed Operation constructor |
+| Handwritten sequence-only Operation implementations | Migrate to reusable Operation tuple types or the same inferred tuple constructor |
+| Proposed fluent sequence DSL and universal construction closure | Remove; use one typed tuple representation and nominal scoped boundary markers |
+| Proposed ContractLifecycleStates getters and per-definition concrete bindings | Remove; export State types and resolve public setup from checked root input during compilation |
+| Proposed public with_input_check callback | Remove the arbitrary predicate; prove input-dependent plan/input coupling before deleting current validation |
 | Operation/expanded/root failure aggregation | Delete associated contracts, automatic lifts, maps, and map-only Runtime machinery |
 | Product public failure projection | Audit actual requirements; preserve justified checked projections at their product reporting owner |
 | `register_fixture_states` and transaction State registration helper | Delete after compiler requirement emission covers every exact State, codec, and handler |
@@ -981,8 +1097,13 @@ removing duplicated ownership does not satisfy the cutover.
 
 ## 16. Logical implementation commits
 
+First complete the bounded cross-crate feasibility slice and contract audits in section 18.
+It must cover typed defaults, root setup projection, nominal checkpoint scopes, current Portfolio
+repetition, cold type inventory, and the product failure-report migration. Do not start broad API
+or persistence deletion merely because the five fixed lifecycle expressions look plausible.
+
 1. **refactor typed authoring and executable association**: implement neutral sources, typed
-   selections/sequences, scoped Operations, typed injection, root validation relocation, and one
+   tuple selections, scoped Operation defaults, typed injection, input/plan qualification, and one
    requirement receiver. Migrate authoring and association consumers together. Delete the mutable
    DSL, wrapper-only Operations, and duplicate executable lists. Update current architecture/design
    and consuming tests in this commit. Include failure-contract removal here if the API and wire
@@ -1014,7 +1135,9 @@ complexity, and measured production-code LOC change separately from test/docs ch
 | Operation scopes | Nested precedence, explicit zero allowances, target replacement, inherited installed handler, foreign/absent/duplicate checkpoint rejection, and repeated source occurrence relocation |
 | Root checks | Direct and nested injection equivalence; wrong binding/action mode rejected at the owning boundary before affected IO or append |
 | Association | Injected States and custom handler included automatically; exact generic ABI conflicts rejected; failed compilation leaves builder unchanged |
-| Cold construction | Fresh Runtime after configuration deletion, using available code and explicit public setup; exact original/output decoding and nondefault policy association |
+| Cold construction | Type inventory without C0/setup/parameter values after config deletion, with explicit live bindings; exact original/output decoding, supported alternatives, and nondefault handler association |
+| Input-dependent planning | Portfolio repetition derives from the input being committed; count/routes mismatch cannot be admitted; empty repetition, nested same-type semantic constraints, and cumulative limits |
+| Later compilation | Already-associated ABIs execute a later compiled Program; missing ABIs fail before admission; a fresh immutable assembly can add supported definitions without mutating an existing Runtime |
 | Product success | Maintained 42 and composed 84, with separate fresh signer/nonce domains where required |
 | Product evidence | Configuration targets created address; observation matches configuration target/receipt anchor; admitted input remains 42 and command encodes effective 84 |
 | Product rejection | Addition overflow before configuration; observed-value mismatch; malformed/wrong ABI result; new-State zero failure retains exact rejected input and prior facts |
@@ -1044,17 +1167,25 @@ For this documentation-only RFC, review links, current-symbol references, contra
 and `git diff --check`. No Rust, managed E2E, or CI gate is selected. Production-code LOC change is
 zero. The implementation must measure its own delta; no numerical reduction is claimed here.
 
-## 18. Material uncertainties
+## 18. Material uncertainties and handoff gates
+
+The RFC is ready for a bounded feasibility/contract-resolution handoff, not an unconditional
+repository-wide implementation. The agreed representation and ownership decisions below must be
+proved together; a compiling tuple alone is insufficient evidence.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
-| Typed source/injection bounds and the scoped constructor remain ergonomic on the pinned Rust toolchain. | The proposed API has not been compiled against existing derives and generic State bounds. | Callers could need forbidden aliases or the compiler could require another representation. | Compile all five callers, two contexts, typed injection failures, and a custom handler before fixing public signatures; change representation rather than weaken contracts. |
-| Typed checkpoint markers can preserve existing scope and reuse semantics without mutable emission. | Marker relocation and fresh identities have not been implemented for nested/reused source values. | Targets could alias, escape scope, or resolve to the wrong expanded boundary. | Prove nested injection/Operation scopes, repeated selection, cross-scope rejection, and Effect-barrier recovery through consuming tests. |
-| Product-facing root reports can be replaced by checked projections of retained originals and operation inputs. | Portfolio/App/transport consumers still use mapped roots; reliance on their durable bytes/identity needs auditing as well as displayed fields. | A required public fact or durability guarantee could be lost, or an implicit history/config lookup introduced. | Inventory consumers before deletion; preserve required facts and explicitly resolve any durable-projection contract before the schema cutover. |
-| Cold association can reconstruct required typed selections and policy choices without configuration custody. | Current factories and registration are not organized around that boundary. | Deleted config or a missing exact implementation could prevent recovery. | Fresh-runtime read/resume after config deletion with injected Effects and nondefault policy; fail explicitly on unavailable ABIs. |
-| Program endpoint typing and staged assembly updates can use existing qualification/registration owners. | Generic Program decoding and transactional builder publication need a consuming implementation proof. | A second wrapper/registry could appear or failed compilation could leave usable partial state. | Test exact typed reconstruction, changed input rejection, ABI conflicts, and unchanged builder state after each construction failure. |
-| The lifecycle's supported ABI/artifact and product report contracts can reuse existing EVM primitives. | The fixture is evidence, not a completed production schema. | The product could expose unsupported configuration choices or duplicate lower integrity checks. | Specify the supported ABI catalogue and checked context/report constructors, then prove 42/84, malformed return, overflow, and independent evidence assertions. |
+| Tuple definitions, default-policy types, and typed injection are ergonomic on the pinned Rust toolchain. | The new representation has not been compiled against existing generic State/derive bounds. | Consumers could need forbidden aliases or a second construction path. | Compile all five callers across crates, nested Operations, a selected Choice, tuple nesting/arity limits, and incompatible injected endpoints without constructing executable States. |
+| Public setup can be projected from the actual checked root input for every selected meaningful State. | Root-aware traversal bounds and multi-binding roles are not specified by AuthoringSource's endpoints alone. | A future input or ambient binding could be used, or callers could need hidden-stage setup implementations. | Prove root-input projections across crates, wrong/multiple bindings, and capability-derived reserve/prepare setup with no consumer scaffolding. |
+| Input-dependent repetition can remain coupled to the committed input without arbitrary callbacks. | Portfolio's current expansion captures collection count/routes independently of C0. | Removing its validator could admit a mismatched plan, especially when nested. | Define bounded homogeneous repetition from the same checked input, preserve count/route checks before admission, and test empty/repeated scopes and nested semantic preconditions. |
+| Nominal checkpoint markers preserve scope and reuse semantics. | Type-based markers have not been relocated across nested/repeated Operation occurrences. | Targets could alias, escape scope, or be rebound during inheritance. | Test duplicate/missing/foreign/terminal markers, repeated definitions, inherited already-bound handlers, typed context mismatch, and Effect barriers. |
+| Cold type inventory can share the same structural traversal without setup or C0 values. | Current injection and policy construction receive values; inventory must instead cover their supported types. | Deleted config could block recovery or a second registration tree could appear. | Fresh-runtime association/read/resume with no C0 reconstruction, both Choice branches, a repeated body, injected alternatives, and a nondefault handler; unavailable exact ABIs fail explicitly. |
+| Product reports can move from mapped roots to checked projections of retained originals. | Portfolio/App/transport consumers require a field and durable-identity audit. | Required facts or persistence guarantees could be lost. | Produce old-field-to-retained-source mappings and explicitly resolve any durable projection requirement before deleting its persisted payload. |
+| Typed Program, staged assembly, and execution result types preserve exact acknowledgement distinctions. | Generic reconstruction, failure atomicity, and the complete result/error variants remain uncompiled. | Partial assemblies, stale-head claims, or silent authority changes could result. | Test unchanged builder on failure, exact typed reconstruction, later compilation, deadline before genesis, known acknowledgement followed by projection failure, ambiguous append, and stale observations. |
+| The lifecycle's supported ABI/artifact and reports can reuse existing EVM primitives. | The fixture is evidence, not a completed production schema. | Product configuration could claim unsupported behavior or duplicate integrity checks. | Specify checked input/intermediate/report constructors and supported ABI choices; prove 42/84, malformed return, overflow, and independent evidence assertions. |
 
-These are implementation proof obligations and product-consumer audits. They do not reopen the
-agreed ownership decisions: standalone State selection, Operations as configured policy scopes,
-Program as compilation output, Runtime as execution owner, and no mandatory aggregate failure type.
+These gates do not reopen the agreed design: Rust types define Operations, typed tuples construct
+them without lambdas, public bindings resolve during compilation, defaults inherit by scope,
+classification remains intrinsic, Program is the execution input, and Runtime retains exact Objects
+and original failures. No getter collection, public arbitrary root predicate, parallel DSL, or
+mandatory aggregate failure type is required.
