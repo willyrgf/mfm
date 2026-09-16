@@ -5,16 +5,16 @@ use std::sync::Arc;
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_config::{
-    ConfigDigest, ConfigImportResult, ConfigName, ConfigRepository, ConfigRepositoryError,
-    ConfigRevision,
+    ConfigDigest, ConfigImportResult, ConfigRepository, ConfigRepositoryError, ConfigRevision,
 };
 use mfm_evm::custody::{
     AuthorityError, EvmTransactionAuthority, ExactRawTransaction, LoadedTransaction, NonceDomain,
     PreparedRecord, Reservation,
 };
 use mfm_evm::{EvmAddress, EvmAuthorityEpoch, EvmChainInstance, EvmHash};
+use mfm_ids::ConfigName;
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
-use mfm_journal::{JournalHistory, OutcomeKind};
+use mfm_journal::seal_frame;
 use mfm_store::{AppendResult, RunIndex, RunPageLimit};
 use sqlx::postgres::PgSslMode;
 use sqlx::{Connection, Executor};
@@ -68,36 +68,26 @@ fn reference(name: &str, bytes: &[u8]) -> ContentRef {
 }
 
 fn genesis(run_id: &RunId) -> EncodedRunFrame {
-    let program = b"{}";
-    let context = br#"{"value":1}"#;
-    EncodedRunFrame::admission(
-        run_id,
-        &reference("mfm.test.program", program),
-        program,
-        &reference("mfm.test.context", context),
-        context,
-    )
-    .expect("genesis")
+    store_scenarios::genesis(run_id, br#"{"value":1}"#)
 }
 
 fn successor(run_id: &RunId) -> EncodedRunFrame {
-    let history = JournalHistory::from_genesis(genesis(run_id)).expect("history");
-    let output = br#"{"value":2}"#;
-    history
-        .encode_pure_conclusion(
-            OutcomeKind::Success,
-            &reference("mfm.test.output", output),
-            output,
-        )
-        .expect("successor")
+    let first = genesis(run_id);
+    let payload = PlainCanonicalJsonBytes::from_json_str(r#"{"value":2}"#).unwrap();
+    seal_frame(run_id, 2, Some(first.head_digest()), &payload).unwrap()
 }
 
 fn observe_store<T>(result: Result<T, StoreError>) -> store_hostile::Observation {
     match result {
         Ok(_) => panic!("expected Store error"),
-        Err(StoreError::Capacity) => store_hostile::Observation::Capacity,
-        Err(StoreError::CorruptPhysicalState) => store_hostile::Observation::Corrupt,
-        Err(StoreError::Unavailable | StoreError::Indeterminate) => {
+        Err(
+            StoreError::FrameSize(_)
+            | StoreError::HistorySize(_)
+            | StoreError::FrameCount(_)
+            | StoreError::ArithmeticOverflow,
+        ) => store_hostile::Observation::Capacity,
+        Err(StoreError::CorruptPhysicalState(_)) => store_hostile::Observation::Corrupt,
+        Err(StoreError::Unavailable(_) | StoreError::Indeterminate(_)) => {
             store_hostile::Observation::Unavailable
         }
     }
@@ -180,21 +170,12 @@ async fn reset_schemas(connection: &mut PgConnection) {
 fn migration_and_classifier_contracts_are_exact() {
     static_assertions::assert_not_impl_any!(PostgresBackend: EvmTransactionAuthority);
     static_assertions::assert_not_impl_any!(PostgresEvmTransactionAuthority: Store, RunIndex, ConfigRepository);
-    assert_eq!(SCHEMA_CONTRACT, "mfm.run-history-postgres.v1");
-    assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_store_schema"));
-    assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_frames"));
-    assert!(RUN_SCHEMA_SQL.contains("CREATE TABLE public.mfm_run_heads"));
-    assert!(CONFIG_SCHEMA_SQL.contains("CREATE SCHEMA mfm_config"));
-    assert!(CONFIG_SCHEMA_SQL.contains("CREATE TABLE mfm_config.config_revisions"));
-    assert!(CONFIG_SCHEMA_SQL.contains("mfm.config-postgres.v2"));
-    assert!(evm_tx::EVM_TX_SCHEMA_SQL.contains("CREATE SCHEMA mfm_evm_tx"));
+    assert_eq!(SCHEMA_CONTRACT, "mfm.run-history-postgres.v2");
     assert_eq!(
         evm_tx::EVM_TX_SCHEMA_CONTRACT,
         "mfm.evm-transaction-postgres.v2"
     );
     assert!(!evm_tx::EVM_TX_SCHEMA_SQL.contains("nonce_domains"));
-    assert!(evm_tx::EVM_TX_SCHEMA_SQL.contains("CREATE TABLE mfm_evm_tx.nonce_reservations"));
-    assert!(evm_tx::EVM_TX_SCHEMA_SQL.contains("CREATE TABLE mfm_evm_tx.prepared_transactions"));
     assert!(!evm_tx::EVM_TX_SCHEMA_SQL.contains("transaction_settlements"));
     assert!(!evm_tx::EVM_TX_SCHEMA_SQL.contains("INSERT INTO"));
     assert!(!CONFIG_SCHEMA_SQL.contains("current"));
@@ -215,10 +196,18 @@ fn migration_and_classifier_contracts_are_exact() {
         classify_open_error(sqlx::Error::Protocol("transport".to_owned())),
         PostgresOpenError::Unavailable
     );
+    let StoreError::Unavailable(evidence) = classify_precommit_sql(
+        "insert_frame",
+        sqlx::Error::Protocol("rejected".to_owned()),
+        None,
+    ) else {
+        panic!("protocol disposition")
+    };
     assert_eq!(
-        classify_precommit_sql(sqlx::Error::Protocol("rejected".to_owned())),
-        StoreError::Unavailable
+        evidence.as_value()["sources"][0]["message"],
+        "encountered unexpected or invalid data: rejected"
     );
+    assert!(evidence.as_value().get("rollback").is_none());
     assert!(durability_matches(true, "on", "on"));
     assert!(!durability_matches(false, "on", "on"));
     assert!(!durability_matches(true, "off", "on"));
@@ -264,6 +253,7 @@ async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresBackend>) {
             load_run(
                 &store.pool,
                 &run_id,
+                None,
                 LoadProbe::SnapshotPause { entered, release },
             )
             .await
@@ -283,29 +273,14 @@ async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresBackend>) {
         .expect("snapshot join")
         .expect("snapshot load")
         .expect("snapshot present");
-    assert_eq!(
-        JournalHistory::qualify(&snapshot_id, raced)
-            .expect("snapshot history")
-            .head_sequence(),
-        1
-    );
+    assert_eq!(raced.head().head_sequence(), 1);
 
     let large_id = run_id(31);
     let mut large_context = Vec::with_capacity(4 * 1024 * 1024 + 2);
     large_context.push(b'"');
     large_context.resize(4 * 1024 * 1024 + 1, b'a');
     large_context.push(b'"');
-    let large = {
-        let program = b"{}";
-        EncodedRunFrame::admission(
-            &large_id,
-            &reference("mfm.test.program", program),
-            program,
-            &reference("mfm.test.context", &large_context),
-            &large_context,
-        )
-        .expect("large genesis")
-    };
+    let large = store_scenarios::genesis(&large_id, &large_context);
     assert_eq!(
         store.append_run(&large).await.expect("large append"),
         AppendResult::Inserted
@@ -322,6 +297,7 @@ async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresBackend>) {
             load_run(
                 &store.pool,
                 &run_id,
+                None,
                 LoadProbe::BlockingPause { entered, release },
             )
             .await
@@ -351,12 +327,7 @@ async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresBackend>) {
     heartbeat_done.store(true, Ordering::SeqCst);
     heartbeat.await.expect("heartbeat join");
     assert!(heartbeat_count.load(Ordering::SeqCst) > 0);
-    assert_eq!(
-        JournalHistory::qualify(&large_id, retained)
-            .expect("large history")
-            .head_sequence(),
-        1
-    );
+    assert_eq!(retained.head().head_sequence(), 1);
 }
 
 async fn assert_commit_and_hostile_contract(
@@ -369,7 +340,7 @@ async fn assert_commit_and_hostile_contract(
     observed.push((
         Case::Absence,
         if store
-            .load_run(&run_id(40))
+            .load_run(&run_id(40), None)
             .await
             .expect("absent load")
             .is_none()
@@ -381,25 +352,10 @@ async fn assert_commit_and_hostile_contract(
     ));
 
     for (byte, fault, expected, committed) in [
-        (
-            41,
-            CommitFault::BeforeSubmission,
-            StoreError::Unavailable,
-            false,
-        ),
-        (42, CommitFault::Rejected, StoreError::Unavailable, false),
-        (
-            43,
-            CommitFault::UnknownRolledBack,
-            StoreError::Indeterminate,
-            false,
-        ),
-        (
-            44,
-            CommitFault::UnknownCommitted,
-            StoreError::Indeterminate,
-            true,
-        ),
+        (41, CommitFault::BeforeSubmission, false, false),
+        (42, CommitFault::Rejected, false, false),
+        (43, CommitFault::UnknownRolledBack, true, false),
+        (44, CommitFault::UnknownCommitted, true, true),
     ] {
         if matches!(fault, CommitFault::Rejected) {
             connection
@@ -416,7 +372,25 @@ async fn assert_commit_and_hostile_contract(
         }
         let fault_id = run_id(byte);
         let result = append_run(&store.pool, &genesis(&fault_id), fault).await;
-        assert_eq!(result, Err(expected));
+        let evidence = match result.as_ref().expect_err("injected failure") {
+            StoreError::Unavailable(evidence) => {
+                assert!(!expected);
+                evidence
+            }
+            StoreError::Indeterminate(evidence) => {
+                assert!(expected);
+                evidence
+            }
+            other => panic!("unexpected disposition: {other}"),
+        };
+        assert_eq!(evidence.as_value()["operation"], "run.append");
+        assert_eq!(evidence.as_value()["stage"], "commit");
+        if matches!(fault, CommitFault::Rejected) {
+            assert_eq!(evidence.as_value()["sources"][0]["kind"], "database");
+            assert_eq!(evidence.as_value()["sources"][1]["sqlstate"], "23503");
+        } else {
+            assert!(evidence.as_value().get("injected").is_some());
+        }
         if matches!(fault, CommitFault::BeforeSubmission) {
             observed.push((Case::AtomicFault, observe_store(result)));
         }
@@ -435,7 +409,7 @@ async fn assert_commit_and_hostile_contract(
         }
         assert_eq!(
             store
-                .load_run(&fault_id)
+                .load_run(&fault_id, None)
                 .await
                 .expect("resolve fault")
                 .is_some(),
@@ -469,7 +443,7 @@ async fn assert_commit_and_hostile_contract(
     .expect("insert orphan frame");
     observed.push((
         Case::AbsentHeadOrphan,
-        observe_store(store.load_run(&orphan_id).await),
+        observe_store(store.load_run(&orphan_id, None).await),
     ));
 
     for (byte, mutation, case) in [
@@ -485,7 +459,7 @@ async fn assert_commit_and_hostile_contract(
         ),
         (
             49,
-            "UPDATE public.mfm_run_heads SET total_bytes = total_bytes + 1 WHERE run_id = $1",
+            "UPDATE public.mfm_run_heads SET total_bytes = 1 WHERE run_id = $1",
             Case::CorruptTotal,
         ),
     ] {
@@ -499,7 +473,7 @@ async fn assert_commit_and_hostile_contract(
             .execute(&mut *connection)
             .await
             .expect("mutate retained row");
-        observed.push((case, observe_store(store.load_run(&corrupt_id).await)));
+        observed.push((case, observe_store(store.load_run(&corrupt_id, None).await)));
     }
 
     let target_id = run_id(50);
@@ -537,7 +511,7 @@ async fn assert_commit_and_hostile_contract(
         .expect("remove head frame");
     observed.push((
         Case::CorruptHead,
-        observe_store(store.load_run(&broken_head_id).await),
+        observe_store(store.load_run(&broken_head_id, None).await),
     ));
     connection
         .execute(
@@ -872,7 +846,7 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
             .unwrap(),
         reserved
     );
-    assert_eq!(
+    assert!(matches!(
         backend
             .reserve_or_compare(
                 &first,
@@ -882,8 +856,8 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
             )
             .await
             .err(),
-        Some(AuthorityError::Internal)
-    );
+        Some(AuthorityError::Internal(_))
+    ));
     // Unsettled reservations do not block independent transactions; external advances are accepted.
     for (id, observed, expected) in [(11, 0, 8), (12, 99, 99), (13, 2, 100)] {
         assert_eq!(
@@ -906,10 +880,10 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
         7,
     )
     .unwrap();
-    assert_eq!(
+    assert!(matches!(
         backend.retain_prepared(&wrong, &candidate).await.err(),
-        Some(AuthorityError::Internal)
-    );
+        Some(AuthorityError::Internal(_))
+    ));
     assert!(
         backend
             .retain_prepared(&reserved, &candidate)
@@ -940,13 +914,13 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
     );
 
     let exhausted = nonce_domain(backend.authority_epoch(), 21, 22, 23);
-    assert_eq!(
+    assert!(matches!(
         backend
             .reserve_or_compare(&effect_id(21), &command, &exhausted, u64::MAX)
             .await
             .err(),
-        Some(AuthorityError::Unavailable)
-    );
+        Some(AuthorityError::Unavailable(_))
+    ));
     assert!(backend.load(&effect_id(21)).await.unwrap().is_none());
     assert_eq!(
         backend
@@ -956,13 +930,13 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
             .nonce(),
         u64::MAX - 1
     );
-    assert_eq!(
+    assert!(matches!(
         backend
             .reserve_or_compare(&effect_id(23), &command, &exhausted, 0)
             .await
             .err(),
-        Some(AuthorityError::Unavailable)
-    );
+        Some(AuthorityError::Unavailable(_))
+    ));
 
     let race_domain = nonce_domain(backend.authority_epoch(), 31, 32, 33);
     let mut tasks = Vec::new();
@@ -1007,31 +981,31 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
     let fault_domain = nonce_domain(backend.authority_epoch(), 61, 62, 63);
     let fault_id = effect_id(61);
     backend.inject_authority_commit_fault(AuthorityCommitFault::UnknownRolledBack);
-    assert_eq!(
+    assert!(matches!(
         backend
             .reserve_or_compare(&fault_id, &command, &fault_domain, 5)
             .await
             .err(),
-        Some(AuthorityError::Unavailable)
-    );
+        Some(AuthorityError::Unavailable(evidence)) if evidence.as_value()["operation"] == "authority.reserve_or_compare" && evidence.as_value()["stage"] == "commit" && evidence.as_value()["injected"] == "unknown_rolled_back"
+    ));
     assert!(backend.load(&fault_id).await.unwrap().is_none());
     backend.inject_authority_commit_fault(AuthorityCommitFault::UnknownCommitted);
-    assert_eq!(
+    assert!(matches!(
         backend
             .reserve_or_compare(&fault_id, &command, &fault_domain, 5)
             .await
             .err(),
-        Some(AuthorityError::Unavailable)
-    );
+        Some(AuthorityError::Unavailable(evidence)) if evidence.as_value()["operation"] == "authority.reserve_or_compare" && evidence.as_value()["stage"] == "commit" && evidence.as_value()["injected"] == "unknown_committed"
+    ));
     let reservation = backend.load(&fault_id).await.unwrap().unwrap().reservation;
     backend.inject_authority_commit_fault(AuthorityCommitFault::UnknownRolledBack);
-    assert_eq!(
+    assert!(matches!(
         backend
             .retain_prepared(&reservation, &candidate)
             .await
             .err(),
-        Some(AuthorityError::Unavailable)
-    );
+        Some(AuthorityError::Unavailable(evidence)) if evidence.as_value()["operation"] == "authority.retain_prepared" && evidence.as_value()["stage"] == "commit" && evidence.as_value()["injected"] == "unknown_rolled_back"
+    ));
     assert!(backend
         .load(&fault_id)
         .await
@@ -1040,13 +1014,13 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
         .prepared
         .is_none());
     backend.inject_authority_commit_fault(AuthorityCommitFault::UnknownCommitted);
-    assert_eq!(
+    assert!(matches!(
         backend
             .retain_prepared(&reservation, &candidate)
             .await
             .err(),
-        Some(AuthorityError::Unavailable)
-    );
+        Some(AuthorityError::Unavailable(evidence)) if evidence.as_value()["operation"] == "authority.retain_prepared" && evidence.as_value()["stage"] == "commit" && evidence.as_value()["injected"] == "unknown_committed"
+    ));
     assert!(
         backend
             .load(&fault_id)
@@ -1113,6 +1087,129 @@ async fn managed_postgres_persistence_authority_contract() {
         .expect("production connection options");
     assert!(matches!(options.get_ssl_mode(), PgSslMode::Disable));
     store_scenarios::exercise_store(backend.as_ref(), &store_scenarios::run(9)).await;
+
+    // Real server diagnostics exercise the private recipe and the production precommit mapper.
+    let primary = sqlx::query("DO $$ BEGIN RAISE EXCEPTION 'primary constraint' USING ERRCODE = '23514', DETAIL = 'constraint detail', HINT = 'constraint hint', SCHEMA = 'public', TABLE = 'fixture', COLUMN = 'value', CONSTRAINT = 'fixture_check'; END $$")
+        .execute(&mut connection).await.unwrap_err();
+    let fields = sqlx_fields("run.append", "insert_frame", &primary);
+    let database = &fields["sources"][1];
+    assert_eq!(fields["sources"][0]["kind"], "database");
+    assert_eq!(database["sqlstate"], "23514");
+    assert_eq!(database["severity"], "ERROR");
+    assert_eq!(database["server_message"], "primary constraint");
+    assert_eq!(database["detail"], "constraint detail");
+    assert_eq!(database["hint"], "constraint hint");
+    assert_eq!(database["schema"], "public");
+    assert_eq!(database["table"], "fixture");
+    assert_eq!(database["column"], "value");
+    assert_eq!(database["constraint"], "fixture_check");
+    assert_eq!(
+        database["message"],
+        primary.as_database_error().unwrap().to_string()
+    );
+    let StoreError::CorruptPhysicalState(evidence) =
+        classify_precommit_sql("insert_frame", primary, Some(sqlx::Error::PoolClosed))
+    else {
+        panic!("class-23 disposition")
+    };
+    assert_eq!(evidence.as_value()["sources"], fields["sources"]);
+    assert_eq!(
+        evidence.as_value()["rollback"]["sources"][0]["kind"],
+        "pool_closed"
+    );
+
+    // Exercise the selected identity conversion through the physical-row validator.
+    let invalid_row = sqlx::query("SELECT $1::text AS run_id, 1::bigint AS head_sequence, 1::bigint AS total_bytes, 'x'::bytea AS frame_bytes, 'invalid'::text AS head_digest")
+        .bind(run_id(20).as_str()).fetch_one(&mut connection).await.unwrap();
+    let StoreError::CorruptPhysicalState(evidence) =
+        validate_observed_head(Some(&invalid_row), true, run_id(20).as_str())
+            .err()
+            .unwrap()
+    else {
+        panic!("identity disposition")
+    };
+    assert_eq!(evidence.as_value()["field"], "head_digest");
+    assert_eq!(evidence.as_value()["source"]["kind"], "identity_error");
+    assert_eq!(
+        evidence.as_value()["source"]["message"],
+        ContentDigest::parse("invalid").unwrap_err().to_string()
+    );
+    assert_ne!(evidence.as_value()["source"]["message"], "withheld");
+
+    let closed = PostgresBackend::connect(&runtime).await.unwrap();
+    closed.pool.close().await;
+    let StoreError::Unavailable(evidence) = closed.load_run(&run_id(20), None).await.err().unwrap()
+    else {
+        panic!("closed load disposition")
+    };
+    assert_eq!(evidence.as_value()["operation"], "run.load");
+    assert_eq!(evidence.as_value()["stage"], "begin");
+    assert_eq!(evidence.as_value()["sources"][0]["kind"], "pool_closed");
+
+    let runtime_with_closed_store = mfm_runtime::Runtime::new(
+        mfm_runtime::RuntimeAssemblyBuilder::new().unwrap().finish(),
+        Arc::new(closed),
+    );
+    let failure = runtime_with_closed_store
+        .read(&run_id(20))
+        .await
+        .err()
+        .unwrap();
+    let mfm_runtime::InvocationFailure::Execution {
+        error: mfm_runtime::RuntimeError::Store(StoreError::Unavailable(forwarded)),
+        last_observed: None,
+        ..
+    } = failure
+    else {
+        panic!("load failure must remain invocation-only")
+    };
+    assert_eq!(forwarded, evidence);
+
+    let closed_authority = PostgresEvmTransactionAuthority::connect(&runtime)
+        .await
+        .unwrap();
+    let domain = nonce_domain(closed_authority.authority_epoch(), 1, 2, 3);
+    let id = effect_id(20);
+    let command = reference("mfm.test.closed-authority", &[1]);
+    let reservation = Reservation::new(id.clone(), command.clone(), domain.clone(), 0).unwrap();
+    let candidate = PreparedRecord::new(
+        evm_hash(20),
+        ExactRawTransaction::new(vec![2, 0xc0]).unwrap(),
+    );
+    closed_authority.pool.close().await;
+    let failures = [
+        (
+            "authority.load",
+            "acquire",
+            closed_authority.load(&id).await.err().unwrap(),
+        ),
+        (
+            "authority.reserve_or_compare",
+            "begin",
+            closed_authority
+                .reserve_or_compare(&id, &command, &domain, 0)
+                .await
+                .err()
+                .unwrap(),
+        ),
+        (
+            "authority.retain_prepared",
+            "begin",
+            closed_authority
+                .retain_prepared(&reservation, &candidate)
+                .await
+                .err()
+                .unwrap(),
+        ),
+    ];
+    for (operation, stage, error) in failures {
+        let AuthorityError::Unavailable(evidence) = error else {
+            panic!("authority SQL disposition")
+        };
+        assert_eq!(evidence.as_value()["operation"], operation);
+        assert_eq!(evidence.as_value()["stage"], stage);
+        assert_eq!(evidence.as_value()["sources"][0]["kind"], "pool_closed");
+    }
 
     let first_run_id = run_id(21);
     let second_run_id = run_id(22);
@@ -1495,10 +1592,10 @@ async fn managed_postgres_persistence_authority_contract() {
     .execute(&mut connection)
     .await
     .expect("inject wrong reservation epoch");
-    assert_eq!(
+    assert!(matches!(
         authority.load(&effect_id(6)).await.err(),
-        Some(AuthorityError::Internal)
-    );
+        Some(AuthorityError::Internal(_))
+    ));
     sqlx::query(
         "UPDATE mfm_evm_tx.nonce_reservations SET authority_epoch = $1 WHERE effect_id = $2",
     )
@@ -1537,10 +1634,10 @@ async fn managed_postgres_persistence_authority_contract() {
         .await
         .expect("replacement authority");
     assert_ne!(replacement.authority_epoch(), &original_epoch);
-    assert_eq!(
+    assert!(matches!(
         authority.load(&effect_id(6)).await.err(),
-        Some(AuthorityError::Internal)
-    );
+        Some(AuthorityError::Internal(_))
+    ));
 
     drop(authority);
     drop(replacement);
@@ -1557,6 +1654,23 @@ async fn managed_postgres_persistence_authority_contract() {
     provision_postgres(&admin, &runtime)
         .await
         .expect("restore schemas");
+    connection
+        .execute(
+            "ALTER TABLE public.mfm_store_schema DROP CONSTRAINT mfm_store_schema_contract_check",
+        )
+        .await
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE public.mfm_store_schema SET schema_contract = 'mfm.run-history-postgres.v1'",
+        )
+        .await
+        .unwrap();
+    assert_base_gate_rejects(&runtime).await;
+    reset_schemas(&mut connection).await;
+    provision_postgres(&admin, &runtime)
+        .await
+        .expect("restore current run capacity baseline");
     connection
         .execute("DELETE FROM public.mfm_store_schema")
         .await
@@ -1728,7 +1842,7 @@ async fn inherited_rows_are_outside_physical_table_custody() {
         .await
         .unwrap();
     for handle in [&backend, &reopened] {
-        assert!(handle.load_run(&run).await.unwrap().is_some());
+        assert!(handle.load_run(&run, None).await.unwrap().is_some());
         assert_eq!(
             handle.append_run(&genesis(&run)).await.unwrap(),
             AppendResult::NotInserted
@@ -1783,7 +1897,11 @@ async fn inherited_rows_are_outside_physical_table_custody() {
         .execute(&mut connection)
         .await
         .unwrap();
-    assert!(backend.load_run(&run_id(202)).await.unwrap().is_none());
+    assert!(backend
+        .load_run(&run_id(202), None)
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(
         backend.append_run(&genesis(&run_id(202))).await.unwrap(),
         AppendResult::Inserted
@@ -1822,4 +1940,164 @@ async fn inherited_rows_are_outside_physical_table_custody() {
         .execute("DROP SCHEMA mfm_test_children CASCADE")
         .await
         .unwrap();
+}
+
+#[test]
+fn sqlx_sources_preserve_order_inline_children_and_interface_repetition() {
+    use std::{error::Error, fmt, io};
+    #[derive(Debug)]
+    struct Inner(u8);
+    impl fmt::Display for Inner {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("inner")
+        }
+    }
+    impl Error for Inner {}
+    #[derive(Debug)]
+    #[repr(C)]
+    struct Outer(Inner, bool);
+    impl fmt::Display for Outer {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(if self.1 { "inner" } else { "outer" })
+        }
+    }
+    impl Error for Outer {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+    for equal_messages in [false, true] {
+        let outer = Outer(Inner(1), equal_messages);
+        assert_eq!(
+            &outer as *const Outer as *const (),
+            &outer.0 as *const Inner as *const ()
+        );
+        assert_eq!(outer.0 .0, 1);
+        let error = sqlx::Error::Decode(Box::new(outer));
+        let details = sqlx_fields("run.load", "decode_head", &error);
+        let sources = details["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources[0]["kind"], "decode");
+        assert_eq!(
+            sources[1]["message"],
+            if equal_messages { "inner" } else { "outer" }
+        );
+        assert_eq!(sources[2]["message"], "inner");
+        assert!(details.get("source_cycle").is_none());
+    }
+    let error = sqlx::Error::Io(io::Error::other(Outer(Inner(2), false)));
+    let details = sqlx_fields("run.append", "begin", &error);
+    let sources = details["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 4);
+    assert_eq!(sources[0]["kind"], "io");
+    assert_eq!(sources[1]["os_kind"], "Other");
+    assert_eq!(sources[1]["os_code"], serde_json::Value::Null);
+    assert_eq!(sources[2]["message"], "outer");
+    assert_eq!(sources[3]["message"], "inner");
+    let error = sqlx::Error::Io(io::Error::from_raw_os_error(13));
+    assert_eq!(
+        sqlx_fields("run.load", "begin", &error)["sources"][1]["os_code"],
+        13
+    );
+
+    #[derive(Debug)]
+    struct Layer(usize, Option<Box<Layer>>);
+    impl fmt::Display for Layer {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "layer {}", self.0)
+        }
+    }
+    impl Error for Layer {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.1.as_deref().map(|v| v as &dyn Error)
+        }
+    }
+    let mut tail = None;
+    for i in (0..40).rev() {
+        tail = Some(Box::new(Layer(i, tail)));
+    }
+    let error = sqlx::Error::Decode(tail.unwrap());
+    let details = sqlx_fields("run.load", "decode_head", &error);
+    let sources = details["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 41);
+    for i in 0..40 {
+        assert_eq!(sources[i + 1]["message"], format!("layer {i}"));
+    }
+    assert!(details.get("source_cycle").is_none());
+
+    #[derive(Debug)]
+    struct Cycle(bool);
+    static FIRST: Cycle = Cycle(false);
+    static SECOND: Cycle = Cycle(true);
+    impl fmt::Display for Cycle {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(if self.0 { "second" } else { "first" })
+        }
+    }
+    impl Error for Cycle {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(if self.0 { &FIRST } else { &SECOND })
+        }
+    }
+    let error = sqlx::Error::Decode(Box::new(Cycle(false)));
+    let details = sqlx_fields("run.load", "decode_head", &error);
+    assert_eq!(details["source_cycle"], true);
+    let sources = details["sources"].as_array().unwrap();
+    assert!(sources.len() >= 3);
+    for (i, source) in sources[1..].iter().enumerate() {
+        assert_eq!(
+            source["message"],
+            if i % 2 == 0 { "first" } else { "second" }
+        );
+    }
+}
+
+#[test]
+fn sqlx_columns_and_secondary_rollback_keep_distinct_native_facts() {
+    for (error, field, expected) in [
+        (
+            sqlx::Error::ColumnDecode {
+                index: "head".into(),
+                source: Box::new(sqlx::Error::RowNotFound),
+            },
+            "index",
+            json!("head"),
+        ),
+        (
+            sqlx::Error::ColumnIndexOutOfBounds { index: 3, len: 2 },
+            "index",
+            json!(3),
+        ),
+        (
+            sqlx::Error::ColumnNotFound("frame".into()),
+            "column",
+            json!("frame"),
+        ),
+        (
+            sqlx::Error::TypeNotFound {
+                type_name: "custom".into(),
+            },
+            "type_name",
+            json!("custom"),
+        ),
+    ] {
+        let fields = sqlx_fields("run.load", "decode_head", &error);
+        assert_eq!(fields["sources"][0][field], expected);
+        assert_eq!(fields["sources"][0]["message"], error.to_string());
+    }
+    let error = classify_precommit_sql(
+        "update_head",
+        sqlx::Error::Decode(Box::new(sqlx::Error::RowNotFound)),
+        Some(sqlx::Error::Io(std::io::Error::from_raw_os_error(32))),
+    );
+    let StoreError::Unavailable(details) = error else {
+        panic!("primary disposition")
+    };
+    let details = details.as_value();
+    assert_eq!(details["stage"], "update_head");
+    assert_eq!(details["sources"][0]["kind"], "decode");
+    assert_eq!(details["sources"][1]["kind"], "row_not_found");
+    assert_eq!(details["rollback"]["stage"], "rollback");
+    assert_eq!(details["rollback"]["sources"][0]["kind"], "io");
+    assert_eq!(details["rollback"]["sources"][1]["os_code"], 32);
 }

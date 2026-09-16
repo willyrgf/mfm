@@ -9,5 +9,26 @@
       "digest": "content:sha256-jcs-v1:0723d5ccf638cfcf6bb85d96de269e93adcef0847147ace563d09464c8c12250",
       "entry_point": "mfm.portfolio/snapshot@1"
     }
+  },
+  "invocation": {
+    "kind": "execution_stopped",
+    "run_id": "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
+    "last_observed": null,
+    "cause": {
+      "recording": {
+        "operation": "record",
+        "failure": {
+          "store": {
+            "original": null,
+            "candidate": {
+              "run_id": "run:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
+              "sequence": 1,
+              "digest": "content:sha256-v1:f5f6eadc29bdce1be91177912bcdc8891292b4e3c1635d146a8bfb9b145d2c9d"
+            },
+            "cause": {"indeterminate": {"operation": "test.store", "injected": "Indeterminate"}}
+          }
+        }
+      }
+    }
   }
 }

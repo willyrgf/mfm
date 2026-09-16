@@ -1,10 +1,17 @@
 # Known limitations
 
+- Adapter error chains are not yet preserved end to end. SQLx, signer, custody and application startup
+  conversions still discard source layers. EVM transport capture now retains reviewed causes, but
+  internal State failures and recovery-before-commit still require the RFC lifecycle cutover. The new repository rule
+  requires preservation; [the adapter error audit](adapter-error-audit.md) records concrete gaps,
+  secret-free retention constraints and coherent remediation scope. Durable typed failure records
+  must not be described as retaining raw client errors already discarded upstream.
 - PostgreSQL claims primary crash/restart durability only. It does not claim safe writable rollback,
   host-loss failover, quorum, replica, or multi-primary authority.
 - Trusted Rust State implementations, assembly, and adapters are in the process trust base.
 - Runtime has caller-driven progression only; it owns no background scheduler or timeout policy.
-- The current product entry point is `mfm.portfolio/snapshot@1`.
+- Current product entry points are `mfm.portfolio/snapshot@1` and bounded candidate enrichment
+  `mfm.portfolio/enrich@1`. Enrichment does not discover assets outside the supplied candidate list.
 - EVM transaction settlement version 1 is limited to the pinned non-reorging development fixture.
   Production submission remains unsupported until a product defines its finality, confirmation,
   reorg, authorization, and operational policy under a separately reviewed capability identity.
@@ -32,14 +39,14 @@ The following are missing capabilities, not current API guarantees:
   implements assembly and progression around production primitives; it does not contain a second
   Runtime engine. The current Portfolio composition does not provide this EVM product surface.
 - Bounded configuration of supported operation order, ABI/function selection, and static typed
-  arguments, with production-owned validation, encoding/decoding, graph construction, and
+  arguments, with production-owned validation, encoding/decoding, sequence construction, and
   executable registration. ABI choices and values should be configuration rather than custom
   test State implementations. The initial supported ABI/type catalogue remains to be specified.
 - RPC fee-discovery Read States and production fee-selection logic. Observation evidence must be
   retained before deterministic transaction construction, with configured bounds/rules. A resumed
   acknowledged prepare must reuse its original command and fees rather than refresh them.
 - Simple configuration of supported terminal failure classes and production-owned classification,
-  propagation, and report construction. Consumers should not write failure adapter States merely
+  propagation, and report construction. Consumers should not write typed maps merely
   to select terminal behavior. Configuring a class does not make an infrastructure error into an
   authenticated durable domain failure.
 - Production typed success/failure reports containing configured names/order, declared public
@@ -54,10 +61,10 @@ The following are missing capabilities, not current API guarantees:
 
 ## Development-node funding
 
-- There is no reusable `DevNodeFundWallet` State/adapter. The E2E currently implements unlocked
-  account discovery, submission, and its own funding RPC path. The target is a small deterministic
-  Effect State with an explicitly selected dev-node adapter using shared bounded transport, not a
-  prerequisite general faucet-authority subsystem.
+- There is no reusable `DevNodeFundWallet` State. The E2E uses
+  `JsonRpcEvmProvider::fund_development_sender` for unlocked account discovery and one submission
+  through the shared bounded causal RPC path. A recoverable funding Effect still needs an explicit
+  convergent protocol; the provider helper alone does not establish that contract.
 - The funding completion/readiness and duplicate-entry contract remains undefined. The current
   helper's returned submission hash does not itself establish funded readiness, and blindly
   repeating `eth_sendTransaction` after lost acknowledgement can fund twice. Select and test the
@@ -65,18 +72,22 @@ The following are missing capabilities, not current API guarantees:
 
 ## General execution and recovery policy
 
+Runtime now supplies intrinsic error classification and common handler selection, bounded retry/checkpoint restart, Effect
+barriers, canonical failure reports, and stopped-invocation observations. The remaining gaps below
+concern configurable product orchestration around that caller-driven contract.
+
 - There is no complete reusable production driver for configured deadlines, polling, retries,
   exact-admission recovery, dependency reconnection, and structured result delivery. Consumers
   should configure this policy rather than implement `drive_to_success` or resume-before-start
   loops. Operational policy must not rewrite admitted Program/input or retained pending commands.
-- Supported actions for domain failure classes, Absent, admission conflict, Unavailable,
-  Indeterminate acknowledgement, cancellation, and deadline expiry need a coherent public policy
-  contract. Stopping an execution attempt must remain distinguishable from a durable terminal
-  workflow failure, including when an external Effect may already have occurred.
+- Product configuration for Absent, admission conflict, dependency reconnection, ambiguous
+  acknowledgement, cancellation, and caller deadlines remains undefined. Any orchestration must
+  preserve the existing distinction between invocation failure and durable terminal failure,
+  including retained pending Effect authority.
 - Recovery after client/process loss, pending transaction reconciliation, key/authority availability,
   and interactions with the existing nonce/replacement/finality limitations are not a complete
   configurable product. Existing cancellation, acknowledgement-loss, prepared-wire, and cold-fold
-  tests establish specific boundaries; they do not establish general recovery support. Ephemeral
+  tests establish specific boundaries; they do not establish a complete configurable orchestration product. Ephemeral
   keystore survival during Runtime reconstruction is not host-process restart recovery.
 - Consumer E2E coverage should configure production execution and assert final report results.
   Deliberate fault schedules can be selected in separate explicit dev/test scenario configuration,

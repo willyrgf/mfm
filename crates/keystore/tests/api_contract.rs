@@ -63,7 +63,7 @@ async fn duplicate_import_and_signing_are_key_and_purpose_bound_and_recoverable(
     owner.shutdown().await.expect("shutdown");
     assert!(matches!(
         first.sign(SigningDigest::from_bytes([1; 32])).await,
-        Err(SigningError::Failed)
+        Err(SigningError::SignFailed(cause)) if cause.as_value()["stage"] == "request_send" && cause.as_value()["message"] == "channel closed"
     ));
 }
 

@@ -8,10 +8,49 @@ owns verification selection and `nixfied.nix` owns the executable task graph.
 - Divide non-trivial work into ordered logical commits. Each commit must leave one coherent current
   design; keep inseparable cutovers together.
 - Follow `docs/code-quality.md` for code, tests, documentation, build, and workflow changes.
+- Treat reducing complexity as an objective of every non-trivial change. Prefer the smallest
+  coherent design that satisfies current requirements. Minimize concepts, public APIs,
+  configuration points, code paths, duplicated responsibilities, and future change sites.
+- Before adding an abstraction or extending existing machinery, identify what can instead be
+  simplified, unified, or deleted within the affected scope. Do not preserve unnecessary complexity
+  merely because it already exists. This does not authorize unrelated rewrites.
+- Before adding a layer, ask whether an existing layer can be removed. Before adding a special
+  case, ask whether the representation is wrong.
+- Delete superseded implementations, APIs, tests, and documentation in the same cutover. Preserve
+  coverage of retained behavior. Do not add wrappers that leave the old complexity underneath.
+- Prefer fewer LOC when behavior and guarantees are equivalent. Do not reduce LOC through
+  compressed code, weaker validation, omitted tests, or blurred ownership boundaries.
+- For non-trivial changes, report what was simplified and removed, what necessary complexity was
+  added, and the resulting production-code LOC change. Explain increases; use LOC as evidence,
+  not a quota, and do not optimize the metric at the expense of the design.
 - Verification is scope-driven. Use the narrowest command that exercises changed behavior, then
   expand only when the affected boundary or risk requires it.
 - Commit subjects are lower case.
 - Never log, print, or persist passwords, mnemonics, private keys, or credentials.
+- Preserve the complete available causal error chain across every adapter and boundary conversion.
+  Classification and public rendering are projections; they must not replace or silently discard
+  the original causes. Existing lossy conversions are auditability gaps, not precedent.
+- Retain each cause layer, its originating operation, and available reviewed diagnostic fields in
+  the audit representation. Do not flatten a source into `Unavailable`, `Internal`, or a formatted
+  string without retaining its causal information. Follow `docs/code-quality.md` for error audit.
+- Malformed stored framework data uses parser category, available location and rejection reason;
+  ordinary Serde decoding need not retain nested constructor ancestry or structured size fields.
+  Direct typed construction, postdecode admission and declared execution originals keep their
+  separate causal contracts.
+- Selected dependency diagnostics follow the explicit upstream trust contract in `docs/design.md`:
+  retain supplied JSON/parser, EVM provider/transport and CLI IO messages without generic sanitizers
+  or diagnostic quotas. This trusts supplied text; it does not certify it secret-free. Never
+  deliberately append MFM secrets or full request/connection objects.
+  Keep concrete owner errors where supported; adapt selected internal facts once into immutable
+  invocation data. Failed first original encoding reports its cause and known context with original
+  detail/identity unavailable, without serializer retry or opaque native-original custody.
+- Error preservation does not authorize deliberate secret disclosure. Explicitly account for unavailable,
+  withheld, or size-limited details; never describe a partial representation as lossless. If full
+  preservation conflicts with the secret-free boundary, resolve the custody contract rather than
+  silently weakening either requirement.
+- Acknowledged operational failures must retain their cause chain durably. Never claim a Store
+  failure was audited through the same failed Store, or an interrupted physical attempt was
+  recorded when it was not. Preserve existing ambiguity and command-authority semantics.
 - Preserve crate boundaries and keep libraries usable without the CLI.
 - Add dependencies only with strong justification.
 - Do not commit third-party vendored source or use external git/path patches without explicit user
@@ -36,12 +75,13 @@ the architect rule above.
 - `docs/design.md` is authoritative. Fix code that disagrees, or update the contract and its tests in
   the same change.
 - `docs/architecture.md` owns taxonomy and placement:
-  - Program is an immutable, content-addressed State/Match graph;
-  - Runtime associates the Program with typed implementations and owns the sole semantic fold;
+  - Program is an immutable, content-addressed linear State sequence;
+  - Runtime associates the Program with typed implementations and owns the current continuation,
+    transitions, and local safety checks;
   - State implementations are deterministic and perform no ambient IO;
   - Read adapters bind typed intent to explicit observational capabilities;
-  - Journal owns the exact append-only frame wire and history qualification;
-  - Store owns mechanical complete-prefix load and atomic exact-head append only;
+  - Journal owns the exact opaque append-only frame wire;
+  - Store owns mechanical admission/latest/optional-probe load and atomic exact-head append only;
   - transports and signers remain reusable platform primitives; and
   - binaries parse/render their supported transport surface only.
 - Run histories are append-only; every append is all-or-nothing and prior frames never mutate.
@@ -49,8 +89,9 @@ the architect rule above.
 - Structured hashing uses canonical JSON with JCS-style semantics. Hashed structures contain no
   floats; use scaled integers or decimal strings.
 - Network and filesystem IO cross explicit adapter or Store abstractions.
-- Secrets never appear in Program, admitted context, Journal, Store metadata, RunView, public output,
-  or error detail.
+- MFM secret inputs never enter Program, admitted context, Journal, Store metadata, RunView,
+  public output or diagnostic context. Dependency-supplied diagnostic text follows the explicit
+  upstream trust contract above.
 - One explicit caller-supplied RunId identifies a run. Writable rollback of acknowledged history is
   unsupported.
 
@@ -78,11 +119,11 @@ composition. Follow the pinned Nixfied adopter guide for framework changes.
 
 ## Surface-specific rules
 
-- Program/Runtime: keep graph association and scheduling deterministic; test hot/cold equivalence,
+- Program/Runtime: keep sequence association, current-state validation and recovery scheduling deterministic; test hot/cold equivalence,
   cancellation safety, typed error mapping, and semantic changes.
 - Journal/Store: keep exact wire qualification in Journal and physical atomicity in Store. Store must
   not acquire Program, domain, capability, or reducer semantics.
-- PostgreSQL: preserve one repeatable-read complete load snapshot and one advisory-locked,
+- PostgreSQL: preserve one repeatable-read admission/latest/probe snapshot and one advisory-locked,
   synchronous-commit append transaction. Ambiguous COMMIT acknowledgement is `Indeterminate`.
 - Adapters: only duplicate-safe Reads are supported. Local mismatch is `Internal` with no provider
   call or append; only authenticated external evidence can durably represent an integrity block.

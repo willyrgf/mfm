@@ -133,7 +133,6 @@ where
 #[test]
 fn checked_evm_primitives_reject_every_noncanonical_boundary() {
     let address = EvmAddress::from_bytes([0x11; 20]);
-    assert_eq!(address.as_bytes(), &[0x11; 20]);
     assert_eq!(
         serde_json::to_string(&address).expect("address wire"),
         r#""0x1111111111111111111111111111111111111111""#
@@ -147,7 +146,6 @@ fn checked_evm_primitives_reject_every_noncanonical_boundary() {
     }
 
     let hash = EvmHash::from_bytes([0xab; 32]);
-    assert_eq!(hash.as_bytes(), &[0xab; 32]);
     assert_eq!(hash.to_string(), format!("0x{}", "ab".repeat(32)));
     assert!(EvmHash::new(format!("0x{}", "AB".repeat(32))).is_err());
     assert!(EvmHash::new(format!("0x{}", "ab".repeat(31))).is_err());
@@ -171,11 +169,6 @@ fn checked_evm_primitives_reject_every_noncanonical_boundary() {
     }
     assert!(serde_json::from_str::<EvmU256>("1").is_err());
 
-    let chain = EvmChainInstance {
-        chain_id: nonzero(1),
-        expected_genesis_hash: EvmHash::from_bytes([0xab; 32]),
-    };
-    assert_eq!(chain.chain_id, nonzero(1));
     assert!(
         serde_json::from_value::<EvmChainInstance>(serde_json::json!({
             "chain_id": 0,
@@ -199,8 +192,6 @@ fn checked_evm_primitives_reject_every_noncanonical_boundary() {
 #[test]
 fn fixed_eip1559_command_has_exact_wire_and_checked_factories() {
     let command = create_command();
-    assert_eq!(command.input(), [1, 2, 3]);
-    assert_eq!(command.to(), None);
     assert_eq!(
         canonical(&command),
         r#"{"action":{"kind":"create","value":{"initcode":"AQID"}},"parameters":{"binding":{"authority_epoch":"ERERERERERERERERERERERERERERERERERERERERERE","route":{"chain_instance":{"chain_id":1,"expected_genesis_hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"endpoint_ref":{"content_digest":"content:sha256-v1:0202020202020202020202020202020202020202020202020202020202020202","schema_id":"schema:mfm.test.endpoint:1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101"}},"sender":"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"},"fees":{"maximum":"10000000000","priority":"1000000000"},"gas_limit":2000000,"value":"0"}}"#

@@ -7,21 +7,21 @@ use std::pin::Pin;
 use crate::{EvmAuthorityEpoch, EvmHash};
 pub use crate::{NonceDomain, Reservation};
 use mfm_ids::{ContentRef, EffectId};
+use mfm_values::{DiagnosticEvidence, InvocationDiagnostic};
 
 /// Maximum exact signed transaction bytes retained by authority.
 pub const MAX_EXACT_RAW_TRANSACTION_BYTES: usize = 132_096;
 
 /// Redaction-safe transaction-authority failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum AuthorityError {
     /// The operation could not safely make progress or its commit acknowledgement was ambiguous.
     #[error("EVM transaction authority is unavailable")]
-    Unavailable,
+    Unavailable(DiagnosticEvidence),
     /// Caller identity or retained authority facts violated the current contract.
     #[error("EVM transaction authority is internally inconsistent")]
-    Internal,
+    Internal(InvocationDiagnostic),
 }
-
 /// Result returned by transaction-authority operations.
 pub type Result<T> = std::result::Result<T, AuthorityError>;
 
@@ -40,7 +40,17 @@ impl ExactRawTransaction {
     /// Checks and owns one nonempty bounded signed transaction.
     pub fn new(bytes: Vec<u8>) -> Result<Self> {
         if bytes.is_empty() || bytes.len() > MAX_EXACT_RAW_TRANSACTION_BYTES {
-            return Err(AuthorityError::Internal);
+            return Err(AuthorityError::Internal(InvocationDiagnostic::from_fields(
+                "authority_internal",
+                "ExactRawTransaction::new",
+                &serde_json::json!({
+                    "check": "raw transaction length",
+                    "minimum": 1,
+                    "maximum": MAX_EXACT_RAW_TRANSACTION_BYTES,
+                    "observed": bytes.len()
+                }),
+                None,
+            )));
         }
         Ok(Self { bytes })
     }

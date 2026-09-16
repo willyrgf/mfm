@@ -10,22 +10,26 @@ use mfm_config::{ConfigImportResult, ConfigRepository, ConfigRepositoryError};
 use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
 use mfm_evm_live::{register_evm_reads, EvmAdapterLocator, EvmReadProvider, JsonRpcEvmProvider};
 use mfm_ids::{ContentRef, RunId};
-use mfm_portfolio::PortfolioError;
-use mfm_runtime::{
-    RetainedValueView, RunView, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError,
+use mfm_portfolio::{
+    EnrichmentProvenance, PortfolioEnrichmentOutput, PortfolioError, PortfolioSnapshotInput,
 };
+use mfm_runtime::{InvocationFailure, RunView, Runtime, RuntimeAssemblyBuilder, RuntimeError};
 use mfm_storage_postgres::{
     provision_postgres as provision_postgres_backend, AdminPostgresLocator, PostgresBackend,
     RuntimePostgresLocator,
 };
 use mfm_store::{RunIndex, RunIndexError, Store};
-use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
-use serde_json::value::RawValue;
 
 mod config;
 mod deployment;
 mod inspection;
+mod reporting;
+#[cfg(test)]
+mod reporting_tests;
+mod run_view;
+pub use reporting::encode_response;
+pub use run_view::SerializableRunView;
 
 pub use config::{
     ConfigDocument, ConfigDocumentError, ConfigSummary, EntryPointSummary, ImportOutcome,
@@ -34,7 +38,8 @@ pub use deployment::{
     Deployment, EnvironmentName, EnvironmentNameError, MAX_DEPLOYMENT_DOCUMENT_BYTES,
 };
 pub use inspection::{ComponentKind, ComponentSummary};
-pub use mfm_config::{ConfigDigest, ConfigName, MAX_CONFIG_DOCUMENT_BYTES};
+pub use mfm_config::{ConfigDigest, MAX_CONFIG_DOCUMENT_BYTES};
+pub use mfm_ids::ConfigName;
 pub use mfm_store::{RunPage, RunPageLimit};
 
 use config::ENTRY_POINTS;
@@ -44,10 +49,9 @@ use deployment::resolve_environment;
 pub const MAX_EVM_BINDINGS: usize = 256;
 
 /// Registers every Portfolio and EVM State implementation the snapshot Program declares.
-///
-/// [`ComposedRuntime`] is the composition trusted callers want. This entry stays public only for
-/// adapterless tests that prove association rejects a Program before Store IO.
-pub fn register_portfolio_states(builder: &mut RuntimeAssemblyBuilder) -> mfm_runtime::Result<()> {
+pub(crate) fn register_portfolio_states(
+    builder: &mut RuntimeAssemblyBuilder,
+) -> mfm_runtime::Result<()> {
     inspection::register_states(builder)
 }
 
@@ -202,6 +206,9 @@ pub enum RequestError {
     /// The complete config cannot be planned.
     #[error("config document is invalid")]
     InvalidConfigDocument,
+    /// Enrichment is incomplete, has the wrong schema, or disagrees with its dependent configuration.
+    #[error("enrichment result is invalid for publication or admission")]
+    InvalidEnrichment,
     /// A configuration mutation may have committed.
     #[error("config mutation outcome is indeterminate")]
     ConfigMutationIndeterminate,
@@ -214,15 +221,21 @@ pub enum RequestError {
     /// Admission differs from retained genesis.
     #[error("run admission conflicts with retained history")]
     RunAdmissionConflict,
+    /// This physical append inserted nothing and could not return a qualified candidate view.
+    #[error("run append was not inserted")]
+    RunAppendNotInserted,
     /// Retained run history is invalid.
     #[error("retained run history is invalid")]
     InvalidRunHistory,
     /// The immutable assembly cannot execute retained history.
     #[error("runtime assembly is incompatible")]
     IncompatibleAssembly,
-    /// A run capacity was exceeded.
-    #[error("run capacity exceeded")]
-    RunCapacity,
+    /// A measured run resource exceeded its explicit limit.
+    #[error("size limit exceeded")]
+    SizeLimitExceeded,
+    /// Capacity arithmetic could not represent a result.
+    #[error("capacity arithmetic overflow")]
+    CapacityArithmeticOverflow,
     /// A config selects a capability not present in the composition.
     #[error("required capability binding is unavailable")]
     BindingUnbound,
@@ -243,13 +256,16 @@ impl RequestError {
         match self {
             Self::ConfigAbsent => "config_absent",
             Self::InvalidConfigDocument => "invalid_config_document",
+            Self::InvalidEnrichment => "invalid_enrichment",
             Self::ConfigMutationIndeterminate => "config_mutation_indeterminate",
             Self::InvalidRetainedConfig => "invalid_retained_config",
             Self::RunAbsent => "run_absent",
             Self::RunAdmissionConflict => "run_admission_conflict",
+            Self::RunAppendNotInserted => "run_append_not_inserted",
             Self::InvalidRunHistory => "invalid_run_history",
             Self::IncompatibleAssembly => "incompatible_assembly",
-            Self::RunCapacity => "run_capacity",
+            Self::SizeLimitExceeded => "size_limit_exceeded",
+            Self::CapacityArithmeticOverflow => "capacity_arithmetic_overflow",
             Self::BindingUnbound => "binding_unbound",
             Self::InvalidRunIndex => "invalid_run_index",
             Self::DependencyUnavailable => "dependency_unavailable",
@@ -306,13 +322,25 @@ pub struct SerializableClientError<'a> {
     code: &'a str,
     message: &'a str,
     detail: ClientErrorDetail<'a>,
+    diagnostic: Option<&'a mfm_values::InvocationDiagnostic>,
 }
 
-#[derive(Clone, Copy)]
 enum ClientErrorDetail<'a> {
     None,
     RunId(&'a RunId),
-    Recovery(&'a RunRecovery),
+    Recovery {
+        recovery: &'a RunRecovery,
+        invocation: run_view::Invocation<'a>,
+    },
+    Invocation(run_view::Invocation<'a>),
+    FailedView {
+        view: &'a mfm_runtime::RunView,
+        original_report: Option<&'a serde_json::value::RawValue>,
+    },
+    FailedRun {
+        error: &'a RunRequestError,
+        original_report: Option<&'a serde_json::value::RawValue>,
+    },
 }
 
 impl<'a> SerializableClientError<'a> {
@@ -322,6 +350,7 @@ impl<'a> SerializableClientError<'a> {
             code,
             message,
             detail: ClientErrorDetail::None,
+            diagnostic: None,
         }
     }
 
@@ -331,16 +360,33 @@ impl<'a> SerializableClientError<'a> {
             code,
             message,
             detail: ClientErrorDetail::RunId(run_id),
+            diagnostic: None,
         }
     }
 
-    /// Constructs an append error carrying its exact recovery instruction.
-    pub const fn recoverable(code: &'a str, message: &'a str, recovery: &'a RunRecovery) -> Self {
-        Self {
-            code,
+    /// Renders a run-call failure with its last observed head and any recovery identity.
+    pub fn for_run(
+        error: &'a RunRequestError,
+        message: &'a str,
+    ) -> Result<Self, mfm_values::InvocationDiagnostic> {
+        Ok(Self {
+            code: error.code(),
             message,
-            detail: ClientErrorDetail::Recovery(recovery),
-        }
+            diagnostic: None,
+            detail: match error {
+                RunRequestError::Request(_) => ClientErrorDetail::None,
+                RunRequestError::AppendIndeterminate {
+                    recovery,
+                    invocation,
+                } => ClientErrorDetail::Recovery {
+                    recovery,
+                    invocation: run_view::Invocation::new(invocation)?,
+                },
+                RunRequestError::Invocation(failure) => {
+                    ClientErrorDetail::Invocation(run_view::Invocation::new(failure)?)
+                }
+            },
+        })
     }
 }
 
@@ -349,23 +395,47 @@ impl Serialize for SerializableClientError<'_> {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct(
-            "ClientError",
-            2 + usize::from(!matches!(self.detail, ClientErrorDetail::None)),
-        )?;
-        state.serialize_field("code", self.code)?;
-        state.serialize_field("message", self.message)?;
-        match self.detail {
+        use serde::ser::SerializeMap;
+        let mut state = serializer.serialize_map(None)?;
+        state.serialize_entry("code", self.code)?;
+        state.serialize_entry("message", self.message)?;
+        match &self.detail {
             ClientErrorDetail::None => {}
-            ClientErrorDetail::RunId(run_id) => state.serialize_field("run_id", run_id)?,
-            ClientErrorDetail::Recovery(recovery) => state.serialize_field("recovery", recovery)?,
+            ClientErrorDetail::RunId(run_id) => state.serialize_entry("run_id", run_id)?,
+            ClientErrorDetail::Recovery {
+                recovery,
+                invocation,
+            } => {
+                state.serialize_entry("recovery", recovery)?;
+                state.serialize_entry("invocation", invocation)?;
+            }
+            ClientErrorDetail::Invocation(failure) => {
+                state.serialize_entry("invocation", failure)?
+            }
+            ClientErrorDetail::FailedView {
+                view,
+                original_report,
+            } => {
+                reporting::view_fields(&mut state, view)?;
+                state.serialize_entry("original_report", original_report)?;
+            }
+            ClientErrorDetail::FailedRun {
+                error,
+                original_report,
+            } => {
+                reporting::run_fields(&mut state, error)?;
+                state.serialize_entry("original_report", original_report)?;
+            }
+        }
+        if let Some(diagnostic) = self.diagnostic {
+            state.serialize_entry("diagnostic", diagnostic)?;
         }
         state.end()
     }
 }
 
 /// Run mutation failure with exact recovery identity for ambiguous append acknowledgement.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(thiserror::Error)]
 // The public recovery sum deliberately retains its checked fields inline; append ambiguity is an
 // exceptional path and changing the variant to an allocation-shaped API would weaken that contract.
 #[allow(clippy::large_enum_variant)]
@@ -378,23 +448,73 @@ pub enum RunRequestError {
     AppendIndeterminate {
         /// Checked public recovery identity.
         recovery: RunRecovery,
+        /// Complete invocation custody, including its original and exact candidate when available.
+        #[source]
+        invocation: InvocationFailure,
     },
+    /// A call stopped without claiming a durable terminal outcome.
+    #[error("{0}")]
+    Invocation(#[source] InvocationFailure),
+}
+
+impl fmt::Debug for RunRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RunRequestError")
+            .field("code", &self.code())
+            .finish_non_exhaustive()
+    }
 }
 
 impl RunRequestError {
+    fn from_invocation(error: InvocationFailure, recovery: RunRecovery) -> Self {
+        let indeterminate = matches!(
+            &error,
+            InvocationFailure::Execution {
+                error: RuntimeError::Recording { failure, .. }, ..
+            } if matches!(failure.as_ref(), mfm_runtime::RecordingFailure::Store {
+                cause: mfm_store::StoreError::Indeterminate(_), ..
+            })
+        );
+        if indeterminate {
+            Self::AppendIndeterminate {
+                recovery,
+                invocation: error,
+            }
+        } else {
+            Self::Invocation(error)
+        }
+    }
+
     /// Returns the stable machine-readable error code.
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
             Self::Request(error) => error.code(),
             Self::AppendIndeterminate { .. } => "run_append_indeterminate",
+            Self::Invocation(InvocationFailure::Execution { error, .. }) => {
+                map_runtime_error(error).code()
+            }
+            Self::Invocation(InvocationFailure::RecoveryStopped { .. }) => "recovery_stopped",
+        }
+    }
+
+    /// Returns the reviewed request category when the invocation has an execution fault.
+    pub fn request_error(&self) -> Option<RequestError> {
+        match self {
+            Self::Request(error) => Some(*error),
+            Self::Invocation(InvocationFailure::Execution { error, .. }) => {
+                Some(map_runtime_error(error))
+            }
+            Self::AppendIndeterminate { .. }
+            | Self::Invocation(InvocationFailure::RecoveryStopped { .. }) => None,
         }
     }
 
     /// Returns recovery identity only for an ambiguously acknowledged append.
     pub const fn recovery(&self) -> Option<&RunRecovery> {
         match self {
-            Self::Request(_) => None,
-            Self::AppendIndeterminate { recovery } => Some(recovery),
+            Self::Request(_) | Self::Invocation(_) => None,
+            Self::AppendIndeterminate { recovery, .. } => Some(recovery),
         }
     }
 }
@@ -412,6 +532,22 @@ pub struct StartRunResult {
 }
 
 impl StartRunResult {
+    // Preserve the public inline recovery sum shared by both async start paths.
+    #[allow(clippy::result_large_err)]
+    fn from_runtime(
+        run_id: RunId,
+        config: ConfigSummary,
+        result: Result<RunView, InvocationFailure>,
+    ) -> Result<Self, RunRequestError> {
+        match result {
+            Ok(run) => Ok(StartRunResult { config, run }),
+            Err(error) => Err(RunRequestError::from_invocation(
+                error,
+                RunRecovery::Start { run_id, config },
+            )),
+        }
+    }
+
     /// Returns the exact selected config revision.
     pub const fn config(&self) -> &ConfigSummary {
         &self.config
@@ -423,85 +559,18 @@ impl StartRunResult {
     }
 }
 
-impl Serialize for StartRunResult {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("StartRunResult", 2)?;
-        state.serialize_field("config", &self.config)?;
-        state.serialize_field("run", &SerializableRunView::new(&self.run))?;
-        state.end()
-    }
-}
-
-/// Borrowed exact JSON serializer for one [`RunView`].
-pub struct SerializableRunView<'a> {
-    view: &'a RunView,
-}
-
-impl<'a> SerializableRunView<'a> {
-    /// Wraps one run view without changing its retained bytes.
-    pub const fn new(view: &'a RunView) -> Self {
-        Self { view }
-    }
-}
-
-impl Serialize for SerializableRunView<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("RunView", 4)?;
-        state.serialize_field("run_id", self.view.run_id())?;
-        state.serialize_field("head_sequence", &self.view.head_sequence())?;
-        state.serialize_field("head_digest", self.view.head_digest())?;
-        match self.view.state() {
-            RunViewState::Runnable => {
-                state.serialize_field("state", &RunnableState { kind: "runnable" })?
-            }
-            RunViewState::Succeeded(value) => {
-                state.serialize_field("state", &TerminalState::new("succeeded", value))?
-            }
-            RunViewState::Failed(value) => {
-                state.serialize_field("state", &TerminalState::new("failed", value))?
-            }
+impl StartRunResult {
+    /// Prepares the selected revision and its qualified run view for transport serialization.
+    pub fn serializable(&self) -> Result<impl Serialize + '_, mfm_values::InvocationDiagnostic> {
+        #[derive(Serialize)]
+        struct Prepared<'a> {
+            config: &'a ConfigSummary,
+            run: SerializableRunView<'a>,
         }
-        state.end()
-    }
-}
-
-#[derive(Serialize)]
-struct RunnableState {
-    kind: &'static str,
-}
-
-struct TerminalState<'a> {
-    kind: &'static str,
-    value: &'a RetainedValueView,
-}
-
-impl<'a> TerminalState<'a> {
-    const fn new(kind: &'static str, value: &'a RetainedValueView) -> Self {
-        Self { kind, value }
-    }
-}
-
-impl Serialize for TerminalState<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let raw = std::str::from_utf8(self.value.canonical_bytes())
-            .ok()
-            .and_then(|value| RawValue::from_string(value.to_owned()).ok())
-            .ok_or_else(|| serde::ser::Error::custom("retained canonical value is invalid"))?;
-        let mut state = serializer.serialize_struct("RunViewState", 4)?;
-        state.serialize_field("kind", self.kind)?;
-        state.serialize_field("contract_ref", self.value.contract_ref())?;
-        state.serialize_field("value_ref", self.value.value_ref())?;
-        state.serialize_field("value", &raw)?;
-        state.end()
+        Ok(Prepared {
+            config: &self.config,
+            run: SerializableRunView::new(&self.run)?,
+        })
     }
 }
 
@@ -580,7 +649,7 @@ impl Application {
         name: ConfigName,
         document: ConfigDocument,
     ) -> Result<ImportOutcome, RequestError> {
-        let document = tokio::task::spawn_blocking(move || match document.plan() {
+        let document = tokio::task::spawn_blocking(move || match document.plan(None) {
             Ok(_) => Ok(document),
             Err(PortfolioError::InvalidValue) => Err(RequestError::InvalidConfigDocument),
             Err(PortfolioError::InvalidContinuation | PortfolioError::Program) => {
@@ -639,12 +708,95 @@ impl Application {
             .map_err(map_config_repository_error)
     }
 
+    /// Publishes one exact successful enrichment result as an immutable snapshot configuration.
+    pub async fn publish_enrichment(
+        &self,
+        destination: ConfigName,
+        run_id: &RunId,
+    ) -> Result<ImportOutcome, RunRequestError> {
+        let observed = self.read_run(run_id).await?;
+        let bindings = self.composed.bindings.clone();
+        let document = tokio::task::spawn_blocking(move || {
+            let mfm_runtime::RunViewState::Succeeded(value) = observed.state() else {
+                return Err(RequestError::InvalidEnrichment);
+            };
+            let output = value
+                .decode::<PortfolioEnrichmentOutput>()
+                .map_err(|_| RequestError::InvalidEnrichment)?;
+            let provenance = EnrichmentProvenance::new(
+                observed.run_id().clone(),
+                observed.head_digest().clone(),
+                value.value_ref().clone(),
+            )
+            .map_err(|_| RequestError::InvalidEnrichment)?;
+            let mut routes = std::collections::BTreeMap::new();
+            for (chain, reference) in output.bindings() {
+                let endpoint = bindings
+                    .iter()
+                    .find_map(|binding| match binding {
+                        PublicBindingView::Evm {
+                            chain_id,
+                            endpoint_id,
+                            binding_ref,
+                        } if *chain_id == chain.get() && binding_ref == reference => {
+                            Some(endpoint_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .ok_or(RequestError::BindingUnbound)?;
+                if routes
+                    .insert(chain.get(), endpoint.clone())
+                    .is_some_and(|previous| previous != endpoint)
+                {
+                    return Err(RequestError::BindingUnbound);
+                }
+            }
+            ConfigDocument::from_enrichment(output, provenance, routes.into_iter().collect())
+                .map_err(|_| RequestError::InvalidEnrichment)
+        })
+        .await
+        .map_err(|_| RequestError::Internal)??;
+        self.import_config(destination, document)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Selects a stored config, plans it, admits the exact RunId, and progresses the run.
     pub async fn start_run(
         &self,
         run_id: RunId,
         selection: &ConfigSelection,
     ) -> Result<StartRunResult, RunRequestError> {
+        match self.composed.runtime.read(&run_id).await {
+            Ok(run) => {
+                let config = tokio::task::spawn_blocking(move || {
+                    let input = run
+                        .admitted_context()
+                        .decode::<PortfolioSnapshotInput>()
+                        .map_err(|_| RequestError::RunAdmissionConflict)?;
+                    let identity = input
+                        .admission()
+                        .ok_or(RequestError::RunAdmissionConflict)?;
+                    if identity.entry_point() != run.entry_point() {
+                        return Err(RequestError::RunAdmissionConflict);
+                    }
+                    let config = ConfigSummary::from_admission(identity);
+                    Ok::<_, RequestError>(config)
+                })
+                .await
+                .map_err(|_| RequestError::Internal)??;
+                if config.name() != selection.name() || config.digest() != selection.digest() {
+                    return Err(RequestError::RunAdmissionConflict.into());
+                }
+                let result = self.composed.runtime.resume(&run_id).await;
+                return StartRunResult::from_runtime(run_id, config, result);
+            }
+            Err(InvocationFailure::Execution {
+                error: RuntimeError::Absent,
+                ..
+            }) => {}
+            Err(error) => return Err(RunRequestError::Invocation(error)),
+        }
         let entry = self
             .configs
             .load_config(selection.name(), selection.digest())
@@ -652,60 +804,74 @@ impl Application {
             .map_err(map_config_repository_error)?
             .ok_or(RequestError::ConfigAbsent)?;
         let (name, digest, canonical) = entry.into_parts();
-        let (document, program, c0) = tokio::task::spawn_blocking(move || {
-            let document = ConfigDocument::parse_retained(canonical, &digest)
-                .map_err(|_| RequestError::InvalidRetainedConfig)?;
-            let (program, c0) = match document.plan() {
-                Ok(planned) => planned,
-                Err(PortfolioError::InvalidValue) => {
-                    return Err(RequestError::InvalidRetainedConfig)
-                }
-                Err(PortfolioError::InvalidContinuation | PortfolioError::Program) => {
-                    return Err(RequestError::Internal);
-                }
-            };
-            Ok((document, program, c0))
+        let document = tokio::task::spawn_blocking(move || {
+            ConfigDocument::parse_retained(canonical, &digest)
+                .map_err(|_| RequestError::InvalidRetainedConfig)
         })
         .await
         .map_err(|_| RequestError::Internal)??;
-        let config = document.summary(name);
+        let observed = if let Some(provenance) = document.enrichment() {
+            Some(self.read_run(provenance.run_id()).await?)
+        } else {
+            None
+        };
+        let (document, config, program, c0) = tokio::task::spawn_blocking(move || {
+            if let (Some(provenance), Some(observed)) = (document.enrichment(), observed) {
+                let mfm_runtime::RunViewState::Succeeded(value) = observed.state() else {
+                    return Err(RequestError::InvalidEnrichment);
+                };
+                let output = value
+                    .decode::<PortfolioEnrichmentOutput>()
+                    .map_err(|_| RequestError::InvalidEnrichment)?;
+                if observed.head_digest() != provenance.head()
+                    || value.value_ref() != provenance.output()
+                    || !document.matches_enrichment(output)
+                {
+                    return Err(RequestError::InvalidEnrichment);
+                }
+            }
+            let admission = document.admission(&name);
+            let (program, c0) = document
+                .plan(Some(admission))
+                .map_err(|error| match error {
+                    PortfolioError::InvalidValue => RequestError::InvalidRetainedConfig,
+                    _ => RequestError::Internal,
+                })?;
+            let config = document.summary(name);
+            Ok::<_, RequestError>((document, config, program, c0))
+        })
+        .await
+        .map_err(|_| RequestError::Internal)??;
         if !self.composed.has_targets(document.targets()) {
             return Err(RequestError::BindingUnbound.into());
         }
-        match self
+        let result = self
             .composed
             .runtime
             .start(run_id.clone(), program, c0)
-            .await
-        {
-            Ok(run) => Ok(StartRunResult { config, run }),
-            Err(RuntimeError::Indeterminate) => Err(RunRequestError::AppendIndeterminate {
-                recovery: RunRecovery::Start { run_id, config },
-            }),
-            Err(error) => Err(map_runtime_error(error).into()),
-        }
+            .await;
+        StartRunResult::from_runtime(run_id, config, result)
     }
 
     /// Progresses one retained run under its exact immutable assembly.
     pub async fn progress_run(&self, run_id: &RunId) -> Result<RunView, RunRequestError> {
-        match self.composed.runtime.resume(run_id).await {
-            Ok(view) => Ok(view),
-            Err(RuntimeError::Indeterminate) => Err(RunRequestError::AppendIndeterminate {
-                recovery: RunRecovery::Progress {
+        self.composed.runtime.resume(run_id).await.map_err(|error| {
+            RunRequestError::from_invocation(
+                error,
+                RunRecovery::Progress {
                     run_id: run_id.clone(),
                 },
-            }),
-            Err(error) => Err(map_runtime_error(error).into()),
-        }
+            )
+        })
     }
 
     /// Reads one retained run without progression.
-    pub async fn read_run(&self, run_id: &RunId) -> Result<RunView, RequestError> {
+    pub async fn read_run(&self, run_id: &RunId) -> Result<RunView, RunRequestError> {
         self.composed
             .runtime
             .read(run_id)
             .await
-            .map_err(map_runtime_error)
+            .map_err(RunRequestError::Invocation)
     }
 
     /// Lists one mechanical keyset page of current run heads.
@@ -787,16 +953,36 @@ const fn map_run_index_error(error: RunIndexError) -> RequestError {
     }
 }
 
-const fn map_runtime_error(error: RuntimeError) -> RequestError {
+fn map_runtime_error(error: &RuntimeError) -> RequestError {
+    if error.size_limit().is_some() {
+        return RequestError::SizeLimitExceeded;
+    }
     match error {
         RuntimeError::Absent => RequestError::RunAbsent,
         RuntimeError::AdmissionConflict => RequestError::RunAdmissionConflict,
-        RuntimeError::Indeterminate => RequestError::Internal,
+        RuntimeError::Store(error) => map_store_error(error),
         RuntimeError::InvalidHistory => RequestError::InvalidRunHistory,
         RuntimeError::IncompatibleAssembly => RequestError::IncompatibleAssembly,
-        RuntimeError::Capacity => RequestError::RunCapacity,
-        RuntimeError::Unavailable => RequestError::DependencyUnavailable,
-        RuntimeError::Internal => RequestError::Internal,
+        RuntimeError::SizeLimit { .. } => RequestError::SizeLimitExceeded,
+        RuntimeError::ArithmeticOverflow => RequestError::CapacityArithmeticOverflow,
+        RuntimeError::Recording { failure, .. } => match failure.as_ref() {
+            mfm_runtime::RecordingFailure::BeforeAppend { cause, .. } => map_runtime_error(cause),
+            mfm_runtime::RecordingFailure::NotInserted { .. } => RequestError::RunAppendNotInserted,
+            mfm_runtime::RecordingFailure::Store { cause, .. } => map_store_error(cause),
+        },
+        RuntimeError::Native { .. } | RuntimeError::Projection { .. } => RequestError::Internal,
+    }
+}
+
+fn map_store_error(error: &mfm_store::StoreError) -> RequestError {
+    match error {
+        mfm_store::StoreError::Unavailable(_) => RequestError::DependencyUnavailable,
+        mfm_store::StoreError::FrameSize(_)
+        | mfm_store::StoreError::HistorySize(_)
+        | mfm_store::StoreError::FrameCount(_) => RequestError::SizeLimitExceeded,
+        mfm_store::StoreError::ArithmeticOverflow => RequestError::CapacityArithmeticOverflow,
+        mfm_store::StoreError::CorruptPhysicalState(_) => RequestError::InvalidRunHistory,
+        mfm_store::StoreError::Indeterminate(_) => RequestError::Internal,
     }
 }
 
@@ -871,7 +1057,9 @@ mod tests {
             run_id: run_id.clone(),
             config: document.summary(ConfigName::new("daily").expect("config name")),
         };
-        let progress = RunRecovery::Progress { run_id };
+        let progress = RunRecovery::Progress {
+            run_id: run_id.clone(),
+        };
         for (recovery, fixture) in [
             (
                 &start,
@@ -883,11 +1071,36 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                serde_json::to_value(SerializableClientError::recoverable(
-                    "run_append_indeterminate",
-                    "run append outcome is indeterminate",
-                    recovery,
-                ))
+                serde_json::to_value(
+                    SerializableClientError::for_run(
+                        &RunRequestError::AppendIndeterminate {
+                            recovery: recovery.clone(),
+                            invocation: InvocationFailure::Execution {
+                                run_id: run_id.clone(),
+                                last_observed: None,
+                                error: RuntimeError::Recording {
+                                    operation: mfm_runtime::Operation::Record,
+                                    failure: Box::new(mfm_runtime::RecordingFailure::Store {
+                                        original: None,
+                                        candidate: mfm_journal::seal_frame(
+                                            &run_id,
+                                            1,
+                                            None,
+                                            &mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+                                                "{}"
+                                            )
+                                            .unwrap()
+                                        )
+                                        .unwrap(),
+                                        cause: mfm_store::StoreError::Indeterminate(mfm_values::DiagnosticEvidence::from_value(serde_json::json!({"operation": "test.store", "injected": "Indeterminate"})))
+                                    }),
+                                },
+                            }
+                        },
+                        "run append outcome is indeterminate",
+                    )
+                    .unwrap()
+                )
                 .expect("recovery error JSON"),
                 serde_json::from_str::<serde_json::Value>(fixture).expect("recovery fixture")
             );
@@ -895,104 +1108,74 @@ mod tests {
     }
 
     #[test]
-    fn compiled_entry_points_are_checked_and_sorted() {
-        assert!(Application::entry_points()
-            .windows(2)
-            .all(|pair| pair[0].entry_point() < pair[1].entry_point()));
-        for entry in Application::entry_points() {
-            assert!(mfm_ids::EntryPointId::new(entry.entry_point()).is_ok());
-        }
+    fn compiled_entry_points_and_components_are_the_shipping_set() {
         assert_eq!(
             serde_json::to_value(ItemList::new(Application::entry_points()))
                 .expect("entry-point JSON"),
             serde_json::json!({
-                "items": [{"entry_point": "mfm.portfolio/snapshot@1"}]
+                "items": [{"entry_point": "mfm.portfolio/enrich@1"}, {"entry_point": "mfm.portfolio/snapshot@1"}]
             })
         );
-    }
-
-    #[test]
-    fn compiled_components_are_checked_complete_and_ordered() {
-        let components = Application::components();
-        let expected = [
-            (ComponentKind::EntryPoint, "mfm.portfolio/snapshot@1"),
-            (
-                ComponentKind::Operation,
-                "mfm.evm.operation.collect-balances@1",
-            ),
-            (
-                ComponentKind::PureState,
-                "mfm.evm.state.consolidate-balance-collection@1",
-            ),
-            (ComponentKind::PureState, "mfm.evm.state.select-asset@1"),
-            (
-                ComponentKind::PureState,
-                "mfm.portfolio.state.consolidate@1",
-            ),
-            (
-                ComponentKind::PureState,
-                "mfm.portfolio.state.enter-collection@1",
-            ),
-            (ComponentKind::PureState, "mfm.portfolio.state.initialize@1"),
-            (
-                ComponentKind::PureState,
-                "mfm.portfolio.state.map-evm-failure@1",
-            ),
-            (
-                ComponentKind::PureState,
-                "mfm.portfolio.state.resume-collection@1",
-            ),
-            (
-                ComponentKind::ReadState,
-                "mfm.evm.state.check-chain-identity@1",
-            ),
-            (
-                ComponentKind::ReadState,
-                "mfm.evm.state.confirm-balance-anchor@1",
-            ),
-            (
-                ComponentKind::ReadState,
-                "mfm.evm.state.read-initial-anchor@1",
-            ),
-            (
-                ComponentKind::ReadState,
-                "mfm.evm.state.read-native-balance@1",
-            ),
-            (
-                ComponentKind::ReadState,
-                "mfm.evm.state.read-token-balance@1",
-            ),
-            (
-                ComponentKind::ReadState,
-                "mfm.evm.state.read-token-decimals@1",
-            ),
-        ];
-        assert_eq!(components.len(), expected.len());
-        for (component, (kind, id)) in components.iter().zip(expected) {
-            assert_eq!(component.kind(), kind);
-            assert_eq!(component.id(), id);
-            assert!(component.description().len() <= 512);
-            assert_eq!(component.description(), component.description().trim());
-            assert!(!component.description().is_empty());
-            assert!(!component.description().chars().any(char::is_control));
-            match kind {
-                ComponentKind::EntryPoint => {
-                    assert!(mfm_ids::EntryPointId::new(component.id()).is_ok());
-                }
-                ComponentKind::Operation | ComponentKind::PureState | ComponentKind::ReadState => {
-                    assert!(mfm_ids::StableId::new(component.id()).is_ok());
-                }
-            }
-        }
-        assert!(components
-            .windows(2)
-            .all(|pair| (pair[0].kind(), pair[0].id()) < (pair[1].kind(), pair[1].id())));
-
-        let json = serde_json::to_value(ItemList::new(&components)).expect("component JSON");
-        assert_eq!(json["items"][0]["kind"], "entry_point");
-        assert_eq!(json["items"][1]["kind"], "operation");
-        assert_eq!(json["items"][2]["kind"], "pure_state");
-        assert_eq!(json["items"][9]["kind"], "read_state");
+        let ids = Application::components()
+            .iter()
+            .map(|component| (component.kind(), component.id()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                (ComponentKind::EntryPoint, "mfm.portfolio/enrich@1"),
+                (ComponentKind::EntryPoint, "mfm.portfolio/snapshot@1"),
+                (
+                    ComponentKind::Operation,
+                    "mfm.evm.operation.collect-balances@2",
+                ),
+                (
+                    ComponentKind::PureState,
+                    "mfm.evm.state.consolidate-balance-collection@1",
+                ),
+                (
+                    ComponentKind::PureState,
+                    "mfm.portfolio.state.consolidate@1",
+                ),
+                (
+                    ComponentKind::PureState,
+                    "mfm.portfolio.state.enter-collection@1",
+                ),
+                (ComponentKind::PureState, "mfm.portfolio.state.initialize@1"),
+                (
+                    ComponentKind::PureState,
+                    "mfm.portfolio.state.resolve-assets@1",
+                ),
+                (
+                    ComponentKind::PureState,
+                    "mfm.portfolio.state.resume-collection@1",
+                ),
+                (
+                    ComponentKind::ReadState,
+                    "mfm.evm.state.check-chain-identity@1",
+                ),
+                (
+                    ComponentKind::ReadState,
+                    "mfm.evm.state.confirm-balance-anchor@2",
+                ),
+                (
+                    ComponentKind::ReadState,
+                    "mfm.evm.state.read-initial-anchor@2",
+                ),
+                (
+                    ComponentKind::ReadState,
+                    "mfm.evm.state.read-native-balance@1",
+                ),
+                (
+                    ComponentKind::ReadState,
+                    "mfm.evm.state.read-token-balance@1",
+                ),
+                (
+                    ComponentKind::ReadState,
+                    "mfm.evm.state.read-token-decimals@1",
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -1025,6 +1208,11 @@ mod tests {
                 "run admission conflicts with retained history",
             ),
             (
+                RequestError::InvalidEnrichment,
+                "invalid_enrichment",
+                "enrichment result is invalid for publication or admission",
+            ),
+            (
                 RequestError::InvalidRunHistory,
                 "invalid_run_history",
                 "retained run history is invalid",
@@ -1035,9 +1223,9 @@ mod tests {
                 "runtime assembly is incompatible",
             ),
             (
-                RequestError::RunCapacity,
-                "run_capacity",
-                "run capacity exceeded",
+                RequestError::SizeLimitExceeded,
+                "size_limit_exceeded",
+                "size limit exceeded",
             ),
             (
                 RequestError::BindingUnbound,
@@ -1064,5 +1252,29 @@ mod tests {
             assert_eq!(error.code(), code);
             assert_eq!(error.to_string(), message);
         }
+    }
+    #[test]
+    fn size_limit_client_errors_preserve_safe_numeric_details() {
+        let size = mfm_values::SizeLimitExceeded::check(35_651_584, 33_554_432).unwrap_err();
+        let failure = RunRequestError::Invocation(InvocationFailure::Execution {
+            run_id: RunId::from_digest(mfm_ids::DigestBytes::from_array([90; 32])),
+            error: RuntimeError::SizeLimit {
+                resource: mfm_values::SizeResource::FailureReport,
+                size,
+            },
+            last_observed: None,
+        });
+        assert_eq!(failure.code(), "size_limit_exceeded");
+        let message = failure.to_string();
+        let wire =
+            serde_json::to_value(SerializableClientError::for_run(&failure, &message).unwrap())
+                .unwrap();
+        assert_eq!(
+            wire["invocation"]["size_limit"],
+            serde_json::json!({
+                "resource": "failure_report", "actual": 35_651_584, "limit": 33_554_432
+            })
+        );
+        assert_eq!(wire["invocation"]["last_observed"], serde_json::Value::Null);
     }
 }

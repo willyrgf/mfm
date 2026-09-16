@@ -13,11 +13,18 @@ layer = "binary"
 mfm-app = { path = "../../crates/app" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
+mfm-values = { path = "../../crates/kernel/values" }
+mfm-canonical = { path = "../../crates/kernel/canonical" }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+mfm-program = { path = "../../crates/kernel/program" }
+mfm-store = { path = "../../crates/kernel/store" }
+mfm-journal = { path = "../../crates/kernel/journal" }
 
 [[bin]]
 name = "mfm_cli"

@@ -15,6 +15,8 @@ use mfm_signing::{
     CompactRecoverableSignature, Secp256k1PublicKey, Secp256k1Signer, SigningDigest, SigningError,
     SigningFuture,
 };
+use mfm_values::DiagnosticEvidence;
+use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 use zeroize::Zeroizing;
 
@@ -98,13 +100,23 @@ impl Keystore {
         &self,
         slot: KeySlot,
         digest: SigningDigest,
-    ) -> Result<CompactRecoverableSignature, KeystoreError> {
-        let signing_key = self.entries.get(slot.0).ok_or(KeystoreError::Internal)?;
+    ) -> Result<CompactRecoverableSignature, SigningError> {
+        let signing_key = self.entries.get(slot.0).ok_or_else(|| {
+            SigningError::SignFailed(DiagnosticEvidence::from_value(json!({
+                "operation": "sign", "stage": "key_lookup", "kind": "missing_key"
+            })))
+        })?;
         let (signature, recovery_id) = signing_key
             .sign_prehash_recoverable(digest.as_bytes())
-            .map_err(|_| KeystoreError::Internal)?;
+            .map_err(|error| {
+                SigningError::SignFailed(DiagnosticEvidence::from_value(json!({
+                    "operation": "sign",
+                    "stage": "sign_prehash_recoverable",
+                    "kind": "signature_error",
+                    "message": error.to_string()
+                })))
+            })?;
         CompactRecoverableSignature::try_from((signature, recovery_id))
-            .map_err(map_checked_signing_error)
     }
 }
 
@@ -124,7 +136,7 @@ enum Command {
     Sign {
         slot: KeySlot,
         digest: SigningDigest,
-        response: oneshot::Sender<Result<CompactRecoverableSignature, KeystoreError>>,
+        response: oneshot::Sender<Result<CompactRecoverableSignature, SigningError>>,
     },
     Shutdown,
     #[cfg(test)]
@@ -213,11 +225,22 @@ impl Secp256k1Signer for KeystoreSigner {
                     response,
                 })
                 .await
-                .map_err(|_| SigningError::Failed)?;
-            result
-                .await
-                .map_err(|_| SigningError::Failed)?
-                .map_err(|_| SigningError::Failed)
+                .map_err(|error| {
+                    SigningError::SignFailed(DiagnosticEvidence::from_value(json!({
+                        "operation": "sign",
+                        "stage": "request_send",
+                        "kind": "channel_closed",
+                        "message": error.to_string()
+                    })))
+                })?;
+            result.await.map_err(|error| {
+                SigningError::SignFailed(DiagnosticEvidence::from_value(json!({
+                    "operation": "sign",
+                    "stage": "reply_receive",
+                    "kind": "channel_closed",
+                    "message": error.to_string()
+                })))
+            })?
         })
     }
 }
@@ -280,5 +303,60 @@ mod tests {
             KeystoreError::Internal.to_string(),
             "keystore operation failed"
         );
+    }
+    #[tokio::test]
+    async fn sign_reply_closure_retains_its_actual_channel_stage() {
+        let owner = KeystoreOwner::start().unwrap();
+        let mut signer = owner
+            .import_secp256k1(
+                SecretSecp256k1Scalar::new([1; 32]).unwrap(),
+                StableId::new("mfm.test/reply-closed@1").unwrap(),
+            )
+            .await
+            .unwrap();
+        let (sender, mut requests) = mpsc::channel(1);
+        signer.sender = sender;
+        let reply_closer = tokio::spawn(async move {
+            let Some(Command::Sign { response, .. }) = requests.recv().await else {
+                panic!("one sign request")
+            };
+            drop(response);
+        });
+        let error = signer
+            .sign(SigningDigest::from_bytes([0xa5; 32]))
+            .await
+            .err()
+            .unwrap();
+        reply_closer.await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            json!({
+                "kind": "sign_failed",
+                "cause": {"operation": "sign", "stage": "reply_receive", "kind": "channel_closed", "message": "channel closed"}
+            })
+        );
+        owner.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn missing_slot_and_primitive_errors_have_only_available_nonsecret_facts() {
+        let error = Keystore::new()
+            .sign(KeySlot(0), SigningDigest::from_bytes([0xa5; 32]))
+            .err()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            json!({
+                "kind": "sign_failed",
+                "cause": {"operation": "sign", "stage": "key_lookup", "kind": "missing_key"}
+            })
+        );
+        // This primitive rejects an invalid prehash length; no signing fault harness is needed.
+        let key = SecretSecp256k1Scalar::new([1; 32])
+            .unwrap()
+            .into_signing_key();
+        let error = key.sign_prehash_recoverable(&[]).err().unwrap();
+        assert_eq!(error.to_string(), "signature error");
+        assert!(std::error::Error::source(&error).is_none());
     }
 }

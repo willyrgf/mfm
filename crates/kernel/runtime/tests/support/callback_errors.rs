@@ -1,5 +1,27 @@
-use super::*;
-use mfm_program::StateExecutionError;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use mfm_ids::{ContentRef, DigestBytes, EntryPointId, RunId, StableId};
+use mfm_program::{
+    expand_program, CapabilityInjection, EffectState, Identity, NoParams, Occurrence, Operation,
+    OperationExpansion, ProgramError, ProgramLimits, ProposedStateOutcome, PureState, ReadState,
+    State,
+};
+use mfm_runtime::{
+    EffectAdapterOutcome, InvocationFailure, RunViewState, Runtime, RuntimeAssemblyBuilder,
+    RuntimeError,
+};
+use mfm_store::MemoryStore;
+use mfm_values::{canonicalize_mfm_value, InvocationDiagnostic};
+use serde::Serialize;
+
+use super::program::*;
+
+#[derive(Debug, Serialize, thiserror::Error)]
+#[error("test callback execution failed")]
+struct ExecutionFault {
+    input: u64,
+}
 
 static FAIL_EXECUTION: AtomicBool = AtomicBool::new(true);
 
@@ -23,9 +45,14 @@ error_state!(FailingPure, "mfm.test.runtime/failing-pure@1");
 error_state!(FailingRead, "mfm.test.runtime/failing-read@1");
 error_state!(FailingEffect, "mfm.test.runtime/failing-effect@1");
 
-fn execution(input: Number) -> Result<ProposedStateOutcome<Number, Number>, StateExecutionError> {
+fn execution(input: Number) -> Result<ProposedStateOutcome<Number, Number>, InvocationDiagnostic> {
     if FAIL_EXECUTION.load(Ordering::SeqCst) {
-        Err(StateExecutionError)
+        Err(InvocationDiagnostic::from_fields(
+            "state_internal",
+            "execution",
+            &(ExecutionFault { input: input.value }),
+            None,
+        ))
     } else {
         Ok(ProposedStateOutcome::Success { output: input })
     }
@@ -34,33 +61,37 @@ fn execution(input: Number) -> Result<ProposedStateOutcome<Number, Number>, Stat
 impl PureState for FailingPure {
     fn evaluate(
         input: Number,
-    ) -> Result<ProposedStateOutcome<Number, Number>, StateExecutionError> {
+    ) -> Result<ProposedStateOutcome<Number, Number>, InvocationDiagnostic> {
         execution(input)
     }
 }
 impl ReadState<Observation> for FailingRead {
-    fn prepare(input: &Number) -> Result<Intent, PreparationError> {
+    fn prepare(input: &Number) -> Result<Intent, InvocationDiagnostic> {
         Ok(Intent { value: input.value })
     }
     fn interpret(
         input: Number,
         _: &Evidence,
-    ) -> Result<ProposedStateOutcome<Number, Number>, StateExecutionError> {
+    ) -> Result<ProposedStateOutcome<Number, Number>, InvocationDiagnostic> {
         execution(input)
     }
 }
 impl EffectState<Mutation> for FailingEffect {
-    fn prepare(input: &Number) -> Result<Command, PreparationError> {
+    fn prepare(input: &Number) -> Result<Command, InvocationDiagnostic> {
         Ok(Command { value: input.value })
     }
     fn interpret(
         input: Number,
         _: &EffectEvidence,
-    ) -> Result<ProposedStateOutcome<Number, Number>, StateExecutionError> {
+    ) -> Result<ProposedStateOutcome<Number, Number>, InvocationDiagnostic> {
         execution(input)
     }
 }
 impl CapabilityInjection<FailingRead> for Observation {
+    type FailureMap = Identity<Number>;
+    fn failure_map_params(_: &Self::Setup) -> mfm_program::Result<NoParams> {
+        Ok(NoParams)
+    }
     type Setup = Binding;
     type ExpandedInput = Number;
     type ExpandedOutput = Number;
@@ -72,6 +103,10 @@ impl CapabilityInjection<FailingRead> for Observation {
     }
 }
 impl CapabilityInjection<FailingEffect> for Mutation {
+    type FailureMap = Identity<Number>;
+    fn failure_map_params(_: &Self::Setup) -> mfm_program::Result<NoParams> {
+        Ok(NoParams)
+    }
     type Setup = Binding;
     type ExpandedInput = Number;
     type ExpandedOutput = Number;
@@ -92,20 +127,32 @@ impl Operation for ErrorProgram {
     type Input = Number;
     type Output = Number;
     type Failure = Number;
+    fn validate_input(&self, _: &Self::Input) -> mfm_program::Result<()> {
+        Ok(())
+    }
+
     fn expand(
         &self,
         body: &mut OperationExpansion<Number, Number, Number>,
     ) -> mfm_program::Result<()> {
         match self {
-            Self::Pure => body.pure::<FailingPure>(),
-            Self::Read => body.read::<FailingRead, Observation>(&Binding { route: 7 }),
-            Self::Effect => body.effect::<FailingEffect, Mutation>(&Binding { route: 8 }),
+            Self::Pure => body.pure::<FailingPure, Identity<Number>>(NoParams, Occurrence::new()),
+            Self::Read => body.read::<FailingRead, Observation, Identity<Number>>(
+                &Binding { route: 7 },
+                NoParams,
+                Occurrence::new(),
+            ),
+            Self::Effect => body.effect::<FailingEffect, Mutation, Identity<Number>>(
+                &Binding { route: 8 },
+                NoParams,
+                Occurrence::new(),
+            ),
         }
     }
 }
 
 #[tokio::test]
-async fn internal_callback_errors_preserve_heads_and_effect_retry_identity() {
+async fn internal_callback_errors_preserve_heads_and_do_not_repeat_settled_effects() {
     let store = Arc::new(MemoryStore::new());
     let identities = Arc::new(std::sync::Mutex::new(Vec::new()));
     let read_calls = Arc::new(AtomicUsize::new(0));
@@ -151,32 +198,40 @@ async fn internal_callback_errors_preserve_heads_and_effect_retry_identity() {
         Runtime::new(builder.finish(), store.clone())
     };
     let runtime = build_runtime();
-    for (index, operation, expected_head) in [
-        (70, ErrorProgram::Pure, 1),
-        (71, ErrorProgram::Read, 1),
-        (72, ErrorProgram::Effect, 2),
+    for (index, operation, expected_head, expected_operation) in [
+        (70, ErrorProgram::Pure, 1, "pure_evaluate"),
+        (71, ErrorProgram::Read, 1, "read_interpret"),
+        (72, ErrorProgram::Effect, 3, "effect_interpret"),
     ] {
         FAIL_EXECUTION.store(true, Ordering::SeqCst);
         let id = RunId::from_digest(DigestBytes::from_array([index; 32]));
         let program = expand_program(
             EntryPointId::new("mfm.test.runtime/callback-error@1").unwrap(),
             &operation,
+            &Number { value: 12 },
+            ProgramLimits::new(0),
         )
         .unwrap();
-        assert!(matches!(
+        assert_execution_failure(
             runtime
                 .start(id.clone(), program, Number { value: 12 })
-                .await,
-            Err(RuntimeError::Internal)
-        ));
+                .await
+                .err()
+                .unwrap(),
+            expected_operation,
+        );
         let pending = runtime.read(&id).await.unwrap();
         assert_eq!(pending.head_sequence(), expected_head);
-        assert!(matches!(pending.state(), RunViewState::Runnable));
+        if expected_head == 3 {
+            assert!(matches!(
+                pending.state(),
+                RunViewState::AwaitingInterpretation { .. }
+            ));
+        } else {
+            assert!(matches!(pending.state(), RunViewState::Runnable { .. }));
+        }
         let cold = build_runtime();
-        assert!(matches!(
-            cold.resume(&id).await,
-            Err(RuntimeError::Internal)
-        ));
+        assert_execution_failure(cold.resume(&id).await.err().unwrap(), expected_operation);
         assert_eq!(
             cold.read(&id).await.unwrap().head_digest(),
             pending.head_digest()
@@ -201,6 +256,28 @@ async fn internal_callback_errors_preserve_heads_and_effect_retry_identity() {
     }
     assert_eq!(read_calls.load(Ordering::SeqCst), 3);
     let retained = identities.lock().unwrap();
-    assert_eq!(retained.len(), 3);
-    assert!(retained.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(
+        retained.len(),
+        1,
+        "accepted settlement is never reconciled again"
+    );
+}
+
+fn assert_execution_failure(failure: InvocationFailure, expected_operation: &str) {
+    let InvocationFailure::Execution {
+        error:
+            RuntimeError::Native {
+                operation,
+                stage: mfm_runtime::Stage::Execute,
+                cause,
+            },
+        ..
+    } = failure
+    else {
+        panic!("typed callback failure")
+    };
+    assert_eq!(serde_json::to_value(operation).unwrap(), expected_operation);
+    assert_eq!(cause.details().as_value()["input"], 12);
+    let projected = cause.details().as_value();
+    assert_eq!(projected["input"], 12);
 }

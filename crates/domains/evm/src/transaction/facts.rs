@@ -1,5 +1,4 @@
 use super::*;
-use mfm_program::StateExecutionError;
 
 /// Reservation and the complete accepted preparation evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -124,7 +123,9 @@ pub trait TransactionSuccessMode: sealed::Sealed + MfmValueTrait + Clone + Eq {
     /// Whether the complete command has the selected action.
     fn accepts(command: &Eip1559TransactionCommand) -> bool;
     /// Projects matching successful evidence; a mismatch is an internal implementation error.
-    fn project(executed: &ExecutedTransactionFacts) -> Result<Self, StateExecutionError>;
+    fn project(
+        executed: &ExecutedTransactionFacts,
+    ) -> Result<Self, mfm_values::InvocationDiagnostic>;
 }
 
 /// Checked required address from a successful creation.
@@ -153,12 +154,19 @@ impl TransactionSuccessMode for Created {
     fn accepts(command: &Eip1559TransactionCommand) -> bool {
         command.to().is_none()
     }
-    fn project(executed: &ExecutedTransactionFacts) -> Result<Self, StateExecutionError> {
+    fn project(
+        executed: &ExecutedTransactionFacts,
+    ) -> Result<Self, mfm_values::InvocationDiagnostic> {
         match (executed.command().to(), executed.settlement().outcome()) {
             (None, EvmTransactionOutcome::Created { created_address }) => Ok(Self {
                 created_address: created_address.clone(),
             }),
-            _ => Err(StateExecutionError),
+            _ => Err(mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "project",
+                &crate::EvmDomainError::InvalidValue,
+                None,
+            )),
         }
     }
 }
@@ -189,12 +197,19 @@ impl TransactionSuccessMode for Called {
     fn accepts(command: &Eip1559TransactionCommand) -> bool {
         command.to().is_some()
     }
-    fn project(executed: &ExecutedTransactionFacts) -> Result<Self, StateExecutionError> {
+    fn project(
+        executed: &ExecutedTransactionFacts,
+    ) -> Result<Self, mfm_values::InvocationDiagnostic> {
         match (executed.command().to(), executed.settlement().outcome()) {
             (Some(target), EvmTransactionOutcome::Called) => Ok(Self {
                 target: target.clone(),
             }),
-            _ => Err(StateExecutionError),
+            _ => Err(mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "project",
+                &crate::EvmDomainError::InvalidValue,
+                None,
+            )),
         }
     }
 }
@@ -214,7 +229,9 @@ pub struct CompletedTransactionFacts<S: TransactionSuccessMode> {
 }
 impl<S: TransactionSuccessMode> CompletedTransactionFacts<S> {
     /// Projects only a matching successful settlement into a completed fact type.
-    pub fn new(executed: ExecutedTransactionFacts) -> Result<Self, StateExecutionError> {
+    pub fn new(
+        executed: ExecutedTransactionFacts,
+    ) -> Result<Self, mfm_values::InvocationDiagnostic> {
         let outcome = S::project(&executed)?;
         Ok(Self { executed, outcome })
     }
@@ -259,7 +276,8 @@ impl<'de, S: TransactionSuccessMode> Deserialize<'de> for CompletedTransactionFa
             outcome: S,
         }
         let wire = Wire::<S>::deserialize(deserializer)?;
-        let facts = Self::new(wire.executed).map_err(de::Error::custom)?;
+        let facts = Self::new(wire.executed)
+            .map_err(|diagnostic| de::Error::custom(diagnostic.details().as_value()))?;
         if facts.outcome != wire.outcome {
             return Err(de::Error::custom("transaction outcome mismatch"));
         }
@@ -293,5 +311,12 @@ impl<C: MfmValueTrait> EvmTransactionFailure<C> {
     /// Moves the accumulated context into the product's terminal failure policy.
     pub fn into_context(self) -> C {
         self.context
+    }
+}
+
+impl<C: MfmValueTrait> mfm_program::ClassifyError for EvmTransactionFailure<C> {
+    fn classify(&self) -> mfm_program::Classification {
+        // Authenticated settlement reversion cannot authorize another transaction.
+        mfm_program::Classification::Permanent
     }
 }

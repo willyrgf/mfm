@@ -13,8 +13,8 @@ use std::num::NonZeroU64;
 use mfm_capabilities::ReadCapabilityContract;
 use mfm_ids::{ContentRef, StableId};
 use mfm_program::{
-    CapabilityInjection, Operation, OperationExpansion, PreparationError, ProgramError,
-    ProposedStateOutcome, PureState, ReadState, State,
+    CapabilityInjection, Operation, OperationExpansion, ProgramError, ProposedStateOutcome,
+    PureState, ReadState, State,
 };
 use mfm_program_derive::MfmValue;
 use mfm_values::{string_contains_secret_marker, MfmValue as MfmValueTrait};
@@ -44,6 +44,10 @@ macro_rules! impl_checked_deserialize {
     };
 }
 
+mod provider_failure;
+pub use provider_failure::*;
+mod recovery;
+pub use recovery::EvmTransactionOperationalError;
 mod anchored_call;
 pub mod custody;
 mod transaction;
@@ -273,37 +277,7 @@ struct EvmBalanceResultMetadata {
     route_ref: ContentRef,
 }
 
-impl_checked_deserialize!(EvmBalanceResultMetadata {
-    collection_ordinal: u32,
-    correlation: String,
-    route_ref: ContentRef,
-});
-
-impl EvmBalanceResultMetadata {
-    fn new(
-        collection_ordinal: u32,
-        correlation: String,
-        route_ref: ContentRef,
-    ) -> Result<Self, EvmDomainError> {
-        if !valid_public_text(&correlation, 256) {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(Self {
-            collection_ordinal,
-            correlation,
-            route_ref,
-        })
-    }
-
-    fn validate(&self) -> Result<(), EvmDomainError> {
-        Self::new(
-            self.collection_ordinal,
-            self.correlation.clone(),
-            self.route_ref.clone(),
-        )
-        .map(|_| ())
-    }
-}
+mod balance_decode;
 
 /// Committed public block anchor of one bounded EVM observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -321,10 +295,6 @@ enum EvmBalanceWork {
     CheckChainIdentity,
     ReadInitialAnchor {
         checked_chain_id: NonZeroU64,
-    },
-    SelectAsset {
-        checked_chain_id: NonZeroU64,
-        initial_anchor: EvmBlockAnchor,
     },
     ReadNativeBalance {
         checked_chain_id: NonZeroU64,
@@ -361,45 +331,13 @@ enum EvmBalanceWork {
         deserialize = "K: serde::de::DeserializeOwned"
     )
 )]
+#[mfm(decode_native = "Self::decode_checked")]
 pub struct EvmBalanceContext<K: MfmValueTrait> {
     request: EvmBalanceRequest,
     caller_continuation: K,
     metadata: EvmBalanceResultMetadata,
     completed: Vec<EvmBalanceResult>,
     work: EvmBalanceWork,
-}
-
-impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmBalanceContext<K> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(
-            deny_unknown_fields,
-            bound(deserialize = "K: serde::de::DeserializeOwned")
-        )]
-        struct Wire<K> {
-            request: EvmBalanceRequest,
-            caller_continuation: K,
-            metadata: EvmBalanceResultMetadata,
-            completed: Vec<EvmBalanceResult>,
-            work: EvmBalanceWork,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let context = Self {
-            request: wire.request,
-            caller_continuation: wire.caller_continuation,
-            metadata: wire.metadata,
-            completed: wire.completed,
-            work: wire.work,
-        };
-        context
-            .validate()
-            .map(|_| context)
-            .map_err(de::Error::custom)
-    }
 }
 
 impl<K: MfmValueTrait> EvmBalanceContext<K> {
@@ -410,12 +348,16 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
         collection_ordinal: u32,
         correlation: String,
         route_ref: ContentRef,
-    ) -> Result<Self, EvmDomainError> {
-        request
-            .sources
-            .first()
-            .ok_or(EvmDomainError::InvalidValue)?;
-        let metadata = EvmBalanceResultMetadata::new(collection_ordinal, correlation, route_ref)?;
+    ) -> Result<Self, mfm_values::InvocationDiagnostic> {
+        request.sources.first().ok_or_else(|| {
+            mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "new",
+                &EvmDomainError::InvalidValue,
+                None,
+            )
+        })?;
+        let metadata = balance_decode::metadata(collection_ordinal, correlation, route_ref)?;
         let context = Self {
             request,
             caller_continuation,
@@ -423,7 +365,9 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
             completed: Vec::new(),
             work: EvmBalanceWork::CheckChainIdentity,
         };
-        context.validate()?;
+        context.validate().map_err(|error| {
+            mfm_values::InvocationDiagnostic::from_fields("state_internal", "new", &error, None)
+        })?;
         Ok(context)
     }
 
@@ -435,7 +379,6 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
 
     fn validate(&self) -> Result<(), EvmDomainError> {
         self.request.validate()?;
-        self.metadata.validate()?;
         if self.completed.len() > self.request.sources.len()
             || self
                 .completed
@@ -506,9 +449,6 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
                     EvmBalanceWork::ReadInitialAnchor {
                         checked_chain_id, ..
                     }
-                    | EvmBalanceWork::SelectAsset {
-                        checked_chain_id, ..
-                    }
                     | EvmBalanceWork::ReadNativeBalance {
                         checked_chain_id, ..
                     }
@@ -526,65 +466,6 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
             (_, None) => return Err(EvmDomainError::InvalidValue),
         }
         Ok(())
-    }
-}
-
-/// Closed Match selector retaining the entire EVM context through either asset arm.
-#[derive(Debug, Serialize, MfmValue)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields,
-    bound(
-        serialize = "K: Serialize",
-        deserialize = "K: serde::de::DeserializeOwned"
-    )
-)]
-pub enum EvmBalanceAsset<K: MfmValueTrait> {
-    /// Native arm with the complete cumulative context.
-    Native(EvmBalanceContext<K>),
-    /// Token arm with the complete cumulative context.
-    Token(EvmBalanceContext<K>),
-}
-
-impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmBalanceAsset<K> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(
-            tag = "kind",
-            content = "value",
-            rename_all = "snake_case",
-            deny_unknown_fields,
-            bound(deserialize = "K: serde::de::DeserializeOwned")
-        )]
-        enum Wire<K: MfmValueTrait> {
-            Native(EvmBalanceContext<K>),
-            Token(EvmBalanceContext<K>),
-        }
-
-        let value = match Wire::deserialize(deserializer)? {
-            Wire::Native(context) => Self::Native(context),
-            Wire::Token(context) => Self::Token(context),
-        };
-        value.validate().map(|_| value).map_err(de::Error::custom)
-    }
-}
-
-impl<K: MfmValueTrait> EvmBalanceAsset<K> {
-    fn validate(&self) -> Result<(), EvmDomainError> {
-        let context = match self {
-            Self::Native(context) | Self::Token(context) => context,
-        };
-        context.validate()?;
-        match (self, context.active_source()) {
-            (Self::Native(_), Some(source)) if source.token.is_none() => Ok(()),
-            (Self::Token(_), Some(source)) if source.token.is_some() => Ok(()),
-            _ => Err(EvmDomainError::InvalidValue),
-        }
     }
 }
 
@@ -848,7 +729,14 @@ impl<K: MfmValueTrait> EvmBalanceCollectionCompletion<K> {
 }
 
 /// Redaction-safe EVM domain construction failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "domain-error",
+    version = "1",
+    schema = "mfm.evm-domain-error"
+)]
 pub enum EvmDomainError {
     /// A bounded public value is invalid.
     #[error("EVM domain value is invalid")]
@@ -1211,7 +1099,8 @@ impl EvmReadEvidence {
 }
 
 /// Groups the subject variants one Read capability admits.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReadCapabilityFamily {
     /// Chain identity observations.
     ChainIdentity,
@@ -1254,6 +1143,7 @@ pub struct EvmBalanceRead;
 macro_rules! impl_read_capability {
     ($ty:ty, $name:literal, $family:ident) => {
         impl ReadCapabilityContract for $ty {
+            type OperationalError = EvmOperationalError;
             type Intent = EvmReadIntent;
             type Evidence = EvmReadEvidence;
             fn contract_id() -> mfm_capabilities::Result<StableId> {
@@ -1264,7 +1154,7 @@ macro_rules! impl_read_capability {
                 intent_value_ref: &ContentRef,
                 intent: &Self::Intent,
                 evidence: &Self::Evidence,
-            ) -> mfm_capabilities::Result<()> {
+            ) -> Result<(), mfm_values::InvocationDiagnostic> {
                 (evidence.intent_value_ref() == intent_value_ref)
                     .then_some(())
                     .ok_or(EvmDomainError::EvidenceBinding)
@@ -1275,7 +1165,14 @@ macro_rules! impl_read_capability {
                             .ok_or(EvmDomainError::EvidenceBinding)
                     })
                     .and_then(|_| evidence.validate_for(intent))
-                    .map_err(|_| mfm_capabilities::CapabilityError::EvidenceBinding)
+                    .map_err(|error| {
+                        mfm_values::InvocationDiagnostic::from_fields(
+                            "state_internal",
+                            "bind_evidence",
+                            &error,
+                            None,
+                        )
+                    })
             }
         }
     };
@@ -1294,9 +1191,6 @@ pub struct CheckChainIdentity<K: MfmValueTrait>(PhantomData<fn() -> K>);
 
 /// Reads the initial anchor for one balance source.
 pub struct ReadInitialAnchor<K: MfmValueTrait>(PhantomData<fn() -> K>);
-
-/// Selects native or token balance observation topology.
-pub struct SelectBalanceAsset<K: MfmValueTrait>(PhantomData<fn() -> K>);
 
 /// Reads one native-asset balance.
 pub struct ReadNativeBalance<K: MfmValueTrait>(PhantomData<fn() -> K>);
@@ -1318,7 +1212,6 @@ pub struct ConsolidateBalanceCollection<K: MfmValueTrait>(PhantomData<fn() -> K>
 enum EvmBalanceFailureStage {
     CheckChainIdentity,
     ReadInitialAnchor,
-    SelectAsset,
     ReadNativeBalance,
     ReadTokenDecimals,
     ReadTokenBalance,
@@ -1331,7 +1224,6 @@ impl EvmBalanceFailureStage {
         match self {
             Self::CheckChainIdentity => "check_chain_identity",
             Self::ReadInitialAnchor => "read_initial_anchor",
-            Self::SelectAsset => "select_asset",
             Self::ReadNativeBalance => "read_native_balance",
             Self::ReadTokenDecimals => "read_token_decimals",
             Self::ReadTokenBalance => "read_token_balance",
@@ -1369,7 +1261,6 @@ impl EvmBalanceFailureCode {
             ) | (
                 Self::ObservationUnavailable,
                 EvmBalanceFailureStage::ReadInitialAnchor
-                    | EvmBalanceFailureStage::SelectAsset
                     | EvmBalanceFailureStage::ReadNativeBalance
                     | EvmBalanceFailureStage::ReadTokenDecimals
                     | EvmBalanceFailureStage::ReadTokenBalance
@@ -1389,6 +1280,16 @@ impl EvmBalanceFailureCode {
     deny_unknown_fields
 )]
 pub enum EvmBalanceFailure {
+    /// Bound provider evidence demonstrated that the collection's anchor changed.
+    AnchorChanged {
+        /// Collection whose coherent observation must be restarted or stopped.
+        collection_ordinal: u32,
+        /// Anchor retained by the collection before this observation.
+        previous: EvmBlockAnchor,
+        /// Different anchor returned by the bound observation.
+        observed: EvmBlockAnchor,
+    },
+
     /// A bounded source-stage failure.
     SourceUnavailable {
         /// Stage that could not be completed.
@@ -1422,6 +1323,12 @@ impl<'de> Deserialize<'de> for EvmBalanceFailure {
             deny_unknown_fields
         )]
         enum Wire {
+            AnchorChanged {
+                collection_ordinal: u32,
+                previous: EvmBlockAnchor,
+                observed: EvmBlockAnchor,
+            },
+
             SourceUnavailable {
                 stage: EvmBalanceFailureStage,
                 collection_ordinal: u32,
@@ -1435,6 +1342,16 @@ impl<'de> Deserialize<'de> for EvmBalanceFailure {
         }
 
         let value = match Wire::deserialize(deserializer)? {
+            Wire::AnchorChanged {
+                collection_ordinal,
+                previous,
+                observed,
+            } if previous != observed => Self::AnchorChanged {
+                collection_ordinal,
+                previous,
+                observed,
+            },
+
             Wire::SourceUnavailable {
                 stage,
                 collection_ordinal,
@@ -1503,15 +1420,8 @@ impl_balance_state!(
     ReadInitialAnchor,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.read-initial-anchor@1",
+    "mfm.evm.state.read-initial-anchor@2",
     "Reads the initial anchor for one balance source."
-);
-impl_balance_state!(
-    SelectBalanceAsset,
-    EvmBalanceContext<K>,
-    EvmBalanceAsset<K>,
-    "mfm.evm.state.select-asset@1",
-    "Selects native or token balance observation topology."
 );
 impl_balance_state!(
     ReadNativeBalance,
@@ -1538,7 +1448,7 @@ impl_balance_state!(
     ConfirmBalanceAnchor,
     EvmBalanceContext<K>,
     EvmBalanceContext<K>,
-    "mfm.evm.state.confirm-balance-anchor@1",
+    "mfm.evm.state.confirm-balance-anchor@2",
     "Confirms that the initial balance anchor remains current."
 );
 impl_balance_state!(
@@ -1634,9 +1544,28 @@ fn interpret_read_initial_anchor<K: MfmValueTrait>(
     };
     match read_returned(evidence, &intent) {
         Some(EvmReadValue::Anchor(initial_anchor)) => {
-            let work = EvmBalanceWork::SelectAsset {
-                checked_chain_id: *checked_chain_id,
-                initial_anchor: initial_anchor.clone(),
+            if let Some(previous) = input.completed.first().map(|result| &result.anchor) {
+                if previous != initial_anchor {
+                    return failure(EvmBalanceFailure::AnchorChanged {
+                        collection_ordinal: input.metadata.collection_ordinal,
+                        previous: previous.clone(),
+                        observed: initial_anchor.clone(),
+                    });
+                }
+            }
+            let Some(source) = input.active_source() else {
+                return balance_failure(&input, EvmBalanceFailureStage::ReadInitialAnchor);
+            };
+            let work = if source.token.is_some() {
+                EvmBalanceWork::ReadTokenDecimals {
+                    checked_chain_id: *checked_chain_id,
+                    initial_anchor: initial_anchor.clone(),
+                }
+            } else {
+                EvmBalanceWork::ReadNativeBalance {
+                    checked_chain_id: *checked_chain_id,
+                    initial_anchor: initial_anchor.clone(),
+                }
             };
             advance_balance_context(input, work, EvmBalanceFailureStage::ReadInitialAnchor)
         }
@@ -1644,33 +1573,13 @@ fn interpret_read_initial_anchor<K: MfmValueTrait>(
     }
 }
 
-fn select_balance_asset<K: MfmValueTrait>(
-    input: EvmBalanceContext<K>,
-) -> ProposedStateOutcome<EvmBalanceAsset<K>, EvmBalanceFailure> {
-    let source = input.active_source();
-    let selected = matches!(input.work, EvmBalanceWork::SelectAsset { .. });
-    let native = selected && source.is_some_and(|source| source.token.is_none());
-    let token = selected && source.is_some_and(|source| source.token.is_some());
-    if native {
-        success(EvmBalanceAsset::Native(input))
-    } else if token {
-        success(EvmBalanceAsset::Token(input))
-    } else {
-        balance_failure(&input, EvmBalanceFailureStage::SelectAsset)
-    }
-}
-
 fn prepare_read_native_balance<K: MfmValueTrait>(
     input: &EvmBalanceContext<K>,
 ) -> Result<EvmReadIntent, EvmDomainError> {
-    let (EvmBalanceWork::SelectAsset {
+    let EvmBalanceWork::ReadNativeBalance {
         checked_chain_id,
         initial_anchor,
-    }
-    | EvmBalanceWork::ReadNativeBalance {
-        checked_chain_id,
-        initial_anchor,
-    }) = &input.work
+    } = &input.work
     else {
         return Err(EvmDomainError::InvalidValue);
     };
@@ -1702,14 +1611,10 @@ fn interpret_read_native_balance<K: MfmValueTrait>(
         Ok(intent) => intent,
         Err(_) => return balance_failure(&input, EvmBalanceFailureStage::ReadNativeBalance),
     };
-    let (EvmBalanceWork::SelectAsset {
+    let EvmBalanceWork::ReadNativeBalance {
         checked_chain_id,
         initial_anchor,
-    }
-    | EvmBalanceWork::ReadNativeBalance {
-        checked_chain_id,
-        initial_anchor,
-    }) = &input.work
+    } = &input.work
     else {
         return balance_failure(&input, EvmBalanceFailureStage::ReadNativeBalance);
     };
@@ -1730,14 +1635,10 @@ fn interpret_read_native_balance<K: MfmValueTrait>(
 fn prepare_read_token_decimals<K: MfmValueTrait>(
     input: &EvmBalanceContext<K>,
 ) -> Result<EvmReadIntent, EvmDomainError> {
-    let (EvmBalanceWork::SelectAsset {
+    let EvmBalanceWork::ReadTokenDecimals {
         checked_chain_id,
         initial_anchor,
-    }
-    | EvmBalanceWork::ReadTokenDecimals {
-        checked_chain_id,
-        initial_anchor,
-    }) = &input.work
+    } = &input.work
     else {
         return Err(EvmDomainError::InvalidValue);
     };
@@ -1769,14 +1670,10 @@ fn interpret_read_token_decimals<K: MfmValueTrait>(
         Ok(intent) => intent,
         Err(_) => return balance_failure(&input, EvmBalanceFailureStage::ReadTokenDecimals),
     };
-    let (EvmBalanceWork::SelectAsset {
+    let EvmBalanceWork::ReadTokenDecimals {
         checked_chain_id,
         initial_anchor,
-    }
-    | EvmBalanceWork::ReadTokenDecimals {
-        checked_chain_id,
-        initial_anchor,
-    }) = &input.work
+    } = &input.work
     else {
         return balance_failure(&input, EvmBalanceFailureStage::ReadTokenDecimals);
     };
@@ -1900,7 +1797,11 @@ fn interpret_confirm_balance_anchor<K: MfmValueTrait>(
         return balance_failure(&input, EvmBalanceFailureStage::ConfirmAnchor);
     };
     if anchor != initial_anchor {
-        return balance_failure(&input, EvmBalanceFailureStage::ConfirmAnchor);
+        return failure(EvmBalanceFailure::AnchorChanged {
+            collection_ordinal: input.metadata.collection_ordinal,
+            previous: initial_anchor.clone(),
+            observed: anchor.clone(),
+        });
     }
     if input
         .request
@@ -1967,9 +1868,16 @@ macro_rules! impl_balance_access {
                 input: &Self::Input,
             ) -> std::result::Result<
                 <$capability as ReadCapabilityContract>::Intent,
-                PreparationError,
+                mfm_values::InvocationDiagnostic,
             > {
-                $prepare(input).map_err(|_| PreparationError)
+                $prepare(input).map_err(|error| {
+                    mfm_values::InvocationDiagnostic::from_fields(
+                        "state_internal",
+                        "prepare",
+                        &error,
+                        None,
+                    )
+                })
             }
 
             fn interpret(
@@ -1977,7 +1885,7 @@ macro_rules! impl_balance_access {
                 evidence: &<$capability as ReadCapabilityContract>::Evidence,
             ) -> std::result::Result<
                 ProposedStateOutcome<Self::Output, Self::Failure>,
-                mfm_program::StateExecutionError,
+                mfm_values::InvocationDiagnostic,
             > {
                 Ok($interpret(input, evidence))
             }
@@ -2021,22 +1929,12 @@ impl_balance_access!(
     prepare_confirm_balance_anchor,
     interpret_confirm_balance_anchor
 );
-impl<K: MfmValueTrait> PureState for SelectBalanceAsset<K> {
-    fn evaluate(
-        input: Self::Input,
-    ) -> std::result::Result<
-        ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
-    > {
-        Ok(select_balance_asset(input))
-    }
-}
 impl<K: MfmValueTrait> PureState for ConsolidateBalanceCollection<K> {
     fn evaluate(
         input: Self::Input,
     ) -> std::result::Result<
         ProposedStateOutcome<Self::Output, Self::Failure>,
-        mfm_program::StateExecutionError,
+        mfm_values::InvocationDiagnostic,
     > {
         Ok(consolidate_balance_collection(input))
     }
@@ -2051,7 +1949,6 @@ fn balance_failure<K: MfmValueTrait, O>(
             EvmBalanceFailureCode::ChainIdentityUnavailable
         }
         EvmBalanceFailureStage::ReadInitialAnchor
-        | EvmBalanceFailureStage::SelectAsset
         | EvmBalanceFailureStage::ReadNativeBalance
         | EvmBalanceFailureStage::ReadTokenDecimals
         | EvmBalanceFailureStage::ReadTokenBalance
@@ -2078,29 +1975,35 @@ fn advance_balance_context<K: MfmValueTrait>(
     }
 }
 
-/// Deterministically expands one checked EVM balance collection.
+/// Deterministically expands the exact checked source order into a linear collection.
 pub struct CollectEvmBalances<K: MfmValueTrait> {
     binding_ref: ContentRef,
-    source_count: usize,
+    request: EvmBalanceRequest,
     marker: PhantomData<fn() -> K>,
 }
 
 impl<K: MfmValueTrait> CollectEvmBalances<K> {
     /// Stable product-inspection identity for this reusable Operation.
-    pub const OPERATION_ID: &'static str = "mfm.evm.operation.collect-balances@1";
+    pub const OPERATION_ID: &'static str = "mfm.evm.operation.collect-balances@2";
     /// Human-readable product inspection description.
     pub const DESCRIPTION: &'static str = "Authors one checked EVM balance collection.";
 
-    /// Constructs one collection expansion with a checked source count.
-    pub fn new(binding_ref: ContentRef, source_count: usize) -> Result<Self, EvmDomainError> {
-        if !(1..=EVM_BALANCE_SOURCE_LIMIT).contains(&source_count) {
-            return Err(EvmDomainError::Program);
-        }
+    /// Constructs a sequence with the checked request and adapter binding.
+    pub fn new(
+        binding_ref: ContentRef,
+        request: EvmBalanceRequest,
+    ) -> Result<Self, EvmDomainError> {
+        request.validate()?;
         Ok(Self {
             binding_ref,
-            source_count,
+            request,
             marker: PhantomData,
         })
+    }
+
+    /// Checks agreement with the exact ordered request and pre-bound route.
+    pub fn matches_request(&self, request: &EvmBalanceRequest, binding_ref: &ContentRef) -> bool {
+        &self.request == request && &self.binding_ref == binding_ref
     }
 }
 
@@ -2108,29 +2011,62 @@ impl<K: MfmValueTrait> Operation for CollectEvmBalances<K> {
     type Input = EvmBalanceContext<K>;
     type Output = EvmBalanceCollectionCompletion<K>;
     type Failure = EvmBalanceFailure;
-
+    fn validate_input(&self, input: &Self::Input) -> mfm_program::Result<()> {
+        input
+            .validate()
+            .map_err(|_| ProgramError::InvalidContract)?;
+        if !self.matches_request(&input.request, &input.metadata.route_ref)
+            || !input.completed.is_empty()
+            || !matches!(input.work, EvmBalanceWork::CheckChainIdentity)
+        {
+            return Err(ProgramError::InvalidContract);
+        }
+        Ok(())
+    }
     fn expand(
         &self,
         body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
     ) -> mfm_program::Result<()> {
-        let native = StableId::new("native").map_err(|_| ProgramError::InvalidContract)?;
-        let token = StableId::new("token").map_err(|_| ProgramError::InvalidContract)?;
-        for _ in 0..self.source_count {
-            body.read::<CheckChainIdentity<K>, EvmChainIdentityRead>(&self.binding_ref)?;
-            body.read::<ReadInitialAnchor<K>, EvmAnchorRead>(&self.binding_ref)?;
-            body.pure::<SelectBalanceAsset<K>>()?;
-            body.match_join::<EvmBalanceAsset<K>, EvmBalanceContext<K>>(|arms| {
-                arms.arm::<EvmBalanceContext<K>>(native.clone(), |branch| {
-                    branch.read::<ReadNativeBalance<K>, EvmBalanceRead>(&self.binding_ref)
-                })?;
-                arms.arm::<EvmBalanceContext<K>>(token.clone(), |branch| {
-                    branch.read::<ReadTokenDecimals<K>, EvmBalanceRead>(&self.binding_ref)?;
-                    branch.read::<ReadTokenBalance<K>, EvmBalanceRead>(&self.binding_ref)
-                })
-            })?;
-            body.read::<ConfirmBalanceAnchor<K>, EvmAnchorRead>(&self.binding_ref)?;
+        use mfm_program::{Identity, NoParams, Occurrence};
+        for source in &self.request.sources {
+            body.read::<CheckChainIdentity<K>, EvmChainIdentityRead, Identity<EvmBalanceFailure>>(
+                &self.binding_ref,
+                NoParams,
+                Occurrence::new(),
+            )?;
+            body.read::<ReadInitialAnchor<K>, EvmAnchorRead, Identity<EvmBalanceFailure>>(
+                &self.binding_ref,
+                NoParams,
+                Occurrence::new(),
+            )?;
+            if source.token.is_some() {
+                body.read::<ReadTokenDecimals<K>, EvmBalanceRead, Identity<EvmBalanceFailure>>(
+                    &self.binding_ref,
+                    NoParams,
+                    Occurrence::new(),
+                )?;
+                body.read::<ReadTokenBalance<K>, EvmBalanceRead, Identity<EvmBalanceFailure>>(
+                    &self.binding_ref,
+                    NoParams,
+                    Occurrence::new(),
+                )?;
+            } else {
+                body.read::<ReadNativeBalance<K>, EvmBalanceRead, Identity<EvmBalanceFailure>>(
+                    &self.binding_ref,
+                    NoParams,
+                    Occurrence::new(),
+                )?;
+            }
+            body.read::<ConfirmBalanceAnchor<K>, EvmAnchorRead, Identity<EvmBalanceFailure>>(
+                &self.binding_ref,
+                NoParams,
+                Occurrence::new(),
+            )?;
         }
-        body.pure::<ConsolidateBalanceCollection<K>>()
+        body.pure::<ConsolidateBalanceCollection<K>, Identity<EvmBalanceFailure>>(
+            NoParams,
+            Occurrence::new(),
+        )
     }
 }
 
@@ -2141,6 +2077,10 @@ macro_rules! impl_identity_injection {
             type ExpandedInput = EvmBalanceContext<K>;
             type ExpandedOutput = EvmBalanceContext<K>;
             type ExpandedFailure = <$state<K> as mfm_program::State>::Failure;
+            type FailureMap = mfm_program::Identity<Self::ExpandedFailure>;
+            fn failure_map_params(_: &Self::Setup) -> mfm_program::Result<mfm_program::NoParams> {
+                Ok(mfm_program::NoParams)
+            }
 
             fn original_binding_ref(setup: &Self::Setup) -> mfm_program::Result<ContentRef> {
                 Ok(setup.clone())
@@ -2181,8 +2121,7 @@ fn read_returned<'a>(
 
 fn work_initial_anchor(work: &EvmBalanceWork) -> Option<&EvmBlockAnchor> {
     match work {
-        EvmBalanceWork::SelectAsset { initial_anchor, .. }
-        | EvmBalanceWork::ReadNativeBalance { initial_anchor, .. }
+        EvmBalanceWork::ReadNativeBalance { initial_anchor, .. }
         | EvmBalanceWork::ReadTokenDecimals { initial_anchor, .. }
         | EvmBalanceWork::ReadTokenBalance { initial_anchor, .. }
         | EvmBalanceWork::ConfirmAnchor { initial_anchor, .. } => Some(initial_anchor),
@@ -2318,7 +2257,7 @@ fn valid_public_text(value: &str, maximum: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, EntryPointId, SchemaId};
+    use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, SchemaId};
 
     use super::*;
 
@@ -2421,7 +2360,6 @@ mod tests {
         check!(EvmBlockAnchor);
         check!(EvmBalanceWork);
         check!(EvmBalanceContext<Continuation>);
-        check!(EvmBalanceAsset<Continuation>);
         check!(EvmBalanceResult);
         check!(EvmCollectedAsset);
         check!(EvmCollectedBalanceSource);
@@ -2436,32 +2374,35 @@ mod tests {
         check!(EvmBalanceFailure);
     }
 
-    struct OneRead {
-        binding: ContentRef,
-    }
-
-    impl Operation for OneRead {
-        type Input = EvmBalanceContext<Continuation>;
-        type Output = EvmBalanceContext<Continuation>;
-        type Failure = EvmBalanceFailure;
-
-        fn expand(
-            &self,
-            body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-        ) -> mfm_program::Result<()> {
-            body.read::<CheckChainIdentity<Continuation>, EvmChainIdentityRead>(&self.binding)
-        }
-    }
-
     #[test]
-    fn balance_authoring_contracts_remain_composable() {
-        let entry = EntryPointId::new("mfm.test/balance-read@1").expect("entry point");
-        mfm_program::expand_program(entry, &OneRead { binding: route() })
-            .expect("one Read Program");
-        mfm_program::expand_program(
-            EntryPointId::new("mfm.test/balance-collection@1").expect("entry point"),
-            &CollectEvmBalances::<Continuation>::new(route(), 1).expect("collection"),
+    fn balance_authoring_rejects_substituted_and_reordered_requests() {
+        let sources = (1..=2)
+            .map(|index| {
+                EvmBalanceSource::new(
+                    format!("source-{index}"),
+                    NonZeroU64::new(1).unwrap(),
+                    EvmAddress::from_bytes([index; 20]),
+                    None,
+                )
+                .unwrap()
+            })
+            .collect();
+        let request = EvmBalanceRequest::new(sources, 18).unwrap();
+        let operation = CollectEvmBalances::<Continuation>::new(route(), request.clone()).unwrap();
+        let mut input = EvmBalanceContext::new(
+            request,
+            Continuation { value: 1 },
+            0,
+            "collection".into(),
+            route(),
         )
-        .expect("one collection Program");
+        .unwrap();
+        operation.validate_input(&input).unwrap();
+        assert!(operation.validate_input(&context()).is_err());
+        input.request.sources.reverse();
+        assert!(operation.validate_input(&input).is_err());
     }
 }
+
+#[cfg(test)]
+mod balance_extremes;

@@ -9,11 +9,13 @@ use axum::{Json, Router};
 use mfm_app::{
     generate_run_id, Application, ConfigDocument, ConfigDocumentError, ConfigName, ConfigSelection,
     ImportOutcome, ItemList, RequestError, RunIdGenerationError, RunPageLimit, RunRequestError,
-    SerializableClientError, SerializableRunView, MAX_CONFIG_DOCUMENT_BYTES,
+    SerializableClientError, MAX_CONFIG_DOCUMENT_BYTES,
 };
 use mfm_ids::RunId;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
+
+mod reporting;
 
 const RUN_BODY_MAX: usize = 4 * 1024;
 
@@ -23,6 +25,10 @@ pub(crate) fn router(application: Arc<Application>) -> Router {
         .route("/v1/entry-points", get(entry_points))
         .route("/v1/bindings", get(bindings))
         .route("/v1/configs", get(list_configs))
+        .route(
+            "/v1/configs/{name}/publish-enrichment",
+            post(publish_enrichment).layer(DefaultBodyLimit::max(RUN_BODY_MAX)),
+        )
         .route(
             "/v1/configs/{name}",
             put(import_config).layer(DefaultBodyLimit::max(MAX_CONFIG_DOCUMENT_BYTES)),
@@ -67,6 +73,27 @@ async fn import_config(
     let Json(raw) = body.map_err(|error| RestError(config_json_rejection(error)))?;
     let document = ConfigDocument::new(raw.get().as_bytes().to_vec()).await?;
     let outcome = application.import_config(name.clone(), document).await?;
+    let status = match outcome {
+        ImportOutcome::Created { .. } => StatusCode::CREATED,
+        ImportOutcome::Unchanged { .. } => StatusCode::OK,
+    };
+    Ok(json_response(status, &outcome))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishEnrichmentBody {
+    run_id: RunId,
+}
+
+async fn publish_enrichment(
+    State(application): State<Arc<Application>>,
+    path: Result<Path<ConfigName>, PathRejection>,
+    body: Result<Json<PublishEnrichmentBody>, JsonRejection>,
+) -> Result<Response, RestError> {
+    let Path(name) = path.map_err(|_| RestError(invalid_config_name()))?;
+    let Json(body) = body.map_err(|error| RestError(json_rejection(error)))?;
+    let outcome = application.publish_enrichment(name, &body.run_id).await?;
     let status = match outcome {
         ImportOutcome::Created { .. } => StatusCode::CREATED,
         ImportOutcome::Unchanged { .. } => StatusCode::OK,
@@ -131,7 +158,7 @@ async fn start_run(
         .start_run(run_id.clone(), &body.config)
         .await
         .map_err(|error| RestError(start_run_error(&run_id, error)))?;
-    Ok(json_response(StatusCode::OK, &result))
+    Ok(reporting::start(result))
 }
 
 async fn progress_run(
@@ -142,10 +169,7 @@ async fn progress_run(
     let Path(run_id) = path.map_err(|_| RestError(invalid_run_id()))?;
     let Json(_) = body.map_err(|error| RestError(json_rejection(error)))?;
     let view = application.progress_run(&run_id).await?;
-    Ok(json_response(
-        StatusCode::OK,
-        &SerializableRunView::new(&view),
-    ))
+    Ok(reporting::view(view))
 }
 
 async fn read_run(
@@ -154,10 +178,7 @@ async fn read_run(
 ) -> Result<Response, RestError> {
     let Path(run_id) = path.map_err(|_| RestError(invalid_run_id()))?;
     let view = application.read_run(&run_id).await?;
-    Ok(json_response(
-        StatusCode::OK,
-        &SerializableRunView::new(&view),
-    ))
+    Ok(reporting::view(view))
 }
 
 async fn route_not_found() -> Response {
@@ -250,10 +271,13 @@ fn request_error(error: RequestError) -> Response {
 const fn request_error_status(error: RequestError) -> StatusCode {
     match error {
         RequestError::ConfigAbsent | RequestError::RunAbsent => StatusCode::NOT_FOUND,
-        RequestError::RunAdmissionConflict | RequestError::BindingUnbound => StatusCode::CONFLICT,
-        RequestError::InvalidConfigDocument | RequestError::RunCapacity => {
-            StatusCode::UNPROCESSABLE_ENTITY
-        }
+        RequestError::RunAdmissionConflict
+        | RequestError::RunAppendNotInserted
+        | RequestError::BindingUnbound => StatusCode::CONFLICT,
+        RequestError::InvalidConfigDocument
+        | RequestError::InvalidEnrichment
+        | RequestError::SizeLimitExceeded
+        | RequestError::CapacityArithmeticOverflow => StatusCode::UNPROCESSABLE_ENTITY,
         RequestError::ConfigMutationIndeterminate | RequestError::DependencyUnavailable => {
             StatusCode::SERVICE_UNAVAILABLE
         }
@@ -274,26 +298,14 @@ fn start_run_error(run_id: &RunId, error: RunRequestError) -> Response {
                 &SerializableClientError::identified(error.code(), &message, run_id),
             )
         }
-        RunRequestError::AppendIndeterminate { recovery } => {
-            run_request_error(RunRequestError::AppendIndeterminate { recovery })
+        error @ (RunRequestError::AppendIndeterminate { .. } | RunRequestError::Invocation(_)) => {
+            run_request_error(error)
         }
     }
 }
 
 fn run_request_error(error: RunRequestError) -> Response {
-    match error {
-        RunRequestError::Request(error) => request_error(error),
-        error @ RunRequestError::AppendIndeterminate { .. } => {
-            let message = error.to_string();
-            let recovery = error
-                .recovery()
-                .expect("append-indeterminate error always carries recovery");
-            json_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &SerializableClientError::recoverable(error.code(), &message, recovery),
-            )
-        }
-    }
+    reporting::error(error)
 }
 
 fn config_json_rejection(error: JsonRejection) -> Response {
@@ -384,6 +396,7 @@ mod tests {
     use axum::http::header::CONTENT_TYPE;
     use axum::http::{HeaderValue, Method, Request};
     use mfm_app::{Application, BoundCapabilitySet, ComposedRuntime, RunRecovery};
+    use mfm_capabilities::AdapterError;
     use mfm_config::MemoryConfigRepository;
     use mfm_evm::{
         AnchoredContractCallEvidence, AnchoredContractCallIntent, EvmBlockAnchor, EvmEndpoint,
@@ -391,7 +404,6 @@ mod tests {
     };
     use mfm_evm_live::{EvmReadProvider, ProviderFuture};
     use mfm_ids::ContentRef;
-    use mfm_runtime::AdapterError;
     use mfm_store::MemoryStore;
     use tower::ServiceExt;
 
@@ -426,7 +438,16 @@ mod tests {
                     EvmReadSubject::NativeBalance { .. } => {
                         EvmReadValue::RawUnits(EvmU256::new("1000000000000000000").expect("units"))
                     }
-                    _ => return Err(AdapterError::Internal),
+                    _ => {
+                        return Err(AdapterError::Invariant(
+                            mfm_values::InvocationDiagnostic::from_fields(
+                                "adapter_invariant",
+                                "observe",
+                                &"incompatible_assembly",
+                                None,
+                            ),
+                        ))
+                    }
                 };
                 Ok(EvmReadEvidence::returned(intent_value_ref.clone(), value))
             })
@@ -437,7 +458,16 @@ mod tests {
             _intent_value_ref: &'a ContentRef,
             _intent: &'a AnchoredContractCallIntent,
         ) -> ProviderFuture<'a, AnchoredContractCallEvidence> {
-            Box::pin(async { Err(AdapterError::Internal) })
+            Box::pin(async {
+                Err(AdapterError::Invariant(
+                    mfm_values::InvocationDiagnostic::from_fields(
+                        "adapter_invariant",
+                        "observe",
+                        &"incompatible_assembly",
+                        None,
+                    ),
+                ))
+            })
         }
     }
 
@@ -714,8 +744,33 @@ mod tests {
         assert_eq!(runs["items"][0]["run_id"], generated_run_id.as_str());
 
         let run_id = RunId::parse(RUN_ID).expect("run id");
+        let candidate = mfm_journal::seal_frame(
+            &run_id,
+            1,
+            None,
+            &mfm_canonical::PlainCanonicalJsonBytes::from_json_str("{}").unwrap(),
+        )
+        .unwrap();
         let recovery = run_request_error(RunRequestError::AppendIndeterminate {
-            recovery: RunRecovery::Progress { run_id },
+            recovery: RunRecovery::Progress {
+                run_id: run_id.clone(),
+            },
+            invocation: mfm_runtime::InvocationFailure::Execution {
+                run_id,
+                last_observed: None,
+                error: mfm_runtime::RuntimeError::Recording {
+                    operation: mfm_runtime::Operation::Record,
+                    failure: Box::new(mfm_runtime::RecordingFailure::Store {
+                        original: None,
+                        candidate,
+                        cause: mfm_store::StoreError::Indeterminate(
+                            mfm_values::DiagnosticEvidence::from_value(
+                                serde_json::json!({"operation": "test.store", "injected": "Indeterminate"}),
+                            ),
+                        ),
+                    }),
+                },
+            },
         });
         assert_eq!(recovery.status(), StatusCode::SERVICE_UNAVAILABLE);
         let recovery = response_json(recovery).await;

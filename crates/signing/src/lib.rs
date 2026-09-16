@@ -15,7 +15,8 @@ use mfm_ids::StableId;
 pub type Result<T> = std::result::Result<T, SigningError>;
 
 /// Redaction-safe signing error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, thiserror::Error)]
+#[serde(tag = "kind", content = "cause", rename_all = "snake_case")]
 pub enum SigningError {
     /// A checked public value or transient signing input was invalid.
     #[error("signing input is invalid")]
@@ -23,6 +24,9 @@ pub enum SigningError {
     /// Signing or public verification failed.
     #[error("signing operation failed")]
     Failed,
+    /// Evidence retained at an executing signer boundary.
+    #[error("signing execution failed")]
+    SignFailed(mfm_values::DiagnosticEvidence),
 }
 
 /// Exact 32-byte prehashed signing digest.

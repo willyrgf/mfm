@@ -1,49 +1,55 @@
 # Run execution
 
-One run is identified by an explicit caller-supplied RunId and one checked Program.
+One run has an explicit caller-supplied RunId and one checked Program committing to its exact
+initial value. Each frame carries the complete current continuation and that operation's facts.
 
 ```text
 start(RunId, Program, C0)
-  -> append RunAdmitted(Program, C0)
-  -> fold exact qualified prefix
-  -> Pure: evaluate input -> append outcome
-  -> Read: prepare intent/value ref -> await typed adapter evidence -> interpret -> append fused conclusion
-  -> Effect: append exact command/value ref/EffectId -> await Pending or Settled evidence
-       -> Pending: append nothing -> return Runnable
-       -> Settled: bind evidence -> interpret -> append adjacent conclusion
-  -> Match: project closed-sum tag/payload without an append
-  -> exact root success or exact root failure
+  -> append admission with exact Program, C0 and current state
+  -> Pure: evaluate -> append success or original failure
+  -> Read: prepare -> observe -> bind/interpret -> append success or original failure
+  -> Effect: append exact input/command/EffectId -> reconcile
+       -> Pending: append nothing -> return EffectPending
+       -> Operational failure: append original -> AwaitingRecovery
+       -> Settled: bind -> append settlement -> AwaitingInterpretation -> interpret
+  -> AwaitingRecovery: classify -> handle -> authorize/map -> append recovery decision
+  -> advance, yield committed retry/restart, or return terminal success/FailureReport
 ```
 
-Program index zero is the root. Only forward successor indices are valid. Each conclusion determines
-the next declaration from its branch. A missing successor terminates at that branch's declared root
-contract; `Never` cannot terminate or have a failure successor. A zero-State Program succeeds at
-genesis with C0.
+Success advances linearly; a zero-State Program succeeds in admission. The exact original error
+supplies intrinsic Classification. The selected handler requests Stop, RetryState or checkpoint
+restart. Runtime checks finite State/run allowances, active checkpoints and Effect barriers before
+committing the decision. Root maps apply only to terminal domain failure. Accepted retry/restart
+yields; restart prunes later checkpoint inputs without resetting recovery usage.
 
-Runtime associates the entire Program with one immutable RuntimeAssembly before admission or fold.
-Association checks exact codecs, State implementations, Read capability/binding callbacks, and
-closed Match projection contracts. Runtime then owns the only semantic fold. Neither Application nor
-Store inspects frames to derive state.
+Runtime associates the Program with one immutable assembly before admission or restore. It owns the
+current continuation, transition rules and local validation. Journal owns only the exact opaque
+canonical envelope; Store supplies admission/latest and an optional candidate row in one mechanical
+snapshot. Neither Application nor Store reconstructs execution from frames. There is no semantic
+history fold or parallel native-value cache.
 
-The typed Read callback and hot/cold evidence binder receive the exact qualified intent value ref.
-The typed Effect callback receives the exact qualified command value ref used in `EffectId`
-derivation. A value ref identifies one canonical instance; a codec contract ref identifies only its
-shared schema and is never substituted at these boundaries.
+Read callbacks and evidence binders receive the exact intent value ref. Effect callbacks receive
+the exact command value ref used for EffectId derivation. Before unresolved Effect reconciliation,
+Runtime re-prepares and compares the retained command. Accepted settlement is authoritative before
+interpretation; a cold AwaitingInterpretation performs no adapter IO. Reading completed work invokes
+no classifier, handler, root map or State interpretation.
 
-After an inserted frame, Runtime extends its private hot accumulator without loading. A
-`NotInserted` result triggers one complete reload because another writer may have advanced the run.
-Cold resume/read always load once, ask Journal to qualify the complete prefix, and use the same fold.
-`read` performs no adapter IO and appends nothing. Cold qualification of a retained Effect prepare
-deterministically invokes its `EffectState::prepare` implementation to compare the exact command and
-derived identity.
+After known insertion, Runtime adopts its candidate locally. NotInserted performs one bound
+candidate probe. Presence can adopt the checked current observation; exclusion or absence remains
+noninsertion. A failed load or projection is secondary, and an already established presence finding
+survives it. These paths yield without executing another visit. Store errors return immediately
+without probing: Unavailable is definitely noncommitted; Indeterminate is ambiguous acknowledgement.
+The invocation retains the original when available, exact candidate once sealed, separate recording
+cause and last observed view. Known insertion followed by projection failure retains the newer
+acknowledged head independently.
 
-Pure evaluation and typed encoding are pure blocking jobs that are immediately awaited. A Read is
-entered at most once in each start/resume call. An Effect adapter is also entered at most once per
-invocation: `Pending` returns a Runnable view at the existing prepare, while `Unavailable` or
-`Internal` returns the corresponding error. All three append no Effect conclusion.
-Dropping at any await is safe: either no candidate was submitted, or the one in-flight Store append
-may commit atomically and a later complete reload determines the result.
+Original failures precede policy commits. A handler, root-map or later encoding failure therefore
+leaves AwaitingRecovery intact. Pending-Effect Stop ends the invocation and retains command authority;
+explicit progress can reconcile it. Actual size/count limits may prevent recording an IO result.
+They do not reserve future capacity or prevent all oversized results after provider entry.
 
-Store `Unavailable` is definitely noncommitted; append `Indeterminate` means COMMIT acknowledgement
-was ambiguous. Runtime exposes that ambiguity and retains no pending owner, background finalizer,
-semaphore, timeout policy, or cancellation token.
+Pure validation, callbacks and encoding use immediately awaited blocking work. Store and adapter IO
+stay async. Cancellation can leave an in-flight physical append whose outcome was not acknowledged
+to this caller, or a provider attempt whose result was not recorded. No internal fault or fallback
+record is appended. A later selected-row snapshot observes retained state; it does not retroactively
+prove delivery. Runtime has no background finalizer or implicit recovery loop.

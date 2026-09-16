@@ -87,6 +87,18 @@ impl fmt::Display for DigestBytes {
     }
 }
 
+impl Serialize for DigestBytes {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for DigestBytes {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        Self::from_hex(&String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
 impl FromStr for DigestBytes {
     type Err = IdentityError;
 

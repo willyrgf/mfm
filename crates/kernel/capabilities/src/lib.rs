@@ -10,8 +10,47 @@ use mfm_values::MfmValue;
 /// Result type for capability contract operations.
 pub type Result<T> = std::result::Result<T, CapabilityError>;
 
+/// A capability-owned operational cause or an unrecoverable local invariant failure.
+///
+/// Typed payloads require no `Error` bound. When the operational type implements `Error`,
+/// standard source traversal exposes it without invoking its formatting implementation.
+pub enum AdapterError<E> {
+    /// Reviewed typed operational cause, retained before recovery policy.
+    Operational(E),
+    /// Trusted local failure, outside classifier and handler recovery.
+    Invariant(mfm_values::InvocationDiagnostic),
+}
+
+impl<E> std::fmt::Debug for AdapterError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Operational(_) => formatter.write_str("Operational(<redacted>)"),
+            Self::Invariant(error) => std::fmt::Debug::fmt(error, formatter),
+        }
+    }
+}
+
+impl<E> std::fmt::Display for AdapterError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Operational(_) => "adapter operational failure",
+            Self::Invariant(_) => "adapter invariant failed",
+        })
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for AdapterError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Operational(error) => Some(error),
+            Self::Invariant(_) => None,
+        }
+    }
+}
+
 /// Redaction-safe capability contract error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
 pub enum CapabilityError {
     /// A static capability identity is invalid.
     #[error("capability contract is invalid")]
@@ -23,6 +62,8 @@ pub enum CapabilityError {
 
 /// One observational capability with a closed intent/evidence contract.
 pub trait ReadCapabilityContract: Send + Sync + 'static {
+    /// Reviewed bounded operational failure returned by the adapter.
+    type OperationalError: MfmValue;
     /// Canonical intent passed to the trusted adapter.
     type Intent: MfmValue;
     /// Closed evidence returned by the trusted adapter.
@@ -36,11 +77,13 @@ pub trait ReadCapabilityContract: Send + Sync + 'static {
         intent_value_ref: &ContentRef,
         intent: &Self::Intent,
         evidence: &Self::Evidence,
-    ) -> Result<()>;
+    ) -> std::result::Result<(), mfm_values::InvocationDiagnostic>;
 }
 
 /// One mutating capability with a closed command/evidence contract.
 pub trait EffectCapabilityContract: Send + Sync + 'static {
+    /// Reviewed bounded operational failure returned by the adapter.
+    type OperationalError: MfmValue;
     /// Complete nonce-free command passed to the trusted adapter.
     type Command: MfmValue;
     /// Closed evidence returned by the trusted adapter.
@@ -54,5 +97,45 @@ pub trait EffectCapabilityContract: Send + Sync + 'static {
         effect_id: &EffectId,
         command: &Self::Command,
         evidence: &Self::Evidence,
-    ) -> Result<()>;
+    ) -> std::result::Result<(), mfm_values::InvocationDiagnostic>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_error_exposes_the_original_nested_source_when_supported() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("reviewed owner failure")]
+        struct Owner(#[source] std::io::Error);
+        let error = AdapterError::Operational(Owner(std::io::Error::from_raw_os_error(104)));
+        let owner = std::error::Error::source(&error).unwrap();
+        assert!(owner.downcast_ref::<Owner>().is_some());
+        assert_eq!(
+            owner
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(104)
+        );
+    }
+
+    #[test]
+    fn adapter_error_formatting_never_formats_the_operational_cause() {
+        struct Unformattable;
+        let operational = AdapterError::Operational(Unformattable);
+        assert_eq!(format!("{operational:?}"), "Operational(<redacted>)");
+        assert_eq!(operational.to_string(), "adapter operational failure");
+        let invariant: AdapterError<Unformattable> =
+            AdapterError::Invariant(mfm_values::InvocationDiagnostic::from_fields(
+                "state_internal",
+                "bind_evidence",
+                &CapabilityError::EvidenceBinding,
+                None,
+            ));
+        assert_eq!(invariant.to_string(), "adapter invariant failed");
+    }
 }

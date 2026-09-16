@@ -88,6 +88,17 @@ fn expand_schema_derive_result(
     let (impl_generics, ty_generics, where_clause) = impl_generics.split_for_impl();
 
     let attrs = ContainerAttrs::parse(&input.attrs, &input.ident)?;
+    if kind == DeriveKind::PersistedContract && attrs.decode_native.is_some() {
+        return Err(syn::Error::new_spanned(
+            &input.ident,
+            "decode_native is only supported by MfmValue",
+        ));
+    }
+    let native_decode = attrs.decode_native.as_ref().map(|decode| quote! {
+        fn decode_native(bytes: &[u8]) -> ::std::result::Result<Self, ::mfm_values::InvocationDiagnostic> {
+            #decode(bytes)
+        }
+    });
     let shape_output = schema_shape_tokens(
         &input.data,
         attrs.rename_all.as_deref(),
@@ -130,7 +141,7 @@ fn expand_schema_derive_result(
                     ::mfm_ids::DigestAlgorithm::Sha256JcsV1,
                     ::mfm_ids::DigestBytes::from_array(#semantic_digest),
                 )
-                .map_err(|error| ::mfm_values::ValueError::Identity(error.to_string()))
+                .map_err(|error| ::mfm_values::ValueError::Identity(error))
             }
         }
     } else {
@@ -152,7 +163,7 @@ fn expand_schema_derive_result(
                 #semantic_identity,
                 #schema_name,
                 ::mfm_ids::SchemaVersion::new(#version)
-                    .map_err(|error| ::mfm_values::ValueError::Identity(error.to_string()))?,
+                    .map_err(|error| ::mfm_values::ValueError::Identity(error))?,
                 #shape,
             )?,
             #audit_path,
@@ -167,7 +178,7 @@ fn expand_schema_derive_result(
             #semantic_identity,
             #schema_name,
             ::mfm_ids::SchemaVersion::new(#version)
-                .map_err(|error| ::mfm_values::ValueError::Identity(error.to_string()))?,
+                .map_err(|error| ::mfm_values::ValueError::Identity(error))?,
             #shape,
         )
     };
@@ -189,6 +200,7 @@ fn expand_schema_derive_result(
         DeriveKind::Value => quote! {
             impl #impl_generics ::mfm_values::MfmValue for #ident #ty_generics #where_clause {
                 #semantic_impl
+                #native_decode
 
                 fn schema_descriptor() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
                     #descriptor_body

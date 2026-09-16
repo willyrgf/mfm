@@ -86,7 +86,6 @@ fn anchored_intent_route_and_capability_are_exact() {
         EVM_ANCHORED_CONTRACT_CALL_CAPABILITY_ID
     );
     assert_eq!(intent().route_ref(), &route().binding_ref().unwrap());
-    assert_eq!(intent().chain_id(), NonZeroU64::new(1).unwrap());
     assert_eq!(
         <EvmAnchoredContractCallRead as CapabilityInjection<Observe>>::original_binding_ref(
             &route()

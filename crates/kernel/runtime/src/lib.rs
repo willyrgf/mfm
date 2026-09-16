@@ -1,17 +1,23 @@
 #![warn(missing_docs)]
 //! Immutable typed Runtime assembly and caller-driven run progression.
 //!
-//! Runtime is the sole semantic fold owner. Store supplies complete opaque
-//! prefixes, Journal qualifies them, and the associated mode-specific
+//! Runtime owns the current continuation and its local validation. Store supplies
+//! admission/latest rows, Journal decodes their opaque envelopes, and the associated
 //! executable runs only the currently selected State.
 
 mod assembly;
 mod engine;
+mod error;
+mod report;
+mod state;
+pub use error::{CandidatePresence, Operation, RecordingFailure, Stage};
+pub use mfm_values::Object;
+pub use report::{FailureReport, InvocationFailure};
+pub use state::{Call, EffectCall, Failure, RecoveryOutcome, Settlement, StateCall};
 
 use std::sync::Arc;
 
-use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_ids::{ContentDigest, ContentRef, RunId};
+use mfm_ids::{ContentDigest, ExecutionPosition, RunId, StatePosition};
 use mfm_program::Program;
 use mfm_store::Store;
 use mfm_values::MfmValue;
@@ -22,7 +28,8 @@ pub use assembly::{RuntimeAssembly, RuntimeAssemblyBuilder};
 pub type Result<T> = std::result::Result<T, RuntimeError>;
 
 /// Redaction-safe Runtime failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, serde::Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeError {
     /// The requested run does not exist.
     #[error("run is absent")]
@@ -30,35 +37,118 @@ pub enum RuntimeError {
     /// The requested admission differs from retained genesis.
     #[error("run admission conflicts with retained history")]
     AdmissionConflict,
-    /// A Store append may have committed.
-    #[error("append outcome is indeterminate")]
-    Indeterminate,
+    /// A mechanical Store operation failed; ambiguous acknowledgement remains distinguishable.
+    #[error("store operation failed")]
+    Store(#[from] mfm_store::StoreError),
     /// Retained physical, structural, or semantic history is invalid.
     #[error("retained run history is invalid")]
     InvalidHistory,
     /// Static assembly and Program associations are incomplete or inconsistent.
     #[error("runtime assembly is incompatible")]
     IncompatibleAssembly,
-    /// A local fixed capacity was exceeded.
-    #[error("runtime capacity exceeded")]
-    Capacity,
-    /// A required Store or capability dependency is unavailable.
-    #[error("runtime dependency is unavailable")]
-    Unavailable,
-    /// A trusted local invariant failed.
-    #[error("runtime internal failure")]
-    Internal,
+    /// A measured size exceeded its limit.
+    #[error("{resource} {size}")]
+    SizeLimit {
+        /// Resource whose inclusive limit was exceeded.
+        resource: SizeResource,
+        /// Safe numeric evidence of the violation.
+        size: mfm_values::SizeLimitExceeded,
+    },
+    /// Capacity arithmetic could not represent the result.
+    #[error("capacity arithmetic overflow")]
+    ArithmeticOverflow,
+    /// A reviewed native failure at its actual operation/stage.
+    #[error("runtime operation failed")]
+    Native {
+        /// Originating operation.
+        operation: Operation,
+        /// Actual stage within that operation.
+        stage: Stage,
+        /// Selected owner data, without native custody.
+        cause: mfm_values::InvocationDiagnostic,
+    },
+    /// A returned original and candidate remain in invocation custody.
+    #[error("runtime recording failed")]
+    Recording {
+        /// Originating operation.
+        operation: Operation,
+        /// Available recording facts.
+        #[source]
+        failure: Box<RecordingFailure>,
+    },
+    /// Insertion was acknowledged but the resulting view could not be projected.
+    #[error("acknowledged state projection failed")]
+    Projection {
+        /// Acknowledged mechanical head, even if the last renderable view is older.
+        acknowledged: Box<mfm_store::RunSummary>,
+        /// Actual projection failure.
+        #[source]
+        cause: Box<RuntimeError>,
+    },
 }
 
-/// Redaction-safe error available to Read and Effect adapters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum AdapterError {
-    /// No trusted observation or settlement evidence was produced.
-    #[error("adapter is unavailable")]
-    Unavailable,
-    /// A trusted adapter invariant failed.
-    #[error("adapter failed")]
-    Internal,
+impl RuntimeError {
+    pub(crate) fn native(operation: Operation, cause: mfm_values::InvocationDiagnostic) -> Self {
+        Self::Native {
+            operation,
+            stage: Stage::Execute,
+            cause,
+        }
+    }
+    pub(crate) fn at(
+        operation: Operation,
+        stage: Stage,
+        cause: mfm_values::InvocationDiagnostic,
+    ) -> Self {
+        Self::Native {
+            operation,
+            stage,
+            cause,
+        }
+    }
+}
+impl From<mfm_values::ValueError> for RuntimeError {
+    fn from(error: mfm_values::ValueError) -> Self {
+        Self::at(
+            Operation::Record,
+            Stage::Encode,
+            error.into_diagnostic("from"),
+        )
+    }
+}
+
+use mfm_values::{SizeResource, SizeViolation};
+impl RuntimeError {
+    /// Projects size evidence from the primary failure without consuming its cause chain.
+    /// A reconciliation error does not replace the original append disposition.
+    pub fn size_limit(&self) -> Option<SizeViolation> {
+        match self {
+            Self::SizeLimit { resource, size } => Some(SizeViolation::measured(*resource, *size)),
+            Self::Store(error) => store_size(error),
+            Self::Native { cause, .. } => cause.size(),
+            Self::Projection { cause, .. } => cause.size_limit(),
+            Self::Recording { failure, .. } => match failure.as_ref() {
+                RecordingFailure::BeforeAppend { cause, .. } => cause.size_limit(),
+                RecordingFailure::Store { cause, .. } => store_size(cause),
+                RecordingFailure::NotInserted { .. } => None,
+            },
+            _ => None,
+        }
+    }
+}
+fn store_size(error: &mfm_store::StoreError) -> Option<SizeViolation> {
+    use mfm_store::StoreError;
+    let (resource, size) = match error {
+        StoreError::FrameSize(size) => (SizeResource::Frame, size),
+        StoreError::HistorySize(size) => (SizeResource::HistoryBytes, size),
+        StoreError::FrameCount(size) => (SizeResource::FrameCount, size),
+        _ => return None,
+    };
+    Some(SizeViolation::measured(resource, *size))
+}
+pub(crate) fn check_size(resource: SizeResource, actual: u64, limit: u64) -> Result<()> {
+    mfm_values::SizeLimitExceeded::check(actual, limit)
+        .map_err(|size| RuntimeError::SizeLimit { resource, size })
 }
 
 /// Result of one successful Effect adapter invocation.
@@ -74,37 +164,51 @@ pub enum EffectAdapterOutcome<E> {
 }
 
 /// Durable public state of a run.
+// Keep the owned observation together; Object clones already share immutable payload bytes.
+#[allow(clippy::large_enum_variant)]
 pub enum RunViewState {
     /// The selected State is waiting for caller-driven progression.
-    Runnable,
+    Runnable {
+        /// Selected execution occurrence.
+        position: ExecutionPosition,
+        /// Committed transition that selected this occurrence.
+        reason: RunnableReason,
+    },
+    /// Acknowledged command awaiting reconciliation with the same authority.
+    EffectPending {
+        /// Complete retained command authority and input.
+        effect: EffectCall,
+        /// Most recent acknowledged original and recovery outcome.
+        latest_failure: Option<(Object, RecoveryOutcome)>,
+    },
+    /// A declared original is durable and awaits recovery evaluation.
+    AwaitingRecovery {
+        /// Complete original operation facts, without an uncommitted decision.
+        failure: Failure,
+    },
+    /// Accepted settlement is durable and awaits deterministic interpretation.
+    AwaitingInterpretation {
+        /// Complete command authority and accepted evidence.
+        settlement: Settlement,
+    },
     /// The Program reached its declared root success.
-    Succeeded(RetainedValueView),
+    Succeeded(Object),
     /// The Program reached its declared root failure.
-    Failed(RetainedValueView),
+    Failed(FailureReport),
 }
 
-/// Qualified retained terminal value.
-pub struct RetainedValueView {
-    contract_ref: ContentRef,
-    value_ref: ContentRef,
-    canonical: PlainCanonicalJsonBytes,
-}
-
-impl RetainedValueView {
-    /// Returns the nominal typed contract.
-    pub const fn contract_ref(&self) -> &ContentRef {
-        &self.contract_ref
-    }
-
-    /// Returns the exact retained instance reference.
-    pub const fn value_ref(&self) -> &ContentRef {
-        &self.value_ref
-    }
-
-    /// Returns exact canonical retained bytes.
-    pub fn canonical_bytes(&self) -> &[u8] {
-        self.canonical.as_bytes()
-    }
+/// Committed transition that selected a runnable occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnableReason {
+    /// The preceding State succeeded, or the run was admitted.
+    Advance,
+    /// Retry with the same exact input.
+    Retry,
+    /// Restore the active retained checkpoint input.
+    Restart {
+        /// Selected checkpoint boundary.
+        checkpoint: StatePosition,
+    },
 }
 
 /// Snapshot of one real qualified durable run head.
@@ -113,9 +217,21 @@ pub struct RunView {
     head_sequence: u64,
     head_digest: ContentDigest,
     state: RunViewState,
+    admitted_context: Arc<Object>,
+    entry_point: mfm_ids::EntryPointId,
 }
 
 impl RunView {
+    /// Returns the exact entry point retained in the admitted Program.
+    pub fn entry_point(&self) -> &mfm_ids::EntryPointId {
+        &self.entry_point
+    }
+
+    /// Returns the exact input qualified from this run's admission.
+    pub fn admitted_context(&self) -> &Object {
+        &self.admitted_context
+    }
+
     /// Returns the run identity.
     pub const fn run_id(&self) -> &RunId {
         &self.run_id
@@ -155,7 +271,7 @@ impl Runtime {
         run_id: RunId,
         program: Program,
         c0: T,
-    ) -> Result<RunView> {
+    ) -> std::result::Result<RunView, InvocationFailure> {
         engine::start(
             self.assembly.handle(),
             Arc::clone(&self.store),
@@ -167,7 +283,7 @@ impl Runtime {
     }
 
     /// Loads and progresses an existing run.
-    pub async fn resume(&self, run_id: &RunId) -> Result<RunView> {
+    pub async fn resume(&self, run_id: &RunId) -> std::result::Result<RunView, InvocationFailure> {
         engine::resume(
             self.assembly.handle(),
             Arc::clone(&self.store),
@@ -176,8 +292,8 @@ impl Runtime {
         .await
     }
 
-    /// Loads and folds an existing run without executing a State or adapter.
-    pub async fn read(&self, run_id: &RunId) -> Result<RunView> {
+    /// Loads and validates the current record without executing a State or adapter.
+    pub async fn read(&self, run_id: &RunId) -> std::result::Result<RunView, InvocationFailure> {
         engine::read(
             self.assembly.handle(),
             Arc::clone(&self.store),
