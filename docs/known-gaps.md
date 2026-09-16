@@ -27,11 +27,21 @@
 - Effect progression is caller-driven and permits duplicate adapter entry for the same exact
   `EffectId` and command. Each mutating adapter must supply its own convergent durable authority.
 
+## Public framework interfaces
+
+MFM supports three public activities: selecting an existing operation, composing Operations/States,
+and implementing a new State. Their caller responsibilities and proposed improvements are recorded
+in the [public interfaces and tests RFC](../RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md).
+Current authoring requires separately maintained executable registrations, and ordinary EVM callers
+still supply execution/result-handling glue. Improving configured products alone does not establish
+usable framework composition or extension. Custom Operations, States, and intentional product maps
+are legitimate in tests of those public authoring contracts.
+
 ## Configuration-driven workflows
 
-The intended consumer supplies workflow/input and execution configuration to production code,
-then inspects a typed report. The full problem and acceptance criteria are recorded in
-[production responsibilities leaking into the E2E](../PROBLEM_LEAK_PROD_IMPLS.md).
+A configured EVM product is one use of the framework, alongside direct Rust authoring. Its consumers
+should supply supported workflow/input and execution options and inspect checked results. The RFC
+separates this product capability from improvements to the three public usage paths.
 The following are missing capabilities, not current API guarantees:
 
 - A production composition/execution entry point for supported EVM workflows that owns dependency
@@ -51,8 +61,8 @@ The following are missing capabilities, not current API guarantees:
   authenticated durable domain failure.
 - Production typed success/failure reports containing configured names/order, declared public
   inputs and execution facts, available outputs, and supported consistency/expectation results.
-  Exact-contract-checked access and bounded lossless failure reporting must replace consumer-side
-  JSON decoding and context reconstruction.
+  Result delivery should reuse existing exact-contract decoding and retain declared facts within
+  report bounds, replacing repeated consumer-side JSON decoding and context reconstruction.
 - **Deferred general output references:** configuration such as “use output Y of State Z as ABI
   argument X” is not generally supported. Existing `CallCreatedAt` and `ObserveAt` recipes provide
   specific checked dependencies. General references need exact type/field checks, dependency
@@ -89,9 +99,9 @@ concern configurable product orchestration around that caller-driven contract.
   configurable product. Existing cancellation, acknowledgement-loss, prepared-wire, and cold-fold
   tests establish specific boundaries; they do not establish a complete configurable orchestration product. Ephemeral
   keystore survival during Runtime reconstruction is not host-process restart recovery.
-- Consumer E2E coverage should configure production execution and assert final report results.
-  Deliberate fault schedules can be selected in separate explicit dev/test scenario configuration,
-  backed by reusable testing infrastructure. Forced interruption, teardown/reconstruction, exact
-  heads, nonce/retained-wire checks, and append-boundary assertions belong in dedicated
-  unit/integration tests. This separation must preserve existing guarantees and managed task
-  coverage, not delete them or embed fault injection in ordinary operation semantics.
+- Selection/product E2Es should use supported execution and checked results. Framework composition
+  and extension tests legitimately author Operations/States and may drive Runtime directly.
+  Deliberate faults, teardown/reconstruction, exact heads, nonce/retained-wire checks, and append
+  boundaries need focused unit/integration assertions. Separating these purposes must preserve
+  existing guarantees and managed task coverage; it does not require a new fault-scenario DSL or
+  embedding fault injection in ordinary operation semantics.
