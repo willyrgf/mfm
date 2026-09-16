@@ -3,6 +3,8 @@ use std::num::NonZeroU64;
 use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
 use mfm_portfolio::{plan_snapshot, PortfolioConfig, PortfolioError, PortfolioSnapshotSelector};
 
+// A snapshot must commit to its selected routes in both Program identity and input, rejecting
+// incomplete or misordered route sets.
 #[test]
 fn planning_uses_the_selected_routes_and_rejects_unusable_route_sets() {
     let config: PortfolioConfig = serde_json::from_value(serde_json::json!({

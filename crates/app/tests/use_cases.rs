@@ -371,6 +371,8 @@ fn bound_routes_reject_duplicates_and_over_capacity() {
     assert!(BoundCapabilitySet::new(over_capacity).is_err());
 }
 
+// Starting a selected config revision must produce the documented portfolio output and expose
+// the run through the application index.
 #[tokio::test]
 async fn snapshot_starts_from_exact_revision_and_returns_holdings() {
     let app = open(
@@ -445,6 +447,8 @@ async fn snapshot_starts_from_exact_revision_and_returns_holdings() {
     assert_eq!(listed.items()[0].run_id(), &run_id);
 }
 
+// Cancelling a snapshot during provider IO must leave enough admitted state for explicit
+// progress to finish it.
 #[tokio::test]
 async fn snapshot_progresses_after_an_interrupted_read() {
     let provider = provider(1);
@@ -489,6 +493,8 @@ async fn snapshot_progresses_after_an_interrupted_read() {
         .expect("snapshot output");
 }
 
+// A provider timeout must remain visible with the same serialized report when the application
+// reloads the run.
 #[tokio::test]
 async fn snapshot_records_a_durable_provider_failure() {
     let provider = provider(1);
@@ -538,6 +544,8 @@ async fn snapshot_records_a_durable_provider_failure() {
     assert_eq!(error.code(), "run_absent");
 }
 
+// Token amounts must use the expected decimals; rejected evidence and provider timeouts must
+// retain their distinct causes and collection context.
 #[tokio::test]
 async fn snapshot_token_holdings_and_typed_read_failures() {
     let token_document = serde_json::json!({
@@ -683,6 +691,8 @@ async fn snapshot_token_holdings_and_typed_read_failures() {
     assert_eq!(wire["metadata"]["collection_ordinal"], 0);
 }
 
+// Import is deployment-independent, but starting a run must reject missing bindings and
+// untrusted retained config identities or plans.
 #[tokio::test]
 async fn config_rejects_malformed_unbound_and_forged_rows_before_admission() {
     let reordered = br#"{
@@ -862,6 +872,8 @@ async fn config_rejects_malformed_unbound_and_forged_rows_before_admission() {
     ));
 }
 
+// Deleting a revision prevents new starts from it while the admitted run remains readable from
+// its own retained history.
 #[tokio::test]
 async fn config_delete_does_not_revoke_an_admitted_run() {
     let app = open(
@@ -923,6 +935,8 @@ async fn config_delete_does_not_revoke_an_admitted_run() {
     assert_eq!(retained.head_digest(), started.run().head_digest());
 }
 
+// An uncertain append must return the RunId and relevant config selection needed for recovery,
+// together with the Store cause.
 #[tokio::test]
 async fn indeterminate_start_and_progress_carry_recovery_identity() {
     let backend = Arc::new(FaultStore::new());
@@ -1007,6 +1021,8 @@ async fn indeterminate_start_and_progress_carry_recovery_identity() {
     );
 }
 
+// Enrichment must filter observed zero-balance tokens, but a failed lookup must remain a failure
+// and prevent publication of partial results.
 #[tokio::test]
 async fn enrichment_keeps_native_and_nonzero_candidates() {
     let document = serde_json::json!({
@@ -1132,6 +1148,8 @@ async fn enrichment_keeps_native_and_nonzero_candidates() {
     assert_eq!(rejected.code(), "invalid_enrichment");
 }
 
+// Only completed enrichment may publish a config; retrying a lost publication acknowledgement
+// must reuse it, and forged provenance must block dependent runs.
 #[tokio::test]
 async fn enrichment_publish_rejects_incomplete_forged_and_lost_ack() {
     let provider = provider(1);
@@ -1276,6 +1294,8 @@ async fn enrichment_publish_rejects_incomplete_forged_and_lost_ack() {
     assert_eq!(wrong_schema.code(), "invalid_enrichment");
 }
 
+// Application progress must retain native metadata rejection details even when schema admission
+// succeeds; malformed stored identities fail during inspection.
 #[tokio::test]
 async fn shipping_metadata_constructor_cases_reach_native_materialization_after_schema_admission() {
     type BalanceInput = mfm_evm::EvmBalanceContext<mfm_portfolio::PortfolioContinuation>;

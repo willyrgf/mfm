@@ -1,6 +1,8 @@
 use super::*;
 use mfm_ids::{DigestBytes, RunId};
 
+// A full candidate portfolio must remain representable through enrichment and publication
+// without losing its selected routes, config or provenance.
 #[tokio::test]
 async fn maximum_candidate_output_and_published_config_fit_the_existing_document_ceiling() {
     {

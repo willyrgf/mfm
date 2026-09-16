@@ -59,6 +59,8 @@ fn schema_id<T: MfmValue>() -> String {
         .to_string()
 }
 
+// Fixed identities and canonical wire examples protect interoperability of persisted EVM
+// requests, values and evidence.
 #[test]
 fn broad_evm_read_contract_ids_and_wires_are_exact() {
     let source = source("wallet.token", "aa");
@@ -151,6 +153,7 @@ fn broad_evm_read_contract_ids_and_wires_are_exact() {
     );
 }
 
+// A balance observed for one wallet or block must not answer another request.
 #[test]
 fn broad_evidence_rejects_cross_intent_substitution() {
     let original = intent(source("wallet.one", "aa"), anchor(17, "bb"));
@@ -170,6 +173,7 @@ fn broad_evidence_rejects_cross_intent_substitution() {
     }
 }
 
+// Rejected and failed Reads must retain the request identity just as successful observations do.
 #[test]
 fn every_broad_terminal_evidence_wire_carries_the_exact_intent_ref() {
     let intent = intent(source("wallet.one", "aa"), anchor(17, "bb"));
@@ -198,6 +202,8 @@ fn every_broad_terminal_evidence_wire_carries_the_exact_intent_ref() {
     }
 }
 
+// Stored Read data must not bypass typed bounds or omit the facts required by its evidence
+// variant.
 #[test]
 fn broad_read_decode_rejects_unchecked_or_incomplete_values() {
     assert!(serde_json::from_str::<EvmTokenDecimals>("31").is_err());

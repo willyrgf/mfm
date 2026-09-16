@@ -4,6 +4,8 @@ use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_values::{canonicalize_mfm_value, MfmValue};
 
+// The chain and endpoint must produce one exact persisted target identity, with invalid chain
+// IDs rejected on load.
 #[test]
 fn a_physical_target_has_one_interoperable_checked_identity() {
     let endpoint = ContentRef::new(
@@ -45,6 +47,8 @@ fn a_physical_target_has_one_interoperable_checked_identity() {
     );
 }
 
+// Route identity must derive from the public endpoint name: equal names produce equal bindings
+// and changing the name changes the binding.
 #[test]
 fn endpoint_names_are_the_only_stable_route_material() {
     let endpoint = EvmEndpoint::new("reth-dev").expect("endpoint");

@@ -2,6 +2,8 @@ use mfm_evm::*;
 use mfm_values::canonicalize_mfm_value;
 use mfm_values::{DiagnosticEvidence, Object};
 
+// Persisting a transaction failure must retain nested provider causes and supplied diagnostic
+// text, including text outside ordinary value rules.
 #[test]
 fn causal_contracts_preserve_diagnostic_text_through_whole_owner_admission() {
     let diagnostics = DiagnosticEvidence::from_value(serde_json::json!({
@@ -56,6 +58,8 @@ fn causal_contracts_preserve_diagnostic_text_through_whole_owner_admission() {
     );
 }
 
+// Frozen schema identities distinguish the current persisted provider and transaction error
+// contracts.
 #[test]
 fn diagnostic_owner_schema_identity() {
     use mfm_values::MfmValue;
@@ -68,6 +72,8 @@ fn diagnostic_owner_schema_identity() {
     }
 }
 
+// Authority and signer failures must retain their diagnostics and distinct recovery
+// classifications while rejecting obsolete schema identities.
 #[test]
 fn authority_and_signer_owners_keep_diagnostic_admission_and_reject_old_contracts() {
     use mfm_program::ClassifyError;
