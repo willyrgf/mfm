@@ -1,5 +1,7 @@
 use super::*;
 
+// Exhausting automatic retries must not erase the unresolved command; later explicit attempts
+// retain its identity and audit each failure.
 #[tokio::test]
 async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_authority() {
     let store = Arc::new(scripted_store::ScriptedStore::recording());
@@ -97,6 +99,8 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
     assert_eq!(original_count(&store.snapshot()), 3);
 }
 
+// Stopping after an unknown outcome must retain the cause and pending command so an explicit
+// resume can settle that same command.
 #[tokio::test]
 async fn standard_unknown_stop_is_durable_and_explicit_resume_can_settle() {
     let store = Arc::new(MemoryStore::new());
@@ -183,6 +187,8 @@ async fn standard_unknown_stop_is_durable_and_explicit_resume_can_settle() {
     assert_eq!(calls[0], calls[1]);
 }
 
+// A lost failure-append acknowledgement must preserve uncertainty; cold inspection exposes only
+// the original actually retained for the pending command.
 #[tokio::test]
 async fn ambiguous_failure_appends_acknowledge_neither_an_uncommitted_cause_nor_a_new_command() {
     use scripted_store::{AppendAction, ScriptedStore};
@@ -347,6 +353,8 @@ impl Store for PausedFailureStore {
     }
 }
 
+// Cancellation on either side of the failure append must restore either the pending command or
+// its complete failure, never a partial record.
 #[tokio::test]
 async fn cancellation_at_failure_append_exposes_only_the_complete_committed_prefix() {
     for retain in [false, true] {
@@ -438,6 +446,8 @@ async fn cancellation_at_failure_append_exposes_only_the_complete_committed_pref
     }
 }
 
+// A pending failure must agree with its visit and recovery decision; command consistency is
+// checked before resume can enter the adapter.
 #[tokio::test]
 async fn current_record_validates_pending_failure_position_input_request_and_stop_reason() {
     for (wrong_visit, reported_input, reason, run_limit, valid) in [
@@ -620,6 +630,8 @@ async fn current_record_validates_pending_failure_position_input_request_and_sto
     }
 }
 
+// Concurrent attempts may fail differently, but only the winning cause is durably recorded; the
+// loser retains its rejected candidate separately.
 #[tokio::test]
 async fn competing_pending_failures_report_only_the_winning_exact_head_candidate() {
     let store = Arc::new(scripted_store::ScriptedStore::recording());

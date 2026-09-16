@@ -95,6 +95,8 @@ async fn fill_frame_count(store: &MemoryStore, run: &RunId) {
     }
 }
 
+// Exhausting frame capacity must leave the original failure readable even when its recovery
+// decision cannot be recorded.
 #[tokio::test]
 async fn full_history_preserves_committed_original_when_recovery_cannot_fit() {
     let store = Arc::new(PauseSecond(MemoryStore::new()));
@@ -217,6 +219,8 @@ impl Operation for CapacityEffectFlow {
     }
 }
 
+// An external settlement that cannot fit in history must leave the existing command pending and
+// must not be acknowledged as durable.
 #[tokio::test]
 async fn full_history_cannot_acknowledge_external_settlement_or_replace_pending_command() {
     let store = Arc::new(PauseSecond(MemoryStore::new()));

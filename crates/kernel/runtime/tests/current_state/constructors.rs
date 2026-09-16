@@ -89,6 +89,8 @@ impl Operation for CheckedFlow {
         body.pure::<Checked, Identity<Never>>(NoParams, Occurrence::new())
     }
 }
+// Schema-valid input can still fail native construction; execution must retain that rejection
+// and never enter the State callback.
 #[tokio::test]
 async fn native_constructor_causes_reach_the_callback_boundary_without_a_parallel_codec() {
     EVALUATIONS.store(0, Ordering::SeqCst);

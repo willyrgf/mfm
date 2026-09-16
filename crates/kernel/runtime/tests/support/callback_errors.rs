@@ -151,6 +151,8 @@ impl Operation for ErrorProgram {
     }
 }
 
+// Callback failures must leave recoverable history; retrying interpretation of an accepted
+// Effect must not repeat the external action.
 #[tokio::test]
 async fn internal_callback_errors_preserve_heads_and_do_not_repeat_settled_effects() {
     let store = Arc::new(MemoryStore::new());

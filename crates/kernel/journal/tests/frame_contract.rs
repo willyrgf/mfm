@@ -12,6 +12,8 @@ fn canonical(value: &Value) -> PlainCanonicalJsonBytes {
     PlainCanonicalJsonBytes::from_json_str(&serde_json::to_string(value).unwrap()).unwrap()
 }
 
+// Journal must preserve the caller-owned payload and exact frame bytes because those bytes
+// identify the append-only history.
 #[test]
 fn opaque_v6_envelope_round_trips_exact_bytes_and_recursive_head_identity() {
     let run = run();
@@ -37,6 +39,7 @@ fn opaque_v6_envelope_round_trips_exact_bytes_and_recursive_head_identity() {
     assert_eq!(first.canonical_bytes(), expected.as_bytes());
 }
 
+// Alternate encodings and obsolete fields must not be accepted as the current frame format.
 #[test]
 fn envelope_rejects_noncanonical_unknown_duplicate_and_obsolete_fields() {
     let first = seal_frame(&run(), 1, None, &canonical(&json!({}))).unwrap();
@@ -65,6 +68,8 @@ fn envelope_rejects_noncanonical_unknown_duplicate_and_obsolete_fields() {
     assert!(decode_frame(duplicate.as_bytes()).is_err());
 }
 
+// A frame can be qualified from its own header and predecessor digest; Journal does not need to
+// load earlier frames.
 #[test]
 fn local_header_checks_do_not_reconstruct_predecessor_history() {
     let payload = canonical(&json!({"arbitrary_payload": true}));
@@ -86,6 +91,8 @@ fn local_header_checks_do_not_reconstruct_predecessor_history() {
     ));
 }
 
+// Oversized input must report the frame limit, while malformed input within that limit must
+// retain its parser cause.
 #[test]
 fn decoding_rejects_actual_frame_overflow_before_parsing_and_retains_parser_causes() {
     let oversized = vec![b' '; MAX_FRAME_BYTES + 1];

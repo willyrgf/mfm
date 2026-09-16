@@ -92,6 +92,8 @@ impl mfm_program::Operation for NestedRegions {
     }
 }
 
+// Alternating between nested checkpoints must restore saved inputs while sharing the same finite
+// State and run recovery budgets.
 #[tokio::test]
 async fn nested_restarts_restore_inputs_without_resetting_local_or_global_allowances() {
     for (case, local, global, expected_limit, committed) in [

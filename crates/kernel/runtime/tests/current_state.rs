@@ -189,6 +189,8 @@ fn runtime(store: Arc<dyn Store>, available: Arc<AtomicBool>, calls: Arc<AtomicU
     Runtime::new(builder.finish(), store)
 }
 
+// A broken recovery handler must not lose the provider failure; resume must retry policy before
+// allowing another provider call.
 #[tokio::test]
 async fn original_commits_before_policy_failure_and_cold_resume_retries_only_recovery() {
     CLASSIFICATIONS.store(0, Ordering::SeqCst);
@@ -317,6 +319,8 @@ impl Store for RefuseFailure {
         }
     }
 }
+// When recording fails, return the original failure and attempted frame without claiming they
+// were stored or performing a speculative reload.
 #[tokio::test]
 async fn recording_failure_retains_admitted_original_and_exact_candidate_without_probing() {
     let store = Arc::new(RefuseFailure {
@@ -482,6 +486,8 @@ impl Operation for EffectFlow {
         body.effect::<Effect, Submit, Identity<Never>>(&NoParams, NoParams, Occurrence::new())
     }
 }
+// Once settlement is stored, an interpreter failure must be recoverable without submitting the
+// external command again.
 #[tokio::test]
 async fn pending_command_settles_before_interpretation_and_resume_enters_no_adapter() {
     INTERPRETER_AVAILABLE.store(false, Ordering::SeqCst);
@@ -661,6 +667,8 @@ impl Operation for Checkpoints {
         body.read::<Read, Refresh, Identity<Never>>(&NoParams, NoParams, Occurrence::new())
     }
 }
+// Restart must restore the chosen checkpoint, discard later checkpoints and retain spent
+// recovery allowance.
 #[tokio::test]
 async fn restart_restores_its_complete_input_prunes_later_checkpoints_and_keeps_usage() {
     let store = Arc::new(MemoryStore::new());

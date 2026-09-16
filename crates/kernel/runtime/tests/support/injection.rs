@@ -120,6 +120,8 @@ impl Operation for InjectedProgram {
     }
 }
 
+// An injected sequence must resume through its pending Effect and preserve both the projection
+// failure and its mapped root result.
 #[tokio::test]
 async fn injected_effects_resume_and_projection_failure_retains_the_root_mapping() {
     let store = Arc::new(MemoryStore::new());
@@ -264,6 +266,8 @@ impl Operation for RecursionProgram {
         body.pure::<Increment, FromNever<Number>>(NoParams, Occurrence::new())
     }
 }
+// Rejecting recursive expansion must leave the parent free of partial injected States so
+// ordinary authoring can continue.
 #[test]
 fn recursive_injection_is_bounded_and_does_not_merge_partial_states() {
     let program = expand_program(

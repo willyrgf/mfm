@@ -22,6 +22,8 @@ impl mfm_program::Operation for RetryingRead {
     }
 }
 
+// Recording a retry must yield before the next provider call; reading retained domain or
+// operational failures must preserve the cause and spent allowance.
 #[tokio::test]
 async fn committed_read_recovery_yields_and_reconstructs_without_provider_calls() {
     use crate::{RunViewState, RunnableReason, Runtime};
@@ -230,6 +232,8 @@ impl mfm_program::Operation for PendingSettlement {
     }
 }
 
+// A stopped invocation must leave the pending command available for explicit settlement with its
+// original Effect identity.
 #[tokio::test]
 async fn stopped_pending_effect_retains_exact_authority_until_explicit_settlement() {
     use crate::{EffectAdapterOutcome, InvocationFailure, RunViewState, Runtime};
@@ -434,6 +438,8 @@ impl mfm_program::Operation for RestartRegion {
     }
 }
 
+// Restart must not cross an injected external action, while a checkpoint after a completed
+// Effect remains usable without repeating that Effect.
 #[tokio::test]
 async fn injected_effect_blocks_prior_checkpoint_but_preserves_post_effect_restart() {
     use crate::{EffectAdapterOutcome, RunViewState, RunnableReason, Runtime};
@@ -532,6 +538,8 @@ async fn injected_effect_blocks_prior_checkpoint_but_preserves_post_effect_resta
     }
 }
 
+// A lost recovery-append acknowledgement must return the prior observation and Store cause;
+// later inspection may discover the committed retry.
 #[tokio::test]
 async fn ambiguous_recovery_append_stops_with_historical_observation_and_preserved_source() {
     use crate::{InvocationFailure, RunViewState, Runtime};
@@ -604,6 +612,8 @@ async fn ambiguous_recovery_append_stops_with_historical_observation_and_preserv
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
+// Concurrent Read failures must converge on retained failure or recovery records and yield
+// before either caller executes the granted retry.
 #[tokio::test]
 async fn competing_original_appends_yield_a_checked_observation_without_executing_the_retry() {
     use crate::{RunViewState, Runtime};
@@ -677,6 +687,8 @@ async fn competing_original_appends_yield_a_checked_observation_without_executin
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
+// An interrupted observation has no recorded failure, so resuming it must retain the visit and
+// its unused retry allowance.
 #[tokio::test]
 async fn cancelled_read_preserves_visit_and_spends_no_recovery_allowance() {
     use crate::{RunViewState, RunnableReason, Runtime};

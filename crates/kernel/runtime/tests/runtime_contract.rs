@@ -25,6 +25,8 @@ mod scripted_store;
 use program::*;
 use scripted_store::*;
 
+// An existing contract identity must not silently select a different Rust codec, descriptor or
+// State implementation.
 #[test]
 fn exact_value_and_state_abi_collisions_are_rejected() {
     let mut different_type = RuntimeAssemblyBuilder::new().expect("builder");
@@ -62,6 +64,8 @@ fn exact_value_and_state_abi_collisions_are_rejected() {
     ));
 }
 
+// Generic values may share a semantic family, but execution and restoration must select the
+// codec for each exact schema.
 #[tokio::test]
 async fn one_semantic_family_executes_multiple_exact_schemas_hot_and_cold() {
     assert_eq!(
@@ -179,6 +183,8 @@ async fn one_semantic_family_executes_multiple_exact_schemas_hot_and_cold() {
     );
 }
 
+// An Effect binding must have one adapter, while a Read with the same nominal identity remains a
+// distinct capability.
 #[test]
 fn effect_registration_rejects_duplicates_and_distinguishes_capability_modes() {
     let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
@@ -232,6 +238,7 @@ fn effect_registration_rejects_duplicates_and_distinguishes_capability_modes() {
         .expect("mode participates in the capability contract identity");
 }
 
+// An incomplete assembly must not admit a run that it cannot execute.
 #[tokio::test]
 async fn missing_effect_adapter_is_rejected_before_store_io() {
     let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
@@ -269,6 +276,8 @@ async fn missing_effect_adapter_is_rejected_before_store_io() {
     ));
 }
 
+// Unused recovery allowances must not prevent ordinary completion; restored inputs and outputs
+// must retain their exact identities.
 #[tokio::test]
 async fn pure_and_zero_state_programs_restore_without_reserving_future_recovery_capacity() {
     let store = Arc::new(MemoryStore::new());
@@ -346,6 +355,8 @@ async fn pure_and_zero_state_programs_restore_without_reserving_future_recovery_
     assert_eq!(value.canonical_bytes(), br#"{"value":9}"#);
 }
 
+// Reading retained success must not call the provider again; an interrupted Read can later
+// record a domain failure and its root mapping.
 #[tokio::test]
 async fn read_success_and_separate_failure_recovery_are_restorable_without_repeating_io() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -466,6 +477,8 @@ async fn read_success_and_separate_failure_recovery_are_restorable_without_repea
     assert_eq!(root.decode::<Number>().unwrap().value, 21);
 }
 
+// Cancelling an in-flight Read must leave the admitted run runnable without inventing a
+// completed observation.
 #[tokio::test]
 async fn cancellation_during_observation_preserves_a_runnable_prefix() {
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -529,6 +542,8 @@ async fn cancellation_during_observation_preserves_a_runnable_prefix() {
     assert!(matches!(prefix.state(), RunViewState::Runnable { .. }));
 }
 
+// Cancellation after adapter entry must leave a durable command that a rebuilt Runtime resumes
+// with the same Effect identity.
 #[tokio::test]
 async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_identity() {
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -659,6 +674,8 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
     );
 }
 
+// A pending response must return control to the caller; only explicit resume may ask the adapter
+// for settlement.
 #[tokio::test]
 async fn pending_yields_once_and_a_later_settlement_closes_the_same_prepare() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -723,6 +740,8 @@ async fn pending_yields_once_and_a_later_settlement_closes_the_same_prepare() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
+// A preparation failure must prevent adapter entry, and invalid evidence must leave the prepared
+// command unresolved.
 #[tokio::test]
 async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -883,6 +902,8 @@ fn retained_effect_reader(frames: Vec<Vec<u8>>, calls: Arc<AtomicUsize>) -> Runt
     )
 }
 
+// A lost append acknowledgement must recover from what was actually stored at each Effect
+// boundary, retaining the same command identity.
 #[tokio::test]
 async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
     // Expected retained heads and adapter counts are independent of the Store script.
@@ -1018,6 +1039,8 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
     }
 }
 
+// Losing an append race must return the winning record and yield before executing the next step
+// on its behalf.
 #[tokio::test]
 async fn effect_not_inserted_returns_the_winner_without_entering_its_new_visit() {
     for (offset, sequence) in [2_u64, 3, 4].into_iter().enumerate() {
@@ -1074,6 +1097,8 @@ async fn effect_not_inserted_returns_the_winner_without_entering_its_new_visit()
     }
 }
 
+// Declared adapter failures require durable audit records; internal errors and panics must leave
+// the command pending without a fabricated outcome.
 #[tokio::test]
 async fn operational_failures_are_audited_while_internal_failures_preserve_prepare() {
     #[derive(Clone, Copy)]
@@ -1178,6 +1203,8 @@ async fn operational_failures_are_audited_while_internal_failures_preserve_prepa
     }
 }
 
+// Inspecting a retained Effect must reject inconsistent command or output facts without
+// contacting its adapter.
 #[tokio::test]
 async fn retained_effect_facts_are_validated_without_adapter_io() {
     for settled in [false, true] {
@@ -1272,6 +1299,8 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
     }
 }
 
+// Two callers may reconcile the same command, but their competing appends must converge on one
+// retained settlement and completion.
 #[tokio::test]
 async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
     let store = Arc::new(MemoryStore::new());
@@ -1360,6 +1389,8 @@ async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
     assert_eq!(ids[0], ids[1]);
 }
 
+// A Store failure must preserve its mechanical cause and candidate without claiming an
+// observation that was never obtained.
 #[tokio::test]
 async fn store_failures_preserve_mechanical_source_and_unknown_observation() {
     for (offset, failure) in [

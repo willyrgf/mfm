@@ -2,6 +2,8 @@ use mfm_ids::StableId;
 use mfm_keystore::{KeystoreError, KeystoreOwner, SecretSecp256k1Scalar, MAX_KEY_INSTANCES};
 use mfm_signing::{recover_public_key, Secp256k1Signer, SigningDigest, SigningError};
 
+// Reimporting a key must preserve its public identity while signer handles retain their
+// purposes; signatures must recover that key and shutdown must report a closed owner.
 #[tokio::test]
 async fn duplicate_import_and_signing_are_key_and_purpose_bound_and_recoverable() {
     let owner = KeystoreOwner::start().expect("owner");

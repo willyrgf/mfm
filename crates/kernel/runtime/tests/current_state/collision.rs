@@ -90,6 +90,8 @@ impl Store for CompetingStore {
     }
 }
 
+// After a rejected append, distinguish the exact candidate from a competing record and preserve
+// reload errors without running recovery.
 #[tokio::test]
 async fn candidate_probe_yields_latest_without_recovery_and_preserves_exclusion_or_reload_failure()
 {

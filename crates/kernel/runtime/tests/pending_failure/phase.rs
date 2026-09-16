@@ -104,6 +104,8 @@ impl Operation for PhaseOperation {
     }
 }
 
+// A handler request cannot override Runtime safety rules or spend recovery allowance on a denied
+// action.
 #[tokio::test]
 async fn runtime_denies_pure_retry_ineligible_restart_and_settled_effect_retry() {
     for (case, (effect, restart, denial)) in [

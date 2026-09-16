@@ -39,6 +39,8 @@ struct TextValue {
     text: String,
 }
 
+// Content addressing must use the declared schema and exact canonical bytes, and reject values
+// that fail admission.
 #[test]
 fn canonicalization_proves_descriptor_bytes_secret_policy_and_exact_digest() {
     let value = ExactValue {
@@ -66,6 +68,8 @@ fn canonicalization_proves_descriptor_bytes_secret_policy_and_exact_digest() {
     ));
 }
 
+// Loading an Object must validate its claimed digest and canonical payload while preserving
+// useful parser rejection details.
 #[test]
 fn object_deserialize_checks_admission_and_reports_parser_errors() {
     use mfm_values::Object;

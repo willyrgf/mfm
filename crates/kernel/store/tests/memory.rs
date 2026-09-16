@@ -8,6 +8,8 @@ fn run_with_byte(byte: u8) -> RunId {
     RunId::from_digest(DigestBytes::from_array([byte; 32]))
 }
 
+// The memory Store must retain exact frame bytes, reject stale appends and allow only one
+// competing successor to win.
 #[tokio::test]
 async fn memory_matches_the_shared_mechanical_store_scenarios() {
     let store = MemoryStore::new();
@@ -20,6 +22,8 @@ fn run_page_limits_are_bounded() {
     assert!(RunPageLimit::new(mfm_store::MAX_RUN_PAGE_ITEMS + 1).is_err());
 }
 
+// Paging must use stable RunId order regardless of insertion order and report the stored head
+// for each run.
 #[tokio::test]
 async fn memory_run_index_pages_only_mechanical_heads_in_run_id_order() {
     let store = MemoryStore::new();

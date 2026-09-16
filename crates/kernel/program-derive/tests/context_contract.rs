@@ -32,6 +32,8 @@ fn complete<C: Value, S: ContextSlot<C, Value = Plan>>(context: C) -> S::With<Co
     S::replace(context, Completed { quantity })
 }
 
+// Advancing one context field must retain its siblings and produce a value that survives
+// persistence, even when the context cannot be cloned.
 #[test]
 fn typed_replacement_preserves_siblings_without_clone_or_shape_specific_forwarding() {
     let initial = Workflow {
@@ -66,6 +68,8 @@ fn typed_replacement_preserves_siblings_without_clone_or_shape_specific_forwardi
     assert_eq!(reloaded.unrelated, 44);
 }
 
+// A workflow field keeps its identity as its type advances, while other fields and namespaces
+// remain distinct.
 #[test]
 fn slot_identities_name_the_explicit_namespace_and_field_independent_of_stage() {
     let first = <WorkflowFirstSlot as ContextSlot<Workflow<Plan, Plan>>>::slot_id().unwrap();
@@ -84,6 +88,8 @@ fn slot_identities_name_the_explicit_namespace_and_field_independent_of_stage() 
     );
 }
 
+// Invalid context layouts and access through a slot at the wrong stage must fail in consumer
+// code at compile time.
 #[test]
 fn unsupported_contexts_and_wrong_required_field_types_are_compile_errors() {
     let cases = trybuild::TestCases::new();

@@ -1,3 +1,5 @@
+// Consumer code must not forge Program internals or let authoring authority escape the scope
+// that owns it.
 #[test]
 fn authoring_authority_remains_scoped() {
     let tests = trybuild::TestCases::new();
