@@ -99,9 +99,10 @@ concern configurable product orchestration around that caller-driven contract.
   configurable product. Existing cancellation, acknowledgement-loss, prepared-wire, and cold-fold
   tests establish specific boundaries; they do not establish a complete configurable orchestration product. Ephemeral
   keystore survival during Runtime reconstruction is not host-process restart recovery.
-- Selection/product E2Es should use supported execution and checked results. Framework composition
-  and extension tests legitimately author Operations/States and may drive Runtime directly.
-  Deliberate faults, teardown/reconstruction, exact heads, nonce/retained-wire checks, and append
-  boundaries need focused unit/integration assertions. Separating these purposes must preserve
-  existing guarantees and managed task coverage; it does not require a new fault-scenario DSL or
-  embedding fault injection in ordinary operation semantics.
+- The [three public-usage E2Es](../RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md#three-public-usage-e2es)
+  are the agreed replacement target: selection through both CLI/REST, composition of existing
+  Operations/States, and new-State implementation plus composition. Each can grow named recovery,
+  durability, and error cases. Framework cases may author Operations/States and drive Runtime
+  directly; fault cases may assert intermediate authority/history. Focused boundary tests remain
+  valid. Map existing guarantees and managed selection before deleting old coverage; planned future
+  cases are not replacements for exercised guarantees. No new scenario DSL is required.
