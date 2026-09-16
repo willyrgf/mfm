@@ -49,6 +49,8 @@ fn checked_public_key_accepts_only_valid_uncompressed_points() {
     assert!(Secp256k1PublicKey::new(off_curve).is_err());
 }
 
+// The frozen signature must recover the expected key only for its original digest, protecting
+// interoperability of public recovery.
 #[test]
 fn public_recovery_matches_the_frozen_key_and_digest() {
     let signature = frozen_signature();

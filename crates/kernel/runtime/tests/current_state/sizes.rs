@@ -148,6 +148,8 @@ impl mfm_program::Operation for LargeFlow {
         body.read::<Read, LargeObservation, Identity<Never>>(&NoParams, NoParams, Occurrence::new())
     }
 }
+// A panicking original serializer must run only once; report known execution context and
+// unavailable original details without advancing history.
 #[tokio::test]
 async fn unrecordable_original_reports_known_slot_and_encoding_cause_without_append() {
     ORIGINAL_SERIALIZATIONS.store(0, Ordering::SeqCst);
@@ -218,6 +220,8 @@ async fn unrecordable_original_reports_known_slot_and_encoding_cause_without_app
     assert_eq!(loaded.head().head_digest(), observed.head_digest());
 }
 
+// An original rejected by value admission must not leak its forbidden text through the error or
+// retained history.
 #[tokio::test]
 async fn rejected_operational_original_reports_unavailable_detail_without_append() {
     let store = Arc::new(MemoryStore::new());

@@ -42,6 +42,8 @@ fn observe<T>(result: std::result::Result<T, StoreError>) -> hostile::Observatio
     }
 }
 
+// The memory backend must match the shared Store contract even when its private physical state
+// is corrupted, so normal construction cannot hide missing load or append validation.
 #[tokio::test]
 async fn memory_runs_the_shared_hostile_conformance_matrix() {
     use hostile::{HostileCase as Case, Observation};

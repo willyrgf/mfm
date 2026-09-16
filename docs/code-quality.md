@@ -122,6 +122,15 @@ See [the adapter review](adapter-error-audit.md) for the current inventory and i
 
 Every test must be able to fail because an observable capability regressed.
 
+Make every test's purpose clear in short, plain English. Name the condition and observable result
+in the test name, for example `append_with_stale_head_leaves_history_unchanged`. When the name alone
+does not explain the guarantee or why a regression matters, add a concise purpose comment, such as
+"A stale writer must not overwrite acknowledged history." Explain the specific behavior protected;
+avoid generic wording such as "tests append functionality", repeating the name, or narrating setup.
+For parameterized tests, explain the shared guarantee once and give cases meaningful labels.
+Check that the assertions establish the stated purpose; narrow the claim or strengthen the test
+when they do not. Apply this convention when adding or changing tests.
+
 Prefer one scenario through a crate public API that a consumer can call. Cover one useful success
 path and its material boundary failures. Product tests call Application methods and production
 domain types. They do not rebuild a parallel Operation, State, or adapter model.

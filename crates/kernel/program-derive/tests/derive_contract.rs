@@ -103,6 +103,8 @@ struct TransparentNonzero(NonZeroU64);
 #[serde(transparent)]
 struct TransparentMap(BTreeMap<String, u64>);
 
+// Generated schemas must reflect consumer types, including enum layouts, transparent wrappers,
+// byte bounds and nonzero numbers.
 #[test]
 fn surviving_value_derives_generate_complete_schema_descriptors() {
     assert!(External::<Payload>::schema_descriptor().is_ok());
@@ -187,6 +189,7 @@ fn surviving_value_derives_generate_complete_schema_descriptors() {
         .is_ok());
 }
 
+// Different generic payload types must not share a cached persisted schema identity.
 #[test]
 fn generic_persisted_derives_keep_monomorphization_specific_identity() {
     let second_identity = Retained::<SecondRetainedValue>::schema_identity().expect("second");
@@ -206,6 +209,7 @@ fn generic_persisted_derives_keep_monomorphization_specific_identity() {
     );
 }
 
+// Consumers must not regain access to superseded derive APIs.
 #[test]
 fn removed_derives_do_not_compile() {
     trybuild::TestCases::new().compile_fail("tests/ui/removed_derives.rs");

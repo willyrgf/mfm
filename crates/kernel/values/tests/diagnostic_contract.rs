@@ -10,6 +10,8 @@ struct Failure {
     details: DiagnosticEvidence,
 }
 
+// The diagnostic-text exception must survive whole-object admission without allowing ordinary
+// sensitive text or floating-point values.
 #[test]
 fn whole_owner_admits_diagnostic_text_but_retains_ordinary_text_and_numeric_rules() {
     let mut failure = Failure {
@@ -29,6 +31,8 @@ fn whole_owner_admits_diagnostic_text_but_retains_ordinary_text_and_numeric_rule
     assert!(Object::from_value(&failure).is_err());
 }
 
+// If diagnostic encoding fails or panics, keep the known operation and size facts without
+// invoking the failing serializer again.
 #[test]
 fn invocation_conversion_failure_keeps_primary_facts_without_retrying_serialization() {
     struct Failing {

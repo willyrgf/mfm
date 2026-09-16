@@ -68,6 +68,8 @@ fn config_digest_and_document_bounds_are_exact() {
     );
 }
 
+// Revisions sharing a name must remain independently addressable; retrying an import or deletion
+// must not affect another revision.
 #[tokio::test]
 async fn memory_repository_retains_lists_loads_and_deletes_exact_revisions() {
     let repository = MemoryConfigRepository::default();
@@ -120,6 +122,7 @@ async fn memory_repository_retains_lists_loads_and_deletes_exact_revisions() {
         .is_some());
 }
 
+// Different bytes claiming an existing revision identity must not replace the retained document.
 #[tokio::test]
 async fn repository_rejects_identity_collision_without_losing_the_revision() {
     let repository = MemoryConfigRepository::default();
@@ -146,6 +149,8 @@ async fn repository_rejects_identity_collision_without_losing_the_revision() {
     );
 }
 
+// Concurrent importers must agree on one creation; that deduplication must not impose a small
+// global limit on distinct revisions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_identical_imports_retain_one_revision() {
     let repository = Arc::new(MemoryConfigRepository::default());

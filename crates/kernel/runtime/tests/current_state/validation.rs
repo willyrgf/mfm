@@ -32,6 +32,8 @@ impl Store for SnapshotStore {
     }
 }
 
+// Inspection validates the current record against admission without replaying execution; a
+// locally valid output is accepted without recomputing it.
 #[tokio::test]
 async fn cold_inspection_rejects_locally_inconsistent_current_records_without_callbacks() {
     let store = Arc::new(MemoryStore::new());
@@ -192,6 +194,8 @@ async fn cold_inspection_rejects_locally_inconsistent_current_records_without_ca
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
+// A one-frame snapshot must not claim two different byte sequences for the same admission and
+// latest frame.
 #[tokio::test]
 async fn admission_and_latest_cannot_disagree_when_the_head_is_admission() {
     let run = RunId::from_digest(DigestBytes::from_array([156; 32]));
@@ -242,6 +246,8 @@ impl Operation for WideAllowances {
     }
 }
 
+// Current recovery counters must fit the run allowance without arithmetic overflow; inspection
+// does not replay historical grants.
 #[tokio::test]
 async fn current_usage_checks_the_derived_sum_without_reconstructing_historical_grants() {
     for (index, limit, retries, restarts, accepted) in [

@@ -96,6 +96,8 @@ impl Operation for ProtocolFlow {
     }
 }
 
+// Explicit evidence of nonacceptance permits retrying the same command; restoring the recorded
+// decision must not run classification or policy again.
 #[tokio::test]
 async fn qualified_nonacceptance_retries_and_cold_history_never_reclassifies() {
     assert_eq!(

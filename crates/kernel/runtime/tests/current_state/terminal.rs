@@ -70,6 +70,8 @@ impl mfm_program::Operation for RejectFlow {
     }
 }
 
+// Failure mapping can be retried from the committed original without evaluating the State again;
+// restored reports must still have a valid root value.
 #[tokio::test]
 async fn terminal_mapping_failure_leaves_the_original_committed_and_resume_maps_without_evaluation()
 {
