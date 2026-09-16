@@ -8,6 +8,8 @@ fn run_id() -> RunId {
     RunId::from_digest(DigestBytes::from_array([19; 32]))
 }
 
+// A REST projection failure after confirmed insertion must preserve the acknowledged frame
+// alongside the projection cause.
 #[tokio::test]
 async fn projection_error_preserves_explicit_acknowledged_head() {
     let candidate = mfm_journal::seal_frame(
@@ -47,6 +49,8 @@ async fn projection_error_preserves_explicit_acknowledged_head() {
     );
 }
 
+// REST must report an uncertain append with HTTP 503 while preserving the RunId and exact
+// attempted frame for recovery.
 #[tokio::test]
 async fn ambiguous_append_keeps_503_and_exact_recovery_identity() {
     let candidate = mfm_journal::seal_frame(
@@ -92,6 +96,8 @@ async fn ambiguous_append_keeps_503_and_exact_recovery_identity() {
     );
 }
 
+// If even the final failure body cannot be encoded, its concrete JSON cause must survive in the
+// body error channel.
 #[tokio::test]
 async fn final_encoding_failure_preserves_concrete_json_error_in_body_channel() {
     let source = serde_json::from_str::<bool>("invalid terminal JSON").unwrap_err();

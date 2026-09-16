@@ -231,6 +231,8 @@ async fn provisioning_rejects_unequal_targets_before_connecting() {
     );
 }
 
+// A concurrent append must not mix load snapshots, and frame qualification must leave the async
+// executor able to make progress.
 async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresBackend>) {
     let snapshot_id = run_id(30);
     let snapshot_genesis = genesis(&snapshot_id);
@@ -330,6 +332,8 @@ async fn assert_snapshot_and_blocking_contract(store: &Arc<PostgresBackend>) {
     assert_eq!(retained.head().head_sequence(), 1);
 }
 
+// Commit faults must retain definite versus uncertain outcomes, while hostile physical rows
+// receive the same rejection as the memory Store.
 async fn assert_commit_and_hostile_contract(
     store: &Arc<PostgresBackend>,
     connection: &mut PgConnection,
@@ -607,6 +611,8 @@ async fn assert_commit_and_hostile_contract(
     store_hostile::assert_hostile_matrix(&observed);
 }
 
+// Import and deletion must expose uncertain commits accurately and preserve independent
+// revisions under retries and races.
 async fn assert_config_mutation_contract(backend: &Arc<PostgresBackend>) {
     use config::MutationCommitFault as Fault;
 
@@ -829,6 +835,8 @@ async fn assert_delete_fault(
     );
 }
 
+// Nonce reservations must be unique within a domain, and competing preparations or lost
+// acknowledgements must preserve the first retained transaction.
 async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTransactionAuthority>) {
     let domain = nonce_domain(backend.authority_epoch(), 1, 2, 3);
     let command = reference("mfm.test.evm-command", &[5]);
@@ -1033,6 +1041,9 @@ async fn assert_evm_transaction_authority_contract(backend: &Arc<PostgresEvmTran
     );
 }
 
+// The real database must enforce append-only run storage, independent config revisions and
+// transaction custody under restricted runtime privileges; incompatible schemas or grants must
+// be rejected.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires the managed local PostgreSQL service provided by postgres-test"]
 async fn managed_postgres_persistence_authority_contract() {
@@ -1756,6 +1767,8 @@ async fn managed_postgres_persistence_authority_contract() {
     reset_schemas(&mut connection).await;
 }
 
+// Ambient PostgreSQL options must not override the checked connection policy, even when the
+// managed locator is valid.
 #[test]
 #[ignore = "requires an isolated postgres-test subprocess with PGOPTIONS"]
 fn managed_postgres_rejects_pgoptions() {
@@ -1771,6 +1784,8 @@ fn managed_postgres_rejects_pgoptions() {
     ));
 }
 
+// Rows in inherited child tables must not affect admission, run lookup, config mutation or nonce
+// selection for the physical tables the backend owns.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires the managed local PostgreSQL service provided by postgres-test"]
 async fn inherited_rows_are_outside_physical_table_custody() {

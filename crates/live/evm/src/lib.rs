@@ -318,6 +318,7 @@ mod tests {
 
     fn assert_send<T: Send>(_: &T) {}
 
+    // The adapter must carry Runtime's exact request identity through the provider into evidence.
     #[tokio::test]
     async fn typed_provider_receives_and_preserves_the_runtime_intent_ref() {
         let target = target(1, 2);
@@ -341,6 +342,7 @@ mod tests {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     }
 
+    // A local route or intent mismatch must retain diagnostic context without issuing a provider call.
     #[tokio::test]
     async fn target_mismatch_is_internal_and_never_enters_provider() {
         let registered = target(1, 2);
@@ -395,6 +397,8 @@ mod tests {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     }
 
+    // Replacing a provider handle in a fresh assembly must preserve the public target identity,
+    // while duplicate registration within one assembly must fail.
     #[test]
     fn one_target_registers_three_capabilities_and_rejects_duplicate_keys() {
         let target = target(1, 2);
@@ -422,6 +426,7 @@ mod tests {
         replacement.finish();
     }
 
+    // An anchored call must use its registered route; mismatches must fail before provider IO.
     #[tokio::test]
     async fn anchored_registration_is_route_keyed_and_rejects_mismatches_locally() {
         let physical = target(1, 2);

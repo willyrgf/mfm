@@ -1,4 +1,6 @@
-//! Managed cross-transport execution verification over production composition.
+//! An interrupted REST run must survive config deletion and finish from its admitted history.
+//! Fresh CLI and REST processes must agree on success and failure reports; enrichment
+//! publication must remain repeatable across both transports after the source config is deleted.
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};

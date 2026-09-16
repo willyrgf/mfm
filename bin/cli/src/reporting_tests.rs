@@ -84,6 +84,8 @@ impl Write for FailingWriter {
     }
 }
 
+// Both CLI formats must render the observed successful value and report success without writing
+// an error.
 #[tokio::test]
 async fn successful_json_and_text_preserve_the_observed_value_and_exit() {
     for output in [OutputFormat::Json, OutputFormat::Text] {
@@ -111,6 +113,8 @@ async fn successful_json_and_text_preserve_the_observed_value_and_exit() {
     }
 }
 
+// Partial output or flush failure must retain the prepared report and historical head on stderr
+// without claiming new acknowledgement.
 #[tokio::test]
 async fn stdout_write_and_flush_failure_preserve_original_report_and_observed_head() {
     for (mut stdout, stage, code) in [
@@ -142,6 +146,8 @@ async fn stdout_write_and_flush_failure_preserve_original_report_and_observed_he
     }
 }
 
+// A failed text flush must preserve the already formatted output in the failure report instead
+// of reconstructing it.
 #[tokio::test]
 async fn stdout_text_failure_keeps_the_already_formatted_buffer() {
     let view = view().await;
@@ -158,6 +164,8 @@ async fn stdout_text_failure_keeps_the_already_formatted_buffer() {
     assert!(text.contains("\"stage\":\"flush\""));
 }
 
+// If the error stream fails, reporting must stop after one attempt instead of recursively trying
+// to report that failure.
 #[tokio::test]
 async fn stderr_failure_ends_both_normal_and_final_presentations_without_retry() {
     let mut stderr = FailingWriter::write_failure(0);
@@ -177,6 +185,8 @@ async fn stderr_failure_ends_both_normal_and_final_presentations_without_retry()
     assert_eq!(stderr.writes, 1);
 }
 
+// If normal JSON encoding never completed, the failure presentation must keep the observed head
+// and mark the original report unavailable.
 #[tokio::test]
 async fn normal_encoding_failure_reports_unavailable_original_without_stdout() {
     let view = view().await;
@@ -346,6 +356,8 @@ fn output_acyclic_sources_retain_every_layer_in_order() {
     assert!(report["details"].get("source_cycle").is_none());
 }
 
+// CLI rendering must preserve the failed append cause and candidate, with no invented original
+// failure or observed head.
 #[tokio::test]
 async fn store_recording_payload_reaches_cli_without_changing_disposition() {
     struct Refuse;

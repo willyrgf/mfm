@@ -140,6 +140,8 @@ fn runtime(binding: &EvmTransactionBinding, store: Arc<MemoryStore>) -> Runtime 
     Runtime::new(builder.finish(), store)
 }
 
+// The reusable transaction workflow must preserve each consumer context and select its exact
+// result codec both during execution and after reconstruction.
 #[tokio::test]
 async fn one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_cold() {
     assert_ne!(
@@ -290,6 +292,7 @@ impl mfm_evm::TransactionRecipe<FirstInitial> for WrongMode {
     }
 }
 
+// A creation command must not expand under a recipe that declares a call result.
 #[test]
 fn an_incompatible_recipe_mode_is_rejected_before_program_admission() {
     let input = FirstContext {
@@ -322,6 +325,8 @@ type Sources = SourceContext<
 type FromA = mfm_evm::CallCreatedAt<SourceContextTransactionSlot, SourceContextASlot>;
 type FromB = mfm_evm::CallCreatedAt<SourceContextTransactionSlot, SourceContextBSlot>;
 
+// Choosing a different source field changes which contract is called, so it must change State
+// identity even when the input and output types match.
 #[test]
 fn same_typed_source_selection_changes_executable_identity_without_changing_value_abis() {
     use mfm_evm::ReserveEvmNonce;
@@ -344,6 +349,8 @@ fn same_typed_source_selection_changes_executable_identity_without_changing_valu
     );
 }
 
+// A Program selecting another source must not execute through the first source's assembly or
+// enter transaction IO.
 #[tokio::test]
 async fn selecting_another_same_typed_source_requires_its_own_assembly_before_io() {
     use mfm_evm::{
@@ -466,6 +473,8 @@ impl mfm_evm::TransactionRecipe<FirstInitial> for CustomCreate {
     }
 }
 
+// A custom recipe must remain a distinct executable selection even when it currently produces
+// the same command as a built-in recipe.
 #[test]
 fn custom_recipe_identity_is_committed_even_when_slots_mode_and_command_are_equal() {
     use mfm_evm::{ReserveEvmNonce, TransactionRecipe};

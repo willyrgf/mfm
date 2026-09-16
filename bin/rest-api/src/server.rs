@@ -524,6 +524,8 @@ mod tests {
         assert_eq!(response_json(response).await["code"], code);
     }
 
+    // HTTP routes must enforce request bounds and return the shared application models,
+    // including config lifecycle, run phases and recovery identities.
     #[tokio::test]
     async fn router_contract_covers_transport_models_and_recovery() {
         let service = router(application());
