@@ -126,14 +126,20 @@ a fixed catalogue of complete workflows cannot satisfy this path alone.
 Acceptance example, expressed as requirements rather than proposed Rust syntax:
 
 ```text
-input: contract artifact, static setter argument 42, checked transaction options
-sequence:
-  deploy the contract
-  call configure(42) on that deployment's successful address
-  observe value() at the configuration transaction's target and receipt anchor
-result: retained execution evidence and a checked decoded value
-assertion owned by test: decoded value equals independently chosen 42
+input: checked production config with initial value 42, increment 42, artifact and transaction options
+maintained operation: Deploy -> Configure -> Observe, yielding 42
+recomposition through the existing OperationExpansion DSL:
+  reuse Deploy
+  insert the existing checked-add Pure State, producing argument 84
+  reuse Configure and Observe
+result: retained execution evidence and checked value 84
+assertion owned by test: result differs from the unchanged operation's independently expected 42
 ```
+
+For this E2E, production owns the context, config, component types and ordinary failure maps.
+The caller obtains documented parts of the maintained operation and rebuilds its source expansion;
+it defines no structs, type aliases or new States. Recomposition validates a new immutable Program,
+not an edit of lowered or admitted history. General framework extension can still define new types.
 
 Changing the sequence or reusing an operation should change the author's semantic declaration,
 not require a second manually synchronized list of internal States and maps. Exact executable
@@ -177,10 +183,10 @@ All three paths converge on the existing checked Program and Runtime:
   library use. Managed service provisioning remains test infrastructure. Reusable composition
   owns normal construction/lifecycle for the paths it advertises; it must not require ambient IO
   in domain code or force library users through CLI/Application products.
-- A maintained execution driver may provide polling, deadlines, admission recovery, and supported
-  reconnection around Runtime. Direct `start`, `resume`, and `read` remain valid for callers owning
-  progression and tests that deliberately exercise it. Repeated consumer copies of an ordinary
-  driver are the gap, not every explicit call to `resume`.
+- One public Runtime execution surface provides bounded ordinary progression, with a builder for
+  explicit dependencies and checked options. It exposes no separate public driver object. Direct
+  `start`, `resume`, and `read` remain valid for callers owning progression and boundary tests.
+  Repeated consumer progress loops are the gap, not every explicit call to `resume`.
 - Admitted workflow/recovery semantics and caller attempt policy are separate. Changing a deadline
   or reconnecting must not rewrite Program, initial input, retained command, fees, or failure facts.
   Preserve one explicit RunId and exact recovery identity across ambiguous acknowledgements.
@@ -301,7 +307,7 @@ public calls, independent oracles, named case runs, production responsibilities,
 | Scenario | Target journey | Detailed design |
 | --- | --- | --- |
 | Selection | Select a Portfolio snapshot through both real transports; execute independently and verify fixture balances, then cold-observe through the other client. | [CLI/REST selection](docs/e2e-selection-design.md) |
-| Composition | Deploy, configure the created contract, and observe its value at the call's receipt anchor using existing Operations and a Read State. | [Compose existing components](docs/e2e-composition-design.md) |
+| Composition | Rebuild a maintained Deploy/Configure/Observe operation through the current DSL, inserting an existing Pure addition State so configured `42` produces observed `84`. | [Compose existing components](docs/e2e-composition-design.md) |
 | Extension | Introduce one meaningful deterministic policy State and compose it with maintained components; prove typed success and rejection. | [Implement and compose a State](docs/e2e-extension-design.md) |
 
 These are target test designs, not descriptions of tests already implemented. Their caller sketches
@@ -309,17 +315,17 @@ are reviewable API proposals. Production must supply the machinery they require;
 not hide missing composition, registration, execution, or decoding support. Existing implementation
 shape may change where necessary, with authoritative contracts updated in the same code cutover.
 
-The common direction is source-authored typed composition with explicit capabilities and one
-maintained driver around the existing Runtime. Operation selection must carry exact executable
+The common direction reuses the current `OperationExpansion` DSL, explicit capabilities, and one
+public Runtime construction/execution surface. No parallel sequence DSL or public driver is selected. Operation selection must carry exact executable
 requirements through the same authoring/lowering path. Ordinary composed domain failures retain
 typed payloads; custom product maps remain intentional authoring. CLI/REST Application execution
-and library callers share the driver rather than acquire separate progress loops. Driver wait
+and library callers share Runtime execution rather than acquire separate progress loops. Wait
 budgets govern attempts, not admitted recovery authority.
 
-The proposed driver follows one shared action contract; its exact types and transport spellings
+Runtime execution follows one shared action contract; its exact types and transport spellings
 must be implemented together:
 
-| Observed condition | Driver behavior |
+| Observed condition | Runtime execution behavior |
 | --- | --- |
 | Runnable, awaiting recovery, or awaiting interpretation | Continue eligible Runtime progression within the invocation budget; Runtime authorizes each transition. |
 | Pending Effect without a stopped recovery decision | Poll the same retained command within the budget; never prepare a replacement. |
@@ -331,7 +337,7 @@ must be implemented together:
 
 Before implementing, reconcile exact signatures and validate the proposed registration mechanism
 with nested Operations, individual States, capability injection, custom maps/handlers, and distinct
-context types. Resolve the shared driver's outcome/action contract for deadline, cancellation,
+context types. Resolve the shared execution outcome/action contract for deadline, cancellation,
 ambiguous append, durable failure, and stopped pending Effects. These feasibility checks must not
 relax the three public objectives to fit current APIs.
 
@@ -376,7 +382,7 @@ These goals remain relevant, but they do not gate agreeing or improving the thre
 2. Implement one coherent authoring/association improvement with consuming tests and documentation.
    Preserve inward crate dependencies. Cut over affected callers and delete superseded registration
    or mapping machinery in the same logical commit; do not leave an older path under a wrapper.
-3. Implement the reviewed reusable execution/result surface with exact identity, stopped-outcome,
+3. Implement the reviewed Runtime execution/result surface with exact identity, stopped-outcome,
    cancellation, and cold-result tests. Replace ordinary copied drivers/codecs in the same cutover,
    retaining direct Runtime use in boundary tests. Combine with step 2 if their APIs are inseparable.
 4. Replace the current E2E organization with the three public-usage scenarios and their required
@@ -404,7 +410,7 @@ alone is not sufficient evidence.
 | Composition can couple semantic selection to exact executable requirements without duplicate lists. | Program/domain crates cannot depend on Runtime; generic context replacement changes exact State ABIs. | A convenience layer could add another registry/lowering path or break crate boundaries. | Validate the proposed Program-owned authoring sink with two contexts, nested Operations, individual States, maps, and capability injection; enumerate the deleted machinery. |
 | Supported ordinary failure propagation can be simpler while preserving custom maps. | Products choose different root schemas and fact retention. | A generic shortcut could erase causes, lose facts, or hide meaningful product policy. | Specify ordinary and custom-root examples, operational failure without a root, report overflow, and cold decoding. |
 | A bounded configured EVM surface can share framework components. | Runtime-selected step counts/order and ABI types do not map automatically to current monomorphized contexts. | The product could require a parallel execution model or expose an unbounded expression system. | Specify supported step/result representation and ABI rejection cases, then compare two distinct workflows. Keep this separate from Rust composition acceptance. |
-| One reusable driver can express supported attempt policy honestly. | Admission ambiguity, pending Effects, cancellation, deadlines, reconnection, and key lifetime interact. | Retry could change authority or stopped attempts could be reported as durable failures. | Define the outcome/action matrix and test exact start/resume identity and each affected interruption boundary. |
+| One Runtime execution surface can express supported attempt policy honestly. | Admission ambiguity, pending Effects, cancellation, deadlines, reconnection, and key lifetime interact. | Retry could change authority or stopped attempts could be reported as durable failures. | Define the outcome/action matrix and test exact start/resume identity and each affected interruption boundary. |
 | Development funding can use a small convergent Effect protocol. | Unlocked-account submission lacks acknowledgement-loss duplicate suppression and readiness evidence. | A wrapper could fund twice or return before funds are usable. | Review the node protocol and test duplicate entry, readiness, and lost acknowledgement before implementing the separate funding capability. |
 
 ## Verification of this RFC revision

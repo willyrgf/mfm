@@ -7,157 +7,157 @@ become acceptance criteria. This document changes no executable test or managed 
 
 ## Objective and user story
 
-A Rust caller deploys a contract, configures its value to `42`, and observes `value()` at the
-configuration transaction's receipt block. The caller selects two existing Operations and one
-individual existing State, connects their typed inputs and outputs, binds explicit capabilities,
-and receives a checked result through the framework's ordinary execution surface.
+A Rust caller starts from a maintained operation that already deploys, configures, and observes a
+contract. The caller takes its documented reusable components and rebuilds that operation through
+the existing `OperationExpansion` DSL, inserting one existing production Pure State. The test
+expresses recomposition, not implementation of an operation's missing internals.
 
-No new State is allowed in this scenario. In particular, a test-owned decoder, projection or
-adapter State must not conceal missing public composition support. The test may own its context,
-sequence and intentional policy. It does not require an Application product or transport.
+The standard operation and recomposed workflow have visibly different results:
 
-The composition consists of:
+```text
+configuration: initial value 42, increment 42
 
-1. `EvmTransaction<Initial, CreateAt<DeploymentSlot>>` creates the contract.
-2. `EvmTransaction<Deployment, CallCreatedAt<ConfigurationSlot, DeploymentSlot>>` configures the
-   created address using a checked call plan.
-3. `ReadAnchoredContractCall<Configuration, ObserveAt<ObservationSlot, ConfigurationSlot>>`
-   observes the configured target at the successful call's receipt anchor.
-
-The result retains both complete transaction histories and the accepted anchored observation.
-The dependencies are meaningful: the address does not exist before deployment, and the observation
-must use the configuration receipt rather than an arbitrary latest block.
-
-## Caller declarations and target calls
-
-Named typed context fields are legitimate caller authoring. Their exact schemas change as existing
-components replace plans with checked facts; unrelated fields remain intact. These declarations do
-not introduce a dynamic context bag or a runtime-selected expression language.
-
-The following is a proposed public API sketch. `operation`, `read`, `then`, `Runtime::prepare`,
-`RuntimeDriver` and the checked ABI accessor are target improvements, not current signatures.
-The context and transaction recipe concepts already exist. Routine checked fixture constructors
-and imports are omitted; no hidden helper may implement the sequence or its execution machinery.
-
-```rust
-#[derive(MfmValue, MfmContext, Serialize, Deserialize)]
-#[context(namespace = "example.configure-contract")]
-struct ContractContext<D, C, O> {
-    label: Label,
-    deployment: D,
-    configuration: C,
-    observation: O,
-}
-
-type Initial = ContractContext<
-    CheckedCreatePlan,
-    CheckedCallPlan,
-    CheckedObservationPlan,
->;
-type Deploy = EvmTransaction<Initial, CreateAt<ContractContextDeploymentSlot>>;
-type Deployment = <Deploy as Operation>::Output;
-type Configure = EvmTransaction<
-    Deployment,
-    CallCreatedAt<ContractContextConfigurationSlot, ContractContextDeploymentSlot>,
->;
-type Configuration = <Configure as Operation>::Output;
-type Observe = ReadAnchoredContractCall<
-    Configuration,
-    ObserveAt<ContractContextObservationSlot, ContractContextConfigurationSlot>,
->;
-
-let workflow = operation(Deploy::new(binding.clone()))
-    .then(operation(Configure::new(binding.clone())))
-    .then(read::<Observe, EvmAnchoredContractCallRead>(binding.route.clone()));
-
-let input = Initial {
-    label,
-    deployment: checked_deployment_plan,
-    configuration: checked_configuration_plan, // configure(uint256), argument 42
-    observation: checked_observation_plan,     // value(), exact uint256 return
-};
-
-let prepared = Runtime::prepare(
-    entry_point,
-    workflow,
-    input,
-    admitted_policy,
-    adapters,
-)?;
-let runtime = Runtime::new(prepared.assembly(), store);
-let outcome = RuntimeDriver::new(runtime)
-    .execute(run_id, &prepared, attempt_policy)
-    .await?;
-
-let success = expect_success(outcome); // Assertion helper only.
-let observed = success.output();
-assert_eq!(observed.label, expected_label);
-assert_eq!(
-    observed.observation.decode_return::<U256>(&value_function)?,
-    U256::from(42),
-);
+maintained operation: Deploy -> Configure -> Observe                    => 42
+recomposed workflow:  Deploy -> CheckedAddConfigurationValue -> Configure -> Observe => 84
 ```
 
-The ABI accessor checks the selected function against the observation calldata and exact return
-contract. It must not merely cast bytes into a requested type. Production owns the supported static
-ABI codecs and checked plan constructors; the test owns the independently chosen expected value.
-The successful workflow result is the typed observed context, without a duplicate fixture report.
+The addition executes as a real Pure State between deployment and configuration. It consumes the
+configured value, not an earlier on-chain observation. There is one deployment and one configuration
+transaction per run. Configure uses the created address; Observe uses the configuration transaction's
+target and receipt anchor. A later case may configure/observe twice, but that is not this baseline.
 
-## One authoring traversal and exact executable association
+The whole operation must exist as maintained production functionality before this E2E consumes it.
+Deploy, Configure, and Observe are its public reusable components, not independently handwritten
+fixture equivalents. Production also owns the checked-add State and its typed argument-slot binding.
+The test introduces no struct, type alias, State implementation, failure map, codec, or registration
+list. Those obligations belong to production for these already-supported components.
 
-Program owns a typed sequence combinator: `Then<A, B>` requires `A::Output = B::Input`. This checks
-adjacency without weakening exact checked value contracts. Existing context slots remain mechanical
-field replacement; domain fact constructors continue owning transaction relationships.
+The existing transaction Operations and anchored Read provide the underlying semantics. Their
+production package owns the reusable workflow/context; Runtime remains generic and acquires no
+built-in EVM workflow knowledge. This remains a library-facing test, independent of Application or CLI.
 
-Extend the existing sole `OperationExpansion` lowering traversal with a Program-owned generic
-implementation sink. Operation expansion threads the sink through children and capability injection.
-At each selected Pure/Read/Effect State, map, handler and required codec, the traversal exposes the
-exact monomorphized contracts while the same private symbolic draft constructs Program.
+## Configuration supplies the input
 
-Runtime implements the sink by installing executable hooks into its existing assembly. The injected
-before/designated/after sequence uses the same sink, including reservation and preparation States.
-A Program-only consumer can use a sink with no executable collection. Domain crates depend only on
-Program's authoring contract, never Runtime, Store or live handles. No authoring callback is retained
-for Runtime progression.
+Load a checked production configuration before constructing the workflow. The fixture supplies the
+configuration document and compiled contract artifact; the maintained configuration boundary owns
+parsing and validation. The document selects the artifact, public binding, setter/getter contracts,
+initial argument, increment, checked gas/fee options, and admitted recovery policy. Secret signer
+material and provider/Store handles are supplied separately as explicit capabilities.
 
-This replaces independently maintained executable lists. It does not introduce a parallel registry,
-second lowering pass, second scheduler or semantic-identity fallback. Existing exact ABI association
-remains authoritative; repeated equivalent registrations may deduplicate, and conflicting ones fail.
-Failed expansion must leave no usable partial prepared result.
+Its relevant value fragment is illustrative, not a complete or implemented config schema:
 
-Explicit adapters provide capability bindings, provider, signer and transaction-authority handles.
-They are distinct from State selection because they grant external authority. Preparation qualifies
-the initial value, retains its exact commitment, lowers the sequence, collects exact executable
-hooks, and checks required bindings without provider or Store calls. The resulting typed prepared
-value carries the Program/input and terminal contracts; it is not a second persisted control format.
+```json
+{
+  "initial_value": "42",
+  "increment": "42",
+  "configure_function": "configure(uint256)",
+  "observe_function": "value()"
+}
+```
 
-The implementation feasibility proof must exercise two context monomorphizations, nested Operations,
-an individual State, explicit custom map and handler, injected State families, and failed expansion.
-The sketch alone does not establish that the necessary Rust bounds and transactional construction
-are correct. Complete this consuming proof before cutting over production callers.
+Production owns `ContractWorkflowConfig`, its initial/intermediate context contracts, and checked
+result access. `config.initial_input()` is a production conversion, not test-owned construction
+of `ContractContext` or transaction recipe aliases. Source code chooses the sequence; configuration
+supplies its inputs and supported options. No arbitrary configured program or JSON-path wiring is
+needed for this scenario.
 
-## Ordinary failure composition
+The initial value must remain a checked number until Configure constructs its calldata and command.
+The Pure State produces a new context with `84`, preserving deployment facts and unrelated fields.
+The admitted initial input still records `42`; it is never rewritten. Command construction occurs
+before the configuration Effect is prepared and acknowledged. Reconciliation thereafter uses the
+retained command and fees, never reruns addition to modify a pending command.
 
-`Then<A, B>::Failure` is a framework-owned `SequenceFailure<A::Failure, B::Failure>` with typed
-`Earlier` and `Next` variants and an exact deterministic generic descriptor. Nested composition
-produces nested alternatives; it does not erase causes into JSON or a universal failure bag.
-Classification delegates to the original selected payload.
+## Recompose through the current authoring DSL
 
-Framework-owned branch-injection maps retain child root values in these alternatives. The same
-traversal supplies their exact executable hooks. Callers write an explicit map only when they choose
-a different public failure schema or intentional product semantics.
+The following is proposed ergonomic syntax over the current
+`OperationExpansion::operation`, `pure`, and `read` mechanisms. `components` and `recompose` expose
+the maintained operation's authoring parts; they do not introduce another sequence DSL or lowering
+path. Exact generic, root-map, and occurrence arguments are abbreviated: production typed component
+descriptors must supply them, with inference where possible. These signatures are targets to validate,
+not methods claimed to exist today.
 
-Runtime continues retaining the complete original execution failure and its provenance separately
-from root projection. Operational failures may legitimately have no mapped domain root. Root/report
-capacity rejection cannot discard the acknowledged original or unresolved command authority.
-Typed cold decoding, custom-root mapping and small-limit overflow need focused coverage.
+```rust
+let config = ContractWorkflowConfig::load(config_path).await?;
+let original = ContractWorkflow::new(&config)?;
+let parts = original.components();
+
+let workflow = original.recompose(|body| {
+    body.operation(parts.deploy())?;
+    body.pure(parts.add_to_configuration(config.increment()))?;
+    body.operation(parts.configure())?;
+    body.read(parts.observe())
+})?;
+
+let runtime = Runtime::builder(store)
+    .capabilities(capabilities)
+    .execution_policy(attempt_policy)
+    .build()?;
+
+let outcome = runtime
+    .execute(run_id, workflow, config.initial_input())
+    .await?;
+
+assert_eq!(expect_success(outcome).value(), U256::from(84));
+```
+
+The closure only declares the sequence through the existing DSL. It does not implement addition,
+ABI encoding, provider IO, or progression. `add_to_configuration` selects a maintained checked-add
+Pure State for a documented typed configuration-argument slot; it must not be a hidden test helper
+or a closure that executes arithmetic during authoring.
+
+The maintained operation's own expansion uses the same Deploy, Configure, and Observe descriptors
+through the same DSL. Its default sequence produces `42`. Recomposition must reuse those exact
+components rather than copy their implementations, inspect private lowered State positions, or edit
+an already-admitted Program. It is source-level authoring of a new immutable Program.
+
+`recompose` preserves the operation's declared root input/output/failure contracts and root validation,
+but validates the replacement expansion independently. A missing deployment, incompatible input,
+wrong capability binding, or unsupported failure map must be rejected; being derived from a valid
+operation does not make a new sequence valid automatically.
+
+## Production ownership and executable association
+
+The production workflow exposes checked configuration, context contracts, documented components,
+and result access. Callers do not need to name every generic intermediate type merely to reuse it.
+Context representation stays typed: a named numeric argument slot is not a global context bag.
+Existing fact constructors own transaction/evidence relationships and sibling preservation.
+
+Retain the single `OperationExpansion` lowering path. Selecting a component must supply its exact
+State, capability, map, handler, and codec requirements to Runtime association, including injected
+transaction stages. A Program-owned implementation sink remains a candidate mechanism, subject to
+a consuming proof; its purpose is to remove duplicate registration, not add a second inventory.
+Domain crates depend inward on Program, never Runtime, Store, or live handles. Authoring callbacks
+are not retained for execution.
+
+Explicit capabilities remain distinct from executable selection because they supply external
+authority. Runtime preparation qualifies the initial input, replacement sequence, exact implementation
+requirements, and declared bindings before admission/provider entry. It performs no external
+workflow execution. Observation-derived inputs and changing live facts still require their existing
+Runtime/adapter checks. Failed preparation must not expose a usable partial assembly.
+
+The production descriptors provide ordinary failure maps into the maintained root contract. That
+contract must support the checked-add failure while retaining its input, arithmetic cause, and prior
+facts; update the production contract coherently if needed. The test must not add a mapper to make
+the inserted State fit. Framework authors can still select custom maps when expressing new semantics.
+No separate `Then` algebra or nested sequence-failure representation is prescribed by this design.
+
+Runtime retains the original execution failure independently of root projection. Operational failures
+can have no mapped domain root. Overflow, mapping, or report-capacity failure must not discard the
+acknowledged original, deployment facts, or pending authority. Checked ABI result access must verify
+the selected getter, observation calldata, and exact return contract, not just cast returned bytes.
 
 ## Execution and checked results
 
-`RuntimeDriver` is one maintained ordinary driver over Runtime, shared with Application and the
-extension scenario. It owns bounded waiting, not transitions or new recovery authority. An attempt
-policy controls its deadline and polling. The admitted Program policy owns semantic retry/restart
-allowances; a longer deadline cannot change those allowances.
+One public Runtime owns preparation, execution, bounded waiting, and checked result delivery.
+There is no separately constructed public driver. A builder makes explicit dependencies and checked
+options visible and validates construction; per-run identity, workflow, and initial input belong to
+`execute`. Configuration loading remains outside deterministic State execution and the generic
+Runtime does not parse EVM-specific documents.
+
+Application and library callers use this same execution surface. Direct start/progress/read/resume
+access remains available for deliberate control and boundary cases. Internal waiting invokes the
+existing transition owner; it is not another engine. Attempt budgets cannot alter admitted recovery
+allowances or authorize replacement commands.
 
 Deadline expiry is a stopped invocation, not a manufactured durable failure. It retains the exact
 RunId and any last qualified observation. That observation can predate an acknowledged append whose
@@ -165,7 +165,7 @@ projection failed: the outcome must preserve known acknowledgement/authority sep
 not label an older observation the latest acknowledged head. Cancellation and unavailable observations
 must remain honest about what was actually observed or acknowledged.
 
-The driver follows the [shared action contract](../RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md#concrete-architect-designs):
+Runtime follows the [shared action contract](../RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md#concrete-architect-designs):
 `RecoveryStopped` and invocation/Store failures end automatic driving. Ordinary pending polling
 reconciles only the same retained command. It must not silently repeat ambiguous admission/appends
 or replace pending authority. Cold
@@ -183,15 +183,17 @@ capabilities required by this design. Settlement retains its non-reorging develo
 
 The baseline independently asserts label preservation, expected command parameters and binding,
 creation success, configuration target equal to the created address, and the observation's target
-and block hash/number equal to the configuration receipt. The checked getter result equals `42`.
+and block hash/number equal to the configuration receipt. The checked getter result equals `84`. The retained configuration command encodes `84`, while
+the admitted input still contains `42`. The added Pure transition creates no transaction or nonce.
 
 A separate node query checks deployed code and receipt identity. Its independently decoded expected
 result must not reuse the workflow's own report construction to prove correctness. Fresh reservations
 use nonces `0` and `1`, and external pending nonce becomes `2`. Assertions retain the returned facts;
 they do not reconstruct the transaction protocol inside the test.
 
-The test owns order, fields, recipe choices, policy, RunId and expected answers. Production owns
-typed association, ordinary failure injection, ABI support, execution and result access. Fixture
+The test owns component order, configuration selections, RunId, execution policy and expected
+answers. Production owns context/recipe types, checked arithmetic, ordinary failure maps, exact
+association, ABI support, execution and result access. Fixture
 code owns services, funding, independent observations and explicit fault injection. Fault controls
 must not become production operation options.
 
@@ -199,7 +201,9 @@ must not become production operation options.
 
 | Named case | Status and evidence |
 | --- | --- |
-| `composes_transactions_and_anchored_state` | New clean baseline; both Operations and the individual existing State produce the expected typed result. |
+| `recomposes_with_checked_addition` | New baseline; reuse the maintained operation's components with one production Pure State inserted, and independently observe `84`. |
+| `maintained_operation_uses_same_components` | Required comparison in an isolated fresh signer/nonce domain: the unchanged maintained operation and configuration produce `42`; no fixture copy of its implementation. A fresh RunId alone does not reset nonces. |
+| `addition_overflow_stops_before_configuration` | Required boundary coverage: checked overflow retains its cause and preceding deployment facts; no configuration transaction is prepared or submitted. A focused test may own this guarantee. |
 | `lost_reservation_ack_resumes_same_command` | Preserve committed reservation acknowledgement loss and Runtime reconstruction from the existing Effect E2E. Keep the same keystore owner alive; do not claim process-restart key recovery. |
 | `external_nonce_advance_affects_only_fresh_transaction` | Preserve independent external transfer, then a fresh ordinary call reserving nonce `3`; pending nonce moves `2 -> 4`. |
 | `cold_terminal_observation_preserves_head_output_nonce` | Preserve exact terminal head/output/nonce under cold read and resume. These assertions do not establish zero provider calls. |
@@ -208,7 +212,7 @@ must not become production operation options.
 | `closed_signer_owner_retains_distinct_failure` | Preserve signer cause, classification and unchanged transaction authority through cold observation. |
 | Prepared-wire/rejecting-signer recovery, cancellation, ambiguous transaction appends | Preserve existing focused `transaction_tests.rs` ownership unless explicitly relocated with equivalent assertions. |
 | Mismatched adjacency, missing binding, wrong typed result, malformed ABI return | Required focused consuming/compile-fail checks for the proposed APIs; no live node required where the owning boundary suffices. |
-| Driver deadline, cancellation and ambiguous acknowledgement | Required focused outcome/authority checks for the new driver; additional live case runs are future enhancements. |
+| Runtime deadline, cancellation and ambiguous acknowledgement | Required focused outcome/authority checks for the Runtime execution surface; additional live case runs are future enhancements. |
 
 The starting assertions live in
 [the Effect E2E](../crates/live/evm/tests/evm_contract_effect_e2e.rs), with fixture composition in
@@ -220,27 +224,39 @@ its selection and documentation change with the executable replacement.
 
 ## Complete cutovers and verification
 
-1. Implement typed composition and one-traversal executable selection with consuming tests. Update
-   all affected authoring/registration users and authoritative contracts together; delete superseded
-   registration machinery. Preserve explicit capability injection and custom mapping/handler support.
-2. Implement the shared driver, exact typed results and necessary static ABI support; remove ordinary
-   copied drivers/codecs. Combine with the first cutover if they cannot form coherent separate commits.
-3. Replace the Effect E2E with this scenario and preserved named cases. Remove superseded
-   `EffectFixtureOperation`, `register_fixture_states`, `DecodeValue`, duplicate `FixtureReport`
-   validation and mechanical failure reconstruction/maps. Retain independent oracles and fault setup.
-4. Update managed coverage and run focused affected Program/Runtime/domain/live tests, managed case
-   runs and one final CI according to the [build guide](build-and-verification.md).
+1. Provide the maintained operation, production config/context/result contracts, documented reusable
+   components, and checked-add slot binding. Reuse transaction/Read semantics rather than relocate
+   the fixture implementation unchanged. Prove original `42` and recomposed `84` behavior.
+2. Improve descriptor inference and executable selection through the current authoring DSL. Cut over
+   affected callers and delete superseded registration lists and caller-owned ordinary maps in the same coherent
+   change. Do not add a parallel chaining DSL. Update authoritative contracts with any owner changes.
+3. Provide one Runtime construction/execution surface and checked result/ABI access. Delete replaced
+   fixture drivers/codecs, preserve direct progression, and align Application. Combine inseparable
+   API changes rather than leave two designs underneath wrappers.
+4. Replace the Effect E2E organization with these cases and mapped existing fault guarantees. Remove
+   superseded `EffectFixtureOperation`, caller context/recipe aliases, `register_fixture_states`,
+   `DecodeValue`, duplicate report validation, and mechanical failure reconstruction. Retain actual
+   fault infrastructure and independent oracles. Update managed selection with the executable cutover.
 
-The necessary added concepts are typed composition, typed failure alternatives and an implementation
-sink. They are justified only by deleting duplicate assembly/mapping obligations. This design revision
-changes production-code LOC by zero; implementation commits must report actual additions/removals.
-Documentation-only validation is link/contract review and `git diff --check`, without Rust gates.
+Validate the current DSL with production descriptors, nested Operations, two supported contexts,
+custom maps/handlers, capability injection, and failed expansion. Reject incompatible recompositions
+at the strongest supported boundary; use compile-fail tests only where the API guarantees static
+exclusion. No caller-defined aliases/maps may be necessary for the target baseline to compile.
+
+Run affected focused tests, managed cases, and final CI according to the
+[build guide](build-and-verification.md) for executable changes. This documentation revision needs
+link/contract review and `git diff --check` only; production-code LOC change is zero.
+
+The intended simplification removes caller context scaffolding, independent registration, and a
+separate public driver while reusing the existing DSL. Necessary production additions are maintained
+component/configuration contracts, checked arithmetic and ergonomic association/execution support.
+Implementation commits must report actual additions and deletions.
 
 ## Material uncertainties
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
-| One generic sink captures exact hooks through the existing lowering. | Operation, map, handler and injection bounds must also preserve failed-expansion atomicity. | A second registration inventory or lowering could reappear. | Prove nested Operations, two contexts, custom maps/handlers, injection and failure rollback in a consuming crate before cutover. |
-| Typed sequence alternatives suffice for ordinary failure composition. | Exact descriptors, classification and aggregate report limits interact. | Cold decoding or original-cause retention could regress. | Exercise every branch, operational failure without root, custom roots, small-limit overflow and cold decoding. |
-| Static checked ABI support suffices for this scenario. | Maintained function/return types do not yet expose the whole desired call surface. | The public sketch could hide unchecked fixture codecs. | Prove configure/getter encoding and wrong-selector/return-shape rejection without adding arbitrary runtime expressions. |
-| One bounded driver preserves every authority distinction. | Deadline, cancellation, uncertain admission and post-acknowledgement projection failure differ. | A stopped result could duplicate work or overclaim its observed head. | Define and test the outcome/action matrix, exact recovery identity and acknowledged-authority versus observation distinction before implementation. |
+| Production descriptors can infer exact contracts and ordinary maps through the existing DSL. | Current methods expose explicit generic/map parameters and no recomposition facade. | The sketch could hide a second DSL or leave caller boilerplate intact. | Compile the target caller without structs/aliases/maps through the existing lowering; also exercise nested operations, handlers, injection and failed expansion. |
+| A reusable typed argument slot can support addition before command construction. | Current input plans already contain encoded calldata. | Arithmetic would require rewriting bytes or retained authority. | Define checked scalar config/context contracts; prove admitted `42` remains unchanged and only the later configuration command contains `84`. |
+| The maintained root failure contract can include inserted arithmetic failure coherently. | Its checked schema and mapping ownership are not yet selected. | A test-only adapter or lossy catch-all could return. | Specify overflow, original-cause retention, prior facts, report bounds and cold decoding in production contracts. |
+| One Runtime execution surface preserves authority distinctions. | Deadline, cancellation, uncertain admission and post-acknowledgement projection failure differ. | A stopped result could duplicate work or overclaim its observed head. | Validate the shared action matrix and exact recovery identity; distinguish acknowledged authority from historical observations. |
