@@ -48,10 +48,12 @@ that Runtime executes. Selecting a component adds an occurrence; it does not def
 Operation implementation.
 
 A typed step selection combines an existing State type with its required authoring setup. Calling
-`steps.deploy()` describes an Effect occurrence with its capability and public binding; it performs
-no deployment or other IO. `body.effect(steps.deploy())` includes that occurrence and its injection
-in the authored sequence. Use `steps` for the local component collection to make this distinction
-visible: it contains selectable steps, not running State instances.
+`states.deploy()` describes an Effect occurrence with its capability and public binding; it performs
+no deployment or other IO. `body.effect(states.deploy())` includes that occurrence and its injection
+in the authored sequence. Use `states` for the local collection and `operation` for the authored
+composition. The accessors return typed selections, not running State instances; document that
+behavior without introducing a separate everyday name. Concrete Operation types retain descriptive
+names such as `ContractDeploymentLifecycle`.
 
 | Component | Mode | Complete caller-facing role |
 | --- | --- | --- |
@@ -71,7 +73,7 @@ The production package implements the selection accessors once. This sketch show
 shape, not existing or complete signatures; ordinary root maps and occurrence policy are omitted:
 
 ```rust
-impl ContractLifecycleSteps {
+impl ContractLifecycleStates {
     pub fn deploy(&self) -> EffectSelection<Deploy, EvmTransactionEffect> {
         EffectSelection::new(self.binding.clone())
     }
@@ -126,7 +128,7 @@ selection. Do not add a competing `State::expand` hook or require every State au
 expansion. Capability-owned injection remains the single owner. Standalone use should be possible:
 
 ```rust
-runtime.execute(run_id, steps.deploy(), checked_deployment_input).await?;
+runtime.execute(run_id, states.deploy(), checked_deployment_input).await?;
 ```
 
 This runs the same injection/lowering as nested selection without a caller-written one-State
@@ -185,15 +187,15 @@ The signatures remain to be validated; they introduce no parallel DSL or lowerin
 
 ```rust
 let config = ContractWorkflowConfig::load(config_path).await?;
-let steps = ContractLifecycleSteps::new(&config)?;
+let states = ContractLifecycleStates::new(&config)?;
 
-let workflow = author_operation(config.contracts(), |body| {
-    body.effect(steps.deploy())?;
-    body.pure(steps.add_to_configuration(config.increment()))?;
-    body.effect(steps.configure())?;
-    body.read(steps.observe())?;
-    body.pure(steps.validate())?;
-    body.pure(steps.report())
+let operation = author_operation(config.contracts(), |body| {
+    body.effect(states.deploy())?;
+    body.pure(states.add_to_configuration(config.increment()))?;
+    body.effect(states.configure())?;
+    body.read(states.observe())?;
+    body.pure(states.validate())?;
+    body.pure(states.report())
 })?;
 
 let runtime = Runtime::builder(store)
@@ -202,7 +204,7 @@ let runtime = Runtime::builder(store)
     .build()?;
 
 let outcome = runtime
-    .execute(run_id, workflow, config.initial_input())
+    .execute(run_id, operation, config.initial_input())
     .await?;
 
 assert_eq!(expect_success(outcome).value(), U256::from(84));
