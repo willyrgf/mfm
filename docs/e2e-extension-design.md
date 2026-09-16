@@ -13,14 +13,15 @@ components. The rule assesses a proposed increase against an observed contract v
 an approval or a typed rejection. The developer supplies semantics and checked contracts, while
 MFM supplies composition, association, execution, recovery, and result handling.
 
-Use the same deployment, configuration, and anchored observation components as the composition
+Reuse the unchanged production `ContractDeploymentLifecycle` Operation from the composition
 E2E, followed by exactly one new Pure State, `AssessIncrease`:
 
 1. Deploy the first-party contract.
-2. Configure its value to `42` through an existing transaction Operation.
+2. Configure its value to `42` through the lifecycle's Configure Effect State.
 3. Read `value()` at the configuration transaction's receipt anchor through an existing State.
-4. Assess an admitted increase of `8` against an admitted ceiling of `100`.
-5. Return the typed approval: observed `42`, proposed `50`, remaining headroom `50`.
+4. Let the lifecycle's maintained Validate and Report States return checked agreement and retained facts.
+5. Assess an admitted increase of `8` against an admitted ceiling of `100`.
+6. Return the typed approval: observed `42`, proposed `50`, remaining headroom `50`.
 
 A second run with ceiling `49` returns a typed business rejection with proposed value `50`.
 The new State performs real policy evaluation. It is not an ABI decoder, context adapter, or
@@ -33,8 +34,9 @@ case can consume the approval downstream if that becomes a required public workf
 The caller owns these strict, canonical, secret-free value contracts:
 
 - `IncreasePolicy`: `increment: NonZeroU64` and `ceiling: u64`.
-- `Observed`: the caller's named context containing checked deployment/configuration facts,
-  anchored observation facts, and the admitted policy. Existing components preserve the policy.
+- The proposed production `ContractLifecycleReport<IncreasePolicy>` supplies the new State's
+  input. It retains checked lifecycle facts and the admitted extension policy; the caller does
+  not recreate the lifecycle's internal context or skip its Validate/Report steps.
 - `ApprovedIncrease`: the checked observation record, policy, observed current value, proposed
   value, and remaining headroom. It retains its declared evidence without an implicit Journal lookup.
 - `IncreaseFailure`: `ArithmeticOverflow` or `CeilingExceeded`, each retaining the checked
@@ -64,7 +66,7 @@ it must not replace constructor causes with a unit error.
 struct AssessIncrease;
 
 impl State for AssessIncrease {
-    type Input = Observed;
+    type Input = ContractLifecycleReport<IncreasePolicy>;
     type Output = ApprovedIncrease;
     type Failure = IncreaseFailure;
 
@@ -81,20 +83,21 @@ impl ClassifyError for IncreaseFailure {
 
 impl PureState for AssessIncrease {
     fn evaluate(
-        input: Observed,
+        input: ContractLifecycleReport<IncreasePolicy>,
     ) -> Result<
         ProposedStateOutcome<ApprovedIncrease, IncreaseFailure>,
         InvocationDiagnostic,
     > {
-        let current = input.observation.decode_uint256_as_u64()?;
-        let increment = input.policy.increment.get();
-        let ceiling = input.policy.ceiling;
+        let (observation, policy) = input.into_observation_and_policy();
+        let current = observation.decode_uint256_as_u64()?;
+        let increment = policy.increment.get();
+        let ceiling = policy.ceiling;
 
         let Some(proposed) = current.checked_add(increment) else {
             return Ok(ProposedStateOutcome::Failure {
                 failure: IncreaseFailure::arithmetic_overflow(
-                    input.observation,
-                    input.policy,
+                    observation,
+                    policy,
                     current,
                 )?,
             });
@@ -103,8 +106,8 @@ impl PureState for AssessIncrease {
         if proposed > ceiling {
             return Ok(ProposedStateOutcome::Failure {
                 failure: IncreaseFailure::ceiling_exceeded(
-                    input.observation,
-                    input.policy,
+                    observation,
+                    policy,
                     current,
                     proposed,
                 )?,
@@ -113,8 +116,8 @@ impl PureState for AssessIncrease {
 
         Ok(ProposedStateOutcome::Success {
             output: ApprovedIncrease::checked(
-                input.observation,
-                input.policy,
+                observation,
+                policy,
                 current,
                 proposed,
                 ceiling - proposed,
@@ -133,14 +136,16 @@ source-preserving diagnostic conventions rather than flattening errors to string
 Use the same current `OperationExpansion` DSL and single Runtime execution surface as the
 composition E2E. This case reuses the unchanged maintained operation (observed value `42`), then
 adds the new semantic State; it does not insert scenario 2's `+42` State. Existing components carry
-the admitted policy as a context sibling. The final `Observed` contract matches the State input.
+the admitted policy through their production context/report contracts. The completed lifecycle
+report matches the new State input. Its proposed consuming accessor exposes checked observation
+and policy; the custom output retains the facts declared by its own contract.
 
 As in the composition sketch, exact generic/map arguments below are abbreviated. Production
 component descriptors supply ordinary requirements; the extension author owns any intentional
 new business failure projection. The closure authors a sequence and performs no runtime work.
 
 ```rust
-let original = ContractWorkflow::new(&config)?;
+let original = ContractDeploymentLifecycle::new(&config)?;
 let workflow = config.author_extension(|body| {
     body.operation(&original)?;
     body.pure::<AssessIncrease>()
@@ -213,7 +218,7 @@ execution policy or maintain a second business implementation as the sole expect
 | `approves_observed_increase` | Baseline | The existing live workflow feeds the custom State; approval is `50`, headroom `50`. |
 | `rejects_increase_above_ceiling` | Baseline | Ceiling `49` yields the permanent typed rejection with retained original facts. |
 | `reloads_terminal_approval_and_rejection` | Baseline | Fresh handles recover exact checked contracts; terminal read/resume leaves authority unchanged. |
-| `resumes_before_custom_state` | Additional | Stop after acknowledged observation, rebuild, then evaluate; compare semantic result against an uninterrupted run. |
+| `resumes_before_custom_state` | Additional | Stop after the acknowledged lifecycle Report, rebuild, then evaluate; compare semantic result against an uninterrupted run. |
 | `rejects_wrong_custom_implementation` | Additional | An incompatible implementation identity fails exact association without append. |
 | `preserves_custom_failure_after_append_ambiguity` | Future | Resume resolves committed-or-absent append without inventing a durable audit record. |
 
@@ -252,6 +257,6 @@ alone requires link review and whitespace checking, not executable gates.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
-| Typed named contexts preserve admitted policy through existing components without custom glue. | The final composition API is proposed. | A helper State could conceal the composition defect. | Compile a downstream example sharing the exact components with E2E 2 before adding wrappers. |
+| Production lifecycle context/report contracts preserve admitted extension policy without custom glue. | The final composition API is proposed. | A helper State could conceal the composition defect. | Compile a downstream example sharing the exact components with E2E 2 before adding wrappers. |
 | Maintained ABI support offers checked `uint256` to `u64` projection. | This convenience is not established today. | Ad hoc decoding or lossy range handling enters the business State. | Specify bounded decoding and preserved range/parser causes; full-width checked integers are an alternative if simpler. |
 | Terminal business approval adequately demonstrates the extension objective. | It does not exercise dynamically constructing a later transaction. | Another extension case may be needed for that separate requirement. | Accept the approval/rejection baseline, and add downstream use only for a concrete required workflow. |

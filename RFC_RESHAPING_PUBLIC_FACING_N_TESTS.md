@@ -127,11 +127,12 @@ Acceptance example, expressed as requirements rather than proposed Rust syntax:
 
 ```text
 input: checked production config with initial value 42, increment 42, artifact and transaction options
-maintained operation: Deploy -> Configure -> Observe, yielding 42
+maintained ContractDeploymentLifecycle operation:
+  Deploy -> Configure -> Observe -> Validate -> Report, yielding 42
 recomposition through the existing OperationExpansion DSL:
   reuse Deploy
   insert the existing checked-add Pure State, producing argument 84
-  reuse Configure and Observe
+  reuse Configure, Observe, Validate and Report
 result: retained execution evidence and checked value 84
 assertion owned by test: result differs from the unchanged operation's independently expected 42
 ```
@@ -140,6 +141,11 @@ For this E2E, production owns the context, config, component types and ordinary 
 The caller obtains documented parts of the maintained operation and rebuilds its source expansion;
 it defines no structs, type aliases or new States. Recomposition validates a new immutable Program,
 not an edit of lowered or admitted history. General framework extension can still define new types.
+Deploy and Configure are business Effect States, Observe is a Read State, and Validate/Report are
+Pure States. Their typed selections carry capability setup and trigger the existing capability-owned
+injection through the current DSL. The lifecycle is the reusable Operation grouping those steps.
+The root authoring entry should accept either an Operation or a checked State selection; this removes
+unnecessary one-State wrappers without introducing `State::expand` or another injection owner.
 
 Changing the sequence or reusing an operation should change the author's semantic declaration,
 not require a second manually synchronized list of internal States and maps. Exact executable
@@ -235,7 +241,7 @@ multiple named, independently diagnosable case runs. No new test framework or sc
 | E2E scenario | Public surface and caller-owned work | Baseline evidence |
 | --- | --- | --- |
 | 1. Select an existing operation through CLI/REST | Select supported production behavior and supply its inputs/options through the client transports. Use the shared Application surface and production domain types. | Execute the same representative use case through both CLI and REST, retaining transport-specific rendering and recovery-identity assertions. Inspect meaningful results without reconstructing the operation's internals. |
-| 2. Compose existing Operations and States | Use public Rust authoring APIs to declare order, valid connections, caller context, and intentional policy; bind explicit execution capabilities. | Compose both reusable Operations and individual existing States, execute through the public framework, and inspect checked results. Do not implement a new State to make the composition work. |
+| 2. Compose existing Operations and States | Use public Rust authoring APIs to declare order, valid connections, caller context, and intentional policy; bind explicit execution capabilities. | Recompose a maintained lifecycle Operation from its existing State selections, insert an existing State, and execute through the public framework with checked results. Do not implement a new State to make the composition work. |
 | 3. Implement a new State and compose it | Define one small State's new semantics and typed contracts through public traits, then combine it with existing Operations/States. | Execute that composition through the public framework and assert the new behavior and integration result. The new State must express actual semantics, not hide missing composition machinery. |
 
 The first scenario covers two transports over one Application surface; passing only CLI or only
@@ -307,7 +313,7 @@ public calls, independent oracles, named case runs, production responsibilities,
 | Scenario | Target journey | Detailed design |
 | --- | --- | --- |
 | Selection | Select a Portfolio snapshot through both real transports; execute independently and verify fixture balances, then cold-observe through the other client. | [CLI/REST selection](docs/e2e-selection-design.md) |
-| Composition | Rebuild a maintained Deploy/Configure/Observe operation through the current DSL, inserting an existing Pure addition State so configured `42` produces observed `84`. | [Compose existing components](docs/e2e-composition-design.md) |
+| Composition | Rebuild ContractDeploymentLifecycle from its Effect/Read/Pure step selections through the current DSL, inserting a Pure addition State so configured `42` produces reported `84`. | [Compose existing components](docs/e2e-composition-design.md) |
 | Extension | Introduce one meaningful deterministic policy State and compose it with maintained components; prove typed success and rejection. | [Implement and compose a State](docs/e2e-extension-design.md) |
 
 These are target test designs, not descriptions of tests already implemented. Their caller sketches

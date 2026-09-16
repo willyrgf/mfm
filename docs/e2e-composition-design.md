@@ -7,8 +7,8 @@ become acceptance criteria. This document changes no executable test or managed 
 
 ## Objective and user story
 
-A Rust caller starts from a maintained operation that already deploys, configures, and observes a
-contract. The caller takes its documented reusable components and rebuilds that operation through
+A Rust caller starts from the maintained `ContractDeploymentLifecycle` Operation, which deploys,
+configures, observes, validates, and reports on a contract. The caller takes its documented reusable components and rebuilds that operation through
 the existing `OperationExpansion` DSL, inserting one existing production Pure State. The test
 expresses recomposition, not implementation of an operation's missing internals.
 
@@ -17,8 +17,10 @@ The standard operation and recomposed workflow have visibly different results:
 ```text
 configuration: initial value 42, increment 42
 
-maintained operation: Deploy -> Configure -> Observe                    => 42
-recomposed workflow:  Deploy -> CheckedAddConfigurationValue -> Configure -> Observe => 84
+maintained operation:
+  Deploy -> Configure -> Observe -> Validate -> Report => 42
+recomposed workflow:
+  Deploy -> CheckedAddConfigurationValue -> Configure -> Observe -> Validate -> Report => 84
 ```
 
 The addition executes as a real Pure State between deployment and configuration. It consumes the
@@ -27,14 +29,115 @@ transaction per run. Configure uses the created address; Observe uses the config
 target and receipt anchor. A later case may configure/observe twice, but that is not this baseline.
 
 The whole operation must exist as maintained production functionality before this E2E consumes it.
-Deploy, Configure, and Observe are its public reusable components, not independently handwritten
-fixture equivalents. Production also owns the checked-add State and its typed argument-slot binding.
+Deploy and Configure are meaningful Effect States; Observe is a Read State; Validate and Report
+are Pure States. These are the operation's public reusable components, not independently handwritten
+fixture equivalents or one-State Operation wrappers. Production also owns the checked-add State and its typed argument-slot binding.
 The test introduces no struct, type alias, State implementation, failure map, codec, or registration
 list. Those obligations belong to production for these already-supported components.
 
-The existing transaction Operations and anchored Read provide the underlying semantics. Their
+The existing transaction and anchored Read implementations provide the underlying semantics. Their
 production package owns the reusable workflow/context; Runtime remains generic and acquires no
 built-in EVM workflow knowledge. This remains a library-facing test, independent of Application or CLI.
+
+## Operations, States, and typed step selections
+
+An Operation is a reusable recipe that groups meaningful States and, where useful, child Operations.
+A State owns one deterministic execution contract. A Program is the final expanded State sequence
+that Runtime executes. Selecting a component adds an occurrence; it does not define a new State or
+Operation implementation.
+
+A typed step selection combines an existing State type with its required authoring setup. Calling
+`steps.deploy()` describes an Effect occurrence with its capability and public binding; it performs
+no deployment or other IO. `body.effect(steps.deploy())` includes that occurrence and its injection
+in the authored sequence. Use `steps` for the local component collection to make this distinction
+visible: it contains selectable steps, not running State instances.
+
+| Component | Mode | Complete caller-facing role |
+| --- | --- | --- |
+| Deploy | Effect | Deployment request to deployed-contract context, including required transaction support. |
+| CheckedAddConfigurationValue | Pure | Checked addition on the numeric configuration argument, preserving deployment facts. |
+| Configure | Effect | Deployed-contract context and effective argument to configured-contract facts. |
+| Observe | Read | Configured-contract facts to observation at that call's target and receipt anchor. |
+| Validate | Pure | Check the observed getter equals the effective configured argument; return checked agreement or a typed mismatch. |
+| Report | Pure | Construct the declared terminal report from validated facts, retaining public inputs, effective value, transaction facts and observation evidence. |
+
+Validate checks the declared lifecycle relationship, not chain/transaction integrity already proved
+by lower owners. Its expected value comes from the effective command input, not a hard-coded `84`.
+Report owns useful public result projection rather than an identity step added solely to match a
+name. The test independently asserts the expected values and evidence.
+
+The production package implements the selection accessors once. This sketch shows the intended
+shape, not existing or complete signatures; ordinary root maps and occurrence policy are omitted:
+
+```rust
+impl ContractLifecycleSteps {
+    pub fn deploy(&self) -> EffectSelection<Deploy, EvmTransactionEffect> {
+        EffectSelection::new(self.binding.clone())
+    }
+
+    pub fn configure(&self) -> EffectSelection<Configure, EvmTransactionEffect> {
+        EffectSelection::new(self.binding.clone())
+    }
+
+    pub fn observe(&self) -> ReadSelection<Observe, EvmAnchoredContractCallRead> {
+        ReadSelection::new(self.binding.route.clone())
+    }
+
+    pub fn validate(&self) -> PureSelection<ValidateConfiguration> {
+        PureSelection::new()
+    }
+
+    pub fn report(&self) -> PureSelection<BuildContractReport> {
+        PureSelection::new()
+    }
+}
+```
+
+The mode-specific selection types belong to the framework authoring layer; domain packages construct
+them without depending on Runtime. The concrete State types, intermediate contracts, and ordinary
+maps are production-owned. These selections carry type information and immutable public setup, not secret keys or provider
+handles. Runtime binds their capability identities to the separately supplied live handles.
+Selecting the addition step similarly binds a maintained checked arithmetic State to a documented
+typed numeric slot. Neither selection construction nor the authoring closure executes State logic.
+
+## Injection and standalone States
+
+Injection already belongs to `CapabilityInjection<S>`. The current
+[`OperationExpansion::effect` and `read`](../crates/kernel/program/src/authoring.rs) directly expand
+an exact capability/State pair through its prefix, designated State, and successful suffix. There
+is no requirement for each selected Effect State inside a composition to have a child Operation
+wrapper. For a transaction selection the expansion includes:
+
+```text
+ReserveNonce -> PrepareTransaction -> designated Deploy/Configure Effect -> ProjectOutcome
+```
+
+Each expanded State retains its own execution, persistence, and recovery boundaries. The suffix
+runs on designated success; it is not a finally handler. Injection neither makes the whole sequence
+atomic nor moves IO into deterministic State code.
+
+Today's root `expand_program` entry accepts only an Operation. The existing `EvmTransaction`
+Operation validates its root input and delegates to one `body.effect(...)` call. That root-entry
+restriction explains standalone-use friction; injection itself does not require the wrapper.
+
+The target generalizes the same authoring entry to accept an Operation or a checked Pure/Read/Effect
+selection. Do not add a competing `State::expand` hook or require every State author to implement
+expansion. Capability-owned injection remains the single owner. Standalone use should be possible:
+
+```rust
+runtime.execute(run_id, steps.deploy(), checked_deployment_input).await?;
+```
+
+This runs the same injection/lowering as nested selection without a caller-written one-State
+Operation. Removing a wrapper must preserve its root checks, including binding agreement and
+transaction action-mode validation, in the domain descriptor or checked occurrence qualification.
+Those checks must still happen before admission/provider entry where their inputs are available.
+
+Expose the selection's `ExpandedInput`, `ExpandedOutput`, and `ExpandedFailure` to its caller.
+The underlying designated State can accept prepared facts and return executed facts, while the
+public Deploy selection accepts a deployment request and returns completed deployment facts.
+Every raw State ABI remains exactly associated internally; hiding intermediates must not weaken
+their validation or require callers to manufacture prepared transaction data.
 
 ## Configuration supplies the input
 
@@ -70,7 +173,7 @@ retained command and fees, never reruns addition to modify a pending command.
 ## Recompose through the current authoring DSL
 
 The following is proposed ergonomic syntax over the current
-`OperationExpansion::operation`, `pure`, and `read` mechanisms. `components` and `recompose` expose
+`OperationExpansion::operation`, `effect`, `pure`, and `read` mechanisms. `components` and `recompose` expose
 the maintained operation's authoring parts; they do not introduce another sequence DSL or lowering
 path. Exact generic, root-map, and occurrence arguments are abbreviated: production typed component
 descriptors must supply them, with inference where possible. These signatures are targets to validate,
@@ -78,14 +181,16 @@ not methods claimed to exist today.
 
 ```rust
 let config = ContractWorkflowConfig::load(config_path).await?;
-let original = ContractWorkflow::new(&config)?;
-let parts = original.components();
+let lifecycle = ContractDeploymentLifecycle::new(&config)?;
+let steps = lifecycle.components();
 
-let workflow = original.recompose(|body| {
-    body.operation(parts.deploy())?;
-    body.pure(parts.add_to_configuration(config.increment()))?;
-    body.operation(parts.configure())?;
-    body.read(parts.observe())
+let workflow = lifecycle.recompose(|body| {
+    body.effect(steps.deploy())?;
+    body.pure(steps.add_to_configuration(config.increment()))?;
+    body.effect(steps.configure())?;
+    body.read(steps.observe())?;
+    body.pure(steps.validate())?;
+    body.pure(steps.report())
 })?;
 
 let runtime = Runtime::builder(store)
@@ -105,8 +210,8 @@ ABI encoding, provider IO, or progression. `add_to_configuration` selects a main
 Pure State for a documented typed configuration-argument slot; it must not be a hidden test helper
 or a closure that executes arithmetic during authoring.
 
-The maintained operation's own expansion uses the same Deploy, Configure, and Observe descriptors
-through the same DSL. Its default sequence produces `42`. Recomposition must reuse those exact
+The maintained lifecycle's own expansion uses these same Effect, Read, and Pure selections through
+the same DSL, omitting only the added arithmetic State. Its default sequence produces `42`. Recomposition must reuse those exact
 components rather than copy their implementations, inspect private lowered State positions, or edit
 an already-admitted Program. It is source-level authoring of a new immutable Program.
 
@@ -168,8 +273,7 @@ must remain honest about what was actually observed or acknowledged.
 Runtime follows the [shared action contract](../RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md#concrete-architect-designs):
 `RecoveryStopped` and invocation/Store failures end automatic driving. Ordinary pending polling
 reconciles only the same retained command. It must not silently repeat ambiguous admission/appends
-or replace pending authority. Cold
-continuation uses the same RunId and checks retained Program identity; exact schema checks govern
+or replace pending authority. Cold continuation uses the same RunId and checks retained Program identity; exact schema checks govern
 hot and cold output access. Deliberate boundary cases may call Runtime progression directly, but
 ordinary callers must not rebuild `drive_to_success` or manually decode terminal JSON.
 
@@ -183,7 +287,9 @@ capabilities required by this design. Settlement retains its non-reorging develo
 
 The baseline independently asserts label preservation, expected command parameters and binding,
 creation success, configuration target equal to the created address, and the observation's target
-and block hash/number equal to the configuration receipt. The checked getter result equals `84`. The retained configuration command encodes `84`, while
+and block hash/number equal to the configuration receipt. Validation records agreement with the
+effective argument, and the checked report value equals `84`. The configuration command encodes `84`,
+while
 the admitted input still contains `42`. The added Pure transition creates no transaction or nonce.
 
 A separate node query checks deployed code and receipt identity. Its independently decoded expected
@@ -193,8 +299,7 @@ they do not reconstruct the transaction protocol inside the test.
 
 The test owns component order, configuration selections, RunId, execution policy and expected
 answers. Production owns context/recipe types, checked arithmetic, ordinary failure maps, exact
-association, ABI support, execution and result access. Fixture
-code owns services, funding, independent observations and explicit fault injection. Fault controls
+association, ABI support, execution and result access. Fixture code owns services, funding, independent observations and explicit fault injection. Fault controls
 must not become production operation options.
 
 ## Case runs and replacement coverage
@@ -203,6 +308,8 @@ must not become production operation options.
 | --- | --- |
 | `recomposes_with_checked_addition` | New baseline; reuse the maintained operation's components with one production Pure State inserted, and independently observe `84`. |
 | `maintained_operation_uses_same_components` | Required comparison in an isolated fresh signer/nonce domain: the unchanged maintained operation and configuration produce `42`; no fixture copy of its implementation. A fresh RunId alone does not reset nonces. |
+| `standalone_deploy_uses_same_injection` | Required consuming coverage: select Deploy directly, retaining the same validation and complete injected transaction sequence without an Operation wrapper. |
+| `validation_rejects_observed_value_mismatch` | Required focused coverage: a mismatching observation produces typed lifecycle failure; Report must not produce a success artifact. Intrinsic evidence checks remain with their existing owners. |
 | `addition_overflow_stops_before_configuration` | Required boundary coverage: checked overflow retains its cause and preceding deployment facts; no configuration transaction is prepared or submitted. A focused test may own this guarantee. |
 | `lost_reservation_ack_resumes_same_command` | Preserve committed reservation acknowledgement loss and Runtime reconstruction from the existing Effect E2E. Keep the same keystore owner alive; do not claim process-restart key recovery. |
 | `external_nonce_advance_affects_only_fresh_transaction` | Preserve independent external transfer, then a fresh ordinary call reserving nonce `3`; pending nonce moves `2 -> 4`. |
@@ -224,12 +331,14 @@ its selection and documentation change with the executable replacement.
 
 ## Complete cutovers and verification
 
-1. Provide the maintained operation, production config/context/result contracts, documented reusable
-   components, and checked-add slot binding. Reuse transaction/Read semantics rather than relocate
+1. Provide the maintained lifecycle, production config/context/result contracts, typed State
+   selections, meaningful validation/reporting, and checked-add slot binding. Reuse transaction/Read semantics rather than relocate
    the fixture implementation unchanged. Prove original `42` and recomposed `84` behavior.
-2. Improve descriptor inference and executable selection through the current authoring DSL. Cut over
-   affected callers and delete superseded registration lists and caller-owned ordinary maps in the same coherent
-   change. Do not add a parallel chaining DSL. Update authoritative contracts with any owner changes.
+2. Improve descriptor inference and executable selection through the current authoring DSL and
+   generalize its root to Operations and State selections. Move wrapper-owned validation into the
+   checked occurrence/domain owner, then delete unnecessary one-State wrappers, superseded
+   registration lists and caller-owned ordinary maps with their replacements. Keep capability-owned
+   injection and update authoritative contracts; add no parallel DSL or State expansion hook.
 3. Provide one Runtime construction/execution surface and checked result/ABI access. Delete replaced
    fixture drivers/codecs, preserve direct progression, and align Application. Combine inseparable
    API changes rather than leave two designs underneath wrappers.
@@ -239,7 +348,7 @@ its selection and documentation change with the executable replacement.
    fault infrastructure and independent oracles. Update managed selection with the executable cutover.
 
 Validate the current DSL with production descriptors, nested Operations, two supported contexts,
-custom maps/handlers, capability injection, and failed expansion. Reject incompatible recompositions
+custom maps/handlers, standalone selections, capability injection, and failed expansion. Reject incompatible recompositions
 at the strongest supported boundary; use compile-fail tests only where the API guarantees static
 exclusion. No caller-defined aliases/maps may be necessary for the target baseline to compile.
 
@@ -248,7 +357,7 @@ Run affected focused tests, managed cases, and final CI according to the
 link/contract review and `git diff --check` only; production-code LOC change is zero.
 
 The intended simplification removes caller context scaffolding, independent registration, and a
-separate public driver while reusing the existing DSL. Necessary production additions are maintained
+separate public driver and unnecessary one-State wrappers while reusing the existing DSL. Necessary production additions are maintained
 component/configuration contracts, checked arithmetic and ergonomic association/execution support.
 Implementation commits must report actual additions and deletions.
 
@@ -257,6 +366,8 @@ Implementation commits must report actual additions and deletions.
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
 | Production descriptors can infer exact contracts and ordinary maps through the existing DSL. | Current methods expose explicit generic/map parameters and no recomposition facade. | The sketch could hide a second DSL or leave caller boilerplate intact. | Compile the target caller without structs/aliases/maps through the existing lowering; also exercise nested operations, handlers, injection and failed expansion. |
+| A common root entry can qualify Operations and State selections. | Root validation currently lives on Operation, and raw State contracts differ from injected contracts. | Wrapper removal could lose binding/mode checks or expose prepared facts as caller input. | Prove standalone/nested equivalence, invalid-binding rejection, exact expanded/raw contracts and cold decoding without a second expansion owner. |
+| Validate and Report have distinct useful contracts. | The production lifecycle value/failure schemas are not yet specified. | Extra States could duplicate intrinsic checks or provide no observable behavior. | Specify effective-value mismatch, checked agreement and report evidence; retain independent assertions and bounded causal failure tests. |
 | A reusable typed argument slot can support addition before command construction. | Current input plans already contain encoded calldata. | Arithmetic would require rewriting bytes or retained authority. | Define checked scalar config/context contracts; prove admitted `42` remains unchanged and only the later configuration command contains `84`. |
 | The maintained root failure contract can include inserted arithmetic failure coherently. | Its checked schema and mapping ownership are not yet selected. | A test-only adapter or lossy catch-all could return. | Specify overflow, original-cause retention, prior facts, report bounds and cold decoding in production contracts. |
 | One Runtime execution surface preserves authority distinctions. | Deadline, cancellation, uncertain admission and post-acknowledgement projection failure differ. | A stopped result could duplicate work or overclaim its observed head. | Validate the shared action matrix and exact recovery identity; distinguish acknowledged authority from historical observations. |
