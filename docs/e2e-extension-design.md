@@ -146,7 +146,7 @@ new business failure projection. The closure authors a sequence and performs no 
 
 ```rust
 let original = ContractDeploymentLifecycle::new(&config)?;
-let workflow = config.author_extension(|body| {
+let workflow = author_operation(assessment_contracts, |body| {
     body.operation(&original)?;
     body.pure::<AssessIncrease>()
 })?;
@@ -170,9 +170,11 @@ match outcome {
 }
 ```
 
-`author_extension` is an illustrative facade for the current authoring DSL, not a second compiler.
-Unlike scenario 2's same-contract recomposition, this extension declares its new output/failure
-contracts. Exact signatures and root-map selection must be validated in the consuming example.
+`author_operation` is the same proposed constructor used by the maintained lifecycle and the
+composition E2E. `assessment_contracts` denotes the author-owned input/output/failure contracts
+and root validation for this new business operation. Its output/failure contracts differ from the
+lifecycle's, but it needs no separate extension constructor. Exact signatures and root-map selection
+must be validated in the consuming example.
 Runtime qualifies the input, Program and exact implementation requirements before external execution.
 Existing lowering validates adjacent contracts; failure projections preserve originals and intentional
 product semantics. No new chaining algebra or universal failure representation is required.

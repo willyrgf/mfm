@@ -7,9 +7,10 @@ become acceptance criteria. This document changes no executable test or managed 
 
 ## Objective and user story
 
-A Rust caller starts from the maintained `ContractDeploymentLifecycle` Operation, which deploys,
-configures, observes, validates, and reports on a contract. The caller takes its documented reusable components and rebuilds that operation through
-the existing `OperationExpansion` DSL, inserting one existing production Pure State. The test
+A Rust caller reuses the documented components of the maintained `ContractDeploymentLifecycle`
+Operation, which deploys, configures, observes, validates, and reports on a contract. The caller
+constructs a new operation through the existing `OperationExpansion` DSL, inserting one existing
+production Pure State. No original lifecycle instance is needed merely to access those components. The test
 expresses recomposition, not implementation of an operation's missing internals.
 
 The standard operation and recomposed workflow have visibly different results:
@@ -170,21 +171,23 @@ The admitted initial input still records `42`; it is never rewritten. Command co
 before the configuration Effect is prepared and acknowledged. Reconciliation thereafter uses the
 retained command and fees, never reruns addition to modify a pending command.
 
-## Recompose through the current authoring DSL
+## One constructor using the current authoring DSL
 
-The following is proposed ergonomic syntax over the current
-`OperationExpansion::operation`, `effect`, `pure`, and `read` mechanisms. `components` and `recompose` expose
-the maintained operation's authoring parts; they do not introduce another sequence DSL or lowering
-path. Exact generic, root-map, and occurrence arguments are abbreviated: production typed component
-descriptors must supply them, with inference where possible. These signatures are targets to validate,
-not methods claimed to exist today.
+The maintained lifecycle and caller-defined compositions use one ordinary authoring constructor
+with the current `OperationExpansion::operation`, `effect`, `pure`, and `read` mechanisms. Reuse
+comes from the production components, not a transformation method on an existing operation.
+
+`author_operation` below is a proposed name for that common constructor, not an existing function
+or a test helper. The configuration supplies the production root contracts and validation through
+the illustrative `config.contracts()` accessor. Exact generic, root-map, and occurrence arguments
+are abbreviated: production typed step selections must supply them, with inference where possible.
+The signatures remain to be validated; they introduce no parallel DSL or lowering path.
 
 ```rust
 let config = ContractWorkflowConfig::load(config_path).await?;
-let lifecycle = ContractDeploymentLifecycle::new(&config)?;
-let steps = lifecycle.components();
+let steps = ContractLifecycleSteps::new(&config)?;
 
-let workflow = lifecycle.recompose(|body| {
+let workflow = author_operation(config.contracts(), |body| {
     body.effect(steps.deploy())?;
     body.pure(steps.add_to_configuration(config.increment()))?;
     body.effect(steps.configure())?;
@@ -210,15 +213,17 @@ ABI encoding, provider IO, or progression. `add_to_configuration` selects a main
 Pure State for a documented typed configuration-argument slot; it must not be a hidden test helper
 or a closure that executes arithmetic during authoring.
 
-The maintained lifecycle's own expansion uses these same Effect, Read, and Pure selections through
-the same DSL, omitting only the added arithmetic State. Its default sequence produces `42`. Recomposition must reuse those exact
-components rather than copy their implementations, inspect private lowered State positions, or edit
-an already-admitted Program. It is source-level authoring of a new immutable Program.
+The maintained lifecycle's constructor uses the same authoring constructor and step selections,
+omitting only the added arithmetic State. Its default sequence produces `42`. The test uses the
+same components to declare a new sequence producing `84`; it does not copy their implementations,
+inspect private lowered positions, or edit an admitted Program.
 
-`recompose` preserves the operation's declared root input/output/failure contracts and root validation,
-but validates the replacement expansion independently. A missing deployment, incompatible input,
-wrong capability binding, or unsupported failure map must be rejected; being derived from a valid
-operation does not make a new sequence valid automatically.
+Both construction paths qualify the declared root input/output/failure contracts, root validation,
+and the complete sequence. A missing deployment, incompatible input, wrong binding, or unsupported
+failure map must be rejected. Reusing valid components does not make an arbitrary sequence valid.
+There is no separate operation-transformation constructor or named-step replacement machinery.
+A constructor for the maintained product may select its default recipe, but it delegates to the
+same authoring path rather than owning another validation/lowering implementation.
 
 ## Production ownership and executable association
 
@@ -365,7 +370,7 @@ Implementation commits must report actual additions and deletions.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
-| Production descriptors can infer exact contracts and ordinary maps through the existing DSL. | Current methods expose explicit generic/map parameters and no recomposition facade. | The sketch could hide a second DSL or leave caller boilerplate intact. | Compile the target caller without structs/aliases/maps through the existing lowering; also exercise nested operations, handlers, injection and failed expansion. |
+| Production descriptors can infer exact contracts and ordinary maps through the existing DSL. | Current methods expose explicit generic/map parameters; the common constructor and step-selection inference remain proposed. | The sketch could hide a second DSL or leave caller boilerplate intact. | Compile the target caller without structs/aliases/maps through the existing lowering; also exercise nested operations, handlers, injection and failed expansion. |
 | A common root entry can qualify Operations and State selections. | Root validation currently lives on Operation, and raw State contracts differ from injected contracts. | Wrapper removal could lose binding/mode checks or expose prepared facts as caller input. | Prove standalone/nested equivalence, invalid-binding rejection, exact expanded/raw contracts and cold decoding without a second expansion owner. |
 | Validate and Report have distinct useful contracts. | The production lifecycle value/failure schemas are not yet specified. | Extra States could duplicate intrinsic checks or provide no observable behavior. | Specify effective-value mismatch, checked agreement and report evidence; retain independent assertions and bounded causal failure tests. |
 | A reusable typed argument slot can support addition before command construction. | Current input plans already contain encoded calldata. | Arithmetic would require rewriting bytes or retained authority. | Define checked scalar config/context contracts; prove admitted `42` remains unchanged and only the later configuration command contains `84`. |
