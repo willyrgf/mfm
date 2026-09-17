@@ -714,13 +714,19 @@ Tuple adjacency requires exact equality of expanded endpoints. Operations are or
 elements and retain scopes. No aggregate Failure associated type, construction closure, fluent
 parallel DSL, getter collection, selection constants, or caller-defined aliases are required.
 
-Program input/output types describe only the outer endpoints. For `A -> B -> C -> D`, the Program
-has input A and output D; its executable States retain the distinct A/B, B/C and C/D contracts.
-Neither compilation nor `Program<I, O>` requires all intermediate States to use I or O. Rust proves
-each authored adjacent connection, while the expanded Program retains every exact State contract.
-Do not add a `try_typed` endpoint-conversion API for ordinary construction or cold resume. Checked
-result decoding must use the actual recorded output contract without requiring callers to restate
-the complete composition or its internal capability requirements.
+Program has no input/output type parameters. For `A -> B -> C -> D`, its executable States retain
+the distinct A/B, B/C and C/D contracts. Rust proves each authored adjacent connection through the
+typed source before compilation returns one complete `Program`. The compiler retains those exact
+contracts and their corresponding typed callbacks; removing endpoint parameters does not introduce
+untyped composition, a context bag, or additional erasure within State/capability implementations.
+Cold loading verifies the stored connections and associates exact installed implementations before
+returning the same `Program` type. It cannot use a compile-time proof for untrusted stored bytes.
+
+Do not add endpoint marker types, a typed Program wrapper, or a `try_typed` conversion. Input is
+checked and committed during compilation. Checked result decoding uses the actual recorded output
+contract (section 7), without requiring callers to restate the complete composition or its internal
+capability requirements. The public result boundary deliberately checks the requested result type
+when it is decoded; it does not promise compile-time inference of that type from `Program`.
 
 Framework-controlled sources comprise tuples, Operations, Pure/Read/Effect selections, resolved
 supporting selections, typed identity, and checkpoints. New-State authors enter
@@ -912,9 +918,8 @@ Program is the complete in-process result of construction. Runtime neither parti
 compilation nor supplies missing executable code or live resource bindings afterward.
 
 ```rust
-pub struct Program<I: MfmValue, O: MfmValue> {
+pub struct Program {
     inner: Arc<ProgramInner>,
-    endpoints: PhantomData<fn(I) -> O>,
 }
 
 struct ProgramInner {
@@ -928,7 +933,7 @@ pub fn compile<P, S, R>(
     input: &S::Input,
     resources: &R,
     limits: ProgramLimits,
-) -> Result<Program<S::Input, S::Output>, ProgramError>
+) -> Result<Program, ProgramError>
 where
     S: AuthoringSource;
 ```
@@ -1002,7 +1007,7 @@ Program owns cold reconstruction:
 pub fn load<P, S, R>(
     canonical_program: &[u8],
     resources: &R,
-) -> Result<Program<S::Input, S::Output>, ProgramError>
+) -> Result<Program, ProgramError>
 where
     S: AuthoringSource;
 ```
@@ -1192,22 +1197,47 @@ control process panic-hook logging; do not claim that this proof changes the pro
 ## 7. Runtime execution and recovery
 
 ```rust
-async fn execute<I: MfmValue, O: MfmValue>(
+async fn execute<I: MfmValue>(
     &self,
     run_id: RunId,
-    program: &Program<I, O>,
+    program: &Program,
     input: &I,
-) -> Result<ExecutionResult<O>, InvocationFailure>;
+) -> Result<ExecutionResult, InvocationFailure>;
 ```
 
 Runtime::new(store) receives only the execution Store. Execute accepts the completed Program, not an
-Operation. It checks exact input commitment and run facts, performs no executable/resource assembly,
-and uses the existing engine until terminal success/failure, RecoveryStopped, invocation failure, or caller
+Operation. It checks the input's exact recorded contract and value commitment before provider IO or
+append, validates retained run facts, and performs no executable/resource assembly. It uses the
+existing engine until terminal success/failure, RecoveryStopped, invocation failure, or caller
 cancellation. ExecutionResult has checked terminal success or terminal original failure; accessors
 success()/failure() borrow the applicable value/report and retain exact RunId. RecoveryStopped is
 InvocationFailure with unresolved command authority, never terminal domain failure.
 
-Direct progression, read and resume likewise receive `&Program<I, O>` with the explicit RunId.
+ExecutionResult is not generic. Its accessors expose the existing checked persistence boundary:
+
+```rust
+impl ExecutionResult {
+    pub fn success(&self) -> Option<&Object>;
+    pub fn failure(&self) -> Option<&FailureReport>;
+    pub fn run_id(&self) -> &RunId;
+}
+
+// Existing Values API; reuse it rather than adding a result conversion layer.
+impl Object {
+    pub fn decode<T: MfmValue>(&self) -> Result<T, InvocationDiagnostic>;
+}
+```
+
+Runtime admits the successful Object against the terminal State's exact output contract before
+exposing it. `success()` returns None only for terminal failure. Decoding checks T's exact schema
+identity before invoking its codec; a different schema is an error even if its JSON shape matches.
+Codec failures retain the existing InvocationDiagnostic cause contract. A failed inspection neither
+changes the acknowledged outcome nor invokes recovery, IO, or a Store append. Failure inspection
+continues to expose the original report and its exact checked originals. Fresh execution and cold
+resume use these same accessors. Consumers select a production result type only when inspecting it;
+this does not restrict intermediate State contracts or require converting the Program.
+
+Direct progression, read and resume likewise receive `&Program` with the explicit RunId.
 They verify the retained Program identity before using its code; read invokes no State or adapter.
 Runtime does not secretly load or compile a Program. Program construction has no Store dependency.
 The same immutable Program can serve separate runs; each continuation and history belongs to its
@@ -1300,11 +1330,13 @@ let state = Pure::<CheckedAdd>::default();
 let program = compile::<NoCapabilities, _, _>(entry_point, &state, &input, &(), limits)?;
 let runtime = Runtime::new(store);
 let result = runtime.execute(run_id, &program, &input).await?;
-assert_eq!(result.success().expect("terminal success").to_string(), "84");
+let sum = result.success().expect("terminal success").decode::<Unsigned256>()?;
+assert_eq!(sum.to_string(), "84");
 ```
 
-Production supplies checked scalar construction/addition and its exact overflow failure. No binding,
-root failure conversion, or registration list exists for this case.
+Production supplies CheckedAddition input, CheckedAdd with Unsigned256 output, checked scalar
+construction/addition and its exact overflow failure. No binding, root failure conversion, or
+registration list exists for this case.
 
 ### 8.2 One existing injected Effect State
 
@@ -1320,7 +1352,7 @@ let program = compile::<ContractCapabilities, _, _>(
 )?;
 let runtime = Runtime::new(store);
 let result = runtime.execute(run_id, &program, &input).await?;
-let deployed = result.success().expect("terminal success");
+let deployed = result.success().expect("terminal success").decode::<DeployedContract>()?;
 assert_eq!(deployed.effective_value().to_string(), "42");
 let locator = deployed.contract()?;
 ```
@@ -1347,7 +1379,7 @@ let program = compile::<ContractCapabilities, _, _>(
 )?;
 let runtime = Runtime::new(store);
 let result = runtime.execute(run_id, &program, &input).await?;
-let report = result.success().expect("terminal success");
+let report = result.success().expect("terminal success").decode::<ContractReport>()?;
 assert_eq!(report.requested_value().to_string(), "42");
 assert_eq!(report.effective_value().to_string(), "42");
 assert_eq!(report.observed_value().to_string(), "42");
@@ -1380,7 +1412,7 @@ let program = compile::<ContractCapabilities, _, _>(
 )?;
 let runtime = Runtime::new(store);
 let result = runtime.execute(run_id, &program, &input).await?;
-let report = result.success().expect("terminal success");
+let report = result.success().expect("terminal success").decode::<ContractReport>()?;
 assert_eq!(report.requested_value().to_string(), "42");
 assert_eq!(report.effective_value().to_string(), "84");
 assert_eq!(report.observed_value().to_string(), "84");
@@ -1450,7 +1482,8 @@ let program = compile::<ContractCapabilities, _, _>(
 )?;
 let runtime = Runtime::new(store);
 let result = runtime.execute(run_id, &program, &input).await?;
-assert_eq!(result.success().expect("terminal success").observed_value().to_string(), "84");
+let report = result.success().expect("terminal success").decode::<ContractReport>()?;
+assert_eq!(report.observed_value().to_string(), "84");
 ```
 
 ProgramError's identity-construction conversion must retain the source. The empty failure does not
@@ -1599,7 +1632,9 @@ Use coherent logical commits, merging inseparable cuts:
    DSL/wrapper/registration/Runtime assembly paths in this cutover. Include root-map removal here when required for one coherent API/wire.
 3. Complete original-failure/report and product-projection migration if independently coherent;
    otherwise keep it with step 2. Remove the native outcome suffix and migrate its exact semantics.
-4. Consolidate execute/checked results on the existing engine and prove native pending waiting,
+4. Use non-generic Program/ExecutionResult with typed source adjacency proofs and exact checked
+   Object result decoding. Consolidate execute/checked results on the existing engine and prove
+   native pending waiting,
    cancellation, ambiguity, and exact RunId. Keep direct access; no new timing API.
 5. Complete maintained lifecycle callers and managed acceptance, replacing fixture equivalents while
    retaining fault infrastructure, external oracles, Portfolio and transport/discovery coverage.
@@ -1647,7 +1682,8 @@ this future implementation requirement.
 | Defaults/checkpoints | Parent/child inheritance, explicit zero, handler/parameter/target unit, distinct occurrence scopes, duplicate/missing/foreign/forward/terminal/context mismatch, inherited-parent-target non-rebinding and Effect barriers |
 | Portfolio migration gate | Resolve section 5.3 before replacing its authoring path; preserve configured collection count/order/routes, empty collections, immutable continuation plan, State boundaries and cumulative limits |
 | Construction/cold | Mandatory executable entries; automatically bound support/codecs/handlers; native adapter reuse across request ABIs; persisted public bindings; missing/mismatched resources rejected before return with no IO; no config/C0/setup fabrication; same exact Program identity after load |
-| Runtime handoff | Explicit Program for execute/read/resume; retained ProgramRef mismatch rejected before execution; unchanged current-state validation, no late binding or hidden load hook |
+| Checked results | One non-generic Program/ExecutionResult for fresh and cold paths; heterogeneous intermediate contracts retained; exact output decoding succeeds; wrong nominal schema with identical JSON and malformed decoding fail explicitly without changing history or triggering recovery |
+| Runtime handoff | Explicit Program for execute/read/resume; wrong input contract or commitment rejected before IO/append; retained ProgramRef mismatch rejected before execution; unchanged current-state validation, no late binding or hidden load hook |
 | Resource custody | No handles/secrets in canonical bytes/debug/context/history; existing Keystore affinity preserved; public endpoint identity is not provider authentication |
 | Evidence | Checked projection before settlement and repeated hot/cold interpretation; native/semantic ref separation including Reads; exact original bytes; no re-encoding or hidden lookup |
 | Product | Maintained42/composed84, target/configuration-point agreement, overflow, malformed ABI, mismatched observed value, custom State zero rejection |
