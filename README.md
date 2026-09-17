@@ -92,14 +92,15 @@ flowchart TB
 
           subgraph RUNTIME_NETWORK["Execute network-dependent implementation"]
               RUNTIME_SUPPORT["Execute the injected supporting State<br/>Consume current input for native preparation or supporting work"]
+              RUNTIME_NATIVE_REQUEST["Translate and validate the exact request<br/>Use the already-selected native codecs"]
               RUNTIME_IO["Invoke the selected native adapter<br/>Use supplied provider, signer and authority resources"]
-              RUNTIME_NATIVE_BIND["Validate native evidence against the exact request<br/>Check protocol facts and evidence binding"]
+              RUNTIME_CHECK_PROJECT["Validate and project native evidence<br/>Run the selected checked projection"]
               RUNTIME_WAIT["Await readiness within the native adapter<br/>Retain the same pending Effect command"]
-              RUNTIME_PROJECT["Project native evidence into the capability's typed semantic evidence<br/>Keep network-specific interpretation here"]
+              RUNTIME_PROJECT["Reconstruct checked semantic evidence from retained settlement<br/>Run the same selected projection"]
           end
 
           RUNTIME_ENCODE["Encode and admit exact native evidence<br/>Preserve its original contents and identity"]
-          RUNTIME_REQUEST{"Check the request mode"}
+          RUNTIME_REQUEST{"Check request mode and recorded phase"}
           RUNTIME_COMMAND["Record the exact Effect command before adapter execution"]
           RUNTIME_SETTLEMENT{"Check whether this is an Effect"}
           RUNTIME_RECORD["Record the accepted native settlement"]
@@ -121,7 +122,7 @@ flowchart TB
           RUNTIME_ADMIT --> RUNTIME_NEXT
           RUNTIME_NEXT -->|"Enter a domain State"| RUNTIME_STATE
           RUNTIME_NEXT -->|"Enter an injected State"| RUNTIME_SUPPORT
-          RUNTIME_NEXT -->|"Reconcile an acknowledged pending command"| RUNTIME_IO
+          RUNTIME_NEXT -->|"Reconcile an acknowledged pending command"| RUNTIME_NATIVE_REQUEST
           RUNTIME_NEXT -->|"Interpret retained native settlement"| RUNTIME_PROJECT
           RUNTIME_NEXT -->|"Recover a recorded original failure"| RUNTIME_RECOVERY
           RUNTIME_NEXT -->|"Read terminal success"| RUNTIME_SUCCESS
@@ -129,11 +130,12 @@ flowchart TB
 
           RUNTIME_STATE -->|"Pure outcome"| RUNTIME_RESULT
           RUNTIME_SUPPORT -->|"Pure outcome"| RUNTIME_RESULT
-          RUNTIME_STATE -->|"Prepared request"| RUNTIME_REQUEST
-          RUNTIME_SUPPORT -->|"Prepared request"| RUNTIME_REQUEST
+          RUNTIME_STATE -->|"Prepared request"| RUNTIME_NATIVE_REQUEST
+          RUNTIME_SUPPORT -->|"Prepared request"| RUNTIME_NATIVE_REQUEST
 
-          RUNTIME_REQUEST -->|"Read"| RUNTIME_IO
-          RUNTIME_REQUEST -->|"Effect"| RUNTIME_COMMAND
+          RUNTIME_NATIVE_REQUEST --> RUNTIME_REQUEST
+          RUNTIME_REQUEST -->|"Read or retained pending Effect"| RUNTIME_IO
+          RUNTIME_REQUEST -->|"New Effect"| RUNTIME_COMMAND
           RUNTIME_COMMAND --> RUNTIME_IO
 
           RUNTIME_IO -->|"Receive native evidence"| RUNTIME_ENCODE
@@ -141,10 +143,10 @@ flowchart TB
           RUNTIME_WAIT -->|"Return control for reconciliation"| RUNTIME_NEXT
           RUNTIME_IO -->|"Receive an original operational failure"| RUNTIME_ERROR
 
-          RUNTIME_ENCODE --> RUNTIME_NATIVE_BIND
-          RUNTIME_NATIVE_BIND --> RUNTIME_SETTLEMENT
+          RUNTIME_ENCODE --> RUNTIME_CHECK_PROJECT
+          RUNTIME_CHECK_PROJECT --> RUNTIME_SETTLEMENT
           RUNTIME_SETTLEMENT -->|"Effect"| RUNTIME_RECORD
-          RUNTIME_SETTLEMENT -->|"Read"| RUNTIME_PROJECT
+          RUNTIME_SETTLEMENT -->|"Read"| RUNTIME_INTERPRET
           RUNTIME_RECORD --> RUNTIME_PROJECT
 
           RUNTIME_PROJECT --> RUNTIME_INTERPRET
@@ -154,9 +156,10 @@ flowchart TB
           RUNTIME_NEXT -->|"Fail reconstruction or local checks"| RUNTIME_INVOCATION
           RUNTIME_STATE -->|"Fail a callback or value check"| RUNTIME_INVOCATION
           RUNTIME_SUPPORT -->|"Fail a callback or value check"| RUNTIME_INVOCATION
-          RUNTIME_IO -->|"Fail native extraction or an adapter invariant"| RUNTIME_INVOCATION
+          RUNTIME_NATIVE_REQUEST -->|"Fail translation or correspondence checks"| RUNTIME_INVOCATION
+          RUNTIME_IO -->|"Fail native authority or an adapter invariant"| RUNTIME_INVOCATION
           RUNTIME_ENCODE -->|"Fail encoding or admission"| RUNTIME_INVOCATION
-          RUNTIME_NATIVE_BIND -->|"Fail evidence binding"| RUNTIME_INVOCATION
+          RUNTIME_CHECK_PROJECT -->|"Fail binding or semantic projection"| RUNTIME_INVOCATION
           RUNTIME_INTERPRET -->|"Fail interpretation"| RUNTIME_INVOCATION
           RUNTIME_PROJECT -->|"Fail semantic projection"| RUNTIME_INVOCATION
           RUNTIME_COMMAND -->|"Fail or lose acknowledgement"| RUNTIME_INVOCATION
@@ -180,8 +183,13 @@ flowchart TB
       end
 
       classDef RUNTIME_native fill:#fff0d9,stroke:#b96812,color:#33210b;
-      class RUNTIME_SUPPORT,RUNTIME_IO,RUNTIME_NATIVE_BIND,RUNTIME_PROJECT,RUNTIME_WAIT RUNTIME_native;
+      class RUNTIME_SUPPORT,RUNTIME_NATIVE_REQUEST,RUNTIME_IO,RUNTIME_CHECK_PROJECT,RUNTIME_PROJECT,RUNTIME_WAIT RUNTIME_native;
 ```
+
+Deploy and Configure remain concrete States, using `TransactionEffect<DeploymentRequest>` and
+`TransactionEffect<DeployedContract>` respectively. `ContractRead` returns the checked scalar observation.
+EVM injects reservation and preparation before each transaction State; it needs no outcome suffix
+or supporting State merely to run a codec.
 
 Expansion selects implementations and injects their supporting States before execution. Those
 States consume the actual predecessor output during execution: Add can produce 84 before
@@ -197,9 +205,10 @@ selections can themselves require injection, using already-selected implementati
 The compiler expands them within its depth and State-count limits. Contracts and codecs are
 associated requirements; they do not become additional persisted States merely by being selected.
 
-All settlement-admission checks precede its append. If admission requires semantic projection,
-the same pure projection runs there too; interpretation reconstructs the view from retained native
-evidence. Reads retain evidence through their existing conclusion rather than a separate settlement.
+The selected checked projection validates and normalizes native evidence before settlement append.
+Effect interpretation reconstructs the semantic view with that same pure function after acknowledgement;
+only native evidence is stored as the authoritative settlement. Reads consume the checked view and
+retain native evidence through their existing conclusion, without a separate settlement.
 Cold continuation uses the retained exact implementation, binding, and command with existing local
 checks; it does not resolve configuration or repeat already-acknowledged preparation States.
 
