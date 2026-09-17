@@ -2074,41 +2074,97 @@ Do not turn every codec into a State or keep superseded implementations behind c
 Retain useful native custody/provider primitives, exact causal diagnostics, validation, safety
 barriers, and independent E2E oracles.
 
-## 12. Implementation sequence
+## 12. Proof handoff and production commit sequence
 
-First compile the specified contracts in a bounded cross-crate slice: fixed States, two distinct
-native ABIs, exact prepared/evidence values, defaults, recursive injection, and cold
-inventory. This proves the design; it does not delegate product vocabulary or ownership to an
-engineer. Adjust private Rust bounds as necessary without weakening the specified guarantees.
+### 12.1 Phase A: bounded integrated proof
 
-Prove the balance contracts in sections 2.5/4.3/9.1 with both snapshot and enrichment continuations,
-native/token prefixes, cold candidate reconstruction and exact report decoding before compiler
-cutover. These contracts are specified; adjust private bounds without changing their ownership.
+The initial engineer-agent task is to prove the agreed construction model on pinned Rust before
+attempting the production cutover:
 
-Use coherent logical commits, merging inseparable cuts:
+```text
+typed authoring -> Operation planning and capability resolution
+               -> complete immutable Program -> existing Runtime engine
+```
 
-1. Establish mfm-chain shared identity/transaction/balance contracts, scalar mechanics and native
-   implementation interfaces with typed constructors, schemas, and consuming proof. Do not expose a second maintained runtime path.
-2. Cut over typed Operation planning/local configuration, homogeneous vectors, inferred environment
-   support, typed injection/defaults/resolution, complete Program/document/binding schema,
-   adapter interfaces, Runtime callback split, native codecs, cold load and explicit read/resume
-   handoff with their consumers together. Move EffectAdapterOutcome inward. Remove mutable
-   DSL/wrapper/registration/Runtime assembly paths in this cutover. Include root-map removal here when required for one coherent API/wire.
-3. Migrate native balance typed support and Portfolio/enrichment together with original-failure/report
-   and product-projection migration if independently coherent;
-   otherwise keep it with step 2. Remove the superseded transaction outcome suffix and migrate its
-   exact semantics; retain the independently meaningful balance confirmation suffix.
-4. Use non-generic Program/ExecutionResult with typed source adjacency proofs and exact checked
-   Object result decoding. Consolidate execute/checked results on the existing engine and prove
-   native pending waiting,
-   cancellation, ambiguity, and exact RunId. Keep direct access; no new timing API.
-5. Complete maintained lifecycle callers and managed acceptance, replacing fixture equivalents while
-   retaining fault infrastructure, external oracles, Portfolio and transport/discovery coverage.
+Work in an isolated checkout/worktree with reviewable source commits. Modify/reuse actual framework
+contracts and existing engine code there rather than implementing a toy execution engine. Keep
+experimental code out of the maintained public API until a coherent cutover is ready. A proof-only
+assignment ends with its evidence report or concrete blocker; it does not silently expand into full
+production migration. Source commits/patches and commands must remain available for reproduction;
+a temporary directory path or a transcript saying tests passed is insufficient. A successful actual
+candidate can be cleaned and promoted into Phase B; do not require a separate reimplementation.
 
-Every implementation commit updates current design/architecture and relevant transport/rustdoc
-contracts. Delete superseded APIs/tests/docs with executable replacements. Report removed complexity,
-necessary additions, and actual production-code LOC separately from test/docs changes; do not claim
-reduction before measuring. A staged proof must not become a permanent alternate DSL or engine.
+Use the smallest cross-crate slice that exercises the boundaries below. The second native
+implementation is proof infrastructure with distinct native command/evidence/error ABIs, not a
+shipping network. Script external IO where useful, but preserve the actual Program/value identities,
+Runtime transition machinery and Journal/Store contracts being claimed. List every surrogate and
+the guarantees it cannot establish. Source-level examples and isolated mock signatures are not an
+integrated proof. Adjust private bounds autonomously; changes to public semantics, crate ownership,
+typing guarantees or the single-path model require a concrete reproducer and architectural review.
+
+The following are ordered proof milestones, not permission to merge partially migrated public APIs.
+Checkpoint commits in the isolated proof branch should follow these boundaries; combine dependent
+milestones when a standalone checkpoint would not build.
+
+| Milestone | Work and required evidence |
+| --- | --- |
+| A1 — typed authoring and planning | Compile the typed source-construction portions of all five caller shapes from section 8, including one new State; fixed/nested Operations, local configuration and homogeneous vectors. Prove maintained child alone and nested. Compile-fail cases reject adjacent/expanded/nested mismatch and unequal vector-body endpoints. Consumers add no context/alias/map/codec/registration plumbing. |
+| A2 — complete construction and cold loading | Infer compile/load support from resources; Pure fresh/cold uses no live handles. Configuration selects two distinct native ABIs, including recursive injected support. Only selected resources are required. Produce mandatory executable entries and canonical public bindings; round-trip the complete document and exact Program identity. Cold load omits original source type/configuration and never invokes planning/defaults/injection construction. Recomposition across installed roots requires no list edit; a new State needs only its accepted one-time publication. |
+| A3 — balance contracts and collection planning | Exercise native/token prefix specializations with both snapshot and enrichment continuations. Preserve exact source order/bindings, endomorphic vectors, local scopes and four/five Read boundaries. Prove retained candidates reconstruct cold before confirmation; no result becomes confirmed early. Verify canonical zero scaling, existing dust/remainder rules and raw/aggregate bounds. |
+| A4 — execution, custody and inspection | Run all five complete callers on the existing engine; maintained lifecycle produces42 and composed addition produces84 from actual predecessor data. Prove exact command preparation, native originals, classification after acknowledgement, checked result/failure decoding and ordinal projection hot/cold. Exercise cancellation, pending continuation, ambiguous append, mismatched input/Program identity and small-bound capacity rejection at the changed boundaries. Construction invokes no State/provider/signer/Store mutation; Runtime performs no assembly. |
+| A5 — evidence and cutover assessment | Supply source refs, baseline revision, exact Nix commands/test names and outcomes. Map each A1–A4 requirement to evidence or a minimal failing reproducer. Record surrogate limits, remaining production verification, required deletions, affected consumers and the dependency-supported Phase B commit boundaries. Report production/test/docs LOC separately and explain necessary complexity. |
+
+A1 checks source connectivity; it cannot establish Runtime guarantees before A4. Earlier milestone
+checks may use temporary missing integration pieces only when named as such; do not mark the whole
+proof successful until the pieces work together. Existing section 15 experiments provide reusable
+evidence and code, not substitutes for these milestones.
+
+**Proof exit criteria:** an assessment is complete when every required claim has reproducible evidence
+or a concrete blocker. The design passes only when A1–A4 work together and no material claim is left
+unproved. A blocker is a valid report, not a passing gate or permission to weaken the design. Preserve
+the smallest failing source/test and describe the necessary decision. Do not start deleting production
+paths or broad consumer migration to conceal a failed proof.
+
+Verification follows docs/build-and-verification.md: all Rust/Cargo commands use the default Nix
+shell, with focused tests first. Record which real Store/managed boundaries were exercised; scripted
+IO does not establish live-chain behavior. Phase A does not replace Phase B's managed acceptance or
+final exact-candidate CI. If the proof becomes a production candidate, apply the full selected
+cross-crate/persistence workflow rather than presenting it as an isolated experiment.
+
+### 12.2 Phase B: dependency-aware production commits
+
+After the integrated proof passes, use its actual dependency map to finalize commit boundaries.
+Each production commit leaves one coherent current API, compiling affected consumers and passing
+its required checks. Merge inseparable changes; do not introduce compatibility wrappers, alternate
+registries or disabled consumers to achieve a predetermined commit count.
+
+The intended logical commits are:
+
+| Commit | Contents, deletions and completion boundary | Verification |
+| --- | --- | --- |
+| B1 — shared value/domain groundwork, only if independently coherent | Establish the shared mfm-chain/Values ownership for reusable identity/scalar/balance arithmetic that existing consumers can actually use. Move implementations rather than retain duplicate mechanics. Include the explicit canonical-zero correction with its regression and documented semantics. Keep the current construction/execution API coherent until B2. Do not publish unused replacement capability/State APIs merely to split the work; any extraction requiring the new ABI belongs in B2. If no independent extraction exists, omit B1 and include this work in B2. | Focused constructors/codecs/arithmetic tests, both current consuming domains, nominal identity/range checks, zero/dust/remainder/80-digit regression coverage; affected boundary checks required by build-and-verification. |
+| B2 — complete authoring, Program and Runtime cutover | Introduce typed planning/local configuration, vector traversal, environment-owned discovery, native injection, complete Program/document/bindings and inferred compile/load. Include non-generic Program/ExecutionResult, checked inspection, Runtime callback/adapter ownership and explicit execute/read/resume handoff. Migrate all affected lifecycle, balance, Portfolio/enrichment, Application, CLI/REST and inspection consumers in the same commit. Replace original-failure/report wires and root-map projections where required by this ABI. Delete superseded DSL, registration, assembly, native phase/context/State, mapper and fixture implementations with their coverage replacements. Update authoritative design/architecture, transport docs, rustdoc and the authoring guide together. | All A1–A4 guarantees on production paths; affected unit/compile-fail/integration and managed lifecycle/balance/transport scenarios from section 13. Complete required checks, then one final CI on the exact candidate under the selected workflow. |
+
+B2 is deliberately an inseparable boundary until the proof demonstrates a smaller coherent division.
+It must already contain non-generic execution/results, required consumer migrations, report changes,
+and deletion of every replaced path. These cannot be deferred to a later cleanup or acceptance commit.
+Do not remove the old compiler while Portfolio still needs it. Do not leave tests using superseded
+fixture implementations merely because the new library API compiles.
+
+If proof evidence permits additional independent production commits, record each proposed boundary
+in the A5 report: what remains executable afterward, which old path is deleted, which consumers and
+checks prove coherence, and why no duplicate public model survives. Conversely, merge B1 into B2
+when dependency or schema changes make the extraction inseparable. A large necessary cutover is
+preferable to a sequence of knowingly broken or parallel designs.
+
+Every implementation commit includes the tests and documentation required by its behavior. Before
+removing an assertion, identify its replacement and owner. Report simplifications/deletions, added
+necessary complexity and production-code LOC separately from proof/tests/docs changes. No staged
+proof becomes a permanent alternate DSL or engine. A follow-up commit may add independently justified
+work; it may not complete behavior, safety checks or deletions required for an earlier commit to be
+correct.
+
+### 12.3 Documentation delivered with the cutover
 
 As part of the capability/authoring cutover, add `docs/capability-authoring.md` and link it from the
 README and relevant public rustdoc. This is a required implementation deliverable, not a second
@@ -2134,6 +2190,11 @@ cutover. Do not add unrelated comments to today's superseded registration tables
 this future implementation requirement.
 
 ## 13. Verification contract
+
+Section 12.1 defines the bounded proof's exit gate. This section defines the full production cutover
+coverage, including managed and consumer-specific requirements beyond that proof. The A5 evidence
+report must distinguish these two scopes; neither a passing scratch proof nor a future verification
+promise satisfies the production commit's checks.
 
 | Boundary | Required evidence |
 | --- | --- |
@@ -2297,23 +2358,25 @@ ProgramRef check, capacity, cancellation, recovery or Journal ordering. The mock
 IO/projection solely to test types; production must retain the separate phase boundaries above.
 Construction errors in the scratch used simple placeholders and do not prove causal diagnostics.
 
-### 15.4 Remaining construction proof, in order
+### 15.4 Using the prior experiments in the integrated proof
 
-The single supported-type tuple in section 6.1 replaces the external-enum introspection gap. The
-second experiment (section 15.5) proves the cross-crate dispatch mechanism without a duplicated
-fresh/cold inventory. Next integrate it with actual recursive injection, resolved supporting leaves,
-Read and full nominal contracts. A cold resolved supporting leaf must not acquire a root-config
-binding-constructor requirement merely because family dispatch also supports fresh construction.
+Section 12.1 is the current ordered proof assignment and completion contract. The experiments below
+are narrower historical evidence; their old signatures and temporary paths are not a second public
+API or a reproducible final handoff by themselves.
 
-The original-encoding callback extraction in section 15.6 proves a narrower boundary than the full
-engine. Next integrate State prepare/check/invoke/project/interpret callbacks and retain actual
-original-append failure, preappend projection rejection, postacknowledgement interpretation failure,
-panic, cancellation and ambiguous-acknowledgement tests. Do not replace them with scratch mocks.
+Reuse the single-family tuple dispatch from section 15.5 in A2, then integrate actual recursive
+injection, resolved supporting leaves, Reads and complete nominal contracts. A cold supporting leaf
+must not acquire fresh root-configuration or Plan bounds. Extend the proof to the inferred environment,
+Operation-local planning and both balance continuations specified since that experiment.
 
-Finally implement and test Runtime-owned program_document extraction, full canonical Program load
-after config deletion, and explicit read/resume ProgramRef mismatch rejection. Preserve existing
-current-state and Store snapshot/head checks. The new bootstrap does not itself qualify a current
-RunView. Production document capacity/deduplication and Portfolio migration remain separate gates.
+Reuse section 15.6's original-encoding extraction in A4, then test the actual engine's original-append
+failure, preappend projection rejection, postacknowledgement interpretation failure, cancellation,
+panic and ambiguous acknowledgement. The isolated callback test does not prove those transitions.
+
+Integrate Runtime-owned program_document extraction, complete canonical load after configuration
+deletion, exact ProgramRef checks and current-state/Store snapshot behavior. Preserve native original
+custody and typed hot/cold result/report access. Record all remaining production acceptance work in
+A5 rather than treating the older experiment results as proof of the completed refactor.
 
 ### 15.5 One native-family tuple: consuming-crate proof
 
