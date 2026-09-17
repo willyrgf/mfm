@@ -61,18 +61,20 @@ flowchart TB
       end
       CONFIG-->TCONFIG
 
-      subgraph EXPANSION["Expansion and assembly — before execution"]
+      RESOURCES["Supply explicit provider, signer and authority handles"]
+
+      subgraph EXPANSION["Construct the complete Program — before execution"]
           ERESOLVE["Resolve capability implementations and public bindings"]
 
           subgraph NETWORK["Network-dependent implementation"]
-              CONSTRUCT["Construct the selected capability implementation for the State<br/>Supply supporting States through the same injection mechanism<br/>Associate its native contracts and protocol codecs"]
+              CONSTRUCT["Construct the selected capability implementation for the State<br/>Supply supporting States through the same injection mechanism<br/>Bind native adapters to supplied handles and associate exact codecs"]
           end
           classDef native fill:#fff0d9,stroke:#b96812,color:#33210b;
           class CONSTRUCT native;
 
-          EXPAND["Expand the State sequence, inject capability States,<br/>and assemble implementations with supplied live resources"]
-          BUILD["Build the immutable Program<br/>Record resolved choices and bind its exact starting input"]
-          READY["Produce the Program and assembled Runtime"]
+          EXPAND["Expand the State sequence and inject supporting States<br/>Construct each exact executable entry"]
+          BUILD["Build the immutable executable Program<br/>Commit the sequence, public bindings, policies and starting input<br/>Retain bound callbacks outside its persisted description"]
+          READY["Return the complete Program to the caller"]
 
           ERESOLVE --> CONSTRUCT
           CONSTRUCT --> EXPAND
@@ -82,6 +84,7 @@ flowchart TB
 
       TCONFIG --> ERESOLVE
       SOURCE --> ERESOLVE
+      RESOURCES --> CONSTRUCT
       READY --> RUNTIME_ADMIT
 
       subgraph RUNTIME_EXECUTION["Runtime execution"]
@@ -93,7 +96,7 @@ flowchart TB
           subgraph RUNTIME_NETWORK["Execute network-dependent implementation"]
               RUNTIME_SUPPORT["Execute the injected supporting State<br/>Consume current input for native preparation or supporting work"]
               RUNTIME_NATIVE_REQUEST["Translate and validate the exact request<br/>Use the already-selected native codecs"]
-              RUNTIME_IO["Invoke the selected native adapter<br/>Use supplied provider, signer and authority resources"]
+              RUNTIME_IO["Invoke the Program's already-bound native adapter<br/>Use its captured provider, signer and authority handles"]
               RUNTIME_CHECK_PROJECT["Validate and project native evidence<br/>Run the selected checked projection"]
               RUNTIME_WAIT["Await readiness within the native adapter<br/>Retain the same pending Effect command"]
               RUNTIME_PROJECT["Reconstruct checked semantic evidence from retained settlement<br/>Run the same selected projection"]
@@ -190,6 +193,14 @@ Deploy and Configure remain concrete States, using `TransactionEffect<Deployment
 `TransactionEffect<DeployedContract>` respectively. `ContractRead` returns the checked scalar observation.
 EVM injects reservation and preparation before each transaction State; it needs no outcome suffix
 or supporting State merely to run a codec.
+
+Construction returns a complete immutable executable Program. Runtime receives it and owns each
+run's continuation, persistence and authorized recovery; it does not select implementations,
+register code, or bind missing resources. Program's canonical description contains exact public
+facts, including public bindings. Executable functions and live handles are not serialized or hashed.
+Cold loading matches recorded implementation identities to installed code and binds explicit matching
+resources before returning the same complete Program, without rerunning configuration resolution.
+Runtime read/resume receive that Program and verify its identity against the retained run.
 
 Expansion selects implementations and injects their supporting States before execution. Those
 States consume the actual predecessor output during execution: Add can produce 84 before
