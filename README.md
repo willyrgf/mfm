@@ -40,27 +40,32 @@ use cases over an unauthenticated Unix socket. The shared production bootstrap a
 Start with [design](docs/design.md), [architecture](docs/architecture.md), and
 [build and verification](docs/build-and-verification.md).
 
-## High level workflow of the Platform
+## Target workflow for the DSL refactor
+
+This diagram describes the target in [RFC_REFACTOR_DSL.md](RFC_REFACTOR_DSL.md), not the
+current implementation. Orange nodes identify capability-owned network-specific behavior.
+Runtime executes every expanded State through the same Pure/Read/Effect machinery; the domain
+and supporting-State branches below show ownership, not different execution engines.
+
 ```mermaid
 flowchart TB
       subgraph INPUTS["0 - Config"]
           CONTRACT["Smart contract definition"]
-          CONFIG["Toml config file:</br>network, chainid, wallets, contracts refs"]
+          CONFIG["Toml config file:<br/>network, chainid, wallets, contracts refs"]
       end
       CONTRACT-->CONFIG
 
       subgraph DSL["1 · DSL / definition"]
           TCONFIG["Checked input and configs"]
-          SOURCE["Select or compose concrete States and Operations:</br> Deploy → Configure → Observe → Validate → Report"]
+          SOURCE["Select or compose concrete States and Operations:<br/> Deploy → Configure → Observe → Validate → Report"]
       end
       CONFIG-->TCONFIG
 
-
       subgraph EXPANSION["Expansion and assembly — before execution"]
           ERESOLVE["Resolve capability implementations and public bindings"]
-          
+
           subgraph NETWORK["Network-dependent implementation"]
-              CONSTRUCT["Construct the selected capability implementation for the State, including concrete impl and codecs"]
+              CONSTRUCT["Construct the selected capability implementation for the State<br/>Choose supporting State definitions, native contracts and protocol codecs"]
           end
           classDef native fill:#fff0d9,stroke:#b96812,color:#33210b;
           class CONSTRUCT native;
@@ -79,21 +84,21 @@ flowchart TB
       SOURCE --> ERESOLVE
       READY --> RUNTIME_ADMIT
 
-     
       subgraph RUNTIME_EXECUTION["Runtime execution"]
           RUNTIME_ADMIT["Admit the exact Program and typed initial input"]
-          RUNTIME_NEXT["Determine the next step from the recorded run state"]
-          RUNTIME_KIND{"Select the next expanded State"}
+          RUNTIME_NEXT{"Determine the next step from the recorded run state"}
 
-          RUNTIME_STATE["Execute the domain State<br/>Evaluate a Pure State or prepare a Read / Effect request"]
+          RUNTIME_STATE["Execute the domain State<br/>Evaluate Pure semantics or supply a checked capability request"]
 
           subgraph RUNTIME_NETWORK["Execute network-dependent implementation"]
-              RUNTIME_SUPPORT["Execute the injected supporting State<br/>For example: reserve nonce or prepare transaction"]
+              RUNTIME_SUPPORT["Execute the injected supporting State<br/>Consume current input for native preparation or supporting work"]
               RUNTIME_IO["Invoke the selected native adapter<br/>Use supplied provider, signer and authority resources"]
-              RUNTIME_NATIVE_EVIDENCE["Encode and bind exact native evidence<br/>Preserve its original contents and identity"]
+              RUNTIME_NATIVE_BIND["Validate native evidence against the exact request<br/>Check protocol facts and evidence binding"]
+              RUNTIME_WAIT["Await readiness within the native adapter<br/>Retain the same pending Effect command"]
               RUNTIME_PROJECT["Project native evidence into the capability's typed semantic evidence<br/>Keep network-specific interpretation here"]
           end
 
+          RUNTIME_ENCODE["Encode and admit exact native evidence<br/>Preserve its original contents and identity"]
           RUNTIME_REQUEST{"Check the request mode"}
           RUNTIME_COMMAND["Record the exact Effect command before adapter execution"]
           RUNTIME_SETTLEMENT{"Check whether this is an Effect"}
@@ -102,8 +107,11 @@ flowchart TB
           RUNTIME_INTERPRET["Interpret semantic evidence in the State<br/>Apply domain rules without network-specific code"]
           RUNTIME_RESULT{"Inspect the State's typed outcome"}
 
-          RUNTIME_ERROR["Retain the exact original domain or operational failure"]
+          RUNTIME_ERROR["Record the exact original failure and execution context"]
           RUNTIME_RECOVERY["Apply the original error's classification<br/>Invoke the handler and authorize recovery"]
+          RUNTIME_RECOVERY_RECORD["Record the authorized recovery decision"]
+          RUNTIME_RECOVERY_ROUTE{"Follow the recorded recovery outcome"}
+          RUNTIME_CONCLUDE["Record the successful State conclusion<br/>Retain checked output and execution evidence"]
           RUNTIME_ADVANCE{"Check whether more States remain"}
           RUNTIME_SUCCESS["Return checked terminal success"]
           RUNTIME_STOP["Return terminal failure or RecoveryStopped"]
@@ -111,9 +119,13 @@ flowchart TB
           RUNTIME_INVOCATION["Return the invocation failure<br/>Preserve causes, known acknowledgements and retained authority"]
 
           RUNTIME_ADMIT --> RUNTIME_NEXT
-          RUNTIME_NEXT --> RUNTIME_KIND
-          RUNTIME_KIND --> RUNTIME_STATE
-          RUNTIME_KIND --> RUNTIME_SUPPORT
+          RUNTIME_NEXT -->|"Enter a domain State"| RUNTIME_STATE
+          RUNTIME_NEXT -->|"Enter an injected State"| RUNTIME_SUPPORT
+          RUNTIME_NEXT -->|"Reconcile an acknowledged pending command"| RUNTIME_IO
+          RUNTIME_NEXT -->|"Interpret retained native settlement"| RUNTIME_PROJECT
+          RUNTIME_NEXT -->|"Recover a recorded original failure"| RUNTIME_RECOVERY
+          RUNTIME_NEXT -->|"Read terminal success"| RUNTIME_SUCCESS
+          RUNTIME_NEXT -->|"Read terminal failure"| RUNTIME_STOP
 
           RUNTIME_STATE -->|"Pure outcome"| RUNTIME_RESULT
           RUNTIME_SUPPORT -->|"Pure outcome"| RUNTIME_RESULT
@@ -124,11 +136,13 @@ flowchart TB
           RUNTIME_REQUEST -->|"Effect"| RUNTIME_COMMAND
           RUNTIME_COMMAND --> RUNTIME_IO
 
-          RUNTIME_IO -->|"Receive native evidence"| RUNTIME_NATIVE_EVIDENCE
-          RUNTIME_IO -->|"Remain pending: await readiness<br/>and reconcile the same command"| RUNTIME_IO
+          RUNTIME_IO -->|"Receive native evidence"| RUNTIME_ENCODE
+          RUNTIME_IO -->|"Remain pending"| RUNTIME_WAIT
+          RUNTIME_WAIT -->|"Return control for reconciliation"| RUNTIME_NEXT
           RUNTIME_IO -->|"Receive an original operational failure"| RUNTIME_ERROR
 
-          RUNTIME_NATIVE_EVIDENCE --> RUNTIME_SETTLEMENT
+          RUNTIME_ENCODE --> RUNTIME_NATIVE_BIND
+          RUNTIME_NATIVE_BIND --> RUNTIME_SETTLEMENT
           RUNTIME_SETTLEMENT -->|"Effect"| RUNTIME_RECORD
           RUNTIME_SETTLEMENT -->|"Read"| RUNTIME_PROJECT
           RUNTIME_RECORD --> RUNTIME_PROJECT
@@ -136,23 +150,56 @@ flowchart TB
           RUNTIME_PROJECT --> RUNTIME_INTERPRET
           RUNTIME_INTERPRET --> RUNTIME_RESULT
 
-          RUNTIME_NATIVE_EVIDENCE -->|"Fail encoding or binding"| RUNTIME_INVOCATION
+          RUNTIME_ADMIT -->|"Fail admission or acknowledgement"| RUNTIME_INVOCATION
+          RUNTIME_NEXT -->|"Fail reconstruction or local checks"| RUNTIME_INVOCATION
+          RUNTIME_STATE -->|"Fail a callback or value check"| RUNTIME_INVOCATION
+          RUNTIME_SUPPORT -->|"Fail a callback or value check"| RUNTIME_INVOCATION
+          RUNTIME_IO -->|"Fail native extraction or an adapter invariant"| RUNTIME_INVOCATION
+          RUNTIME_ENCODE -->|"Fail encoding or admission"| RUNTIME_INVOCATION
+          RUNTIME_NATIVE_BIND -->|"Fail evidence binding"| RUNTIME_INVOCATION
+          RUNTIME_INTERPRET -->|"Fail interpretation"| RUNTIME_INVOCATION
           RUNTIME_PROJECT -->|"Fail semantic projection"| RUNTIME_INVOCATION
           RUNTIME_COMMAND -->|"Fail or lose acknowledgement"| RUNTIME_INVOCATION
           RUNTIME_RECORD -->|"Fail or lose acknowledgement"| RUNTIME_INVOCATION
 
           RUNTIME_RESULT -->|"Domain failure"| RUNTIME_ERROR
           RUNTIME_ERROR --> RUNTIME_RECOVERY
-          RUNTIME_RECOVERY -->|"Continue through an authorized transition"| RUNTIME_NEXT
-          RUNTIME_RECOVERY -->|"Terminate or stop recovery"| RUNTIME_STOP
+          RUNTIME_RECOVERY -->|"Authorize a transition"| RUNTIME_RECOVERY_RECORD
+          RUNTIME_RECOVERY -->|"Fail classification or handler invocation"| RUNTIME_INVOCATION
+          RUNTIME_RECOVERY_RECORD --> RUNTIME_RECOVERY_ROUTE
+          RUNTIME_RECOVERY_ROUTE -->|"Continue"| RUNTIME_NEXT
+          RUNTIME_RECOVERY_ROUTE -->|"Terminate or stop pending-Effect recovery"| RUNTIME_STOP
+          RUNTIME_ERROR -->|"Fail encoding or acknowledgement"| RUNTIME_INVOCATION
+          RUNTIME_RECOVERY_RECORD -->|"Fail encoding or acknowledgement"| RUNTIME_INVOCATION
 
-          RUNTIME_RESULT -->|"Success"| RUNTIME_ADVANCE
+          RUNTIME_RESULT -->|"Success"| RUNTIME_CONCLUDE
+          RUNTIME_CONCLUDE -->|"Acknowledge conclusion"| RUNTIME_ADVANCE
+          RUNTIME_CONCLUDE -->|"Fail encoding or acknowledgement"| RUNTIME_INVOCATION
           RUNTIME_ADVANCE -->|"Continue"| RUNTIME_NEXT
           RUNTIME_ADVANCE -->|"Finish"| RUNTIME_SUCCESS
       end
 
-
-
       classDef RUNTIME_native fill:#fff0d9,stroke:#b96812,color:#33210b;
-      class RUNTIME_SUPPORT,RUNTIME_IO,RUNTIME_NATIVE_EVIDENCE,RUNTIME_PROJECT RUNTIME_native;
+      class RUNTIME_SUPPORT,RUNTIME_IO,RUNTIME_NATIVE_BIND,RUNTIME_PROJECT,RUNTIME_WAIT RUNTIME_native;
 ```
+
+Expansion selects implementations and injects their supporting States before execution. Those
+States consume the actual predecessor output during execution: Add can produce 84 before
+capability-owned preparation constructs and validates the native configuration request. Configure
+does not inspect native fields or duplicate that validation. Observe receives checked semantic
+evidence from its capability; Validate compares the observed value with the retained effective value.
+
+RecoveryStopped follows a recorded decision to stop recovery of an unresolved Effect; the retained
+command remains authoritative. It does not imply that the external transaction failed.
+
+All settlement-admission checks precede its append. If admission requires semantic projection,
+the same pure projection runs there too; interpretation reconstructs the view from retained native
+evidence. Reads retain evidence through their existing conclusion rather than a separate settlement.
+Cold continuation uses the retained exact implementation, binding, and command with existing local
+checks; it does not resolve configuration or repeat already-acknowledged preparation States.
+
+The readiness node describes waiting inside the existing async adapter boundary, not a separate
+scheduler or injected State. Runtime retains progression authority. Direct progression can return
+Pending; ordinary execute must avoid spinning while preserving cancellation and the same command.
+Every recording failure preserves known acknowledgements and any ambiguous append disposition;
+an invocation failure is not a promise that it was durably recorded.
