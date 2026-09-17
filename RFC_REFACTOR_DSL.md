@@ -8,6 +8,10 @@ Rust sketches omit routine derives and implementations where the surrounding con
 behavior; they have not been compiled. Implementation must prove the complete contracts together,
 not invent a different ownership model behind the examples.
 
+The fixed-sequence target excludes public branching/repetition combinators. Section 5.3 records
+the resulting unresolved Portfolio migration; the complete compiler cutover is not ready until
+that existing consumer is accounted for.
+
 [Design](docs/design.md) and [architecture](docs/architecture.md) remain authoritative for the current
 implementation. Update their affected contracts, code, and tests together during the implementation
 cutover. This RFC does not change persisted schemas or enable shipping transaction execution.
@@ -700,7 +704,7 @@ elements and retain scopes. No aggregate Failure associated type, construction c
 parallel DSL, getter collection, selection constants, or caller-defined aliases are required.
 
 Framework-controlled sources comprise tuples, Operations, Pure/Read/Effect selections, resolved
-supporting selections, typed identity, checkpoints, Choice, and Repeat. New-State authors enter
+supporting selections, typed identity, and checkpoints. New-State authors enter
 through a State selection, not an arbitrary mutable emitter. Exact supported tuple arities and
 nested tuples must be covered in consuming tests, without inventing a dynamic heterogeneous list.
 
@@ -761,38 +765,24 @@ not a change to the baseline lifecycle definition above.
 Checkpoint markers emit no State/frame. Resolve a newly installed target only in its owning scope.
 Reject missing, duplicate, foreign, forward, terminal-without-following-State, and context-mismatched
 targets. An inherited already-bound parent target is never rebound to a child marker of the same
-type. Repeated occurrences receive distinct scopes. Relocate to final expanded positions and retain
+type. Distinct occurrences receive distinct scopes. Relocate to final expanded positions and retain
 Runtime's irreversible Effect barrier checks.
 
-### 5.3 Choice, repetition, and semantic planning checks
+### 5.3 Planning checks and excluded composition features
 
-Choice<A, B> requires equal endpoints and expands the selected construction-time branch. It is not
-a failure sum or Runtime branch. Choice also supplies the closed alternative structure for native
-implementation families; do not introduce another alternative algebra or registry.
+This refactor defines fixed typed sequences. It adds no public `Choice`, `Repeat`, `ItemsFrom`,
+conditional composition, or configuration-driven repetition API. Capability implementation
+selection remains required and is owned by the native family as described in section 6.1;
+it does not expose a general-purpose branching combinator to composition authors.
 
-```rust
-pub trait ItemsFrom<Config> {
-    type Item;
-    fn items(config: &Config) -> &[Self::Item];
-}
-
-pub struct Repeat<Body, Items> {
-    body: Body,
-    items: PhantomData<Items>,
-}
-```
-
-Body's output must equal its input. Compile each body under the corresponding borrowed Item as
-its configuration; derive count/order from the actual checked slice. Empty repeat is typed identity.
-A bare empty tuple cannot establish an arbitrary input contract; provide explicit typed identity.
-Each occurrence gets a fresh policy/checkpoint scope and contributes to cumulative expansion limits.
-
-Portfolio's production selector borrows the root's collections. Its repeated body is
-EnterPortfolioCollection -> CollectEvmBalances -> ResumePortfolioCollection. Resolve each occurrence's
-route from that actual item. Delete the separately stored checked_collections vector and root-only
-validator once this coupling is proved. The continuation preserves the immutable collection plan;
-execution changes cursor/results, not collection count/order/routes. A composition that changes
-planning fields cannot claim compatibility merely by sharing a broad context type.
+Portfolio currently expands one child sequence for each configured collection. Removing the
+proposed repetition API leaves that existing consumer's migration unresolved; it does not authorize
+removing collection support, replacing it with a fixed count, or retaining a parallel legacy DSL.
+Before the compiler cutover can replace all current consumers, resolve that migration explicitly
+against actual Portfolio requirements. Preserve collection count/order/routes, the immutable plan,
+and each collection's State boundaries. Do not claim that `checked_collections` or its agreement
+checks can be deleted until an equivalent replacement is designed and proved. This is a handoff
+blocker for the complete cutover, not permission to introduce repetition under a different name.
 
 Remove arbitrary with_input_check/root predicates, not their guarantees. Checked constructors and
 decoders own local invariants; capability setup owns binding/action agreement; planning derives from
@@ -806,26 +796,32 @@ exact schemas, content identity, and capacity even where Rust proves authored co
 ### 6.1 Profiles and one structural walk
 
 ```rust
-pub trait CapabilityFamily<C, Role> {
-    type Choices;
+pub trait CapabilityFamily<C> {
+    type Selection;
 }
 
-pub trait Resolve<Config, C, Role>: CapabilityFamily<C, Role> {
-    fn resolve(config: &Config) -> Result<Self::Choices, ProgramError>;
+pub trait Resolve<Config, C>: CapabilityFamily<C> {
+    fn resolve(config: &Config) -> Result<Self::Selection, ProgramError>;
 }
 ```
 
-A production profile declares supported typed implementation choices per capability family and
-binding role. A transaction family can implement these generically over supported R, sharing the
+A production profile declares supported typed implementations per capability family.
+A transaction family can implement these generically over supported R, sharing the
 configuration match; adding Configure does not require another handwritten native registry.
 Each selected leaf supplies a concrete I and checked I::Binding. All offered alternatives must
-support the selected State's typed injection. Use a narrower admitted family/role if necessary;
+support the selected State's typed injection. Use a narrower admitted family if necessary;
 never silently fall back to a network incapable of the advertised operation.
 
-The default role keeps ordinary selections two-argument. Multiple accounts/networks use explicit
-typed roles. Shared roles must agree across a workflow. At entry, Config is the actual checked root
-input. Nested tuples/Operations inherit it; Repeat borrows an Item. Changing compile configuration
-for a repeated body does not change the root input whose identity is committed.
+Selection is a concrete resolved leaf for a single implementation, or a family-owned Rust enum
+whose variants hold the supported concrete implementations and checked bindings. The family's
+private traversal matches that enum during compilation and visits each declared variant type for
+cold inventory through the same requirement receiver. It introduces no public generic choice
+algebra, erased executable, or additional registration list.
+
+Resolve exact bindings from checked configuration; do not add a public binding-role type parameter
+or multi-account composition API for hypothetical use. Binding identity and cross-State agreement
+remain checked. At entry, Config is the actual checked root input. Nested tuples/Operations inherit
+it; compilation commits that exact root input.
 
 The private traversal is one sealed structural walk with two modes:
 
@@ -833,12 +829,10 @@ The private traversal is one sealed structural walk with two modes:
 | --- | --- | --- |
 | Tuple | Walk children with unchanged borrowed config | Walk child types |
 | Operation | Enter scope, resolve typed defaults, walk body | Visit declared handler/target and body types |
-| Choice/family | Walk selected supported branch | Walk all supported branch types |
-| Repeat | Borrow each Item and walk Body under it | Walk Body type once |
 | Unresolved selection | Resolve profile choice/binding then use typed injection | Visit family alternatives and their injection types |
 | Resolved supporting selection | Use supplied I/binding through the same injection | Visit I/prefix/designated/suffix types without values |
 
-Compile leaf bounds require Resolve<Config, C, Role>; inventory requires only structural family and
+Compile leaf bounds require Resolve<Config, C>; inventory requires only structural family and
 injection support. Inventory never calls resolve/surround/default resolution, fabricates C0, or loads
 source configuration. Runtime does not perform this authoring traversal during progression.
 
@@ -879,7 +873,7 @@ fn compile<S: AuthoringSource>(
 
 The builder is profile-typed (`Runtime::builder::<EvmContractCapabilities>(store)?`); built Runtime
 is not. The shown compile signature has additional private walk/profile bounds described above.
-Stage the complete Program and association delta privately. Check input/config agreement, roles,
+Stage the complete Program and association delta privately. Check input/config and binding agreement,
 contracts, policies, limits, and exact live bindings before publication. Any failure leaves the
 builder unchanged. Constructor/codec/assembly errors retain their concrete causes.
 
@@ -1263,7 +1257,7 @@ migration reader, or claim old Programs run with unavailable ABIs.
 | register_fixture_states and native State-registration helper | Compiler-emitted exact requirements, including support/codecs/handlers |
 | Application handwritten compiled State registration inventory | Inspection fed from the same structural source/type inventory |
 | Separate ordinary public assembly construction and copied progress loops | Runtime builder and execute over the existing engine |
-| Independent Portfolio checked_collections / root-only validator | Root-derived typed Repeat plus immutable execution plan |
+| Independent Portfolio checked_collections / root-only validator | Replacement unresolved after removing repetition; preserve guarantees and resolve section 5.3 before complete cutover |
 | Public untyped occurrence modifiers / ambiguous Operation instance config | Typed maintained defaults interpreting one checked input |
 | Duplicate decimal/range implementation | Shared Unsigned256 mechanics with exact owning schemas preserved or deliberately versioned |
 
@@ -1287,9 +1281,12 @@ barriers, and independent E2E oracles.
 ## 12. Implementation sequence
 
 First compile the specified contracts in a bounded cross-crate slice: fixed States, two distinct
-native ABIs, exact prepared/evidence values, defaults, recursive injection, Repeat, and cold
+native ABIs, exact prepared/evidence values, defaults, recursive injection, and cold
 inventory. This proves the design; it does not delegate product vocabulary or ownership to an
 engineer. Adjust private Rust bounds as necessary without weakening the specified guarantees.
+
+Resolve the Portfolio migration gate in section 5.3 before attempting the complete compiler cutover.
+Do not hand the unresolved construction model to an engineer as an implementation detail.
 
 Use coherent logical commits, merging inseparable cuts:
 
@@ -1331,11 +1328,11 @@ turn the illustrative transfer into an additional implementation requirement.
 | Static typing | Incompatible adjacent/expanded/nested endpoints fail compilation; supported tuple nesting and typed empty identity |
 | Generic native reuse | Preserve a second supported context and an ordinary call to an existing address through maintained typed components, without fixture-specific Runtime machinery |
 | Shared scalar | Full unsigned-256 range, canonical decoding, zero, maximum, overflow, native schema equivalence where retained |
-| Capability family | Same non-generic State with distinct native command/evidence/error ABIs; exact request-type schemas; supported roles and no fallback |
+| Capability family | Same non-generic State with distinct native command/evidence/error ABIs; exact request-type schemas; checked binding agreement and no fallback |
 | Native request custody | Actual predecessor84 produces native84 before reservation; forged request84/native42, wrong schema/binding/implementation/action rejected at owning hot/cold boundary; no duplicate Configure validation |
 | Recursive injection | Nested supporting selection uses same walk/bindings; no product re-resolution; finite types, depth/State-count rejection, atomic builder failure |
-| Defaults/checkpoints | Parent/child inheritance, explicit zero, handler/parameter/target unit, distinct repeated scopes, duplicate/missing/foreign/forward/terminal/context mismatch, inherited-parent-target non-rebinding and Effect barriers |
-| Portfolio planning | Actual root-derived collection count/order/routes, immutable continuation plan, empty Repeat, nested use and cumulative limits |
+| Defaults/checkpoints | Parent/child inheritance, explicit zero, handler/parameter/target unit, distinct occurrence scopes, duplicate/missing/foreign/forward/terminal/context mismatch, inherited-parent-target non-rebinding and Effect barriers |
+| Portfolio migration gate | Resolve section 5.3 before replacing its authoring path; preserve configured collection count/order/routes, empty collections, immutable continuation plan, State boundaries and cumulative limits |
 | Assembly/cold | Automatic support/codecs/handlers, one native callback serving distinct request-specialized ABIs, explicit matching public-binding custody, exact conflicts, unchanged builder on failure, no config/C0/setup fabrication, supported alternatives and typed Program reconstruction |
 | Evidence | Checked projection before settlement and repeated hot/cold interpretation; native/semantic ref separation including Reads; exact original bytes; no re-encoding or hidden lookup |
 | Product | Maintained42/composed84, target/configuration-point agreement, overflow, malformed ABI, mismatched observed value, custom State zero rejection |
@@ -1364,12 +1361,14 @@ stack broad gates. For this documentation rewrite, review local links, signature
 
 ## 14. Material uncertainties and handoff gates
 
-The core design is specified. Remaining uncertainties require implementation evidence, not an
-alternative capability vocabulary or a new framework layer.
+The fixed-sequence lifecycle design is specified. Portfolio migration remains an explicit design
+gap after removing optional composition constructs. Other uncertainties require implementation
+evidence, not an alternative capability vocabulary or a new framework layer.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
-| Exact generic contracts compose on pinned Rust | Derive/coherence/private traversal bounds are uncompiled | Extra erasure or a second path could be introduced | Compile fixed States, typed requests, two native ABIs, recursive support, defaults, Repeat and cold inventory across crates |
+| Existing Portfolio can migrate without the removed repetition API | Its current expansion loops over configured collections; no replacement is specified | Complete compiler deletion/cutover is blocked | Review actual Portfolio requirements and agree its migration before implementation; preserve behavior or explicitly approve a separate product scope change |
+| Exact generic contracts compose on pinned Rust | Derive/coherence/private traversal bounds are uncompiled | Extra erasure or a second path could be introduced | Compile fixed States, typed requests, two native ABIs, recursive support, defaults and cold inventory across crates |
 | Complete prepared requests fit capacity behavior | Requests retain explicit context/artifact/evidence | Some current workloads or report thresholds may overflow | Measure maintained artifacts and small-bound failure cases without dropping facts or authority |
 | Shared scalar extraction preserves native behavior | Range/decimal mechanics move inward | Accepted values or schema/serialization could drift | Boundary/overflow/native equivalence tests and explicit versioning for changed contracts |
 | Native artifact/ABI binding is exact | Actual identifiers/selectors must come from the maintained artifact definition | Arbitrary bytecode could be treated as supported semantics | Wrong artifact/schema/ledger and malformed-return tests against independent oracle |
