@@ -65,7 +65,7 @@ flowchart TB
           ERESOLVE["Resolve capability implementations and public bindings"]
 
           subgraph NETWORK["Network-dependent implementation"]
-              CONSTRUCT["Construct the selected capability implementation for the State<br/>Choose supporting State definitions, native contracts and protocol codecs"]
+              CONSTRUCT["Construct the selected capability implementation for the State<br/>Supply supporting States through the same injection mechanism<br/>Associate its native contracts and protocol codecs"]
           end
           classDef native fill:#fff0d9,stroke:#b96812,color:#33210b;
           class CONSTRUCT native;
@@ -191,6 +191,11 @@ evidence from its capability; Validate compares the observed value with the reta
 
 RecoveryStopped follows a recorded decision to stop recovery of an unresolved Effect; the retained
 command remains authoritative. It does not imply that the external transaction failed.
+
+Nonce reservation and other supporting States use the same typed injection mechanism. Supporting
+selections can themselves require injection, using already-selected implementations and bindings.
+The compiler expands them within its depth and State-count limits. Contracts and codecs are
+associated requirements; they do not become additional persisted States merely by being selected.
 
 All settlement-admission checks precede its append. If admission requires semantic projection,
 the same pure projection runs there too; interpretation reconstructs the view from retained native
