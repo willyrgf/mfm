@@ -15,7 +15,8 @@ prove the complete contracts together, not invent a different ownership model be
 
 The target uses typed tuples and Operation planning, including homogeneous collections required by
 Portfolio. It excludes a separate branching/repetition DSL. Section 5.3 specifies that construction
-model and records the remaining native balance-contract design gate before complete cutover.
+model; sections 2.5, 4.3 and 9.1 specify the balance contracts and their migration. Complete
+cutover still requires the consuming proofs and verification in sections 13–15.
 
 [Design](docs/design.md) and [architecture](docs/architecture.md) remain authoritative for the current
 implementation. Update their affected contracts, code, and tests together during the implementation
@@ -400,6 +401,130 @@ do not duplicate the whole executed context inside each failure. Their intrinsic
 preserves the existing Permanent classification for authenticated transaction reversion. Other
 semantic failures, such as overflow and observation mismatch, belong to their owning Pure States.
 
+### 2.5 Reusable semantic balance contracts
+
+Balance collection uses the same capability and injection machinery as the transaction lifecycle.
+Shared balance contracts contain no EVM types and introduce no universal asset framework:
+
+```rust
+pub struct BalanceTarget {
+    ledger: LedgerIdentity,
+    native: Object,
+}
+
+pub struct BalanceSource {
+    source_id: String,
+    target: BalanceTarget,
+}
+
+pub struct DecimalScale(u8); // checked 0..=30
+
+pub struct BalanceRequest {
+    sources: Vec<BalanceSource>,
+    decimals: DecimalScale,
+}
+
+pub struct BalanceContext<K: MfmValue> {
+    request: BalanceRequest,
+    caller: K,
+    metadata: BalanceCollectionMetadata,
+    completed: Vec<ConfirmedBalance>,
+}
+
+pub struct PreparedBalance<K: MfmValue> {
+    context: BalanceContext<K>,
+    observed_at: ObservationPoint,
+    source_decimals: DecimalScale,
+}
+
+pub struct CandidateBalance<K: MfmValue> {
+    prepared: PreparedBalance<K>,
+    raw_units: Unsigned256,
+}
+
+pub struct ConfirmedBalance {
+    source: BalanceSource,
+    observed_at: ObservationPoint,
+    source_decimals: DecimalScale,
+    raw_units: Unsigned256,
+}
+
+pub struct ReadBalanceAt {
+    target: BalanceTarget,
+    observed_at: ObservationPoint,
+}
+
+pub struct BalanceEvidence {
+    intent_ref: ContentRef,
+    implementation_ref: ContentRef,
+    original: Object,
+    outcome: BalanceOutcome,
+}
+
+pub enum BalanceOutcome {
+    Observed { observed_at: ObservationPoint, raw_units: Unsigned256 },
+    Rejected,
+    SafeFailure,
+    IntegrityBlocked,
+}
+
+pub struct BalanceRead;
+impl ReadCapabilityContract for BalanceRead {
+    type Intent = ReadBalanceAt;
+    type Evidence = BalanceEvidence;
+    // Exact identity and evidence binding follow section 3.
+}
+
+pub struct ObserveBalance<K>(PhantomData<fn() -> K>);
+impl<K: MfmValue> State for ObserveBalance<K> {
+    type Input = PreparedBalance<K>;
+    type Output = CandidateBalance<K>;
+    type Failure = ObserveBalanceFailure;
+    // Read prepare/interpret construct intent and interpret checked BalanceOutcome.
+}
+```
+
+All value fields are private; constructors and decoders enforce their owning invariants. Source IDs
+retain the current nonempty, bounded public-text checks. BalanceRequest preserves nonempty sources,
+at most 64, unique source IDs, declaration order and one ledger per collection. The native owner
+additionally qualifies the exact ledger/route/target contracts. BalanceCollectionMetadata retains
+checked collection ordinal, correlation and public route reference; native failures do not carry
+Portfolio-specific metadata. Derive the active source from completed.len(), without a second mutable
+index. Completed values must match the corresponding request prefix and common observation point.
+
+K is the exactly typed caller continuation, not a network/capability parameter. Preserve current
+snapshot and enrichment reuse through their distinct continuations. Consumers reuse maintained
+contracts and definitions; they do not construct context aliases. This introduces neither a generic
+carry/lift mechanism nor an erased caller context. Deploy remains a concrete non-generic State.
+
+BalanceTarget is one purpose-specific native boundary like ContractLocator. Its EVM payload contains
+the account and native/token asset descriptor; only the capability implementation decodes addresses
+or token ABI facts. ObservationPoint already carries the exact native number/hash needed for anchor
+confirmation. Do not add another opaque protocol-context Object. Native originals remain in their
+acknowledged Read calls. BalanceEvidence uses the existing immutable-original projection protocol;
+CandidateBalance stores only prepared facts and units, not a copied evidence history.
+
+ObserveBalance returns a candidate only for checked Observed evidence at the requested point.
+Rejected/SafeFailure and authenticated IntegrityBlocked are semantic failure interpretations
+(section 9.1), not local codec errors. Only the native confirmation suffix may advance completed
+results. Its shared semantic append helper checks request-prefix agreement and amount semantics;
+context mismatches remain invocation diagnostics, not fabricated external failures.
+
+Raw units retain the full unsigned-256 range. Scaled values and totals retain the existing 80-digit
+limit: a private checked DecimalUnits80 in the balance domain owns canonical nonnegative decimal
+arithmetic. Do not narrow totals to Unsigned256 or add a general arbitrary-precision framework.
+Reuse/move the existing mechanics; decimal scale and the 80-digit product bound stay explicit.
+
+Preserve the current scaling policy: native source scale equals the configured collection scale
+(not an implicit 18); token scale is read at the anchor and lies in 0..=30. Scale-down returns zero
+for amounts below one target unit; otherwise discarded nonzero digits are rejected. Scale-up and
+summation reject values exceeding 80 digits. No rounding configuration is introduced.
+
+Explicitly fix zero upscaling: scale_units("0", 0, 2) currently constructs noncanonical "000", which
+subsequent summation rejects. The new arithmetic returns canonical "0" for zero at every scale.
+This is a deliberate correctness change; retain the other dust/exact-remainder behavior and add
+boundary regressions. Semantic arithmetic failure contracts are specified in section 9.1.
+
 ## 3. Native implementation and codec interfaces
 
 ### 3.1 Inward capability interfaces
@@ -669,6 +794,64 @@ Operation and injected nesting; reject excess before returning Program. Runtime 
 do not make infinitely recursive Rust types valid. Native contracts/codecs are associated
 requirements, not additional persisted States merely because they were selected.
 
+### 4.3 Balance preparation, observation and confirmation
+
+EvmNativeBalance and EvmTokenBalance are two concrete implementations of BalanceRead. Both supply
+ReadSelection endpoints `BalanceContext<K> -> BalanceContext<K>` around the same designated
+ObserveBalance<K>, whose raw endpoints are `PreparedBalance<K> -> CandidateBalance<K>`.
+
+| Expanded Read State | Input | Output |
+| --- | --- | --- |
+| CheckEvmBalanceChain<K> | BalanceContext<K> | EvmChainChecked<K> |
+| ReadInitialEvmBalanceAnchor<K, Native> | EvmChainChecked<K> | PreparedBalance<K> |
+| ReadInitialEvmBalanceAnchor<K, Token> | EvmChainChecked<K> | EvmTokenAnchored<K> |
+| ReadEvmTokenDecimals<K>, token only | EvmTokenAnchored<K> | PreparedBalance<K> |
+| ObserveBalance<K> | PreparedBalance<K> | CandidateBalance<K> |
+| ConfirmEvmBalanceAnchor<K> | CandidateBalance<K> | BalanceContext<K> |
+
+The two initial-anchor rows are alternatives selected by the native implementation, not consecutive
+States. Native/Token are private preparation specializations sharing anchor-reading logic. Their
+associated output types are exact; do not hide an output conversion after State execution or use
+optional decimals to represent an incomplete PreparedBalance. EvmChainChecked retains the typed
+context and checked native chain facts; EvmTokenAnchored additionally retains the native anchor.
+Only native supporting State implementations interpret those EVM facts. The shared point envelope
+must preserve the current native anchor number range and hash; normalizing it must not narrow
+EvmBlockAnchor's EvmU256 number representation.
+
+Native prefix: chain check, native anchor specialization. Token prefix: chain check, token anchor
+specialization, token decimals. Both share the confirmation suffix. Use existing InjectRead,
+ResolvedRead and identity native translation for supporting protocols. No extra conversion State,
+conditional DSL, native-only engine or custom evidence registry is needed.
+
+Each production source definition owns checked local planning facts derived from the collection:
+source ordinal/target, collection scale and public route. Native resolution selects its fixed
+implementation shape and derives exact per-source binding. Before affected provider IO, the selected
+implementation checks actual active source against planned ordinal, target and route. This is native
+request/binding admission, not a generic Runtime product validator. A typed vector of source
+Operations with equal BalanceContext<K> endpoints preserves collection order and connectivity.
+
+Preserve the actual observation protocol:
+
+1. Check chain identity for every source.
+2. Read the initial anchor at latest for every source. After the first confirmed source, require
+   equality with that first source's number/hash; reject differing anchors before continuing.
+3. Read token decimals when required and the raw balance at the initial anchor's block number.
+4. Re-read that committed block number for confirmation, never latest, and compare number/hash.
+5. Only after successful comparison, run shared semantic scaling/append validation and return the
+   next BalanceContext. Consolidate after all sources have confirmed.
+
+This preserves current number-based observation/reorg detection; it does not claim finality or
+protection against every transient reorg. Retain four Read boundaries per native source and five
+per token source, plus the existing collection consolidation and outer handoffs. No successful
+intermediate candidate is exposed as a completed collection result.
+
+State interpretation constructs proposed outputs before append; Runtime acknowledgement governs
+advancement. Cancellation or failed append cannot claim a prefix/candidate/confirmation was recorded.
+Cold resume uses retained typed stage values, exact implementation and binding without replanning.
+Each Read's original evidence remains in its own acknowledged frame. A confirmation failure report
+contains its candidate input and confirming evidence, not the preceding balance Read's entire
+original; historical evidence remains in the run history. No evidence bag is carried through stages.
+
 ## 5. One authoring representation and maintained defaults
 
 ### 5.1 Tuples and Operations
@@ -905,22 +1088,11 @@ An empty vector is mechanically an identity. Current PortfolioConfig, PortfolioS
 EvmBalanceRequest reject empty collections/sources: preserve those product rejections rather than
 mistaking structural identity support for permission to accept empty requests.
 
-The native/token branch also needs migration. The target is a meaningful ObserveBalance Read with
-a semantic BalanceRead capability. Its selected native implementation supplies fixed typed support:
-
-```text
-Check chain -> Read initial anchor -> [Read token decimals for the token implementation]
-            -> ObserveBalance -> Confirm anchor
-```
-
-The brackets describe two concrete native implementation shapes, not a public optional-State
-combinator. Preserve each current Read boundary and native original; do not collapse the protocol
-into one adapter call. Selecting native/token protocol is capability-owned implementation resolution.
-The native prefix prepares normalized facts; ObserveBalance returns a candidate; the native suffix
-confirms the anchor before exposing successful collection context. This still needs an exact
-request/prefix/raw-State/suffix contract table and native-evidence carrier design. That is a design
-handoff gate, not permission for an engineer to invent an erased carrier or leak EVM contracts into
-the meaningful State. Do not delete existing agreement checks until their replacements are proved.
+The per-source collection body uses ObserveBalance<K>/BalanceRead with the two fixed native
+injection shapes specified in section 4.3. Native/token choice belongs to capability resolution,
+not a domain conditional-source algebra. Sections 2.5 and 9.1 specify normalized values, arithmetic
+and original failures. Delete old agreement checks only with their typed/construction replacements
+and consuming tests; no parallel legacy compiler remains.
 
 No public Choice, Repeat, ItemsFrom, generic conditional-source algebra, or heterogeneous dynamic
 emitter is added. Execution-dependent discovery produces a subsequent Program; planning cannot
@@ -1432,7 +1604,7 @@ replaces a transaction, or becomes a new inter-Program scheduler.
 ## 8. Complete caller examples
 
 Production exports State types, requests, capabilities, and maintained Operation definitions from
-`mfm_transactions::contract_lifecycle` and the shared transaction module. The EVM domain exports
+`mfm_chain::transaction::contract_lifecycle` and the shared transaction module. The EVM domain exports
 checked EvmContractWorkflowConfig. Downstream composition supplies network-independent
 ContractResources and ContractWorkflowConfig covering supported native implementations. The
 configuration selects the implementation; the resource environment identifies installed support. The current
@@ -1717,9 +1889,8 @@ It does not prove its copied descriptor belongs to ProgramRef or grant execution
 or recovery authority. An API using an untrusted report authoritatively must check it against the
 exact Program declaration at its position. Stopped pending authority remains RecoveryStopped.
 
-Portfolio's existing mapped collection ordinal/code are a checked domain projection of the retained
-EvmBalanceFailure. App decodes the exact original and calls the domain projection; domains do not
-depend on Runtime FailureReport. Preserve native Portfolio originals directly. An ordinal conversion
+Portfolio's collection ordinal/code become a checked projection of the exact original and retained
+typed call input (section 9.1). Domains do not depend on Runtime FailureReport. Preserve native Portfolio originals directly. An ordinal conversion
 failure becomes a projection error, not a fabricated ConsolidationFailed incident. Product projection
 never replaces the original or becomes a prerequisite for ordinary composition.
 
@@ -1729,18 +1900,116 @@ Retain Never as the exact uninhabited State failure. Preserve source facts, not 
 thresholds or claims of unchanged artifact identity. Complete-report overflow retains the known
 acknowledged original/recovery head and authority; use small-bound tests, no serializer retries.
 
+### 9.1 Balance originals and Portfolio presentation
+
+Keep domain, native operational and local invocation routes distinct:
+
+```rust
+pub enum ObserveBalanceFailure {
+    ObservationUnavailable,
+    IntegrityBlocked,
+}
+
+pub enum BalanceArithmetic { Scale, Sum }
+
+pub enum BalanceCollectionFailure {
+    InexactScale {
+        raw_units: Unsigned256,
+        source_decimals: DecimalScale,
+        target_decimals: DecimalScale,
+    },
+    DecimalCapacityExceeded {
+        operation: BalanceArithmetic,
+        // Reuse reviewed size facts: measured digits at rejection and the fixed limit 80.
+        size: SizeLimitExceeded,
+    },
+}
+
+pub enum EvmObservationRejection { Rejected, SafeFailure, ChainMismatch }
+
+pub enum EvmBalanceFailure {
+    AnchorChanged { previous: EvmBlockAnchor, observed: EvmBlockAnchor },
+    ObservationRejected { reason: EvmObservationRejection },
+    IntegrityBlocked,
+    Collection { source: BalanceCollectionFailure },
+}
+```
+
+Preserve exact native evidence with the Read call, including external chain-mismatch evidence.
+Native failures contain no Portfolio ordinal, duplicated stage strings or presentation codes.
+Collection's source is the concrete semantic arithmetic error, retained through source-preserving
+serialization/conversion. Invalid scales, missing sources, wrong native contracts and impossible
+local context are checked-construction/decoder/invocation errors, not catch-all semantic variants.
+Size facts describe the measured rejection; do not claim the final total's size if summation stopped
+earlier. Private checked construction/decoding rejects inconsistent error fields.
+
+| Current producer/outcome | Target original | Classification and retained public code |
+| --- | --- | --- |
+| Initial/confirmation anchor differs | EvmBalanceFailure::AnchorChanged, both anchors retained | InputInvalidated; anchor_changed |
+| Chain-check accepted rejection/safe failure or observed wrong chain | Native ObservationRejected | Permanent; chain_identity_unavailable |
+| Anchor or token-decimals accepted rejection/safe failure | Native ObservationRejected | Permanent; observation_unavailable |
+| Balance Read accepted rejection/safe failure | ObserveBalanceFailure::ObservationUnavailable | Permanent; observation_unavailable |
+| Confirmation accepted rejection/safe failure | Native ObservationRejected | Permanent; observation_unavailable |
+| Authenticated integrity evidence at native support | Native IntegrityBlocked | Permanent; integrity_blocked |
+| Authenticated integrity evidence at designated balance Read | ObserveBalanceFailure::IntegrityBlocked | Permanent; integrity_blocked |
+| Legitimate scale/capacity rejection after anchor confirmation | Native Collection wrapping BalanceCollectionFailure | Permanent; observation_unavailable |
+| Legitimate consolidation arithmetic rejection | BalanceCollectionFailure directly | Permanent; observation_unavailable |
+| Provider/transport failure | Existing exact EvmOperationalError and its source chain | Existing classification, including Retryable for unavailable/timeout/rate limiting |
+| Invalid work/context, prepare/reconstruction or completion invariant | Source-preserving invocation diagnostic at actual phase | Internal; no fabricated durable SourceUnavailable |
+| Local codec/parser/binding mismatch | Existing invocation diagnostic with owning facts | No false integrity evidence or acknowledged domain failure |
+
+The semantic State cannot declare Never: normalized unsuccessful evidence is a durable State failure,
+not a projection error. project_evidence preserves Rejected/SafeFailure/IntegrityBlocked as evidence
+outcomes; it does not turn them into provider exceptions. Native confirmation compares anchors before
+calling shared semantic amount validation. A mismatch therefore wins over arithmetic rejection as
+before. Delete the blanket balance_failure helper instead of preserving its lossy local-error cases.
+
+Application decodes the exact original and current-call input according to the selected State
+contract. Production typed accessors expose the BalanceContext<PortfolioContinuation> retained in
+native support/prepared/candidate inputs. A Portfolio constructor checks the ordinal against the
+retained continuation/request before constructing the public CollectionFailed projection. Ordinal
+conversion or context disagreement returns a projection error, never ConsolidationFailed.
+
+Use pure domain/native projections, not a Runtime-dependent trait or new projection registry:
+
+```rust
+// Portfolio domain, using the existing reviewed public code contract.
+fn collection_failure(
+    context: &BalanceContext<PortfolioContinuation>,
+    code: &str,
+) -> Result<PortfolioSnapshotFailure, PortfolioProjectionError>;
+
+// Native domain; stage comes from the selected exact native State definition.
+fn public_balance_failure_code(
+    stage: EvmBalanceFailureStage,
+    failure: &EvmBalanceFailure,
+) -> &'static str;
+```
+
+The semantic error types expose equivalent fixed code projections. Reuse the current closed native
+stage vocabulary where code compatibility depends on stage; never infer it by parsing arbitrary
+identity strings. Application's typed cases use installed State definitions, not a new handwritten
+executable-registration list. Projection does not classify, authorize recovery or replace originals.
+Reporting needs no provider IO. Preserve genuine Portfolio-owned failure originals directly.
+
+Delete MapEvmBalanceFailure and root-map reporting. A changed anchor remains eligible for the
+existing admitted collection restart policy; Runtime authorizes it and appends new history without
+erasing the failed candidate or original. Reset changed State/value/report ABI identities together;
+no old EvmBalanceWork histories are reinterpreted as the new typed stages.
+
 ## 10. Crate placement and dependency perimeter
 
-Use one new inward domain crate, `crates/domains/transactions` (`mfm-transactions`), for shared
-transaction contracts, purpose-specific semantic values, and its `contract_lifecycle` module.
-This avoids copying those contracts into each native domain or placing product semantics in Runtime.
-EVM depends inward on it; it never depends back on EVM. Values owns reusable Unsigned256 mechanics.
+Use one new inward domain crate, `crates/domains/chain` (`mfm-chain`), containing shared identity,
+transaction and balance modules. This replaces the previously planned, unimplemented transactions
+crate; it does not add another layer. The transaction module owns contract_lifecycle; balance owns
+semantic collection contracts and its 80-digit arithmetic. EVM and Portfolio depend inward on these
+contracts; shared State code never imports EVM or Runtime. Values owns reusable Unsigned256 mechanics.
 
 | Location | Target responsibility |
 | --- | --- |
 | kernel/capabilities | Semantic/native Read/Effect, typed adapter/binding interfaces and EffectAdapterOutcome; no State outcome or classifier dependency |
 | kernel/program | Typed construction/planning, environment support contract, immutable document/executable sequence, derived executable discovery, live binding and cold load; no Store/Journal or Runtime dependency |
-| domains/transactions | `TransactionEffect<R>`, `PreparedTransaction<R>`, evidence, shared values and concrete lifecycle States/contracts |
+| domains/chain | Shared ledger/point identities; transaction contracts and lifecycle States; BalanceRead, ObserveBalance<K>, typed balance contexts, semantic arithmetic/errors |
 | domains/evm | Native config/artifact contracts, request recipes, supporting States, native translation/projection and native operational originals |
 | live/evm and downstream composition | Typed resource environments/binders, native adapters, installed source roots, supported native families/configuration; derive exact executable requirements |
 | app | Supported wire/config use cases, checked product projections, inspection consuming structural inventory |
@@ -1779,8 +2048,11 @@ migration reader, or claim old Programs run with unavailable ABIs.
 | Application handwritten compiled State registration inventory | Inspection fed from the same structural source/type inventory |
 | RuntimeAssembly/Builder, Runtime-owned ExecutableProgram and native register_*_adapters helpers | Complete Program plus typed binders; Runtime::new(store) and execute/read/resume over the existing engine |
 | Proposed ExecutableRequirements receiver, RuntimeBuilder::compile and no-op receiver path | Program-owned compile/load with mandatory executable entries; no Runtime construction callbacks |
-| Independent Portfolio checked_collections / root-only validator | Typed Operation planning derives collection demands from committed input; endomorphic vectors preserve typed sequence connections; finish the balance contract gate before deleting old checks |
+| Independent Portfolio checked_collections / root-only validator | Typed Operation planning derives collection demands from committed input; endomorphic vectors preserve typed sequence connections; preserve the specified balance protocols and prove replacements before deleting old checks |
 | Caller-selected capability profiles / original-source cold load | Inferred ProgramEnvironment with one installed source publication and derived dependencies |
+| EvmBalanceWork and EVM-only cumulative balance context/results | Typed semantic context/prepared/candidate contracts and native prefix stages shared by snapshot/enrichment |
+| ReadNativeBalance / ReadTokenBalance meaningful States | ObserveBalance<K> with EvmNativeBalance/EvmTokenBalance capability implementations |
+| balance_failure catch-all / MapEvmBalanceFailure | Exact native/semantic originals, source-preserving local diagnostics and checked product projection |
 | Unconditional root configuration in every child | Production planning views and Operation-local checked configuration |
 | Public untyped occurrence modifiers / ambiguous Operation instance config | Typed maintained defaults interpreting one checked input |
 | Duplicate decimal/range implementation | Shared Unsigned256 mechanics with exact owning schemas preserved or deliberately versioned |
@@ -1809,21 +2081,23 @@ native ABIs, exact prepared/evidence values, defaults, recursive injection, and 
 inventory. This proves the design; it does not delegate product vocabulary or ownership to an
 engineer. Adjust private Rust bounds as necessary without weakening the specified guarantees.
 
-Specify the native balance request/prefix/State/suffix contracts and evidence carrier in section 5.3
-before the complete compiler cutover. The Operation planning and collection representation are
-chosen; the remaining semantic/native contract design must not be delegated as an implementation detail.
+Prove the balance contracts in sections 2.5/4.3/9.1 with both snapshot and enrichment continuations,
+native/token prefixes, cold candidate reconstruction and exact report decoding before compiler
+cutover. These contracts are specified; adjust private bounds without changing their ownership.
 
 Use coherent logical commits, merging inseparable cuts:
 
-1. Establish shared scalar/domain contracts and native implementation interfaces with their typed
-   constructors, schemas, and consuming proof. Do not expose a second maintained runtime path.
+1. Establish mfm-chain shared identity/transaction/balance contracts, scalar mechanics and native
+   implementation interfaces with typed constructors, schemas, and consuming proof. Do not expose a second maintained runtime path.
 2. Cut over typed Operation planning/local configuration, homogeneous vectors, inferred environment
    support, typed injection/defaults/resolution, complete Program/document/binding schema,
    adapter interfaces, Runtime callback split, native codecs, cold load and explicit read/resume
    handoff with their consumers together. Move EffectAdapterOutcome inward. Remove mutable
    DSL/wrapper/registration/Runtime assembly paths in this cutover. Include root-map removal here when required for one coherent API/wire.
-3. Complete original-failure/report and product-projection migration if independently coherent;
-   otherwise keep it with step 2. Remove the native outcome suffix and migrate its exact semantics.
+3. Migrate native balance typed support and Portfolio/enrichment together with original-failure/report
+   and product-projection migration if independently coherent;
+   otherwise keep it with step 2. Remove the superseded transaction outcome suffix and migrate its
+   exact semantics; retain the independently meaningful balance confirmation suffix.
 4. Use non-generic Program/ExecutionResult with typed source adjacency proofs and exact checked
    Object result decoding. Consolidate execute/checked results on the existing engine and prove
    native pending waiting,
@@ -1874,7 +2148,10 @@ this future implementation requirement.
 | Defaults/checkpoints | Parent/child inheritance, explicit zero, handler/parameter/target unit, distinct occurrence scopes, duplicate/missing/foreign/forward/terminal/context mismatch, inherited-parent-target non-rebinding and Effect barriers |
 | Operation planning | Same maintained child standalone/nested/after addition; local demand and defaults scope restored; cold discovery never invokes Plan; future84 reaches preparation without compile-time State evaluation |
 | Installed support | Pure fresh/cold with no handles; recomposition across source roots without list edits; dependent handlers/injection derived; ambiguous code/resources rejected; unselected handles unnecessary |
-| Portfolio migration gate | Specify balance carrier/contracts in section 5.3; preserve collection/source count/order/routes, rejection of empty requests, native/token boundaries, cumulative limits and occurrence recovery scopes; reject vector bodies with unequal endpoints |
+| Portfolio migration | Snapshot and enrichment use shared typed continuation; preserve count/order/routes, empty-request rejection, occurrence recovery scopes and cumulative limits; reject vector bodies with unequal endpoints |
+| Balance injection | Both prefix shapes converge on exact prepared/candidate types; native4/token5 Read boundaries; per-source chain/latest/common anchor and committed-number confirmation; wrong source/route fails locally; cold resume at every stage without configuration |
+| Balance semantics | Native configured scale, token0..30, raw256-bit and aggregate80-digit limits, existing dust/exact-remainder behavior; canonical zero-upscale regression; no completed candidate before confirmation |
+| Balance originals | Rejected/safe/integrity/chain mismatch matrix; exact native originals; anchor rejection before arithmetic; semantic causes retained; corrected local-invariant route; typed ordinal projection hot/cold without a mapper or fabricated failure |
 | Construction/cold | Mandatory executable entries; automatically bound support/codecs/handlers; native adapter reuse across request ABIs; persisted public bindings; missing/mismatched resources rejected before return with no IO; no config/C0/setup fabrication; same exact Program identity after load |
 | Checked results | One non-generic Program/ExecutionResult for fresh and cold paths; heterogeneous intermediate contracts retained; exact output decoding succeeds; wrong nominal schema with identical JSON and malformed decoding fail explicitly without changing history or triggering recovery |
 | Runtime handoff | Explicit Program for execute/read/resume; wrong input contract or commitment rejected before IO/append; retained ProgramRef mismatch rejected before execution; unchanged current-state validation, no late binding or hidden load hook |
@@ -1908,14 +2185,14 @@ and its limits are recorded in section 15. Production-code LOC change is zero.
 ## 14. Material uncertainties and handoff gates
 
 Operation planning, local configuration, installed-support ownership and homogeneous collection
-construction are specified. The Portfolio native balance carrier and exact semantic/native contract
-table remain design work. Other uncertainties require implementation evidence, not another DSL,
-registry or execution layer.
+construction and the balance semantic/native contracts are specified. Remaining uncertainties
+require implementation evidence, not another DSL, registry or execution layer. No uncompiled sketch
+is a claim that the complete cutover is already proved.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
 | Environment-owned support permits inferred compile/load | Combined installed-source, native-family and binding bounds are uncompiled | Cold discovery could require source/configuration knowledge or duplicate inventories | Prove Pure and mixed fresh/cold workflows, multiple published roots/handlers, exact conflicts and selected-only binding |
-| Native balance protocols fit semantic Read plus injected support | The normalized prepared/candidate context and native anchor carrier are not yet specified | Native details could leak or originals/persistence boundaries could be lost | Design the request/prefix/raw-State/suffix contract table before cutover; prove mixed native/token cold execution and original custody |
+| Typed balance stages preserve both consumers and native custody | Prefix specializations and typed cold report projection are uncompiled | A continuation, original or execution boundary could be lost | Compile native/token sequences with both continuations; cold-resume candidates; assert exact original and ordinal projection with no duplicate evidence carrier |
 | Operation-local planning config remains available before execution | Planning views and derived demands have not been demonstrated across nested consumers | Future State computation might be incorrectly simulated or require a second config source | Compile standalone/nested lifecycle and Portfolio; execution-dependent choices must form a subsequent Program |
 | Exact generic contracts compose on pinned Rust | Derive/coherence/private traversal bounds are uncompiled | Extra erasure or a second path could be introduced | Compile fixed States, typed requests, two native ABIs, recursive support, defaults and cold inventory across crates |
 | Native family traversal integrates with full recursive injection | Section 6.1 replaces external enum introspection with one supported type tuple; production traversal is not implemented | The real recursive bounds could still require duplicated discovery code | Compile distinct native ABIs, resolved supporting leaves and Read/Effect sources through the same tuple traversal |
