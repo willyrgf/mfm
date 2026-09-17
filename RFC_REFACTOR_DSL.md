@@ -1007,10 +1007,39 @@ or mismatched resources fail before execution. No semantic-identity fallback is 
 Ordinary Deserialize must not return an executable Program. Canonical decoding is a private step;
 document-only inspection remains non-executable and need not acquire live resources.
 
-Application retrieves canonical Program bytes through existing Journal/Store boundaries and calls
-load before Runtime receives the Program. Program never depends on Store or reconstructs run
-history. Runtime read/resume receive the completed Program and check it against the retained
-ProgramRef and current facts. A later complete Program can use the same Runtime/Store without
+Runtime owns the private admission-record wire, so Application must not duplicate that parser to
+obtain the stored Program. Add this narrow read-only bootstrap method:
+
+```rust
+impl Runtime {
+    pub async fn program_document(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Object, InvocationFailure>;
+}
+```
+
+It loads through the existing Store admission/latest snapshot, checks the Journal admission
+envelope, RunId, admission sequence/variant, available metadata and Program reference linkage, and
+returns the retained Program Object without re-encoding. It neither resolves code/resources nor
+claims a checked RunView or validates the current continuation. Errors retain the requested RunId
+and no fabricated last observation. Canonical Program validation remains in its owning decoder.
+
+The cold caller workflow is explicit:
+
+```rust
+let document = runtime.program_document(&run_id).await?;
+let program = load::<ContractCapabilities, ContractDeploymentLifecycle, _>(
+    document.canonical_bytes(), &resources,
+)?;
+let result = runtime.resume(&run_id, &program).await?;
+```
+
+Program load has no Store dependency. Runtime read/resume take a fresh existing snapshot and compare the
+supplied Program identity with its admitted document before current-state validation. Progress
+between extraction and resume is allowed: admission is immutable, and no old head grants append
+authority. Preserve all existing snapshot/head and retained-state checks. Runtime never calls load
+or compiles a Program internally. A later complete Program can use the same Runtime/Store without
 installing more code into Runtime or mutating an earlier Program.
 
 ### 6.4 Typed live binding and the execution boundary
@@ -1105,6 +1134,47 @@ Store/Journal transitions, EffectId scheduling, acknowledgement and recovery aut
 functions already belong to Program and return proposals; moving their association does not move
 authorization. Program kernel accessors expose the narrow execution boundary to Runtime without
 letting consumers forge executable entries.
+
+### 6.5 Callback failure phase and original custody
+
+Program's internal executable boundary distinguishes invocation failure phase without importing
+RuntimeError or duplicating Runtime's execution-operation enum:
+
+```rust
+pub enum CallbackFailure {
+    Decode(InvocationDiagnostic),
+    Execute(InvocationDiagnostic),
+    Encode(InvocationDiagnostic),
+}
+```
+
+This kernel interface is invocation-only, not a persisted domain/operational failure contract.
+Runtime knows the operation it called (prepare, native adapter, evidence binding, interpretation,
+classification or handler) and wraps the returned phase/cause at that call site. Keep compound
+callbacks separated where their operation provenance differs. Runtime alone adds RunId, retained
+StateCall, known acknowledgement and last observation. No generic original-error bag is introduced.
+
+Each executable captures its exact declared original-error contract; Runtime supplies the current
+execution position for diagnostic context. Encode a concrete State/native original exactly once
+before returning its Object across the heterogeneous boundary. Failure retains position, expected
+contract, encoding cause/size facts and explicitly unavailable original detail/identity; it never
+retries the serializer or invokes classification. Runtime forms the complete existing Failure from
+its retained call/command facts and the encoded original. Classification is a separate callback,
+invoked only after Runtime has acknowledged the original failure.
+
+Move the existing encode_failure implementation and adapter callback/poll panic containment inward
+with those typed wrappers; delete the Runtime-local copies in the same cutover. Preserve immediately
+awaited pure blocking encoding with the existing workspace Tokio dependency in Program. This adds
+an existing direct dependency for necessary async wrapper work, not a new executor abstraction or
+third-party package. Never move provider IO, Store access or mutation authority into that job.
+Runtime retains frame encoding, sealing, append and Store-error handling.
+
+Report decode failures as Decode, callback/invariant failures as Execute, and encoding failures or
+encoding-job panics as Encode. This deliberately corrects current adapter decode/normal-encoding
+panic paths that sometimes report Execute. Preserve their causes and test the new phase explicitly;
+it changes diagnostic precision, not recovery classification or acknowledgement semantics.
+Panic containment must not include panic payloads in returned diagnostics. It does not by itself
+control process panic-hook logging; do not claim that this proof changes the process logging contract.
 
 ## 7. Runtime execution and recovery
 
@@ -1592,7 +1662,7 @@ evidence, not an alternative capability vocabulary or a new framework layer.
 | Native family traversal integrates with full recursive injection | Section 6.1 replaces external enum introspection with one supported type tuple; production traversal is not implemented | The real recursive bounds could still require duplicated discovery code | Compile distinct native ABIs, resolved supporting leaves and Read/Effect sources through the same tuple traversal |
 | Complete Program callbacks preserve Runtime phase ownership | Current registered runners include Runtime driver context and typed encoding | Moving whole runners would move transitions inward or alter original custody | Separate prepare/check/invoke/project/interpret/classify and prove encode-once and acknowledgement ordering |
 | Persisted binding table fits exact document/capacity rules | Section 15.1 confirms existing public fields, but the new table/envelope is unimplemented | Cold load could omit a binding or exceed bounds | Measure checked Object/document encoding, deduplication, wrong-binding rejection and small-bound failures |
-| Explicit Program loading supports existing read/resume | Current Runtime hides admission decode and executable association | Application could regain a hidden compiler or lose current-state checks | Retrieve the stored document through existing boundaries, load before Runtime, and test ProgramRef mismatch/config deletion |
+| Explicit Program loading preserves existing read/resume | The new program_document bootstrap is specified but unimplemented | Admission extraction or current-state checks could be weakened | Test the Runtime-owned read-only extraction, config-free load, mismatched ProgramRef rejection and fresh snapshot semantics |
 | Complete prepared requests fit capacity behavior | Requests retain explicit context/artifact/evidence | Some current workloads or report thresholds may overflow | Measure maintained artifacts and small-bound failure cases without dropping facts or authority |
 | Shared scalar extraction preserves native behavior | Range/decimal mechanics move inward | Accepted values or schema/serialization could drift | Boundary/overflow/native equivalence tests and explicit versioning for changed contracts |
 | Native artifact/ABI binding is exact | Actual identifiers/selectors must come from the maintained artifact definition | Arbitrary bytecode could be treated as supported semantics | Wrong artifact/schema/ledger and malformed-return tests against independent oracle |
@@ -1659,11 +1729,9 @@ Program callback must preserve those facts and the originating operation/stage. 
 classify an unacknowledged original, or transport opaque native originals between owners.
 
 Async adapter wrappers currently offload pure native encoding to immediately awaited blocking work
-and catch callback construction/poll panics without exposing panic payloads. Preserve those
-properties when moving wrappers inward. Reusing the existing workspace Tokio dependency in Program
-for that narrow helper is a candidate; an executor abstraction or moving IO/authority into blocking
-work is not justified. The final callback/error signatures and scheduling split still need a
-compiled proof against the actual engine, not just a type-level experiment.
+and catch callback construction/poll panics without returning panic payloads. Section 6.5 specifies
+the selected inward helper and error-phase boundary. Section 15.6 records the extracted helper proof;
+actual engine integration and acknowledgement ordering still require separate tests.
 
 ### 15.3 Temporary cross-crate experiment
 
@@ -1701,11 +1769,15 @@ fresh/cold inventory. Next integrate it with actual recursive injection, resolve
 Read and full nominal contracts. A cold resolved supporting leaf must not acquire a root-config
 binding-constructor requirement merely because family dispatch also supports fresh construction.
 
-After that, prove the actual callback split: failed first encoding, original append failure,
-preappend projection rejection, postacknowledgement interpretation failure, panic handling and
-cancellation. Finally prove full document/resource load after config deletion and explicit
-read/resume ProgramRef mismatch rejection, preserving current-state checks and snapshot/head
-validation. Production document capacity/deduplication and Portfolio migration remain separate gates.
+The original-encoding callback extraction in section 15.6 proves a narrower boundary than the full
+engine. Next integrate State prepare/check/invoke/project/interpret callbacks and retain actual
+original-append failure, preappend projection rejection, postacknowledgement interpretation failure,
+panic, cancellation and ambiguous-acknowledgement tests. Do not replace them with scratch mocks.
+
+Finally implement and test Runtime-owned program_document extraction, full canonical Program load
+after config deletion, and explicit read/resume ProgramRef mismatch rejection. Preserve existing
+current-state and Store snapshot/head checks. The new bootstrap does not itself qualify a current
+RunView. Production document capacity/deduplication and Portfolio migration remain separate gates.
 
 ### 15.5 One native-family tuple: consuming-crate proof
 
@@ -1740,3 +1812,32 @@ The production Read/Effect binding trait names in section 6.1 specialize the sam
 they have not all been compiled together. This is evidence for the chosen representation, not a
 claim that the complete RFC has been implemented. Temporary files are not a maintained second DSL.
 
+### 15.6 Original encoding and callback error-phase proof
+
+A separate extraction used the actual engine encode_failure helper with its Runtime operation
+parameter removed and its final wrapper changed to CallbackFailure::Encode. It retained Values,
+IDs, the actual ClassifyError contract, and the workspace-lock Tokio version. Two tests passed:
+
+```sh
+nix develop -c cargo test \
+  --manifest-path /tmp/mfm-callback-proof-20260917/Cargo.toml --offline
+```
+
+They check successful nested original roundtrip with exactly one serialization; serializer failure
+and task panic with exactly one attempt, exact known contract/position and unavailable original
+identity/detail; classification only on successfully encoded/decoded originals; and adapter-poll
+panic conversion with no panic payload in the returned diagnostic. They do not prove process panic
+hook behavior or durable acknowledgement ordering. No mock transition engine was added.
+
+The existing production regression also passed in the pinned shell:
+
+```sh
+nix develop -c cargo test -p mfm-runtime --test current_state \
+  sizes::unrecordable_original_reports_known_slot_and_encoding_cause_without_append -- --exact
+```
+
+That [regression](crates/kernel/runtime/tests/current_state/sizes.rs) checks the actual engine's
+ReadAdapter/Encode provenance, one serialization, retained known failure context, and unchanged
+acknowledged head. Preserve and migrate it during the callback split. Passing the current engine
+establishes the baseline; it does not certify an unimplemented replacement. The prototype extraction
+covers neither constructor panics nor the full prepare/bind/project/interpret callback matrix.
