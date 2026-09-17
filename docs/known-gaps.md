@@ -41,7 +41,9 @@ are legitimate in tests of those public authoring contracts.
 
 The [DSL refactor RFC](../RFC_REFACTOR_DSL.md) accepts one temporary limitation: authors introducing
 new executable semantics must publish the new source once in their integration's installed public
-component set. Stored implementation identities cannot instantiate Rust code absent from that set.
+component set through ProgramEnvironment::Sources on the maintained resource environment. Its
+native families supply their dependent injected implementations and codecs through the same discovery
+walk. Stored implementation identities cannot instantiate Rust code absent from that support set.
 Automatic discovery of arbitrary downstream State implementations is deferred; this is a target
 design limitation, not a claim that the new construction API is implemented.
 

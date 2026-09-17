@@ -13,9 +13,9 @@ behavior; the complete sketches have not been compiled. Section 15 distinguishes
 scratch compilation experiment from the still-unproved production contracts. Implementation must
 prove the complete contracts together, not invent a different ownership model behind the examples.
 
-The fixed-sequence target excludes public branching/repetition combinators. Section 5.3 records
-the resulting unresolved Portfolio migration; the complete compiler cutover is not ready until
-that existing consumer is accounted for.
+The target uses typed tuples and Operation planning, including homogeneous collections required by
+Portfolio. It excludes a separate branching/repetition DSL. Section 5.3 specifies that construction
+model and records the remaining native balance-contract design gate before complete cutover.
 
 [Design](docs/design.md) and [architecture](docs/architecture.md) remain authoritative for the current
 implementation. Update their affected contracts, code, and tests together during the implementation
@@ -656,7 +656,7 @@ valid only for equal endpoints; a suffix runs on success, not as a finally handl
 
 An implementation-owned `ResolvedEffect<S, C, I>` holds I::Binding and type markers. Its endpoints
 are S's expanded endpoints, like Effect<S, C>. ResolvedRead is analogous. Ordinary selection asks
-the profile for I; a resolved supporting selection already supplies I. Both call the same typed
+the maintained environment for I; a resolved supporting selection already supplies I. Both call the same typed
 injection routine. These supporting leaves are not an everyday second DSL or native-only emitter.
 
 Expansion walks the prefix recursively, emits the designated executable exactly once, and walks
@@ -679,8 +679,20 @@ pub trait AuthoringSource: sealed::Sealed {
     type Output: MfmValue;
 }
 
-pub struct Operation<Body, Defaults = Inherit> {
-    body: Body,
+pub trait OperationDefinition {
+    type Body: AuthoringSource;
+}
+
+pub trait Plan<Parent: ?Sized>: OperationDefinition {
+    type Config: ?Sized;
+    fn plan<'a>(
+        &'a self,
+        parent: &'a Parent,
+    ) -> Result<(&'a Self::Config, Self::Body), ProgramError>;
+}
+
+pub struct Operation<Definition, Defaults = Inherit> {
+    definition: Definition,
     defaults: PhantomData<Defaults>,
 }
 
@@ -704,11 +716,29 @@ pub type ConfigureAndObserve = Operation<
 >;
 ```
 
-Operation::new(body) is infallible on Operation<Body, Inherit>, preserving inference. Maintained
+Operation::new(definition) is infallible on Operation<Definition, Inherit>, preserving inference. Maintained
 Operation::default constructs the same structure with its Defaults marker. Selection defaults
 construct markers, not executable States; they require no S: Default. Neither construction performs
 IO, binding resolution, input validation, or State execution. A maintained definition need not be a
 literal Rust static; it is reusable with different checked inputs and resulting Programs.
+
+Supported tuples implement OperationDefinition with Body=Self and identity Plan: borrow the parent
+configuration and clone their construction values. Clone/Default requirements apply only to those
+values and selection markers, never to executable State types. The fixed aliases above therefore
+keep their current caller syntax. Authors only implement a named definition when introducing new
+planning semantics; arranging existing components requires no trait implementation.
+
+At an Operation node, the compiler invokes plan once, resolves that Operation's defaults from its
+returned local configuration, then walks the returned Body through the same sealed source traversal.
+An ordinary tuple walk does not invoke plan, so identity definitions do not recursively replan.
+Leaving the Operation restores its parent's configuration and policy scope. Planning performs no
+State execution, provider/signer IO or Store activity. It returns a typed structure, never an
+unrestricted mutable emitter. Operation endpoints are its Definition::Body endpoints and cannot
+change with configuration values. Bodies and supporting types must form finite structures.
+
+Cold discovery visits Definition::Body and declared policy types without invoking plan, constructing
+an Operation value or requiring Plan<RootConfig>. Separate OperationDefinition from Plan for this
+reason. The number of occurrences is read from the retained expanded document, not regenerated.
 
 Tuple adjacency requires exact equality of expanded endpoints. Operations are ordinary tuple
 elements and retain scopes. No aggregate Failure associated type, construction closure, fluent
@@ -729,7 +759,7 @@ capability requirements. The public result boundary deliberately checks the requ
 when it is decoded; it does not promise compile-time inference of that type from `Program`.
 
 Framework-controlled sources comprise tuples, Operations, Pure/Read/Effect selections, resolved
-supporting selections, typed identity, and checkpoints. New-State authors enter
+supporting selections, homogeneous vectors with equal body endpoints, typed identity, and checkpoints. New-State authors enter
 through a State selection, not an arbitrary mutable emitter. Exact supported tuple arities and
 nested tuples must be covered in consuming tests, without inventing a dynamic heterogeneous list.
 
@@ -739,9 +769,32 @@ mode traits internal instead of exposing a generic visitor DSL.
 
 ### 5.2 Configuration and policy defaults
 
-Checked input is the sole per-run configuration source. Operation definitions own structure and
-interpretation of supported policy values. There is no independent Operation-instance config or
-binding payload, with_selection(), with_policy(), or speculative Scoped wrapper.
+Checked root input is the authoritative per-run configuration source. A maintained Operation may
+project a borrowed local configuration or derive child definition values from that checked input.
+Those values are planning facts, not a second independently supplied override or future State input.
+Operation definitions own structure and interpretation of supported policy values. No with_selection(),
+with_policy(), arbitrary root predicate, or generic Scoped wrapper is introduced.
+
+Production supplies a typed view of the lifecycle's retained planning facts:
+
+```rust
+pub trait LifecyclePlanning {
+    fn deployment_request(&self) -> &DeploymentRequest;
+}
+```
+
+DeploymentRequest returns itself; DeployedContract returns its retained request. Implement the same
+view on later maintained contexts where standalone selections require it. Lifecycle defaults and
+native resolution use `Config: LifecyclePlanning + ?Sized`, not a single root Rust type. Thus the
+fixed ConfigureAndObserve tuple works alone with DeployedContract or nested under DeploymentRequest,
+and ordinary mixed tuples need no consumer conversion. This domain-owned view is not an erased
+context or a generic config bag. It exposes already-known network/binding/options/policy facts;
+Configure still obtains the actual effective value (84 after addition) from its execution input.
+
+A configuration-dependent child can instead own the exact checked demand derived by its parent's
+plan. Its Plan implementation returns a reference to that demand as its local Config. Section 5.3
+uses this for Portfolio; child native resolution then needs no knowledge of the parent's root type.
+No compiler step fabricates a DeployedContract or evaluates Add to obtain planning information.
 
 ```rust
 pub trait OperationDefaults {
@@ -749,7 +802,7 @@ pub trait OperationDefaults {
     type Targets: CheckpointTargets;
 }
 
-pub trait ResolveDefaults<Config>: OperationDefaults {
+pub trait ResolveDefaults<Config: ?Sized>: OperationDefaults {
     fn resolve(config: &Config)
         -> Result<PolicyValues<Self::Handler>, ProgramError>;
 }
@@ -793,21 +846,85 @@ targets. An inherited already-bound parent target is never rebound to a child ma
 type. Distinct occurrences receive distinct scopes. Relocate to final expanded positions and retain
 Runtime's irreversible Effect barrier checks.
 
-### 5.3 Planning checks and excluded composition features
+### 5.3 Configuration-dependent typed bodies and Portfolio
 
-This refactor defines fixed typed sequences. It adds no public `Choice`, `Repeat`, `ItemsFrom`,
-conditional composition, or configuration-driven repetition API. Capability implementation
-selection remains required and is owned by the native family as described in section 6.1;
-it does not expose a general-purpose branching combinator to composition authors.
+Operation planning may use ordinary Rust iteration over checked configuration to return homogeneous
+collections of typed bodies. The sealed source implementation has the following endpoint rule:
 
-Portfolio currently expands one child sequence for each configured collection. Removing the
-proposed repetition API leaves that existing consumer's migration unresolved; it does not authorize
-removing collection support, replacing it with a fixed count, or retaining a parallel legacy DSL.
-Before the compiler cutover can replace all current consumers, resolve that migration explicitly
-against actual Portfolio requirements. Preserve collection count/order/routes, the immutable plan,
-and each collection's State boundaries. Do not claim that `checked_collections` or its agreement
-checks can be deleted until an equivalent replacement is designed and proved. This is a handoff
-blocker for the complete cutover, not permission to introduce repetition under a different name.
+```rust
+impl<T, B> AuthoringSource for Vec<B>
+where
+    T: MfmValue,
+    B: AuthoringSource<Input = T, Output = T>,
+{
+    type Input = T;
+    type Output = T;
+}
+```
+
+This is bounded repetition required by existing behavior, not a second compiler or runtime loop.
+Each body's internals can have different exact contracts; equality of its outer endpoints proves
+that any number of occurrences connects. The compiler expands each element in order, retains each
+State boundary and ordinary Operation scope, and applies cumulative depth/State/capacity limits.
+Planning must check product bounds before materializing oversized collections; compiler limits still
+cover the complete injected sequence. Rust proves connectivity, not the configured count/order/routes;
+production planning tests must establish those value-level guarantees.
+
+Portfolio's maintained definition returns this structure (names below are target definitions):
+
+```rust
+type PortfolioBody = (
+    Pure<InitializePortfolio>,
+    Vec<Operation<CollectionDefinition>>,
+    Pure<ConsolidatePortfolio>,
+);
+
+struct CollectionDefinition {
+    demand: CollectionDemand,
+}
+
+impl<Parent: ?Sized> Plan<Parent> for CollectionDefinition {
+    type Config = CollectionDemand;
+    fn plan<'a>(
+        &'a self,
+        _parent: &'a Parent,
+    ) -> Result<(&'a CollectionDemand, Self::Body), ProgramError> {
+        Ok((&self.demand, Self::Body::default()))
+    }
+}
+```
+
+CollectionDefinition's associated Body wraps collection entry, balance collection and resumption;
+its endpoints are PortfolioContinuation. The parent derives every demand directly from the committed
+PortfolioSnapshotInput in declaration order. The balance collection definition likewise derives its
+per-source body from its checked source list. No separately maintained checked_collections plan or
+consumer-built intermediate context is retained. Cold discovery visits vector element/body types
+once and reconstructs the stored occurrences without calling plan or reading configuration.
+
+An empty vector is mechanically an identity. Current PortfolioConfig, PortfolioSnapshotInput and
+EvmBalanceRequest reject empty collections/sources: preserve those product rejections rather than
+mistaking structural identity support for permission to accept empty requests.
+
+The native/token branch also needs migration. The target is a meaningful ObserveBalance Read with
+a semantic BalanceRead capability. Its selected native implementation supplies fixed typed support:
+
+```text
+Check chain -> Read initial anchor -> [Read token decimals for the token implementation]
+            -> ObserveBalance -> Confirm anchor
+```
+
+The brackets describe two concrete native implementation shapes, not a public optional-State
+combinator. Preserve each current Read boundary and native original; do not collapse the protocol
+into one adapter call. Selecting native/token protocol is capability-owned implementation resolution.
+The native prefix prepares normalized facts; ObserveBalance returns a candidate; the native suffix
+confirms the anchor before exposing successful collection context. This still needs an exact
+request/prefix/raw-State/suffix contract table and native-evidence carrier design. That is a design
+handoff gate, not permission for an engineer to invent an erased carrier or leak EVM contracts into
+the meaningful State. Do not delete existing agreement checks until their replacements are proved.
+
+No public Choice, Repeat, ItemsFrom, generic conditional-source algebra, or heterogeneous dynamic
+emitter is added. Execution-dependent discovery produces a subsequent Program; planning cannot
+change an admitted Program based on a future State result.
 
 Remove arbitrary with_input_check/root predicates, not their guarantees. Checked constructors and
 decoders own local invariants; capability setup owns binding/action agreement; planning derives from
@@ -825,18 +942,18 @@ pub trait CapabilityFamily<C> {
     type Implementations;
 }
 
-pub trait Resolve<Config, C>: CapabilityFamily<C> {
+pub trait Resolve<Config: ?Sized, C>: CapabilityFamily<C> {
     fn implementation(config: &Config) -> Result<StableId, ProgramError>;
 }
 
-pub trait ResolveEffectBinding<Config, C>: EffectImplementation<C>
+pub trait ResolveEffectBinding<Config: ?Sized, C>: EffectImplementation<C>
 where
     C: EffectCapabilityContract,
 {
     fn binding(config: &Config) -> Result<Self::Binding, ProgramError>;
 }
 
-pub trait ResolveReadBinding<Config, C>: ReadImplementation<C>
+pub trait ResolveReadBinding<Config: ?Sized, C>: ReadImplementation<C>
 where
     C: ReadCapabilityContract,
 {
@@ -844,11 +961,47 @@ where
 }
 ```
 
+Program owns the support-environment contract; maintained outward integrations implement it:
+
+```rust
+pub trait ProgramEnvironment {
+    type Sources;
+}
+
+impl ProgramEnvironment for ContractResources {
+    type Sources = (
+        ContractDeploymentLifecycle,
+        Pure<CheckedAdd>,
+        Pure<CheckedAddConfigurationValue>,
+    );
+}
+```
+
+Sources is a tuple of independent installed source roots, not an executable sequence. Its entries
+have no adjacency requirement. The same structural machinery visits their State, handler and
+capability types in discovery mode. Actual compiled sequences retain all adjacency requirements.
+The environment also implements CapabilityFamily/Resolve and the typed native binders. Remove the
+separate public profile parameter/marker: configuration chooses the network from installed support,
+not from another caller-selected profile. Resources are explicit handles, not a network override.
+
+Each Pure selection supplies its callbacks and value/failure codecs. Each Read/Effect selection
+supplies its meaningful State and semantic contracts. Its selected native implementation supplies
+its native codecs, adapter, binding, errors/projections and recursively injected sources. Operation
+defaults supply handlers and parameter codecs. Derive these requirements during the same traversal;
+no independent registration/emission tree or Runtime receiver is introduced.
+
+A genuinely new State or handler must be reachable from one published source root for cold loading.
+Fresh compilation knows its supplied source; it does not automatically install code for future
+processes. Cold discovery can only find the environment's installed support. Existing-component
+recomposition changes no publication list. Identical exact descriptors discovered through several
+roots deduplicate; conflicting or ambiguous implementation claims fail without ordered fallback.
+Keep the implementation-site comment and known-gaps entry required in section 12.
+
 Implementations is one tuple of concrete native implementation types, interpreted by sealed
 framework traversal. For a family supporting two implementations, the shape is:
 
 ```rust
-impl CapabilityFamily<TransactionEffect<DeploymentRequest>> for ContractCapabilities {
+impl CapabilityFamily<TransactionEffect<DeploymentRequest>> for ContractResources {
     type Implementations = (EvmTransactionImplementation, TestTransactionImplementation);
 }
 ```
@@ -857,8 +1010,8 @@ TestTransactionImplementation illustrates a second supported implementation in p
 another shipping network. Production lists only its actual support. Request-generic native families
 can share this declaration and configuration selection across supported R; adding Configure must
 not require another native registration list. This tuple declares supported native code, not an
-executable-State list or a branching/repetition source. The existing fixed tuple/Operation DSL is
-unchanged. Remove the previously proposed family-owned Selection enum and its implicit external
+executable-State list or a branching/repetition source. The typed tuple/Operation representation is
+shared with Operation planning and vector traversal. Remove the previously proposed family-owned Selection enum and its implicit external
 visitor interface rather than maintaining both representations.
 
 Resolve selects a supported implementation StableId from checked configuration. The compiler
@@ -877,7 +1030,7 @@ the advertised action. No public Choice, derive macro, role generic or registry 
 The private tuple dispatch handles two binding sources:
 
 ```rust
-enum BindingSource<'a, Config> {
+enum BindingSource<'a, Config: ?Sized> {
     Configuration(&'a Config),
     Stored(&'a Object),
 }
@@ -900,17 +1053,18 @@ The compiler uses one structural traversal for public sources and injected sourc
 | Source | Compile mode | Cold discovery mode |
 | --- | --- | --- |
 | Tuple | Walk children with unchanged borrowed config | Walk child types |
-| Operation | Enter scope, resolve defaults, walk body | Visit declared handler/target and body types |
+| Operation | Plan once, enter local config/scope, resolve defaults, walk typed body | Visit Definition::Body and declared handler/target types without Plan bounds |
+| Homogeneous vector | Walk every occurrence in order, with cumulative limits | Visit its element type, not configured occurrences |
 | Unresolved selection | Match family tuple, construct typed binding, inject | Inspect the same family tuple and its injection types |
 | Resolved supporting selection | Use supplied I/binding through the same injection | Visit I/prefix/designated/suffix types without values |
 
-At entry Config is the actual checked root input; nested tuples/Operations inherit it. Cold
-construction receives no configuration value, never calls Resolve, typed binding construction,
-surround or defaults resolution, and never fabricates initial input. A shared private tuple dispatch
-may retain a static root Config type bound for its fresh branch; that does not require source
-configuration at load. Cold discovery of already-resolved native leaves requires no root-binding
-constructor. Program construction commits the exact root input and checks binding agreement across
-the workflow. Runtime never performs this traversal.
+At entry Config is the actual checked root input. Tuples inherit the current borrowed configuration;
+Operation planning may establish a local view or derived demand. Cold construction receives no
+configuration value and never calls Plan, Resolve, typed binding construction, surround or defaults
+resolution. Cold traversal must not require a fresh Plan<Root> implementation. Resolved supporting
+selections already carry their selected binding and do not rerun root resolution. Program construction
+commits the exact root input and checks binding agreement across the workflow. Runtime performs none
+of this traversal.
 
 ### 6.2 Complete immutable executable Program
 
@@ -927,7 +1081,7 @@ struct ProgramInner {
     executables: Box<[ExecutableState]>,
 }
 
-pub fn compile<P, S, R>(
+pub fn compile<S, R>(
     entry_point: EntryPointId,
     states: &S,
     input: &S::Input,
@@ -935,14 +1089,15 @@ pub fn compile<P, S, R>(
     limits: ProgramLimits,
 ) -> Result<Program, ProgramError>
 where
-    S: AuthoringSource;
+    S: AuthoringSource,
+    R: ProgramEnvironment;
 ```
 
-The signature additionally requires private source/profile/resource traversal bounds. P is the
-maintained set of supported implementations, such as ContractCapabilities; checked input selects
-the network, implementation and public binding. R is a concrete environment of explicitly supplied
-resource handles. Selecting P must not require callers to select the network a second time.
-A Pure-only source uses NoCapabilities and `&()` and requires no adapter resources.
+Additional sealed traversal/planning/binding bounds apply. S and R are inferred from the supplied
+source and maintained environment. Checked configuration selects the implementation and public
+binding. A Pure-only caller uses that same maintained environment with no attached live handles;
+its installed source types still support cold discovery. There is no NoCapabilities marker or
+per-call capability-profile argument.
 
 ProgramDocument and ExecutableState are kernel implementation details, not new consumer layers.
 Each executable entry corresponds to exactly one expanded declaration. Both fields are mandatory;
@@ -1004,23 +1159,23 @@ native/semantic distinction without adding an Effect-style settlement transition
 Program owns cold reconstruction:
 
 ```rust
-pub fn load<P, S, R>(
+pub fn load<R>(
     canonical_program: &[u8],
     resources: &R,
 ) -> Result<Program, ProgramError>
 where
-    S: AuthoringSource;
+    R: ProgramEnvironment;
 ```
 
-As with compile, additional private inventory/binding bounds apply. S and P supply installed code
-inventory; they do not reconstruct the authored plan. Load validates the canonical document and
-exact endpoints, matches each declaration to installed exact code, decodes its recorded public
+Additional sealed discovery/binding bounds apply. R::Sources and its supported native families
+supply installed code; callers do not name the original source or capability profile. They do not
+reconstruct the authored plan. Load validates the canonical document and exact endpoints, matches each declaration to installed exact code, decodes its recorded public
 binding, and uses the same typed binding and executable constructors as fresh compilation. It
 returns the same complete Program. Bind only implementations selected in the stored declarations,
 not every alternative discovered during inventory.
 
-Load never calls configuration resolution, surround, or defaults resolution; it never reinjects
-States, fabricates initial input, or replans from current configuration. Missing exact implementations
+Load never calls Operation planning, configuration resolution, surround, or defaults resolution.
+It never reinjects States, fabricates initial input, or replans from current configuration. Missing exact implementations
 or mismatched resources fail before execution. No semantic-identity fallback is permitted.
 Ordinary Deserialize must not return an executable Program. Canonical decoding is a private step;
 document-only inspection remains non-executable and need not acquire live resources.
@@ -1047,7 +1202,7 @@ The cold caller workflow is explicit:
 
 ```rust
 let document = runtime.program_document(&run_id).await?;
-let program = load::<ContractCapabilities, ContractDeploymentLifecycle, _>(
+let program = load(
     document.canonical_bytes(), &resources,
 )?;
 let result = runtime.resume(&run_id, &program).await?;
@@ -1279,8 +1434,8 @@ replaces a transaction, or becomes a new inter-Program scheduler.
 Production exports State types, requests, capabilities, and maintained Operation definitions from
 `mfm_transactions::contract_lifecycle` and the shared transaction module. The EVM domain exports
 checked EvmContractWorkflowConfig. Downstream composition supplies network-independent
-ContractCapabilities and ContractWorkflowConfig covering supported native implementations. The
-configuration selects the implementation; the profile names its installed support set. The current
+ContractResources and ContractWorkflowConfig covering supported native implementations. The
+configuration selects the implementation; the resource environment identifies installed support. The current
 production example supports EVM; another native ABI in proof tests does not claim another shipping
 network. No State getters or selection constants are needed.
 
@@ -1302,17 +1457,25 @@ pub struct EvmTransactionResources {
     pub provider: Arc<dyn EvmTransactionProvider>,
 }
 
+pub struct EvmReadResources {
+    pub route: EvmTransactionRoute,
+    pub provider: Arc<dyn EvmReadProvider>,
+}
+
+#[derive(Default)]
 pub struct ContractResources {
-    pub transactions: EvmTransactionResources,
-    pub read_route: EvmTransactionRoute,
-    pub read_provider: Arc<dyn EvmReadProvider>,
+    pub transactions: Vec<EvmTransactionResources>,
+    pub reads: Vec<EvmReadResources>,
 }
 ```
 
 These names are target production types. Their BindEffect/BindRead implementations use existing
 native routines and validate configured binding against supplied public routes, sender, purpose,
-and authority epoch. The transaction-only environment suffices for a lone Deploy; ContractResources
-also supplies Observe's provider. This avoids requiring a Read handle for an Effect-only source.
+and authority epoch. A selected binder requires a unique corresponding typed resource; missing or
+ambiguous matches reject construction. These vectors supply handles for multiple public routes,
+not erased executable registrations. Pure callers supply empty vectors; Deploy needs only a
+transaction entry; the full lifecycle also needs a Read entry. Unselected native implementations
+require no handles. Add fields for another native implementation only when that support ships.
 Route identities describe the caller's association of a provider handle with its public endpoint;
 matching them does not attest the remote chain. Native evidence checks remain mandatory.
 
@@ -1327,7 +1490,8 @@ compiled symbols. Binding occurs inside compile, not in Runtime::new.
 ```rust
 let input = CheckedAddition::new("42", "42")?;
 let state = Pure::<CheckedAdd>::default();
-let program = compile::<NoCapabilities, _, _>(entry_point, &state, &input, &(), limits)?;
+let resources = ContractResources::default();
+let program = compile(entry_point, &state, &input, &resources, limits)?;
 let runtime = Runtime::new(store);
 let result = runtime.execute(run_id, &program, &input).await?;
 let sum = result.success().expect("terminal success").decode::<Unsigned256>()?;
@@ -1344,10 +1508,13 @@ registration list exists for this case.
 let config: ContractWorkflowConfig = toml::from_str(&config_text)?;
 let input = config.initial_input()?;
 let state = Effect::<Deploy, TransactionEffect<DeploymentRequest>>::default();
-let resources = EvmTransactionResources {
-    route: transaction_route, signer, authority, provider: transaction_provider,
+let resources = ContractResources {
+    transactions: vec![EvmTransactionResources {
+        route: transaction_route, signer, authority, provider: transaction_provider,
+    }],
+    reads: vec![],
 };
-let program = compile::<ContractCapabilities, _, _>(
+let program = compile(
     entry_point, &state, &input, &resources, limits,
 )?;
 let runtime = Runtime::new(store);
@@ -1369,17 +1536,17 @@ let config: ContractWorkflowConfig = toml::from_str(&config_text)?;
 let input = config.initial_input()?;
 let operation = ContractDeploymentLifecycle::default();
 let resources = ContractResources {
-    transactions: EvmTransactionResources {
+    transactions: vec![EvmTransactionResources {
         route: transaction_route, signer, authority, provider: transaction_provider,
-    },
-    read_route, read_provider,
+    }],
+    reads: vec![EvmReadResources { route: read_route, provider: read_provider }],
 };
-let program = compile::<ContractCapabilities, _, _>(
+let program = compile(
     entry_point, &operation, &input, &resources, limits,
 )?;
 let runtime = Runtime::new(store);
 let result = runtime.execute(run_id, &program, &input).await?;
-let report = result.success().expect("terminal success").decode::<ContractReport>()?;
+let report = result.success().expect("terminal success").decode::<ContractDeploymentReport>()?;
 assert_eq!(report.requested_value().to_string(), "42");
 assert_eq!(report.effective_value().to_string(), "42");
 assert_eq!(report.observed_value().to_string(), "42");
@@ -1402,17 +1569,17 @@ let states = (
 );
 let operation = Operation::new(states);
 let resources = ContractResources {
-    transactions: EvmTransactionResources {
+    transactions: vec![EvmTransactionResources {
         route: transaction_route, signer, authority, provider: transaction_provider,
-    },
-    read_route, read_provider,
+    }],
+    reads: vec![EvmReadResources { route: read_route, provider: read_provider }],
 };
-let program = compile::<ContractCapabilities, _, _>(
+let program = compile(
     entry_point, &operation, &input, &resources, limits,
 )?;
 let runtime = Runtime::new(store);
 let result = runtime.execute(run_id, &program, &input).await?;
-let report = result.success().expect("terminal success").decode::<ContractReport>()?;
+let report = result.success().expect("terminal success").decode::<ContractDeploymentReport>()?;
 assert_eq!(report.requested_value().to_string(), "42");
 assert_eq!(report.effective_value().to_string(), "84");
 assert_eq!(report.observed_value().to_string(), "84");
@@ -1472,17 +1639,17 @@ let operation = Operation::new((
     Pure::<Report>::default(),
 ));
 let resources = ContractResources {
-    transactions: EvmTransactionResources {
+    transactions: vec![EvmTransactionResources {
         route: transaction_route, signer, authority, provider: transaction_provider,
-    },
-    read_route, read_provider,
+    }],
+    reads: vec![EvmReadResources { route: read_route, provider: read_provider }],
 };
-let program = compile::<ContractCapabilities, _, _>(
+let program = compile(
     entry_point, &operation, &input, &resources, limits,
 )?;
 let runtime = Runtime::new(store);
 let result = runtime.execute(run_id, &program, &input).await?;
-let report = result.success().expect("terminal success").decode::<ContractReport>()?;
+let report = result.success().expect("terminal success").decode::<ContractDeploymentReport>()?;
 assert_eq!(report.observed_value().to_string(), "84");
 ```
 
@@ -1492,6 +1659,27 @@ A companion zero-input/zero-increment case cold-decodes exactly ZeroConfiguratio
 configuration command was prepared. No enclosing failure conversion or separate per-State,
 codec, handler or adapter registration list is added. Publishing the new source in the integration's
 installed component set remains necessary until automatic downstream discovery is designed.
+
+For this extension example, the composing integration owns ContractResources. It replaces its one
+section 6.1 publication declaration with the following; these are alternative complete versions of
+one implementation, not two concurrent impls or registries:
+
+```rust
+impl ProgramEnvironment for ContractResources {
+    type Sources = (
+        ContractDeploymentLifecycle,
+        Pure<CheckedAdd>,
+        Pure<CheckedAddConfigurationValue>,
+        Pure<RequireNonZeroConfiguration>,
+    );
+}
+```
+
+The new failure codec and classifier follow from the State declaration. Cold load now discovers
+the new State through that source entry without naming the original composition. A downstream
+extension must publish through its owning integration; it cannot add an external trait implementation
+for an externally owned resource type. This installation responsibility applies to new semantics,
+not to callers rearranging the already installed lifecycle components.
 
 ## 9. Original-failure reporting and migration
 
@@ -1551,10 +1739,10 @@ EVM depends inward on it; it never depends back on EVM. Values owns reusable Uns
 | Location | Target responsibility |
 | --- | --- |
 | kernel/capabilities | Semantic/native Read/Effect, typed adapter/binding interfaces and EffectAdapterOutcome; no State outcome or classifier dependency |
-| kernel/program | Typed construction, immutable document/executable sequence, automatic code inventory, live binding and cold load; no Store/Journal or Runtime dependency |
+| kernel/program | Typed construction/planning, environment support contract, immutable document/executable sequence, derived executable discovery, live binding and cold load; no Store/Journal or Runtime dependency |
 | domains/transactions | `TransactionEffect<R>`, `PreparedTransaction<R>`, evidence, shared values and concrete lifecycle States/contracts |
 | domains/evm | Native config/artifact contracts, request recipes, supporting States, native translation/projection and native operational originals |
-| live/evm and downstream composition | Typed resource environments/binders, native adapters, supported ContractCapabilities/configuration; no handwritten executable inventory |
+| live/evm and downstream composition | Typed resource environments/binders, native adapters, installed source roots, supported native families/configuration; derive exact executable requirements |
 | app | Supported wire/config use cases, checked product projections, inspection consuming structural inventory |
 | kernel/runtime | One mode dispatcher/transition engine over complete Program, continuation, recovery authorization and checked results |
 | journal/store/backends | Existing owned physical/wire contracts; separate native authority implementations remain separate ports |
@@ -1591,7 +1779,9 @@ migration reader, or claim old Programs run with unavailable ABIs.
 | Application handwritten compiled State registration inventory | Inspection fed from the same structural source/type inventory |
 | RuntimeAssembly/Builder, Runtime-owned ExecutableProgram and native register_*_adapters helpers | Complete Program plus typed binders; Runtime::new(store) and execute/read/resume over the existing engine |
 | Proposed ExecutableRequirements receiver, RuntimeBuilder::compile and no-op receiver path | Program-owned compile/load with mandatory executable entries; no Runtime construction callbacks |
-| Independent Portfolio checked_collections / root-only validator | Replacement unresolved after removing repetition; preserve guarantees and resolve section 5.3 before complete cutover |
+| Independent Portfolio checked_collections / root-only validator | Typed Operation planning derives collection demands from committed input; endomorphic vectors preserve typed sequence connections; finish the balance contract gate before deleting old checks |
+| Caller-selected capability profiles / original-source cold load | Inferred ProgramEnvironment with one installed source publication and derived dependencies |
+| Unconditional root configuration in every child | Production planning views and Operation-local checked configuration |
 | Public untyped occurrence modifiers / ambiguous Operation instance config | Typed maintained defaults interpreting one checked input |
 | Duplicate decimal/range implementation | Shared Unsigned256 mechanics with exact owning schemas preserved or deliberately versioned |
 
@@ -1619,14 +1809,16 @@ native ABIs, exact prepared/evidence values, defaults, recursive injection, and 
 inventory. This proves the design; it does not delegate product vocabulary or ownership to an
 engineer. Adjust private Rust bounds as necessary without weakening the specified guarantees.
 
-Resolve the Portfolio migration gate in section 5.3 before attempting the complete compiler cutover.
-Do not hand the unresolved construction model to an engineer as an implementation detail.
+Specify the native balance request/prefix/State/suffix contracts and evidence carrier in section 5.3
+before the complete compiler cutover. The Operation planning and collection representation are
+chosen; the remaining semantic/native contract design must not be delegated as an implementation detail.
 
 Use coherent logical commits, merging inseparable cuts:
 
 1. Establish shared scalar/domain contracts and native implementation interfaces with their typed
    constructors, schemas, and consuming proof. Do not expose a second maintained runtime path.
-2. Cut over authoring, typed injection/defaults/resolution, complete Program/document/binding schema,
+2. Cut over typed Operation planning/local configuration, homogeneous vectors, inferred environment
+   support, typed injection/defaults/resolution, complete Program/document/binding schema,
    adapter interfaces, Runtime callback split, native codecs, cold load and explicit read/resume
    handoff with their consumers together. Move EffectAdapterOutcome inward. Remove mutable
    DSL/wrapper/registration/Runtime assembly paths in this cutover. Include root-map removal here when required for one coherent API/wire.
@@ -1680,7 +1872,9 @@ this future implementation requirement.
 | Native request custody | Actual predecessor84 produces native84 before reservation; forged request84/native42, wrong schema/binding/implementation/action rejected at owning hot/cold boundary; no duplicate Configure validation |
 | Recursive injection | Nested supporting selection uses same walk/bindings; no product re-resolution; finite types, depth/State-count rejection, atomic construction failure |
 | Defaults/checkpoints | Parent/child inheritance, explicit zero, handler/parameter/target unit, distinct occurrence scopes, duplicate/missing/foreign/forward/terminal/context mismatch, inherited-parent-target non-rebinding and Effect barriers |
-| Portfolio migration gate | Resolve section 5.3 before replacing its authoring path; preserve configured collection count/order/routes, empty collections, immutable continuation plan, State boundaries and cumulative limits |
+| Operation planning | Same maintained child standalone/nested/after addition; local demand and defaults scope restored; cold discovery never invokes Plan; future84 reaches preparation without compile-time State evaluation |
+| Installed support | Pure fresh/cold with no handles; recomposition across source roots without list edits; dependent handlers/injection derived; ambiguous code/resources rejected; unselected handles unnecessary |
+| Portfolio migration gate | Specify balance carrier/contracts in section 5.3; preserve collection/source count/order/routes, rejection of empty requests, native/token boundaries, cumulative limits and occurrence recovery scopes; reject vector bodies with unequal endpoints |
 | Construction/cold | Mandatory executable entries; automatically bound support/codecs/handlers; native adapter reuse across request ABIs; persisted public bindings; missing/mismatched resources rejected before return with no IO; no config/C0/setup fabrication; same exact Program identity after load |
 | Checked results | One non-generic Program/ExecutionResult for fresh and cold paths; heterogeneous intermediate contracts retained; exact output decoding succeeds; wrong nominal schema with identical JSON and malformed decoding fail explicitly without changing history or triggering recovery |
 | Runtime handoff | Explicit Program for execute/read/resume; wrong input contract or commitment rejected before IO/append; retained ProgramRef mismatch rejected before execution; unchanged current-state validation, no late binding or hidden load hook |
@@ -1713,14 +1907,16 @@ and its limits are recorded in section 15. Production-code LOC change is zero.
 
 ## 14. Material uncertainties and handoff gates
 
-The fixed-sequence lifecycle design is specified. Portfolio migration remains an explicit design
-gap after removing optional composition constructs. Other uncertainties require implementation
-evidence, not an alternative capability vocabulary or a new framework layer.
+Operation planning, local configuration, installed-support ownership and homogeneous collection
+construction are specified. The Portfolio native balance carrier and exact semantic/native contract
+table remain design work. Other uncertainties require implementation evidence, not another DSL,
+registry or execution layer.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
-| Maintained integration can supply installed code without per-run profile/source declarations | The existing compile/load signature sketches still expose P and cold source S; that caller surface is rejected | Consumers would need to know hidden executable requirements or the original composition | Replace those public generics with integration-owned support and prove cold loading of an arbitrary compatible composition without endpoint conversion; retain typed intermediate contracts |
-| Existing Portfolio can migrate without the removed repetition API | Its current expansion loops over configured collections; no replacement is specified | Complete compiler deletion/cutover is blocked | Review actual Portfolio requirements and agree its migration before implementation; preserve behavior or explicitly approve a separate product scope change |
+| Environment-owned support permits inferred compile/load | Combined installed-source, native-family and binding bounds are uncompiled | Cold discovery could require source/configuration knowledge or duplicate inventories | Prove Pure and mixed fresh/cold workflows, multiple published roots/handlers, exact conflicts and selected-only binding |
+| Native balance protocols fit semantic Read plus injected support | The normalized prepared/candidate context and native anchor carrier are not yet specified | Native details could leak or originals/persistence boundaries could be lost | Design the request/prefix/raw-State/suffix contract table before cutover; prove mixed native/token cold execution and original custody |
+| Operation-local planning config remains available before execution | Planning views and derived demands have not been demonstrated across nested consumers | Future State computation might be incorrectly simulated or require a second config source | Compile standalone/nested lifecycle and Portfolio; execution-dependent choices must form a subsequent Program |
 | Exact generic contracts compose on pinned Rust | Derive/coherence/private traversal bounds are uncompiled | Extra erasure or a second path could be introduced | Compile fixed States, typed requests, two native ABIs, recursive support, defaults and cold inventory across crates |
 | Native family traversal integrates with full recursive injection | Section 6.1 replaces external enum introspection with one supported type tuple; production traversal is not implemented | The real recursive bounds could still require duplicated discovery code | Compile distinct native ABIs, resolved supporting leaves and Read/Effect sources through the same tuple traversal |
 | Complete Program callbacks preserve Runtime phase ownership | Current registered runners include Runtime driver context and typed encoding | Moving whole runners would move transitions inward or alter original custody | Separate prepare/check/invoke/project/interpret/classify and prove encode-once and acknowledgement ordering |
