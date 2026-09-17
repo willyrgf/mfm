@@ -799,51 +799,99 @@ exact schemas, content identity, and capacity even where Rust proves authored co
 
 ## 6. Resolution, compilation, and executable association
 
-### 6.1 Profiles and one structural walk
+### 6.1 One supported implementation set for construction and cold discovery
 
 ```rust
 pub trait CapabilityFamily<C> {
-    type Selection;
+    type Implementations;
 }
 
 pub trait Resolve<Config, C>: CapabilityFamily<C> {
-    fn resolve(config: &Config) -> Result<Self::Selection, ProgramError>;
+    fn implementation(config: &Config) -> Result<StableId, ProgramError>;
+}
+
+pub trait ResolveEffectBinding<Config, C>: EffectImplementation<C>
+where
+    C: EffectCapabilityContract,
+{
+    fn binding(config: &Config) -> Result<Self::Binding, ProgramError>;
+}
+
+pub trait ResolveReadBinding<Config, C>: ReadImplementation<C>
+where
+    C: ReadCapabilityContract,
+{
+    fn binding(config: &Config) -> Result<Self::Binding, ProgramError>;
 }
 ```
 
-A production profile declares supported typed implementations per capability family.
-A transaction family can implement these generically over supported R, sharing the
-configuration match; adding Configure does not require another handwritten native registry.
-Each selected leaf supplies a concrete I and checked I::Binding. All offered alternatives must
-support the selected State's typed injection. Use a narrower admitted family if necessary;
-never silently fall back to a network incapable of the advertised operation.
+Implementations is one tuple of concrete native implementation types, interpreted by sealed
+framework traversal. For a family supporting two implementations, the shape is:
 
-Selection is a concrete resolved leaf for a single implementation, or a family-owned Rust enum
-whose variants hold the supported concrete implementations and checked bindings. The family's
-expert integration interface must expose selected construction and exact cold discovery through
-checked Program-owned leaf constructors. A private/sealed trait cannot inspect an enum defined in
-another crate; the cross-crate interface is a proof gate in section 14, not an implicit Rust feature.
-Public tuple/Operation authoring remains sealed. Selected construction and cold loading reuse the
-same executable constructors. It introduces no public generic choice algebra, untyped executable
-selection, or additional registration list.
+```rust
+impl CapabilityFamily<TransactionEffect<DeploymentRequest>> for ContractCapabilities {
+    type Implementations = (EvmTransactionImplementation, TestTransactionImplementation);
+}
+```
 
-Resolve exact bindings from checked configuration; do not add a public binding-role type parameter
-or multi-account composition API for hypothetical use. Binding identity and cross-State agreement
-remain checked. At entry, Config is the actual checked root input. Nested tuples/Operations inherit
-it; compilation commits that exact root input.
+TestTransactionImplementation illustrates a second supported implementation in proof tests, not
+another shipping network. Production lists only its actual support. Request-generic native families
+can share this declaration and configuration selection across supported R; adding Configure must
+not require another native registration list. This tuple declares supported native code, not an
+executable-State list or a branching/repetition source. The existing fixed tuple/Operation DSL is
+unchanged. Remove the previously proposed family-owned Selection enum and its implicit external
+visitor interface rather than maintaining both representations.
 
-The private traversal is one sealed structural walk with two modes:
+Resolve selects a supported implementation StableId from checked configuration. The compiler
+requires a unique matching entry; duplicate/ambiguous family identities or unsupported choices are
+errors, never ordered fallback. The selected implementation's ResolveEffectBinding or
+ResolveReadBinding constructs its exact typed public binding from that same configuration. These
+methods perform no IO and do not obtain live handles. BindEffect/BindRead (section 6.4) subsequently
+attach the supplied handles to that already-selected typed binding.
 
-| Source | Compile mode | Inventory mode |
+All family entries must support the selected State's injection and the resource environment's
+typed binder. Sealed tuple implementations state those bounds for each concrete entry; an external
+enum does not need to implement a private trait and no generic visitor with impossible per-entry
+bounds is introduced. Use a narrower supported family if a native implementation cannot implement
+the advertised action. No public Choice, derive macro, role generic or registry is needed.
+
+The private tuple dispatch handles two binding sources:
+
+```rust
+enum BindingSource<'a, Config> {
+    Configuration(&'a Config),
+    Stored(&'a Object),
+}
+```
+
+Fresh construction resolves the configured identity and calls the matching native typed binding
+constructor. Cold construction matches the complete retained ABI and decodes the corresponding
+I::Binding from its recorded Object. Both then call the same checked leaf constructor with that
+typed binding and explicit resources. The leaf itself requires no configuration-resolution trait;
+resolved supporting selections already supply their binding. Never rerun parent configuration
+selection for injected nonce/preparation States.
+
+StableId selects installed code during fresh construction; it is not sufficient cold admission.
+Before resource binding, compare the complete stored State, semantic capability, native value/error
+and binding contracts with the installed exact descriptor. No fallback to a matching name/version
+with different schemas. Detect multiple incompatible installed matches before publishing Program.
+
+The compiler uses one structural traversal for public sources and injected source types:
+
+| Source | Compile mode | Cold discovery mode |
 | --- | --- | --- |
 | Tuple | Walk children with unchanged borrowed config | Walk child types |
-| Operation | Enter scope, resolve typed defaults, walk body | Visit declared handler/target and body types |
-| Unresolved selection | Resolve profile choice/binding then use typed injection | Visit family alternatives and their injection types |
+| Operation | Enter scope, resolve defaults, walk body | Visit declared handler/target and body types |
+| Unresolved selection | Match family tuple, construct typed binding, inject | Inspect the same family tuple and its injection types |
 | Resolved supporting selection | Use supplied I/binding through the same injection | Visit I/prefix/designated/suffix types without values |
 
-Compile leaf bounds require Resolve<Config, C>; inventory requires only structural family and
-injection support. Inventory never calls resolve/surround/default resolution, fabricates C0, or loads
-source configuration. Runtime does not perform this authoring traversal during progression.
+At entry Config is the actual checked root input; nested tuples/Operations inherit it. Cold
+construction receives no configuration value, never calls Resolve, typed binding construction,
+surround or defaults resolution, and never fabricates initial input. A shared private tuple dispatch
+may retain a static root Config type bound for its fresh branch; that does not require source
+configuration at load. Cold discovery of already-resolved native leaves requires no root-binding
+constructor. Program construction commits the exact root input and checks binding agreement across
+the workflow. Runtime never performs this traversal.
 
 ### 6.2 Complete immutable executable Program
 
@@ -1541,7 +1589,7 @@ evidence, not an alternative capability vocabulary or a new framework layer.
 | --- | --- | --- | --- |
 | Existing Portfolio can migrate without the removed repetition API | Its current expansion loops over configured collections; no replacement is specified | Complete compiler deletion/cutover is blocked | Review actual Portfolio requirements and agree its migration before implementation; preserve behavior or explicitly approve a separate product scope change |
 | Exact generic contracts compose on pinned Rust | Derive/coherence/private traversal bounds are uncompiled | Extra erasure or a second path could be introduced | Compile fixed States, typed requests, two native ABIs, recursive support, defaults and cold inventory across crates |
-| External native families can participate in typed construction | The compiler cannot inspect arbitrary external enums or accept implementations of private traits | Cross-crate selection/inventory could require duplicated lists or an unsafe escape hatch | Prove a narrow family interface with two native alternatives and checked leaf constructors; keep public source composition sealed |
+| Native family traversal integrates with full recursive injection | Section 6.1 replaces external enum introspection with one supported type tuple; production traversal is not implemented | The real recursive bounds could still require duplicated discovery code | Compile distinct native ABIs, resolved supporting leaves and Read/Effect sources through the same tuple traversal |
 | Complete Program callbacks preserve Runtime phase ownership | Current registered runners include Runtime driver context and typed encoding | Moving whole runners would move transitions inward or alter original custody | Separate prepare/check/invoke/project/interpret/classify and prove encode-once and acknowledgement ordering |
 | Persisted binding table fits exact document/capacity rules | Section 15.1 confirms existing public fields, but the new table/envelope is unimplemented | Cold load could omit a binding or exceed bounds | Measure checked Object/document encoding, deduplication, wrong-binding rejection and small-bound failures |
 | Explicit Program loading supports existing read/resume | Current Runtime hides admission decode and executable association | Application could regain a hidden compiler or lose current-state checks | Retrieve the stored document through existing boundaries, load before Runtime, and test ProgramRef mismatch/config deletion |
@@ -1647,19 +1695,48 @@ Construction errors in the scratch used simple placeholders and do not prove cau
 
 ### 15.4 Remaining construction proof, in order
 
-The experiment confirms that an externally defined native-family enum needs an explicit expert
-interface. Its separate compile/load matches duplicate alternatives; it therefore does not prove
-automatic cold inventory or the absence of handwritten discovery lists. Private/sealed traversal
-cannot inspect external variants by itself.
-
-Next prove one family definition supporting both selected construction and cold exact discovery,
-through checked Program-owned leaf constructors. Keep consumer tuple/Operation sources sealed and
-do not reintroduce public Choice, mutable emitters, a Runtime receiver or a registration list.
-Only then extend the experiment to distinct native ABIs, recursive injection and a Read using the
-actual proposed traits. Do not substitute extra convenience APIs for this missing cross-crate seam.
+The single supported-type tuple in section 6.1 replaces the external-enum introspection gap. The
+second experiment (section 15.5) proves the cross-crate dispatch mechanism without a duplicated
+fresh/cold inventory. Next integrate it with actual recursive injection, resolved supporting leaves,
+Read and full nominal contracts. A cold resolved supporting leaf must not acquire a root-config
+binding-constructor requirement merely because family dispatch also supports fresh construction.
 
 After that, prove the actual callback split: failed first encoding, original append failure,
 preappend projection rejection, postacknowledgement interpretation failure, panic handling and
 cancellation. Finally prove full document/resource load after config deletion and explicit
 read/resume ProgramRef mismatch rejection, preserving current-state checks and snapshot/head
-validation. These tests close different obligations; the six scratch tests do not replace them.
+validation. Production document capacity/deduplication and Portfolio migration remain separate gates.
+
+### 15.5 One native-family tuple: consuming-crate proof
+
+A second disposable three-crate experiment passed eight behavioral tests and one compile-fail
+doctest in the pinned Nix shell:
+
+```sh
+nix develop -c cargo test \
+  --manifest-path /tmp/mfm-family-proof-7YlUIT/Cargo.toml \
+  --target-dir /tmp/mfm-family-proof-7YlUIT/target --offline
+```
+
+Its outward profile declares one `(NativeA, NativeB)` implementation tuple. The inward crate owns
+sealed tuple dispatch, shares its Config/Stored selection path, and calls the same checked native
+leaf constructor. The former separate compile/load match lists are gone. Root native binding
+construction remains separate from the typed leaf constructor, which accepts its already-derived
+binding. No external enum implementation, public visitor, registry or Runtime receiver is needed.
+
+Unlike the first experiment, these native implementations have different binding, command and
+evidence types. The tests exercise selection for the same concrete State; reuse across a second
+semantic request; unavailable unselected resources; selected-resource mismatch without IO; mock
+descriptor serialization/deserialization and cold reconstruction without configuration resolution;
+wrong endpoints, unknown implementation IDs, duplicate family IDs and forged native schema rejection;
+and exact nested original preservation. Callback checks retain distinct semantic/native command
+references. The compile-fail case rejects incompatible State/capability types.
+
+The proof uses actual Values/IDs/AdapterError/derive code. Its descriptor compares semantic and
+native schema identities, but is not the full production Program wire or nominal ABI. It does not
+prove ProgramRef/EffectId, policies, injection traversal, multi-State tuple composition, Read,
+capacity, Runtime ordering, recovery or cancellation. Construction errors remain scratch placeholders.
+The production Read/Effect binding trait names in section 6.1 specialize the same dispatch mechanism;
+they have not all been compiled together. This is evidence for the chosen representation, not a
+claim that the complete RFC has been implemented. Temporary files are not a maintained second DSL.
+
