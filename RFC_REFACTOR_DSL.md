@@ -38,7 +38,12 @@ is an overview of this target, not a second specification or a claim of implemen
 
 An existing-component consumer defines no State, context struct, type alias, failure mapper,
 codec, or executable-registration list. Authors introducing new semantics legitimately define
-contracts and implementations. Use `operation` for an Operation value and `states` for a tuple.
+contracts and implementations. For now, their integration must also publish each newly supported
+source once in its installed component set so a cold process can find the executable code. This
+accepted limitation applies to new executable semantics, not rearranging existing components;
+automatic discovery of arbitrary downstream implementations is deferred. Derive State, codec,
+handler and injected-support requirements from that publication, without separate lists for each.
+Use `operation` for an Operation value and `states` for a tuple.
 There is no State getter collection and no prerequisite Operation instance for selecting a State.
 
 The acceptance product is a maintained scalar-contract lifecycle:
@@ -708,6 +713,14 @@ literal Rust static; it is reusable with different checked inputs and resulting 
 Tuple adjacency requires exact equality of expanded endpoints. Operations are ordinary tuple
 elements and retain scopes. No aggregate Failure associated type, construction closure, fluent
 parallel DSL, getter collection, selection constants, or caller-defined aliases are required.
+
+Program input/output types describe only the outer endpoints. For `A -> B -> C -> D`, the Program
+has input A and output D; its executable States retain the distinct A/B, B/C and C/D contracts.
+Neither compilation nor `Program<I, O>` requires all intermediate States to use I or O. Rust proves
+each authored adjacent connection, while the expanded Program retains every exact State contract.
+Do not add a `try_typed` endpoint-conversion API for ordinary construction or cold resume. Checked
+result decoding must use the actual recorded output contract without requiring callers to restate
+the complete composition or its internal capability requirements.
 
 Framework-controlled sources comprise tuples, Operations, Pure/Read/Effect selections, resolved
 supporting selections, typed identity, and checkpoints. New-State authors enter
@@ -1382,7 +1395,9 @@ preparation, not pre-encoded in config or edited after acknowledgement.
 
 ### 8.5 New semantics composed with existing components
 
-Only the new State and its original failure are authored:
+The new State and its original failure are authored below. Its integration also publishes this
+new source once for cold executable discovery, under the accepted limitation in section 1; ordinary
+composition does not maintain an executable-registration list.
 
 ```rust
 #[derive(Debug, serde::Serialize, serde::Deserialize, mfm_program_derive::MfmValue)]
@@ -1441,7 +1456,9 @@ assert_eq!(result.success().expect("terminal success").observed_value().to_strin
 ProgramError's identity-construction conversion must retain the source. The empty failure does not
 discard its rejected input: Runtime's complete Failure retains the originating call and prior facts.
 A companion zero-input/zero-increment case cold-decodes exactly ZeroConfiguration and proves no
-configuration command was prepared. No enclosing failure conversion or registration entry is added.
+configuration command was prepared. No enclosing failure conversion or separate per-State,
+codec, handler or adapter registration list is added. Publishing the new source in the integration's
+installed component set remains necessary until automatic downstream discovery is designed.
 
 ## 9. Original-failure reporting and migration
 
@@ -1606,6 +1623,15 @@ consumers, State authors, and capability implementation authors. Link to authori
 and consuming compiled examples rather than maintaining a duplicate set of signatures. Do not
 turn the illustrative transfer into an additional implementation requirement.
 
+At the implementation site that declares installed public component sources, add a code comment
+explaining the accepted cold-discovery limitation and link it to
+[known gaps](docs/known-gaps.md#downstream-component-discovery-in-the-dsl-refactor). The comment must
+say that publishing a new source makes its executable code available after restart, that consumers
+recomposing installed components need no registration changes, and that dependent codecs/handlers/
+injected States are derived rather than separately listed. Keep that gap entry current during the
+cutover. Do not add unrelated comments to today's superseded registration tables merely to satisfy
+this future implementation requirement.
+
 ## 13. Verification contract
 
 | Boundary | Required evidence |
@@ -1657,6 +1683,7 @@ evidence, not an alternative capability vocabulary or a new framework layer.
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
+| Maintained integration can supply installed code without per-run profile/source declarations | The existing compile/load signature sketches still expose P and cold source S; that caller surface is rejected | Consumers would need to know hidden executable requirements or the original composition | Replace those public generics with integration-owned support and prove cold loading of an arbitrary compatible composition without endpoint conversion; retain typed intermediate contracts |
 | Existing Portfolio can migrate without the removed repetition API | Its current expansion loops over configured collections; no replacement is specified | Complete compiler deletion/cutover is blocked | Review actual Portfolio requirements and agree its migration before implementation; preserve behavior or explicitly approve a separate product scope change |
 | Exact generic contracts compose on pinned Rust | Derive/coherence/private traversal bounds are uncompiled | Extra erasure or a second path could be introduced | Compile fixed States, typed requests, two native ABIs, recursive support, defaults and cold inventory across crates |
 | Native family traversal integrates with full recursive injection | Section 6.1 replaces external enum introspection with one supported type tuple; production traversal is not implemented | The real recursive bounds could still require duplicated discovery code | Compile distinct native ABIs, resolved supporting leaves and Read/Effect sources through the same tuple traversal |
