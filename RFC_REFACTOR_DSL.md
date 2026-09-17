@@ -76,8 +76,8 @@ new State composed with maintained components must all use this same public path
    recovery responds; they do not silently reclassify an existing error.
 10. Discovery may execute a Program and use its checked output to construct a new Program. It
     cannot mutate admitted history or supersede unresolved command authority.
-11. One Runtime provides bounded ordinary progression and direct progression/read/resume access.
-    Attempt limits remain separate from admitted recovery policy.
+11. One Runtime provides ordinary progression and direct progression/read/resume access. No
+    execution deadline, wall-clock limit, AttemptOptions, or optional progression-control API is added.
 12. Reusable Operations are Rust type definitions over typed tuples and default-policy types.
     Caller construction uses the same tuple representation, without a universal closure or fluent DSL.
 13. Production exports State types directly. There is no required State-getter collection per Operation.
@@ -90,6 +90,11 @@ new State composed with maintained components must all use this same public path
     implementation; it does not specialize Deploy into Deploy<C> or replace it with another State.
 18. Native command, evidence, and operational-error contracts belong to the selected implementation.
     Retain exact native settlement evidence; derive the semantic view during interpretation.
+19. Resolve capabilities and assemble exact callbacks before execution. Execution-time value checks
+    belong to their selected components and existing admission/binding boundaries, not a new generic
+    Runtime State/implementation qualification hook.
+20. Do not add optional selection/policy modifiers, a universal TransactionOutcome hierarchy, or
+    general-purpose erased values. Add only interfaces justified by the supported scenarios.
 
 ## 3. Current evidence and what must change
 
@@ -233,8 +238,9 @@ section 7.4. There is no `author_operation` or `recompose` constructor.
 
 Definition structure is reusable independently of checked per-run values. Production Operations
 own documented defaults and supported configuration choices. Custom composition may choose
-explicit policy overrides using the same typed policy representation; it does not silently inherit
-all the defaults of a maintained Operation merely by importing its constituent States.
+the supported defaults of a maintained Operation or define meaningful Operation defaults where
+needed; it does not silently inherit a workflow's policy merely by importing its constituent States.
+This RFC adds no arbitrary occurrence-modifier API.
 
 ### 5.3 Supported choices and bounded repetition
 
@@ -346,27 +352,60 @@ pub trait EffectCapabilityContract {
 }
 
 pub trait EffectImplementation<C: EffectCapabilityContract> {
+    type Binding: MfmValue;
     type NativeCommand: MfmValue;
     type NativeEvidence: MfmValue;
-    type OperationalError: ClassifyError;
+    type OperationalError: MfmValue;
 
     // Exact implementation identity and checked public binding contract.
-    // Qualify/extract NativeCommand from C::Command without IO.
+    // Decode/extract NativeCommand at the already-associated native boundary, without IO.
     // Bind NativeEvidence to the admitted command, EffectId, and binding.
     // Deterministically project NativeEvidence into C::Evidence.
 }
 ```
 
 For TransactionEffect, the proposed fixed command is SubmitPreparedTransaction and the fixed
-State-facing evidence is TransactionEvidence. For EvmTransactionImplementation, native types reuse
+State-facing evidence is TransactionEvidence. These names describe their roles; their final fields
+must follow the concrete consuming proof rather than a speculative universal transaction vocabulary. For EvmTransactionImplementation, native types reuse
 PreparedEvmTransaction, EvmTransactionSettlement, and EvmTransactionOperationalError. Deploy's own
 semantic failure remains its State::Failure; no aggregate capability or Operation error is required.
 
-The pure implementation functions must receive enough qualified command/binding context to verify
-semantic/native correspondence, not merely trust a native tag. Their errors preserve concrete
-causes through InvocationDiagnostic or the appropriate construction error. Live callbacks belong to
-downstream adapter assembly, not these domain/kernel contracts. Exact method signatures, typed
-custody access, and root-aware resolution bounds are section 18 proof obligations.
+The implementation supplies deterministic native command extraction, evidence binding, and semantic
+projection. The callbacks are associated before execution, not discovered or resolved by Runtime.
+They preserve existing exact decoding/binding responsibilities; they do not introduce a generic
+Runtime product-validation hook. Native preparation and its checked value constructors establish
+product/native correspondence as described in section 6.3. Live callbacks remain downstream.
+
+Keep OperationalError: MfmValue in the inward capability interface. ClassifyError currently belongs
+to Program, which depends on capabilities; enforce I::OperationalError: ClassifyError at Program and
+Runtime association instead of creating a reverse dependency or moving the classifier for convenience.
+A State returns its original typed domain failure, an adapter returns its original typed operational
+failure, and Runtime applies that original's classification for recovery. No second classifier,
+product-error remapping layer, or extra classification method is added to the implementation.
+
+Do not require an additional TransactionOutcome enum/result hierarchy. Use the existing distinction:
+
+| Observation | Existing owner and outcome |
+| --- | --- |
+| Transaction remains unresolved | Adapter reports Pending; Runtime retains the acknowledged command |
+| Accepted native evidence is available | The selected implementation projects the fixed typed evidence; the State interprets it |
+| The State finds semantic success or failure | State returns ProposedStateOutcome with its exact output or domain failure |
+| Provider/transport operation fails | Adapter returns its exact operational original; Runtime classifies that original |
+
+A discriminator inside evidence is justified only when the consuming State needs to distinguish
+specific authenticated observations. An authenticated settled revert can be evidence interpreted
+as a domain failure; transport failure or uncertain submission cannot be relabeled as Rejected.
+Evidence exposes checked transaction identity, relevant settlement facts, and available failure
+meaning while retaining the exact native source. Do not discard rejection details behind a generic
+reason string, duplicate receipts into another authoritative result, or add scalar-product variants
+to a supposedly universal transaction capability. Product requests stay in State inputs. Common
+identifier/completion contracts require a reviewed definition; a network tag or an opaque string
+alone is not that definition.
+
+The method signatures remain a cross-crate proof obligation. Projection must receive the original
+canonical native evidence as well as any decoded value it needs, so retention clones the immutable
+Object rather than re-encoding the original or requiring every native Rust type to implement Clone.
+Semantic evidence binding must verify the carried native reference against that authoritative source.
 
 Apply the same separation to Reads: ReadCapabilityContract retains fixed semantic Intent/Evidence;
 ReadImplementation<C> owns NativeIntent, NativeEvidence, OperationalError, exact binding, and pure
@@ -395,16 +434,29 @@ SubmitPreparedTransaction
     inline exact native preparation descriptor
 ```
 
-The preparation descriptor uses the existing canonical Object machinery behind a framework-owned,
-private envelope. It retains exact schema, canonical bytes, and content identity. It offers no
-arbitrary field lookup or unchecked native casting to consumers. This is one qualified native value
-at a defined capability boundary, not a general-purpose context or error bag.
+Use concrete typed values throughout authoring, native preparation, qualification, and interpretation.
+Use existing Object erasure only where necessary to retain heterogeneous native data across a fixed
+semantic/persistence boundary. The private native preparation field retains exact schema, canonical
+bytes, and content identity. It is not the representation for ordinary product fields or configuration,
+and exposes no arbitrary field lookup, unchecked casting, or caller-built context bag.
 
-An implementation-author constructor has the conceptual shape
-PreparedTransaction::from_native::<I>(intent, binding, native_command). It qualifies and encodes the
-concrete I::NativeCommand using I's deterministic rules. Injected preparation/projection States call
-it; consumers load a checked deployment request. There is no serializer retry or opaque side copy
-if original encoding fails.
+Prefer the existing Object inside a purpose-specific checked owner. Do not introduce a general
+QualifiedValue framework, native cache, second serializer grammar, or type-witness ladder. A shared
+wrapper is justified only by actual shared invariants, not the presence of several private Object
+fields. Artifact/contract-locator identities are qualified by their own exact contracts and ledger;
+they do not inherit the transaction implementation version merely because a receipt produced them.
+
+Native preparation consumes the actual typed predecessor input and constructs a checked prepared
+value. Its constructor establishes action, target, current argument values, binding, and native
+command correspondence, then canonicalizes the native descriptor once. Consumers supply requests,
+not native descriptors. Preserve concrete construction causes and the existing no-retry behavior
+when first encoding fails; no opaque side copy is retained.
+
+For example, the Configure preparation owner constructs a command from current effective value 84
+and qualifies it before its owning reservation/submission boundary. A native descriptor encoding 42
+cannot become a checked prepared value for that request. This check belongs to native preparation
+and its checked contracts, not a new Runtime callback comparing S::Input against I::NativeCommand.
+The same owning contracts enforce applicable invariants when stored prepared values are decoded.
 
 For EVM, retain the public PreparedEvmTransaction descriptor, including reserved command and
 transaction hash. Signed transaction bytes remain under EvmTransactionAuthority's existing custody.
@@ -412,11 +464,24 @@ The adapter qualifies the descriptor and retrieves the exact retained wire throu
 boundary. A bare ContentRef is insufficient: Store has no arbitrary value lookup, and deterministic
 States cannot fetch hidden preparation facts. No new blob store or implicit history lookup is added.
 
-Private fields are API discipline, not authority. Structural decoding of the envelope is not complete
-native admission. Before acknowledging the Effect command and before adapter IO, Runtime uses the
-Program's exact selected implementation to qualify native schema, semantic intent, binding, and
-retained-command correspondence. Cold reconstruction repeats the applicable qualification. The
-adapter separately preserves authority-epoch, sender, signing-purpose, and exact-wire checks.
+Private fields are API discipline, not authority. Structural Object decoding checks canonical bytes,
+hash, grammar, and size; exact descriptor admission, typed decoding, and the owning checked value's
+invariants remain necessary before native use. Runtime retains its existing schema/input admission
+and command/evidence binding checks. The already-associated native component validates its protocol
+facts, and the adapter checks actual retained authority, epoch, sender, signing purpose, and wire.
+
+Cold reconstruction uses the retained exact implementation and the same checked contracts. It does
+not select a network again or trust arbitrary decoded native bytes. The implementation proof must
+show forged/mismatched prepared values are rejected at the owning boundary without weakening these
+checks. Do not solve that proof by adding the rejected generic State/implementation Runtime hook.
+The compiler cannot certify live custody; that remains the explicit authority boundary's check.
+
+The native owner's checked extraction must receive the relevant semantic intent and binding carried
+by the fixed command, not only the native descriptor. An otherwise-valid native descriptor for 42
+paired with a semantic intent for 84 must fail this contextual check on cold/native use. A matching
+label or unattested request hash alone proves no correspondence. The concrete prepared contract must
+retain the facts needed for that owner-local check without an arbitrary payload bag or a Runtime
+S::Input/I::NativeCommand comparison hook. Checked construction alone is insufficient for decoded data.
 
 The semantic command commits the complete native descriptor. Its command identity and EffectId
 must stay linked to the exact native command identity; neither can be silently substituted for the
@@ -434,6 +499,37 @@ prefix:      ExpandedInput -> State::Input
 designated:  State::Input  -> State::Output
 suffix:      State::Output -> ExpandedOutput
 ```
+
+The domain declares endpoints without an expansion callback; the implementation declares the
+surrounding source types. Proposed signature shape:
+
+```rust
+pub trait EffectSelection<C>: EffectState<C>
+where
+    C: EffectCapabilityContract,
+{
+    type ExpandedInput: MfmValue;
+    type ExpandedOutput: MfmValue;
+}
+
+pub trait InjectEffect<S, C>: EffectImplementation<C>
+where
+    C: EffectCapabilityContract,
+    S: EffectSelection<C>,
+{
+    type Prefix: AuthoringSource<Input = S::ExpandedInput, Output = S::Input>;
+    type Suffix: AuthoringSource<Input = S::Output, Output = S::ExpandedOutput>;
+
+    fn surround(binding: &Self::Binding)
+        -> Result<(Self::Prefix, Self::Suffix), ProgramError>;
+}
+```
+
+The current EVM setup is its public binding. Reuse it instead of introducing another generic setup
+layer without a concrete requirement. Native command options and product arguments remain checked
+input data. `surround` constructs typed sources during expansion and performs no IO; construction
+errors must preserve their causes. Read injection follows the same endpoint relationship. Prefix,
+State, and suffix are emitted by the framework, so implementations cannot omit or replace the State.
 
 The State/capability selection declares its public expanded endpoints independently of the selected
 implementation. Every supported implementation must prove those endpoints and the same designated
@@ -456,6 +552,13 @@ to the common prepared-input contract, or add an explicit native-to-semantic pro
 step is necessary. Do not hide it in an adapter or pretend the current native context already has
 the required type. Configure follows the same pattern with its own semantic action and projection.
 Other implementations inject the sequence their protocol requires, not a universal nonce workflow.
+
+The displayed suffix is subject to the semantic audit, not an obligation to retain redundant work.
+If Deploy's interpretation already checks success/rejection and constructs the final checked output,
+remove a native suffix that merely repeats those decisions and use typed identity. Preserve any
+separate useful work explicitly. Audit the old ProjectEvmTransactionOutcome failure/context behavior
+and migrate its tests and recovery semantics in the same breaking cutover before retiring its boundary.
+No acknowledged history is rewritten. Other genuinely needed injected boundaries remain independent.
 
 The framework inserts the selected executable State exactly once. Prefix and suffix retain separate
 policy/checkpoint scopes without one-State Operation wrappers. Empty expansion is typed identity
@@ -497,7 +600,7 @@ failure. Projection before acknowledgement similarly makes no claim that evidenc
 Native evidence and the derived view have different schema/reference identities. Failure-origin
 metadata must identify the native original and the semantic view supplied to interpretation without
 labeling either as the other. State-failure audit retains the source needed to reconstruct that view
-and the exact projection implementation identity. A product requiring a separately committed semantic
+and the exact selected implementation identity. A product requiring a separately committed semantic
 view must justify that persistence contract explicitly; it is not a default second authoritative copy.
 
 If a native suffix needs native evidence, the fixed State output carries the framework-owned
@@ -506,41 +609,97 @@ preserve this envelope without interpreting native fields. The suffix decodes th
 implementation contract; it never performs hidden Store or historical lookup. Native retention,
 projection, output, and failure-report capacity checks remain applicable to complete representations.
 
-### 6.6 Resolve configuration before publication
+### 6.6 Resolve and bind everything needed before execution
 
-A downstream production profile supplies supported State/capability-to-implementation associations.
-Semantic domain contracts must not import or enumerate every native implementation. The profile
-uses a closed typed alternative structure and an explicit checked configuration match; it is not a
-runtime plugin registry or lookup of executable code by a configured string. Its alternatives also
-provide the structural inventory used by section 9.4. No separate list of injected executable types
-is maintained.
+A downstream production profile supplies supported capability-to-implementation associations once
+per capability and explicit binding role. It does not repeat a configuration switch for every State
+or maintain an executable-registration list. Semantic domain contracts do not import or enumerate
+all native implementations. Reuse the closed Choice representation for alternatives; no second
+alternative algebra or runtime plugin registry is added.
 
-Production may expose supported public selections at Operation or State construction. Resolve
-checked root/default selection, enclosing Operation configuration, nearer scope, then explicit State
-occurrence configuration. The concrete typed configuration modifier is a compile-proof obligation;
-no arbitrary map, universal constructor lambda, or mandatory per-State binding argument is added.
+Separate structural support from checked selection. The proposed minimal relationship is:
 
-A local override replaces correlated protocol, binding role, action mode, and dependent options
-as one checked unit. It must agree with the actual input's constraints; it cannot silently redirect
-an already-qualified request to another account or network. Config-dependent public values that
-affect execution must be retained in Program declarations or admitted values. They cannot remain
-unpersisted constructor captures. Policy inheritance remains section 7, independently of native
-selection; configuration cannot enlarge recovery authority.
+```rust
+pub trait CapabilityFamily<C, Role> {
+    type Choices;
+}
 
-Multiple occurrences requiring the same network/account use the same explicit typed binding role;
-qualify their agreement before publication. Distinct roles permit intentional distinct bindings.
-Never silently pick the first provider or a global default. A binding discovered by execution
-requires discovery followed by a new Program, not an unresolved selection in an admitted Program.
+pub trait Resolve<Root: MfmValue, C, Role>: CapabilityFamily<C, Role> {
+    fn resolve(root: &Root) -> Result<Self::Choices, ProgramError>;
+}
+```
 
-Program commits the selected implementation and versioned native/semantic contract references,
-projection/injection semantics, binding, expanded sequence, and policy. Deploy's State identity stays
-fixed, while its executable association distinguishes these selected implementations. Rust TypeId
-and allocation identity are not durable identities. Cold continuation follows the retained Program,
-not a new resolution against changed configuration.
+A selected leaf names a concrete implementation and its checked public binding; native owners
+provide any required supporting setup. Framework bounds require every declared alternative to
+supply valid typed injection for the selected State. That is a static guarantee. A profile with
+an implementation incapable of the advertised State is invalid; expose an intentionally narrower
+family/role rather than silently falling back. Supported configuration values still need checked
+resolution for account, network, action, and options before publication.
 
-Keep depth and expanded-State limits across all injection and alternatives. Failed compilation
-publishes neither a partial Program nor a registration delta. Missing implementation or live binding
-fails before admission; it does not fall back to another protocol.
+The binding role may default for the ordinary two-argument Effect<S, C> surface. Multiple accounts
+or networks use explicit roles. Shared roles must agree across the selected workflow. A new State
+using an existing family needs actual native support for its semantics, not another profile entry
+or parallel registration tree. Supporting injected States have already-selected native bindings;
+they do not trigger another product-profile lookup for hidden preparation stages.
+
+Operation configuration and checked root input supply the supported values and defaults already
+required by the product. Their agreement is checked before publication. No with_selection(),
+with_policy(), generic scoped override wrapper, or extra builder configuration object is added.
+Ordinary State data remains in its admitted input. Native preparation derives future commands from
+current predecessor values, not from stale root values. A binding discovered through execution
+requires discovery followed by a new Program, not a mutable or unresolved binding in an admitted run.
+
+Compilation and assembly resolve implementations, public bindings, native/semantic codecs,
+injection, and exact callbacks before execution. Runtime receives a fully associated executable
+Program. It executes those callbacks; it does not consult configuration, choose a network, rebuild
+an injection plan, or resolve an abstract capability during progression. Cold assembly associates
+retained exact descriptors with available code and explicit live handles without changing the plan.
+
+Depth, expanded-State limits, and atomic assembly staging remain. Missing implementations or live
+bindings fail before admission. Construction alone does not prove future execution values: their
+checks remain with the selected component that constructs or consumes them.
+
+### 6.7 Minimal durable identity and provenance
+
+Extend the existing Program execution descriptor rather than introduce another registry or record:
+
+| Descriptor facts | Owner |
+| --- | --- |
+| State implementation, input/output/failure contracts | Existing State ABI |
+| Semantic capability and command/intent/evidence contracts | Fixed State-facing interface |
+| Concrete implementation and native command/intent/evidence contracts | Selected implementation ABI |
+| Exact operational-error contract | Selected implementation original |
+| Public binding and policy | Resolved existing occurrence fields |
+
+The versioned implementation identity commits native extraction, evidence qualification, and
+projection semantics. Changing those semantics changes that identity even if schemas stay the same.
+Do not add separate projection/injection IDs: projection belongs to the implementation contract,
+and the actual expanded declarations, bindings, and policies already commit injection into Program.
+Replace the old combined capability/error identity scheme in the same cutover, rather than retaining
+parallel schemes. Rust TypeId and allocation identity are never durable identities.
+
+Keep the existing EffectCall/Settlement structure:
+
+```text
+EffectCall.command = semantic command including its inline native descriptor
+Settlement.evidence = exact native original
+EffectId = H(RunId, ProgramRef, ExecutionPosition, semantic command reference)
+```
+
+Do not persist another native-command field or a second semantic settlement. At the native adapter
+boundary, distinguish the semantic command reference from the exact native reference obtained from
+its canonical descriptor; do not silently substitute one for the other. Pending reconciliation
+retains the same command and authority regardless of later configuration changes.
+
+Identify a derived semantic evidence view by native source reference, exact implementation reference,
+and semantic evidence contract. Do not add a mandatory persisted view hash and its encoding failure
+point. If checked inspection requires that view's own ContentRef, produce it only after successful
+projection/encoding and report it unavailable on failure. Never use the native evidence reference
+as though it identified the semantic view.
+
+Reuse existing StateCall and failure context to retain origin. Self-contained reports may expose
+resolved descriptor facts, but internal records need not duplicate every schema and binding field.
+Suffix custody uses those same retained facts in its State input, with no historical lookup.
 
 ## 7. Operations, defaults, and recovery scopes
 
@@ -562,35 +721,33 @@ fallback remains Stop and zero allowances; the lifecycle baseline must document 
 defaults. Permission for three retries does not force three retries: the handler and Runtime still
 check classification, phase, evidence, and retained authority.
 
-### 7.2 Inheritance and overrides
+### 7.2 Required default inheritance
 
-Resolve defaults from outer scope to the occurrence:
+Resolve supported policy declarations from outer scope to the occurrence:
 
 ```text
 framework fallback
     -> enclosing Operation defaults
-    -> nearer child Operation or injection-scope defaults
-    -> explicit State-occurrence override
+    -> nearer maintained child Operation or injection-scope policy
 ```
 
-Every expanded State, including ReserveEvmNonce and PrepareEvmTransaction, inherits the applicable
-Operation defaults unless a more local declaration overrides them. Importing State types does
-not import the policy of every maintained Operation that uses them.
+Every expanded State, including native reservation/preparation, inherits applicable Operation
+defaults unless a maintained component already declares a required more-local policy. Importing
+State types does not import every Operation policy that happens to use them. Reusing a child twice
+creates distinct occurrence scopes.
 
-Policy declarations distinguish unspecified from explicit zero. A more local declaration replaces
-only the fields it explicitly specifies. A selected handler, its parameters, and checkpoint targets
-form one replacement unit; allowances inherit independently. Outer defaults do not rewrite explicit
-policy inside a maintained child. Reusing a child twice creates two occurrence scopes.
+Keep one typed policy representation for these required declarations. Unspecified differs from
+explicit zero. Handler, parameters, and checkpoint targets form one replacement unit; allowances
+inherit independently. Preserve existing explicit component policies and scoped recovery behavior;
+do not introduce a new optional caller API for arbitrary State-occurrence overrides.
 
-Use one typed policy representation for Operation defaults and occurrence overrides. An occurrence
-can carry a typed policy wrapper around its State selection; it is not another State, registry,
-or execution engine. Concrete modifier/associated-type spelling must be established by the compile
-proof, not a second fluent sequence DSL.
+No with_policy(), with_selection(), or speculative Scoped wrapper is part of this refactor. Existing
+Operation configuration/defaults meet the accepted consumer scenarios. Add other controls only when
+a concrete demand justifies their semantics and owner.
 
-Per-occurrence allowances are separate from the Program-wide recovery budget. An inherited local
-retry count cannot increase the global budget or authorize a forbidden restart. Future settings
-extend the typed contract only when their concrete semantics and owner are defined; no unrestricted
-configuration bag is introduced for hypothetical options.
+Per-occurrence recovery allowances remain separate from the Program-wide admitted recovery budget.
+Local defaults cannot enlarge that budget or authorize a forbidden restart. These are durable safety
+policies, not execution deadlines or limits on the duration of a Runtime invocation.
 
 ### 7.3 Classification is not redefined by an Operation
 
@@ -684,8 +841,8 @@ that checked resolution at their IO/configuration boundary before this input is 
 No credentials, provider handles, environment lookup, or signer access belong in the definition
 or admitted input. Configuration supplies values and supported choices, not contracts through a
 `config.contracts()` accessor. The compiler projects required public setup from this actual checked
-input and qualifies any supported occurrence override against it. There is no repeated concrete
-binding argument on each State definition.
+input and the maintained Operation configuration. There is no repeated concrete binding argument
+on each State definition.
 
 ### 8.2 Public expanded contracts
 
@@ -750,12 +907,14 @@ trait ExecutableRequirements {
     where
         C: ReadCapabilityContract,
         I: ReadImplementation<C>,
+        I::OperationalError: ClassifyError,
         S: ReadState<C>;
 
     fn effect<S, C, I>(&mut self) -> Result<(), Self::Error>
     where
         C: EffectCapabilityContract,
         I: EffectImplementation<C>,
+        I::OperationalError: ClassifyError,
         S: EffectState<C>;
 
     fn handler<H: Handler>(&mut self) -> Result<(), Self::Error>;
@@ -777,6 +936,12 @@ use the same framework-owned structural
 definition with explicit traversal modes. Components do not maintain independent compilation and
 registration trees or expose a second `register` method. The feasibility proof must demonstrate
 that the shared structure is sufficient for both modes, including injection and policy choices.
+
+Use one sealed structural traversal with mode-specific leaf bounds: compilation needs the profile's
+Resolve<Root, C, Role>; inventory needs only CapabilityFamily<C, Role> and typed injection support.
+Inventory never constructs fake root input or calls resolve/surround. Tuples, Operations, choices,
+and repeated bodies share their structural walk; only the selected-versus-inventory leaf handling
+differs. Keep these traversal details internal rather than exposing another visitor DSL.
 
 This mechanism removes duplicate executable-registration knowledge. It does not remove Runtime's
 canonical Object representation. Object retains canonical bytes and content identity across
@@ -819,8 +984,8 @@ fn compile<S: AuthoringSource>(
 ```
 
 During expansion, compilation resolves the implementation, public capability setup, and supported
-policy values from the actual checked root input being committed and qualified scoped selection
-under section 6.6. There is no required additional concrete binding argument
+policy values from the actual checked root input being committed and supported Operation
+configuration under section 6.6. There is no required additional concrete binding argument
 on the Operation definition. A selected leaf requires a typed projection from that root input,
 not from an unavailable future State input. Production owns projections for its supported public
 components; consumers do not write per-injected-stage plumbing.
@@ -832,10 +997,10 @@ Injection derives its supporting setup from the designated implementation's reso
 can only be learned through execution, use discovery and compile a subsequent Program; do not
 leave an unresolved or mutable binding inside an admitted Program.
 
-Exact projection signatures, scoped configuration, profile selection, multi-binding typed roles,
-and input-dependent repetition coupling must be proved together. Do not fill this gap with a generic
+Exact projection signatures, profile selection, multi-binding typed roles, and input-dependent
+repetition coupling must be proved together. Do not fill this gap with a generic
 setup bag, an unqualified second configuration that can disagree with C0, or the removed arbitrary
-input-check callback. Typed constructor overrides must be qualified and retained under section 6.6.
+input-check callback. Resolved public execution parameters are retained under section 6.6.
 
 The builder stages requirements privately. It qualifies the complete Program, root/input agreement,
 input commitment, exact executable associations, and required live bindings before publishing
@@ -977,49 +1142,59 @@ async fn execute<I: MfmValue, O: MfmValue>(
     run_id: RunId,
     program: Program<I, O>,
     input: I,
-    attempt: AttemptOptions,
 ) -> Result<ExecutionResult<O>, InvocationFailure>;
 ```
 
-Program already carries its entry point, limits, resolved recovery choices, exact expanded
-sequence, and input commitment. Runtime verifies its association and input before admission.
-Executing it never invokes an Operation constructor or capability injection callback.
+Program already carries its entry point, structural/capacity limits, resolved recovery policy,
+expanded sequence, implementation associations, and input commitment. Runtime checks its exact
+association and input before admission. Execution never invokes an Operation constructor, capability
+resolver, or injection callback. It uses the already-selected code and existing engine transitions.
 
-`ExecutionResult<O>` is a checked result, not another driver. It distinguishes terminal success,
-terminal original failure, and bounded incomplete progression. `success()` borrows an `O` only
-for qualified success; `failure()` exposes the complete checked original report only for terminal
-failure. Callers inspect the explicit outcome when either is absent. Neither accessor manufactures
-success from raw bytes. `RecoveryStopped` retains its existing unresolved-authority meaning through
-`InvocationFailure`; it is not an ordinary terminal domain failure.
+ExecutionResult has checked terminal success and terminal original failure only. `success()` borrows
+an O for qualified success; `failure()` exposes the checked original report for terminal failure.
+Its private representation excludes contradictory outcomes/observations and retains the exact RunId.
+No result is manufactured from unchecked bytes. RecoveryStopped remains InvocationFailure with
+unresolved Effect authority; it is not terminal domain failure or a new result category.
 
-Attempt options contain a deadline, a finite progression bound, and a supported pending-poll
-interval. They are process-local controls, not admitted recovery policy. The bounded loop delegates
-every transition to the existing engine and follows this action contract:
+Do not add AttemptOptions, deadlines, wall-clock limits, a finite invocation progression budget,
+configurable polling controls, or time-exhaustion/incomplete result variants. None is required by
+the accepted consumer scenario. Program capacity limits and admitted recovery allowances remain
+independent existing contracts. Future timing controls require a demonstrated demand and separate
+design; they are not an implementation gate for this refactor.
+
+`execute` progresses until terminal completion, RecoveryStopped, invocation failure, or caller
+cancellation. It delegates to the existing engine:
 
 | Observation | Action |
 | --- | --- |
-| Runnable, AwaitingRecovery, AwaitingInterpretation | Continue eligible progression within the budget; Runtime alone authorizes transitions |
-| Pending Effect without RecoveryStopped | Reconcile the same retained command at the selected bounded polling cadence |
+| Runnable, AwaitingRecovery, AwaitingInterpretation | Continue the eligible existing transition; Runtime alone authorizes recovery |
+| Pending Effect without RecoveryStopped | Reconcile the same retained command through the selected async native adapter |
 | Durable success or terminal failure | Return its checked result |
-| RecoveryStopped | End automatic driving; explicit later resume may reconcile existing authority |
-| Store/internal/invocation failure or ambiguous acknowledgement | Return its causal failure and exact recovery identity; do not invisibly retry admission or append |
-| Deadline or work-bound exhaustion between transitions | Return explicit incomplete progression and its qualified observation |
-| Deadline interrupting in-flight work | Preserve known acknowledgement/authority and uncertainty; do not substitute an older view for the current head |
-| Cancellation or disconnected caller | Preserve cancellation safety; no response or cancellation record is promised |
+| RecoveryStopped | Return the existing unresolved-authority failure; later explicit resume may reconcile |
+| Store/internal/invocation failure or ambiguous acknowledgement | Return its causal failure and exact recovery identity; do not invisibly retry admission/append |
+| Caller cancellation or disconnection | Preserve cancellation safety; no response or fabricated cancellation record is promised |
 
-Before any acknowledged view exists, a stopped invocation must still identify the selected RunId
-and available recovery context. After a known acknowledgement with failed projection, preserve
-the acknowledgement separately from the last qualified observation. A successful Store commit,
-ambiguous commit, historical read, and unavailable observation cannot share a misleading status.
+Pending execution must not spin on an immediately-returning Pending adapter. The native IO owner
+must suspend appropriately for readiness or reconciliation backoff within its existing async call.
+This introduces no Runtime timer, deadline, new waiting trait, detached worker, or polling-options
+surface. Current adapter behavior needs inspection and a non-spinning/cancellation proof; do not
+claim it already waits appropriately. Adapter-owned waiting does not limit the invocation's lifetime.
 
-Retain direct start/progression, `read`, and `resume`. Cold result access uses the same exact value
-decoders as hot execution. Do not introduce `RuntimeDriver`, a second scheduler, or consumer-owned
-`drive_to_success` loops for ordinary supported progression.
+Preserve existing InvocationFailure::Execution with RunId, original RuntimeError, and last_observed,
+and RecoveryStopped with its checked pending observation. RuntimeError::Projection retains a known
+acknowledged summary separately from a failed/older observation; RecordingFailure retains the exact
+candidate and definite/indeterminate disposition. Reuse those facts instead of another status enum.
+An error before any acknowledged view still identifies the supplied RunId. A historical observation
+never claims to be the current head, and failure to append is not audited through the failed Store.
+
+Retain direct start/progression, read, and resume for pending inspection and deliberate manual control.
+Cold results use the same exact codecs and selected projections as hot execution. Do not introduce
+RuntimeDriver, another scheduler, or consumer-owned drive_to_success loops for ordinary progression.
 
 ## 12. Caller examples
 
 These are proposed authoring/execution bodies, not runnable current tests. Imports and surrounding
-async signatures are omitted. Callers supply explicit RunId, entry_point, limits, attempt, and
+async signatures are omitted. Callers supply explicit RunId, entry_point, limits, and
 Arc<dyn Store>. EVM bodies also receive explicit signer, authority, transaction-provider, and
 read-provider handles where needed. These handles come from their IO/custody owners; no implicit
 resource acquisition is hidden in a definition constructor.
@@ -1051,7 +1226,7 @@ let state = Pure::<CheckedAdd>::default();
 let mut builder = Runtime::builder::<NoCapabilities>(store)?;
 let program = builder.compile(entry_point, &state, &input, limits)?;
 let runtime = builder.build()?;
-let result = runtime.execute(run_id, program, input, attempt).await?;
+let result = runtime.execute(run_id, program, input).await?;
 
 let value = result.success().expect("expected terminal success");
 assert_eq!(value, &EvmU256::from_u64(84));
@@ -1079,7 +1254,7 @@ register_evm_transaction_adapters(
 )?;
 let program = builder.compile(entry_point, &state, &input, limits)?;
 let runtime = builder.build()?;
-let result = runtime.execute(run_id, program, input, attempt).await?;
+let result = runtime.execute(run_id, program, input).await?;
 
 let deployed = result.success().expect("expected terminal success");
 assert_eq!(deployed.requested_value(), &EvmU256::from_u64(42));
@@ -1117,7 +1292,7 @@ register_evm_anchored_contract_calls(
 )?;
 let program = builder.compile(entry_point, &operation, &input, limits)?;
 let runtime = builder.build()?;
-let result = runtime.execute(run_id, program, input, attempt).await?;
+let result = runtime.execute(run_id, program, input).await?;
 
 let report = result.success().expect("expected terminal success");
 assert_eq!(report.requested_value(), &EvmU256::from_u64(42));
@@ -1174,7 +1349,7 @@ register_evm_anchored_contract_calls(
 )?;
 let program = builder.compile(entry_point, &operation, &input, limits)?;
 let runtime = builder.build()?;
-let result = runtime.execute(run_id, program, input, attempt).await?;
+let result = runtime.execute(run_id, program, input).await?;
 
 let report = result.success().expect("expected terminal success");
 assert_eq!(report.requested_value(), &EvmU256::from_u64(42));
@@ -1182,8 +1357,8 @@ assert_eq!(report.effective_value(), &EvmU256::from_u64(84));
 assert_eq!(report.observed_value(), &EvmU256::from_u64(84));
 ```
 
-Unspecified outer policy fields inherit framework fallback; explicit child defaults and occurrence
-overrides resolve by section 7.2. The all-State variant in section 5.2 has the same acceptance
+Unspecified outer policy fields inherit framework fallback; explicit maintained child defaults
+resolve by section 7.2. The all-State variant in section 5.2 has the same acceptance
 result. Neither consumer defines a State, context, alias, mapper, codec, getter collection, or
 separately maintained executable-State registration list. Live adapter binding remains explicit.
 
@@ -1271,7 +1446,7 @@ register_evm_anchored_contract_calls(
 )?;
 let program = builder.compile(entry_point, &operation, &input, limits)?;
 let runtime = builder.build()?;
-let result = runtime.execute(run_id, program, input, attempt).await?;
+let result = runtime.execute(run_id, program, input).await?;
 
 let report = result.success().expect("expected terminal success");
 assert_eq!(report.observed_value(), &EvmU256::from_u64(84));
@@ -1360,6 +1535,12 @@ does not by itself make that policy suitable for shipping transaction compositio
 | EVM execution State standing in for Deploy | Move useful native mechanics to the implementation/supporting States; emit Deploy itself as the designated Effect |
 | Adapter association by shared capability/binding alone | Qualify exact implementation identity and binding in the existing tables; no second registry |
 | Evidence treated as both native original and semantic view | Retain native originals, project semantic views, and update audit provenance and suffix custody together |
+| Generic Runtime State/implementation product-qualification hook | Do not add; native preparation and checked value owners establish correspondence, while existing admission/binding/authority checks remain |
+| Universal TransactionOutcome or product-action enum in TransactionEffect | Do not add without a concrete evidence-contract need; retain existing Pending, State outcomes, and original operational failures |
+| Proposed selection/policy modifier APIs and Scoped wrapper | Remove from this target; retain required maintained Operation configuration/defaults only |
+| AttemptOptions, deadlines, wall-clock/progression limits, polling knobs, incomplete execution results | Remove from this target; ordinary execute returns terminal results or existing invocation failures and supports caller cancellation |
+| Separate projection/injection IDs, native-command copy, or persisted semantic-view hash | Do not add; reuse exact implementation identity, expanded declarations, inline native descriptor, and reproducible view provenance |
+| Native outcome suffix duplicating Deploy interpretation | Audit distinct semantics, retire redundant work/boundary and migrate coverage in the same cutover; retain useful suffix support |
 | Wrapper-only `EvmTransaction<C, R>` | Move validation to checked selection/capability ownership and delete the wrapper |
 | Handwritten sequence-only Operation implementations | Migrate to reusable Operation tuple types or the same inferred tuple constructor |
 | Proposed fluent sequence DSL and universal construction closure | Remove; use one typed tuple representation and nominal scoped boundary markers |
@@ -1399,9 +1580,10 @@ fixed lifecycle expressions look plausible.
    remain internally coherent. Remove root maps and mapped-root persistence, migrate actual product
    reporting requirements, and update every affected schema, transport, cold decoder, and capacity
    test together. Preserve exact originals and recovery authority.
-3. **consolidate runtime execution and checked results**: accept compiled Program, add bounded
-   progression and honest stopped outcomes over the existing engine, and replace ordinary copied
-   drivers/decoders. Keep direct APIs and interruption/ambiguity coverage. Merge with the first
+3. **consolidate runtime execution and checked results**: accept compiled Program, progress through
+   the existing engine to terminal results or existing invocation failures, and replace ordinary
+   copied drivers/decoders. Add no timing/options API. Prove adapter-owned pending waiting does not
+   spin and retains cancellation safety. Keep direct APIs and cancellation/ambiguity coverage. Merge with the first
    commit if typed Program construction and Runtime public construction are inseparable.
 4. **provide lifecycle contracts and consumer acceptance**: implement maintained product contexts,
    scalar-before-command semantics, reusable selections, meaningful validation/reporting, and the
@@ -1420,8 +1602,8 @@ complexity, and measured production-code LOC change separately from test/docs ch
 | Static authoring | Compile-fail incompatible State/Operation adjacency and incompatible injected prefix/suffix; positive standalone, nested, and mixed cases |
 | Generic reuse | A second supported context and ordinary call to an existing address, without fixture-specific runtime machinery |
 | Fixed-State capability abstraction | Same non-generic executable State and semantic ABI with two distinct native implementations, exact native commands/evidence/errors, and different typed injection; a deterministic test implementation proves the DSL, not production support for another chain |
-| Implementation selection | Supported scoped overrides and shared-role agreement; unsupported network/action rejected before admission; no network fallback or resolution from changed config on resume |
-| Prepared custody | Inline native descriptor admission, semantic/native command identity linkage, wrong implementation/schema/binding/intent rejection before acknowledgement or IO, and retained-wire recovery |
+| Implementation selection | One family per capability/role, supported Operation configuration and shared-role agreement; unsupported choices rejected before admission; no network fallback or resolution during progression/resume |
+| Prepared custody | Owning native preparation/checked decoding rejects wrong action/current value/implementation/schema/binding; exact native descriptor admission and semantic/native command identity linkage remain; no extra generic Runtime product hook |
 | Evidence views | Native settlement retained before interpretation; hot/cold semantic projection equivalence; projection failure preserves known head; suffix receives native custody without hidden IO |
 | Evidence provenance | Native and semantic schemas/references distinguished in State-failure reports; exact native operational originals and classification retained |
 | Operation scopes | Nested precedence, explicit zero allowances, target replacement, inherited installed handler, foreign/absent/duplicate checkpoint rejection, and repeated source occurrence relocation |
@@ -1435,7 +1617,9 @@ complexity, and measured production-code LOC change separately from test/docs ch
 | Product rejection | Addition overflow before configuration; observed-value mismatch; malformed/wrong ABI result; new-State zero failure retains exact rejected input and prior facts |
 | Causal failures | Distinguishable nested domain/provider/authority/signer causes survive hot/cold access, with classification unchanged and no deliberately appended secrets |
 | Report limits | Small-bound complete-report overflow preserves original, acknowledged head, and command authority; no production-maximum allocations |
-| Attempt control | Deadline before/after acknowledgement, stale last observation, cancellation, ambiguous admission/append, RecoveryStopped, and retained-command pending polling |
+| Execution and cancellation | Terminal execute results, stale last observation, cancellation, ambiguous admission/append, RecoveryStopped, and adapter-owned non-spinning retained-command reconciliation; no timing-limit API |
+| Minimal evidence | No mandatory new outcome hierarchy; checked transaction identity and authenticated rejection detail remain available; transport uncertainty stays an original operational error |
+| Suffix simplification | Any removed projection boundary has its distinct original/failure/recovery semantics audited and retained where required; Deploy owns its semantic result and errors |
 | Discovery | Checked source-output linkage, new immutable Program/RunId, no rewrite of old Program or pending authority |
 
 Before deleting an existing assertion, record its executable replacement and managed owner.
@@ -1469,15 +1653,19 @@ proved together; a compiling tuple alone is insufficient evidence.
 | --- | --- | --- | --- |
 | Tuple definitions, default-policy types, and typed injection are ergonomic on the pinned Rust toolchain. | The new representation has not been compiled against existing generic State/derive bounds. | Consumers could need forbidden aliases or a second construction path. | Compile all five callers across crates, nested Operations, a selected Choice, tuple nesting/arity limits, and incompatible injected endpoints without constructing executable States. |
 | Fixed semantic deployment contracts can support more than one native implementation. | The product's common prepared-input, outcome, identifier, and completion guarantees are not specified by existing EVM fixture types. | Network independence could be nominal or hide incompatible guarantees. | Specify one concrete shared contract and execute the same State with two native implementations; state supported actions explicitly and reject unsupported combinations. |
-| Semantic/native implementation association fits the one compiler and Runtime. | Complete implementation methods, resolver bounds, public expanded endpoints, and scoped configuration modifiers are uncompiled. | Type erasure could bypass validation or require a second registry/engine. | Cross-crate proof of fixed State ABI, different native ABIs, typed injection, identity projection for native support, atomic assembly failure, and cold inventory without configuration. |
+| Semantic/native implementation association fits the one compiler and Runtime. | Complete implementation methods, resolver bounds, and public expanded endpoints are uncompiled. | Type erasure could bypass validation or require a second registry/engine. | Cross-crate proof of fixed State ABI, different native ABIs, typed injection, identity projection for native support, atomic assembly failure, and cold inventory without configuration or resolution during execution. |
 | Prepared envelopes preserve exact command custody and authority. | Private canonical envelopes alone do not establish native qualification or custody references. | Resume could rebind or replace the acknowledged native command. | Define qualified constructor/admission APIs and identity linkage; test forged/decoded mismatches, native wire retention, cancellation, and ambiguous acknowledgement. |
+| Preparation and its checked value contracts can enforce product/native correspondence without a new Runtime hook. | A fixed semantic State cannot inspect arbitrary native bytes, and structural envelope decoding alone proves no calldata relation. | A forged prepared value or root42 substitution could bypass the intended effective84 check. | Compile and test the complete selected preparation path plus exact cold admission, including forged native42 with semantic84; resolve failures at the owning component without weakening typing or adding the rejected hook. |
+| Existing evidence/outcome contracts need no universal transaction-result layer. | Checked transaction identifiers, settlement facts, and rejection observations are not yet fully specified. | A generic reason or success flag could hide facts needed by the State or audit. | Define the minimal concrete evidence consumed by Deploy/Configure; test authenticated rejection versus provider uncertainty, exact native retention, and common/native checked access. |
 | Native evidence alone suffices as authoritative settlement. | Current audit metadata and product commitments may conflate native evidence with the State-facing view. | Projection failures or cold reports could lose evidence or misidentify its schema. | Audit durable evidence-reference obligations, prove hot/cold projection, known-head failure, exact original decoding, suffix envelope custody, and small-bound capacity behavior. |
 | Public setup can be projected from the actual checked root input for every selected meaningful State. | Root-aware traversal bounds and multi-binding roles are not specified by AuthoringSource's endpoints alone. | A future input or ambient binding could be used, or callers could need hidden-stage setup implementations. | Prove root-input projections across crates, wrong/multiple bindings, and capability-derived reserve/prepare setup with no consumer scaffolding. |
 | Input-dependent repetition can remain coupled to the committed input without arbitrary callbacks. | Portfolio's current expansion captures collection count/routes independently of C0. | Removing its validator could admit a mismatched plan, especially when nested. | Define bounded homogeneous repetition from the same checked input, preserve count/route checks before admission, and test empty/repeated scopes and nested semantic preconditions. |
 | Nominal checkpoint markers preserve scope and reuse semantics. | Type-based markers have not been relocated across nested/repeated Operation occurrences. | Targets could alias, escape scope, or be rebound during inheritance. | Test duplicate/missing/foreign/terminal markers, repeated definitions, inherited already-bound handlers, typed context mismatch, and Effect barriers. |
 | Cold type inventory can share the same structural traversal without setup or C0 values. | Current injection and policy construction receive values; inventory must instead cover their supported types. | Deleted config could block recovery or a second registration tree could appear. | Fresh-runtime association/read/resume with no C0 reconstruction, both Choice branches, a repeated body, injected alternatives, and a nondefault handler; unavailable exact ABIs fail explicitly. |
 | Product reports can move from mapped roots to checked projections of retained originals. | Portfolio/App/transport consumers require a field and durable-identity audit. | Required facts or persistence guarantees could be lost. | Produce old-field-to-retained-source mappings and explicitly resolve any durable projection requirement before deleting its persisted payload. |
-| Typed Program, staged assembly, and execution result types preserve exact acknowledgement distinctions. | Generic reconstruction, failure atomicity, and the complete result/error variants remain uncompiled. | Partial assemblies, stale-head claims, or silent authority changes could result. | Test unchanged builder on failure, exact typed reconstruction, later compilation, deadline before genesis, known acknowledgement followed by projection failure, ambiguous append, and stale observations. |
+| Typed Program, staged assembly, and execution result types preserve exact acknowledgement distinctions. | Generic reconstruction, failure atomicity, and terminal result ownership remain uncompiled. | Partial assemblies, stale-head claims, or silent authority changes could result. | Test unchanged builder on failure, exact typed reconstruction, later compilation, known acknowledgement followed by projection failure, ambiguous append, cancellation, and stale observations. |
+| Existing async native adapter calls can wait appropriately for pending reconciliation. | Current adapters may return Pending immediately and no Runtime deadline/polling surface is being added. | Automatic execute could busy-spin or acquire a second scheduling path. | Inspect the EVM pending path, implement needed adapter-owned readiness/backoff using its async IO boundary, and test non-spinning execution, retained-command reuse, and cancellation without timers/options in Runtime. |
+| Some native outcome suffixes are redundant after State interpretation owns the semantic result. | Existing suffixes carry domain failures and may have distinct recovery behavior. | Blind deletion could lose facts, classification, or a necessary boundary. | Audit ProjectEvmTransactionOutcome and its tests; remove only duplicate work in a complete cutover and retain coverage for every remaining guarantee. |
 | The lifecycle's supported ABI/artifact and reports can reuse existing EVM primitives. | The fixture is evidence, not a completed production schema. | Product configuration could claim unsupported behavior or duplicate integrity checks. | Specify checked input/intermediate/report constructors and supported ABI choices; prove 42/84, malformed return, overflow, and independent evidence assertions. |
 
 These gates do not reopen the agreed design: Rust types define Operations, typed tuples construct
@@ -1486,4 +1674,6 @@ classification remains intrinsic, Program is the execution input, and Runtime re
 and original failures. Deploy stays non-generic and executable; capability implementation selection
 occurs during expansion, native evidence remains authoritative, and semantic projection runs within
 the existing execution path. No getter collection, public arbitrary root predicate, parallel DSL, or
-mandatory aggregate failure type is required.
+mandatory aggregate failure type is required. No optional selection/policy modifier, new generic
+Runtime product-qualification hook, deadline, wall-clock limit, or invocation-control surface is part
+of this target.
