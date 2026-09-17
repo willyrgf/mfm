@@ -136,7 +136,7 @@ descriptor. Reuse that custody boundary; do not introduce a second transaction s
 | State | One meaningful deterministic executable step. Domain/framework authors implement Pure, Read, or Effect semantics. Adapters perform IO. |
 | State selection | A typed definition of one State/capability occurrence and optional policy. Its public setup is resolved during compilation. |
 | Semantic capability | The fixed typed intent/command and evidence interface used by a State, independent of the supported network implementation. |
-| Capability implementation | Exact native protocol, evidence qualification/projection, operational errors, and typed injection for a supported State/capability selection. Selected before Program publication. |
+| Capability implementation | Owns network-specific preparation, injected supporting States, native contracts/codecs, protocol validation, evidence projection, and operational errors; live adapters supply its explicit IO. Selected before Program publication. |
 | `states` | An optional local name for a tuple of imported State selections. No collection type, constructor, or getter set is required. |
 | Operation | A reusable functional grouping of States or child Operations, with supported configuration, validation, and scoped policy. |
 | Typed tuple | The sequence representation connecting compatible selections or Operations. It adds no execution semantics or persistence boundary. |
@@ -146,6 +146,13 @@ descriptor. Reuse that custody boundary; do not introduce a second transaction s
 Use `operation` for an authored functional grouping and `states` when naming its tuple is useful.
 Concrete maintained names remain descriptive, such as ContractDeploymentLifecycle and
 ConfigureAndObserve. No getter collection or original Operation instance is needed to import States.
+
+All network-dependent behavior belongs to capability implementations and their supporting
+components. Authored domain States consume fixed semantic capability contracts without inspecting
+native representations. A capability implementation includes deterministic preparation and
+validation as well as its live adapters; it is not merely a provider callback. Generic canonical
+encoding, hashing, and schema admission remain framework responsibilities, as do persistence and
+recovery scheduling. This ownership does not make injected supporting States network-independent.
 
 An Operation does not execute as a hidden State. Its grouping affects construction, validation,
 and policy scope; it adds no Journal frame and creates no atomic transaction around its children.
@@ -279,7 +286,7 @@ The validation requirements themselves remain:
 | Check | Owner |
 | --- | --- |
 | Value structure and local invariants | Checked input constructors and decoders |
-| Selected capability binding/action agreement | Typed public setup resolution and the owning deterministic execution boundary |
+| Selected capability binding/action agreement | Typed public setup resolution and capability-owned preparation/checked contracts at the applicable execution boundary |
 | Execution-time semantic prerequisite | Checked State input/output contracts and deterministic State behavior |
 | Agreement between input-dependent source shape and admitted input | Planning and compilation from the same checked root input |
 
@@ -446,17 +453,27 @@ wrapper is justified only by actual shared invariants, not the presence of sever
 fields. Artifact/contract-locator identities are qualified by their own exact contracts and ledger;
 they do not inherit the transaction implementation version merely because a receipt produced them.
 
-Native preparation consumes the actual typed predecessor input and constructs a checked prepared
-value. Its constructor establishes action, target, current argument values, binding, and native
-command correspondence, then canonicalizes the native descriptor once. Consumers supply requests,
-not native descriptors. Preserve concrete construction causes and the existing no-retry behavior
-when first encoding fails; no opaque side copy is retained.
+Capability-owned preparation consumes the actual typed predecessor input, derives the effective
+request, and constructs a checked prepared value. Its constructor establishes action, target,
+current argument values, binding, and native command correspondence, then canonicalizes the native
+descriptor once. Consumers supply requests, not native descriptors. The designated State uses the
+resulting checked capability command without inspecting native fields or repeating correspondence
+validation.
+
+Carry one authoritative effective request through preparation and execution. Do not retain
+independently editable copies of the effective value and an unrelated prepared semantic request.
+Preserve required sibling domain context and the distinct original requested value through checked
+contracts. The concrete prepared-input representation must establish these relationships on
+construction and applicable decoding; adding a duplicate validator to Configure is not the solution.
+Preserve concrete construction causes and the existing no-retry behavior when first encoding fails;
+no opaque side copy is retained.
 
 For example, the Configure preparation owner constructs a command from current effective value 84
 and qualifies it before its owning reservation/submission boundary. A native descriptor encoding 42
-cannot become a checked prepared value for that request. This check belongs to native preparation
-and its checked contracts, not a new Runtime callback comparing S::Input against I::NativeCommand.
-The same owning contracts enforce applicable invariants when stored prepared values are decoded.
+cannot become a checked prepared value for that request. This check belongs to capability-owned
+preparation and its checked contracts, not Configure or a new Runtime callback comparing S::Input
+against I::NativeCommand. The same owning contracts enforce applicable invariants when stored
+prepared values are decoded.
 
 For EVM, retain the public PreparedEvmTransaction descriptor, including reserved command and
 transaction hash. Signed transaction bytes remain under EvmTransactionAuthority's existing custody.
@@ -482,6 +499,11 @@ paired with a semantic intent for 84 must fail this contextual check on cold/nat
 label or unattested request hash alone proves no correspondence. The concrete prepared contract must
 retain the facts needed for that owner-local check without an arbitrary payload bag or a Runtime
 S::Input/I::NativeCommand comparison hook. Checked construction alone is insufficient for decoded data.
+
+Cold checks preserve those same ownership boundaries. A decoded request/native mismatch is
+rejected by the selected capability's checked extraction; Configure need not decode calldata or
+repeat that check. This is local contract validation, not a new claim that Runtime authenticates
+arbitrary coherent substitutions of the complete run history.
 
 The semantic command commits the complete native descriptor. Its command identity and EffectId
 must stay linked to the exact native command identity; neither can be silently substituted for the
@@ -553,6 +575,24 @@ step is necessary. Do not hide it in an adapter or pretend the current native co
 the required type. Configure follows the same pattern with its own semantic action and projection.
 Other implementations inject the sequence their protocol requires, not a universal nonce workflow.
 
+For the modified lifecycle, the execution order is:
+
+```text
+Add produces effective value 84
+    -> capability-owned preparation receives that current typed input
+    -> required supporting States construct and retain checked preparation
+    -> Configure executes using the checked capability command
+    -> capability implementation projects accepted native evidence
+    -> Configure interprets the semantic response
+```
+
+Expansion selects and inserts these implementations before execution; their executable supporting
+States consume 84 during execution, after Add. Saying "Configure calls the capability with 84"
+describes the authored selection. Its request must reach capability-owned preparation before the
+designated Configure State executes, not first be created inside Configure after its prefix.
+This requires no additional State hook. Every injected State retains its own existing execution,
+persistence, and recovery boundaries.
+
 The displayed suffix is subject to the semantic audit, not an obligation to retain redundant work.
 If Deploy's interpretation already checks success/rejection and constructs the final checked output,
 remove a native suffix that merely repeats those decisions and use typed identity. Preserve any
@@ -596,6 +636,13 @@ it later. Do not postpone integrity qualification merely to make the sequence lo
 Projection failure after acknowledgement preserves the native settlement and known head, reporting
 an InvocationFailure. It does not authorize resubmission, command replacement, or a fabricated domain
 failure. Projection before acknowledgement similarly makes no claim that evidence was recorded.
+
+For Observe, the selected capability implementation validates native evidence against the requested
+contract and observation requirements, then exposes a checked semantic value through ContractRead.
+It owns native decoding, target/evidence binding, and protocol guarantees. Validate compares that
+observed value with the retained effective request; it does not repeat network integrity checks.
+The response is the capability's exact typed semantic contract, not a universal result bag. Native
+originals and operational causes remain retained through normalization.
 
 Native evidence and the derived view have different schema/reference identities. Failure-origin
 metadata must identify the native original and the semantic view supplied to interpretation without
@@ -818,7 +865,11 @@ prepared envelopes, State endpoints, and semantic results must live inward of na
 Native facts remain exact qualified values. Existing EVM-specific fixture contexts are migration
 inputs, not an already-specified network-independent schema. Moving exports alone does not establish
 that schema; section 18 requires a concrete shared-contract proof. EVM-specific checked report
-accessors may project native facts without making the generic State inspect them.
+accessors may project native facts without making the generic State inspect them. Public scalar
+contracts also belong to the shared domain; they must not require EvmU256 in State implementations.
+The examples use their canonical decimal Display representation for assertions and their is_zero()
+predicate for semantic validation. These are requirements on the proposed checked scalar contract,
+not claims that the existing EVM fixture already provides the shared type.
 
 Delete the proposed `ContractLifecycleStates` collection, its constructor, its stored setup, and
 its per-State forwarding getters. Do not replace it with generated per-Operation accessors or a
@@ -851,8 +902,8 @@ on each State definition.
 | Deploy | DeploymentRequest | DeployedContract | Create the supported contract and retain checked deployment facts |
 | CheckedAddConfigurationValue | DeployedContract | DeployedContract | Add the admitted increment to the effective scalar, with checked overflow and sibling preservation |
 | Configure selection | DeployedContract | ConfiguredContract | Native preparation constructs the command from the current effective scalar and created address; Configure executes against the semantic capability and the suffix retains checked call facts |
-| Observe | ConfiguredContract | ObservedConfiguration | Read the configured target at the configuration receipt anchor |
-| Validate | ObservedConfiguration | ValidatedConfiguration | Check the lifecycle-specific equality between observation and effective command argument |
+| Observe | ConfiguredContract | ObservedConfiguration | Consume the capability's checked semantic value for the configured target at the required configuration receipt anchor |
+| Validate | ObservedConfiguration | ValidatedConfiguration | Compare the checked observed value with the retained effective request; do not repeat native evidence validation |
 | Report | ValidatedConfiguration | ContractDeploymentReport | Produce useful checked public output retaining inputs, effective value, transaction facts, and observation evidence |
 
 Configure and Observe must preserve the target/anchor relationships already checked by lower
@@ -879,6 +930,21 @@ construction, or an explicit preceding Pure State may supply it if a separate st
 Configure then executes against its prepared semantic input; Observe and Validate use the retained
 facts and Report returns observed 84. The cross-crate proof must establish this data flow before any
 reservation, including rejection at the appropriate original-failure boundary.
+
+The complete acceptance flow is:
+
+```text
+Requested 42 -> Add 42 -> Effective 84
+    -> capability-owned preparation constructs the native request from 84
+    -> Configure executes configuration
+    -> Observe receives semantic value 84 from its capability
+    -> Validate compares observed 84 with retained effective 84
+    -> Report
+```
+
+Configure contains no native-field inspection or duplicate request/native validation. Observe
+consumes the capability's checked semantic response, preserving original evidence for audit.
+The caller supplies neither encoded calldata nor prepared transaction facts.
 
 The maintained sequence omits Addition and reports 42. Merely configuring an increment does not
 execute it. The increment is admitted data, not an unpersisted closure capture or State-instance
@@ -1229,7 +1295,7 @@ let runtime = builder.build()?;
 let result = runtime.execute(run_id, program, input).await?;
 
 let value = result.success().expect("expected terminal success");
-assert_eq!(value, &EvmU256::from_u64(84));
+assert_eq!(value.to_string(), "84");
 ```
 
 The definition has no binding or setup argument. Its input constructor parses checked scalars;
@@ -1257,7 +1323,7 @@ let runtime = builder.build()?;
 let result = runtime.execute(run_id, program, input).await?;
 
 let deployed = result.success().expect("expected terminal success");
-assert_eq!(deployed.requested_value(), &EvmU256::from_u64(42));
+assert_eq!(deployed.requested_value().to_string(), "42");
 let created_address = deployed.deployment().created_address();
 ```
 
@@ -1295,9 +1361,9 @@ let runtime = builder.build()?;
 let result = runtime.execute(run_id, program, input).await?;
 
 let report = result.success().expect("expected terminal success");
-assert_eq!(report.requested_value(), &EvmU256::from_u64(42));
-assert_eq!(report.effective_value(), &EvmU256::from_u64(42));
-assert_eq!(report.observed_value(), &EvmU256::from_u64(42));
+assert_eq!(report.requested_value().to_string(), "42");
+assert_eq!(report.effective_value().to_string(), "42");
+assert_eq!(report.observed_value().to_string(), "42");
 ```
 
 Supported configuration values specialize compilation, not the static definition's account or
@@ -1352,9 +1418,9 @@ let runtime = builder.build()?;
 let result = runtime.execute(run_id, program, input).await?;
 
 let report = result.success().expect("expected terminal success");
-assert_eq!(report.requested_value(), &EvmU256::from_u64(42));
-assert_eq!(report.effective_value(), &EvmU256::from_u64(84));
-assert_eq!(report.observed_value(), &EvmU256::from_u64(84));
+assert_eq!(report.requested_value().to_string(), "42");
+assert_eq!(report.effective_value().to_string(), "84");
+assert_eq!(report.observed_value().to_string(), "84");
 ```
 
 Unspecified outer policy fields inherit framework fallback; explicit maintained child defaults
@@ -1401,7 +1467,7 @@ impl PureState for RequireNonZeroConfiguration {
         ProposedStateOutcome<DeployedContract, ZeroConfiguration>,
         InvocationDiagnostic,
     > {
-        if input.effective_value() == &EvmU256::from_u64(0) {
+        if input.effective_value().is_zero() {
             Ok(ProposedStateOutcome::Failure {
                 failure: ZeroConfiguration {},
             })
@@ -1449,7 +1515,7 @@ let runtime = builder.build()?;
 let result = runtime.execute(run_id, program, input).await?;
 
 let report = result.success().expect("expected terminal success");
-assert_eq!(report.observed_value(), &EvmU256::from_u64(84));
+assert_eq!(report.observed_value().to_string(), "84");
 ```
 
 A companion case uses zero initial value and zero increment, decodes exactly ZeroConfiguration
@@ -1495,10 +1561,14 @@ Values / IDs / capability contracts
 
 Program owns authoring types, typed injection compilation, policy lowering, and Program
 qualification. Runtime owns semantic/native executable association and progression. Shared domains
-own semantic capability contracts and non-generic States. Native domains depend on those shared
-contracts and own exact native implementations, typed injection, and deterministic projections;
-shared domains must not depend on a global enum of native implementations. Downstream composition
-owns profiles connecting supported implementations. Domains also own Operations, checked
+own semantic capability contracts and non-generic States. Native domain modules contain the
+deterministic portion of capability implementations: native contracts, preparation, typed injected
+States, protocol validation, and evidence projections. They depend on shared contracts; they are
+not separate network-specific implementations of Deploy or Configure. Live adapters provide the
+IO portion of those same capability implementations. This crate separation preserves inward
+dependencies without splitting conceptual ownership. Shared domains must not depend on a global
+enum of native implementations. Downstream composition owns profiles connecting supported
+implementations. Domains also own Operations, checked
 configuration, contexts, and product reports. Live crates bind reusable
 platform providers/signers/custody. Journal remains the exact opaque append-only frame owner;
 Store remains mechanical admission/latest/probe and atomic exact-head append.
@@ -1603,17 +1673,17 @@ complexity, and measured production-code LOC change separately from test/docs ch
 | Generic reuse | A second supported context and ordinary call to an existing address, without fixture-specific runtime machinery |
 | Fixed-State capability abstraction | Same non-generic executable State and semantic ABI with two distinct native implementations, exact native commands/evidence/errors, and different typed injection; a deterministic test implementation proves the DSL, not production support for another chain |
 | Implementation selection | One family per capability/role, supported Operation configuration and shared-role agreement; unsupported choices rejected before admission; no network fallback or resolution during progression/resume |
-| Prepared custody | Owning native preparation/checked decoding rejects wrong action/current value/implementation/schema/binding; exact native descriptor admission and semantic/native command identity linkage remain; no extra generic Runtime product hook |
+| Prepared custody | Capability-owned preparation consumes actual predecessor output and retains one authoritative effective request; its checked construction/extraction rejects request/native mismatches, including cold decoding and wrong action/implementation/schema/binding; Configure contains no native inspection or duplicate correspondence validator; exact descriptor admission and semantic/native command identity linkage remain; no extra generic Runtime product hook |
 | Evidence views | Native settlement retained before interpretation; hot/cold semantic projection equivalence; projection failure preserves known head; suffix receives native custody without hidden IO |
 | Evidence provenance | Native and semantic schemas/references distinguished in State-failure reports; exact native operational originals and classification retained |
 | Operation scopes | Nested precedence, explicit zero allowances, target replacement, inherited installed handler, foreign/absent/duplicate checkpoint rejection, and repeated source occurrence relocation |
 | Root checks | Direct and nested injection equivalence; wrong binding/action mode rejected at the owning boundary before affected IO or append |
-| Association | Injected States and custom handler included automatically; exact generic ABI conflicts rejected; failed compilation leaves builder unchanged |
+| Association | Injected States and custom handler included automatically; each supporting State retains independent persistence/recovery boundaries; exact generic ABI conflicts rejected; failed compilation leaves builder unchanged |
 | Cold construction | Type inventory without C0/setup/parameter values after config deletion, with explicit live bindings; exact original/output decoding, supported alternatives, and nondefault handler association |
 | Input-dependent planning | Portfolio repetition derives from the input being committed; count/routes mismatch cannot be admitted; empty repetition, nested same-type semantic constraints, and cumulative limits |
 | Later compilation | Already-associated ABIs execute a later compiled Program; missing ABIs fail before admission; a fresh immutable assembly can add supported definitions without mutating an existing Runtime |
 | Product success | Maintained 42 and composed 84, with separate fresh signer/nonce domains where required |
-| Product evidence | Configuration targets created address; observation matches configuration target/receipt anchor; admitted input remains 42 and command encodes effective 84 |
+| Product evidence | Configuration targets created address; capability validates observation target/receipt anchor and exposes checked semantic 84 with native provenance; Validate compares it with retained effective 84; admitted input remains 42 and capability-owned preparation constructs the command from predecessor 84 |
 | Product rejection | Addition overflow before configuration; observed-value mismatch; malformed/wrong ABI result; new-State zero failure retains exact rejected input and prior facts |
 | Causal failures | Distinguishable nested domain/provider/authority/signer causes survive hot/cold access, with classification unchanged and no deliberately appended secrets |
 | Report limits | Small-bound complete-report overflow preserves original, acknowledged head, and command authority; no production-maximum allocations |
@@ -1655,7 +1725,7 @@ proved together; a compiling tuple alone is insufficient evidence.
 | Fixed semantic deployment contracts can support more than one native implementation. | The product's common prepared-input, outcome, identifier, and completion guarantees are not specified by existing EVM fixture types. | Network independence could be nominal or hide incompatible guarantees. | Specify one concrete shared contract and execute the same State with two native implementations; state supported actions explicitly and reject unsupported combinations. |
 | Semantic/native implementation association fits the one compiler and Runtime. | Complete implementation methods, resolver bounds, and public expanded endpoints are uncompiled. | Type erasure could bypass validation or require a second registry/engine. | Cross-crate proof of fixed State ABI, different native ABIs, typed injection, identity projection for native support, atomic assembly failure, and cold inventory without configuration or resolution during execution. |
 | Prepared envelopes preserve exact command custody and authority. | Private canonical envelopes alone do not establish native qualification or custody references. | Resume could rebind or replace the acknowledged native command. | Define qualified constructor/admission APIs and identity linkage; test forged/decoded mismatches, native wire retention, cancellation, and ambiguous acknowledgement. |
-| Preparation and its checked value contracts can enforce product/native correspondence without a new Runtime hook. | A fixed semantic State cannot inspect arbitrary native bytes, and structural envelope decoding alone proves no calldata relation. | A forged prepared value or root42 substitution could bypass the intended effective84 check. | Compile and test the complete selected preparation path plus exact cold admission, including forged native42 with semantic84; resolve failures at the owning component without weakening typing or adding the rejected hook. |
+| One authoritative effective request and capability-owned preparation preserve product/native correspondence. | The common prepared-input fields and cold-decoding APIs remain unproved; independently editable request/context copies could disagree. | An inconsistent prepared value could bypass the effective84 requirement or force duplicate validation into Configure. | Prove the complete Add-to-preparation data flow from actual predecessor output, required sibling-context preservation, and owner-local cold rejection of request/native mismatches (including native42 with request84); Configure must neither inspect native fields nor repeat correspondence checks, and Runtime gains no generic product-validation hook. |
 | Existing evidence/outcome contracts need no universal transaction-result layer. | Checked transaction identifiers, settlement facts, and rejection observations are not yet fully specified. | A generic reason or success flag could hide facts needed by the State or audit. | Define the minimal concrete evidence consumed by Deploy/Configure; test authenticated rejection versus provider uncertainty, exact native retention, and common/native checked access. |
 | Native evidence alone suffices as authoritative settlement. | Current audit metadata and product commitments may conflate native evidence with the State-facing view. | Projection failures or cold reports could lose evidence or misidentify its schema. | Audit durable evidence-reference obligations, prove hot/cold projection, known-head failure, exact original decoding, suffix envelope custody, and small-bound capacity behavior. |
 | Public setup can be projected from the actual checked root input for every selected meaningful State. | Root-aware traversal bounds and multi-binding roles are not specified by AuthoringSource's endpoints alone. | A future input or ambient binding could be used, or callers could need hidden-stage setup implementations. | Prove root-input projections across crates, wrong/multiple bindings, and capability-derived reserve/prepare setup with no consumer scaffolding. |
