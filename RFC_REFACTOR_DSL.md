@@ -67,7 +67,7 @@ network-specific; they still execute through the same Pure/Read/Effect machinery
 
 ### 2.1 A request-typed transaction capability
 
-One reusable transaction protocol is specialized by exact production request types:
+One reusable transaction capability contract is specialized by exact production request types:
 
 ```rust
 pub trait TransactionRequest: MfmValue {
@@ -89,6 +89,53 @@ impl<R: TransactionRequest> EffectCapabilityContract for TransactionEffect<R> {
     // Identity and semantic evidence binding follow sections 2.4 and 3.
 }
 ```
+
+`TransactionRequest` associates a meaningful request with the domain result of successful
+transaction execution. Implement it per request contract, not per State: multiple States can use
+the same request type. The request declares the relationship; the selected native capability
+implementation translates and checks native evidence to produce that result. The generic `R`
+specializes the request/result contract, not the network. Deploy remains a concrete State.
+
+Keep four contracts distinct:
+
+| Contract | Deployment example | Responsibility |
+| --- | --- | --- |
+| Semantic request `R` | `DeploymentRequest` | Describe the requested work in domain terms |
+| Prepared command | `PreparedTransaction<DeploymentRequest>` | Retain that request together with capability-owned native preparation |
+| Capability evidence | `TransactionEvidence<ContractLocator>` | Describe settlement and its checked applied result, preserving native evidence |
+| State output | `DeployedContract` | Carry the domain context produced when Deploy interprets the evidence |
+
+The deployment flow is:
+
+```text
+DeploymentRequest
+  -> injected reservation and preparation States
+  -> PreparedTransaction<DeploymentRequest>
+  -> Deploy uses TransactionEffect<DeploymentRequest>
+  -> TransactionEvidence<ContractLocator>
+  -> Deploy interprets evidence and returns DeployedContract or its declared failure
+```
+
+`PreparedTransaction<R>` does not introduce another request/result relationship. It preserves the
+typed request and exact native preparation across separate persisted execution boundaries, so
+continuation does not reconstruct acknowledged preparation from configuration or hidden memory.
+The domain State does not inspect native fields.
+
+The applied result contains domain facts beyond the common transaction evidence. Deployment needs
+a `ContractLocator`; transaction identity is already carried by `TransactionEvidence.transaction`.
+An illustrative transfer request could therefore have a unit `TransferApplied` result if settlement
+and the common evidence provide everything its domain needs. It need not return or duplicate a
+transaction identifier as its applied result. This illustration does not add transfer functionality
+to the implementation scope.
+
+This structure is not a template required for every capability. Every Effect capability declares
+its typed command/evidence contract through `EffectCapabilityContract`; every Read capability uses
+`ReadCapabilityContract`. A capability with fixed input/output contracts needs no request trait or
+generic parameter: `ContractRead` uses `ReadContractValue` and `ContractValueEvidence` directly.
+Introduce a prepared value when intermediate preparation must cross execution boundaries, and
+supporting States when that work needs its own persistence/recovery boundary. A codec alone does
+not require a supporting State. Existing-component consumers reuse these production contracts;
+they do not implement request traits merely to select or compose States.
 
 The prepared value's fields are private. Its native Object is the exact public preparation
 descriptor, with schema, canonical bytes, and content identity. It is not signed wire, a blob-store
@@ -1263,11 +1310,24 @@ contracts. Delete superseded APIs/tests/docs with executable replacements. Repor
 necessary additions, and actual production-code LOC separately from test/docs changes; do not claim
 reduction before measuring. A staged proof must not become a permanent alternate DSL or engine.
 
+As part of the capability/authoring cutover, add `docs/capability-authoring.md` and link it from the
+README and relevant public rustdoc. This is a required implementation deliverable, not a second
+specification to publish against unimplemented APIs. Explain when to reuse an existing capability,
+when new semantics require a new capability contract, and when request specialization, prepared
+values, or supporting States are necessary. Contrast the fixed `ContractRead` contract with the
+request-specialized transaction contract and trace request, prepared command, capability evidence,
+and State output through the maintained deployment example. Explain native codec ownership,
+common transaction identity versus applied result, and the different responsibilities of component
+consumers, State authors, and capability implementation authors. Link to authoritative contracts
+and consuming compiled examples rather than maintaining a duplicate set of signatures. Do not
+turn the illustrative transfer into an additional implementation requirement.
+
 ## 13. Verification contract
 
 | Boundary | Required evidence |
 | --- | --- |
 | Public construction | All five complete callers; no consumer context/alias/map/codec/registration list; no executable-State Default bound |
+| Capability authoring documentation | New guide linked from README/rustdoc; fixed and request-specialized examples match compiled production contracts; decision criteria distinguish codecs, prepared values and persisted supporting States |
 | Static typing | Incompatible adjacent/expanded/nested endpoints fail compilation; supported tuple nesting and typed empty identity |
 | Generic native reuse | Preserve a second supported context and an ordinary call to an existing address through maintained typed components, without fixture-specific Runtime machinery |
 | Shared scalar | Full unsigned-256 range, canonical decoding, zero, maximum, overflow, native schema equivalence where retained |
