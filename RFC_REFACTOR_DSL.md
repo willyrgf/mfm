@@ -9,8 +9,9 @@ code and already-bound adapter handles in memory; its canonical document contain
 execution facts. Runtime never completes missing associations.
 
 Rust sketches omit routine derives and implementations where the surrounding contract specifies
-behavior; they have not been compiled. Implementation must prove the complete contracts together,
-not invent a different ownership model behind the examples.
+behavior; the complete sketches have not been compiled. Section 15 distinguishes a bounded
+scratch compilation experiment from the still-unproved production contracts. Implementation must
+prove the complete contracts together, not invent a different ownership model behind the examples.
 
 The fixed-sequence target excludes public branching/repetition combinators. Section 5.3 records
 the resulting unresolved Portfolio migration; the complete compiler cutover is not ready until
@@ -1527,7 +1528,8 @@ remain temporary.
 Follow [build and verification](docs/build-and-verification.md): affected focused checks in the
 Nix shell, relevant managed cases, and one final CI on the exact implementation candidate. Do not
 stack broad gates. For this documentation rewrite, review local links, signatures/workflows and
-`git diff --check`; no Rust/managed E2E/CI gate is selected. Production-code LOC change is zero.
+`git diff --check`; no production Rust/managed E2E/CI gate is selected. The isolated Rust experiment
+and its limits are recorded in section 15. Production-code LOC change is zero.
 
 ## 14. Material uncertainties and handoff gates
 
@@ -1541,7 +1543,7 @@ evidence, not an alternative capability vocabulary or a new framework layer.
 | Exact generic contracts compose on pinned Rust | Derive/coherence/private traversal bounds are uncompiled | Extra erasure or a second path could be introduced | Compile fixed States, typed requests, two native ABIs, recursive support, defaults and cold inventory across crates |
 | External native families can participate in typed construction | The compiler cannot inspect arbitrary external enums or accept implementations of private traits | Cross-crate selection/inventory could require duplicated lists or an unsafe escape hatch | Prove a narrow family interface with two native alternatives and checked leaf constructors; keep public source composition sealed |
 | Complete Program callbacks preserve Runtime phase ownership | Current registered runners include Runtime driver context and typed encoding | Moving whole runners would move transitions inward or alter original custody | Separate prepare/check/invoke/project/interpret/classify and prove encode-once and acknowledgement ordering |
-| Public bindings can be persisted completely | Current Program wire keeps references; document table and capacity are new | Cold load could need hidden config or exceed bounds | Audit fields and measure checked Object/document encoding, wrong-binding rejection, and small-bound failures |
+| Persisted binding table fits exact document/capacity rules | Section 15.1 confirms existing public fields, but the new table/envelope is unimplemented | Cold load could omit a binding or exceed bounds | Measure checked Object/document encoding, deduplication, wrong-binding rejection and small-bound failures |
 | Explicit Program loading supports existing read/resume | Current Runtime hides admission decode and executable association | Application could regain a hidden compiler or lose current-state checks | Retrieve the stored document through existing boundaries, load before Runtime, and test ProgramRef mismatch/config deletion |
 | Complete prepared requests fit capacity behavior | Requests retain explicit context/artifact/evidence | Some current workloads or report thresholds may overflow | Measure maintained artifacts and small-bound failure cases without dropping facts or authority |
 | Shared scalar extraction preserves native behavior | Range/decimal mechanics move inward | Accepted values or schema/serialization could drift | Boundary/overflow/native equivalence tests and explicit versioning for changed contracts |
@@ -1552,3 +1554,112 @@ evidence, not an alternative capability vocabulary or a new framework layer.
 Do not claim sketches are compiled or broaden Runtime's historical validation/custody authority.
 Unavailable exact implementations fail explicitly. No deadline, wall-clock limit, optional modifier
 API, second registry, or native-only engine is an implicit solution to a failed proof.
+
+## 15. Initial construction audit and bounded proof
+
+This section records evidence gathered after adopting the complete executable Program design.
+It does not mark the production cutover or the complete signatures above as compiled. No production
+Rust or dependency manifest changed during this investigation.
+
+### 15.1 Public binding custody
+
+The existing [transaction binding](crates/domains/evm/src/transaction.rs) contains only these public
+facts: authority epoch, chain ID, expected genesis hash, endpoint content reference and sender
+address. The anchored Read binding is EvmTransactionRoute (chain instance and endpoint reference).
+Full transaction bindings already occur in persisted commands. Moving those exact public facts
+into Program closes a custody gap; it does not require copying provider configuration or secrets.
+
+The existing [canonical command fixture](crates/domains/evm/tests/transaction_contract.rs) measures
+493 bytes for its transaction binding and 365 bytes for its route, extracted and compactly encoded
+with sorted JSON keys. These are fixture measurements, exclude Object envelopes, and are not limits
+or measurements of the proposed whole Program. Deduplication and final document capacity still
+need actual schema tests.
+
+Existing [live transaction binding](crates/live/evm/src/transaction.rs) checks signer purpose,
+sender and authority epoch locally. Existing [endpoint contracts](crates/domains/evm/src/lib.rs)
+identify a public named route, not a physical URL or authenticated connection. Resource environments
+must explicitly associate provider handles with those public identities. Construction can verify
+that association; it cannot certify the provider's remote chain without observation. Retain native
+command/route, current authority, chain and evidence checks during execution.
+
+The existing [Keystore signer handle](crates/keystore/src/lib.rs) already supports the required
+capture without moving the custody owner across threads. Keep private connection data, signer
+queue internals, key slots, secret material and signed-wire custody out of Program's document.
+
+### 15.2 Callback split and acknowledgement boundaries
+
+Current [assembly callbacks](crates/kernel/runtime/src/assembly.rs) delegate to generic engine
+runners carrying DriverContext/DriverDisposition. The [engine](crates/kernel/runtime/src/engine.rs)
+combines typed invocation with recording and recovery. The replacement must separate these actions:
+
+| Program callback work | Runtime boundary |
+| --- | --- |
+| Prepare semantic command and check native correspondence | Derive EffectId and acknowledge the exact prepared command before invoking IO |
+| Invoke already-bound adapter and encode its exact native result/original once | Retain pending authority or handle the returned evidence/failure |
+| Check native evidence and semantic projection | Append accepted native settlement only after this succeeds |
+| Reproject retained settlement and interpret the State | Run only after acknowledgement; failure cannot authorize resubmission |
+| Decode/classify retained original and ask the handler for a proposal | Classify only after failure acknowledgement, authorize the proposal, then record recovery |
+
+Current pending reconciliation also reproduces S::prepare from retained input and compares it to
+the acknowledged command. Preserve this equality check; complete construction does not justify
+removing an execution invariant or recreating an acknowledged command from new configuration.
+
+Current encode_failure retains position, exact failure contract, original detail/identity marked
+unavailable, the encoding cause and available size facts when first encoding fails. The extracted
+Program callback must preserve those facts and the originating operation/stage. A plain encoding
+`?` returning only a generic diagnostic is not an equivalent replacement. Do not retry serialization,
+classify an unacknowledged original, or transport opaque native originals between owners.
+
+Async adapter wrappers currently offload pure native encoding to immediately awaited blocking work
+and catch callback construction/poll panics without exposing panic payloads. Preserve those
+properties when moving wrappers inward. Reusing the existing workspace Tokio dependency in Program
+for that narrow helper is a candidate; an executor abstraction or moving IO/authority into blocking
+work is not justified. The final callback/error signatures and scheduling split still need a
+compiled proof against the actual engine, not just a type-level experiment.
+
+### 15.3 Temporary cross-crate experiment
+
+A disposable three-crate experiment outside the repository passed six behavioral tests and one
+compile-fail doctest in the pinned Nix development shell. It used actual mfm-values, mfm-ids,
+AdapterError and MfmValue derive; proposed capability/Program types were deliberately small scratch
+surrogates, not the production types in this RFC. The command used was:
+
+```sh
+nix develop -c cargo test \
+  --manifest-path /tmp/mfm-program-proof-rtewSo/Cargo.toml \
+  --target-dir /tmp/mfm-program-proof-rtewSo/target --offline
+```
+
+That temporary path is experiment evidence, not a repository verification command or maintained
+alternate framework. The six tests exercised configuration-selected mock implementations for one
+concrete Deploy, missing/mismatched resources with no IO, native binding reused by two semantic
+request types, configuration-free reconstruction of a recorded description, rejection of mismatched
+endpoint contracts, and exact nested native failure fields through Object. The callback also checked
+distinct semantic/native command references. The compile-fail case rejected a State/capability
+pairing with incompatible contracts.
+
+This supports the feasibility of inward ownership, typed resource binding and native-original
+custody. It does not prove the complete public API: both mock networks used the same native ABI;
+there was no injection, Read, multi-State sequence, EffectId, persisted whole-document roundtrip,
+ProgramRef check, capacity, cancellation, recovery or Journal ordering. The mock callback combined
+IO/projection solely to test types; production must retain the separate phase boundaries above.
+Construction errors in the scratch used simple placeholders and do not prove causal diagnostics.
+
+### 15.4 Remaining construction proof, in order
+
+The experiment confirms that an externally defined native-family enum needs an explicit expert
+interface. Its separate compile/load matches duplicate alternatives; it therefore does not prove
+automatic cold inventory or the absence of handwritten discovery lists. Private/sealed traversal
+cannot inspect external variants by itself.
+
+Next prove one family definition supporting both selected construction and cold exact discovery,
+through checked Program-owned leaf constructors. Keep consumer tuple/Operation sources sealed and
+do not reintroduce public Choice, mutable emitters, a Runtime receiver or a registration list.
+Only then extend the experiment to distinct native ABIs, recursive injection and a Read using the
+actual proposed traits. Do not substitute extra convenience APIs for this missing cross-crate seam.
+
+After that, prove the actual callback split: failed first encoding, original append failure,
+preappend projection rejection, postacknowledgement interpretation failure, panic handling and
+cancellation. Finally prove full document/resource load after config deletion and explicit
+read/resume ProgramRef mismatch rejection, preserving current-state checks and snapshot/head
+validation. These tests close different obligations; the six scratch tests do not replace them.
