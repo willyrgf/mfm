@@ -605,6 +605,23 @@ policy/checkpoint scopes without one-State Operation wrappers. Empty expansion i
 only for equal endpoints. A suffix runs on success, not as a finally handler. Every emitted State
 retains its exact ABI, original failure, persistence boundary, and recovery eligibility.
 
+Nonce reservation is a supporting State, not a separate injection category. Every required
+supporting State uses this same typed prefix/designated/suffix mechanism. An injected selection
+may itself require supporting States; expand it recursively through the same structural traversal,
+with its already-selected native implementation and binding. Do not repeat product configuration
+resolution for hidden stages or add a native-only expansion path.
+
+Supporting definitions must form a finite typed source structure with compatible endpoints at
+every level. Apply the existing expansion-depth and expanded-State limits across nested injection;
+reject over-limit expansion before publishing Program or assembly changes. These limits do not
+make an infinitely recursive Rust type valid. Runtime receives only the expanded linear sequence
+and performs no injection. Cold inventory visits the same supporting source types without invoking
+configuration resolution or constructing setup values.
+
+Native contracts and protocol codecs are requirements associated from those selections, not
+additional executable States. A meaningful Pure preparation State may use a codec; encoding alone
+does not justify another persistence boundary. Retain one requirement receiver and association path.
+
 Preserve one injection protocol and one typed source compiler. A runtime adjacency check inside the
 old mutable callback is insufficient. The proof must include incompatible prefix/suffix compile
 failures and the same non-generic Deploy executed with two distinct native implementations, both
@@ -1673,6 +1690,7 @@ complexity, and measured production-code LOC change separately from test/docs ch
 | Generic reuse | A second supported context and ordinary call to an existing address, without fixture-specific runtime machinery |
 | Fixed-State capability abstraction | Same non-generic executable State and semantic ABI with two distinct native implementations, exact native commands/evidence/errors, and different typed injection; a deterministic test implementation proves the DSL, not production support for another chain |
 | Implementation selection | One family per capability/role, supported Operation configuration and shared-role agreement; unsupported choices rejected before admission; no network fallback or resolution during progression/resume |
+| Recursive injection | A supporting selection injects its own typed support through the same traversal; already-selected bindings require no repeated product resolution; incompatible nested endpoints fail compilation; depth/State-count overflow leaves assembly unchanged; cold inventory includes nested requirements and each emitted State retains its own execution boundary |
 | Prepared custody | Capability-owned preparation consumes actual predecessor output and retains one authoritative effective request; its checked construction/extraction rejects request/native mismatches, including cold decoding and wrong action/implementation/schema/binding; Configure contains no native inspection or duplicate correspondence validator; exact descriptor admission and semantic/native command identity linkage remain; no extra generic Runtime product hook |
 | Evidence views | Native settlement retained before interpretation; hot/cold semantic projection equivalence; projection failure preserves known head; suffix receives native custody without hidden IO |
 | Evidence provenance | Native and semantic schemas/references distinguished in State-failure reports; exact native operational originals and classification retained |
@@ -1724,6 +1742,7 @@ proved together; a compiling tuple alone is insufficient evidence.
 | Tuple definitions, default-policy types, and typed injection are ergonomic on the pinned Rust toolchain. | The new representation has not been compiled against existing generic State/derive bounds. | Consumers could need forbidden aliases or a second construction path. | Compile all five callers across crates, nested Operations, a selected Choice, tuple nesting/arity limits, and incompatible injected endpoints without constructing executable States. |
 | Fixed semantic deployment contracts can support more than one native implementation. | The product's common prepared-input, outcome, identifier, and completion guarantees are not specified by existing EVM fixture types. | Network independence could be nominal or hide incompatible guarantees. | Specify one concrete shared contract and execute the same State with two native implementations; state supported actions explicitly and reject unsupported combinations. |
 | Semantic/native implementation association fits the one compiler and Runtime. | Complete implementation methods, resolver bounds, and public expanded endpoints are uncompiled. | Type erasure could bypass validation or require a second registry/engine. | Cross-crate proof of fixed State ABI, different native ABIs, typed injection, identity projection for native support, atomic assembly failure, and cold inventory without configuration or resolution during execution. |
+| Supporting selections can reuse typed injection recursively. | Nested source/visitor bounds and cold traversal have not been compiled. | A second expansion path or registration list could appear, or recursive types could fail to compile. | Prove finite nested injection across crates, incompatible endpoints, expansion-limit rejection, and cold inventory with already-selected bindings through the same traversal; reject infinitely recursive source types rather than erase their structure. |
 | Prepared envelopes preserve exact command custody and authority. | Private canonical envelopes alone do not establish native qualification or custody references. | Resume could rebind or replace the acknowledged native command. | Define qualified constructor/admission APIs and identity linkage; test forged/decoded mismatches, native wire retention, cancellation, and ambiguous acknowledgement. |
 | One authoritative effective request and capability-owned preparation preserve product/native correspondence. | The common prepared-input fields and cold-decoding APIs remain unproved; independently editable request/context copies could disagree. | An inconsistent prepared value could bypass the effective84 requirement or force duplicate validation into Configure. | Prove the complete Add-to-preparation data flow from actual predecessor output, required sibling-context preservation, and owner-local cold rejection of request/native mismatches (including native42 with request84); Configure must neither inspect native fields nor repeat correspondence checks, and Runtime gains no generic product-validation hook. |
 | Existing evidence/outcome contracts need no universal transaction-result layer. | Checked transaction identifiers, settlement facts, and rejection observations are not yet fully specified. | A generic reason or success flag could hide facts needed by the State or audit. | Define the minimal concrete evidence consumed by Deploy/Configure; test authenticated rejection versus provider uncertainty, exact native retention, and common/native checked access. |
