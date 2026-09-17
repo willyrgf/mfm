@@ -37,6 +37,23 @@ still supply execution/result-handling glue. Improving configured products alone
 usable framework composition or extension. Custom Operations, States, and intentional product maps
 are legitimate in tests of those public authoring contracts.
 
+### Downstream component discovery in the DSL refactor
+
+The [DSL refactor RFC](../RFC_REFACTOR_DSL.md) accepts one temporary limitation: authors introducing
+new executable semantics must publish the new source once in their integration's installed public
+component set. Stored implementation identities cannot instantiate Rust code absent from that set.
+Automatic discovery of arbitrary downstream State implementations is deferred; this is a target
+design limitation, not a claim that the new construction API is implemented.
+
+Consumers selecting or recomposing installed components need no registration-list changes. The
+framework must derive each published source's State, codec, handler and injected-support requirements
+instead of requiring separate executable lists. The original Operation/composition type must not be
+required at each cold load to compensate for missing discovery infrastructure.
+
+During implementation, place a comment explaining this constraint at the source-publication site
+and link it here. Revisit automatic discovery later without weakening exact implementation matching,
+inward dependencies or explicit failure when required code is unavailable.
+
 ## Configuration-driven workflows
 
 A configured EVM product is one use of the framework, alongside direct Rust authoring. Its consumers
