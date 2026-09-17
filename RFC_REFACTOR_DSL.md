@@ -4,6 +4,10 @@
 
 This RFC specifies the replacement design for MFM's public authoring API. The concrete contracts,
 capability inventory, supporting sequences, codec interfaces, and workflows below are the target.
+Construction follows DSL -> complete executable Program -> Runtime. Program retains selected
+code and already-bound adapter handles in memory; its canonical document contains only public
+execution facts. Runtime never completes missing associations.
+
 Rust sketches omit routine derives and implementations where the surrounding contract specifies
 behavior; they have not been compiled. Implementation must prove the complete contracts together,
 not invent a different ownership model behind the examples.
@@ -57,8 +61,8 @@ ABI prove the abstraction, not deployment support on every network.
 | Capability implementation | All network-specific preparation, supporting States, native contracts/codecs, protocol validation, evidence projection, and operational errors |
 | Native live adapter | Explicit provider, signer, and authority IO for that implementation |
 | Operation | Reusable typed sequence and maintained defaults/policy interpretation |
-| Program compiler | Typed traversal, capability selection, injection, policy relocation, exact descriptors and input commitment |
-| Runtime | Exact executable association, continuation, local admission, durable transitions and authorized recovery |
+| Program construction | Typed traversal, capability selection, injection, policy relocation, exact descriptors, public bindings, executable code and bound live adapters |
+| Runtime | Execute completed Programs; continuation, local run admission, durable transitions and authorized recovery |
 | Values / IDs | Canonical encoding, hashing, checked identities, exact schemas and heterogeneous Object custody |
 | Journal / Store | Opaque frame wire / mechanical load and atomic exact-head append |
 
@@ -518,8 +522,9 @@ Identity translation is the base case, not another native-only engine or callbac
 
 ### 3.3 Adapters, timing, and error routes
 
-Preserve the existing async callback/lifetime representation in Runtime assembly. The Effect
-callback receives EffectId, native command reference, and typed I::NativeCommand, and returns:
+Preserve the existing async callback/lifetime behavior in the inward adapter interface. The Effect
+callback receives EffectId, semantic and native command references, and typed I::NativeCommand,
+and returns:
 
 ```rust
 Result<EffectAdapterOutcome<I::NativeEvidence>, AdapterError<I::OperationalError>>
@@ -527,11 +532,11 @@ Result<EffectAdapterOutcome<I::NativeEvidence>, AdapterError<I::OperationalError
 
 A Read callback receives the semantic intent reference, native intent reference, and typed
 I::NativeIntent, returning typed native evidence or AdapterError<I::OperationalError>. Explicit
-binding resources are captured at assembly. No new executor or waiting trait is needed.
+binding resources are captured during Program construction (section 6.4). No new executor or waiting trait is needed.
 
 | Moment | Required behavior |
 | --- | --- |
-| Expansion/assembly | Select implementation, exact ABI/binding, typed injection, codecs and live callback |
+| Program construction | Resolve implementation, exact ABI/binding, typed injection, codecs and already-bound live callback |
 | Before command acknowledgement | Selected checked native extraction rejects local mismatches; preserve existing exact command admission |
 | Before provider call | Native adapter checks actual authority, epoch, sender, signing purpose, and retained wire |
 | Native evidence returned | Canonically encode once; first encoding failure preserves cause/context without retry or opaque side custody |
@@ -654,7 +659,7 @@ itself. Each emitted State retains its own ABI, policy scope, original failure, 
 recovery boundary. Injection never makes the whole sequence atomic.
 
 Supporting definitions form finite typed structures. Apply depth and total-State limits across
-Operation and injected nesting; reject excess before publishing Program/assembly. Runtime limits
+Operation and injected nesting; reject excess before returning Program. Runtime limits
 do not make infinitely recursive Rust types valid. Native contracts/codecs are associated
 requirements, not additional persisted States merely because they were selected.
 
@@ -814,9 +819,12 @@ never silently fall back to a network incapable of the advertised operation.
 
 Selection is a concrete resolved leaf for a single implementation, or a family-owned Rust enum
 whose variants hold the supported concrete implementations and checked bindings. The family's
-private traversal matches that enum during compilation and visits each declared variant type for
-cold inventory through the same requirement receiver. It introduces no public generic choice
-algebra, erased executable, or additional registration list.
+expert integration interface must expose selected construction and exact cold discovery through
+checked Program-owned leaf constructors. A private/sealed trait cannot inspect an enum defined in
+another crate; the cross-crate interface is a proof gate in section 14, not an implicit Rust feature.
+Public tuple/Operation authoring remains sealed. Selected construction and cold loading reuse the
+same executable constructors. It introduces no public generic choice algebra, untyped executable
+selection, or additional registration list.
 
 Resolve exact bindings from checked configuration; do not add a public binding-role type parameter
 or multi-account composition API for hypothetical use. Binding identity and cross-State agreement
@@ -836,71 +844,70 @@ Compile leaf bounds require Resolve<Config, C>; inventory requires only structur
 injection support. Inventory never calls resolve/surround/default resolution, fabricates C0, or loads
 source configuration. Runtime does not perform this authoring traversal during progression.
 
-### 6.2 Exact requirement emission and atomic construction
+### 6.2 Complete immutable executable Program
 
-Program owns the receiver contract; Runtime implements it through its existing exact ABI tables:
+Program is the complete in-process result of construction. Runtime neither participates in
+compilation nor supplies missing executable code or live resource bindings afterward.
 
 ```rust
-trait ExecutableRequirements {
-    type Error: From<ProgramError>;
-    fn value<V: MfmValue>(&mut self) -> Result<(), Self::Error>;
-    fn pure<S: PureState>(&mut self) -> Result<(), Self::Error>;
-    fn read<S, C, I>(&mut self) -> Result<(), Self::Error>
-    where C: ReadCapabilityContract, I: ReadImplementation<C>,
-          I::OperationalError: ClassifyError, S: ReadState<C>;
-    fn effect<S, C, I>(&mut self) -> Result<(), Self::Error>
-    where C: EffectCapabilityContract, I: EffectImplementation<C>,
-          I::OperationalError: ClassifyError, S: EffectState<C>;
-    fn handler<H: Handler>(&mut self) -> Result<(), Self::Error>;
+pub struct Program<I: MfmValue, O: MfmValue> {
+    inner: Arc<ProgramInner>,
+    endpoints: PhantomData<fn(I) -> O>,
 }
-```
 
-These generic methods are statically dispatched, not a dyn visitor. Emission retains concrete types
-until both descriptor and executable requirements are supplied: raw/expanded values, original
-failures, semantic/native requests/evidence, operational errors, exact translation functions,
-handler parameters, and support. There is no root-map receiver method. Same exact registration is
-idempotent; conflicting ABIs fail. Include I and binding in association, not just shared C or State ID.
+struct ProgramInner {
+    document: ProgramDocument,
+    executables: Box<[ExecutableState]>,
+}
 
-```rust
-fn compile<S: AuthoringSource>(
-    &mut self,
+pub fn compile<P, S, R>(
     entry_point: EntryPointId,
-    source: &S,
+    states: &S,
     input: &S::Input,
+    resources: &R,
     limits: ProgramLimits,
-) -> Result<Program<S::Input, S::Output>, CompileError>;
+) -> Result<Program<S::Input, S::Output>, ProgramError>
+where
+    S: AuthoringSource;
 ```
 
-The builder is profile-typed (`Runtime::builder::<EvmContractCapabilities>(store)?`); built Runtime
-is not. The shown compile signature has additional private walk/profile bounds described above.
-Stage the complete Program and association delta privately. Check input/config and binding agreement,
-contracts, policies, limits, and exact live bindings before publication. Any failure leaves the
-builder unchanged. Constructor/codec/assembly errors retain their concrete causes.
+The signature additionally requires private source/profile/resource traversal bounds. P is the
+maintained set of supported implementations, such as ContractCapabilities; checked input selects
+the network, implementation and public binding. R is a concrete environment of explicitly supplied
+resource handles. Selecting P must not require callers to select the network a second time.
+A Pure-only source uses NoCapabilities and `&()` and requires no adapter resources.
 
-Program-only compilation uses this same compiler/profile with a no-op receiver, not a second
-lowering implementation. Program<I,O> wraps one immutable content-addressed representation; checked
-reconstruction verifies exact endpoints and initial commitment, not merely PhantomData.
+ProgramDocument and ExecutableState are kernel implementation details, not new consumer layers.
+Each executable entry corresponds to exactly one expanded declaration. Both fields are mandatory;
+there is no optional executable companion or public half-constructed Program.
 
-The existing adapter table holds native callbacks under an exact key derived from mode, native
-implementation StableId, native request/evidence/operational-error/binding contract references, and
-binding value reference. The full <S,C,I> executable association selects its monomorphized pure
-translators and matches that native entry. This key is not a new adapter identity and never replaces
-the full semantic/native Program ABI. No wildcard, fallback, generic callback factory, or second
-registry is introduced.
+| Persistent, content-addressed document | Nonserialized executable realization |
+| --- | --- |
+| Expanded State sequence and exact implementation/value contracts | State evaluate/prepare/interpret functions and exact codecs |
+| Complete checked public bindings and their references | Native translation/projection functions and already-bound adapter callbacks |
+| Recovery policies, handler identities/parameters and permitted targets | Original-error classifiers and deterministic handler functions |
+| Initial input commitment and limits | Exact code necessary to interpret the declared contracts |
 
-This allows one native PreparedEvmTransaction callback to serve deployment and configuration's
-distinct `TransactionEffect<R>` ABIs. register_evm_transaction_adapters remains independent of R and
-binds its fixed reserve/prepare/submit IO protocols; the compiler discovers selected executable
-requirements. Callers maintain neither per-request registrations nor lists of executable States.
-Conflicting callbacks or bindings under one exact native key are rejected.
+Compilation owns its private draft. It resolves, injects, constructs and binds each designated and
+supporting executable, checks contracts/policies/capacity, then freezes both parts together. Failure
+returns no Program and publishes no registrations. Construction invokes no State, provider, signer
+operation, authority mutation, or Store append. Caller-supplied handles are already constructed.
+Local binding checks may inspect their declared public identity. Constructor and binding errors
+retain their causal information through Program-owned errors, without importing RuntimeError.
 
-Each native entry retains the checked canonical public binding Object. Installation verifies its
-schema/value reference; association decodes I::Binding and captures it in immutable translator
-closures alongside the selected code. This is assembly state, not a typed continuation cache.
-The Program retains its binding reference; a reference alone does not reconstruct the binding value.
-Cold callers supply matching explicit public bindings/resources without needing the source config.
+Store each canonical nonsecret public binding Object once in the document, in deterministic order;
+exact declaration references must resolve to those values and expected contracts. Reject missing,
+conflicting, or wrong-contract bindings. Include this table in Program identity and size limits.
+A binding hash alone cannot support cold reconstruction. Credentials, private keys, provider
+connections, signer handles and authority handles never enter that document or admitted values.
 
-### 6.3 Durable identities and cold association
+The executable realization captures explicit adapter handles, never serializes/hashes them, and
+never prints them through derived Debug. Clone can share immutable Program storage. Program identity
+is document identity, not pointer identity: matching replacement handles can realize the same
+persisted Program. Immutability fixes code and resource associations; it does not freeze remote
+services. Capture the existing signer handle, not Keystore; preserve its thread-affine ownership.
+
+### 6.3 Durable identities and cold reconstruction
 
 Extend existing Program Execution descriptors with separate native implementation facts:
 
@@ -909,7 +916,7 @@ Extend existing Program Execution descriptors with separate native implementatio
 | State ABI | State implementation, input/output/failure contracts |
 | Semantic capability | Exact capability and command/intent/evidence contracts |
 | Native implementation | Exact implementation, native command/intent/evidence, operational-error and public-binding contracts |
-| Occurrence | Public binding, handler/parameters, allowances, permitted targets |
+| Occurrence | Public binding reference, handler/parameters, allowances, permitted targets |
 
 Implementation identity commits extraction, binding, and projection semantics. Changing those
 semantics changes the versioned identity even with unchanged schemas. No separate projection or
@@ -927,15 +934,128 @@ descriptor or a duplicate semantic settlement/view hash. Native command refs cro
 and never replace semantic refs in EffectId. Read intent/evidence provenance makes the corresponding
 native/semantic distinction without adding an Effect-style settlement transition.
 
-A fresh builder associates source/profile types, including all supported injected alternatives and
-handlers, using `builder.associate::<ContractDeploymentLifecycle>()?`. Then bind explicit live
-resources and build. Read/resume checks retained exact descriptors against those implementations.
-No original config, fake input, network re-selection, native cache, or missing-ABI fallback occurs.
-Unavailable exact implementations fail explicitly.
+Program owns cold reconstruction:
 
-A later Program can execute on an existing immutable Runtime only if its exact requirements are
-already associated. Otherwise build a new immutable assembly sharing Store and explicitly supplied
-resources. Do not mutate the existing Runtime or secretly install code at admission.
+```rust
+pub fn load<P, S, R>(
+    canonical_program: &[u8],
+    resources: &R,
+) -> Result<Program<S::Input, S::Output>, ProgramError>
+where
+    S: AuthoringSource;
+```
+
+As with compile, additional private inventory/binding bounds apply. S and P supply installed code
+inventory; they do not reconstruct the authored plan. Load validates the canonical document and
+exact endpoints, matches each declaration to installed exact code, decodes its recorded public
+binding, and uses the same typed binding and executable constructors as fresh compilation. It
+returns the same complete Program. Bind only implementations selected in the stored declarations,
+not every alternative discovered during inventory.
+
+Load never calls configuration resolution, surround, or defaults resolution; it never reinjects
+States, fabricates initial input, or replans from current configuration. Missing exact implementations
+or mismatched resources fail before execution. No semantic-identity fallback is permitted.
+Ordinary Deserialize must not return an executable Program. Canonical decoding is a private step;
+document-only inspection remains non-executable and need not acquire live resources.
+
+Application retrieves canonical Program bytes through existing Journal/Store boundaries and calls
+load before Runtime receives the Program. Program never depends on Store or reconstructs run
+history. Runtime read/resume receive the completed Program and check it against the retained
+ProgramRef and current facts. A later complete Program can use the same Runtime/Store without
+installing more code into Runtime or mutating an earlier Program.
+
+### 6.4 Typed live binding and the execution boundary
+
+Replace Runtime-mutating native registration helpers with maintained resource environments and
+typed binding implementations. These interfaces are owned inward, with concrete implementations in
+live/composition crates. They bind an already-selected native implementation; they neither resolve
+configuration nor register arbitrary States.
+
+```rust
+pub trait BindEffect<C, I>
+where
+    C: EffectCapabilityContract,
+    I: EffectImplementation<C>,
+{
+    type Adapter: EffectAdapter<
+        I::NativeCommand, I::NativeEvidence, I::OperationalError,
+    >;
+    fn bind_effect(
+        &self,
+        binding: &I::Binding,
+    ) -> Result<Self::Adapter, InvocationDiagnostic>;
+}
+
+pub trait BindRead<C, I>
+where
+    C: ReadCapabilityContract,
+    I: ReadImplementation<C>,
+{
+    type Adapter: ReadAdapter<
+        I::NativeIntent, I::NativeEvidence, I::OperationalError,
+    >;
+    fn bind_read(
+        &self,
+        binding: &I::Binding,
+    ) -> Result<Self::Adapter, InvocationDiagnostic>;
+}
+```
+
+EffectAdapter and ReadAdapter are typed async invocation interfaces in Capabilities. Preserve the
+existing boxed-future lifetime and Send/Sync requirements; introduce no executor or waiting trait.
+Their invocation shapes are:
+
+```rust
+// EffectAdapter<Command, Evidence, Failure>::invoke
+fn invoke<'a>(
+    &'a self,
+    effect_id: &'a EffectId,
+    semantic_command_ref: &'a ContentRef,
+    native_command_ref: &'a ContentRef,
+    command: &'a Command,
+) -> Pin<Box<dyn Future<Output = Result<
+    EffectAdapterOutcome<Evidence>, AdapterError<Failure>,
+>> + Send + 'a>>;
+
+// ReadAdapter<Intent, Evidence, Failure>::invoke
+fn invoke<'a>(
+    &'a self,
+    semantic_intent_ref: &'a ContentRef,
+    native_intent_ref: &'a ContentRef,
+    intent: &'a Intent,
+) -> Pin<Box<dyn Future<Output = Result<Evidence, AdapterError<Failure>>>
+    + Send + 'a>>;
+```
+
+Move EffectAdapterOutcome (Pending/Settled) from Runtime to Capabilities beside AdapterError; do
+not duplicate it. Native custody uses native references; EffectId continues to commit the semantic
+command reference. Capabilities has no Program classifier dependency. Program's constructor enforces
+I::OperationalError: ClassifyError and captures the corresponding exact classifier.
+
+A maintained native resource environment can implement the transaction binder generically over
+supported request types sharing its native ABI. Deployment and configuration reuse native adapter
+code and supplied handles; neither requires a per-request registration list. Each supporting
+reservation/preparation State uses this same binding path with its already-selected implementation.
+
+Binding validates local correspondence, including sender, signing purpose and authority epoch.
+It is not a provider health check or a guarantee of future external success. Actual predecessor
+values, signed facts, external chain evidence and current authority retain their execution-time
+checks at the owning native boundary. Such checks do not finish an incomplete Program.
+
+Internally, each mode-specific executable contains only its valid deterministic callbacks, exact
+codecs, bound native adapter and recovery functions. Use the existing exact Object boundary for the
+heterogeneous sequence, with typed construction and exact admission before decoding. No Any context,
+untyped semantic request, or opaque original-error custody is added. Native callbacks return their
+exact originals through the existing encoding/audit contract; classification remains after durable
+failure acknowledgement.
+
+Do not move existing StateStart/ReadStart/EffectPendingStart callbacks wholesale into Program: they
+accept Runtime DriverContext and return DriverDisposition. Split deterministic State invocation and
+bound capability invocation from the one Runtime mode dispatcher. Only Runtime owns continuation,
+Store/Journal transitions, EffectId scheduling, acknowledgement and recovery authorization. Handler
+functions already belong to Program and return proposals; moving their association does not move
+authorization. Program kernel accessors expose the narrow execution boundary to Runtime without
+letting consumers forge executable entries.
 
 ## 7. Runtime execution and recovery
 
@@ -943,16 +1063,23 @@ resources. Do not mutate the existing Runtime or secretly install code at admiss
 async fn execute<I: MfmValue, O: MfmValue>(
     &self,
     run_id: RunId,
-    program: Program<I, O>,
-    input: I,
+    program: &Program<I, O>,
+    input: &I,
 ) -> Result<ExecutionResult<O>, InvocationFailure>;
 ```
 
-Execute accepts the resulting Program, not an Operation. It checks exact input/association and uses
-the existing engine until terminal success/failure, RecoveryStopped, invocation failure, or caller
+Runtime::new(store) receives only the execution Store. Execute accepts the completed Program, not an
+Operation. It checks exact input commitment and run facts, performs no executable/resource assembly,
+and uses the existing engine until terminal success/failure, RecoveryStopped, invocation failure, or caller
 cancellation. ExecutionResult has checked terminal success or terminal original failure; accessors
 success()/failure() borrow the applicable value/report and retain exact RunId. RecoveryStopped is
 InvocationFailure with unresolved command authority, never terminal domain failure.
+
+Direct progression, read and resume likewise receive `&Program<I, O>` with the explicit RunId.
+They verify the retained Program identity before using its code; read invokes no State or adapter.
+Runtime does not secretly load or compile a Program. Program construction has no Store dependency.
+The same immutable Program can serve separate runs; each continuation and history belongs to its
+own caller-supplied RunId. Do not add a Program cache or another execution wrapper to hide this handoff.
 
 | Recorded phase | Progression |
 | --- | --- |
@@ -989,30 +1116,58 @@ replaces a transaction, or becomes a new inter-Program scheduler.
 
 Production exports State types, requests, capabilities, and maintained Operation definitions from
 `mfm_transactions::contract_lifecycle` and the shared transaction module. The EVM domain exports
-checked `EvmContractWorkflowConfig`; live composition supplies EvmContractCapabilities and explicit
-adapter binders. No State getters or selection constants are needed.
+checked EvmContractWorkflowConfig. Downstream composition supplies network-independent
+ContractCapabilities and ContractWorkflowConfig covering supported native implementations. The
+configuration selects the implementation; the profile names its installed support set. The current
+production example supports EVM; another native ABI in proof tests does not claim another shipping
+network. No State getters or selection constants are needed.
 
-The config type implements checked Deserialize. Its fields are the native artifact, native execution
-config, shared requested/increment scalars, and optional retry/restart allowances described above.
-`initial_input()` constructs DeploymentRequest, encoding native envelopes once and assigning the
-supported implementation selectors. `transaction_binding()` borrows that config's exact public
-EVM binding. The shared DeploymentRequest cannot expose an EVM-typed binding accessor.
+ContractWorkflowConfig has checked Deserialize and a native configuration variant selected by the
+configuration's network field. The EVM variant contains EvmContractWorkflowConfig: native artifact,
+execution config, shared requested/increment scalars, and the supported retry/restart allowances.
+`initial_input()` delegates to the selected native config to construct DeploymentRequest, encoding
+native envelopes once and assigning supported implementation selectors. It performs no IO. There
+is no native binding accessor on the shared DeploymentRequest and callers do not supply a second
+binding value to override checked configuration.
 
-Examples assume the caller supplies config_text through its own IO boundary, explicit Store/live
-resources, entry_point, limits, and one RunId. They use the existing workspace TOML parser in the
-consuming application/example, not a new domain parsing dependency; another Serde format can consume
-the same checked config type. TOML parsing is configuration loading, not an author-supplied codec.
-All named production components here are target API, not presently compiled symbols.
+Maintained live resource types have explicit fields, not a type-erased resource registry:
+
+```rust
+pub struct EvmTransactionResources {
+    pub route: EvmTransactionRoute,
+    pub signer: Arc<dyn Secp256k1Signer>,
+    pub authority: Arc<dyn EvmTransactionAuthority>,
+    pub provider: Arc<dyn EvmTransactionProvider>,
+}
+
+pub struct ContractResources {
+    pub transactions: EvmTransactionResources,
+    pub read_route: EvmTransactionRoute,
+    pub read_provider: Arc<dyn EvmReadProvider>,
+}
+```
+
+These names are target production types. Their BindEffect/BindRead implementations use existing
+native routines and validate configured binding against supplied public routes, sender, purpose,
+and authority epoch. The transaction-only environment suffices for a lone Deploy; ContractResources
+also supplies Observe's provider. This avoids requiring a Read handle for an Effect-only source.
+Route identities describe the caller's association of a provider handle with its public endpoint;
+matching them does not attest the remote chain. Native evidence checks remain mandatory.
+
+Examples assume caller-owned IO supplies config_text, explicit Store/live resources and their
+public routes, entry_point, limits, and one RunId. TOML is the existing workspace parser in the
+consuming application/example, not a new domain dependency. A different Serde format can consume
+the same checked config. All named production components below are target APIs, not presently
+compiled symbols. Binding occurs inside compile, not in Runtime::new.
 
 ### 8.1 One existing Pure State
 
 ```rust
 let input = CheckedAddition::new("42", "42")?;
 let state = Pure::<CheckedAdd>::default();
-let mut builder = Runtime::builder::<NoCapabilities>(store)?;
-let program = builder.compile(entry_point, &state, &input, limits)?;
-let runtime = builder.build()?;
-let result = runtime.execute(run_id, program, input).await?;
+let program = compile::<NoCapabilities, _, _>(entry_point, &state, &input, &(), limits)?;
+let runtime = Runtime::new(store);
+let result = runtime.execute(run_id, &program, &input).await?;
 assert_eq!(result.success().expect("terminal success").to_string(), "84");
 ```
 
@@ -1022,17 +1177,17 @@ root failure conversion, or registration list exists for this case.
 ### 8.2 One existing injected Effect State
 
 ```rust
-let config: EvmContractWorkflowConfig = toml::from_str(&config_text)?;
+let config: ContractWorkflowConfig = toml::from_str(&config_text)?;
 let input = config.initial_input()?;
 let state = Effect::<Deploy, TransactionEffect<DeploymentRequest>>::default();
-let mut builder = Runtime::builder::<EvmContractCapabilities>(store)?;
-register_evm_transaction_adapters(
-    &mut builder, config.transaction_binding().clone(),
-    signer, authority, transaction_provider,
+let resources = EvmTransactionResources {
+    route: transaction_route, signer, authority, provider: transaction_provider,
+};
+let program = compile::<ContractCapabilities, _, _>(
+    entry_point, &state, &input, &resources, limits,
 )?;
-let program = builder.compile(entry_point, &state, &input, limits)?;
-let runtime = builder.build()?;
-let result = runtime.execute(run_id, program, input).await?;
+let runtime = Runtime::new(store);
+let result = runtime.execute(run_id, &program, &input).await?;
 let deployed = result.success().expect("terminal success");
 assert_eq!(deployed.effective_value().to_string(), "42");
 let locator = deployed.contract()?;
@@ -1046,18 +1201,20 @@ specifically required. Adapter binding validates epoch, sender, signing purpose 
 ### 8.3 One maintained Operation
 
 ```rust
-let config: EvmContractWorkflowConfig = toml::from_str(&config_text)?;
+let config: ContractWorkflowConfig = toml::from_str(&config_text)?;
 let input = config.initial_input()?;
-let binding = config.transaction_binding().clone();
 let operation = ContractDeploymentLifecycle::default();
-let mut builder = Runtime::builder::<EvmContractCapabilities>(store)?;
-register_evm_transaction_adapters(
-    &mut builder, binding.clone(), signer, authority, transaction_provider,
+let resources = ContractResources {
+    transactions: EvmTransactionResources {
+        route: transaction_route, signer, authority, provider: transaction_provider,
+    },
+    read_route, read_provider,
+};
+let program = compile::<ContractCapabilities, _, _>(
+    entry_point, &operation, &input, &resources, limits,
 )?;
-register_evm_anchored_contract_calls(&mut builder, binding.route.clone(), read_provider)?;
-let program = builder.compile(entry_point, &operation, &input, limits)?;
-let runtime = builder.build()?;
-let result = runtime.execute(run_id, program, input).await?;
+let runtime = Runtime::new(store);
+let result = runtime.execute(run_id, &program, &input).await?;
 let report = result.success().expect("terminal success");
 assert_eq!(report.requested_value().to_string(), "42");
 assert_eq!(report.effective_value().to_string(), "42");
@@ -1070,9 +1227,8 @@ and defaults. Merely admitting increment42 does not execute addition.
 ### 8.4 A mixed composition of existing Operations and States
 
 ```rust
-let config: EvmContractWorkflowConfig = toml::from_str(&config_text)?;
+let config: ContractWorkflowConfig = toml::from_str(&config_text)?;
 let input = config.initial_input()?;
-let binding = config.transaction_binding().clone();
 let states = (
     Effect::<Deploy, TransactionEffect<DeploymentRequest>>::default(),
     Pure::<CheckedAddConfigurationValue>::default(),
@@ -1081,14 +1237,17 @@ let states = (
     Pure::<Report>::default(),
 );
 let operation = Operation::new(states);
-let mut builder = Runtime::builder::<EvmContractCapabilities>(store)?;
-register_evm_transaction_adapters(
-    &mut builder, binding.clone(), signer, authority, transaction_provider,
+let resources = ContractResources {
+    transactions: EvmTransactionResources {
+        route: transaction_route, signer, authority, provider: transaction_provider,
+    },
+    read_route, read_provider,
+};
+let program = compile::<ContractCapabilities, _, _>(
+    entry_point, &operation, &input, &resources, limits,
 )?;
-register_evm_anchored_contract_calls(&mut builder, binding.route.clone(), read_provider)?;
-let program = builder.compile(entry_point, &operation, &input, limits)?;
-let runtime = builder.build()?;
-let result = runtime.execute(run_id, program, input).await?;
+let runtime = Runtime::new(store);
+let result = runtime.execute(run_id, &program, &input).await?;
 let report = result.success().expect("terminal success");
 assert_eq!(report.requested_value().to_string(), "42");
 assert_eq!(report.effective_value().to_string(), "84");
@@ -1136,9 +1295,8 @@ impl PureState for RequireNonZeroConfiguration {
     }
 }
 
-let config: EvmContractWorkflowConfig = toml::from_str(&config_text)?;
+let config: ContractWorkflowConfig = toml::from_str(&config_text)?;
 let input = config.initial_input()?;
-let binding = config.transaction_binding().clone();
 let operation = Operation::new((
     Effect::<Deploy, TransactionEffect<DeploymentRequest>>::default(),
     Pure::<CheckedAddConfigurationValue>::default(),
@@ -1147,14 +1305,17 @@ let operation = Operation::new((
     Pure::<Validate>::default(),
     Pure::<Report>::default(),
 ));
-let mut builder = Runtime::builder::<EvmContractCapabilities>(store)?;
-register_evm_transaction_adapters(
-    &mut builder, binding.clone(), signer, authority, transaction_provider,
+let resources = ContractResources {
+    transactions: EvmTransactionResources {
+        route: transaction_route, signer, authority, provider: transaction_provider,
+    },
+    read_route, read_provider,
+};
+let program = compile::<ContractCapabilities, _, _>(
+    entry_point, &operation, &input, &resources, limits,
 )?;
-register_evm_anchored_contract_calls(&mut builder, binding.route.clone(), read_provider)?;
-let program = builder.compile(entry_point, &operation, &input, limits)?;
-let runtime = builder.build()?;
-let result = runtime.execute(run_id, program, input).await?;
+let runtime = Runtime::new(store);
+let result = runtime.execute(run_id, &program, &input).await?;
 assert_eq!(result.success().expect("terminal success").observed_value().to_string(), "84");
 ```
 
@@ -1192,8 +1353,9 @@ or Read intent/evidence, and exact original. Keep position there once. Objects o
 contracts/value refs. No whole Program/handler copy, new incident tree, or projection ID is needed.
 
 This bounded diagnostic artifact supports exact decoding/projection with installed implementations
-and matching explicitly associated public bindings, without source config. Installed code alone
-cannot supply a missing binding value. Diagnostic projection uses pure translators, not provider IO.
+and matching public bindings from the retained Program document, without source config. A standalone
+report still needs that document (or its exact binding values) for projection; a reference alone
+cannot supply them. Diagnostic projection uses pure translators, not provider IO.
 It does not prove its copied descriptor belongs to ProgramRef or grant execution
 or recovery authority. An API using an untrusted report authoritatively must check it against the
 exact Program declaration at its position. Stopped pending authority remains RecoveryStopped.
@@ -1219,19 +1381,21 @@ EVM depends inward on it; it never depends back on EVM. Values owns reusable Uns
 
 | Location | Target responsibility |
 | --- | --- |
-| kernel/capabilities | Generic semantic/native Read/Effect interfaces; no State outcome or classifier dependency |
-| kernel/program | Typed source/injection/defaults, exact descriptors, compiler and requirement receiver |
+| kernel/capabilities | Semantic/native Read/Effect, typed adapter/binding interfaces and EffectAdapterOutcome; no State outcome or classifier dependency |
+| kernel/program | Typed construction, immutable document/executable sequence, automatic code inventory, live binding and cold load; no Store/Journal or Runtime dependency |
 | domains/transactions | `TransactionEffect<R>`, `PreparedTransaction<R>`, evidence, shared values and concrete lifecycle States/contracts |
 | domains/evm | Native config/artifact contracts, request recipes, supporting States, native translation/projection and native operational originals |
-| live/evm and downstream composition | Explicit IO binding and supported EvmContractCapabilities profile; no handwritten executable inventory |
+| live/evm and downstream composition | Typed resource environments/binders, native adapters, supported ContractCapabilities/configuration; no handwritten executable inventory |
 | app | Supported wire/config use cases, checked product projections, inspection consuming structural inventory |
-| kernel/runtime | Existing association tables/engine, continuation, recovery and checked results |
+| kernel/runtime | One mode dispatcher/transition engine over complete Program, continuation, recovery authorization and checked results |
 | journal/store/backends | Existing owned physical/wire contracts; separate native authority implementations remain separate ports |
 
 EvmContractWorkflowConfig has checked Deserialize and the concrete native fields described in section
 8. It lives with native deterministic domain contracts and needs no TOML dependency. A consuming
 application owns format parsing/IO. Native wire consensus/signing qualification remains with its
-current appropriate live/platform owner; moving shared semantics does not move provider IO inward.
+current appropriate live/platform owner; the compiler binds explicit callbacks but never invokes provider IO. Runtime invokes them only at
+its authorized execution boundaries. Program may retain bound callbacks; deterministic State
+functions and Program construction remain free of IO.
 
 Generic Store semantics do not acquire EVM knowledge because a backend separately implements
 EvmTransactionAuthority. Reusable signing remains a platform primitive. No cryptographic or keystore
@@ -1254,9 +1418,10 @@ migration reader, or claim old Programs run with unavailable ABIs.
 | ExecuteEvmTransaction as product step, ProjectEvmTransactionOutcome, wrapper EvmTransaction | Concrete Deploy/Configure with retained reservation/preparation and checked semantic interpretation |
 | Fixture-owned contexts, slots/aliases, ABI decoding, report reconstruction | Maintained shared contracts and capability-owned native code; internal recipes/slot mechanics may remain useful |
 | Root Failure/ExpandedFailure/FailureMap, root maps and map-only machinery | Exact originals and complete versioned Failure reports; domain/App checked projections where required |
-| register_fixture_states and native State-registration helper | Compiler-emitted exact requirements, including support/codecs/handlers |
+| register_fixture_states and native State-registration helper | Program-owned exact executable construction, including support/codecs/handlers |
 | Application handwritten compiled State registration inventory | Inspection fed from the same structural source/type inventory |
-| Separate ordinary public assembly construction and copied progress loops | Runtime builder and execute over the existing engine |
+| RuntimeAssembly/Builder, Runtime-owned ExecutableProgram and native register_*_adapters helpers | Complete Program plus typed binders; Runtime::new(store) and execute/read/resume over the existing engine |
+| Proposed ExecutableRequirements receiver, RuntimeBuilder::compile and no-op receiver path | Program-owned compile/load with mandatory executable entries; no Runtime construction callbacks |
 | Independent Portfolio checked_collections / root-only validator | Replacement unresolved after removing repetition; preserve guarantees and resolve section 5.3 before complete cutover |
 | Public untyped occurrence modifiers / ambiguous Operation instance config | Typed maintained defaults interpreting one checked input |
 | Duplicate decimal/range implementation | Shared Unsigned256 mechanics with exact owning schemas preserved or deliberately versioned |
@@ -1292,9 +1457,10 @@ Use coherent logical commits, merging inseparable cuts:
 
 1. Establish shared scalar/domain contracts and native implementation interfaces with their typed
    constructors, schemas, and consuming proof. Do not expose a second maintained runtime path.
-2. Cut over authoring, typed injection/defaults/resolution, exact Program descriptors, association,
-   native codecs, cold decoding, and their consumers together. Remove mutable DSL/wrapper/registration
-   paths in this cutover. Include root-map removal here when required for one coherent API/wire.
+2. Cut over authoring, typed injection/defaults/resolution, complete Program/document/binding schema,
+   adapter interfaces, Runtime callback split, native codecs, cold load and explicit read/resume
+   handoff with their consumers together. Move EffectAdapterOutcome inward. Remove mutable
+   DSL/wrapper/registration/Runtime assembly paths in this cutover. Include root-map removal here when required for one coherent API/wire.
 3. Complete original-failure/report and product-projection migration if independently coherent;
    otherwise keep it with step 2. Remove the native outcome suffix and migrate its exact semantics.
 4. Consolidate execute/checked results on the existing engine and prove native pending waiting,
@@ -1313,7 +1479,9 @@ specification to publish against unimplemented APIs. Explain when to reuse an ex
 when new semantics require a new capability contract, and when request specialization, prepared
 values, or supporting States are necessary. Contrast the fixed `ContractRead` contract with the
 request-specialized transaction contract and trace request, prepared command, capability evidence,
-and State output through the maintained deployment example. Explain native codec ownership,
+and State output through the maintained deployment example. Document complete Program construction,
+public binding persistence versus live handle custody, and configuration-free cold load before
+Runtime read/resume. Explain native codec ownership,
 common transaction identity versus applied result, and the different responsibilities of component
 consumers, State authors, and capability implementation authors. Link to authoritative contracts
 and consuming compiled examples rather than maintaining a duplicate set of signatures. Do not
@@ -1330,10 +1498,12 @@ turn the illustrative transfer into an additional implementation requirement.
 | Shared scalar | Full unsigned-256 range, canonical decoding, zero, maximum, overflow, native schema equivalence where retained |
 | Capability family | Same non-generic State with distinct native command/evidence/error ABIs; exact request-type schemas; checked binding agreement and no fallback |
 | Native request custody | Actual predecessor84 produces native84 before reservation; forged request84/native42, wrong schema/binding/implementation/action rejected at owning hot/cold boundary; no duplicate Configure validation |
-| Recursive injection | Nested supporting selection uses same walk/bindings; no product re-resolution; finite types, depth/State-count rejection, atomic builder failure |
+| Recursive injection | Nested supporting selection uses same walk/bindings; no product re-resolution; finite types, depth/State-count rejection, atomic construction failure |
 | Defaults/checkpoints | Parent/child inheritance, explicit zero, handler/parameter/target unit, distinct occurrence scopes, duplicate/missing/foreign/forward/terminal/context mismatch, inherited-parent-target non-rebinding and Effect barriers |
 | Portfolio migration gate | Resolve section 5.3 before replacing its authoring path; preserve configured collection count/order/routes, empty collections, immutable continuation plan, State boundaries and cumulative limits |
-| Assembly/cold | Automatic support/codecs/handlers, one native callback serving distinct request-specialized ABIs, explicit matching public-binding custody, exact conflicts, unchanged builder on failure, no config/C0/setup fabrication, supported alternatives and typed Program reconstruction |
+| Construction/cold | Mandatory executable entries; automatically bound support/codecs/handlers; native adapter reuse across request ABIs; persisted public bindings; missing/mismatched resources rejected before return with no IO; no config/C0/setup fabrication; same exact Program identity after load |
+| Runtime handoff | Explicit Program for execute/read/resume; retained ProgramRef mismatch rejected before execution; unchanged current-state validation, no late binding or hidden load hook |
+| Resource custody | No handles/secrets in canonical bytes/debug/context/history; existing Keystore affinity preserved; public endpoint identity is not provider authentication |
 | Evidence | Checked projection before settlement and repeated hot/cold interpretation; native/semantic ref separation including Reads; exact original bytes; no re-encoding or hidden lookup |
 | Product | Maintained42/composed84, target/configuration-point agreement, overflow, malformed ABI, mismatched observed value, custom State zero rejection |
 | Original reports | Complete original/call/native evidence and implementation provenance after root removal; exact-type access; Portfolio field projection; report is not admission authority |
@@ -1369,6 +1539,10 @@ evidence, not an alternative capability vocabulary or a new framework layer.
 | --- | --- | --- | --- |
 | Existing Portfolio can migrate without the removed repetition API | Its current expansion loops over configured collections; no replacement is specified | Complete compiler deletion/cutover is blocked | Review actual Portfolio requirements and agree its migration before implementation; preserve behavior or explicitly approve a separate product scope change |
 | Exact generic contracts compose on pinned Rust | Derive/coherence/private traversal bounds are uncompiled | Extra erasure or a second path could be introduced | Compile fixed States, typed requests, two native ABIs, recursive support, defaults and cold inventory across crates |
+| External native families can participate in typed construction | The compiler cannot inspect arbitrary external enums or accept implementations of private traits | Cross-crate selection/inventory could require duplicated lists or an unsafe escape hatch | Prove a narrow family interface with two native alternatives and checked leaf constructors; keep public source composition sealed |
+| Complete Program callbacks preserve Runtime phase ownership | Current registered runners include Runtime driver context and typed encoding | Moving whole runners would move transitions inward or alter original custody | Separate prepare/check/invoke/project/interpret/classify and prove encode-once and acknowledgement ordering |
+| Public bindings can be persisted completely | Current Program wire keeps references; document table and capacity are new | Cold load could need hidden config or exceed bounds | Audit fields and measure checked Object/document encoding, wrong-binding rejection, and small-bound failures |
+| Explicit Program loading supports existing read/resume | Current Runtime hides admission decode and executable association | Application could regain a hidden compiler or lose current-state checks | Retrieve the stored document through existing boundaries, load before Runtime, and test ProgramRef mismatch/config deletion |
 | Complete prepared requests fit capacity behavior | Requests retain explicit context/artifact/evidence | Some current workloads or report thresholds may overflow | Measure maintained artifacts and small-bound failure cases without dropping facts or authority |
 | Shared scalar extraction preserves native behavior | Range/decimal mechanics move inward | Accepted values or schema/serialization could drift | Boundary/overflow/native equivalence tests and explicit versioning for changed contracts |
 | Native artifact/ABI binding is exact | Actual identifiers/selectors must come from the maintained artifact definition | Arbitrary bytecode could be treated as supported semantics | Wrong artifact/schema/ledger and malformed-return tests against independent oracle |
