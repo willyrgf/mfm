@@ -482,3 +482,22 @@ assembly/registration/root maps, Application composition and binding caches, han
 inventory, old mutable authoring/depth scope, checked-plan wrappers, context slots and fixture-owned
 transaction workflow. New tests cover actual cold product failure projection, both continuations,
 independent routes, native delayed settlement and preserved diagnostic/authority boundaries.
+
+## Combined-service startup correction
+
+B2 implementation commit: `472f950a3c42e3a9f503bf10e92b5cd454dd21aa`.
+The first `nix run .#ci` on that exact revision stopped before any Rust task (4.37s): pinned Reth
+binds a peer listener even in dev mode, contrary to the imported adapter's three-listener assumption.
+Starting both managed nodes exposed `0.0.0.0:30303` already in use. Smallest reproducer: simultaneous
+instant and delayed node startup, as in CI's required service closure. Evidence:
+`/home/willyrgf.linux/.local/state/nixfied/mfm/dev/0/runs/run-2588688-1789845420122954767/artifacts/run-summary.json`.
+
+The adopter now models a fourth loopback endpoint for each node, disables discovery and peers,
+and shares one explicit launch definition with the interval flag as its only timing difference.
+Imported readiness/health/containment remain in use. No upstream patch or dependency was added.
+The existing `reth-smoke` task requires both services so this co-start regression remains executable.
+`nix run .#run -- --task reth-smoke` passed (11ms task, 3.35s run), both nodes ready with owned,
+reserved endpoints. Evidence:
+`/home/willyrgf.linux/.local/state/nixfied/mfm/dev/0/runs/run-2590728-1789845533987397213/artifacts/run-summary.json`.
+This startup failure is retained as evidence; it is not a passing CI result. The corrected committed
+candidate receives the final composed CI below.
