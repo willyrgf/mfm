@@ -1,21 +1,20 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use mfm_ids::{ContentRef, DigestBytes, EntryPointId, RunId, StableId};
+use mfm_capabilities::EffectAdapterOutcome;
+use mfm_ids::{DigestBytes, EntryPointId, RunId, StableId};
 use mfm_program::{
-    expand_program, CapabilityInjection, EffectState, Identity, NoParams, Occurrence, Operation,
-    OperationExpansion, ProgramError, ProgramLimits, ProposedStateOutcome, PureState, ReadState,
-    State,
+    compile, load, EffectSelection, EffectState, Operation, OperationDefinition, Plan,
+    ProgramError, ProgramLimits, ProposedStateOutcome, Pure, PureState, ReadSelection, ReadState,
+    ResolvedEffect, ResolvedRead, State,
 };
-use mfm_runtime::{
-    EffectAdapterOutcome, InvocationFailure, RunViewState, Runtime, RuntimeAssemblyBuilder,
-    RuntimeError,
-};
+use mfm_runtime::{InvocationFailure, RunViewState, Runtime, RuntimeError};
 use mfm_store::MemoryStore;
 use mfm_values::{canonicalize_mfm_value, InvocationDiagnostic};
 use serde::Serialize;
 
 use super::program::*;
+use super::resources::{Native, Resources};
 
 #[derive(Debug, Serialize, thiserror::Error)]
 #[error("test callback execution failed")]
@@ -87,35 +86,14 @@ impl EffectState<Mutation> for FailingEffect {
         execution(input)
     }
 }
-impl CapabilityInjection<FailingRead> for Observation {
-    type FailureMap = Identity<Number>;
-    fn failure_map_params(_: &Self::Setup) -> mfm_program::Result<NoParams> {
-        Ok(NoParams)
-    }
-    type Setup = Binding;
+impl ReadSelection<Observation> for FailingRead {
     type ExpandedInput = Number;
     type ExpandedOutput = Number;
-    type ExpandedFailure = Number;
-    fn original_binding_ref(setup: &Binding) -> mfm_program::Result<ContentRef> {
-        canonicalize_mfm_value(setup)
-            .map(|(_, reference)| reference)
-            .map_err(|_| ProgramError::InvalidContract)
-    }
 }
-impl CapabilityInjection<FailingEffect> for Mutation {
-    type FailureMap = Identity<Number>;
-    fn failure_map_params(_: &Self::Setup) -> mfm_program::Result<NoParams> {
-        Ok(NoParams)
-    }
-    type Setup = Binding;
+
+impl EffectSelection<Mutation> for FailingEffect {
     type ExpandedInput = Number;
     type ExpandedOutput = Number;
-    type ExpandedFailure = Number;
-    fn original_binding_ref(setup: &Binding) -> mfm_program::Result<ContentRef> {
-        canonicalize_mfm_value(setup)
-            .map(|(_, reference)| reference)
-            .map_err(|_| ProgramError::InvalidContract)
-    }
 }
 
 enum ErrorProgram {
@@ -123,31 +101,31 @@ enum ErrorProgram {
     Read,
     Effect,
 }
-impl Operation for ErrorProgram {
-    type Input = Number;
-    type Output = Number;
-    type Failure = Number;
-    fn validate_input(&self, _: &Self::Input) -> mfm_program::Result<()> {
-        Ok(())
-    }
-
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Number, Number, Number>,
-    ) -> mfm_program::Result<()> {
-        match self {
-            Self::Pure => body.pure::<FailingPure, Identity<Number>>(NoParams, Occurrence::new()),
-            Self::Read => body.read::<FailingRead, Observation, Identity<Number>>(
-                &Binding { route: 7 },
-                NoParams,
-                Occurrence::new(),
+type Source = Operation<ErrorProgram>;
+impl OperationDefinition for ErrorProgram {
+    type Body = (
+        Vec<Pure<FailingPure>>,
+        Vec<ResolvedRead<FailingRead, Observation, Native>>,
+        Vec<ResolvedEffect<FailingEffect, Mutation, Native>>,
+    );
+}
+impl Plan<Number> for ErrorProgram {
+    type Config = Number;
+    fn plan<'a>(&'a self, input: &'a Number) -> mfm_program::Result<(&'a Number, Self::Body)> {
+        let body = match self {
+            Self::Pure => (vec![Pure::default()], vec![], vec![]),
+            Self::Read => (
+                vec![],
+                vec![ResolvedRead::new(Binding { route: 7 })],
+                vec![],
             ),
-            Self::Effect => body.effect::<FailingEffect, Mutation, Identity<Number>>(
-                &Binding { route: 8 },
-                NoParams,
-                Occurrence::new(),
+            Self::Effect => (
+                vec![],
+                vec![],
+                vec![ResolvedEffect::new(Binding { route: 8 })],
             ),
-        }
+        };
+        Ok((input, body))
     }
 }
 
@@ -159,47 +137,37 @@ async fn internal_callback_errors_preserve_heads_and_do_not_repeat_settled_effec
     let identities = Arc::new(std::sync::Mutex::new(Vec::new()));
     let read_calls = Arc::new(AtomicUsize::new(0));
     let build_runtime = || {
-        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-        builder.register_pure::<FailingPure>().unwrap();
-        builder.register_read::<FailingRead, Observation>().unwrap();
-        builder
-            .register_effect::<FailingEffect, Mutation>()
-            .unwrap();
-        builder
-            .register_adapter::<Observation, _, _>(Binding { route: 7 }, {
-                let calls = read_calls.clone();
-                move |reference, intent| {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    let evidence = Evidence {
-                        intent_value_ref: reference.clone(),
-                        value: intent.value,
-                        accepted: true,
-                    };
-                    Box::pin(async move { Ok(evidence) })
-                }
-            })
-            .unwrap();
-        builder
-            .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-                let identities = identities.clone();
-                move |effect_id, reference, command| {
-                    identities.lock().unwrap().push((
-                        effect_id.clone(),
-                        reference.clone(),
-                        canonicalize_mfm_value(command).unwrap().0,
-                    ));
-                    let evidence = EffectEvidence {
-                        effect_id: effect_id.clone(),
-                        value: command.value,
-                        accepted: true,
-                    };
-                    Box::pin(async move { Ok(EffectAdapterOutcome::Settled(evidence)) })
-                }
-            })
-            .unwrap();
-        Runtime::new(builder.finish(), store.clone())
+        let mut resources = Resources::<Source>::read({
+            let calls = read_calls.clone();
+            move |reference, intent| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let evidence = Evidence {
+                    intent_value_ref: reference.clone(),
+                    value: intent.value,
+                    accepted: true,
+                };
+                Box::pin(async move { Ok(evidence) })
+            }
+        });
+        resources.effect = Some(Arc::new({
+            let identities = identities.clone();
+            move |effect_id, reference, command| {
+                identities.lock().unwrap().push((
+                    effect_id.clone(),
+                    reference.clone(),
+                    canonicalize_mfm_value(command).unwrap().0,
+                ));
+                let evidence = EffectEvidence {
+                    effect_id: effect_id.clone(),
+                    value: command.value,
+                    accepted: true,
+                };
+                Box::pin(async move { Ok(EffectAdapterOutcome::Settled(evidence)) })
+            }
+        }));
+        (Runtime::new(store.clone()), resources)
     };
-    let runtime = build_runtime();
+    let (runtime, resources) = build_runtime();
     for (index, operation, expected_head, expected_operation) in [
         (70, ErrorProgram::Pure, 1, "pure_evaluate"),
         (71, ErrorProgram::Read, 1, "read_interpret"),
@@ -207,22 +175,23 @@ async fn internal_callback_errors_preserve_heads_and_do_not_repeat_settled_effec
     ] {
         FAIL_EXECUTION.store(true, Ordering::SeqCst);
         let id = RunId::from_digest(DigestBytes::from_array([index; 32]));
-        let program = expand_program(
+        let program = compile(
             EntryPointId::new("mfm.test.runtime/callback-error@1").unwrap(),
-            &operation,
+            &Source::from(operation),
             &Number { value: 12 },
+            &resources,
             ProgramLimits::new(0),
         )
         .unwrap();
         assert_execution_failure(
             runtime
-                .start(id.clone(), program, Number { value: 12 })
+                .start(id.clone(), &program, &Number { value: 12 })
                 .await
                 .err()
                 .unwrap(),
             expected_operation,
         );
-        let pending = runtime.read(&id).await.unwrap();
+        let pending = runtime.read(&id, &program).await.unwrap();
         assert_eq!(pending.head_sequence(), expected_head);
         if expected_head == 3 {
             assert!(matches!(
@@ -232,21 +201,26 @@ async fn internal_callback_errors_preserve_heads_and_do_not_repeat_settled_effec
         } else {
             assert!(matches!(pending.state(), RunViewState::Runnable { .. }));
         }
-        let cold = build_runtime();
-        assert_execution_failure(cold.resume(&id).await.err().unwrap(), expected_operation);
+        let (cold, cold_resources) = build_runtime();
+        let program = load(program.canonical_bytes(), &cold_resources).unwrap();
+        assert_execution_failure(
+            cold.resume(&id, &program).await.err().unwrap(),
+            expected_operation,
+        );
         assert_eq!(
-            cold.read(&id).await.unwrap().head_digest(),
+            cold.read(&id, &program).await.unwrap().head_digest(),
             pending.head_digest()
         );
         FAIL_EXECUTION.store(false, Ordering::SeqCst);
-        let completed = cold.resume(&id).await.unwrap();
+        let completed = cold.resume(&id, &program).await.unwrap();
         assert!(matches!(completed.state(), RunViewState::Succeeded(_)));
         assert_eq!(completed.head_sequence(), expected_head + 1);
         FAIL_EXECUTION.store(true, Ordering::SeqCst);
-        let terminal = build_runtime();
-        let reloaded = terminal.read(&id).await.unwrap();
+        let (terminal, terminal_resources) = build_runtime();
+        let program = load(program.canonical_bytes(), &terminal_resources).unwrap();
+        let reloaded = terminal.read(&id, &program).await.unwrap();
         assert_eq!(reloaded.head_digest(), completed.head_digest());
-        let resumed = terminal.resume(&id).await.unwrap();
+        let resumed = terminal.resume(&id, &program).await.unwrap();
         assert_eq!(resumed.head_digest(), completed.head_digest());
         let (RunViewState::Succeeded(actual), RunViewState::Succeeded(expected)) =
             (resumed.state(), completed.state())

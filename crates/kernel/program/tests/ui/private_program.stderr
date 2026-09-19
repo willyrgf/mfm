@@ -1,19 +1,8 @@
-error[E0624]: associated function `new` is private
+error[E0599]: no associated function or constant named `new` found for struct `Program` in the current scope
  --> tests/ui/private_program.rs:4:22
   |
-4 |       let _ = Program::new;
-  |                        ^^^ private associated function
-  |
- ::: src/program.rs
-  |
-  | /     pub(crate) fn new(
-  | |         entry_point_id: EntryPointId,
-  | |         admitted: ContentRef,
-  | |         initial_value_ref: ContentRef,
-... |
-  | |         limits: ProgramLimits,
-  | |     ) -> Result<Self> {
-  | |_____________________- private associated function defined here
+4 |     let _ = Program::new;
+  |                      ^^^ associated function or constant not found in `Program`
 
 error: cannot construct `StateDeclaration` with struct literal syntax due to private fields
  --> tests/ui/private_program.rs:5:18

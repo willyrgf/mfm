@@ -1,17 +1,14 @@
-use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use mfm_capabilities::AdapterError;
+use mfm_capabilities::EffectAdapterOutcome;
 use mfm_ids::{DigestBytes, EffectId, EntryPointId, RunId};
 use mfm_journal::{decode_frame, seal_frame};
-use mfm_program::{expand_program, ProgramLimits};
-use mfm_runtime::{
-    EffectAdapterOutcome, InvocationFailure, RunViewState, Runtime, RuntimeAssemblyBuilder,
-    RuntimeError,
-};
+use mfm_program::{compile, load, Identity, ProgramLimits};
+use mfm_runtime::{InvocationFailure, RunViewState, Runtime, RuntimeError};
 use mfm_store::{MemoryStore, Store, StoreError};
-use mfm_values::{canonicalize_mfm_value, InvocationDiagnostic, MfmValue as MfmValueTrait};
+use mfm_values::{canonicalize_mfm_value, InvocationDiagnostic};
 
 #[path = "support/callback_errors.rs"]
 mod callback_errors;
@@ -22,337 +19,45 @@ mod program;
 #[path = "support/scripted_store.rs"]
 mod scripted_store;
 
+#[path = "support/resources.rs"]
+mod resources;
+use resources::*;
+type Installed = (ReadSource, EffectSource, Identity<Number>);
 use program::*;
 use scripted_store::*;
 
-// An existing contract identity must not silently select a different Rust codec, descriptor or
-// State implementation.
+// Mode is part of native ABI identity even when semantic and implementation IDs are equal.
 #[test]
-fn exact_value_and_state_abi_collisions_are_rejected() {
-    let mut different_type = RuntimeAssemblyBuilder::new().expect("builder");
-    different_type
-        .register_value::<Number>()
-        .expect("number codec");
-    assert!(matches!(
-        different_type.register_value::<NumberAlias>(),
-        Err(RuntimeError::IncompatibleAssembly)
-    ));
-    different_type
-        .register_value::<Number>()
-        .expect("failed registration does not poison the builder");
-    different_type.finish();
-
-    ALTERNATE_DESCRIPTOR_AUDIT.store(false, Ordering::SeqCst);
-    let mut different_descriptor = RuntimeAssemblyBuilder::new().expect("builder");
-    different_descriptor
-        .register_value::<MutableDescriptorNumber>()
-        .expect("first descriptor");
-    ALTERNATE_DESCRIPTOR_AUDIT.store(true, Ordering::SeqCst);
-    assert!(matches!(
-        different_descriptor.register_value::<MutableDescriptorNumber>(),
-        Err(RuntimeError::IncompatibleAssembly)
-    ));
-    ALTERNATE_DESCRIPTOR_AUDIT.store(false, Ordering::SeqCst);
-
-    let mut different_state_type = RuntimeAssemblyBuilder::new().expect("builder");
-    different_state_type
-        .register_pure::<GenericState<FirstGenericValue>>()
-        .expect("generic state");
-    assert!(matches!(
-        different_state_type.register_pure::<ConflictingGenericState<FirstGenericValue>>(),
-        Err(RuntimeError::IncompatibleAssembly)
-    ));
-}
-
-// Generic values may share a semantic family, but execution and restoration must select the
-// codec for each exact schema.
-#[tokio::test]
-async fn one_semantic_family_executes_multiple_exact_schemas_hot_and_cold() {
-    assert_eq!(
-        GenericStateValue::<FirstGenericValue>::semantic_id().expect("first semantic id"),
-        GenericStateValue::<SecondGenericValue>::semantic_id().expect("second semantic id")
-    );
+fn native_abi_distinguishes_capability_modes() {
     assert_ne!(
-        mfm_program::nominal_contract_ref::<GenericStateValue<FirstGenericValue>>()
-            .expect("first contract"),
-        mfm_program::nominal_contract_ref::<GenericStateValue<SecondGenericValue>>()
-            .expect("second contract")
-    );
-
-    let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    builder
-        .register_pure::<GenericState<FirstGenericValue>>()
-        .expect("first generic State ABI");
-    builder
-        .register_pure::<GenericState<SecondGenericValue>>()
-        .expect("second generic State ABI");
-    let runtime = Runtime::new(builder.finish(), store.clone());
-
-    let first_run_id = RunId::from_digest(DigestBytes::from_array([60; 32]));
-    let first_hot = runtime
-        .start(
-            first_run_id.clone(),
-            expand_program(
-                EntryPointId::new("mfm.test.runtime/generic-first@1").expect("first entry point"),
-                &GenericProgram::<FirstGenericValue>(PhantomData),
-                &GenericStateValue {
-                    value: FirstGenericValue { first: 11 },
-                },
-                ProgramLimits::new(0),
-            )
-            .expect("first Program"),
-            GenericStateValue {
-                value: FirstGenericValue { first: 11 },
-            },
-        )
-        .await
-        .expect("first hot execution");
-    let RunViewState::Succeeded(first_hot_value) = first_hot.state() else {
-        panic!("first generic Program did not succeed");
-    };
-    assert_eq!(
-        first_hot_value.canonical_bytes(),
-        br#"{"value":{"first":11}}"#
-    );
-
-    let second_run_id = RunId::from_digest(DigestBytes::from_array([61; 32]));
-    let second_hot = runtime
-        .start(
-            second_run_id.clone(),
-            expand_program(
-                EntryPointId::new("mfm.test.runtime/generic-second@1").expect("second entry point"),
-                &GenericProgram::<SecondGenericValue>(PhantomData),
-                &GenericStateValue {
-                    value: SecondGenericValue {
-                        second: "two".to_owned(),
-                    },
-                },
-                ProgramLimits::new(0),
-            )
-            .expect("second Program"),
-            GenericStateValue {
-                value: SecondGenericValue {
-                    second: "two".to_owned(),
-                },
-            },
-        )
-        .await
-        .expect("second hot execution");
-    let RunViewState::Succeeded(second_hot_value) = second_hot.state() else {
-        panic!("second generic Program did not succeed");
-    };
-    assert_eq!(
-        second_hot_value.canonical_bytes(),
-        br#"{"value":{"second":"two"}}"#
-    );
-
-    let mut cold_builder = RuntimeAssemblyBuilder::new().expect("builder");
-    cold_builder
-        .register_pure::<GenericState<FirstGenericValue>>()
-        .expect("cold first generic State ABI");
-    cold_builder
-        .register_pure::<GenericState<SecondGenericValue>>()
-        .expect("cold second generic State ABI");
-    let cold_runtime = Runtime::new(cold_builder.finish(), store);
-
-    let first_cold = cold_runtime
-        .read(&first_run_id)
-        .await
-        .expect("first cold read");
-    let RunViewState::Succeeded(first_cold_value) = first_cold.state() else {
-        panic!("first cold generic Program did not succeed");
-    };
-    assert_eq!(first_cold.head_digest(), first_hot.head_digest());
-    assert_eq!(
-        first_cold_value.canonical_bytes(),
-        first_hot_value.canonical_bytes()
-    );
-
-    let second_cold = cold_runtime
-        .read(&second_run_id)
-        .await
-        .expect("second cold read");
-    let RunViewState::Succeeded(second_cold_value) = second_cold.state() else {
-        panic!("second cold generic Program did not succeed");
-    };
-    assert_eq!(second_cold.head_digest(), second_hot.head_digest());
-    assert_eq!(
-        second_cold_value.canonical_bytes(),
-        second_hot_value.canonical_bytes()
+        mfm_program::NativeAbi::read::<ConflictingReadCapability, Native>().unwrap(),
+        mfm_program::NativeAbi::effect::<Mutation, Native>().unwrap()
     );
 }
 
-// An Effect binding must have one adapter, while a Read with the same nominal identity remains a
-// distinct capability.
-#[test]
-fn effect_registration_rejects_duplicates_and_distinguishes_capability_modes() {
-    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    builder
-        .register_effect_adapter::<Mutation, _, _>(
-            Binding { route: 8 },
-            |effect_id, _command_value_ref, command| {
-                let effect_id = effect_id.clone();
-                let value = command.value;
-                Box::pin(async move {
-                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                        effect_id,
-                        value,
-                        accepted: true,
-                    }))
-                })
-            },
-        )
-        .expect("Effect adapter");
-    assert!(matches!(
-        builder.register_effect_adapter::<Mutation, _, _>(
-            Binding { route: 8 },
-            |effect_id, _command_value_ref, command| {
-                let effect_id = effect_id.clone();
-                let value = command.value;
-                Box::pin(async move {
-                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                        effect_id,
-                        value,
-                        accepted: true,
-                    }))
-                })
-            },
-        ),
-        Err(RuntimeError::IncompatibleAssembly)
-    ));
-    builder
-        .register_adapter::<ConflictingReadCapability, _, _>(Binding { route: 8 }, |_, _| {
-            Box::pin(async {
-                Err(AdapterError::Invariant(InvocationDiagnostic::from_fields(
-                    "state_internal",
-                    "effect_registration_rejects_duplicates_and_distinguishes_capability_modes",
-                    &(AdapterRejected),
-                    None,
-                )))
-            })
-        })
-        .expect("mode participates in the capability contract identity");
-}
-
-// An incomplete assembly must not admit a run that it cannot execute.
 #[tokio::test]
 async fn missing_effect_adapter_is_rejected_before_store_io() {
-    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    let runtime = Runtime::new(builder.finish(), Arc::new(MemoryStore::new()));
+    let resources = Resources::<Installed>::default();
+    let runtime = Runtime::new(Arc::new(MemoryStore::new()));
     let run_id = RunId::from_digest(DigestBytes::from_array([29; 32]));
+    let error = compile(
+        EntryPointId::new("mfm.test.runtime/missing-effect-adapter@1").unwrap(),
+        &EffectSource::new(Binding { route: 8 }),
+        &Number { value: 1 },
+        &resources,
+        ProgramLimits::new(0),
+    )
+    .err()
+    .unwrap();
+    let diagnostic = serde_json::to_string(&error).unwrap();
+    assert!(diagnostic.contains("bind_effect"), "{diagnostic}");
     assert!(matches!(
-        runtime
-            .start(
-                run_id.clone(),
-                expand_program(
-                    EntryPointId::new("mfm.test.runtime/missing-effect-adapter@1")
-                        .expect("entry point"),
-                    &EffectProgram,
-                    &Number { value: 1 },
-                    ProgramLimits::new(0),
-                )
-                .expect("Program"),
-                Number { value: 1 },
-            )
-            .await,
-        Err(InvocationFailure::Execution {
-            error: RuntimeError::IncompatibleAssembly,
-            ..
-        })
-    ));
-    assert!(matches!(
-        runtime.read(&run_id).await,
+        runtime.program_document(&run_id).await,
         Err(InvocationFailure::Execution {
             error: RuntimeError::Absent,
             ..
         })
     ));
-}
-
-// Unused recovery allowances must not prevent ordinary completion; restored inputs and outputs
-// must retain their exact identities.
-#[tokio::test]
-async fn pure_and_zero_state_programs_restore_without_reserving_future_recovery_capacity() {
-    let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    builder.register_pure::<Increment>().expect("Pure State");
-    let runtime = Runtime::new(builder.finish(), store);
-    let run_id = RunId::from_digest(DigestBytes::from_array([1; 32]));
-    let program = expand_program(
-        EntryPointId::new("mfm.test.runtime/pure@1").expect("entry point"),
-        &PureProgram,
-        &Number { value: 4 },
-        ProgramLimits::new(u32::MAX),
-    )
-    .expect("Program");
-
-    let hot = runtime
-        .start(run_id.clone(), program, Number { value: 4 })
-        .await
-        .expect("start");
-    let RunViewState::Succeeded(hot_value) = hot.state() else {
-        panic!("Pure Program did not succeed");
-    };
-    assert_eq!(hot.head_sequence(), 2);
-    assert_eq!(hot.admitted_context().decode::<Number>().unwrap().value, 4);
-    assert_eq!(hot_value.canonical_bytes(), br#"{"value":5}"#);
-    assert_eq!(hot_value.decode::<Number>().unwrap().value, 5);
-    let mismatch = hot_value.decode::<FirstGenericValue>().err().unwrap();
-    assert_eq!(mismatch.code(), "value_error");
-    assert_eq!(
-        mismatch.details().as_value(),
-        &serde_json::json!("invalid_schema_identity")
-    );
-
-    let cold = runtime.read(&run_id).await.expect("cold read");
-    let RunViewState::Succeeded(cold_value) = cold.state() else {
-        panic!("cold Program did not succeed");
-    };
-    assert_eq!(cold.head_sequence(), hot.head_sequence());
-    assert_eq!(
-        cold.admitted_context().value_ref(),
-        hot.admitted_context().value_ref()
-    );
-    assert_eq!(
-        cold.admitted_context().canonical_bytes(),
-        hot.admitted_context().canonical_bytes()
-    );
-    assert_eq!(cold.head_digest(), hot.head_digest());
-    assert_eq!(cold_value.canonical_bytes(), hot_value.canonical_bytes());
-    assert_eq!(cold_value.decode::<Number>().unwrap().value, 5);
-
-    let mut empty_builder = RuntimeAssemblyBuilder::new().expect("builder");
-    empty_builder
-        .register_value::<Number>()
-        .expect("root value");
-    let empty = Runtime::new(empty_builder.finish(), Arc::new(MemoryStore::new()));
-    let empty_program = expand_program(
-        EntryPointId::new("mfm.test.runtime/empty@1").expect("entry point"),
-        &EmptyProgram,
-        &Number { value: 9 },
-        ProgramLimits::new(0),
-    )
-    .expect("empty Program");
-    let empty_view = empty
-        .start(
-            RunId::from_digest(DigestBytes::from_array([2; 32])),
-            empty_program,
-            Number { value: 9 },
-        )
-        .await
-        .expect("empty start");
-    let RunViewState::Succeeded(value) = empty_view.state() else {
-        panic!("zero-State Program did not succeed");
-    };
-    assert_eq!(empty_view.head_sequence(), 1);
-    assert_eq!(value.canonical_bytes(), br#"{"value":9}"#);
 }
 
 // Reading retained success must not call the provider again; an interrupted Read can later
@@ -361,108 +66,99 @@ async fn pure_and_zero_state_programs_restore_without_reserving_future_recovery_
 async fn read_success_and_separate_failure_recovery_are_restorable_without_repeating_io() {
     let calls = Arc::new(AtomicUsize::new(0));
     let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    builder
-        .register_read::<Observe, Observation>()
-        .expect("Read State");
-    builder
-        .register_adapter::<Observation, _, _>(Binding { route: 7 }, {
-            let calls = Arc::clone(&calls);
-            move |intent_value_ref, intent| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                let intent_value_ref = intent_value_ref.clone();
-                Box::pin(async move {
-                    Ok(Evidence {
-                        intent_value_ref,
-                        value: intent.value,
-                        accepted: true,
-                    })
-                })
-            }
-        })
-        .expect("adapter");
-    let runtime = Runtime::new(builder.finish(), store);
-    let run_id = RunId::from_digest(DigestBytes::from_array([3; 32]));
-    let program = expand_program(
-        EntryPointId::new("mfm.test.runtime/read@1").expect("entry point"),
-        &ReadProgram,
-        &Number { value: 12 },
-        ProgramLimits::new(0),
-    )
-    .expect("Program");
-    let hot = runtime
-        .start(run_id.clone(), program, Number { value: 12 })
-        .await
-        .expect("Read execution");
-    assert!(matches!(hot.state(), RunViewState::Succeeded(_)));
-    assert_eq!(hot.head_sequence(), 2);
-    let cold = runtime.read(&run_id).await.expect("cold read");
-    assert_eq!(cold.head_digest(), hot.head_digest());
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-    let unavailable_store = Arc::new(MemoryStore::new());
-    let mut unavailable_builder = RuntimeAssemblyBuilder::new().expect("builder");
-    unavailable_builder
-        .register_read::<Observe, Observation>()
-        .expect("Read State");
-    unavailable_builder
-        .register_adapter::<Observation, _, _>(Binding { route: 7 }, |_, _| {
-            Box::pin(async {
-                Err(AdapterError::Invariant(InvocationDiagnostic::from_fields("state_internal", "read_success_and_separate_failure_recovery_are_restorable_without_repeating_io", &(AdapterRejected), None)))
-            })
-        })
-        .expect("unavailable adapter");
-    let unavailable = Runtime::new(unavailable_builder.finish(), unavailable_store.clone());
-    let interrupted_run_id = RunId::from_digest(DigestBytes::from_array([4; 32]));
-    let interrupted_program = expand_program(
-        EntryPointId::new("mfm.test.runtime/read@1").expect("entry point"),
-        &ReadProgram,
-        &Number { value: 21 },
-        ProgramLimits::new(0),
-    )
-    .expect("Program");
-    assert!(matches!(
-        unavailable
-            .start(
-                interrupted_run_id.clone(),
-                interrupted_program,
-                Number { value: 21 },
-            )
-            .await,
-        Err(InvocationFailure::Execution {
-            error: RuntimeError::Native {
-                operation: mfm_runtime::Operation::ReadAdapter,
-                stage: mfm_runtime::Stage::Execute,
-                cause,
-            },
-            ..
-        }) if cause.details().as_value() == &serde_json::json!(null)
-    ));
-    let prefix = unavailable
-        .read(&interrupted_run_id)
-        .await
-        .expect("durable prefix");
-    assert_eq!(prefix.head_sequence(), 1);
-    assert!(matches!(prefix.state(), RunViewState::Runnable { .. }));
-
-    let mut resumed_builder = RuntimeAssemblyBuilder::new().expect("builder");
-    resumed_builder
-        .register_read::<Observe, Observation>()
-        .expect("Read State");
-    resumed_builder
-        .register_adapter::<Observation, _, _>(Binding { route: 7 }, |intent_value_ref, intent| {
+    let builder = Resources::<Installed>::read({
+        let calls = Arc::clone(&calls);
+        move |intent_value_ref, intent| {
+            calls.fetch_add(1, Ordering::SeqCst);
             let intent_value_ref = intent_value_ref.clone();
             Box::pin(async move {
                 Ok(Evidence {
                     intent_value_ref,
                     value: intent.value,
-                    accepted: false,
+                    accepted: true,
                 })
             })
+        }
+    });
+    let runtime = Runtime::new(store);
+    let run_id = RunId::from_digest(DigestBytes::from_array([3; 32]));
+    let program = compile(
+        EntryPointId::new("mfm.test.runtime/read@1").expect("entry point"),
+        &ReadSource::new(Binding { route: 7 }),
+        &Number { value: 12 },
+        &builder,
+        ProgramLimits::new(0),
+    )
+    .expect("Program");
+    let hot = runtime
+        .start(run_id.clone(), &program, &Number { value: 12 })
+        .await
+        .expect("Read execution");
+    assert!(matches!(hot.state(), RunViewState::Succeeded(_)));
+    assert_eq!(hot.head_sequence(), 2);
+    let cold = runtime.read(&run_id, &program).await.expect("cold read");
+    assert_eq!(cold.head_digest(), hot.head_digest());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let unavailable_store = Arc::new(MemoryStore::new());
+    let unavailable_builder = Resources::<Installed>::read(|_, _| {
+        Box::pin(async {
+            Err(AdapterError::Invariant(InvocationDiagnostic::from_fields(
+                "state_internal",
+                "read_success_and_separate_failure_recovery_are_restorable_without_repeating_io",
+                &(AdapterRejected),
+                None,
+            )))
         })
-        .expect("replacement adapter");
-    let resumed = Runtime::new(resumed_builder.finish(), unavailable_store)
-        .resume(&interrupted_run_id)
+    });
+    let unavailable = Runtime::new(unavailable_store.clone());
+    let interrupted_run_id = RunId::from_digest(DigestBytes::from_array([4; 32]));
+    let interrupted_program = compile(
+        EntryPointId::new("mfm.test.runtime/read@1").expect("entry point"),
+        &ReadSource::new(Binding { route: 7 }),
+        &Number { value: 21 },
+        &unavailable_builder,
+        ProgramLimits::new(0),
+    )
+    .expect("Program");
+    assert!(matches!(
+            unavailable
+                .start(
+    interrupted_run_id.clone(),
+    &interrupted_program,
+    &Number { value: 21 },
+    )
+                .await,
+            Err(InvocationFailure::Execution {
+                error: RuntimeError::Native {
+                    operation: mfm_runtime::Operation::ReadAdapter,
+                    stage: mfm_runtime::Stage::Execute,
+                    cause,
+                },
+                ..
+            }) if cause.details().as_value() == &serde_json::json!(null)
+        ));
+    let prefix = unavailable
+        .read(&interrupted_run_id, &interrupted_program)
+        .await
+        .expect("durable prefix");
+    assert_eq!(prefix.head_sequence(), 1);
+    assert!(matches!(prefix.state(), RunViewState::Runnable { .. }));
+
+    let resumed_builder = Resources::<Installed>::read(|intent_value_ref, intent| {
+        let intent_value_ref = intent_value_ref.clone();
+        Box::pin(async move {
+            Ok(Evidence {
+                intent_value_ref,
+                value: intent.value,
+                accepted: false,
+            })
+        })
+    });
+    let interrupted_program =
+        load(interrupted_program.canonical_bytes(), &resumed_builder).unwrap();
+    let resumed = Runtime::new(unavailable_store)
+        .resume(&interrupted_run_id, &interrupted_program)
         .await
         .expect("resume");
     let RunViewState::Failed(value) = resumed.state() else {
@@ -472,9 +168,7 @@ async fn read_success_and_separate_failure_recovery_are_restorable_without_repea
     let mfm_runtime::Failure::Domain { original, .. } = value.failure() else {
         panic!("domain result")
     };
-    let root = value.root().unwrap();
     assert_eq!(original.decode::<Number>().unwrap().value, 21);
-    assert_eq!(root.decode::<Number>().unwrap().value, 21);
 }
 
 // Cancelling an in-flight Read must leave the admitted run runnable without inventing a
@@ -484,50 +178,39 @@ async fn cancellation_during_observation_preserves_a_runnable_prefix() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    builder
-        .register_read::<Observe, Observation>()
-        .expect("Read State");
-    builder
-        .register_adapter::<Observation, _, _>(Binding { route: 7 }, {
+    let builder = Resources::<Installed>::read({
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        move |intent_value_ref, intent| {
             let entered = Arc::clone(&entered);
             let release = Arc::clone(&release);
-            move |intent_value_ref, intent| {
-                let entered = Arc::clone(&entered);
-                let release = Arc::clone(&release);
-                let intent_value_ref = intent_value_ref.clone();
-                Box::pin(async move {
-                    entered.notify_one();
-                    release.notified().await;
-                    Ok(Evidence {
-                        intent_value_ref,
-                        value: intent.value,
-                        accepted: true,
-                    })
+            let intent_value_ref = intent_value_ref.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(Evidence {
+                    intent_value_ref,
+                    value: intent.value,
+                    accepted: true,
                 })
-            }
-        })
-        .expect("adapter");
-    let runtime = Arc::new(Runtime::new(builder.finish(), store));
+            })
+        }
+    });
+    let runtime = Arc::new(Runtime::new(store));
     let run_id = RunId::from_digest(DigestBytes::from_array([5; 32]));
+    let program = compile(
+        EntryPointId::new("mfm.test.runtime/cancel@1").expect("entry point"),
+        &ReadSource::new(Binding { route: 7 }),
+        &Number { value: 8 },
+        &builder,
+        ProgramLimits::new(0),
+    )
+    .expect("Program");
     let task = {
         let runtime = Arc::clone(&runtime);
+        let program = program.clone();
         let run_id = run_id.clone();
-        tokio::spawn(async move {
-            runtime
-                .start(
-                    run_id,
-                    expand_program(
-                        EntryPointId::new("mfm.test.runtime/cancel@1").expect("entry point"),
-                        &ReadProgram,
-                        &Number { value: 8 },
-                        ProgramLimits::new(0),
-                    )
-                    .expect("Program"),
-                    Number { value: 8 },
-                )
-                .await
-        })
+        tokio::spawn(async move { runtime.start(run_id, &program, &Number { value: 8 }).await })
     };
     entered.notified().await;
     task.abort();
@@ -537,7 +220,10 @@ async fn cancellation_during_observation_preserves_a_runnable_prefix() {
     }
     release.notify_waiters();
 
-    let prefix = runtime.read(&run_id).await.expect("durable prefix");
+    let prefix = runtime
+        .read(&run_id, &program)
+        .await
+        .expect("durable prefix");
     assert_eq!(prefix.head_sequence(), 1);
     assert!(matches!(prefix.state(), RunViewState::Runnable { .. }));
 }
@@ -550,62 +236,51 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
     let release = Arc::new(tokio::sync::Notify::new());
     let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
     let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
+    let builder = Resources::<Installed>::effect({
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        let observed = Arc::clone(&observed);
+        move |effect_id, command_value_ref, command| {
+            let effect_id = effect_id.clone();
+            let command_value_ref = command_value_ref.clone();
+            let value = command.value;
+            observed.lock().expect("observations").push((
+                effect_id.clone(),
+                command_value_ref,
+                value,
+            ));
             let entered = Arc::clone(&entered);
             let release = Arc::clone(&release);
-            let observed = Arc::clone(&observed);
-            move |effect_id, command_value_ref, command| {
-                let effect_id = effect_id.clone();
-                let command_value_ref = command_value_ref.clone();
-                let value = command.value;
-                observed.lock().expect("observations").push((
-                    effect_id.clone(),
-                    command_value_ref,
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(EffectAdapterOutcome::Settled(EffectEvidence {
+                    effect_id,
                     value,
-                ));
-                let entered = Arc::clone(&entered);
-                let release = Arc::clone(&release);
-                Box::pin(async move {
-                    entered.notify_one();
-                    release.notified().await;
-                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                        effect_id,
-                        value,
-                        accepted: true,
-                    }))
-                })
-            }
-        })
-        .expect("Effect adapter");
-    let runtime = Arc::new(Runtime::new(builder.finish(), store.clone()));
+                    accepted: true,
+                }))
+            })
+        }
+    });
+    let runtime = Arc::new(Runtime::new(store.clone()));
     let run_id = RunId::from_digest(DigestBytes::from_array([30; 32]));
+    let program = compile(
+        EntryPointId::new("mfm.test.runtime/effect@1").expect("entry point"),
+        &EffectSource::new(Binding { route: 8 }),
+        &Number { value: 34 },
+        &builder,
+        ProgramLimits::new(0),
+    )
+    .expect("Program");
     let task = {
         let runtime = Arc::clone(&runtime);
+        let program = program.clone();
         let run_id = run_id.clone();
-        tokio::spawn(async move {
-            runtime
-                .start(
-                    run_id,
-                    expand_program(
-                        EntryPointId::new("mfm.test.runtime/effect@1").expect("entry point"),
-                        &EffectProgram,
-                        &Number { value: 34 },
-                        ProgramLimits::new(0),
-                    )
-                    .expect("Program"),
-                    Number { value: 34 },
-                )
-                .await
-        })
+        tokio::spawn(async move { runtime.start(run_id, &program, &Number { value: 34 }).await })
     };
     entered.notified().await;
 
-    let pending = runtime.read(&run_id).await.expect("pending view");
+    let pending = runtime.read(&run_id, &program).await.expect("pending view");
     assert_eq!(pending.head_sequence(), 2);
     assert!(matches!(
         pending.state(),
@@ -629,33 +304,31 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
     );
 
     let resumed_observed = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut resumed_builder = RuntimeAssemblyBuilder::new().expect("builder");
-    resumed_builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    resumed_builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-            let resumed_observed = Arc::clone(&resumed_observed);
-            move |effect_id, command_value_ref, command| {
-                let effect_id = effect_id.clone();
-                let command_value_ref = command_value_ref.clone();
-                let value = command.value;
-                resumed_observed
-                    .lock()
-                    .expect("resumed observations")
-                    .push((effect_id.clone(), command_value_ref, value));
-                Box::pin(async move {
-                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                        effect_id,
-                        value,
-                        accepted: true,
-                    }))
-                })
-            }
-        })
-        .expect("Effect adapter");
-    let resumed_runtime = Runtime::new(resumed_builder.finish(), store);
-    let resumed = resumed_runtime.resume(&run_id).await.expect("cold resume");
+    let resumed_builder = Resources::<Installed>::effect({
+        let resumed_observed = Arc::clone(&resumed_observed);
+        move |effect_id, command_value_ref, command| {
+            let effect_id = effect_id.clone();
+            let command_value_ref = command_value_ref.clone();
+            let value = command.value;
+            resumed_observed
+                .lock()
+                .expect("resumed observations")
+                .push((effect_id.clone(), command_value_ref, value));
+            Box::pin(async move {
+                Ok(EffectAdapterOutcome::Settled(EffectEvidence {
+                    effect_id,
+                    value,
+                    accepted: true,
+                }))
+            })
+        }
+    });
+    let program = load(program.canonical_bytes(), &resumed_builder).unwrap();
+    let resumed_runtime = Runtime::new(store);
+    let resumed = resumed_runtime
+        .resume(&run_id, &program)
+        .await
+        .expect("cold resume");
     assert_eq!(resumed.head_sequence(), 4);
     assert!(matches!(resumed.state(), RunViewState::Succeeded(_)));
     {
@@ -666,7 +339,10 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
         );
     }
 
-    let cold = resumed_runtime.read(&run_id).await.expect("cold view");
+    let cold = resumed_runtime
+        .read(&run_id, &program)
+        .await
+        .expect("cold view");
     assert_eq!(cold.head_digest(), resumed.head_digest());
     assert_eq!(
         resumed_observed.lock().expect("resumed observations").len(),
@@ -680,46 +356,38 @@ async fn effect_prepare_is_durable_before_adapter_entry_and_cold_resume_reuses_i
 async fn pending_yields_once_and_a_later_settlement_closes_the_same_prepare() {
     let calls = Arc::new(AtomicUsize::new(0));
     let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-            let calls = Arc::clone(&calls);
-            move |effect_id, _command_value_ref, command| {
-                let invocation = calls.fetch_add(1, Ordering::SeqCst);
-                let effect_id = effect_id.clone();
-                let value = command.value;
-                Box::pin(async move {
-                    if invocation == 0 {
-                        Ok(EffectAdapterOutcome::Pending)
-                    } else {
-                        Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                            effect_id,
-                            value,
-                            accepted: true,
-                        }))
-                    }
-                })
-            }
-        })
-        .expect("Effect adapter");
-    let runtime = Runtime::new(builder.finish(), store);
+    let builder = Resources::<Installed>::effect({
+        let calls = Arc::clone(&calls);
+        move |effect_id, _command_value_ref, command| {
+            let invocation = calls.fetch_add(1, Ordering::SeqCst);
+            let effect_id = effect_id.clone();
+            let value = command.value;
+            Box::pin(async move {
+                if invocation == 0 {
+                    Ok(EffectAdapterOutcome::Pending)
+                } else {
+                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
+                        effect_id,
+                        value,
+                        accepted: true,
+                    }))
+                }
+            })
+        }
+    });
+    let runtime = Runtime::new(store);
     let run_id = RunId::from_digest(DigestBytes::from_array([45; 32]));
 
+    let program = compile(
+        EntryPointId::new("mfm.test.runtime/pending-effect@1").expect("entry point"),
+        &EffectSource::new(Binding { route: 8 }),
+        &Number { value: 21 },
+        &builder,
+        ProgramLimits::new(0),
+    )
+    .expect("Program");
     let pending = runtime
-        .start(
-            run_id.clone(),
-            expand_program(
-                EntryPointId::new("mfm.test.runtime/pending-effect@1").expect("entry point"),
-                &EffectProgram,
-                &Number { value: 21 },
-                ProgramLimits::new(0),
-            )
-            .expect("Program"),
-            Number { value: 21 },
-        )
+        .start(run_id.clone(), &program, &Number { value: 21 })
         .await
         .expect("pending is normal progress");
     assert_eq!(pending.head_sequence(), 2);
@@ -729,12 +397,18 @@ async fn pending_yields_once_and_a_later_settlement_closes_the_same_prepare() {
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    let cold = runtime.read(&run_id).await.expect("cold pending view");
+    let cold = runtime
+        .read(&run_id, &program)
+        .await
+        .expect("cold pending view");
     assert_eq!(cold.head_digest(), pending.head_digest());
     assert!(matches!(cold.state(), RunViewState::EffectPending { .. }));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    let settled = runtime.resume(&run_id).await.expect("later settlement");
+    let settled = runtime
+        .resume(&run_id, &program)
+        .await
+        .expect("later settlement");
     assert_eq!(settled.head_sequence(), 4);
     assert!(matches!(settled.state(), RunViewState::Succeeded(_)));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -746,60 +420,56 @@ async fn pending_yields_once_and_a_later_settlement_closes_the_same_prepare() {
 async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
     let calls = Arc::new(AtomicUsize::new(0));
     let store = Arc::new(MemoryStore::new());
-    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-            let calls = Arc::clone(&calls);
-            move |effect_id, _command_value_ref, command| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                let effect_id = effect_id.clone();
-                let value = command.value;
-                Box::pin(async move {
-                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                        effect_id,
-                        value,
-                        accepted: true,
-                    }))
-                })
-            }
-        })
-        .expect("adapter");
-    let runtime = Runtime::new(builder.finish(), store);
+    let builder = Resources::<Installed>::effect({
+        let calls = Arc::clone(&calls);
+        move |effect_id, _command_value_ref, command| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let effect_id = effect_id.clone();
+            let value = command.value;
+            Box::pin(async move {
+                Ok(EffectAdapterOutcome::Settled(EffectEvidence {
+                    effect_id,
+                    value,
+                    accepted: true,
+                }))
+            })
+        }
+    });
+    let runtime = Runtime::new(store);
     let run_id = RunId::from_digest(DigestBytes::from_array([31; 32]));
+    let program = compile(
+        EntryPointId::new("mfm.test.runtime/reject-effect@1").expect("entry point"),
+        &EffectSource::new(Binding { route: 8 }),
+        &Number {
+            value: PREPARATION_FAILURE_SENTINEL,
+        },
+        &builder,
+        ProgramLimits::new(0),
+    )
+    .expect("Program");
     assert!(matches!(
-        runtime
-            .start(
-                run_id.clone(),
-                expand_program(
-                    EntryPointId::new("mfm.test.runtime/reject-effect@1").expect("entry point"),
-                    &EffectProgram,
-                    &Number {
-                        value: PREPARATION_FAILURE_SENTINEL
+            runtime
+                .start(
+    run_id.clone(),
+    &program,
+    &Number {
+                        value: PREPARATION_FAILURE_SENTINEL,
                     },
-                    ProgramLimits::new(0),
-                )
-                .expect("Program"),
-                Number {
-                    value: PREPARATION_FAILURE_SENTINEL,
+    )
+                .await,
+            Err(InvocationFailure::Execution {
+                error: RuntimeError::Native {
+                    operation: mfm_runtime::Operation::EffectPrepare,
+                    stage: mfm_runtime::Stage::Execute,
+                    cause,
                 },
-            )
-            .await,
-        Err(InvocationFailure::Execution {
-            error: RuntimeError::Native {
-                operation: mfm_runtime::Operation::EffectPrepare,
-                stage: mfm_runtime::Stage::Execute,
-                cause,
-            },
-            ..
-        }) if cause.details().as_value()["input"] == PREPARATION_FAILURE_SENTINEL
-    ));
+                ..
+            }) if cause.details().as_value()["input"] == PREPARATION_FAILURE_SENTINEL
+        ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         runtime
-            .read(&run_id)
+            .read(&run_id, &program)
             .await
             .expect("genesis")
             .head_sequence(),
@@ -807,53 +477,47 @@ async fn effect_preparation_and_evidence_failures_append_no_conclusion() {
     );
 
     let invalid_store = Arc::new(MemoryStore::new());
-    let mut invalid_builder = RuntimeAssemblyBuilder::new().expect("builder");
-    invalid_builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    invalid_builder
-        .register_effect_adapter::<Mutation, _, _>(
-            Binding { route: 8 },
-            |_effect_id, _command_value_ref, command| {
-                let value = command.value;
-                Box::pin(async move {
-                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                        effect_id: EffectId::from_digest(DigestBytes::from_array([99; 32])),
-                        value,
-                        accepted: true,
-                    }))
-                })
-            },
-        )
-        .expect("adapter");
-    let invalid = Runtime::new(invalid_builder.finish(), invalid_store);
+    let invalid_builder =
+        Resources::<Installed>::effect(|_effect_id, _command_value_ref, command| {
+            let value = command.value;
+            Box::pin(async move {
+                Ok(EffectAdapterOutcome::Settled(EffectEvidence {
+                    effect_id: EffectId::from_digest(DigestBytes::from_array([99; 32])),
+                    value,
+                    accepted: true,
+                }))
+            })
+        });
+    let invalid = Runtime::new(invalid_store);
     let invalid_run_id = RunId::from_digest(DigestBytes::from_array([32; 32]));
+    let invalid_program = compile(
+        EntryPointId::new("mfm.test.runtime/invalid-evidence@1").expect("entry point"),
+        &EffectSource::new(Binding { route: 8 }),
+        &Number { value: 2 },
+        &invalid_builder,
+        ProgramLimits::new(0),
+    )
+    .expect("Program");
     assert!(matches!(
-        invalid
-            .start(
-                invalid_run_id.clone(),
-                expand_program(
-                    EntryPointId::new("mfm.test.runtime/invalid-evidence@1").expect("entry point"),
-                    &EffectProgram,
-                    &Number { value: 2 },
-                    ProgramLimits::new(0),
-                )
-                .expect("Program"),
-                Number { value: 2 },
-            )
-            .await,
-        Err(InvocationFailure::Execution {
-            error: RuntimeError::Native {
-                operation: mfm_runtime::Operation::EffectBind,
-                stage: mfm_runtime::Stage::Execute,
-                cause,
-            },
-            ..
-        }) if cause.details().as_value() == &serde_json::json!("evidence_binding")
-    ));
+            invalid
+                .start(
+    invalid_run_id.clone(),
+    &invalid_program,
+    &Number { value: 2 },
+    )
+                .await,
+            Err(InvocationFailure::Execution {
+                error: RuntimeError::Native {
+                    operation: mfm_runtime::Operation::EffectBind,
+                    stage: mfm_runtime::Stage::Execute,
+                    cause,
+                },
+                ..
+            }) if cause.details().as_value() == &serde_json::json!("evidence_binding")
+        ));
     assert_eq!(
         invalid
-            .read(&invalid_run_id)
+            .read(&invalid_run_id, &invalid_program)
             .await
             .expect("pending")
             .head_sequence(),
@@ -865,36 +529,30 @@ fn effect_runtime_with_counting_adapter(
     store: Arc<dyn Store>,
     calls: Arc<AtomicUsize>,
     effect_ids: Arc<std::sync::Mutex<Vec<EffectId>>>,
-) -> Runtime {
-    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    builder
-        .register_effect_adapter::<Mutation, _, _>(
-            Binding { route: 8 },
-            move |effect_id, _command_value_ref, command| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                let effect_id = effect_id.clone();
-                effect_ids
-                    .lock()
-                    .expect("effect ids")
-                    .push(effect_id.clone());
-                let value = command.value;
-                Box::pin(async move {
-                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                        effect_id,
-                        value,
-                        accepted: true,
-                    }))
-                })
-            },
-        )
-        .expect("adapter");
-    Runtime::new(builder.finish(), store)
+) -> (Runtime, Resources<Installed>) {
+    let builder = Resources::<Installed>::effect(move |effect_id, _command_value_ref, command| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        let effect_id = effect_id.clone();
+        effect_ids
+            .lock()
+            .expect("effect ids")
+            .push(effect_id.clone());
+        let value = command.value;
+        Box::pin(async move {
+            Ok(EffectAdapterOutcome::Settled(EffectEvidence {
+                effect_id,
+                value,
+                accepted: true,
+            }))
+        })
+    });
+    (Runtime::new(store), builder)
 }
 
-fn retained_effect_reader(frames: Vec<Vec<u8>>, calls: Arc<AtomicUsize>) -> Runtime {
+fn retained_effect_reader(
+    frames: Vec<Vec<u8>>,
+    calls: Arc<AtomicUsize>,
+) -> (Runtime, Resources<Installed>) {
     effect_runtime_with_counting_adapter(
         Arc::new(RetainedStore(frames)),
         calls,
@@ -958,7 +616,7 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
         let calls = Arc::new(AtomicUsize::new(0));
         let effect_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
         let store = Arc::new(ScriptedStore::new([(sequence, action)]));
-        let runtime = effect_runtime_with_counting_adapter(
+        let (runtime, builder) = effect_runtime_with_counting_adapter(
             store,
             Arc::clone(&calls),
             Arc::clone(&effect_ids),
@@ -966,13 +624,14 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
         let run_id = RunId::from_digest(DigestBytes::from_array(
             [u8::try_from(33 + offset).expect("RunId byte"); 32],
         ));
-        let program = expand_program(
+        let program = compile(
             EntryPointId::new(format!("mfm.test.runtime/ambiguous-{}@1", name))
                 .expect("entry point"),
-            &EffectProgram,
+            &EffectSource::new(Binding { route: 8 }),
             &Number {
                 value: u64::try_from(offset + 3).expect("input value"),
             },
+            &builder,
             ProgramLimits::new(0),
         )
         .expect("Program");
@@ -981,8 +640,8 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
             runtime
                 .start(
                     run_id.clone(),
-                    program,
-                    Number {
+                    &program,
+                    &Number {
                         value: u64::try_from(offset + 3).expect("input value"),
                     },
                 )
@@ -1000,7 +659,10 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
             "{} adapter entries after start",
             name
         );
-        let after_start = runtime.read(&run_id).await.expect("retained prefix");
+        let after_start = runtime
+            .read(&run_id, &program)
+            .await
+            .expect("retained prefix");
         assert_eq!(
             after_start.head_sequence(),
             expected_head_after_start,
@@ -1021,7 +683,10 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
             _ => unreachable!("fixture head"),
         }
 
-        let completed = runtime.resume(&run_id).await.expect("ambiguous recovery");
+        let completed = runtime
+            .resume(&run_id, &program)
+            .await
+            .expect("ambiguous recovery");
         assert_eq!(completed.head_sequence(), 4, "{} terminal head", name);
         assert!(
             matches!(completed.state(), RunViewState::Succeeded(_)),
@@ -1049,7 +714,7 @@ async fn effect_not_inserted_returns_the_winner_without_entering_its_new_visit()
             sequence,
             AppendAction::RetainThenNotInserted,
         )]));
-        let runtime = effect_runtime_with_counting_adapter(
+        let (runtime, builder) = effect_runtime_with_counting_adapter(
             store,
             Arc::clone(&calls),
             Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1057,19 +722,17 @@ async fn effect_not_inserted_returns_the_winner_without_entering_its_new_visit()
         let run_id = RunId::from_digest(DigestBytes::from_array(
             [u8::try_from(38 + offset).expect("RunId byte"); 32],
         ));
+        let program = compile(
+            EntryPointId::new(format!("mfm.test.runtime/not-inserted-{sequence}@1"))
+                .expect("entry point"),
+            &EffectSource::new(Binding { route: 8 }),
+            &Number { value: 8 },
+            &builder,
+            ProgramLimits::new(0),
+        )
+        .expect("Program");
         let completed = runtime
-            .start(
-                run_id.clone(),
-                expand_program(
-                    EntryPointId::new(format!("mfm.test.runtime/not-inserted-{sequence}@1"))
-                        .expect("entry point"),
-                    &EffectProgram,
-                    &Number { value: 8 },
-                    ProgramLimits::new(0),
-                )
-                .expect("Program"),
-                Number { value: 8 },
-            )
+            .start(run_id.clone(), &program, &Number { value: 8 })
             .await
             .expect("converged Effect");
         assert_eq!(completed.head_sequence(), sequence);
@@ -1090,7 +753,7 @@ async fn effect_not_inserted_returns_the_winner_without_entering_its_new_visit()
         } else {
             assert!(matches!(completed.state(), RunViewState::Succeeded(_)));
         }
-        let resumed = runtime.resume(&run_id).await.unwrap();
+        let resumed = runtime.resume(&run_id, &program).await.unwrap();
         assert_eq!(resumed.head_sequence(), 4);
         assert!(matches!(resumed.state(), RunViewState::Succeeded(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -1118,44 +781,36 @@ async fn operational_failures_are_audited_while_internal_failures_preserve_prepa
     {
         let calls = Arc::new(AtomicUsize::new(0));
         let store = Arc::new(MemoryStore::new());
-        let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-        builder
-            .register_effect::<Mutate, Mutation>()
-            .expect("Effect State");
-        builder
-            .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
-                let calls = Arc::clone(&calls);
-                move |_effect_id, _command_value_ref, _command| {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    match mode {
-                        FailureMode::Unavailable => Box::pin(async {
-                            Err(AdapterError::Operational(OperationalFailure::Unavailable))
-                        }),
-                        FailureMode::Internal => Box::pin(async {
-                            Err(AdapterError::Invariant(InvocationDiagnostic::from_fields("state_internal", "operational_failures_are_audited_while_internal_failures_preserve_prepare", &(AdapterRejected), None)))
-                        }),
-                        FailureMode::Panic => panic!("adapter panic"),
-                    }
+        let builder = Resources::<Installed>::effect({
+            let calls = Arc::clone(&calls);
+            move |_effect_id, _command_value_ref, _command| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                match mode {
+                    FailureMode::Unavailable => Box::pin(async {
+                        Err(AdapterError::Operational(OperationalFailure::Unavailable))
+                    }),
+                    FailureMode::Internal => Box::pin(async {
+                        Err(AdapterError::Invariant(InvocationDiagnostic::from_fields("state_internal", "operational_failures_are_audited_while_internal_failures_preserve_prepare", &(AdapterRejected), None)))
+                    }),
+                    FailureMode::Panic => panic!("adapter panic"),
                 }
-            })
-            .expect("adapter");
-        let runtime = Runtime::new(builder.finish(), store);
+            }
+        });
+        let runtime = Runtime::new(store);
         let run_id = RunId::from_digest(DigestBytes::from_array(
             [u8::try_from(40 + offset).expect("RunId byte"); 32],
         ));
+        let program = compile(
+            EntryPointId::new(format!("mfm.test.runtime/adapter-failure-{offset}@1"))
+                .expect("entry point"),
+            &EffectSource::new(Binding { route: 8 }),
+            &Number { value: 9 },
+            &builder,
+            ProgramLimits::new(0),
+        )
+        .expect("Program");
         let result = runtime
-            .start(
-                run_id.clone(),
-                expand_program(
-                    EntryPointId::new(format!("mfm.test.runtime/adapter-failure-{offset}@1"))
-                        .expect("entry point"),
-                    &EffectProgram,
-                    &Number { value: 9 },
-                    ProgramLimits::new(0),
-                )
-                .expect("Program"),
-                Number { value: 9 },
-            )
+            .start(run_id.clone(), &program, &Number { value: 9 })
             .await;
         match mode {
             FailureMode::Unavailable => assert!(matches!(
@@ -1187,7 +842,7 @@ async fn operational_failures_are_audited_while_internal_failures_preserve_prepa
             }
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        let pending = runtime.read(&run_id).await.expect("pending view");
+        let pending = runtime.read(&run_id, &program).await.expect("pending view");
         assert_eq!(
             pending.head_sequence(),
             if matches!(mode, FailureMode::Unavailable) {
@@ -1218,29 +873,31 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
         } else {
             ScriptedStore::new(actions)
         });
-        let runtime = effect_runtime_with_counting_adapter(
+        let (runtime, builder) = effect_runtime_with_counting_adapter(
             store.clone(),
             Arc::new(AtomicUsize::new(0)),
             Arc::new(std::sync::Mutex::new(Vec::new())),
         );
         let run_id =
             RunId::from_digest(DigestBytes::from_array([if settled { 37 } else { 36 }; 32]));
-        let program = expand_program(
+        let program = compile(
             EntryPointId::new("mfm.test.runtime/retained-effect@1").unwrap(),
-            &EffectProgram,
+            &EffectSource::new(Binding { route: 8 }),
             &Number { value: 7 },
+            &builder,
             ProgramLimits::new(0),
         )
         .unwrap();
         let hot = runtime
-            .start(run_id.clone(), program, Number { value: 7 })
+            .start(run_id.clone(), &program, &Number { value: 7 })
             .await
             .unwrap();
         let frames = store.snapshot();
         let calls = Arc::new(AtomicUsize::new(0));
-        let reader = retained_effect_reader(frames.clone(), calls.clone());
+        let (reader, reader_resources) = retained_effect_reader(frames.clone(), calls.clone());
+        let program = load(program.canonical_bytes(), &reader_resources).unwrap();
         assert_eq!(
-            reader.read(&run_id).await.unwrap().head_digest(),
+            reader.read(&run_id, &program).await.unwrap().head_digest(),
             hot.head_digest()
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -1289,9 +946,10 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
             let mut changed_frames = frames.clone();
             *changed_frames.last_mut().unwrap() = changed.canonical_bytes().to_vec();
             let calls = Arc::new(AtomicUsize::new(0));
-            let reader = retained_effect_reader(changed_frames, calls.clone());
+            let (reader, reader_resources) = retained_effect_reader(changed_frames, calls.clone());
+            let program = load(program.canonical_bytes(), &reader_resources).unwrap();
             assert!(
-                reader.read(&run_id).await.is_err(),
+                reader.read(&run_id, &program).await.is_err(),
                 "settled={settled}, mutation={mutation}"
             );
             assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -1304,70 +962,59 @@ async fn retained_effect_facts_are_validated_without_adapter_io() {
 #[tokio::test]
 async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
     let store = Arc::new(MemoryStore::new());
-    let mut unavailable_builder = RuntimeAssemblyBuilder::new().expect("builder");
-    unavailable_builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    unavailable_builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, |_, _, _| {
-            Box::pin(async { Err(AdapterError::Operational(OperationalFailure::Unavailable)) })
-        })
-        .expect("adapter");
-    let unavailable = Runtime::new(unavailable_builder.finish(), store.clone());
+    let unavailable_builder = Resources::<Installed>::effect(|_, _, _| {
+        Box::pin(async { Err(AdapterError::Operational(OperationalFailure::Unavailable)) })
+    });
+    let unavailable = Runtime::new(store.clone());
     let run_id = RunId::from_digest(DigestBytes::from_array([35; 32]));
+    let program = compile(
+        EntryPointId::new("mfm.test.runtime/concurrent-effect@1").expect("entry point"),
+        &EffectSource::new(Binding { route: 8 }),
+        &Number { value: 5 },
+        &unavailable_builder,
+        ProgramLimits::new(0),
+    )
+    .expect("Program");
     assert!(matches!(
         unavailable
-            .start(
-                run_id.clone(),
-                expand_program(
-                    EntryPointId::new("mfm.test.runtime/concurrent-effect@1").expect("entry point"),
-                    &EffectProgram,
-                    &Number { value: 5 },
-                    ProgramLimits::new(0),
-                )
-                .expect("Program"),
-                Number { value: 5 },
-            )
+            .start(run_id.clone(), &program, &Number { value: 5 },)
             .await,
         Err(InvocationFailure::RecoveryStopped { .. })
     ));
 
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let ids = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    builder
-        .register_effect::<Mutate, Mutation>()
-        .expect("Effect State");
-    builder
-        .register_effect_adapter::<Mutation, _, _>(Binding { route: 8 }, {
+    let builder = Resources::<Installed>::effect({
+        let barrier = Arc::clone(&barrier);
+        let ids = Arc::clone(&ids);
+        move |effect_id, _command_value_ref, command| {
+            let effect_id = effect_id.clone();
+            let value = command.value;
+            ids.lock().expect("ids").push(effect_id.clone());
             let barrier = Arc::clone(&barrier);
-            let ids = Arc::clone(&ids);
-            move |effect_id, _command_value_ref, command| {
-                let effect_id = effect_id.clone();
-                let value = command.value;
-                ids.lock().expect("ids").push(effect_id.clone());
-                let barrier = Arc::clone(&barrier);
-                Box::pin(async move {
-                    barrier.wait().await;
-                    Ok(EffectAdapterOutcome::Settled(EffectEvidence {
-                        effect_id,
-                        value,
-                        accepted: true,
-                    }))
-                })
-            }
-        })
-        .expect("adapter");
-    let runtime = Arc::new(Runtime::new(builder.finish(), store));
+            Box::pin(async move {
+                barrier.wait().await;
+                Ok(EffectAdapterOutcome::Settled(EffectEvidence {
+                    effect_id,
+                    value,
+                    accepted: true,
+                }))
+            })
+        }
+    });
+    let runtime = Arc::new(Runtime::new(store));
+    let program = load(program.canonical_bytes(), &builder).unwrap();
     let left = {
         let runtime = Arc::clone(&runtime);
+        let program = program.clone();
         let run_id = run_id.clone();
-        tokio::spawn(async move { runtime.resume(&run_id).await })
+        tokio::spawn(async move { runtime.resume(&run_id, &program).await })
     };
     let right = {
         let runtime = Arc::clone(&runtime);
+        let program = program.clone();
         let run_id = run_id.clone();
-        tokio::spawn(async move { runtime.resume(&run_id).await })
+        tokio::spawn(async move { runtime.resume(&run_id, &program).await })
     };
     let left = left.await.expect("left task").expect("left resume");
     let right = right.await.expect("right task").expect("right resume");
@@ -1383,7 +1030,14 @@ async fn concurrent_pending_effect_callers_converge_on_one_conclusion() {
         }
     }
     assert!(left.head_sequence() == 6 || right.head_sequence() == 6);
-    assert_eq!(runtime.read(&run_id).await.unwrap().head_sequence(), 6);
+    assert_eq!(
+        runtime
+            .read(&run_id, &program)
+            .await
+            .unwrap()
+            .head_sequence(),
+        6
+    );
     let ids = ids.lock().expect("ids");
     assert_eq!(ids.len(), 2);
     assert_eq!(ids[0], ids[1]);
@@ -1408,31 +1062,28 @@ async fn store_failures_preserve_mechanical_source_and_unknown_observation() {
     .into_iter()
     .enumerate()
     {
-        let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-        builder.register_value::<Number>().expect("root value");
-        let runtime = Runtime::new(
-            builder.finish(),
-            Arc::new(FaultStore {
-                failure: failure.clone(),
-            }),
-        );
+        let builder = Resources::<Installed>::default();
+        let runtime = Runtime::new(Arc::new(FaultStore {
+            failure: failure.clone(),
+        }));
         let run_id = RunId::from_digest(DigestBytes::from_array(
             [u8::try_from(offset + 10).expect("RunId byte"); 32],
         ));
         assert!(matches!(
-            runtime.read(&run_id).await,
+            runtime.program_document(&run_id).await,
             Err(InvocationFailure::Execution { error: RuntimeError::Store(source), last_observed: None, .. }) if source == failure
         ));
-        let program = expand_program(
+        let program = compile(
             EntryPointId::new("mfm.test.runtime/fault@1").expect("entry point"),
-            &EmptyProgram,
+            &Identity::<Number>::default(),
             &Number { value: 1 },
+            &builder,
             ProgramLimits::new(0),
         )
         .expect("Program");
         assert_store_recording(
             runtime
-                .start(run_id, program, Number { value: 1 })
+                .start(run_id, &program, &Number { value: 1 })
                 .await
                 .err()
                 .unwrap(),

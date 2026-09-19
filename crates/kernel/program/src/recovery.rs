@@ -1,18 +1,14 @@
 //! Typed recovery policy contracts and checked authoring descriptors.
 
-use std::marker::PhantomData;
-
 use mfm_ids::{StableId, StatePosition};
 use mfm_values::MfmValue;
 
-use crate::{Never, ProgramError, Result};
+use crate::{Never, Result};
 
 mod bindings;
-pub(crate) mod scope;
-pub use scope::Checkpoint;
 pub(crate) mod defaults;
-pub use bindings::{HandlerAbi, HandlerBinding, MapAbi, MapBinding, PolicyParams};
-pub use defaults::{Occurrence, StandardRecovery, Stop};
+pub use bindings::{HandlerAbi, HandlerBinding, PolicyParams};
+pub use defaults::{StandardRecovery, Stop};
 
 /// Intrinsic recovery semantics of an exact error contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -249,56 +245,6 @@ pub trait Handler: Send + Sync + 'static {
     ) -> std::result::Result<RecoveryRequest, mfm_values::InvocationDiagnostic>;
 }
 
-/// Explicit typed consuming conversion for root domain failure.
-pub trait ValueMap: Send + Sync + 'static {
-    /// Exact input contract.
-    type Input: MfmValue;
-    /// Exact output contract.
-    type Output: MfmValue;
-    /// Immutable checked parameters.
-    type Params: MfmValue;
-    /// Returns the conversion implementation identity.
-    fn implementation_id() -> Result<StableId>;
-    /// Converts one value without IO. Original incident retention belongs to Runtime.
-    fn apply(
-        params: &Self::Params,
-        value: Self::Input,
-    ) -> std::result::Result<Self::Output, mfm_values::InvocationDiagnostic>;
-}
-
-/// Identity conversion without requiring values to implement Clone.
-pub struct Identity<T>(PhantomData<T>);
-
-impl<T: MfmValue> ValueMap for Identity<T> {
-    type Input = T;
-    type Output = T;
-    type Params = NoParams;
-    fn implementation_id() -> Result<StableId> {
-        StableId::new("mfm.recovery.identity@1").map_err(|_| ProgramError::InvalidContract)
-    }
-    fn apply(_: &NoParams, value: T) -> std::result::Result<T, mfm_values::InvocationDiagnostic> {
-        Ok(value)
-    }
-}
-
-/// Unreachable root conversion for States with no domain failure.
-pub struct FromNever<T>(PhantomData<T>);
-
-impl<T: MfmValue> ValueMap for FromNever<T> {
-    type Input = Never;
-    type Output = T;
-    type Params = NoParams;
-    fn implementation_id() -> Result<StableId> {
-        StableId::new("mfm.recovery.from-never@1").map_err(|_| ProgramError::InvalidContract)
-    }
-    fn apply(
-        _: &NoParams,
-        value: Never,
-    ) -> std::result::Result<T, mfm_values::InvocationDiagnostic> {
-        match value {}
-    }
-}
-
 /// Checked unit configuration for parameterless policies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NoParams;
@@ -312,7 +258,7 @@ impl MfmValue for NoParams {
             mfm_ids::DigestAlgorithm::Sha256JcsV1,
             *mfm_canonical::raw_content_digest(b"mfm.recovery.no-params.v1").digest(),
         )
-        .map_err(|_| mfm_values::ValueError::InvalidSchemaIdentity)
+        .map_err(mfm_values::ValueError::Identity)
     }
     fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
         mfm_values::framework_value_descriptor(

@@ -1,0 +1,18 @@
+error[E0271]: type mismatch resolving `<(Pure<Validate>, Pure<Finish>) as AuthoringSource>::Output == Observed`
+  --> tests/ui/source_vector.rs:10:13
+   |
+10 |       accepts(&vec![(
+   |  _____-------_^
+   | |     |
+   | |     required by a bound introduced by this call
+11 | |         Pure::<Validate>::default(),
+12 | |         Pure::<Finish>::default(),
+13 | |     )]);
+   | |______^ expected `Observed`, found `Report`
+   |
+   = note: required for `std::vec::Vec<(mfm_program::Pure<contracts::Validate>, mfm_program::Pure<contracts::Finish>)>` to implement `mfm_program::AuthoringSource`
+note: required by a bound in `accepts`
+  --> tests/ui/source_vector.rs:7:15
+   |
+ 7 | fn accepts<S: AuthoringSource>(_: &S) {}
+   |               ^^^^^^^^^^^^^^^ required by this bound in `accepts`

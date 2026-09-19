@@ -29,6 +29,53 @@ impl SizeLimitExceeded {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for SizeLimitExceeded {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            actual: u64,
+            limit: u64,
+        }
+        let wire = <Wire as serde::Deserialize>::deserialize(deserializer)?;
+        Self::check(wire.actual, wire.limit)
+            .err()
+            .ok_or_else(|| serde::de::Error::custom("size violation must exceed its limit"))
+    }
+}
+
+impl crate::MfmValue for SizeLimitExceeded {
+    fn schema_descriptor() -> crate::Result<crate::SchemaDescriptor> {
+        crate::framework_value_descriptor(
+            "mfm-values",
+            Self::semantic_id()?,
+            "mfm.size-limit-exceeded",
+            crate::SchemaShape::named_struct(vec![
+                crate::FieldDescriptor::required(
+                    "actual",
+                    crate::SchemaShape::UnsignedInteger { bits: 64 },
+                ),
+                crate::FieldDescriptor::required(
+                    "limit",
+                    crate::SchemaShape::UnsignedInteger { bits: 64 },
+                ),
+            ])?,
+            "mfm_values::SizeLimitExceeded",
+        )
+    }
+
+    fn semantic_id() -> crate::Result<mfm_ids::SemanticTypeId> {
+        mfm_ids::SemanticTypeId::new(
+            "mfm.values",
+            "size-limit-exceeded",
+            "1",
+            mfm_ids::DigestAlgorithm::Sha256JcsV1,
+            mfm_canonical::sha256_digest_bytes(b"semantic:mfm.values:size-limit-exceeded:1"),
+        )
+        .map_err(crate::ValueError::Identity)
+    }
+}
+
 /// Resource measured by a Runtime size-limit failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]

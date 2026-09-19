@@ -4,17 +4,12 @@ use std::num::NonZeroU64;
 use mfm_canonical::CanonicalBytes;
 use mfm_ids::{ContentRef, EffectId, StableId};
 use mfm_program_derive::MfmValue;
-use mfm_values::{canonicalize_mfm_value, MfmValue as MfmValueTrait};
+use mfm_values::{canonicalize_mfm_value, MfmValue as MfmValueTrait, Unsigned256};
 use serde::de;
 use serde::{Deserialize, Serialize};
 
 use crate::EvmDomainError;
 
-/// Exact Effect capability identity for EIP-1559 transaction execution.
-pub const EVM_TRANSACTION_EFFECT_CAPABILITY_ID: &str = "mfm.evm.capability.execute-transaction@2";
-
-const MAX_U256_DECIMAL: &str =
-    "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 /// Maximum EVM contract-creation initcode bytes admitted by one command.
 pub const MAX_EVM_INITCODE_BYTES: usize = 49_152;
 /// Maximum EVM call calldata bytes admitted by one command or anchored Read.
@@ -117,8 +112,8 @@ impl From<EvmHash> for String {
 }
 
 /// Canonical decimal unsigned EVM word in the inclusive range `0..=2^256-1`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, MfmValue)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, MfmValue)]
+#[serde(try_from = "String", into = "String")]
 #[mfm(
     namespace = "mfm.evm",
     name = "uint256",
@@ -127,55 +122,57 @@ impl From<EvmHash> for String {
 )]
 pub struct EvmU256 {
     #[mfm(minimum_bytes = 1, maximum_bytes = 78)]
-    value: String,
+    value: Unsigned256,
 }
 
 impl EvmU256 {
     /// Parses a canonical decimal integer no greater than `2^256-1`.
     pub fn new(value: impl Into<String>) -> Result<Self, EvmDomainError> {
-        let value = value.into();
-        let canonical = value == "0"
-            || (!value.starts_with('0') && value.bytes().all(|byte| byte.is_ascii_digit()));
-        if value.is_empty()
-            || !canonical
-            || value.len() > MAX_U256_DECIMAL.len()
-            || (value.len() == MAX_U256_DECIMAL.len() && value.as_str() > MAX_U256_DECIMAL)
-        {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(Self { value })
+        Ok(Self {
+            value: Unsigned256::new(value)?,
+        })
     }
 
     /// Constructs one quantity from a `u64`.
     pub fn from_u64(value: u64) -> Self {
         Self {
-            value: value.to_string(),
+            value: Unsigned256::from_u64(value),
         }
     }
 
     /// Returns the canonical decimal spelling.
     pub fn as_str(&self) -> &str {
-        &self.value
+        self.value.as_str()
     }
 
     /// Returns this value as `u128` when it fits that checked range.
     pub fn to_u128(&self) -> Option<u128> {
-        self.value.parse().ok()
+        self.value.to_u128()
     }
 }
 
 impl fmt::Display for EvmU256 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
+        self.value.fmt(formatter)
     }
 }
 
-impl<'de> Deserialize<'de> for EvmU256 {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+impl Serialize for EvmU256 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.value.serialize(serializer)
+    }
+}
+
+impl TryFrom<String> for EvmU256 {
+    type Error = EvmDomainError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<EvmU256> for String {
+    fn from(value: EvmU256) -> Self {
+        value.value.into_string()
     }
 }
 
@@ -529,6 +526,22 @@ pub struct EvmTransactionSettlement {
 }
 
 impl EvmTransactionSettlement {
+    /// Qualifies settlement against the exact retained native command and Effect identity.
+    pub fn qualify(
+        &self,
+        effect_id: &EffectId,
+        command: &PreparedEvmTransaction,
+    ) -> Result<(), mfm_values::InvocationDiagnostic> {
+        if self.effect_id() != effect_id
+            || self.nonce() != command.reserved().reservation().nonce()
+            || self.transaction_hash() != command.transaction_hash()
+            || !stages::action_matches(command.reserved().command(), self)
+        {
+            return Err(stages::invariant("project_transaction_settlement"));
+        }
+        Ok(())
+    }
+
     /// Constructs one successful contract-creation settlement.
     pub fn created(
         effect_id: EffectId,
@@ -604,13 +617,17 @@ pub(crate) fn validate_input_bytes(input: &[u8], maximum: usize) -> Result<(), E
 pub(crate) mod recipes;
 pub use recipes::*;
 
-mod facts;
-pub use facts::*;
+mod native;
+mod read;
+pub use native::*;
+pub use read::EvmContractReadImplementation;
 
+mod artifact;
+mod config;
 mod parameters;
+pub use artifact::{EvmScalarContractArtifact, ScalarArtifactError};
+pub use config::{Eip1559Options, EvmContractExecutionConfig};
 use parameters::TransactionParameters;
-mod plans;
-pub use plans::*;
 
 mod stages;
 pub use stages::*;

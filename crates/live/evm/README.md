@@ -1,10 +1,11 @@
 # mfm-evm-live
 
-Direct provider registration for the three balance-oriented EVM Read capabilities, the generic
-anchored contract-call Read, and the development-only durable EVM transaction Effect. The balance
-callbacks and anchored calls share the typed `EvmReadProvider` boundary. Anchored calls bind an
-`EvmTransactionRoute`;
-transaction execution binds the complete route, authority epoch, and sender account.
+`EvmResources<Sources>` binds native balance and anchored Reads and durable transaction Effects
+through the compiler's existing environment/discovery contracts. Checked records own public route
+facts and explicit provider, signer and authority handles. Construction and cold loading match the
+retained binding exactly before IO. Public views derive from these records without a second cache.
+`client::portfolio` owns native configuration admission, native rendering, configuration-free
+publication and exact failure decoding; it has no production Runtime dependency.
 
 `EvmAdapterLocator` is one bounded private HTTP(S) URL. It implements neither `Debug`, `Display`,
 nor serialization. Non-HTTP schemes, fragments, and control characters are rejected.
@@ -12,7 +13,7 @@ nor serialization. Non-HTTP schemes, fragments, and control characters are rejec
 `JsonRpcEvmProvider` implements both the observational `EvmReadProvider` and the separate
 typed `EvmTransactionProvider`. It owns one endpoint URL, one 10-second per-request deadline, a
 512 KiB response bound, exact JSON-RPC IDs, and no proxy, redirect, referer propagation, or automatic
-retry. The transaction facet exposes only chain/genesis, pending nonce, receipt, canonical block,
+retry. The transaction facet exposes only chain/genesis, pending nonce, receipt, transaction presence, canonical block,
 and exact-raw submission operations. JSON values are discarded at ingress in favor of checked
 private-field types.
 
@@ -58,15 +59,13 @@ retained bytes, invalid or high-S signatures, wrong hashes, recovered-key mismat
 mismatches. Keccak helpers expose only checked public hash/address results; private key custody
 remains in `mfm-keystore`.
 
-`register_evm_transaction_adapters` registers reservation, preparation, and execution callbacks.
-`register_evm_transaction_states::<C, R>` separately installs the four exact executable State
-ABIs and injected failure map for an accumulated context and recipe; it binds no IO and performs no Program planning. Reservation captures binding,
-custody, and provider; preparation captures binding, custody, and signer; execution captures no
-signer. Reservation loads first, then observes pending nonce if absent. Preparation loads first,
-signs only when necessary, and validates the immutable first winner returned by custody.
-Execution decodes exact retained wire, recovers sender, checks receipt before submission, and
-submits at most once per invocation. CPU work runs in immediately awaited blocking closures;
-provider, signer, and custody IO stay outside them.
+Reservation loads first, then observes pending nonce if absent. Preparation loads first, signs only
+when necessary, and validates the immutable first winner returned by custody. Execution never invokes
+the signer: it qualifies retained wire, checks receipt and transaction-known status, and submits the
+exact retained bytes only if both observations are absent. Pending awaits one private second before
+returning. Cancellation discards no retained authority; the next invocation reconciles again. No
+Runtime timer, background task, rebasing, or automatic provider-error retry is introduced. CPU work
+uses immediately awaited blocking closures; provider, signer and custody IO stays outside them.
 
 Transaction adapter errors retain provider causes inside `EvmTransactionOperationalError::Provider`;
 custody and signer failures are AuthorityUnavailable and SignerUnavailable respectively. Local
@@ -88,24 +87,21 @@ would add unrelated transport and RPC surface, so `alloy-provider`, `alloy-netwo
 `alloy-rpc-types`, and `alloy-signer` remain excluded. Verify with
 `cargo tree -e features -p mfm-evm-live`.
 
-The crate registers callbacks and the reusable transaction State family, and owns no planner,
-binding wrapper, response echo, secret custody, provider retry loop, or production finality configuration. Production
-`ComposedRuntime`, CLI, REST, and configuration do not register these transaction or anchored-route
-callbacks. Settlement is only the canonical-receipt policy of the pinned non-reorging Reth
-development fixture.
-
-Capability injection is not live registration: it is deterministic domain-owned Program topology
-applied before Runtime sees the Program. This crate never invokes Operation or injection hooks.
+Installed source roots derive their codecs, handlers, supporting States and inspection metadata.
+Publishing a new executable source is the explicit downstream discovery boundary; consumers can
+recompose installed components without registration changes. Capability injection is deterministic
+native-owned Program topology, completed before Runtime sees the Program. Settlement remains the
+canonical-receipt policy of the pinned Reth development fixture.
 
 Success envelopes require an explicit `result` field even for nullable receipt and block results.
 An omitted field is Unavailable; explicit null alone represents absence. Malformed receipt ingress
 retains Prepared without submission, and a later caller resumes the same exact bytes.
 
-Authority unavailable evidence moves unchanged into EvmTransactionOperationalError v3; internal
-InvocationDiagnostic moves unchanged into AdapterError::Invariant. The v3 owner also carries signer
+Authority unavailable evidence moves unchanged into EvmTransactionOperationalError v4; internal
+InvocationDiagnostic moves unchanged into AdapterError::Invariant. The v4 owner also carries signer
 cause data. Existing SigningError::Invalid/Failed produce only their actual kind and sign/signer
 context, without invented deeper causes. SigningError::SignFailed moves its executing keystore
 operation/stage/cause evidence unchanged into SignerUnavailable, classified Retryable.
-The new owner schema changes dependent assembly contracts. This implementation performs no deployed
+The new owner schema changes dependent native ABIs. This implementation performs no deployed
 assembly replacement; v2 runs require an explicit handling decision before rollout, without rewriting
 acknowledged history or adding a dual decoder.

@@ -83,7 +83,13 @@ generate a RunId before their one Application call. HTTP status represents reque
 CLI exit 1 represents a runnable, Effect-pending, awaiting-recovery, awaiting-interpretation or
 durably failed run. REST returns 200 for each successfully observed phase. Runnable views carry
 position/visit and tagged reason; pending views carry the exact EffectId. Failed views embed the
-canonical `report` and its reference, while successful views embed the canonical `value`.
+canonical `report` and its reference, while successful views embed the canonical semantic `value`.
+Portfolio views additionally carry `product` on success or `product_failure` for supported domain
+failures. Native clients decode exact retained contracts and Portfolio checks collection agreement;
+REST only serializes the shared model. Operational originals stay in their exact reports. A rejected
+projection uses the existing reporting-error path with its causal diagnostic and known head, without
+appending another outcome. Native configuration admission errors and construction/association errors
+also retain their supplied diagnostics; neither is authenticated integrity evidence.
 Provider failures retain method, stage, status/code, ordered source messages and selected fields
 under the upstream diagnostic trust contract. MFM does not append its own secrets or full
 requests/connections; dependency-supplied text is retained without a diagnostic quota.

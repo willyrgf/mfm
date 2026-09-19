@@ -3,12 +3,65 @@
 //!
 //! Read evidence binds to both the typed intent and its exact qualified value reference. Effect
 //! evidence binds to Runtime's Effect identity and typed command.
+//!
+//! See the [capability authoring guide](https://github.com/willyrgf/mfm/blob/main/docs/capability-authoring.md)
+//! for consumer, State and native implementation responsibilities.
 
 use mfm_ids::{ContentRef, EffectId, StableId};
-use mfm_values::MfmValue;
+use mfm_values::{InvocationDiagnostic, MfmValue};
+
+/// Phase-preserving synchronous native codecs.
+pub mod codec;
+
+/// Invocation-only failure phase; Runtime supplies the originating execution operation.
+#[derive(Debug, thiserror::Error)]
+pub enum CallbackFailure {
+    /// Exact native materialization failed before invocation.
+    #[error("callback decoding failed")]
+    Decode(InvocationDiagnostic),
+    /// Callback construction, polling or a local invariant failed.
+    #[error("callback execution failed")]
+    Execute(InvocationDiagnostic),
+    /// Canonical encoding failed, including a panicking encoding job.
+    #[error("callback encoding failed")]
+    Encode(InvocationDiagnostic),
+}
+
+mod native;
+pub use native::*;
+
+impl CallbackFailure {
+    /// Retains a nested codec phase when crossing a construction or ordinary State diagnostic boundary.
+    pub fn into_diagnostic(self) -> InvocationDiagnostic {
+        let (phase, cause) = match self {
+            Self::Execute(cause) => return cause,
+            Self::Decode(cause) => ("decode", cause),
+            Self::Encode(cause) => ("encode", cause),
+        };
+        InvocationDiagnostic::from_fields("native_codec", phase, &cause, cause.size())
+    }
+}
+
+impl From<InvocationDiagnostic> for CallbackFailure {
+    fn from(cause: InvocationDiagnostic) -> Self {
+        Self::Execute(cause)
+    }
+}
 
 /// Result type for capability contract operations.
 pub type Result<T> = std::result::Result<T, CapabilityError>;
+
+/// Result of one successful Effect adapter invocation.
+///
+/// Nonterminal progress is represented without fabricating evidence or
+/// concluding the durable Effect prepare.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectAdapterOutcome<E> {
+    /// The Effect remains pending and can be resumed by a later caller.
+    Pending,
+    /// The Effect produced terminal evidence that Runtime must bind and interpret.
+    Settled(E),
+}
 
 /// A capability-owned operational cause or an unrecoverable local invariant failure.
 ///
@@ -49,9 +102,12 @@ impl<E: std::error::Error + 'static> std::error::Error for AdapterError<E> {
 }
 
 /// Redaction-safe capability contract error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityError {
+    /// Invalid checked identity, with its original grammar rejection.
+    #[error("capability identity is invalid")]
+    Identity(#[from] mfm_ids::CheckedStringError),
     /// A static capability identity is invalid.
     #[error("capability contract is invalid")]
     InvalidContract,
@@ -62,8 +118,6 @@ pub enum CapabilityError {
 
 /// One observational capability with a closed intent/evidence contract.
 pub trait ReadCapabilityContract: Send + Sync + 'static {
-    /// Reviewed bounded operational failure returned by the adapter.
-    type OperationalError: MfmValue;
     /// Canonical intent passed to the trusted adapter.
     type Intent: MfmValue;
     /// Closed evidence returned by the trusted adapter.
@@ -76,14 +130,13 @@ pub trait ReadCapabilityContract: Send + Sync + 'static {
     fn bind_evidence(
         intent_value_ref: &ContentRef,
         intent: &Self::Intent,
+        native_evidence_ref: &ContentRef,
         evidence: &Self::Evidence,
     ) -> std::result::Result<(), mfm_values::InvocationDiagnostic>;
 }
 
 /// One mutating capability with a closed command/evidence contract.
 pub trait EffectCapabilityContract: Send + Sync + 'static {
-    /// Reviewed bounded operational failure returned by the adapter.
-    type OperationalError: MfmValue;
     /// Complete nonce-free command passed to the trusted adapter.
     type Command: MfmValue;
     /// Closed evidence returned by the trusted adapter.
@@ -95,7 +148,9 @@ pub trait EffectCapabilityContract: Send + Sync + 'static {
     /// Proves that evidence settles the exact Effect and command.
     fn bind_evidence(
         effect_id: &EffectId,
+        command_ref: &ContentRef,
         command: &Self::Command,
+        native_evidence_ref: &ContentRef,
         evidence: &Self::Evidence,
     ) -> std::result::Result<(), mfm_values::InvocationDiagnostic>;
 }

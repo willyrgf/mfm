@@ -112,7 +112,7 @@ async fn candidate_probe_yields_latest_without_recovery_and_preserves_exclusion_
             probes: std::sync::Mutex::new(Vec::new()),
         });
         let calls = Arc::new(AtomicUsize::new(0));
-        let runtime = runtime(
+        let (runtime, resources) = runtime(
             store.clone(),
             Arc::new(AtomicBool::new(false)),
             calls.clone(),
@@ -121,15 +121,16 @@ async fn candidate_probe_yields_latest_without_recovery_and_preserves_exclusion_
             value: 9,
             continuation: "candidate custody".into(),
         };
-        let program = mfm_program::expand_program(
+        let program = mfm_program::compile(
             EntryPointId::new("mfm.test/current-collision@1").unwrap(),
-            &Flow,
+            &Flow::default(),
             &input,
+            &resources,
             ProgramLimits::new(1),
         )
         .unwrap();
         let run = RunId::from_digest(DigestBytes::from_array([130 + index as u8; 32]));
-        let result = runtime.start(run.clone(), program.clone(), input).await;
+        let result = runtime.start(run.clone(), &program, &input).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(*store.probes.lock().unwrap(), vec![Some(3)]);
         match collision {
@@ -150,8 +151,8 @@ async fn candidate_probe_yields_latest_without_recovery_and_preserves_exclusion_
                 let repeated = runtime
                     .start(
                         run.clone(),
-                        program,
-                        Input {
+                        &program,
+                        &Input {
                             value: 9,
                             continuation: "candidate custody".into(),
                         },
@@ -164,24 +165,45 @@ async fn candidate_probe_yields_latest_without_recovery_and_preserves_exclusion_
                     value: 10,
                     continuation: "different admission".into(),
                 };
-                let different_program = mfm_program::expand_program(
+                let different_program = mfm_program::compile(
                     EntryPointId::new("mfm.test/current-collision@1").unwrap(),
-                    &Flow,
+                    &Flow::default(),
                     &different,
+                    &resources,
                     ProgramLimits::new(1),
                 )
                 .unwrap();
-                assert!(matches!(
-                    runtime
-                        .start(run.clone(), different_program, different)
-                        .await,
-                    Err(InvocationFailure::Execution {
-                        error: RuntimeError::AdmissionConflict,
-                        ..
-                    })
-                ));
+                let conflict = runtime
+                    .start(run.clone(), &different_program, &different)
+                    .await
+                    .err()
+                    .unwrap();
+                let InvocationFailure::Execution {
+                    error:
+                        RuntimeError::Native {
+                            operation: mfm_runtime::Operation::Restore,
+                            stage: mfm_runtime::Stage::Decode,
+                            cause,
+                        },
+                    last_observed: None,
+                    ..
+                } = conflict
+                else {
+                    panic!("different complete Program must reject before observation")
+                };
+                assert_eq!(cause.operation(), "restore_frames");
+                let identity = &cause.details().as_value()["identity"];
+                assert_eq!(identity["field"], "program_ref");
                 assert_eq!(
-                    runtime.read(&run).await.unwrap().head_digest(),
+                    identity["expected"],
+                    serde_json::to_value(different_program.content_ref()).unwrap()
+                );
+                assert_eq!(
+                    identity["actual"],
+                    serde_json::to_value(program.content_ref()).unwrap()
+                );
+                assert_eq!(
+                    runtime.read(&run, &program).await.unwrap().head_digest(),
                     observed.head_digest()
                 );
                 assert_eq!(calls.load(Ordering::SeqCst), 1);

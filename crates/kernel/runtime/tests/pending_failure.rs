@@ -1,12 +1,10 @@
+use mfm_capabilities::EffectAdapterOutcome;
 use mfm_capabilities::{AdapterError, EffectCapabilityContract};
 use mfm_ids::{ContentRef, DigestBytes, EffectId, EntryPointId, RunId, StableId};
 use mfm_journal::{decode_frame, seal_frame};
 use mfm_program::*;
 use mfm_program_derive::MfmValue;
-use mfm_runtime::{
-    EffectAdapterOutcome, InvocationFailure, RecoveryOutcome, RunViewState, Runtime,
-    RuntimeAssemblyBuilder, RuntimeError,
-};
+use mfm_runtime::{InvocationFailure, RecoveryOutcome, RunViewState, Runtime, RuntimeError};
 use mfm_store::{MemoryStore, Store};
 use mfm_values::InvocationDiagnostic;
 use serde::{Deserialize, Serialize};
@@ -31,14 +29,15 @@ struct Submit;
 impl EffectCapabilityContract for Submit {
     type Command = Number;
     type Evidence = Number;
-    type OperationalError = Cause;
     fn contract_id() -> mfm_capabilities::Result<StableId> {
         StableId::new("mfm.test.audited-submit@1")
             .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
     }
     fn bind_evidence(
         _: &EffectId,
+        _: &ContentRef,
         command: &Number,
+        _: &ContentRef,
         evidence: &Number,
     ) -> std::result::Result<(), InvocationDiagnostic> {
         if command.value == evidence.value {
@@ -73,20 +72,9 @@ impl EffectState<Submit> for Execute {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
-impl CapabilityInjection<Execute> for Submit {
-    type Setup = Number;
+impl EffectSelection<Submit> for Execute {
     type ExpandedInput = Number;
     type ExpandedOutput = Number;
-    type ExpandedFailure = Never;
-    type FailureMap = Identity<Never>;
-    fn failure_map_params(_: &Number) -> mfm_program::Result<NoParams> {
-        Ok(NoParams)
-    }
-    fn original_binding_ref(setup: &Number) -> mfm_program::Result<ContentRef> {
-        mfm_values::canonicalize_mfm_value(setup)
-            .map(|(_, reference)| reference)
-            .map_err(|_| ProgramError::InvalidContract)
-    }
 }
 struct RetryUnknown;
 impl Handler for RetryUnknown {
@@ -103,45 +91,166 @@ impl Handler for RetryUnknown {
         Ok(RecoveryRequest::RetryState)
     }
 }
-struct Flow;
-impl Operation for Flow {
-    type Input = Number;
-    type Output = Number;
-    type Failure = Never;
-    fn validate_input(&self, _: &Number) -> mfm_program::Result<()> {
-        Ok(())
-    }
-    fn expand(
-        &self,
-        scope: &mut OperationExpansion<Number, Number, Never>,
-    ) -> mfm_program::Result<()> {
-        scope.handler(HandlerBinding::new::<RetryUnknown>(NoParams)?)?;
-        scope.allowances(RecoveryAllowances::new(1, 0))?;
-        scope.effect::<Execute, Submit, Identity<Never>>(
-            &Number { value: 1 },
-            NoParams,
-            Occurrence::new(),
-        )
+struct SubmitFlow;
+impl OperationDefinition for SubmitFlow {
+    type Body = ResolvedEffect<Execute, Submit, Native<Cause>>;
+}
+impl Plan<Number> for SubmitFlow {
+    type Config = Number;
+    fn plan<'a>(&'a self, input: &'a Number) -> mfm_program::Result<(&'a Number, Self::Body)> {
+        Ok((input, ResolvedEffect::new(Number { value: 1 })))
     }
 }
-
-struct StopFlow;
-impl Operation for StopFlow {
-    type Input = Number;
-    type Output = Number;
-    type Failure = Never;
-    fn validate_input(&self, _: &Number) -> mfm_program::Result<()> {
-        Ok(())
+impl Default for SubmitFlow {
+    fn default() -> Self {
+        Self
     }
-    fn expand(
-        &self,
-        scope: &mut OperationExpansion<Number, Number, Never>,
-    ) -> mfm_program::Result<()> {
-        scope.handler(HandlerBinding::new::<StandardRecovery>(NoParams)?)?;
-        scope.effect::<Execute, Submit, Identity<Never>>(
-            &Number { value: 1 },
-            NoParams,
-            Occurrence::new(),
+}
+struct Policy<H, const RETRIES: u32>(std::marker::PhantomData<fn() -> H>);
+impl<H: Handler, const RETRIES: u32> OperationDefaults for Policy<H, RETRIES> {
+    type Handler = H;
+    type Targets = ();
+}
+impl<C: ?Sized, H: Handler<Params = NoParams>, const RETRIES: u32> ResolveDefaults<C>
+    for Policy<H, RETRIES>
+{
+    fn resolve(_: &C) -> mfm_program::Result<PolicyValues<H>> {
+        Ok(PolicyValues {
+            handler: Some(NoParams),
+            retries: Some(RETRIES),
+            restarts: Some(0),
+        })
+    }
+}
+type Flow = Operation<SubmitFlow, Policy<RetryUnknown, 1>>;
+type StopFlow = Operation<SubmitFlow, Policy<StandardRecovery, 0>>;
+
+// The native protocol is an identity codec here; the observable boundary is the scripted IO.
+struct Native<E>(std::marker::PhantomData<fn() -> E>);
+impl<C, E> mfm_capabilities::EffectImplementation<C> for Native<E>
+where
+    C: EffectCapabilityContract<Command = Number, Evidence = Number>,
+    E: mfm_values::MfmValue,
+{
+    type Binding = Number;
+    type NativeCommand = Number;
+    type NativeEvidence = Number;
+    type OperationalError = E;
+    fn implementation_id() -> mfm_capabilities::Result<StableId> {
+        Ok(StableId::new("mfm.test.pending-native@1")?)
+    }
+    fn decode_command(
+        _: &ContentRef,
+        _: &ContentRef,
+        _: &Number,
+        reference: &ContentRef,
+        command: &Number,
+    ) -> std::result::Result<(ContentRef, Number), mfm_capabilities::CallbackFailure> {
+        Ok((
+            reference.clone(),
+            Number {
+                value: command.value,
+            },
+        ))
+    }
+    fn project_evidence(
+        _: &ContentRef,
+        _: &ContentRef,
+        _: &Number,
+        effect: &EffectId,
+        command_ref: &ContentRef,
+        command: &Number,
+        _: &Number,
+        evidence: &Number,
+        original: &mfm_values::Object,
+    ) -> std::result::Result<Number, mfm_capabilities::CallbackFailure> {
+        C::bind_evidence(effect, command_ref, command, original.value_ref(), evidence)?;
+        Ok(Number {
+            value: evidence.value,
+        })
+    }
+}
+impl<S, C, E> InjectEffect<S, C> for Native<E>
+where
+    C: EffectCapabilityContract<Command = Number, Evidence = Number>,
+    S: EffectSelection<
+        C,
+        Input = Number,
+        Output = Number,
+        ExpandedInput = Number,
+        ExpandedOutput = Number,
+    >,
+    E: mfm_values::MfmValue,
+{
+    type Prefix = Identity<Number>;
+    type Suffix = Identity<Number>;
+    fn surround(_: &Number) -> mfm_program::Result<(Self::Prefix, Self::Suffix)> {
+        Ok((Identity::default(), Identity::default()))
+    }
+}
+type EffectFuture<E> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = std::result::Result<EffectAdapterOutcome<Number>, AdapterError<E>>,
+            > + Send,
+    >,
+>;
+type Invocation<E> = dyn Fn(EffectId, ContentRef, Number) -> EffectFuture<E> + Send + Sync;
+struct Resources<S, E = Cause> {
+    invoke: Arc<Invocation<E>>,
+    source: std::marker::PhantomData<fn() -> S>,
+}
+impl<S, E> Resources<S, E> {
+    fn new(
+        invoke: impl Fn(EffectId, ContentRef, Number) -> EffectFuture<E> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            invoke: Arc::new(invoke),
+            source: std::marker::PhantomData,
+        }
+    }
+}
+impl<S: 'static, E: 'static> ProgramEnvironment for Resources<S, E> {
+    type Sources = S;
+}
+impl<S, C, E> BindEffect<C, Native<E>> for Resources<S, E>
+where
+    S: 'static,
+    C: EffectCapabilityContract<Command = Number, Evidence = Number>,
+    E: mfm_values::MfmValue,
+{
+    type Adapter = Self;
+    fn bind_effect(&self, binding: &Number) -> std::result::Result<Self, InvocationDiagnostic> {
+        assert_eq!(binding.value, 1);
+        Ok(Self {
+            invoke: Arc::clone(&self.invoke),
+            source: std::marker::PhantomData,
+        })
+    }
+}
+impl<S: 'static, E: 'static> mfm_capabilities::EffectAdapter<Number, Number, E>
+    for Resources<S, E>
+{
+    fn invoke<'a>(
+        &'a self,
+        effect: &'a EffectId,
+        _: &'a ContentRef,
+        reference: &'a ContentRef,
+        command: &'a Number,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = std::result::Result<EffectAdapterOutcome<Number>, AdapterError<E>>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        (self.invoke)(
+            effect.clone(),
+            reference.clone(),
+            Number {
+                value: command.value,
+            },
         )
     }
 }
@@ -156,3 +265,6 @@ mod audit;
 mod phase;
 #[path = "pending_failure/protocol.rs"]
 mod protocol;
+
+#[path = "pending_failure/capacity.rs"]
+mod capacity;

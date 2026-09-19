@@ -1,11 +1,10 @@
 #![warn(missing_docs)]
-//! Immutable typed Runtime assembly and caller-driven run progression.
+//! Caller-driven progression of complete immutable Programs.
 //!
 //! Runtime owns the current continuation and its local validation. Store supplies
 //! admission/latest rows, Journal decodes their opaque envelopes, and the associated
 //! executable runs only the currently selected State.
 
-mod assembly;
 mod engine;
 mod error;
 mod report;
@@ -21,8 +20,6 @@ use mfm_ids::{ContentDigest, ExecutionPosition, RunId, StatePosition};
 use mfm_program::Program;
 use mfm_store::Store;
 use mfm_values::MfmValue;
-
-pub use assembly::{RuntimeAssembly, RuntimeAssemblyBuilder};
 
 /// Result type for Runtime operations.
 pub type Result<T> = std::result::Result<T, RuntimeError>;
@@ -43,9 +40,6 @@ pub enum RuntimeError {
     /// Retained physical, structural, or semantic history is invalid.
     #[error("retained run history is invalid")]
     InvalidHistory,
-    /// Static assembly and Program associations are incomplete or inconsistent.
-    #[error("runtime assembly is incompatible")]
-    IncompatibleAssembly,
     /// A measured size exceeded its limit.
     #[error("{resource} {size}")]
     SizeLimit {
@@ -88,6 +82,16 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
+    pub(crate) fn callback(operation: Operation, error: mfm_capabilities::CallbackFailure) -> Self {
+        use mfm_capabilities::CallbackFailure;
+        let (stage, cause) = match error {
+            CallbackFailure::Decode(cause) => (Stage::Decode, cause),
+            CallbackFailure::Execute(cause) => (Stage::Execute, cause),
+            CallbackFailure::Encode(cause) => (Stage::Encode, cause),
+        };
+        Self::at(operation, stage, cause)
+    }
+
     pub(crate) fn native(operation: Operation, cause: mfm_values::InvocationDiagnostic) -> Self {
         Self::Native {
             operation,
@@ -149,18 +153,6 @@ fn store_size(error: &mfm_store::StoreError) -> Option<SizeViolation> {
 pub(crate) fn check_size(resource: SizeResource, actual: u64, limit: u64) -> Result<()> {
     mfm_values::SizeLimitExceeded::check(actual, limit)
         .map_err(|size| RuntimeError::SizeLimit { resource, size })
-}
-
-/// Result of one successful Effect adapter invocation.
-///
-/// Nonterminal progress is represented without fabricating evidence or
-/// concluding the durable Effect prepare.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EffectAdapterOutcome<E> {
-    /// The Effect remains pending and can be resumed by a later caller.
-    Pending,
-    /// The Effect produced terminal evidence that Runtime must bind and interpret.
-    Settled(E),
 }
 
 /// Durable public state of a run.
@@ -247,58 +239,181 @@ impl RunView {
         &self.head_digest
     }
 
+    /// Borrows terminal success, absent at nonterminal or failed heads.
+    pub fn success(&self) -> Option<&Object> {
+        match &self.state {
+            RunViewState::Succeeded(value) => Some(value),
+            _ => None,
+        }
+    }
+    /// Borrows terminal original failure, absent at other heads.
+    pub fn failure(&self) -> Option<&FailureReport> {
+        match &self.state {
+            RunViewState::Failed(report) => Some(report),
+            _ => None,
+        }
+    }
+
     /// Returns the semantic state at this snapshot.
     pub const fn state(&self) -> &RunViewState {
         &self.state
     }
 }
 
-/// Runtime over one immutable assembly and one mechanical Store.
+/// Checked terminal outcome of one caller-supplied run.
+pub struct ExecutionResult {
+    run_id: RunId,
+    outcome: TerminalOutcome,
+}
+enum TerminalOutcome {
+    Success(Object),
+    Failure(Box<FailureReport>),
+}
+impl ExecutionResult {
+    /// Returns the caller-supplied run identity.
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+    /// Borrows the exact success Object, if execution succeeded.
+    pub fn success(&self) -> Option<&Object> {
+        match &self.outcome {
+            TerminalOutcome::Success(value) => Some(value),
+            _ => None,
+        }
+    }
+    /// Borrows the complete original failure report, if execution failed.
+    pub fn failure(&self) -> Option<&FailureReport> {
+        match &self.outcome {
+            TerminalOutcome::Failure(report) => Some(report),
+            _ => None,
+        }
+    }
+}
+
+/// Runtime over one mechanical Store; each invocation supplies its complete Program.
 pub struct Runtime {
-    assembly: RuntimeAssembly,
     store: Arc<dyn Store>,
 }
 
 impl Runtime {
     /// Constructs a Runtime over an already-open Store.
-    pub fn new(assembly: RuntimeAssembly, store: Arc<dyn Store>) -> Self {
-        Self { assembly, store }
+    pub fn new(store: Arc<dyn Store>) -> Self {
+        Self { store }
     }
 
-    /// Admits an exact checked Program and typed C0, then progresses it.
-    pub async fn start<T: MfmValue>(
+    /// Executes a complete Program to terminal success or original failure.
+    ///
+    /// Admission encodes the borrowed input synchronously exactly once. Subsequent pure work
+    /// uses immediately awaited blocking jobs. Pending adapters must await readiness or backoff
+    /// within their IO boundary; Runtime adds no polling timer or implicit append retry.
+    pub async fn execute<I: MfmValue>(
         &self,
         run_id: RunId,
-        program: Program,
-        c0: T,
+        program: &Program,
+        input: &I,
+    ) -> std::result::Result<ExecutionResult, InvocationFailure> {
+        let view = self
+            .admit(run_id, program, input, engine::Advancement::Terminal)
+            .await?;
+        let outcome = match view.state {
+            RunViewState::Succeeded(value) => TerminalOutcome::Success(value),
+            RunViewState::Failed(report) => TerminalOutcome::Failure(Box::new(report)),
+            _ => {
+                return Err(InvocationFailure::Execution {
+                    run_id: view.run_id.clone(),
+                    error: RuntimeError::InvalidHistory,
+                    last_observed: Some(view),
+                })
+            }
+        };
+        Ok(ExecutionResult {
+            run_id: view.run_id,
+            outcome,
+        })
+    }
+
+    /// Admits a borrowed input and progresses to the next deliberate manual boundary.
+    ///
+    /// Shares execute's synchronous admission encoding exception. Pending and committed recovery
+    /// decisions yield a checked view; resume explicitly progresses that retained continuation.
+    pub async fn start<I: MfmValue>(
+        &self,
+        run_id: RunId,
+        program: &Program,
+        input: &I,
     ) -> std::result::Result<RunView, InvocationFailure> {
-        engine::start(
-            self.assembly.handle(),
+        self.admit(run_id, program, input, engine::Advancement::Manual)
+            .await
+    }
+
+    async fn admit<I: MfmValue>(
+        &self,
+        run_id: RunId,
+        program: &Program,
+        input: &I,
+        advancement: engine::Advancement,
+    ) -> std::result::Result<RunView, InvocationFailure> {
+        let encoded =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Object::from_value(input)));
+        let admission_error = |cause| InvocationFailure::Execution {
+            run_id: run_id.clone(),
+            error: RuntimeError::at(Operation::Admission, Stage::Encode, cause),
+            last_observed: None,
+        };
+        let initial = match encoded {
+            Ok(Ok(initial)) => initial,
+            Ok(Err(cause)) => {
+                return Err(admission_error(cause.into_diagnostic("encode_admission")))
+            }
+            Err(_) => {
+                return Err(admission_error(
+                    mfm_values::InvocationDiagnostic::from_fields(
+                        "task_failure",
+                        "encode_admission",
+                        &"panicked",
+                        None,
+                    ),
+                ))
+            }
+        };
+        engine::admit(
             Arc::clone(&self.store),
             run_id,
-            program,
-            c0,
+            program.clone(),
+            initial,
+            advancement,
         )
         .await
+    }
+
+    /// Returns the retained Program Object from one qualified Store snapshot.
+    ///
+    /// Checks frame envelopes, admission shape, metadata bounds and Program reference linkage.
+    /// Does not resolve executable code or resources, validate the current continuation, or
+    /// produce a checked RunView. Program owns canonical document validation. Failure retains
+    /// the requested RunId with no last observation; this read never appends or obtains authority.
+    pub async fn program_document(
+        &self,
+        run_id: &RunId,
+    ) -> std::result::Result<Object, InvocationFailure> {
+        engine::program_document(&self.store, run_id.clone()).await
     }
 
     /// Loads and progresses an existing run.
-    pub async fn resume(&self, run_id: &RunId) -> std::result::Result<RunView, InvocationFailure> {
-        engine::resume(
-            self.assembly.handle(),
-            Arc::clone(&self.store),
-            run_id.clone(),
-        )
-        .await
+    pub async fn resume(
+        &self,
+        run_id: &RunId,
+        program: &Program,
+    ) -> std::result::Result<RunView, InvocationFailure> {
+        engine::resume(program.clone(), Arc::clone(&self.store), run_id.clone()).await
     }
 
     /// Loads and validates the current record without executing a State or adapter.
-    pub async fn read(&self, run_id: &RunId) -> std::result::Result<RunView, InvocationFailure> {
-        engine::read(
-            self.assembly.handle(),
-            Arc::clone(&self.store),
-            run_id.clone(),
-        )
-        .await
+    pub async fn read(
+        &self,
+        run_id: &RunId,
+        program: &Program,
+    ) -> std::result::Result<RunView, InvocationFailure> {
+        engine::read(program.clone(), Arc::clone(&self.store), run_id.clone()).await
     }
 }

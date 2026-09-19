@@ -1,5 +1,10 @@
 # E2E design: compose existing Operations and States
 
+Historical design proposal. The current contract is [RFC_REFACTOR_DSL.md](../RFC_REFACTOR_DSL.md);
+its native Pending pacing supersedes the Runtime deadline proposed here. Production acceptance
+and the exact replacement mapping are recorded in [dsl-phase-b.md](dsl-phase-b.md).
+
+
 The [DSL refactoring RFC](../RFC_REFACTOR_DSL.md) supersedes this document's authoring and execution
 API sketches. It specifies typed State/Operation construction, capability-owned typed injection,
 compilation to Program, automatic executable association, and original failures without mandatory
@@ -113,7 +118,7 @@ typed numeric slot. Neither selection construction nor the authoring closure exe
 ## Injection and standalone States
 
 Injection already belongs to `CapabilityInjection<S>`. The current
-[`OperationExpansion::effect` and `read`](../crates/kernel/program/src/authoring.rs) directly expand
+`OperationExpansion::effect` and `read` (at revision `660285d0`) directly expand
 an exact capability/State pair through its prefix, designated State, and successful suffix. There
 is no requirement for each selected Effect State inside a composition to have a child Operation
 wrapper. For a transaction selection the expansion includes:
@@ -337,7 +342,7 @@ must not become production operation options.
 
 The starting assertions live in
 [the Effect E2E](../crates/live/evm/tests/evm_contract_effect_e2e.rs), with fixture composition in
-[contract_workflow.rs](../crates/live/evm/tests/support/contract_workflow.rs) and focused protocol
+the removed `contract_workflow.rs` fixture (available at revision `660285d0`) and focused protocol
 coverage in [transaction_tests.rs](../crates/live/evm/src/transaction_tests.rs). Before deletion,
 record each old assertion's executable replacement and managed owner. Future cases never justify
 removing currently exercised guarantees. The managed `effect-e2e` identity can initially remain while

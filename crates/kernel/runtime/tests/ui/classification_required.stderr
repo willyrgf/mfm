@@ -1,39 +1,46 @@
 error[E0277]: the trait bound `mfm_program::NoParams: ClassifyError` is not satisfied
-  --> tests/ui/classification_required.rs:56:23
-   |
-56 |         .read::<Read, Observation, Identity<Never>>(
-   |                       ^^^^^^^^^^^ the trait `ClassifyError` is not implemented for `mfm_program::NoParams`
-   |
+   --> tests/ui/classification_required.rs:120:9
+    |
+118 |     compile(
+    |     ------- required by a bound introduced by this call
+119 |         EntryPointId::new("mfm.test/unclassified@1").unwrap(),
+120 |         &Source::new(NoParams),
+    |         ^^^^^^^^^^^^^^^^^^^^^^ the trait `ClassifyError` is not implemented for `mfm_program::NoParams`
+    |
 help: the trait `ClassifyError` is implemented for `mfm_program::Never`
-  --> $WORKSPACE/crates/kernel/program/src/recovery.rs
-   |
-   | impl ClassifyError for Never {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `mfm_program::OperationExpansion::<I, O, F>::read`
-  --> $WORKSPACE/crates/kernel/program/src/authoring.rs
-   |
-   |     pub fn read<S, C, M>(
-   |            ---- required by a bound in this associated function
+   --> $WORKSPACE/crates/kernel/program/src/recovery.rs
+    |
+    | impl ClassifyError for Never {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: required for `mfm_program::ResolvedRead<Observe, Observation, Native>` to implement `mfm_program::construction::Walk<mfm_program::NoParams, _>`
+note: required by a bound in `mfm_program::compile`
+   --> $WORKSPACE/crates/kernel/program/src/construction.rs
+    |
+    | pub fn compile<S, R>(
+    |        ------- required by a bound in this function
 ...
-   |         C::OperationalError: ClassifyError,
-   |                              ^^^^^^^^^^^^^ required by this bound in `OperationExpansion::<I, O, F>::read`
+    |     S: AuthoringSource + Walk<<S as AuthoringSource>::Input, R>,
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `compile`
 
 error[E0277]: the trait bound `mfm_program::NoParams: ClassifyError` is not satisfied
-  --> tests/ui/classification_required.rs:66:32
-   |
-66 |         .register_read::<Read, Observation>()
-   |                                ^^^^^^^^^^^ the trait `ClassifyError` is not implemented for `mfm_program::NoParams`
-   |
+   --> tests/ui/classification_required.rs:126:17
+    |
+126 |     load(b"{}", &Resources).unwrap();
+    |     ----        ^^^^^^^^^^ the trait `ClassifyError` is not implemented for `mfm_program::NoParams`
+    |     |
+    |     required by a bound introduced by this call
+    |
 help: the trait `ClassifyError` is implemented for `mfm_program::Never`
-  --> $WORKSPACE/crates/kernel/program/src/recovery.rs
-   |
-   | impl ClassifyError for Never {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `RuntimeAssemblyBuilder::register_read`
-  --> src/assembly.rs
-   |
-   |     pub fn register_read<S, C>(&mut self) -> Result<()>
-   |            ------------- required by a bound in this associated function
+   --> $WORKSPACE/crates/kernel/program/src/recovery.rs
+    |
+    | impl ClassifyError for Never {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: required for `mfm_program::ResolvedRead<Observe, Observation, Native>` to implement `mfm_program::construction::Discover<Resources>`
+note: required by a bound in `mfm_program::load`
+   --> $WORKSPACE/crates/kernel/program/src/construction.rs
+    |
+    | pub fn load<R>(canonical_program: &[u8], resources: &R) -> Result<Program>
+    |        ---- required by a bound in this function
 ...
-   |         C::OperationalError: mfm_program::ClassifyError,
-   |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `RuntimeAssemblyBuilder::register_read`
+    |     R::Sources: Discover<R>,
+    |                 ^^^^^^^^^^^ required by this bound in `load`

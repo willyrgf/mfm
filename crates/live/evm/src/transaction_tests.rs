@@ -315,6 +315,7 @@ enum ProviderOperation {
     ChainInstance,
     PendingNonce(EvmAddress),
     Receipt(EvmHash),
+    TransactionKnown(EvmHash),
     CanonicalBlock(EvmU256),
     SubmitRaw(Vec<u8>),
 }
@@ -322,6 +323,7 @@ enum ProviderOperation {
 struct ScriptedProvider {
     chain: EvmChainInstance,
     pending: u64,
+    known: Mutex<VecDeque<Result<bool, AdapterError<EvmOperationalError>>>>,
     receipts: Mutex<VecDeque<Result<Option<ProviderReceipt>, AdapterError<EvmOperationalError>>>>,
     canonical: EvmBlockAnchor,
     submissions: Mutex<VecDeque<Result<Option<EvmHash>, AdapterError<EvmOperationalError>>>>,
@@ -339,6 +341,7 @@ impl ScriptedProvider {
                 expected_genesis_hash: EvmHash::new(GENESIS).expect("genesis"),
             },
             pending: 7,
+            known: Mutex::new(VecDeque::new()),
             receipts: Mutex::new(VecDeque::new()),
             canonical: EvmBlockAnchor {
                 number: EvmU256::from_u64(9),
@@ -413,6 +416,16 @@ impl EvmTransactionProvider for ScriptedProvider {
                 .expect("receipts lock")
                 .pop_front()
                 .unwrap_or(Ok(None))
+        })
+    }
+
+    fn transaction_known<'a>(&'a self, hash: &'a EvmHash) -> ProviderFuture<'a, bool> {
+        Box::pin(async move {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(ProviderOperation::TransactionKnown(hash.clone()));
+            self.known.lock().unwrap().pop_front().unwrap_or(Ok(false))
         })
     }
 
@@ -503,71 +516,123 @@ async fn fixture() -> (
     )
 }
 
-// Registering a second transaction adapter for the same binding must fail instead of replacing
-// its signer, authority or provider.
 #[tokio::test]
-async fn transaction_registration_uses_the_complete_binding_as_its_only_key() {
-    let (_owner, signer, binding, _command, _effect_id) = fixture().await;
-    let authority: Arc<dyn EvmTransactionAuthority> =
-        Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
-    let provider: Arc<dyn EvmTransactionProvider> = Arc::new(ScriptedProvider::new(1337));
-    let signer: Arc<dyn Secp256k1Signer> = signer;
-    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    register_evm_transaction_adapters(
-        &mut builder,
-        binding.clone(),
-        Arc::clone(&signer),
-        Arc::clone(&authority),
-        Arc::clone(&provider),
-    )
-    .expect("transaction callback");
-    assert!(matches!(
-        register_evm_transaction_adapters(&mut builder, binding, signer, authority, provider),
-        Err(mfm_runtime::RuntimeError::IncompatibleAssembly)
-    ));
-    builder.finish();
+async fn transaction_resources_reject_duplicate_bindings_without_replacing_handles() {
+    let (_owner, signer, binding, _, _) = fixture().await;
+    let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
+    let provider = Arc::new(ScriptedProvider::new(1337));
+    let resource =
+        crate::EvmTransactionResource::new(binding, signer, authority, provider.clone()).unwrap();
+    assert!(crate::EvmResources::<()>::new(vec![], vec![resource.clone(), resource]).is_err());
+    assert!(provider.operations().is_empty());
 }
 
-use mfm_evm::{CheckedCreatePlan, CreateAt, EvmTransaction};
+use mfm_chain::transaction::{
+    PreparedTransaction, TransactionEffect, TransactionEvidence, TransactionRequest,
+    TransactionResult,
+};
+use mfm_evm::{EvmTransactionImplementation, EvmTransactionRecipe};
 use mfm_ids::{EntryPointId, RunId};
-use mfm_program::expand_program;
-use mfm_program_derive::{MfmContext, MfmValue};
+use mfm_program::{
+    Classification, ClassifyError, EffectSelection, EffectState, ProposedStateOutcome,
+    ResolvedEffect, State,
+};
+use mfm_program_derive::MfmValue;
 use mfm_runtime::{RunViewState, Runtime};
 use mfm_store::{MemoryStore, Store};
+use mfm_values::InvocationDiagnostic;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, MfmValue, MfmContext)]
-#[context(namespace = "mfm.test.transaction.recovery")]
-struct RecoveryContext<T> {
-    transaction: T,
+#[derive(Clone, Serialize, Deserialize, MfmValue)]
+struct RecoveryRequest {
+    transaction: Eip1559TransactionCommand,
     unrelated: EvmU256,
 }
-type InitialContext = RecoveryContext<CheckedCreatePlan>;
-type RecoveryRecipe = CreateAt<RecoveryContextTransactionSlot>;
-
-fn runtime(
+impl TransactionRequest for RecoveryRequest {
+    type Applied = EvmU256;
+}
+impl EvmTransactionRecipe for RecoveryRequest {
+    fn command(&self) -> Result<Eip1559TransactionCommand, mfm_capabilities::CallbackFailure> {
+        Ok(self.transaction.clone())
+    }
+    fn applied(
+        &self,
+        _: &EvmTransactionSettlement,
+    ) -> Result<EvmU256, mfm_capabilities::CallbackFailure> {
+        Ok(self.unrelated.clone())
+    }
+}
+#[derive(Serialize, Deserialize, MfmValue)]
+struct Reverted;
+impl ClassifyError for Reverted {
+    fn classify(&self) -> Classification {
+        Classification::Permanent
+    }
+}
+struct ExecuteRecovery;
+impl State for ExecuteRecovery {
+    type Input = PreparedTransaction<RecoveryRequest>;
+    type Output = TransactionEvidence<EvmU256>;
+    type Failure = Reverted;
+    fn state_id() -> mfm_program::Result<StableId> {
+        Ok(StableId::new("mfm.test.execute-recovery@1")?)
+    }
+}
+impl EffectSelection<TransactionEffect<RecoveryRequest>> for ExecuteRecovery {
+    type ExpandedInput = RecoveryRequest;
+    type ExpandedOutput = TransactionEvidence<EvmU256>;
+}
+impl EffectState<TransactionEffect<RecoveryRequest>> for ExecuteRecovery {
+    fn prepare(input: &Self::Input) -> Result<Self::Input, InvocationDiagnostic> {
+        Ok(input.clone())
+    }
+    fn interpret(
+        _: Self::Input,
+        evidence: &Self::Output,
+    ) -> Result<ProposedStateOutcome<Self::Output, Reverted>, InvocationDiagnostic> {
+        Ok(match evidence.result() {
+            TransactionResult::Applied { .. } => ProposedStateOutcome::Success {
+                output: evidence.clone(),
+            },
+            TransactionResult::Rejected { .. } => {
+                ProposedStateOutcome::Failure { failure: Reverted }
+            }
+        })
+    }
+}
+type Source = ResolvedEffect<
+    ExecuteRecovery,
+    TransactionEffect<RecoveryRequest>,
+    EvmTransactionImplementation,
+>;
+type Resources = crate::EvmResources<Source>;
+fn setup(
     binding: &EvmTransactionBinding,
     signer: Arc<dyn Secp256k1Signer>,
     authority: Arc<MemoryAuthority>,
     provider: Arc<ScriptedProvider>,
     store: Arc<dyn mfm_store::Store>,
-) -> Runtime {
-    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-    crate::register_evm_transaction_states::<InitialContext, RecoveryRecipe>(&mut builder).unwrap();
-    register_evm_transaction_adapters(&mut builder, binding.clone(), signer, authority, provider)
-        .unwrap();
-    Runtime::new(builder.finish(), store)
+) -> (Runtime, Resources) {
+    let resource =
+        crate::EvmTransactionResource::new(binding.clone(), signer, authority, provider).unwrap();
+    (
+        Runtime::new(store),
+        Resources::new(vec![], vec![resource]).unwrap(),
+    )
 }
-fn program(input: &InitialContext) -> mfm_program::Program {
-    expand_program(
+fn program(input: &RecoveryRequest, resources: &Resources) -> mfm_program::Program {
+    mfm_program::compile(
         EntryPointId::new("mfm.test/transaction@1").unwrap(),
-        &EvmTransaction::<InitialContext, RecoveryRecipe>::new(
-            input.transaction.command().binding().clone(),
-        ),
+        &Source::new(input.transaction.binding().clone()),
         input,
+        resources,
         mfm_program::ProgramLimits::new(0),
     )
     .unwrap()
+}
+async fn cold_program(runtime: &Runtime, resources: &Resources) -> mfm_program::Program {
+    let document = runtime.program_document(&run_id()).await.unwrap();
+    mfm_program::load(document.canonical_bytes(), resources).unwrap()
 }
 
 fn run_id() -> RunId {
@@ -611,36 +676,34 @@ async fn pending_effect_reuses_identical_wire_and_cold_projection_needs_no_signe
         let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
         let provider = Arc::new(ScriptedProvider::new(1337));
         let store = Arc::new(MemoryStore::new());
-        let hot = runtime(
+        let (hot, hot_resources) = setup(
             &binding,
             signer.clone(),
             authority.clone(),
             provider.clone(),
             store.clone(),
         );
-        let input = RecoveryContext {
+        let input = RecoveryRequest {
             unrelated: EvmU256::from_u64(42),
-            transaction: CheckedCreatePlan::new(
-                command.binding().clone(),
-                command.input().to_vec(),
-                command.value().clone(),
-                command.gas_limit(),
-                command.max_priority_fee_per_gas(),
-                command.max_fee_per_gas(),
-            )
-            .unwrap(),
+            transaction: command.clone(),
         };
-        let _view = hot.start(run_id(), program(&input), input).await.unwrap();
+        let _view = hot
+            .start(run_id(), &program(&input, &hot_resources), &input)
+            .await
+            .unwrap();
         let prepared = authority.state().unwrap().prepared.unwrap();
         let reject = Arc::new(RejectingSigner::matching(signer.as_ref()));
-        let cold = runtime(
+        let (cold, cold_resources) = setup(
             &binding,
             reject,
             authority.clone(),
             provider.clone(),
             store.clone(),
         );
-        let _view = cold.resume(&run_id()).await.unwrap();
+        let _view = cold
+            .resume(&run_id(), &cold_program(&cold, &cold_resources).await)
+            .await
+            .unwrap();
         let submitted: Vec<_> = provider
             .operations()
             .into_iter()
@@ -677,7 +740,10 @@ async fn pending_effect_reuses_identical_wire_and_cold_projection_needs_no_signe
             result,
             provider.canonical.clone(),
         ))));
-        let terminal = cold.resume(&run_id()).await.unwrap();
+        let terminal = cold
+            .resume(&run_id(), &cold_program(&cold, &cold_resources).await)
+            .await
+            .unwrap();
         assert!(if reverted {
             matches!(terminal.state(), RunViewState::Failed(_))
         } else {
@@ -685,7 +751,10 @@ async fn pending_effect_reuses_identical_wire_and_cold_projection_needs_no_signe
         });
         let operation_count = provider.operations().len();
         assert_eq!(
-            cold.read(&run_id()).await.unwrap().head_digest(),
+            cold.read(&run_id(), &cold_program(&cold, &cold_resources).await)
+                .await
+                .unwrap()
+                .head_digest(),
             terminal.head_digest()
         );
         assert_eq!(provider.operations().len(), operation_count);
@@ -714,27 +783,19 @@ async fn custody_acknowledgement_loss_recovers_each_stage() {
         authority.fault.store(fault, Ordering::SeqCst);
         let provider = Arc::new(ScriptedProvider::new(1337));
         let store = Arc::new(MemoryStore::new());
-        let hot = runtime(
+        let (hot, hot_resources) = setup(
             &binding,
             signer.clone(),
             authority.clone(),
             provider.clone(),
             store.clone(),
         );
-        let input = RecoveryContext {
+        let input = RecoveryRequest {
             unrelated: EvmU256::from_u64(0),
-            transaction: CheckedCreatePlan::new(
-                command.binding().clone(),
-                command.input().to_vec(),
-                command.value().clone(),
-                command.gas_limit(),
-                command.max_priority_fee_per_gas(),
-                command.max_fee_per_gas(),
-            )
-            .unwrap(),
+            transaction: command.clone(),
         };
         assert!(matches!(
-            hot.start(run_id(), program(&input), input).await,
+            hot.start(run_id(), &program(&input, &hot_resources), &input).await,
             Err(mfm_runtime::InvocationFailure::RecoveryStopped { observed })
                 if matches!(observed.state(), RunViewState::EffectPending { latest_failure: Some((original, _)), .. } if matches!(original.decode::<EvmTransactionOperationalError>().unwrap(), EvmTransactionOperationalError::AuthorityUnavailable { .. }))
         ));
@@ -743,8 +804,11 @@ async fn custody_acknowledgement_loss_recovers_each_stage() {
         } else {
             signer
         };
-        let cold = runtime(&binding, signer, authority.clone(), provider.clone(), store);
-        cold.resume(&run_id()).await.unwrap();
+        let (cold, cold_resources) =
+            setup(&binding, signer, authority.clone(), provider.clone(), store);
+        cold.resume(&run_id(), &cold_program(&cold, &cold_resources).await)
+            .await
+            .unwrap();
         assert!(authority.state().unwrap().prepared.is_some());
         assert_eq!(
             provider
@@ -981,32 +1045,24 @@ async fn cancelled_receipt_wait_resumes_exact_prepared_wire() {
     let provider = Arc::new(ScriptedProvider::new(1337));
     provider.block_receipt_once.store(true, Ordering::SeqCst);
     let store = Arc::new(MemoryStore::new());
-    let hot = runtime(
+    let (hot, hot_resources) = setup(
         &binding,
         signer.clone(),
         authority.clone(),
         provider.clone(),
         store.clone(),
     );
-    let input = RecoveryContext {
+    let input = RecoveryRequest {
         unrelated: EvmU256::from_u64(42),
-        transaction: CheckedCreatePlan::new(
-            command.binding().clone(),
-            command.input().to_vec(),
-            command.value().clone(),
-            command.gas_limit(),
-            command.max_priority_fee_per_gas(),
-            command.max_fee_per_gas(),
-        )
-        .unwrap(),
+        transaction: command.clone(),
     };
-    let entry = program(&input);
-    let task = tokio::spawn(async move { hot.start(run_id(), entry, input).await });
+    let entry = program(&input, &hot_resources);
+    let task = tokio::spawn(async move { hot.start(run_id(), &entry, &input).await });
     provider.receipt_entered.notified().await;
     task.abort();
     assert!(matches!(task.await, Err(error) if error.is_cancelled()));
     let prepared = authority.state().unwrap().prepared.unwrap();
-    let cold = runtime(
+    let (cold, cold_resources) = setup(
         &binding,
         Arc::new(RejectingSigner::matching(signer.as_ref())),
         authority,
@@ -1014,7 +1070,10 @@ async fn cancelled_receipt_wait_resumes_exact_prepared_wire() {
         store,
     );
     assert!(matches!(
-        cold.resume(&run_id()).await.unwrap().state(),
+        cold.resume(&run_id(), &cold_program(&cold, &cold_resources).await)
+            .await
+            .unwrap()
+            .state(),
         RunViewState::EffectPending { .. }
     ));
     assert!(provider.operations().iter().any(|op| matches!(op, ProviderOperation::SubmitRaw(raw) if raw == prepared.raw_transaction().as_bytes())));
@@ -1059,40 +1118,164 @@ async fn unavailable_signer_retains_reservation_and_its_distinct_operational_cau
 // A Program declaring the obsolete transaction-error schema must fail before run admission or
 // provider IO.
 #[tokio::test]
-async fn v3_transaction_assembly_rejects_v2_error_contract_before_admission() {
+async fn native_discovery_rejects_retired_error_contract_before_admission() {
     let (_owner, signer, binding, command, _) = fixture().await;
     let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
     let provider = Arc::new(ScriptedProvider::new(1337));
     let store = Arc::new(MemoryStore::new());
-    let runtime = runtime(&binding, signer, authority, provider.clone(), store.clone());
-    let input = RecoveryContext {
+    let (_runtime, resources) = setup(&binding, signer, authority, provider.clone(), store.clone());
+    let input = RecoveryRequest {
         unrelated: EvmU256::from_u64(0),
-        transaction: CheckedCreatePlan::new(
-            command.binding().clone(),
-            command.input().to_vec(),
-            command.value().clone(),
-            command.gas_limit(),
-            command.max_priority_fee_per_gas(),
-            command.max_fee_per_gas(),
-        )
-        .unwrap(),
+        transaction: command.clone(),
     };
-    let current = program(&input);
+    let current = program(&input, &resources);
+    let current_id = mfm_program::nominal_contract_ref::<EvmTransactionOperationalError>().unwrap();
     let bytes = std::str::from_utf8(current.canonical_bytes()).unwrap();
-    let current_id = "schema:mfm.evm-transaction-operational-error:3:sha256-jcs-v1:2292902eaf07f4fe168ab33b496a1eb0913203f3010c41db59fe0ce9d0c56a81";
-    assert!(bytes.contains(current_id));
-    let old = bytes.replace(current_id, "schema:mfm.evm-transaction-operational-error:2:sha256-jcs-v1:6293c5ceeb0e9cc6329dfe21ea5d4001f9efce5114878ea77a6a0503b109ce45");
-    let old = mfm_program::Program::decode_canonical(old.as_bytes()).unwrap();
-    assert!(matches!(
-        runtime.start(run_id(), old, input).await,
-        Err(mfm_runtime::InvocationFailure::Execution {
-            error: RuntimeError::IncompatibleAssembly,
-            ..
-        })
-    ));
+    let encoded_id = serde_json::to_string(&current_id).unwrap();
+    assert!(bytes.contains(&encoded_id));
+    let old = bytes.replace(&encoded_id, "\"schema:mfm.evm-transaction-operational-error:2:sha256-jcs-v1:6293c5ceeb0e9cc6329dfe21ea5d4001f9efce5114878ea77a6a0503b109ce45\"");
+    assert!(mfm_program::load(old.as_bytes(), &resources).is_err());
     assert!(mfm_store::Store::load_run(store.as_ref(), &run_id(), None)
         .await
         .unwrap()
         .is_none());
     assert!(provider.operations().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_reconciliation_is_paced_and_cancellation_preserves_exact_command() {
+    for known in [false, true] {
+        let (_owner, signer, binding, command, id) = fixture().await;
+        let authority = Arc::new(MemoryAuthority::new(binding.authority_epoch.clone()));
+        let provider = Arc::new(ScriptedProvider::new(1337));
+        let reserved = reserve(
+            &binding,
+            authority.as_ref(),
+            provider.as_ref(),
+            &id,
+            &command,
+        )
+        .await;
+        let evidence = settled(
+            prepare_transaction(
+                &binding,
+                authority.as_ref(),
+                signer.as_ref(),
+                &id,
+                &reserved,
+            )
+            .await,
+        );
+        let prepared = PreparedEvmTransaction::new(reserved, evidence.transaction_hash);
+        let retained = authority.state().unwrap().prepared.unwrap();
+        provider.known.lock().unwrap().push_back(Ok(known));
+        let offset = provider.operations().len();
+        let task = tokio::spawn({
+            let (binding, authority, provider, id, prepared) = (
+                binding.clone(),
+                authority.clone(),
+                provider.clone(),
+                id.clone(),
+                prepared.clone(),
+            );
+            async move {
+                execute_transaction(
+                    &binding,
+                    authority.as_ref(),
+                    provider.as_ref(),
+                    &id,
+                    &prepared,
+                )
+                .await
+            }
+        });
+        while !provider.operations()[offset..]
+            .iter()
+            .any(|operation| matches!(operation, ProviderOperation::TransactionKnown(_)))
+        {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(std::time::Duration::from_millis(999)).await;
+        assert!(!task.is_finished());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let operations = provider.operations();
+        assert!(
+            matches!(&operations[offset..offset+3], [ProviderOperation::ChainInstance, ProviderOperation::Receipt(hash), ProviderOperation::TransactionKnown(known_hash)] if hash == prepared.transaction_hash() && known_hash == hash)
+        );
+        let submitted: Vec<_> = operations[offset..]
+            .iter()
+            .filter_map(|operation| match operation {
+                ProviderOperation::SubmitRaw(raw) => Some(raw),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(submitted.len(), usize::from(!known));
+        assert!(submitted
+            .iter()
+            .all(|raw| raw.as_slice() == retained.raw_transaction().as_bytes()));
+        assert!(authority.state().unwrap().prepared.unwrap() == retained);
+        provider.known.lock().unwrap().push_back(Ok(true));
+        let start = tokio::time::Instant::now();
+        assert!(matches!(
+            execute_transaction(
+                &binding,
+                authority.as_ref(),
+                provider.as_ref(),
+                &id,
+                &prepared
+            )
+            .await
+            .unwrap(),
+            EffectAdapterOutcome::Pending
+        ));
+        assert!(start.elapsed() >= std::time::Duration::from_secs(1));
+        assert_eq!(
+            provider
+                .operations()
+                .iter()
+                .filter(|operation| matches!(operation, ProviderOperation::SubmitRaw(_)))
+                .count(),
+            usize::from(!known)
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn transaction_known_provider_failure_is_unchanged_and_never_rebroadcasts() {
+    let (_owner, signer, binding, command, id) = fixture().await;
+    let authority = MemoryAuthority::new(binding.authority_epoch.clone());
+    let provider = ScriptedProvider::new(1337);
+    let reserved = reserve(&binding, &authority, &provider, &id, &command).await;
+    let evidence =
+        settled(prepare_transaction(&binding, &authority, signer.as_ref(), &id, &reserved).await);
+    let prepared = PreparedEvmTransaction::new(reserved, evidence.transaction_hash);
+    let original = EvmOperationalError::new(
+        EvmOperationalKind::Unavailable,
+        ProviderFailure {
+            method: EvmRpcMethod::GetTransactionByHash,
+            stage: RpcStage::Send,
+            failure: ProviderFailureKind::Client,
+            diagnostics: mfm_values::DiagnosticEvidence::from_value(
+                serde_json::json!({"response": null, "sources": [{"message": "connection reset by peer"}]}),
+            ),
+        },
+    );
+    provider
+        .known
+        .lock()
+        .unwrap()
+        .push_back(Err(AdapterError::Operational(original.clone())));
+    let start = tokio::time::Instant::now();
+    let error = execute_transaction(&binding, &authority, &provider, &id, &prepared)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, AdapterError::Operational(EvmTransactionOperationalError::Provider { operation: TransactionProviderOperation::TransactionKnown, cause }) if cause == original)
+    );
+    assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+    assert!(!provider
+        .operations()
+        .iter()
+        .any(|operation| matches!(operation, ProviderOperation::SubmitRaw(_))));
 }

@@ -61,7 +61,14 @@ async fn entry_points() -> Response {
 }
 
 async fn bindings(State(application): State<Arc<Application>>) -> Response {
-    json_response(StatusCode::OK, &ItemList::new(application.bindings()))
+    match application.bindings() {
+        Ok(bindings) => json_response(StatusCode::OK, &ItemList::new(&bindings)),
+        Err(cause) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &SerializableClientError::new("internal", "binding inspection failed")
+                .with_diagnostic(&cause),
+        ),
+    }
 }
 
 async fn import_config(
@@ -253,10 +260,25 @@ impl From<RunRequestError> for RestError {
 fn config_document_error(error: ConfigDocumentError) -> Response {
     let status = match error {
         ConfigDocumentError::Malformed => StatusCode::BAD_REQUEST,
-        ConfigDocumentError::Invalid => StatusCode::UNPROCESSABLE_ENTITY,
+        ConfigDocumentError::Invalid | ConfigDocumentError::Native(_) => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
         ConfigDocumentError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         ConfigDocumentError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
     };
+    if let ConfigDocumentError::Native(cause) = &error {
+        let diagnostic = mfm_values::InvocationDiagnostic::from_fields(
+            "native_config",
+            "admit_config",
+            cause,
+            None,
+        );
+        return json_response(
+            status,
+            &SerializableClientError::new(error.code(), &error.to_string())
+                .with_diagnostic(&diagnostic),
+        );
+    }
     boundary_error(status, error.code(), &error.to_string())
 }
 
@@ -298,9 +320,9 @@ fn start_run_error(run_id: &RunId, error: RunRequestError) -> Response {
                 &SerializableClientError::identified(error.code(), &message, run_id),
             )
         }
-        error @ (RunRequestError::AppendIndeterminate { .. } | RunRequestError::Invocation(_)) => {
-            run_request_error(error)
-        }
+        error @ (RunRequestError::Construction { .. }
+        | RunRequestError::AppendIndeterminate { .. }
+        | RunRequestError::Invocation(_)) => run_request_error(error),
     }
 }
 
@@ -395,7 +417,7 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::http::header::CONTENT_TYPE;
     use axum::http::{HeaderValue, Method, Request};
-    use mfm_app::{Application, BoundCapabilitySet, ComposedRuntime, RunRecovery};
+    use mfm_app::{Application, RunRecovery};
     use mfm_capabilities::AdapterError;
     use mfm_config::MemoryConfigRepository;
     use mfm_evm::{
@@ -473,15 +495,20 @@ mod tests {
 
     fn application() -> Arc<Application> {
         let store = Arc::new(MemoryStore::new());
-        let bindings = BoundCapabilitySet::new(vec![(
-            1,
-            EvmEndpoint::new("alpha").expect("endpoint"),
-            Arc::new(Provider) as Arc<dyn EvmReadProvider>,
-        )])
+        let resources = mfm_evm_live::client::portfolio::PortfolioResources::new(
+            vec![(
+                mfm_evm::EvmBalanceRoute::new(
+                    std::num::NonZeroU64::new(1).unwrap(),
+                    EvmEndpoint::new("alpha").expect("endpoint"),
+                ),
+                Arc::new(Provider) as Arc<dyn EvmReadProvider>,
+            )],
+            vec![],
+        )
         .expect("bindings");
-        let composed = ComposedRuntime::compose(store, bindings).expect("composition");
         Arc::new(Application::from_parts(
-            composed,
+            store,
+            resources,
             Arc::new(MemoryConfigRepository::default()),
         ))
     }

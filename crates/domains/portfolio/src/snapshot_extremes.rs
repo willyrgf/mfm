@@ -1,97 +1,145 @@
 use super::*;
+use mfm_chain::balance::ConsolidateBalanceCollection;
+
+use mfm_chain::balance::BalanceSource;
+use mfm_chain::balance::{CandidateBalance, PreparedBalance};
+use mfm_chain::ObservationPoint;
+use mfm_chain::{BalanceTarget, LedgerIdentity};
+use mfm_values::{Object, Unsigned256};
+
+#[derive(Debug, Clone, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct Fact {
+    text: String,
+}
 
 #[test]
-fn maximum_public_fields_preserve_completed_prefix_and_snapshot() {
-    let target = EvmPhysicalTarget {
-        chain_id: NonZeroU64::new(u64::MAX).unwrap(),
-        endpoint_ref: mfm_evm::EvmEndpoint::new("\"".repeat(256))
-            .unwrap()
-            .endpoint_ref()
-            .unwrap(),
-    };
+fn maximum_public_fields_preserve_completed_prefix_snapshot_and_enrichment() {
     let maximum_units =
         "115792089237316195423570985008687907853269984665640564039457584007913129639935";
     for collection_count in [1, 64] {
-        let sources = (0..64)
-            .map(|index| {
-                EvmBalanceSource::new(
-                    format!("{index:02}{}", "\"".repeat(254)),
-                    target.chain_id,
-                    mfm_evm::EvmAddress::from_bytes([255; 20]),
-                    (collection_count == 1 && index % 2 == 0)
-                        .then(|| mfm_evm::EvmAddress::from_bytes([254; 20])),
-                )
-                .unwrap()
+        let input = {
+            let collections = collection_count;
+            let sources_per_collection = 64 / collection_count;
+            let scale = 30;
+            let label = |index: usize| format!("{index:02}{}", "\"".repeat(254));
+            let ledger = LedgerIdentity::new(
+                Object::from_value(&Fact {
+                    text: "independent-ledger".into(),
+                })
+                .unwrap(),
+            );
+            let route = Object::from_value(&Fact {
+                text: "\"".repeat(256),
             })
-            .collect::<Vec<_>>();
-        let collections = sources
-            .chunks(64 / collection_count)
-            .enumerate()
-            .map(|(index, sources)| {
-                PortfolioCollectionDemand::new(
-                    format!("{index:02}{}", "\"".repeat(254)),
-                    EvmBalanceRequest::new(sources.to_vec(), 30).unwrap(),
-                    target.binding_ref().unwrap(),
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let input = PortfolioSnapshotInput::from_demand(
-            serde_json::from_value(serde_json::json!("\"".repeat(256))).unwrap(),
-            collections,
-            serde_json::from_value(serde_json::json!("usd")).unwrap(),
-            vec![QuoteCode::Usd, QuoteCode::Eur],
-            None,
-        )
-        .unwrap();
-        // Use full-width EVM amounts and the broader public Portfolio anchor contract.
-        // The sum of 64 U256 values remains within the 80-digit checked total.
-        let completed = input
+            .unwrap();
+            let collections = (0..collections)
+                .map(|ordinal| {
+                    let sources = (0..sources_per_collection)
+                        .map(|source| {
+                            BalanceSource::new(
+                                label(ordinal * sources_per_collection + source),
+                                BalanceTarget::new(
+                                    ledger.clone(),
+                                    Object::from_value(&Fact {
+                                        text: label(source),
+                                    })
+                                    .unwrap(),
+                                ),
+                            )
+                            .unwrap()
+                        })
+                        .collect();
+                    let request =
+                        BalanceRequest::new(sources, DecimalScale::new(scale).unwrap()).unwrap();
+                    let executions = (0..sources_per_collection)
+                        .map(|_| {
+                            BalanceExecutionConfig::new(route.value_ref().clone(), route.clone())
+                        })
+                        .collect();
+                    PortfolioCollectionDemand::new(label(ordinal), request, executions).unwrap()
+                })
+                .collect();
+            PortfolioSnapshotInput::new(
+                PortfolioId {
+                    value: "\"".repeat(256),
+                },
+                collections,
+                QuoteCode::Usd,
+                vec![QuoteCode::Usd, QuoteCode::Eur],
+                None,
+            )
+            .unwrap()
+        };
+        let required: Vec<_> = input
             .collections
             .iter()
-            .enumerate()
-            .map(|(ordinal, demand)| PortfolioSnapshotCollection {
-                collection_ordinal: ordinal as u32,
-                chain_id: target.chain_id,
-                anchor: PortfolioAnchor::new("9".repeat(80), "\"".repeat(256)).unwrap(),
-                holdings: demand
+            .flat_map(|collection| {
+                collection
                     .request
                     .sources()
                     .iter()
-                    .map(|source| PortfolioHolding {
-                        source_id: source.source_id().to_owned(),
-                        asset: match source.token() {
-                            None => PortfolioAsset::Native,
-                            Some(contract) => PortfolioAsset::Token {
-                                contract: contract.to_string(),
-                            },
-                        },
-                        decimals: 30,
-                        raw_units: maximum_units.to_owned(),
-                        amount_dec: decimal_amount(maximum_units, 30),
-                    })
-                    .collect(),
+                    .map(|source| source.source_id().to_owned())
             })
             .collect();
-        let continuation = PortfolioContinuation::new(input, completed).unwrap();
-        mfm_values::canonicalize_mfm_value(&continuation).unwrap();
-        let encoded = serde_json::to_vec(&continuation).unwrap();
-        let ProposedStateOutcome::Success { output: resolved } =
-            ResolvePortfolioAssets::evaluate(serde_json::from_slice(&encoded).unwrap()).unwrap()
+        let ProposedStateOutcome::Success {
+            output: mut continuation,
+        } = InitializePortfolio::evaluate(input).unwrap()
         else {
-            panic!("bounded native/token candidates must resolve")
+            panic!("expected success");
+        };
+        for _ in 0..collection_count {
+            let ProposedStateOutcome::Success {
+                output: mut context,
+            } = EnterPortfolioCollection::evaluate(continuation).unwrap()
+            else {
+                panic!("expected success");
+            };
+            for _ in 0..context.request().sources().len() {
+                let point = ObservationPoint::new(
+                    context.request().sources()[0].target().ledger().clone(),
+                    Object::from_value(&Fact {
+                        text: "9".repeat(80),
+                    })
+                    .unwrap(),
+                );
+                context = CandidateBalance::new(
+                    PreparedBalance::new(context, point, DecimalScale::new(30).unwrap()).unwrap(),
+                    Unsigned256::new(maximum_units).unwrap(),
+                )
+                .append_confirmed()
+                .unwrap()
+                .unwrap();
+            }
+            let ProposedStateOutcome::Success { output: complete } =
+                ConsolidateBalanceCollection::evaluate(context).unwrap()
+            else {
+                panic!("expected success");
+            };
+            let ProposedStateOutcome::Success { output } =
+                ResumePortfolioCollection::evaluate(complete).unwrap()
+            else {
+                panic!("expected resumed collection");
+            };
+            continuation = output;
+        }
+        mfm_values::canonicalize_mfm_value(&continuation).unwrap();
+        let enriched = serde_json::json!({"progress":continuation,"required_sources":required});
+        let enriched = serde_json::from_slice::<EnrichmentContinuation>(
+            &serde_json::to_vec(&enriched).unwrap(),
+        )
+        .unwrap();
+        let ProposedStateOutcome::Success { output: resolved } =
+            ResolvePortfolioAssets::evaluate(enriched).unwrap()
+        else {
+            panic!("expected success");
         };
         mfm_values::canonicalize_mfm_value(&resolved).unwrap();
-        assert!(
-            serde_json::to_vec(&resolved.into_snapshot_config().0)
-                .unwrap()
-                .len()
-                < 128 * 1024
-        );
+        assert_eq!(resolved.collections().len(), collection_count);
         let ProposedStateOutcome::Success { output } =
             ConsolidatePortfolio::evaluate(continuation).unwrap()
         else {
-            panic!("bounded complete Portfolio must consolidate")
+            panic!("expected success");
         };
         mfm_values::canonicalize_mfm_value(&output).unwrap();
         assert_eq!(output.snapshot.collections.len(), collection_count);

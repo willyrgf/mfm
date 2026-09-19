@@ -85,9 +85,9 @@ profile; MFM does not deliberately append its own secrets or full request object
 Classification is unchanged; timeouts do not establish nonacceptance. Cold Read tests retain the admitted provider carrier. The separate Runtime recovery tests prove
 that the original commits before classification or handler entry.
 
-### 2. Read registration bridges preserve the cause they receive
+### 2. Native Read binding bridges preserve the cause they receive
 
-Source: [live EVM registration](../crates/live/evm/src/lib.rs), `read` and `read_anchored`.
+Source: [live EVM adapters](../crates/live/evm/src/lib.rs), `read` and `read_anchored`.
 
 The chain/anchor/balance and anchored-call bridges pass provider errors through without replacing
 them. They now carry the provider's reviewed causal value without a second persistence object.
@@ -102,9 +102,9 @@ Source: [transaction.rs](../crates/live/evm/src/transaction.rs), `reserve_nonce`
 `prepare_transaction`, `execute_transaction`, `map_provider_error` and `map_authority_error`.
 
 - `map_provider_error` retains the complete reviewed provider carrier alongside the originating
-  chain-verification, nonce-observation, receipt, canonical-block or submission operation. The
+  chain-verification, nonce-observation, receipt, transaction-known, canonical-block or submission operation. The
   transaction classification remains OutcomeUnknown.
-- `map_authority_error` moves unavailable evidence into the v3 durable transaction owner and
+- `map_authority_error` moves unavailable evidence into the v4 durable transaction owner and
   forwards internal InvocationDiagnostic unchanged. No receiver recapture or authority serializer remains.
 - Signer Invalid/Failed now enter SignerUnavailable with their actual unit kind and sign/signer
   context. SignFailed evidence moves unchanged from executing keystore/channel/primitive producers.
@@ -242,7 +242,7 @@ that no operation committed, and failure to print an error must not overwrite th
 
 Sources: [capability errors](../crates/kernel/capabilities/src/lib.rs),
 [Runtime errors](../crates/kernel/runtime/src/lib.rs),
-[Runtime recovery association](../crates/kernel/runtime/src/assembly/recovery.rs),
+[Runtime recovery association](../crates/kernel/program/src/recovery/bindings.rs),
 [engine](../crates/kernel/runtime/src/engine.rs), [reports](../crates/kernel/runtime/src/report.rs),
 [Journal](../crates/kernel/journal/src/lib.rs), [public view](../crates/app/src/run_view.rs).
 

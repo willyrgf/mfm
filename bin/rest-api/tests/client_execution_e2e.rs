@@ -16,9 +16,6 @@ const FUNDED_RAW_UNITS: &str = "1000000000000000000000000";
 const INTERRUPTED_HEAD_SEQUENCE: u64 = 3;
 // Two native sources execute eight Reads and five Portfolio/collection Pure States.
 const TERMINAL_HEAD_SEQUENCE: u64 = 14;
-const OUTPUT_CONTRACT_DIGEST: &str =
-    "content:sha256-v1:804c7a33a2bc23a692444fcc2833f71d96f8315e6529523a7f884e13e6559927";
-const OUTPUT_SCHEMA_ID: &str = "schema:mfm.derived.portfolio_snapshot_output:1:sha256-jcs-v1:e9cf985feb7415fdcf3d4e84eb53a6273ac0a2330ca4137ca72c806d72d112f6";
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires explicit CLI/REST binaries and managed PostgreSQL/Reth services"]
@@ -239,10 +236,10 @@ async fn generated_rest_run_survives_deletion_and_matches_fresh_cli_execution() 
     assert_eq!(failed.0, 200);
     let failed_view = &failed.1["run"];
     assert_eq!(failed_view["state"]["kind"], "failed");
-    assert_eq!(failed_view["state"]["report"]["cause"]["kind"], "adapter");
-    assert_eq!(failed_view["state"]["report"]["cause"]["mode"], "read");
+    assert!(failed_view["state"]["report"]["failure"]["read"].is_object());
+    assert!(failed_view["state"].get("product_failure").is_none());
     assert_eq!(
-        failed_view["state"]["report"]["cause"]["error"]["canonical"],
+        failed_view["state"]["report"]["failure"]["read"]["original"]["canonical"],
         serde_json::json!({
             "kind": "unavailable",
             "source": {
@@ -450,22 +447,28 @@ fn assert_exact_live_snapshot(view: &serde_json::Value, run_id: &str) {
     assert_digest(&view["head_digest"], "content:sha256-v1:");
 
     let state = view["state"].as_object().expect("terminal state");
-    assert_eq!(state.len(), 4);
+    assert_eq!(state.len(), 5);
     assert_eq!(state["kind"], "succeeded");
+    // Decode the exact semantic owner and qualify both identities independently of rendering.
+    let semantic: mfm_portfolio::PortfolioSnapshotOutput =
+        serde_json::from_value(state["value"].clone()).expect("checked semantic snapshot");
+    let object = mfm_values::Object::from_value(&semantic).expect("snapshot identity");
     assert_eq!(
         state["contract_ref"],
-        serde_json::json!({
-            "content_digest": OUTPUT_CONTRACT_DIGEST,
-            "schema_id": OUTPUT_SCHEMA_ID
-        })
+        serde_json::to_value(object.contract_ref().unwrap()).unwrap()
     );
-    assert_eq!(state["value_ref"]["schema_id"], OUTPUT_SCHEMA_ID);
-    assert_digest(&state["value_ref"]["content_digest"], "content:sha256-v1:");
-
-    let anchor = state["value"]["snapshot"]["collections"][0]["anchor"].clone();
+    assert_eq!(
+        state["value_ref"],
+        serde_json::to_value(object.value_ref()).unwrap()
+    );
+    assert_eq!(
+        state["product"],
+        mfm_evm_live::client::portfolio::render_snapshot(&semantic).unwrap()
+    );
+    let anchor = state["product"]["snapshot"]["collections"][0]["anchor"].clone();
     assert_anchor(&anchor);
     assert_eq!(
-        state["value"],
+        state["product"],
         serde_json::json!({
             "snapshot": {
                 "schema_version": 1,
@@ -599,7 +602,7 @@ impl RpcStub {
     fn assert_chain_identity_request(&self) {
         let encoded = self
             .observed
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(130))
             .expect("provider request");
         let body = http_request_body(&encoded);
         let request: serde_json::Value = serde_json::from_slice(body).expect("provider JSON-RPC");

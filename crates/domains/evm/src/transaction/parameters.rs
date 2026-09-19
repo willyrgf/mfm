@@ -30,7 +30,7 @@ pub(super) struct TransactionFees {
 }
 
 impl TransactionFees {
-    fn validate(&self) -> Result<(), EvmDomainError> {
+    pub(super) fn validate(&self) -> Result<(), EvmDomainError> {
         (self.priority.0 <= self.maximum.0)
             .then_some(())
             .ok_or(EvmDomainError::InvalidValue)

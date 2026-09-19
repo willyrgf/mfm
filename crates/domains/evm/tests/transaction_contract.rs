@@ -1,13 +1,11 @@
 use mfm_canonical::CanonicalBytes;
 use mfm_capabilities::EffectCapabilityContract;
 use mfm_evm::{
-    Called, CheckedCallPlan, CheckedCreatePlan, CheckedTargetCallPlan, CompletedTransactionFacts,
-    Created, Eip1559TransactionCommand, EvmAddress, EvmAuthorityEpoch, EvmBlockAnchor,
-    EvmChainInstance, EvmHash, EvmNonceReservationEffect, EvmTransactionBinding,
-    EvmTransactionEffect, EvmTransactionOutcome, EvmTransactionPreparationEffect,
-    EvmTransactionReceipt, EvmTransactionRoute, EvmTransactionSettlement, EvmU256,
-    ExecutedTransactionFacts, NonceDomain, PreparedEvmTransaction, PreparedEvmTransactionEvidence,
-    PreparedTransactionFacts, Reservation, ReservedEvmTransaction, MAX_EVM_CALLDATA_BYTES,
+    Eip1559TransactionCommand, EvmAddress, EvmAuthorityEpoch, EvmBlockAnchor, EvmChainInstance,
+    EvmHash, EvmNonceReservationEffect, EvmTransactionBinding, EvmTransactionOutcome,
+    EvmTransactionPreparationEffect, EvmTransactionReceipt, EvmTransactionRoute,
+    EvmTransactionSettlement, EvmU256, NonceDomain, PreparedEvmTransaction,
+    PreparedEvmTransactionEvidence, Reservation, ReservedEvmTransaction, MAX_EVM_CALLDATA_BYTES,
     MAX_EVM_INITCODE_BYTES,
 };
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, EffectId, SchemaId};
@@ -395,196 +393,60 @@ fn reservation_descriptors_reject_mismatched_commands_domains_and_exhaustion() {
     assert_closed_object(&reserved, "reservation");
 }
 
-// Persisted plans must enforce command constraints before execution so choosing a target later
-// cannot create an invalid command.
+// Native qualification retains command, reservation and preparation independently of the shared
+// applied-result projection. Mixed nonce/hash/action/Effect identities must fail locally.
 #[test]
-fn checked_plans_share_command_boundaries_and_construct_totally_after_target_selection() {
-    for size in [0, 49_152] {
-        let plan = CheckedCreatePlan::new(
-            binding(),
-            vec![1; size],
-            EvmU256::from_u64(0),
-            nonzero(1),
-            1_u128,
-            2_u128,
-        )
-        .unwrap();
-        assert_eq!(
-            plan.command(),
-            Eip1559TransactionCommand::create(
-                binding(),
-                vec![1; size],
-                EvmU256::from_u64(0),
-                nonzero(1),
-                1_u128,
-                2_u128
-            )
-            .unwrap()
-        );
-        let decoded: CheckedCreatePlan =
-            serde_json::from_value(serde_json::to_value(&plan).unwrap()).unwrap();
-        assert_eq!(decoded, plan);
-    }
-    for size in [0, 131_072] {
-        let plan = CheckedCallPlan::new(
-            binding(),
-            vec![2; size],
-            EvmU256::from_u64(0),
-            nonzero(1),
-            1_u128,
-            2_u128,
-        )
-        .unwrap();
-        for target in [
-            EvmAddress::from_bytes([1; 20]),
-            EvmAddress::from_bytes([2; 20]),
-        ] {
-            let expected = Eip1559TransactionCommand::call(
-                binding(),
-                target.clone(),
-                vec![2; size],
-                EvmU256::from_u64(0),
-                nonzero(1),
-                1_u128,
-                2_u128,
-            )
-            .unwrap();
-            assert_eq!(plan.command_for(target.clone()), expected);
-            assert_eq!(
-                CheckedTargetCallPlan::new(plan.clone(), target).command(),
-                expected
-            );
-        }
-    }
-    assert!(CheckedCreatePlan::new(
-        binding(),
-        vec![0; 49_153],
-        EvmU256::from_u64(0),
-        nonzero(1),
-        1_u128,
-        2_u128
-    )
-    .is_err());
-    assert!(CheckedCallPlan::new(
-        binding(),
-        vec![0; 131_073],
-        EvmU256::from_u64(0),
-        nonzero(1),
-        1_u128,
-        2_u128
-    )
-    .is_err());
-    let ceiling = u128::MAX;
-    assert!(CheckedCallPlan::new(
-        binding(),
-        vec![],
-        EvmU256::from_u64(0),
-        nonzero(1),
-        ceiling,
-        ceiling
-    )
-    .is_ok());
-    assert!(
-        CheckedCreatePlan::new(binding(), vec![], EvmU256::from_u64(0), nonzero(1), 2, 1).is_err()
-    );
-    assert!(
-        CheckedCallPlan::new(binding(), vec![], EvmU256::from_u64(0), nonzero(1), 2, 1).is_err()
-    );
-    let create = CheckedCreatePlan::new(
-        binding(),
-        vec![],
-        EvmU256::from_u64(0),
-        nonzero(1),
-        ceiling,
-        ceiling,
-    )
-    .unwrap();
-    let call = CheckedCallPlan::new(
-        binding(),
-        vec![],
-        EvmU256::from_u64(0),
-        nonzero(1),
-        ceiling,
-        ceiling,
-    )
-    .unwrap();
-    for (field, hostile) in [
-        ("/parameters/gas_limit", serde_json::json!(0)),
-        ("/parameters/fees/maximum", serde_json::json!("0")),
-        (
-            "/parameters/fees/priority",
-            serde_json::json!("340282366920938463463374607431768211456"),
-        ),
-    ] {
-        let mut wire = serde_json::to_value(&create).unwrap();
-        *wire.pointer_mut(field).unwrap() = hostile.clone();
-        assert!(serde_json::from_value::<CheckedCreatePlan>(wire).is_err());
-        let mut wire = serde_json::to_value(&call).unwrap();
-        *wire.pointer_mut(field).unwrap() = hostile;
-        assert!(serde_json::from_value::<CheckedCallPlan>(wire).is_err());
-    }
-    for invalid in [
-        serde_json::json!("340282366920938463463374607431768211456"),
-        serde_json::json!("01"),
-        serde_json::json!("+1"),
-        serde_json::json!("-1"),
-        serde_json::json!(" 1"),
-        serde_json::json!("1.0"),
-        serde_json::json!(1),
-    ] {
-        for field in ["priority", "maximum"] {
-            let mut wire = serde_json::to_value(&create).unwrap();
-            wire["parameters"]["fees"][field] = invalid.clone();
-            assert!(serde_json::from_value::<CheckedCreatePlan>(wire.clone()).is_err());
-            wire.as_object_mut().unwrap().remove("initcode");
-            wire["calldata"] = serde_json::json!("");
-            assert!(serde_json::from_value::<CheckedCallPlan>(wire).is_err());
-        }
-    }
-    let mut wire = serde_json::to_value(&create).unwrap();
-    wire["initcode"] = serde_json::json!(CanonicalBytes::new(vec![0; 49_153]));
-    assert!(serde_json::from_value::<CheckedCreatePlan>(wire).is_err());
-    let mut wire = serde_json::to_value(&call).unwrap();
-    wire["calldata"] = serde_json::json!(CanonicalBytes::new(vec![0; 131_073]));
-    assert!(serde_json::from_value::<CheckedCallPlan>(wire).is_err());
-    assert!(
-        serde_json::from_value::<CheckedCreatePlan>(serde_json::to_value(&call).unwrap()).is_err()
-    );
-    assert_closed_object(&create, "initcode");
-    assert_closed_object(&call, "calldata");
-}
-
-// Completed transaction facts must retain matching reservation, preparation and settlement
-// evidence; loading mixed facts must fail.
-#[test]
-fn cumulative_facts_preserve_every_stage_and_reject_hostile_combinations() {
+fn native_preparation_and_settlement_reject_hostile_combinations() {
     for command in [create_command(), call_command()] {
+        let command_ref = canonicalize_mfm_value(&command).unwrap().1;
         let reservation = Reservation::new(
             effect_id(1),
-            canonicalize_mfm_value(&command).unwrap().1,
+            command_ref.clone(),
             NonceDomain::from_binding(command.binding()),
             7,
         )
         .unwrap();
-        EvmNonceReservationEffect::bind_evidence(&effect_id(1), &command, &reservation).unwrap();
-        assert!(
-            EvmNonceReservationEffect::bind_evidence(&effect_id(2), &command, &reservation)
-                .is_err()
-        );
+        let reservation_ref = canonicalize_mfm_value(&reservation).unwrap().1;
+        EvmNonceReservationEffect::bind_evidence(
+            &effect_id(1),
+            &command_ref,
+            &command,
+            &reservation_ref,
+            &reservation,
+        )
+        .unwrap();
+        assert!(EvmNonceReservationEffect::bind_evidence(
+            &effect_id(2),
+            &command_ref,
+            &command,
+            &reservation_ref,
+            &reservation
+        )
+        .is_err());
         let reserved = ReservedEvmTransaction::new(command.clone(), reservation.clone()).unwrap();
+        let reserved_ref = canonicalize_mfm_value(&reserved).unwrap().1;
         let preparation = PreparedEvmTransactionEvidence {
             effect_id: effect_id(2),
             transaction_hash: transaction_hash(9),
         };
-        EvmTransactionPreparationEffect::bind_evidence(&effect_id(2), &reserved, &preparation)
-            .unwrap();
+        let preparation_ref = canonicalize_mfm_value(&preparation).unwrap().1;
+        EvmTransactionPreparationEffect::bind_evidence(
+            &effect_id(2),
+            &reserved_ref,
+            &reserved,
+            &preparation_ref,
+            &preparation,
+        )
+        .unwrap();
         assert!(EvmTransactionPreparationEffect::bind_evidence(
             &effect_id(1),
+            &reserved_ref,
             &reserved,
+            &preparation_ref,
             &preparation
         )
         .is_err());
-        let prepared = PreparedTransactionFacts::new(reserved.clone(), preparation.clone());
+        let prepared = PreparedEvmTransaction::new(reserved, preparation.transaction_hash.clone());
         let receipt = EvmTransactionReceipt {
             block_anchor: anchor(1),
             transaction_hash: transaction_hash(9),
@@ -599,54 +461,25 @@ fn cumulative_facts_preserve_every_stage_and_reject_hostile_combinations() {
         } else {
             EvmTransactionSettlement::called(effect_id(3), 7, receipt.clone())
         };
-        EvmTransactionEffect::bind_evidence(
-            &effect_id(3),
-            &prepared.execution_command(),
-            &settlement,
-        )
-        .unwrap();
-        assert!(EvmTransactionEffect::bind_evidence(
-            &effect_id(2),
-            &prepared.execution_command(),
-            &settlement
-        )
-        .is_err());
-        let executed = ExecutedTransactionFacts::new(prepared.clone(), settlement.clone()).unwrap();
-        assert_eq!(executed.command(), &command);
-        assert_eq!(executed.reservation(), &reservation);
-        assert_eq!(executed.preparation(), &preparation);
-        assert_eq!(executed.settlement(), &settlement);
-        let wire = serde_json::to_value(&executed).unwrap();
-        assert_eq!(
-            serde_json::from_value::<ExecutedTransactionFacts>(wire.clone()).unwrap(),
-            executed
-        );
-        for hostile in [
-            {
-                let mut v = wire.clone();
-                v["settlement"]["nonce"] = serde_json::json!(8);
-                v
-            },
-            {
-                let mut v = wire.clone();
-                v["settlement"]["receipt"]["transaction_hash"] =
-                    serde_json::json!(transaction_hash(8));
-                v
-            },
-            {
-                let mut v = wire.clone();
-                v["prepared"]["reserved"]["reservation"]["command_value_ref"] =
-                    serde_json::json!(content_ref());
-                v
-            },
-            {
-                let mut v = wire.clone();
-                v["prepared"]["reserved"]["reservation"]["domain"]["sender"] =
-                    serde_json::json!(EvmAddress::from_bytes([99; 20]));
-                v
-            },
+        settlement.qualify(&effect_id(3), &prepared).unwrap();
+        assert!(settlement.qualify(&effect_id(2), &prepared).is_err());
+        let decoded: PreparedEvmTransaction =
+            serde_json::from_value(serde_json::to_value(&prepared).unwrap()).unwrap();
+        assert_eq!(decoded.reserved().command(), &command);
+        assert_eq!(decoded.reserved().reservation(), &reservation);
+        assert_eq!(decoded.transaction_hash(), &preparation.transaction_hash);
+        let wire = serde_json::to_value(&settlement).unwrap();
+        for (field, value) in [
+            ("nonce", serde_json::json!(8)),
+            (
+                "receipt",
+                serde_json::json!({"block_anchor":anchor(1),"transaction_hash":transaction_hash(8)}),
+            ),
         ] {
-            assert!(serde_json::from_value::<ExecutedTransactionFacts>(hostile).is_err());
+            let mut changed = wire.clone();
+            changed[field] = value;
+            let hostile: EvmTransactionSettlement = serde_json::from_value(changed).unwrap();
+            assert!(hostile.qualify(&effect_id(3), &prepared).is_err());
         }
         let bad_action = if command.to().is_none() {
             EvmTransactionSettlement::called(effect_id(3), 7, receipt.clone())
@@ -658,44 +491,47 @@ fn cumulative_facts_preserve_every_stage_and_reject_hostile_combinations() {
                 EvmAddress::from_bytes([3; 20]),
             )
         };
-        assert!(ExecutedTransactionFacts::new(prepared.clone(), bad_action.clone()).is_err());
-        let mut hostile = wire;
-        hostile["settlement"] = serde_json::to_value(bad_action).unwrap();
-        assert!(serde_json::from_value::<ExecutedTransactionFacts>(hostile).is_err());
-        if command.to().is_none() {
-            let completed = CompletedTransactionFacts::<Created>::new(executed.clone()).unwrap();
-            assert_eq!(completed.executed(), &executed);
-            assert_eq!(
-                completed.outcome().created_address(),
-                &EvmAddress::from_bytes([3; 20])
-            );
-            let mut hostile = serde_json::to_value(&completed).unwrap();
-            hostile["outcome"]["created_address"] =
-                serde_json::json!(EvmAddress::from_bytes([4; 20]));
-            assert!(serde_json::from_value::<CompletedTransactionFacts<Created>>(hostile).is_err());
-            assert!(CompletedTransactionFacts::<Called>::new(executed).is_err());
-        } else {
-            let completed = CompletedTransactionFacts::<Called>::new(executed.clone()).unwrap();
-            assert_eq!(completed.executed(), &executed);
-            assert_eq!(Some(completed.outcome().target()), command.to());
-            let mut hostile = serde_json::to_value(&completed).unwrap();
-            hostile["outcome"]["target"] = serde_json::json!(EvmAddress::from_bytes([4; 20]));
-            assert!(serde_json::from_value::<CompletedTransactionFacts<Called>>(hostile).is_err());
-            assert!(CompletedTransactionFacts::<Created>::new(executed).is_err());
-        }
-        let reverted = ExecutedTransactionFacts::new(
-            prepared,
-            EvmTransactionSettlement::reverted(effect_id(3), 7, receipt),
-        )
-        .unwrap();
-        assert_eq!(reverted.command(), &command);
-        assert_eq!(reverted.reservation(), &reservation);
-        assert_eq!(reverted.preparation(), &preparation);
-        assert!(CompletedTransactionFacts::<Created>::new(reverted.clone()).is_err());
-        assert!(CompletedTransactionFacts::<Called>::new(reverted).is_err());
+        assert!(bad_action.qualify(&effect_id(3), &prepared).is_err());
+        EvmTransactionSettlement::reverted(effect_id(3), 7, receipt)
+            .qualify(&effect_id(3), &prepared)
+            .unwrap();
+    }
+}
+
+#[test]
+fn shared_scalar_rejection_retains_its_cause_and_native_wire_stays_exact() {
+    use mfm_evm::EvmDomainError;
+    use mfm_values::{Object, Unsigned256, Unsigned256Error};
+
+    for (input, expected) in [
+        ("01", Unsigned256Error::NonCanonical),
+        (
+            "115792089237316195423570985008687907853269984665640564039457584007913129639936",
+            Unsigned256Error::OutOfRange,
+        ),
+    ] {
+        let error = EvmU256::new(input).unwrap_err();
         assert_eq!(
-            PreparedEvmTransaction::new(reserved, transaction_hash(9)).transaction_hash(),
-            &transaction_hash(9)
+            std::error::Error::source(&error).unwrap().downcast_ref(),
+            Some(&expected)
         );
+        let object = Object::from_value(&error).unwrap();
+        assert_eq!(
+            object.decode::<EvmDomainError>().unwrap(),
+            EvmDomainError::Unsigned256(expected),
+        );
+    }
+    for text in [
+        "0",
+        "42",
+        "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+    ] {
+        let native = Object::from_value(&EvmU256::new(text).unwrap()).unwrap();
+        let shared = Object::from_value(&Unsigned256::new(text).unwrap()).unwrap();
+        assert_eq!(native.canonical_bytes(), shared.canonical_bytes());
+        assert_ne!(native.value_ref(), shared.value_ref());
+        assert_eq!(native.decode::<EvmU256>().unwrap().as_str(), text);
+        assert!(native.decode::<Unsigned256>().is_err());
+        assert!(shared.decode::<EvmU256>().is_err());
     }
 }

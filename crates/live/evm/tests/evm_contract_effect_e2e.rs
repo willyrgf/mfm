@@ -4,43 +4,37 @@
 //! faults are exercised in `src/transaction_tests.rs`; this test does not count provider calls.
 
 use std::io::Read;
-use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use alloy_primitives::U256;
+use mfm_chain::transaction::*;
+use mfm_chain::{ContractArtifact, LedgerIdentity};
 use mfm_evm::custody::{
     AuthorityError, AuthorityFuture, EvmTransactionAuthority, LoadedTransaction, PreparedRecord,
     Reservation,
 };
 use mfm_evm::{
-    CheckedCallPlan, CheckedCreatePlan, CheckedObservationPlan, CheckedTargetCallPlan, EvmAddress,
-    EvmAnchoredContractCallRead, EvmAuthorityEpoch, EvmEndpoint, EvmHash, EvmTransactionBinding,
-    EvmTransactionRoute, EvmU256, ReadAnchoredContractCall,
+    Eip1559Options, EvmAddress, EvmAuthorityEpoch, EvmBalanceRoute, EvmContractExecutionConfig,
+    EvmContractReadImplementation, EvmEndpoint, EvmHash, EvmScalarContractArtifact,
+    EvmTransactionBinding, EvmTransactionImplementation, EvmTransactionRoute, EvmU256,
 };
 use mfm_evm_live::{
-    ethereum_address, register_evm_anchored_contract_calls, register_evm_transaction_adapters,
-    register_evm_transaction_states, EvmAdapterLocator, EvmReadProvider, EvmTransactionProvider,
-    JsonRpcEvmProvider, EVM_EIP1559_SIGNING_PURPOSE_ID,
+    ethereum_address, EvmAdapterLocator, EvmReadProvider, EvmResources, EvmTransactionProvider,
+    EvmTransactionResource, JsonRpcEvmProvider, EVM_EIP1559_SIGNING_PURPOSE_ID,
 };
 use mfm_ids::{ContentRef, DigestBytes, EffectId, EntryPointId, RunId, StableId};
 use mfm_keystore::{KeystoreOwner, SecretSecp256k1Scalar};
-use mfm_program::{
-    expand_program, Operation, OperationExpansion, ProgramError, ProposedStateOutcome, PureState,
-    State,
-};
-use mfm_program_derive::MfmValue;
-use mfm_runtime::{RunView, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError};
+use mfm_program::{compile, load, Effect, Operation, Program, ProgramLimits, Pure};
+use mfm_runtime::{RunView, RunViewState, Runtime, RuntimeError};
 use mfm_signing::Secp256k1Signer;
 use mfm_storage_postgres::{
     provision_evm_transaction_authority, provision_postgres, AdminPostgresLocator, PostgresBackend,
     PostgresEvmTransactionAuthority, RuntimePostgresLocator,
 };
 use mfm_store::Store;
-use mfm_values::MfmValue;
-use serde::{Deserialize, Serialize};
+use mfm_values::Object;
 use zeroize::Zeroizing;
 
 const MAX_INITCODE_BYTES: usize = 49_152;
@@ -53,12 +47,27 @@ const CONFIGURATION_GAS: u64 = 200_000;
 const PRIORITY_FEE: u64 = 1_000_000_000;
 const MAX_FEE: u64 = 10_000_000_000;
 const FUNDING_WEI: u64 = 1_000_000_000_000_000_000;
-const CONFIGURE_SELECTOR: [u8; 4] = [0x1e, 0xb2, 0x5e, 0x0a];
-const VALUE_SELECTOR: [u8; 4] = [0x3f, 0xa4, 0xf2, 0x45];
+type Deployer = Effect<Deploy, TransactionEffect<DeploymentRequest>>;
+type Composed = Operation<
+    (
+        Deployer,
+        Pure<CheckedAddConfigurationValue>,
+        ConfigureAndObserve,
+        Pure<Validate>,
+        Pure<Report>,
+    ),
+    LifecycleDefaults,
+>;
+type Resources = EvmResources<(
+    ContractDeploymentLifecycle,
+    Composed,
+    ConfigureAndObserve,
+    Deployer,
+)>;
 
-#[path = "support/contract_workflow.rs"]
-mod workflow;
-use workflow::*;
+#[path = "support/managed_provider.rs"]
+mod managed_provider;
+use managed_provider::*;
 
 fn nonzero(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).expect("nonzero fixture")
@@ -119,7 +128,8 @@ async fn runtime(
     binding: &EvmTransactionBinding,
     signer: Arc<dyn Secp256k1Signer>,
     consumed: Arc<AtomicBool>,
-) -> Runtime {
+    calls: Arc<ProviderCalls>,
+) -> (Runtime, Resources) {
     let backend = Arc::new(
         PostgresBackend::connect(runtime_locator)
             .await
@@ -139,25 +149,21 @@ async fn runtime(
         inner: transaction_authority,
         consumed,
     });
-    let transaction_provider: Arc<dyn EvmTransactionProvider> = provider.clone();
+    let transaction_provider = Arc::new(ObservedProvider {
+        inner: provider.clone(),
+        calls,
+    });
     let read_provider: Arc<dyn EvmReadProvider> = provider;
-
-    let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-    register_fixture_states(&mut builder).expect("fixture State ABIs");
-    register_evm_transaction_states::<WalletInitial, WalletRecipe>(&mut builder)
-        .expect("wallet State ABIs");
-    register_evm_transaction_adapters(
-        &mut builder,
-        binding.clone(),
-        signer,
-        authority,
-        transaction_provider,
-    )
-    .expect("transaction adapter");
-    register_evm_anchored_contract_calls(&mut builder, binding.route.clone(), read_provider)
-        .expect("anchored adapter");
+    let resource =
+        EvmTransactionResource::new(binding.clone(), signer, authority, transaction_provider)
+            .unwrap();
+    let route = EvmBalanceRoute::new(
+        binding.route.chain_instance.chain_id,
+        EvmEndpoint::new("reth-effect-e2e").unwrap(),
+    );
+    let resources = Resources::new(vec![(route, read_provider)], vec![resource]).unwrap();
     let store: Arc<dyn Store> = backend;
-    Runtime::new(builder.finish(), store)
+    (Runtime::new(store), resources)
 }
 
 fn fixture_initcode() -> Vec<u8> {
@@ -186,22 +192,47 @@ fn fixture_initcode() -> Vec<u8> {
     alloy_primitives::hex::decode(digits).expect("hexadecimal fixture initcode")
 }
 
-fn fixture_configure_calldata() -> Vec<u8> {
-    let mut calldata = Vec::with_capacity(36);
-    calldata.extend_from_slice(&CONFIGURE_SELECTOR);
-    calldata.extend_from_slice(&abi_word(CONFIGURED_VALUE));
-    calldata
+fn deployment_request(binding: &EvmTransactionBinding, initcode: Vec<u8>) -> DeploymentRequest {
+    use mfm_capabilities::{EffectImplementation, ReadImplementation};
+    let native = EvmContractExecutionConfig::new(
+        binding.clone(),
+        Eip1559Options::new(nonzero(DEPLOYMENT_GAS), PRIORITY_FEE.into(), MAX_FEE.into()).unwrap(),
+        Eip1559Options::new(
+            nonzero(CONFIGURATION_GAS),
+            PRIORITY_FEE.into(),
+            MAX_FEE.into(),
+        )
+        .unwrap(),
+    );
+    DeploymentRequest::new(
+        ContractArtifact::new(
+            LedgerIdentity::new(Object::from_value(&binding.route.chain_instance).unwrap()),
+            Object::from_value(&EvmScalarContractArtifact::new(initcode).unwrap()).unwrap(),
+        ),
+        ContractExecutionConfig::new(
+            <EvmTransactionImplementation as EffectImplementation<
+                TransactionEffect<DeploymentRequest>,
+            >>::implementation_id()
+            .unwrap(),
+            <EvmContractReadImplementation as ReadImplementation<ContractRead>>::implementation_id(
+            )
+            .unwrap(),
+            Object::from_value(&binding.route)
+                .unwrap()
+                .value_ref()
+                .clone(),
+            Object::from_value(&native).unwrap(),
+        ),
+        ConfigurationValue::new("42").unwrap(),
+        ConfigurationValue::new("42").unwrap(),
+        None,
+        None,
+    )
 }
 
-fn abi_word(value: u64) -> [u8; 32] {
-    let mut word = [0_u8; 32];
-    word[24..].copy_from_slice(&value.to_be_bytes());
-    word
-}
-
-fn decode_fixture_value(return_bytes: &[u8]) -> Option<EvmU256> {
-    let word = <[u8; 32]>::try_from(return_bytes).ok()?;
-    EvmU256::new(U256::from_be_bytes(word).to_string()).ok()
+async fn cold_program(runtime: &Runtime, resources: &Resources, run: &RunId) -> Program {
+    let document = runtime.program_document(run).await.unwrap();
+    load(document.canonical_bytes(), resources).unwrap()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -215,7 +246,7 @@ enum FundingError {
 async fn fund_sender(locator: &str, sender: &EvmAddress) -> Result<(), FundingError> {
     let locator = EvmAdapterLocator::parse(locator)?;
     let provider = JsonRpcEvmProvider::connect(&locator)?;
-    provider
+    let transaction = provider
         .fund_development_sender(
             sender,
             &EvmU256::from_u64(FUNDING_WEI),
@@ -223,6 +254,14 @@ async fn fund_sender(locator: &str, sender: &EvmAddress) -> Result<(), FundingEr
             u128::from(PRIORITY_FEE),
         )
         .await?;
+    tokio::time::timeout(PROGRESS_TIMEOUT, async {
+        while provider.receipt(&transaction).await?.is_none() {
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        Ok::<_, FundingError>(())
+    })
+    .await
+    .expect("funding settlement deadline")?;
     Ok(())
 }
 
@@ -285,7 +324,7 @@ async fn generated_signer(owner: &KeystoreOwner) -> Arc<dyn Secp256k1Signer> {
     panic!("four entropy candidates did not contain a valid secp256k1 scalar")
 }
 
-async fn drive_to_success<F: mfm_values::MfmValue + std::fmt::Debug>(
+async fn drive_to_success(
     mut step: impl AsyncFnMut() -> Result<RunView, mfm_runtime::InvocationFailure>,
 ) -> RunView {
     let mut last_progress = String::from("no completed invocation");
@@ -295,7 +334,7 @@ async fn drive_to_success<F: mfm_values::MfmValue + std::fmt::Debug>(
                 Ok(view) => match view.state() {
                     RunViewState::Succeeded(_) => return view,
                     RunViewState::Failed(value) => {
-                        let failure: F = root_failure(value);
+                        let failure = value.failure().original();
                         panic!(
                             "fixture failed at frame {}: {failure:?}",
                             view.head_sequence()
@@ -329,11 +368,11 @@ async fn drive_to_success<F: mfm_values::MfmValue + std::fmt::Debug>(
     })
 }
 
-fn terminal_value(view: &RunView) -> FixtureReport {
-    let RunViewState::Succeeded(value) = view.state() else {
-        panic!("effect fixture must succeed")
-    };
-    serde_json::from_slice(value.canonical_bytes()).expect("typed final value")
+fn terminal_value(view: &RunView) -> ContractDeploymentReport {
+    view.success()
+        .expect("lifecycle success")
+        .decode()
+        .expect("checked semantic report")
 }
 
 #[tokio::test]
@@ -371,7 +410,12 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
             .expect("endpoint ref"),
     };
     let owner = KeystoreOwner::start().expect("keystore owner");
-    let signer = generated_signer(&owner).await;
+    let signing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let signer: Arc<dyn Secp256k1Signer> = Arc::new(ObservedSigner {
+        inner: generated_signer(&owner).await,
+        calls: signing_calls.clone(),
+    });
+    let provider_calls = Arc::new(ProviderCalls::default());
     let sender = ethereum_address(signer.public_key());
     let binding = EvmTransactionBinding {
         route,
@@ -400,42 +444,34 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         .await
         .unwrap_or_else(|_| panic!("managed admin connection"));
     let diagnostic_run = RunId::from_digest(DigestBytes::from_array([0x59; 32]));
-    let diagnostic_input = WalletContext {
-        transaction: CheckedTargetCallPlan::new(
-            CheckedCallPlan::new(
-                binding.clone(),
-                Vec::new(),
-                EvmU256::from_u64(0),
-                nonzero(21_000),
-                PRIORITY_FEE as u128,
-                MAX_FEE as u128,
-            )
-            .unwrap(),
-            sender.clone(),
-        ),
-        label: 19,
-    };
-    let diagnostic_program = expand_program(
-        EntryPointId::new("mfm.test.evm-effect/authority-diagnostic@1").unwrap(),
-        &WalletTransaction::new(binding.clone()),
-        &diagnostic_input,
-        mfm_program::ProgramLimits::new(0),
-    )
-    .unwrap();
-    let hot = runtime(
+    let diagnostic_input = deployment_request(&binding, initcode.clone());
+    let (hot, resources) = runtime(
         &runtime_locator,
         &rpc_locator,
         &binding,
         signer.clone(),
         Arc::new(AtomicBool::new(true)),
+        provider_calls.clone(),
     )
     .await;
+    let diagnostic_program = compile(
+        EntryPointId::new("mfm.test.evm-effect/authority-diagnostic@1").unwrap(),
+        &Deployer::default(),
+        &diagnostic_input,
+        &resources,
+        ProgramLimits::new(0),
+    )
+    .unwrap();
     sqlx::query("REVOKE SELECT ON mfm_evm_tx.nonce_reservations FROM mfm_runtime")
         .execute(&mut admin)
         .await
         .unwrap();
     let failure = hot
-        .start(diagnostic_run.clone(), diagnostic_program, diagnostic_input)
+        .start(
+            diagnostic_run.clone(),
+            &diagnostic_program,
+            &diagnostic_input,
+        )
         .await;
     sqlx::query("GRANT SELECT ON mfm_evm_tx.nonce_reservations TO mfm_runtime")
         .execute(&mut admin)
@@ -489,15 +525,22 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         hot_wire["state"]["latest_failure"]["error"]
     );
     drop(hot);
-    let cold = runtime(
+    let (cold, resources) = runtime(
         &runtime_locator,
         &rpc_locator,
         &binding,
         signer.clone(),
         Arc::new(AtomicBool::new(true)),
+        provider_calls.clone(),
     )
     .await;
-    let cold_view = cold.read(&diagnostic_run).await.unwrap();
+    drop(diagnostic_program);
+    drop(diagnostic_input);
+    let diagnostic_program = cold_program(&cold, &resources, &diagnostic_run).await;
+    let cold_view = cold
+        .read(&diagnostic_run, &diagnostic_program)
+        .await
+        .unwrap();
     assert_eq!(
         serde_json::to_value(mfm_app::SerializableRunView::new(&cold_view).unwrap()).unwrap(),
         hot_wire
@@ -516,7 +559,7 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         .execute(&mut admin)
         .await
         .unwrap();
-    let internal = cold.resume(&diagnostic_run).await;
+    let internal = cold.resume(&diagnostic_run, &diagnostic_program).await;
     sqlx::query("UPDATE mfm_evm_tx.mfm_evm_tx_schema SET authority_epoch = $1")
         .bind(saved_epoch)
         .execute(&mut admin)
@@ -553,7 +596,10 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         wire["invocation"]["cause"]["native"]["cause"]["code"],
         "authority_internal"
     );
-    let after = cold.read(&diagnostic_run).await.unwrap();
+    let after = cold
+        .read(&diagnostic_run, &diagnostic_program)
+        .await
+        .unwrap();
     assert_eq!(after.head_sequence(), cold_view.head_sequence());
     assert_eq!(after.head_digest(), cold_view.head_digest());
     assert_eq!(
@@ -563,242 +609,328 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     drop(cold);
     drop(admin);
 
-    let deployment = CheckedCreatePlan::new(
-        binding.clone(),
-        initcode,
-        EvmU256::from_u64(0),
-        nonzero(DEPLOYMENT_GAS),
-        (PRIORITY_FEE) as u128,
-        (MAX_FEE) as u128,
-    )
-    .expect("checked deployment");
-    let configuration = CheckedCallPlan::new(
-        binding.clone(),
-        fixture_configure_calldata(),
-        EvmU256::from_u64(0),
-        nonzero(CONFIGURATION_GAS),
-        (PRIORITY_FEE) as u128,
-        (MAX_FEE) as u128,
-    )
-    .expect("checked configuration");
-    let observation = CheckedObservationPlan::new(binding.route.clone(), VALUE_SELECTOR.to_vec())
-        .expect("checked observation");
-    let input = ContractWorkflow {
-        request: FixtureRequest { label: 17 },
-        deployment,
-        configuration,
-        observation,
-    };
-    let expected_input = input.clone();
-    let program = expand_program(
-        EntryPointId::new("mfm.test.evm-effect/run@1").expect("entry point"),
-        &EffectFixtureOperation {
-            binding: binding.clone(),
-        },
-        &input,
-        mfm_program::ProgramLimits::new(1),
-    )
-    .expect("fixture Program");
+    let input = deployment_request(&binding, initcode);
     let run_id = RunId::from_digest(DigestBytes::from_array([0x5a; 32]));
     let consumed = Arc::new(AtomicBool::new(false));
-    let initial_runtime = runtime(
+    let (initial_runtime, resources) = runtime(
         &runtime_locator,
         &rpc_locator,
         &binding,
         signer.clone(),
         consumed.clone(),
+        provider_calls.clone(),
     )
     .await;
+    let program = compile(
+        EntryPointId::new("mfm.test.evm-effect/run@1").unwrap(),
+        &ContractDeploymentLifecycle::default(),
+        &input,
+        &resources,
+        ProgramLimits::new(1),
+    )
+    .unwrap();
     let initial = tokio::time::timeout(
         PROGRESS_TIMEOUT,
-        initial_runtime.start(run_id.clone(), program, input),
+        initial_runtime.start(run_id.clone(), &program, &input),
     )
     .await
-    .expect("initial reservation deadline");
+    .expect("reservation deadline");
     assert!(matches!(
         initial,
         Err(mfm_runtime::InvocationFailure::RecoveryStopped { .. })
     ));
     assert!(consumed.load(Ordering::SeqCst));
-    assert_eq!(
-        setup_provider
-            .pending_nonce(&sender)
-            .await
-            .expect("nonce before broadcast"),
-        0
-    );
+    assert_eq!(setup_provider.pending_nonce(&sender).await.unwrap(), 0);
+    assert_eq!(signing_calls.load(Ordering::SeqCst), 0);
+    assert!(provider_calls.submitted.lock().unwrap().is_empty());
+    drop(input);
+    drop(program);
+    drop(resources);
     drop(initial_runtime);
 
-    let terminal = drive_to_success::<FixtureFailure>(async || {
-        let runtime = runtime(
+    // Cancel after the real node accepts a signed transaction while interval mining is delayed.
+    // The exact prepared command already has durable authority; dropping this future records none
+    // of its unacknowledged work and leaves the keystore owner alive for cold reconstruction.
+    let (interrupted, resources) = runtime(
+        &runtime_locator,
+        &rpc_locator,
+        &binding,
+        signer.clone(),
+        consumed.clone(),
+        provider_calls.clone(),
+    )
+    .await;
+    let program = cold_program(&interrupted, &resources, &run_id).await;
+    tokio::time::timeout(PROGRESS_TIMEOUT, async {
+        let progress = interrupted.resume(&run_id, &program);
+        tokio::pin!(progress);
+        tokio::select! {
+            _ = provider_calls.broadcast.notified() => {},
+            result = &mut progress => panic!("expected cancellation after broadcast; error: {:?}", result.err()),
+        }
+    })
+    .await
+    .expect("broadcast deadline");
+    let pending = interrupted.read(&run_id, &program).await.unwrap();
+    let RunViewState::EffectPending { effect, .. } = pending.state() else {
+        panic!("broadcast cancellation must preserve command authority")
+    };
+    let prepared = effect
+        .command()
+        .decode::<PreparedTransaction<DeploymentRequest>>()
+        .unwrap();
+    let native = prepared
+        .native()
+        .decode::<mfm_evm::PreparedEvmTransaction>()
+        .unwrap();
+    assert_eq!(native.reserved().reservation().nonce(), 0);
+    assert_eq!(
+        native.reserved().command(),
+        &mfm_evm::EvmTransactionRecipe::command(prepared.request()).unwrap()
+    );
+    assert_eq!(signing_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider_calls.submitted.lock().unwrap().len(), 1);
+    drop(prepared);
+    drop(native);
+    drop(pending);
+    drop(program);
+    drop(resources);
+    drop(interrupted);
+
+    let terminal = drive_to_success(async || {
+        let (runtime, resources) = runtime(
             &runtime_locator,
             &rpc_locator,
             &binding,
             signer.clone(),
             consumed.clone(),
+            provider_calls.clone(),
         )
         .await;
-        runtime.resume(&run_id).await
+        let program = cold_program(&runtime, &resources, &run_id).await;
+        runtime.resume(&run_id, &program).await
     })
     .await;
-    assert_eq!(
-        terminal_value(&terminal).decoded(),
-        &EvmU256::from_u64(CONFIGURED_VALUE)
-    );
     let report = terminal_value(&terminal);
-    assert_eq!(report.context().request, expected_input.request);
+    assert_eq!(report.requested_value().to_string(), "42");
+    assert_eq!(report.effective_value().to_string(), "42");
+    assert_eq!(report.observed_value().to_string(), "42");
+    let deployment = report
+        .deployment()
+        .original()
+        .decode::<mfm_evm::EvmTransactionSettlement>()
+        .unwrap();
+    let configuration = report
+        .configuration()
+        .original()
+        .decode::<mfm_evm::EvmTransactionSettlement>()
+        .unwrap();
+    assert_eq!(deployment.nonce(), 0);
+    assert_eq!(configuration.nonce(), 1);
     assert_eq!(
-        report.context().deployment.command(),
-        &expected_input.deployment.command()
+        &report
+            .deployment()
+            .transaction()
+            .native()
+            .decode::<EvmHash>()
+            .unwrap(),
+        deployment.transaction_hash()
     );
     assert_eq!(
-        report.context().configuration.command(),
-        &expected_input.configuration.command_for(
-            report
-                .context()
-                .deployment
-                .outcome()
-                .created_address()
-                .clone()
-        )
+        &report
+            .configuration()
+            .transaction()
+            .native()
+            .decode::<EvmHash>()
+            .unwrap(),
+        configuration.transaction_hash()
     );
-    assert_eq!(report.context().deployment.reservation().nonce(), 0);
-    assert_eq!(report.context().configuration.reservation().nonce(), 1);
+    let observation = report
+        .observation()
+        .original()
+        .decode::<mfm_evm::AnchoredContractCallEvidence>()
+        .unwrap();
+    let mfm_evm::AnchoredContractCallEvidence::Returned {
+        result: observation,
+        ..
+    } = observation
+    else {
+        panic!("authenticated anchored scalar result")
+    };
+    assert_eq!(observation.anchor(), configuration.block_anchor());
+    assert_eq!(observation.return_bytes().len(), 32);
+    assert_eq!(observation.return_bytes()[31], CONFIGURED_VALUE as u8);
+    assert_eq!(setup_provider.pending_nonce(&sender).await.unwrap(), 2);
     assert_eq!(
-        (&report.context().deployment.preparation().transaction_hash),
-        report.context().deployment.settlement().transaction_hash()
+        signing_calls.load(Ordering::SeqCst),
+        2,
+        "cold recovery never re-signs the prepared deployment"
     );
-    assert_eq!(
-        (&report
-            .context()
-            .configuration
-            .preparation()
-            .transaction_hash),
-        report
-            .context()
-            .configuration
-            .settlement()
-            .transaction_hash()
-    );
-    assert_eq!(
-        report.context().observation.intent(),
-        &expected_input.observation.intent_for(
-            report.context().configuration.outcome().target().clone(),
-            report
-                .context()
-                .configuration
-                .settlement()
-                .block_anchor()
-                .clone()
-        )
-    );
-    assert_eq!(
-        report
-            .context()
-            .observation
-            .result()
-            .unwrap()
-            .return_bytes(),
-        &abi_word(CONFIGURED_VALUE)
-    );
-    let final_nonce = setup_provider
-        .pending_nonce(&sender)
-        .await
-        .expect("final pending nonce");
-    assert_eq!(final_nonce, 2);
 
-    external_wallet_transfer(&setup_provider, signer.as_ref(), &binding, final_nonce).await;
-    let fresh_plan = CheckedTargetCallPlan::new(
-        CheckedCallPlan::new(
-            binding.clone(),
-            Vec::new(),
-            EvmU256::from_u64(0),
-            nonzero(21_000),
-            (PRIORITY_FEE) as u128,
-            (MAX_FEE) as u128,
-        )
-        .unwrap(),
-        sender.clone(),
-    );
-    let cold_runtime = runtime(
+    // The maintained child also runs from a real deployed predecessor and calls its existing address.
+    external_wallet_transfer(&setup_provider, signer.as_ref(), &binding, 2).await;
+    let fresh_input = DeployedContract::new(
+        report.request().clone(),
+        report.effective_value().clone(),
+        report.deployment().clone(),
+    )
+    .unwrap();
+    let (cold_runtime, resources) = runtime(
         &runtime_locator,
         &rpc_locator,
         &binding,
         signer.clone(),
-        consumed,
+        consumed.clone(),
+        provider_calls.clone(),
     )
     .await;
     let fresh_run = RunId::from_digest(DigestBytes::from_array([0x5b; 32]));
-    let fresh_input = WalletContext {
-        transaction: fresh_plan.clone(),
-        label: 18,
-    };
-    let fresh_program = expand_program(
-        EntryPointId::new("mfm.test.evm-effect/wallet-call@1").unwrap(),
-        &WalletTransaction::new(binding.clone()),
+    let fresh_program = compile(
+        EntryPointId::new("mfm.test.evm-effect/existing-contract@1").unwrap(),
+        &ConfigureAndObserve::default(),
         &fresh_input,
-        mfm_program::ProgramLimits::new(1),
+        &resources,
+        ProgramLimits::new(1),
     )
     .unwrap();
-    // Resume first so Unavailable from admission is retried without assuming genesis committed.
-    let wallet_terminal =
-        drive_to_success::<WalletFailure>(async || match cold_runtime.resume(&fresh_run).await {
-            Err(mfm_runtime::InvocationFailure::Execution {
-                error: RuntimeError::Absent,
-                ..
-            }) => {
-                cold_runtime
-                    .start(
-                        fresh_run.clone(),
-                        fresh_program.clone(),
-                        fresh_input.clone(),
-                    )
-                    .await
-            }
-            progress => progress,
-        })
+    let existing =
+        drive_to_success(
+            async || match cold_runtime.resume(&fresh_run, &fresh_program).await {
+                Err(mfm_runtime::InvocationFailure::Execution {
+                    error: RuntimeError::Absent,
+                    ..
+                }) => {
+                    cold_runtime
+                        .start(fresh_run.clone(), &fresh_program, &fresh_input)
+                        .await
+                }
+                progress => progress,
+            },
+        )
         .await;
-    let RunViewState::Succeeded(wallet_value) = wallet_terminal.state() else {
-        panic!("wallet follow-up success")
-    };
-    let wallet_report: WalletReport =
-        serde_json::from_slice(wallet_value.canonical_bytes()).unwrap();
-    assert_eq!(wallet_report.label, 18);
-    assert_eq!(wallet_report.transaction.command(), &fresh_plan.command());
-    assert_eq!(wallet_report.transaction.reservation().nonce(), 3);
-    let final_nonce = final_nonce + 2;
+    let observed = existing
+        .success()
+        .unwrap()
+        .decode::<ObservedConfiguration>()
+        .unwrap();
+    let existing_native = observed
+        .configured()
+        .configuration()
+        .original()
+        .decode::<mfm_evm::EvmTransactionSettlement>()
+        .unwrap();
+    assert_eq!(existing_native.nonce(), 3);
     assert_eq!(
-        setup_provider.pending_nonce(&sender).await.unwrap(),
-        final_nonce
+        observed.configured().configured().contract().unwrap(),
+        fresh_input.contract().unwrap()
     );
-    let cold_read = cold_runtime.read(&run_id).await.expect("cold read");
-    assert_eq!(cold_read.head_sequence(), terminal.head_sequence());
-    assert_eq!(cold_read.head_digest(), terminal.head_digest());
-    assert_eq!(terminal_value(&cold_read), report);
-    let cold_resume = cold_runtime.resume(&run_id).await.expect("terminal resume");
-    assert_eq!(cold_resume.head_sequence(), terminal.head_sequence());
-    assert_eq!(cold_resume.head_digest(), terminal.head_digest());
-    assert_eq!(terminal_value(&cold_resume), report);
-    assert_eq!(
-        setup_provider
-            .pending_nonce(&sender)
-            .await
-            .expect("cold replay nonce"),
-        final_nonce
+    assert!(
+        matches!(observed.observation().outcome(), ContractValueOutcome::Observed { value, .. } if value.to_string() == "42")
     );
+    assert_eq!(setup_provider.pending_nonce(&sender).await.unwrap(), 4);
 
+    let composed_run = RunId::from_digest(DigestBytes::from_array([0x5d; 32]));
+    let composed_input = report.request().clone();
+    let composed = compile(
+        EntryPointId::new("mfm.test.evm-effect/composed@1").unwrap(),
+        &Composed::default(),
+        &composed_input,
+        &resources,
+        ProgramLimits::new(1),
+    )
+    .unwrap();
+    let started = cold_runtime
+        .start(composed_run.clone(), &composed, &composed_input)
+        .await;
+    assert!(started.is_ok(), "composed admission must succeed");
+    drop(composed_input);
+    drop(composed);
+    let eighty_four = drive_to_success(async || {
+        let (runtime, resources) = runtime(
+            &runtime_locator,
+            &rpc_locator,
+            &binding,
+            signer.clone(),
+            consumed.clone(),
+            provider_calls.clone(),
+        )
+        .await;
+        let program = cold_program(&runtime, &resources, &composed_run).await;
+        runtime.resume(&composed_run, &program).await
+    })
+    .await;
+    let composed_report = terminal_value(&eighty_four);
+    assert_eq!(composed_report.requested_value().to_string(), "42");
+    assert_eq!(composed_report.effective_value().to_string(), "84");
+    assert_eq!(composed_report.observed_value().to_string(), "84");
+    assert_eq!(
+        composed_report
+            .deployment()
+            .original()
+            .decode::<mfm_evm::EvmTransactionSettlement>()
+            .unwrap()
+            .nonce(),
+        4
+    );
+    assert_eq!(
+        composed_report
+            .configuration()
+            .original()
+            .decode::<mfm_evm::EvmTransactionSettlement>()
+            .unwrap()
+            .nonce(),
+        5
+    );
+    assert_eq!(setup_provider.pending_nonce(&sender).await.unwrap(), 6);
+    assert!(provider_calls.absent_receipts.load(Ordering::SeqCst) > 0);
+    assert!(
+        provider_calls.known_transactions.load(Ordering::SeqCst) > 0,
+        "delayed mining must exercise known Pending transactions"
+    );
+    {
+        let submitted = provider_calls.submitted.lock().unwrap();
+        assert_eq!(
+            submitted.len(),
+            5,
+            "one accepted submission per native transaction"
+        );
+        let unique: std::collections::BTreeSet<_> = submitted.iter().collect();
+        assert_eq!(
+            unique.len(),
+            5,
+            "known transactions must not be rebroadcast"
+        );
+    }
+    assert_eq!(
+        signing_calls.load(Ordering::SeqCst),
+        6,
+        "five native signatures plus the external wallet transfer"
+    );
+    for (run, expected) in [(&run_id, &terminal), (&composed_run, &eighty_four)] {
+        let program = cold_program(&cold_runtime, &resources, run).await;
+        let read = cold_runtime.read(run, &program).await.unwrap();
+        let resumed = cold_runtime.resume(run, &program).await.unwrap();
+        for view in [read, resumed] {
+            assert_eq!(view.head_sequence(), expected.head_sequence());
+            assert_eq!(view.head_digest(), expected.head_digest());
+            assert_eq!(view.success(), expected.success());
+        }
+    }
+    assert_eq!(setup_provider.pending_nonce(&sender).await.unwrap(), 6);
     owner.shutdown().await.expect("keystore shutdown");
     let signing_run = RunId::from_digest(DigestBytes::from_array([0x5c; 32]));
-    let hot = runtime(
+    let (hot, resources) = runtime(
         &runtime_locator,
         &rpc_locator,
         &binding,
         signer.clone(),
         Arc::new(AtomicBool::new(true)),
+        provider_calls.clone(),
     )
     .await;
+    let fresh_program = load(fresh_program.canonical_bytes(), &resources).unwrap();
     let failed = hot
-        .start(signing_run.clone(), fresh_program, fresh_input)
+        .start(signing_run.clone(), &fresh_program, &fresh_input)
         .await;
     let Err(mfm_runtime::InvocationFailure::RecoveryStopped { observed }) = failed else {
         panic!("durable closed signer failure")
@@ -828,18 +960,20 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         serde_json::to_value(&original).unwrap()
     );
     drop(hot);
-    let cold = runtime(
+    let (cold, resources) = runtime(
         &runtime_locator,
         &rpc_locator,
         &binding,
         signer,
         Arc::new(AtomicBool::new(true)),
+        provider_calls.clone(),
     )
     .await;
-    let cold_view = cold.read(&signing_run).await.unwrap();
+    let program = cold_program(&cold, &resources, &signing_run).await;
+    let cold_view = cold.read(&signing_run, &program).await.unwrap();
     assert_eq!(
         serde_json::to_value(mfm_app::SerializableRunView::new(&cold_view).unwrap()).unwrap(),
         hot_wire
     );
-    assert_eq!(setup_provider.pending_nonce(&sender).await.unwrap(), 4);
+    assert_eq!(setup_provider.pending_nonce(&sender).await.unwrap(), 6);
 }

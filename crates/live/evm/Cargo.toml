@@ -13,11 +13,14 @@ domain-role = "live"
 
 [dependencies]
 mfm-program = { path = "../../kernel/program" }
+mfm-program-derive = { path = "../../kernel/program-derive" }
+mfm-canonical = { path = "../../kernel/canonical" }
+mfm-chain = { path = "../../domains/chain" }
+mfm-portfolio = { path = "../../domains/portfolio" }
 mfm-values = { path = "../../kernel/values" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-evm = { path = "../../domains/evm" }
 mfm-ids = { path = "../../kernel/ids" }
-mfm-runtime = { path = "../../kernel/runtime" }
 mfm-signing = { path = "../../signing" }
 alloy-consensus = { workspace = true }
 alloy-eips = { workspace = true }
@@ -30,13 +33,14 @@ tokio = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+mfm-runtime = { path = "../../kernel/runtime" }
+tokio = { workspace = true, features = ["test-util"] }
 mfm-app = { path = "../../app" }
 sqlx = { workspace = true }
 getrandom = { workspace = true }
 k256 = { workspace = true }
 mfm-journal = { path = "../../kernel/journal" }
 mfm-keystore = { path = "../../keystore" }
-mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-store = { path = "../../kernel/store" }
 mfm-storage-postgres = { path = "../../storages/postgres" }
 zeroize = { workspace = true }

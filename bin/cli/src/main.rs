@@ -435,7 +435,16 @@ fn emit_entry_points(output: OutputFormat) -> Result<ExitCode, CliError> {
 }
 
 fn emit_components(output: OutputFormat) -> Result<ExitCode, CliError> {
-    let items = Application::components();
+    let items = Application::components().map_err(|cause| {
+        CliError::Composition(mfm_app::ComposeError::Native(
+            mfm_values::InvocationDiagnostic::from_fields(
+                "program_contract",
+                "inspect_components",
+                &cause,
+                None,
+            ),
+        ))
+    })?;
     emit_serializable(output, &ItemList::new(&items), || render_components(&items))
 }
 
@@ -454,9 +463,11 @@ fn render_components(items: &[ComponentSummary]) -> String {
 }
 
 fn emit_bindings(output: OutputFormat, application: &Application) -> Result<ExitCode, CliError> {
-    emit_serializable(output, &ItemList::new(application.bindings()), || {
-        application
-            .bindings()
+    let bindings = application
+        .bindings()
+        .map_err(|cause| CliError::Composition(mfm_app::ComposeError::Native(cause)))?;
+    emit_serializable(output, &ItemList::new(&bindings), || {
+        bindings
             .iter()
             .map(|binding| match binding {
                 mfm_app::PublicBindingView::Evm {
@@ -544,13 +555,12 @@ mod tests {
 
     #[test]
     fn component_text_is_complete_and_uniform() {
-        let items = Application::components();
+        let items = Application::components().unwrap();
         let rendered = render_components(&items);
         assert_eq!(rendered.lines().count(), items.len() * 4);
         assert!(rendered.starts_with("kind=entry_point\nid=mfm.portfolio/enrich@1\ndescription="));
         assert!(rendered
-            .contains("kind=operation\nid=mfm.evm.operation.collect-balances@2\ndescription="));
-        assert!(rendered
-            .contains("kind=read_state\nid=mfm.evm.state.read-native-balance@1\ndescription="));
+            .contains("kind=operation\nid=mfm.portfolio.operation.snapshot@1\ndescription="));
+        assert!(rendered.contains("kind=read_state\nid=mfm.chain.observe-balance@1\ndescription="));
     }
 }

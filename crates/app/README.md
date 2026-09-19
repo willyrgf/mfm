@@ -33,24 +33,26 @@ is not part of this file and is resolved only by the CLI `postgres init` command
 UTF-8/JSON, duplicate keys, floats, excess depth, unknown fields, and invalid domain values, then
 owns canonical JSON plus its `sha256-jcs-v1` digest. The required entry-point tag is
 `mfm.portfolio/snapshot@1` or `mfm.portfolio/enrich@1`; the route array has 1–64 entries, is strictly chain-ordered, and must
-exactly cover the Portfolio source chains when Application runs the planner during import.
+exactly cover the Portfolio source chains during native-client admission.
 
-One `ComposedRuntime` derives Runtime adapter registration, public binding discovery, planning
-targets, Store, and RunIndex from the same checked inputs. The production Application coerces the
-same PostgreSQL backend into Store, RunIndex, and configuration-repository ports. The complete Application
-surface is:
+Application coordinates Runtime, the native Portfolio resource environment, RunIndex and the
+configuration repository. The production Application coerces the same PostgreSQL backend into the
+mechanical persistence ports. Native clients own configuration admission and conversion; Application
+compiles the selected maintained source with admitted input, then supplies the complete Program to
+Runtime. Cold read/resume first loads the retained Program through the same native environment.
 
-- static compiled-component and entry-point discovery plus composed-binding discovery;
-- immutable exact-revision config import, complete list, and idempotent delete;
-- stored-config run start through one exact name/digest selection;
-- run progress, semantic read, and mechanical `RunId`-keyset list.
+Component inspection uses the compiler's installed-source discovery plus supported transport entry
+points. Domain State/Operation definitions own IDs and descriptions; no handwritten executable table
+or native registration loop remains. Discovery requires no Plan, configuration, deployment, Store or
+provider. Binding views derive from native resource records. Publication reconstructs endpoint facts
+from retained enrichment output, without source configuration or a lookup in live binding views.
 
-Compiled-component discovery returns the entry points, public reusable Operations, and Pure/Read
-States admitted by the product composition. Domain definitions own their stable IDs and
-human-readable descriptions. The private State inventory also performs the exact Runtime State
-registrations, so discovery cannot drift from live composition. It performs no Program expansion,
-configuration parsing, deployment resolution, Store access, or provider IO; descriptions are
-non-semantic and never enter Program bytes or durable history.
+Successful run JSON retains the exact semantic Object under `value` and a separate native `product`
+rendering. Domain failures retain the exact complete `report` plus a checked `product_failure` when
+supported. Operational originals remain operational reports. Native clients decode contracts and
+Portfolio validates context; Application coordinates the conversion without native interpretation.
+Projection errors retain diagnostics rather than substituting a product failure. Construction errors
+carry the requested RunId and reviewed causal diagnostics before any admission append.
 
 Every execution receives an explicit caller-owned `RunId`. The shared `generate_run_id()` client
 primitive obtains exactly 32 bytes of OS cryptographic entropy and applies

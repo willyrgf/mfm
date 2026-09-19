@@ -1,19 +1,13 @@
 use std::num::NonZeroU64;
 
 use mfm_canonical::CanonicalBytes;
-use mfm_capabilities::{CapabilityError, ReadCapabilityContract};
-use mfm_ids::{ContentRef, StableId};
+use mfm_ids::ContentRef;
 use mfm_program_derive::MfmValue;
 use serde::de;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    EvmAddress, EvmBlockAnchor, EvmDomainError, EvmTransactionRoute, MAX_EVM_CALLDATA_BYTES,
-};
+use crate::{EvmAddress, EvmBlockAnchor, EvmDomainError, MAX_EVM_CALLDATA_BYTES};
 
-/// Exact anchored contract-call Read capability identity.
-pub const EVM_ANCHORED_CONTRACT_CALL_CAPABILITY_ID: &str =
-    "mfm.evm.capability.read-anchored-contract-call@1";
 /// Maximum returned bytes retained by an anchored call.
 pub const MAX_EVM_CALL_RETURN_BYTES: usize = 131_072;
 
@@ -255,7 +249,10 @@ impl AnchoredContractCallEvidence {
         }
     }
 
-    fn validate_for(&self, intent: &AnchoredContractCallIntent) -> Result<(), EvmDomainError> {
+    pub(crate) fn validate_for(
+        &self,
+        intent: &AnchoredContractCallIntent,
+    ) -> Result<(), EvmDomainError> {
         match self {
             Self::Returned { result, .. } if result.anchor() == intent.anchor() => Ok(()),
             Self::Rejected { .. } | Self::SafeFailure { .. } | Self::IntegrityBlocked { .. } => {
@@ -314,39 +311,3 @@ impl<'de> Deserialize<'de> for AnchoredContractCallFailureReason {
         })
     }
 }
-
-/// Duplicate-safe anchored contract-call Read capability.
-pub struct EvmAnchoredContractCallRead;
-
-impl ReadCapabilityContract for EvmAnchoredContractCallRead {
-    type OperationalError = crate::EvmOperationalError;
-    type Intent = AnchoredContractCallIntent;
-    type Evidence = AnchoredContractCallEvidence;
-
-    fn contract_id() -> mfm_capabilities::Result<StableId> {
-        StableId::new(EVM_ANCHORED_CONTRACT_CALL_CAPABILITY_ID)
-            .map_err(|_| CapabilityError::InvalidContract)
-    }
-
-    fn bind_evidence(
-        intent_value_ref: &ContentRef,
-        intent: &Self::Intent,
-        evidence: &Self::Evidence,
-    ) -> Result<(), mfm_values::InvocationDiagnostic> {
-        (evidence.intent_value_ref() == intent_value_ref)
-            .then_some(())
-            .ok_or(EvmDomainError::EvidenceBinding)
-            .and_then(|_| evidence.validate_for(intent))
-            .map_err(|error| {
-                mfm_values::InvocationDiagnostic::from_fields(
-                    "state_internal",
-                    "bind_evidence",
-                    &error,
-                    None,
-                )
-            })
-    }
-}
-
-mod context;
-pub use context::*;

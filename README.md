@@ -37,7 +37,8 @@ The CLI drives exact-revision config import/list/delete and run start/progress/s
 use cases over an unauthenticated Unix socket. The shared production bootstrap and complete
 `deployment.toml` example are documented by [`mfm-app`](crates/app/README.md).
 
-Start with [design](docs/design.md), [architecture](docs/architecture.md), and
+Start with [design](docs/design.md), [architecture](docs/architecture.md),
+[capability authoring](docs/capability-authoring.md), and
 [build and verification](docs/build-and-verification.md).
 
 ## Target workflow for the DSL refactor

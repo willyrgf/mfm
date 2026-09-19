@@ -8,7 +8,7 @@ use super::*;
 #[mfm(
     namespace = "mfm.evm",
     name = "transaction-operational-error",
-    version = "3",
+    version = "4",
     schema = "mfm.evm-transaction-operational-error"
 )]
 pub enum EvmTransactionOperationalError {
@@ -44,17 +44,6 @@ impl mfm_program::ClassifyError for EvmOperationalError {
             EvmOperationalKind::Unavailable
             | EvmOperationalKind::Timeout
             | EvmOperationalKind::RateLimited => mfm_program::Classification::Retryable,
-        }
-    }
-}
-
-impl mfm_program::ClassifyError for EvmBalanceFailure {
-    fn classify(&self) -> mfm_program::Classification {
-        match self {
-            Self::AnchorChanged { .. } => mfm_program::Classification::InputInvalidated,
-            Self::SourceUnavailable { .. } | Self::IntegrityBlocked { .. } => {
-                mfm_program::Classification::Permanent
-            }
         }
     }
 }

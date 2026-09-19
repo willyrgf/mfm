@@ -1,0 +1,25 @@
+[package]
+name = "mfm-chain"
+version = "0.1.0"
+edition = "2021"
+description = "Shared deterministic chain semantics for MFM"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[package.metadata.mfm]
+layer = "domain"
+domain = "chain"
+domain-role = "source"
+
+[dependencies]
+mfm-capabilities = { path = "../../kernel/capabilities" }
+mfm-ids = { path = "../../kernel/ids" }
+mfm-program = { path = "../../kernel/program" }
+mfm-program-derive = { path = "../../kernel/program-derive" }
+mfm-values = { path = "../../kernel/values" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -1,30 +1,29 @@
 #![warn(missing_docs)]
-//! Bounded EVM provider registration and durable transaction execution.
+//! Explicit native resources, bounded EVM providers, and durable transaction execution.
 //!
 //! The live adapter owns provider ingress, exact transaction wire encoding, and
-//! signer/authority/provider orchestration, plus a pure transaction State registration helper.
-//! Runtime construction remains a trusted composition responsibility.
+//! signer/authority/provider orchestration. Native clients own configuration and product conversion;
+//! complete Programs bind explicit resources through the compiler environment.
 
 use mfm_evm::ReadCapabilityFamily;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use crate::error::{invariant, AdapterFailure};
 use mfm_capabilities::AdapterError;
+/// Native product clients with explicit configuration and retained-output boundaries.
+pub mod client;
 mod error;
 use mfm_evm::EvmOperationalError;
 use mfm_evm::{
-    AnchoredContractCallEvidence, AnchoredContractCallIntent, EvmAnchorRead,
-    EvmAnchoredContractCallRead, EvmBalanceRead, EvmChainIdentityRead, EvmPhysicalTarget,
-    EvmReadEvidence, EvmReadIntent, EvmTransactionRoute,
+    AnchoredContractCallEvidence, AnchoredContractCallIntent, EvmPhysicalTarget, EvmReadEvidence,
+    EvmReadIntent, EvmTransactionRoute,
 };
 use mfm_ids::ContentRef;
-use mfm_runtime::RuntimeAssemblyBuilder;
 
-mod assembly;
-pub use assembly::register_evm_transaction_states;
+mod resources;
+pub use resources::{EvmBindingView, EvmResources, EvmTransactionResource, MAX_EVM_BINDINGS};
 
 mod codec;
 mod json_rpc;
@@ -35,8 +34,7 @@ pub use json_rpc::{
     MAX_EVM_ADAPTER_LOCATOR_BYTES,
 };
 pub use transaction::{
-    register_evm_transaction_adapters, EvmTransactionProvider, ProviderReceipt,
-    ProviderReceiptResult, EVM_EIP1559_SIGNING_PURPOSE_ID,
+    EvmTransactionProvider, ProviderReceipt, ProviderReceiptResult, EVM_EIP1559_SIGNING_PURPOSE_ID,
 };
 
 pub use codec::{ethereum_address, evm_keccak256, EvmCodecError};
@@ -66,100 +64,6 @@ pub trait EvmReadProvider: Send + Sync + 'static {
         intent_value_ref: &'a ContentRef,
         intent: &'a AnchoredContractCallIntent,
     ) -> ProviderFuture<'a, AnchoredContractCallEvidence>;
-}
-
-/// Registers the three surviving EVM Read capability callbacks for one target.
-pub fn register_evm_reads(
-    builder: &mut RuntimeAssemblyBuilder,
-    target: EvmPhysicalTarget,
-    provider: Arc<dyn EvmReadProvider>,
-) -> mfm_runtime::Result<()> {
-    macro_rules! register {
-        ($capability:ty, $family:ident, $target:expr, $provider:expr) => {{
-            let binding = $target;
-            let callback_target = binding.clone();
-            let callback_ref =
-                binding
-                    .binding_ref()
-                    .map_err(|source| mfm_runtime::RuntimeError::Native {
-                        operation: mfm_runtime::Operation::Admission,
-                        stage: mfm_runtime::Stage::Execute,
-                        cause: mfm_values::InvocationDiagnostic::from_fields(
-                            "adapter_invariant",
-                            "register_evm_reads",
-                            &source,
-                            None,
-                        ),
-                    })?;
-            let callback_provider = $provider;
-            builder.register_adapter::<$capability, EvmPhysicalTarget, _>(
-                binding,
-                move |intent_value_ref, intent| {
-                    let target = callback_target.clone();
-                    let binding_ref = callback_ref.clone();
-                    let provider = Arc::clone(&callback_provider);
-                    Box::pin(async move {
-                        read(
-                            &target,
-                            &binding_ref,
-                            provider.as_ref(),
-                            ReadCapabilityFamily::$family,
-                            intent_value_ref,
-                            intent,
-                        )
-                        .await
-                    })
-                },
-            )
-        }};
-    }
-    register!(
-        EvmChainIdentityRead,
-        ChainIdentity,
-        target.clone(),
-        Arc::clone(&provider)
-    )?;
-    register!(EvmAnchorRead, Anchor, target.clone(), Arc::clone(&provider))?;
-    register!(EvmBalanceRead, Balance, target, provider)
-}
-
-/// Registers the generic anchored contract-call Read callback for one transaction route.
-pub fn register_evm_anchored_contract_calls(
-    builder: &mut RuntimeAssemblyBuilder,
-    route: EvmTransactionRoute,
-    provider: Arc<dyn EvmReadProvider>,
-) -> mfm_runtime::Result<()> {
-    let callback_route = route.clone();
-    let callback_ref = route
-        .binding_ref()
-        .map_err(|source| mfm_runtime::RuntimeError::Native {
-            operation: mfm_runtime::Operation::Admission,
-            stage: mfm_runtime::Stage::Execute,
-            cause: mfm_values::InvocationDiagnostic::from_fields(
-                "adapter_invariant",
-                "register_anchored_contract_call_read",
-                &source,
-                None,
-            ),
-        })?;
-    builder.register_adapter::<EvmAnchoredContractCallRead, EvmTransactionRoute, _>(
-        route,
-        move |intent_value_ref, intent| {
-            let route = callback_route.clone();
-            let binding_ref = callback_ref.clone();
-            let provider = Arc::clone(&provider);
-            Box::pin(async move {
-                read_anchored(
-                    &route,
-                    &binding_ref,
-                    provider.as_ref(),
-                    intent_value_ref,
-                    intent,
-                )
-                .await
-            })
-        },
-    )
 }
 
 async fn read_anchored(
@@ -211,6 +115,7 @@ async fn read(
 mod tests {
     use std::num::NonZeroU64;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use mfm_evm::{
         AnchoredContractCallResult, EvmAddress, EvmBlockAnchor, EvmHash, EvmReadSubject,
@@ -279,7 +184,10 @@ mod tests {
 
     fn intent(target: &EvmPhysicalTarget) -> EvmReadIntent {
         EvmReadIntent::new(
+            0,
+            mfm_chain::balance::DecimalScale::new(18).unwrap(),
             target.chain_id,
+            mfm_evm::EvmBalanceTarget::new(EvmAddress::from_bytes([1; 20]), None),
             target.binding_ref().expect("binding"),
             EvmReadSubject::ChainIdentity,
         )
@@ -397,38 +305,34 @@ mod tests {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     }
 
-    // Replacing a provider handle in a fresh assembly must preserve the public target identity,
-    // while duplicate registration within one assembly must fail.
     #[test]
-    fn one_target_registers_three_capabilities_and_rejects_duplicate_keys() {
-        let target = target(1, 2);
-        let binding = target.binding_ref().expect("binding");
-        let first_provider: Arc<dyn EvmReadProvider> = Arc::new(Provider {
+    fn exact_resource_routes_reject_duplicates_and_preserve_identity_across_handles() {
+        let route = mfm_evm::EvmBalanceRoute::new(
+            NonZeroU64::new(1).unwrap(),
+            mfm_evm::EvmEndpoint::new("endpoint").unwrap(),
+        );
+        let first: Arc<dyn EvmReadProvider> = Arc::new(Provider {
             calls: AtomicUsize::new(0),
         });
-        let second_provider: Arc<dyn EvmReadProvider> = Arc::new(Provider {
+        let second: Arc<dyn EvmReadProvider> = Arc::new(Provider {
             calls: AtomicUsize::new(0),
         });
-
-        let mut first = RuntimeAssemblyBuilder::new().expect("builder");
-        register_evm_reads(&mut first, target.clone(), first_provider).expect("three callbacks");
-        assert_eq!(target.binding_ref().expect("stable binding"), binding);
-        assert!(matches!(
-            register_evm_reads(&mut first, target.clone(), second_provider.clone()),
-            Err(mfm_runtime::RuntimeError::IncompatibleAssembly)
-        ));
-
-        let mut replacement = RuntimeAssemblyBuilder::new().expect("builder");
-        register_evm_reads(&mut replacement, target.clone(), second_provider)
-            .expect("replacement handle");
-        assert_eq!(target.binding_ref().expect("durable identity"), binding);
-        first.finish();
-        replacement.finish();
+        assert!(EvmResources::<()>::new(
+            vec![
+                (route.clone(), first.clone()),
+                (route.clone(), second.clone())
+            ],
+            vec![]
+        )
+        .is_err());
+        let hot = EvmResources::<()>::new(vec![(route.clone(), first)], vec![]).unwrap();
+        let cold = EvmResources::<()>::new(vec![(route, second)], vec![]).unwrap();
+        assert_eq!(hot.bindings().unwrap(), cold.bindings().unwrap());
     }
 
     // An anchored call must use its registered route; mismatches must fail before provider IO.
     #[tokio::test]
-    async fn anchored_registration_is_route_keyed_and_rejects_mismatches_locally() {
+    async fn anchored_binding_rejects_mismatches_before_provider_io() {
         let physical = target(1, 2);
         let registered_route = route(&physical);
         let provider = Arc::new(Provider {
@@ -451,19 +355,5 @@ mod tests {
         };
         assert!(cause.details().as_value().get("read_binding").is_some());
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
-
-        let provider: Arc<dyn EvmReadProvider> = provider;
-        let mut builder = RuntimeAssemblyBuilder::new().expect("builder");
-        register_evm_anchored_contract_calls(
-            &mut builder,
-            registered_route.clone(),
-            Arc::clone(&provider),
-        )
-        .expect("anchored callback");
-        assert!(matches!(
-            register_evm_anchored_contract_calls(&mut builder, registered_route, provider),
-            Err(mfm_runtime::RuntimeError::IncompatibleAssembly)
-        ));
-        builder.finish();
     }
 }

@@ -2,7 +2,7 @@ use super::{CliError, OutputFormat};
 use mfm_app::{
     encode_response, RunRequestError, SerializableClientError, SerializableRunView, StartRunResult,
 };
-use mfm_runtime::{InvocationFailure, RunView, RunViewState};
+use mfm_runtime::{InvocationFailure, RunView};
 use mfm_values::InvocationDiagnostic;
 use serde::Serialize;
 use serde_json::value::RawValue;
@@ -167,64 +167,49 @@ fn json_field(
 }
 
 fn run_text(view: &RunView) -> Result<String, InvocationDiagnostic> {
+    // Consume the same prepared transport model as JSON, including native client projections.
+    // Borrow raw fields so retained canonical values are not decoded and re-encoded by the CLI.
+    #[derive(serde::Deserialize)]
+    struct TextView<'a> {
+        #[serde(borrow)]
+        state: std::collections::BTreeMap<&'a str, &'a RawValue>,
+    }
+    let model = SerializableRunView::new(view)?;
+    let encoded = encode_response(&model).map_err(|cause| {
+        InvocationDiagnostic::from_fields("json_error", "run_text", &cause, None)
+    })?;
+    let fields: TextView<'_> = serde_json::from_str(encoded.get()).map_err(|cause| {
+        InvocationDiagnostic::from_fields(
+            "json_error",
+            "run_text_fields",
+            &mfm_canonical::JsonError::new(cause),
+            None,
+        )
+    })?;
     let mut text = format!(
         "run_id={}\nhead_sequence={}\nhead_digest={}\n",
         view.run_id(),
         view.head_sequence(),
         view.head_digest()
     );
-    match view.state() {
-        RunViewState::Runnable { position, reason } => {
-            text.push_str("state=runnable\n");
-            json_field(&mut text, "position", position)?;
-            match reason {
-                mfm_runtime::RunnableReason::Advance => text.push_str("reason=advance\n"),
-                mfm_runtime::RunnableReason::Retry => text.push_str("reason=retry\n"),
-                mfm_runtime::RunnableReason::Restart { checkpoint } => {
-                    text.push_str("reason=restart\n");
-                    json_field(&mut text, "checkpoint", checkpoint)?;
-                }
-            }
+    for (name, raw) in fields.state {
+        if name == "kind" {
+            let kind: &str = serde_json::from_str(raw.get()).map_err(|cause| {
+                InvocationDiagnostic::from_fields(
+                    "json_error",
+                    "run_text_kind",
+                    &mfm_canonical::JsonError::new(cause),
+                    None,
+                )
+            })?;
+            text.push_str("state=");
+            text.push_str(kind);
+        } else {
+            text.push_str(name);
+            text.push('=');
+            text.push_str(raw.get());
         }
-        RunViewState::EffectPending {
-            effect,
-            latest_failure,
-        } => {
-            text.push_str("state=effect_pending\n");
-            json_field(&mut text, "position", effect.call().position())?;
-            json_field(&mut text, "effect_id", effect.effect_id())?;
-            json_field(&mut text, "latest_failure", latest_failure)?;
-        }
-        RunViewState::AwaitingRecovery { failure } => {
-            text.push_str("state=awaiting_recovery\n");
-            json_field(&mut text, "position", failure.call().position())?;
-            json_field(&mut text, "failure", failure)?;
-        }
-        RunViewState::AwaitingInterpretation { settlement } => {
-            text.push_str("state=awaiting_interpretation\n");
-            json_field(&mut text, "settlement", settlement)?;
-        }
-        RunViewState::Succeeded(value) => {
-            text.push_str("state=succeeded\n");
-            json_field(
-                &mut text,
-                "contract_ref",
-                &value
-                    .contract_ref()
-                    .map_err(|error| error.into_diagnostic("run_text"))?,
-            )?;
-            json_field(&mut text, "value_ref", value.value_ref())?;
-            text.push_str("canonical=");
-            text.push_str(&String::from_utf8_lossy(value.canonical_bytes()));
-            text.push('\n');
-        }
-        RunViewState::Failed(report) => {
-            text.push_str("state=failed\n");
-            json_field(&mut text, "value_ref", report.value_ref())?;
-            text.push_str("report=");
-            text.push_str(&String::from_utf8_lossy(report.canonical_bytes()));
-            text.push('\n');
-        }
+        text.push('\n');
     }
     Ok(text)
 }
@@ -238,15 +223,27 @@ fn error_to(output: OutputFormat, error: CliError, stderr: &mut impl Write) -> E
         return run_error_to(output, *error, stderr);
     }
     let message = error.message();
+    let native_config = match &error {
+        CliError::ConfigDocument(mfm_app::ConfigDocumentError::Native(cause)) => Some(
+            InvocationDiagnostic::from_fields("native_config", "admit_config", cause, None),
+        ),
+        _ => None,
+    };
+    let diagnostic = match &error {
+        CliError::Output(cause) | CliError::Composition(mfm_app::ComposeError::Native(cause)) => {
+            Some(cause)
+        }
+        _ => native_config.as_ref(),
+    };
     let mut model = SerializableClientError::new(error.code(), &message);
-    if let CliError::Output(diagnostic) = &error {
+    if let Some(diagnostic) = diagnostic {
         model = model.with_diagnostic(diagnostic);
     }
     match output {
         OutputFormat::Json => final_json(stderr, &model),
         OutputFormat::Text => {
             let mut text = format!("error: {message}\ncode={}\n", error.code());
-            if let CliError::Output(diagnostic) = &error {
+            if let Some(diagnostic) = diagnostic {
                 if json_field(&mut text, "diagnostic", diagnostic).is_err() {
                     return ExitCode::from(2);
                 }
@@ -293,6 +290,11 @@ fn run_error_to(output: OutputFormat, error: RunRequestError, stderr: &mut impl 
                 }
                 let invocation = match &error {
                     RunRequestError::Request(_) => return Ok(text),
+                    RunRequestError::Construction { run_id, cause } => {
+                        json_field(&mut text, "run_id", run_id)?;
+                        json_field(&mut text, "cause", cause)?;
+                        return Ok(text);
+                    }
                     RunRequestError::Invocation(invocation)
                     | RunRequestError::AppendIndeterminate { invocation, .. } => invocation,
                 };

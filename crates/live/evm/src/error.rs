@@ -1,6 +1,6 @@
 use alloy_primitives::ruint::{BaseConvertError, ParseError};
 use mfm_evm::{
-    EvmAddress, EvmAuthorityEpoch, EvmBalanceSource, EvmBlockAnchor, EvmChainInstance,
+    EvmAddress, EvmAuthorityEpoch, EvmBalanceTarget, EvmBlockAnchor, EvmChainInstance,
     EvmDomainError, EvmHash, EvmReadSubject, EvmTransactionBinding, NonceDomain,
     ReadCapabilityFamily, Reservation,
 };
@@ -84,7 +84,7 @@ pub(crate) enum AdapterFailure {
         observed: EvmChainInstance,
     },
     #[error("token call has no token address")]
-    MissingToken { balance_source: EvmBalanceSource },
+    MissingToken { balance_target: EvmBalanceTarget },
     #[error("anchored result construction failed")]
     AnchoredResult {
         anchor: EvmBlockAnchor,

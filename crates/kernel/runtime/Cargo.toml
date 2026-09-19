@@ -2,7 +2,7 @@
 name = "mfm-runtime"
 version = "0.1.0"
 edition = "2021"
-description = "Immutable live Runtime assembly for MFM"
+description = "Execution and durable continuation of immutable MFM Programs"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"

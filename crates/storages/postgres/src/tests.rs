@@ -1157,12 +1157,9 @@ async fn managed_postgres_persistence_authority_contract() {
     assert_eq!(evidence.as_value()["stage"], "begin");
     assert_eq!(evidence.as_value()["sources"][0]["kind"], "pool_closed");
 
-    let runtime_with_closed_store = mfm_runtime::Runtime::new(
-        mfm_runtime::RuntimeAssemblyBuilder::new().unwrap().finish(),
-        Arc::new(closed),
-    );
+    let runtime_with_closed_store = mfm_runtime::Runtime::new(Arc::new(closed));
     let failure = runtime_with_closed_store
-        .read(&run_id(20))
+        .program_document(&run_id(20))
         .await
         .err()
         .unwrap();

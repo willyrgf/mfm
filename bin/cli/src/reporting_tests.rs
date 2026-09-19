@@ -1,24 +1,13 @@
 use super::*;
 use mfm_ids::{DigestBytes, EntryPointId, RunId};
-use mfm_program::{Never, NoParams, Operation, OperationExpansion, ProgramLimits};
-use mfm_runtime::{Runtime, RuntimeAssemblyBuilder};
+use mfm_program::{Identity, NoParams, ProgramEnvironment, ProgramLimits};
+use mfm_runtime::Runtime;
 use std::io;
 use std::sync::Arc;
 
-struct Empty;
-impl Operation for Empty {
-    type Input = NoParams;
-    type Output = NoParams;
-    type Failure = Never;
-    fn validate_input(&self, _: &NoParams) -> mfm_program::Result<()> {
-        Ok(())
-    }
-    fn expand(
-        &self,
-        _: &mut OperationExpansion<NoParams, NoParams, Never>,
-    ) -> mfm_program::Result<()> {
-        Ok(())
-    }
+struct Resources;
+impl ProgramEnvironment for Resources {
+    type Sources = Identity<NoParams>;
 }
 
 fn run_id() -> RunId {
@@ -26,18 +15,16 @@ fn run_id() -> RunId {
 }
 
 async fn view() -> RunView {
-    let runtime = Runtime::new(
-        RuntimeAssemblyBuilder::new().unwrap().finish(),
-        Arc::new(mfm_store::MemoryStore::new()),
-    );
-    let program = mfm_program::expand_program(
+    let runtime = Runtime::new(Arc::new(mfm_store::MemoryStore::new()));
+    let program = mfm_program::compile(
         EntryPointId::new("mfm.test/cli-output@1").unwrap(),
-        &Empty,
+        &Identity::<NoParams>::default(),
         &NoParams,
+        &Resources,
         ProgramLimits::new(0),
     )
     .unwrap();
-    runtime.start(run_id(), program, NoParams).await.unwrap()
+    runtime.start(run_id(), &program, &NoParams).await.unwrap()
 }
 
 struct FailingWriter {
@@ -106,7 +93,7 @@ async fn successful_json_and_text_preserve_the_observed_value_and_exit() {
             OutputFormat::Text => {
                 let text = String::from_utf8(stdout).unwrap();
                 assert!(text.contains("state=succeeded\n"));
-                assert!(text.contains("canonical=null\n"));
+                assert!(text.contains("value=null\n"));
                 assert!(text.contains(&format!("value_ref={}\n", expected["state"]["value_ref"])));
             }
         }
@@ -396,19 +383,17 @@ async fn store_recording_payload_reaches_cli_without_changing_disposition() {
             })
         }
     }
-    let runtime = Runtime::new(
-        RuntimeAssemblyBuilder::new().unwrap().finish(),
-        Arc::new(Refuse),
-    );
-    let program = mfm_program::expand_program(
+    let runtime = Runtime::new(Arc::new(Refuse));
+    let program = mfm_program::compile(
         EntryPointId::new("mfm.test/cli-store@1").unwrap(),
-        &Empty,
+        &Identity::<NoParams>::default(),
         &NoParams,
+        &Resources,
         ProgramLimits::new(0),
     )
     .unwrap();
     let failure = runtime
-        .start(run_id(), program, NoParams)
+        .start(run_id(), &program, &NoParams)
         .await
         .err()
         .unwrap();

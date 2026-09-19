@@ -2,7 +2,7 @@
 name = "mfm-program"
 version = "0.1.0"
 edition = "2021"
-description = "Typed Operation authoring and immutable Program v3 contracts for MFM"
+description = "Typed source construction and immutable executable Program contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
@@ -24,6 +24,7 @@ mfm-values = { path = "../values" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 mfm-program-derive = { path = "../program-derive" }
