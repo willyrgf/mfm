@@ -109,8 +109,7 @@ composition. Follow the pinned Nixfied adopter guide for framework changes.
 
 - Prefer explicit readable code, borrowing, async IO, and typed errors. Avoid panics in libraries,
   accidental hot-path allocations, and `unsafe`.
-- Put unavoidable blocking pure work in `spawn_blocking`, await it immediately, and never move IO or
-  mutation authority into the blocking closure.
+- Never move IO or mutation authority into a blocking closure.
 - Keep one current documented public API and `#![warn(missing_docs)]` in libraries.
 - Prefer `thiserror` with source-preserving conversions. Reserve `anyhow` for executable glue.
 - Convert failures to reviewed redaction-safe codes/messages at CLI/API boundaries.
