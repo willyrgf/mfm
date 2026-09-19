@@ -9,9 +9,9 @@ code and already-bound adapter handles in memory; its canonical document contain
 execution facts. Runtime never completes missing associations.
 
 Rust sketches omit routine derives and implementations where the surrounding contract specifies
-behavior; the complete sketches have not been compiled. Section 15 distinguishes a bounded
-scratch compilation experiment from the still-unproved production contracts. Implementation must
-prove the complete contracts together, not invent a different ownership model behind the examples.
+behavior; the complete sketches have not been compiled. Section 15 records earlier bounded
+scratch experiments; section 12.2 records the later integrated Phase A assessment and remaining
+production obligations. Implementation must prove the complete contracts together, not invent a different ownership model behind the examples.
 
 The target uses typed tuples and Operation planning, including homogeneous collections required by
 Portfolio. It excludes a separate branching/repetition DSL. Section 5.3 specifies that construction
@@ -66,7 +66,8 @@ ABI prove the abstraction, not deployment support on every network.
 | --- | --- |
 | Shared domain States | Meaningful deterministic steps and product semantics using fixed typed capability interfaces |
 | Capability implementation | All network-specific preparation, supporting States, native contracts/codecs, protocol validation, evidence projection, and operational errors |
-| Native live adapter | Explicit provider, signer, and authority IO for that implementation |
+| Native live adapter/client | Explicit provider, signer, and authority IO; native configuration admission and pure native output/presentation conversion |
+| Application | Coordinate configuration custody, complete Program construction, Runtime, publication and provenance; call native clients without interpreting native contracts |
 | Operation | Reusable typed sequence and maintained defaults/policy interpretation |
 | Program construction | Typed traversal, capability selection, injection, policy relocation, exact descriptors, public bindings, executable code and bound live adapters |
 | Runtime | Execute completed Programs; continuation, local run admission, durable transitions and authorized recovery |
@@ -580,7 +581,7 @@ pub trait EffectImplementation<C: EffectCapabilityContract>: Send + Sync + 'stat
         binding: &Self::Binding,
         command_ref: &ContentRef,
         command: &C::Command,
-    ) -> Result<(ContentRef, Self::NativeCommand), InvocationDiagnostic>;
+    ) -> Result<(ContentRef, Self::NativeCommand), CallbackFailure>;
 
     fn project_evidence(
         implementation_ref: &ContentRef,
@@ -592,7 +593,7 @@ pub trait EffectImplementation<C: EffectCapabilityContract>: Send + Sync + 'stat
         native_command: &Self::NativeCommand,
         native_evidence: &Self::NativeEvidence,
         original: &Object,
-    ) -> Result<C::Evidence, InvocationDiagnostic>;
+    ) -> Result<C::Evidence, CallbackFailure>;
 }
 
 pub trait ReadImplementation<C: ReadCapabilityContract>: Send + Sync + 'static {
@@ -607,7 +608,7 @@ pub trait ReadImplementation<C: ReadCapabilityContract>: Send + Sync + 'static {
         binding_ref: &ContentRef,
         binding: &Self::Binding,
         intent: &C::Intent,
-    ) -> Result<Self::NativeIntent, InvocationDiagnostic>;
+    ) -> Result<Self::NativeIntent, CallbackFailure>;
 
     fn project_evidence(
         implementation_ref: &ContentRef,
@@ -619,7 +620,7 @@ pub trait ReadImplementation<C: ReadCapabilityContract>: Send + Sync + 'static {
         native_intent: &Self::NativeIntent,
         native_evidence: &Self::NativeEvidence,
         original: &Object,
-    ) -> Result<C::Evidence, InvocationDiagnostic>;
+    ) -> Result<C::Evidence, CallbackFailure>;
 }
 ```
 
@@ -699,6 +700,21 @@ in Program; moving it inward solely to satisfy a bound would invert current depe
 defaults cannot override intrinsic classification. Changing an original error's classification
 semantics changes its exact error-contract identity, including State domain errors. A local mismatch has no affected provider call or
 append and cannot become a durable integrity block without authenticated external evidence.
+
+For production EVM Pending, keep one reconciliation attempt inside the existing native adapter:
+qualify the retained command, query its receipt, and settle only checked receipt evidence. If no
+receipt exists, query whether the endpoint knows the exact transaction; submit the exact retained
+bytes only when absent. Await a private one-second observation interval before returning Pending.
+There is no internal retry loop, background task, Runtime timer, public pacing option or deadline.
+Manual progression also waits before returning Pending; cancellation drops that same future.
+
+Extend the existing native provider facet with transaction_known(hash) -> ProviderFuture<bool>.
+The bounded transaction-by-hash decoder treats null as absent; an object must carry the requested
+checked hash. Known is not settlement or finality. Every provider error returns immediately through
+the existing original-failure route, including an already-known race between lookup and submission;
+never hide it through error-text matching. Subsequent reconciliation requires Runtime authorization.
+Cold execution checks receipt/known status before any rebroadcast, preserving the same retained bytes,
+EffectId and authority. Update affected exact native error/method schemas with their consumers.
 
 ## 4. Supporting States and typed injection
 
@@ -900,7 +916,11 @@ pub type ConfigureAndObserve = Operation<
 ```
 
 Operation::new(definition) is infallible on Operation<Definition, Inherit>, preserving inference. Maintained
-Operation::default constructs the same structure with its Defaults marker. Selection defaults
+Operation::default constructs the same structure with its Defaults marker. Implement
+From<Definition> for Operation<Definition, Defaults> for explicitly constructed definitions with
+maintained defaults; new and Default delegate to that conversion. For example,
+RecoveringCollection::from(CollectionDefinition { demand }) needs no artificial Definition: Default
+bound or nested Operation solely to attach policy. Selection defaults
 construct markers, not executable States; they require no S: Default. Neither construction performs
 IO, binding resolution, input validation, or State execution. A maintained definition need not be a
 literal Rust static; it is reusable with different checked inputs and resulting Programs.
@@ -949,6 +969,14 @@ nested tuples must be covered in consuming tests, without inventing a dynamic he
 AuthoringSource's endpoints are not all compiler bounds: selection resolution and defaults also
 depend on the current borrowed compile configuration. Section 6 defines that traversal. Keep its
 mode traits internal instead of exposing a generic visitor DSL.
+
+Use one compiler nesting guard around Operation planning/defaults/body traversal and around resolved
+capability injection. Check before invoking plan or surround, not after their work. Policy scope
+entry does not increment depth again. The limit counts simultaneously active planning/injection
+frames: a root Operation or injected selection counts one; tuples, vectors, Pure leaves and
+checkpoint markers add none. Siblings release their frame before the next sibling. This bounds
+compiler traversal, not arbitrary computation inside user planning functions. Preserve State-count
+and product collection limits separately; reject atomically without publishing a Program.
 
 ### 5.2 Configuration and policy defaults
 
@@ -1104,6 +1132,34 @@ the committed input; semantic prerequisites belong to their checked contracts/ow
 Compilation cannot simulate preceding States to validate a future 84. Native preparation consumes
 that future value during execution. Retain Program validation for decoded/untrusted documents,
 exact schemas, content identity, and capacity even where Rust proves authored connections.
+
+Portfolio planning uses a shared BalanceSourceDefinition<K> carrying the checked source, ordinal,
+scale and BalanceExecutionConfig. The latter is a purpose-specific exact native public descriptor,
+not a context bag or live resource. Native resolution decodes it and constructs/qualifies EVM
+bindings; Portfolio does not decode EVM route, target or anchor types. Shared completed-collection
+values retain semantic confirmed balances, not a parallel native snapshot for later Pure decoding.
+
+Native client configuration admission produces Portfolio's checked semantic input. Enrichment also
+carries a checked required-source set: native admission marks the sources that must remain included;
+Portfolio retains those plus nonzero sources. Validate coverage, uniqueness and membership, preserving
+existing collection/source requirements. Pure inclusion logic never tests an EVM native/token tag.
+
+Retain each selected source's original public execution descriptor with enrichment results. EVM owns
+an exact EvmBalanceRoute containing checked chain_id and EvmEndpoint public name, from which it derives
+and qualifies EvmPhysicalTarget and binding references. A hash alone cannot reconstruct the external
+endpoint_id. Public names exclude URLs/credentials. The native client can therefore expose:
+
+```rust
+pub fn snapshot_config(
+    output: &PortfolioEnrichmentOutput,
+) -> Result<EvmPortfolioConfig, EvmPortfolioClientError>;
+```
+
+This pure conversion checks retained native route identity and reconstructs external configuration
+without original configuration, live handles or provider calls. Native snapshot rendering follows the
+same ownership. Application owns publication and RunId/head/output linkage. The retained semantic
+output identity is not the hash of its separately rendered native wire view. Reset affected exact
+schemas and preserve supported transport fields deliberately; do not retain legacy decoders.
 
 ## 6. Resolution, compilation, and executable association
 
@@ -1301,6 +1357,15 @@ is document identity, not pointer identity: matching replacement handles can rea
 persisted Program. Immutability fixes code and resource associations; it does not freeze remote
 services. Capture the existing signer handle, not Keystore; preserve its thread-affine ownership.
 
+Serialize the entire Program wire, including aggregate bindings, through existing
+mfm_canonical::to_json_bounded with MAX_RUN_OBJECT_CANONICAL_BYTES before canonicalization. Retain
+canonicalization and its final length check. Cold ingress checks borrowed byte length before any
+clone, canonicalization or decoding. SerializationLimit retains its cause and observed lower bound
+through ProgramError::Encoding; complete measured byte overflow uses existing SizeLimitExceeded
+through ValueError. Never replace these with bare Capacity. This bounds serialized accumulation,
+not total heap usage. Current float-free wire canonicalization does not expand encoded length;
+retain the final check and escaped-string/nested-Object regression coverage.
+
 ### 6.3 Durable identities and cold reconstruction
 
 Extend existing Program Execution descriptors with separate native implementation facts:
@@ -1482,8 +1547,9 @@ letting consumers forge executable entries.
 
 ### 6.5 Callback failure phase and original custody
 
-Program's internal executable boundary distinguishes invocation failure phase without importing
-RuntimeError or duplicating Runtime's execution-operation enum:
+Capabilities owns the existing CallbackFailure type, moved inward rather than copied. Native hooks
+and Program's executable boundary use it without importing RuntimeError or duplicating Runtime's
+execution-operation enum:
 
 ```rust
 pub enum CallbackFailure {
@@ -1520,6 +1586,47 @@ panic paths that sometimes report Execute. Preserve their causes and test the ne
 it changes diagnostic precision, not recovery classification or acknowledgement semantics.
 Panic containment must not include panic payloads in returned diagnostics. It does not by itself
 control process panic-hook logging; do not claim that this proof changes the process logging contract.
+
+Native decode_command, encode_intent and project_evidence return this phase-bearing failure.
+Reuse small synchronous codec::decode/codec::encode scopes to retain the original diagnostic and
+catch codec panics at their actual phase without retaining panic payloads. Native semantic checks
+return Execute. Program preserves an already identified phase and catches uncaught hook panics as
+Execute. Audit nested Read ledger/address/anchor decodes and request recipe/projection encodings,
+not only the outer transaction hook. Ordinary State callback contracts need not change. Do not add
+intermediate decoded-facts types or extra hooks solely to label diagnostic phases.
+
+### 6.6 Production resources, inspection and construction diagnostics
+
+Implement the existing ProgramEnvironment, BindRead and BindEffect contracts in mfm-evm-live using
+EvmResources<Sources>. It holds private checked read-route/provider and transaction-binding/signer/
+authority/provider records. A maintained native client alias supplies installed source roots, so
+ordinary callers never name an internal Sources profile. Dependent State/codec/handler requirements
+still come from existing Discover traversal, not executable-registration lists.
+
+Move existing BoundCapabilitySet validation into this native owner: ordered unique bounded routes,
+exact authority epoch, signer purpose and sender qualification, and no route fallback. Construction
+and selected binding perform local checks without IO; adapters retain command-specific checks before
+IO. Keep keys in the existing signer/Keystore owner. Bind only selected occurrences, not every
+installed alternative. Derive public binding views from these records instead of duplicating caches.
+Delete Application's BoundCapabilitySet, ComposedRuntime, native registration loops and target caches;
+remove superseded native register_* functions. The native client needs no production Runtime dependency.
+
+Extend existing source discovery for inspection. State owns description() alongside its existing
+identity; named OperationDefinition may expose component metadata, anonymous definitions return None.
+The same private Inventory walk records descriptions while discovering executable contracts,
+deduplicates by kind/checked identity, rejects conflicting claims, and sorts summaries. A type-only
+components<R>() entry point uses R::Sources without resources, configuration or Plan; the native
+client hides that type argument from Application. Metadata does not affect Program identity. Delete
+Application's handwritten State and Operation inspection tables. Installed executable components are
+not automatically transport configuration entry points.
+
+Use existing ProgramError::Diagnostic with private reviewed payloads for unsupported/duplicate native
+selection, missing exact State/handler/value/binding association, and checkpoint rejection. Record
+specific reason, available exact references and scope/positions; a pre-injection boundary is not a
+final State position, and cold discovery must not fabricate one. Preserve existing concrete owner
+errors unchanged. Capture invocation diagnostics once; do not serialize TypeId, arbitrary config,
+requests, handler parameters or handles. Application preserves the source with fixed public rendering.
+These failures do not claim an acknowledged run record or introduce a public error framework.
 
 ## 7. Runtime execution and recovery
 
@@ -1964,33 +2071,46 @@ outcomes; it does not turn them into provider exceptions. Native confirmation co
 calling shared semantic amount validation. A mismatch therefore wins over arithmetic rejection as
 before. Delete the blanket balance_failure helper instead of preserving its lossy local-error cases.
 
-Application decodes the exact original and current-call input according to the selected State
-contract. Production typed accessors expose the BalanceContext<PortfolioContinuation> retained in
-native support/prepared/candidate inputs. A Portfolio constructor checks the ordinal against the
-retained continuation/request before constructing the public CollectionFailed projection. Ordinal
-conversion or context disagreement returns a projection error, never ConsolidationFailed.
-
-Use pure domain/native projections, not a Runtime-dependent trait or new projection registry:
+Application selects the retained declaration using Runtime's checked failure position and borrows
+the failed-call input and exact original. Native decoding belongs to the existing native client:
 
 ```rust
-// Portfolio domain, using the existing reviewed public code contract.
-fn collection_failure(
-    context: &BalanceContext<PortfolioContinuation>,
-    code: &str,
-) -> Result<PortfolioSnapshotFailure, PortfolioProjectionError>;
+// mfm-evm-live::client::portfolio; pure, no Runtime types or live resources.
+pub fn snapshot_failure(
+    state: &StateDeclaration,
+    input: &Object,
+    original: &Object,
+) -> Result<PortfolioSnapshotFailure, PortfolioFailureProjectionError>;
 
-// Native domain; stage comes from the selected exact native State definition.
-fn public_balance_failure_code(
-    stage: EvmBalanceFailureStage,
-    failure: &EvmBalanceFailure,
-) -> &'static str;
+pub fn enrichment_failure(
+    state: &StateDeclaration,
+    input: &Object,
+    original: &Object,
+) -> Result<PortfolioSnapshotFailure, PortfolioFailureProjectionError>;
 ```
 
-The semantic error types expose equivalent fixed code projections. Reuse the current closed native
-stage vocabulary where code compatibility depends on stage; never infer it by parsing arbitrary
-identity strings. Application's typed cases use installed State definitions, not a new handwritten
-executable-registration list. Projection does not classify, authorize recovery or replace originals.
-Reporting needs no provider IO. Preserve genuine Portfolio-owned failure originals directly.
+The client checks exact State/implementation ABI, input and original contracts before typed decoding.
+Native-owned accessors extract BalanceContext<K>; native projections select a closed reviewed
+BalanceFailureCode rather than an arbitrary string. The semantic originals expose equivalent code
+projections. Preserve current public codes and exact provider originals; do not wrap an operational
+original in a domain failure merely for presentation.
+
+Portfolio owns snapshot_collection_failure and enrichment_collection_failure, accepting their typed
+BalanceContext<PortfolioContinuation> or BalanceContext<EnrichmentContinuation> and BalanceFailureCode.
+One shared private check verifies ordinal, admitted request, correlation, route, active source and
+continuation agreement before constructing CollectionFailed. Representational range or disagreement
+returns a typed projection error, never ConsolidationFailed. Preserve genuine Portfolio originals.
+
+Derive native exact decoder dispatch and its closed stage vocabulary from the same native State
+declarations. A small declaration macro may remove duplicate metadata, but no separately maintained
+State-to-decoder map, ID-string parsing, Program presentation callback or Runtime registry is allowed.
+Heterogeneous cold decoding requires typed dispatch; deriving it from owner definitions does not
+create another registration list. Shared States retain their shared contracts without native tags.
+
+Projection performs no classification, recovery, report authentication or IO. Application retains the
+complete original report separately, calls the client and coordinates rendering. Cold presentation
+must work without configuration or provider access. Native clients depend inward on Program, Values,
+Portfolio and EVM; Portfolio depends on the shared domain, never EVM.
 
 Delete MapEvmBalanceFailure and root-map reporting. A changed anchor remains eligible for the
 existing admitted collection restart policy; Runtime authorizes it and appends new history without
@@ -2007,12 +2127,13 @@ contracts; shared State code never imports EVM or Runtime. Values owns reusable 
 
 | Location | Target responsibility |
 | --- | --- |
-| kernel/capabilities | Semantic/native Read/Effect, typed adapter/binding interfaces and EffectAdapterOutcome; no State outcome or classifier dependency |
+| kernel/capabilities | Semantic/native Read/Effect, typed adapter/binding interfaces, EffectAdapterOutcome and invocation-only CallbackFailure; no State outcome or classifier dependency |
 | kernel/program | Typed construction/planning, environment support contract, immutable document/executable sequence, derived executable discovery, live binding and cold load; no Store/Journal or Runtime dependency |
 | domains/chain | Shared ledger/point identities; transaction contracts and lifecycle States; BalanceRead, ObserveBalance<K>, typed balance contexts, semantic arithmetic/errors |
 | domains/evm | Native config/artifact contracts, request recipes, supporting States, native translation/projection and native operational originals |
-| live/evm and downstream composition | Typed resource environments/binders, native adapters, installed source roots, supported native families/configuration; derive exact executable requirements |
-| app | Supported wire/config use cases, checked product projections, inspection consuming structural inventory |
+| live/evm and native clients | Typed resource environments/binders, paced adapters, installed source roots, native config admission/output/failure conversion; derive executable requirements and inspection |
+| domains/portfolio | Semantic collection planning/results, inclusion policy and checked product failure projection; no EVM dependency |
+| app | Thin configuration/run/publication coordination, provenance and transport models; call native client conversions/projections and source-derived inspection |
 | kernel/runtime | One mode dispatcher/transition engine over complete Program, continuation, recovery authorization and checked results |
 | journal/store/backends | Existing owned physical/wire contracts; separate native authority implementations remain separate ports |
 
@@ -2164,6 +2285,33 @@ proof becomes a permanent alternate DSL or engine. A follow-up commit may add in
 work; it may not complete behavior, safety checks or deletions required for an earlier commit to be
 correct.
 
+#### Phase A review incorporated into B2
+
+The isolated proof assessment at c4d97c9d, including d7a42c78 route enforcement, reports a passing
+amended Phase A scope. Its docs/dsl-phase-a.md records source refs and reproduction commands. The
+review did not independently rerun those tests. It does not establish migrated production consumers,
+managed acceptance or final CI. Section 14 records remaining production uncertainties; the proof
+assessment and section 13 distinguish established isolated behavior from outstanding consumer evidence.
+
+B2 includes sections 3.3, 5.1, 5.3, 6.2, 6.5, 6.6 and 9.1, specifically:
+
+- Remove native planning/decoding/rendering from Portfolio and Application; native clients own
+  configuration admission, wire conversion and native failure decoding. Keep semantic output identity
+  distinct from presentation and preserve configuration-deleted publication.
+- Replace production registration/ComposedRuntime and handwritten inspection with native resource
+  binding and the existing source walk; preserve signer, authority, exact-route and selected-only checks.
+- Implement paced Pending with transaction-known observation and exact retained-command custody.
+- Preserve nested native codec phases and bounded complete Program serialization with original causes.
+- Deliver actual snapshot/enrichment failure projection, not only manual proof assertions over decoded
+  ordinals. Derive native decoder dispatch from owning State declarations.
+- Complete source-preserving construction rejection details, explicit-definition/defaults construction
+  and one pre-planning/injection nesting guard; remove duplicate policy-scope depth accounting.
+
+These are completion requirements of the coherent production cutover, not a later cleanup phase.
+Independent fixes may precede B2 only when they compile and verify against the current API without a
+parallel path. Record any revised commit boundary with that evidence. Update current design/architecture,
+transport docs and build/verification descriptions with the implementation, not ahead of it.
+
 ### 12.3 Documentation delivered with the cutover
 
 As part of the capability/authoring cutover, add `docs/capability-authoring.md` and link it from the
@@ -2225,6 +2373,20 @@ promise satisfies the production commit's checks.
 | Failure boundaries | Declared domain/native operational originals retain causes and classification; codec/invariant failures stay invocation errors; no failed-Store audit claim |
 | Discovery/later Program | Source RunId/output/head linkage, config deletion, new Program/RunId, unavailable ABI rejection, no replacement of unresolved command |
 
+The Phase A review adds these production acceptance boundaries:
+
+| Boundary | Required evidence |
+| --- | --- |
+| Network perimeter | A second native test implementation uses the same Portfolio planning/Pure States; Portfolio imports no EVM contracts; native client alone performs native config/output conversion |
+| Publication | Retained public endpoint name derives the exact route/binding; config-deleted enrichment publishes equivalent external configuration without live handles; provenance refers to semantic output |
+| Production resources/inspection | Wrong sender/purpose/epoch/route and duplicate routes reject locally; unused alternatives bind nothing; cold exact binding works; inspection needs no handles/Plan and changes with installed sources |
+| Native Pending | Paused-clock call-rate bound, delayed receipt, one accepted submission while known, exact-byte rebroadcast when absent, cancel/cold without re-signing, actual lookup/receipt/submit failures and already-known race preserved; managed delayed-mining case |
+| Native codec phases | Actual nested Read/Effect decode rejection and panic are Decode; projection encoding failure/panic is Encode; qualification is Execute; no IO or extra append on local rejection |
+| Complete Program capacity | Small-limit aggregate-binding overflow short-circuits the actual serializer, retains size cause/lower bound, preserves non-size serializer errors and unchanged successful canonical identity |
+| Product failure projection | Both continuations after prior successful collection/source; every native stage and shared failure; exact original plus public code hot/cold with configuration removed; forged ordinal/request/route/source/correlation or wrong ABI rejects as projection error |
+| Construction diagnostics | Unsupported/duplicate selection, missing exact cold association and checkpoint reasons preserve reviewed refs/positions through Application; no fabricated durable record |
+| Operation construction/depth | Non-Default definition with maintained defaults compiles; active-frame boundary and one deeper rejection before plan/surround; mixed injection/Operation and sibling scopes; no partial Program |
+
 Before removing an assertion, record its executable replacement and managed owner. Retain reservation
 acknowledgement loss, prepared-wire recovery with rejecting signer, transaction-boundary cancellation
 and ambiguity, external nonce advancement, cold terminal history/output/nonce, actual SQL causes,
@@ -2245,26 +2407,16 @@ and its limits are recorded in section 15. Production-code LOC change is zero.
 
 ## 14. Material uncertainties and handoff gates
 
-Operation planning, local configuration, installed-support ownership and homogeneous collection
-construction and the balance semantic/native contracts are specified. Remaining uncertainties
-require implementation evidence, not another DSL, registry or execution layer. No uncompiled sketch
-is a claim that the complete cutover is already proved.
+The isolated Phase A assessment establishes the amended design within its recorded scope. Phase B
+must establish the same guarantees on production paths and complete section 13's consumer matrix.
+Remaining design assumptions and their validation gates are:
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
-| Environment-owned support permits inferred compile/load | Combined installed-source, native-family and binding bounds are uncompiled | Cold discovery could require source/configuration knowledge or duplicate inventories | Prove Pure and mixed fresh/cold workflows, multiple published roots/handlers, exact conflicts and selected-only binding |
-| Typed balance stages preserve both consumers and native custody | Prefix specializations and typed cold report projection are uncompiled | A continuation, original or execution boundary could be lost | Compile native/token sequences with both continuations; cold-resume candidates; assert exact original and ordinal projection with no duplicate evidence carrier |
-| Operation-local planning config remains available before execution | Planning views and derived demands have not been demonstrated across nested consumers | Future State computation might be incorrectly simulated or require a second config source | Compile standalone/nested lifecycle and Portfolio; execution-dependent choices must form a subsequent Program |
-| Exact generic contracts compose on pinned Rust | Derive/coherence/private traversal bounds are uncompiled | Extra erasure or a second path could be introduced | Compile fixed States, typed requests, two native ABIs, recursive support, defaults and cold inventory across crates |
-| Native family traversal integrates with full recursive injection | Section 6.1 replaces external enum introspection with one supported type tuple; production traversal is not implemented | The real recursive bounds could still require duplicated discovery code | Compile distinct native ABIs, resolved supporting leaves and Read/Effect sources through the same tuple traversal |
-| Complete Program callbacks preserve Runtime phase ownership | Current registered runners include Runtime driver context and typed encoding | Moving whole runners would move transitions inward or alter original custody | Separate prepare/check/invoke/project/interpret/classify and prove encode-once and acknowledgement ordering |
-| Persisted binding table fits exact document/capacity rules | Section 15.1 confirms existing public fields, but the new table/envelope is unimplemented | Cold load could omit a binding or exceed bounds | Measure checked Object/document encoding, deduplication, wrong-binding rejection and small-bound failures |
-| Explicit Program loading preserves existing read/resume | The new program_document bootstrap is specified but unimplemented | Admission extraction or current-state checks could be weakened | Test the Runtime-owned read-only extraction, config-free load, mismatched ProgramRef rejection and fresh snapshot semantics |
-| Complete prepared requests fit capacity behavior | Requests retain explicit context/artifact/evidence | Some current workloads or report thresholds may overflow | Measure maintained artifacts and small-bound failure cases without dropping facts or authority |
-| Shared scalar extraction preserves native behavior | Range/decimal mechanics move inward | Accepted values or schema/serialization could drift | Boundary/overflow/native equivalence tests and explicit versioning for changed contracts |
-| Native artifact/ABI binding is exact | Actual identifiers/selectors must come from the maintained artifact definition | Arbitrary bytecode could be treated as supported semantics | Wrong artifact/schema/ledger and malformed-return tests against independent oracle |
-| Native adapters implement the required waiting and identities | Current Pending may return immediately; Read currently shares native/semantic identity | Busy looping or wrong evidence binding | Async cancellation/non-spinning proof and distinct native/semantic Read refs hot/cold |
-| Report cutover preserves every consumer fact | Current canonical reports omit in-memory call facts and include mapped roots | Exported diagnostics or product fields could be lost | Field/source comparison, exact original cold decoding, descriptor checks, and product projection tests |
+| One native declaration derives exact presentation dispatch and inspection | Existing native States mix macros and explicit implementations; proposed consolidation is uncompiled | A second registry or framework extension could be introduced | Compile one full supporting family with both Portfolio continuations and source-derived inspection before broad migration |
+| Retained public route suffices for output-only config publication | Current target retains only a hashed endpoint, so the descriptor schema changes | Cold publication might still depend on missing external config/resources | Round-trip endpoint name/ref/physical target and publish after config deletion with no live handles |
+| Fixed pacing and transaction-known observation work for supported providers | Production facet and managed delayed-mining path are not yet migrated | Unnecessary rebroadcast, excessive calls or unacceptable manual Pending latency | Paused-clock tests, bounded lookup decoding and real-provider delayed receipt/cancel/cold scenarios |
+| Full cutover preserves production safety and transport contracts | Isolated Phase A does not execute migrated live/App/transport consumers | Passing proof could mask lost command custody, causes or product behavior | Migrate existing fault matrix and managed acceptance, then final CI on the exact candidate |
 
 Do not claim sketches are compiled or broaden Runtime's historical validation/custody authority.
 Unavailable exact implementations fail explicitly. No deadline, wall-clock limit, optional modifier
