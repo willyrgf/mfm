@@ -1,35 +1,28 @@
 # mfm-portfolio
 
-Portfolio owns checked secret-free selector/config authoring, exact target-set resolution, Program/C0
-planning, cumulative aggregation, EVM child-failure mapping, and frozen snapshot/report values.
-Targets must be sorted and unique by chain ID; total sources are bounded at 64.
-Balance-request fields remain private behind checked accessors, and their constructor fixes one
-nonzero chain across the declaration-ordered source set.
+Portfolio owns semantic collection admission, declaration-ordered planning, checked aggregation and
+snapshot/enrichment continuations. Its production dependency is the shared Chain domain; EVM,
+provider, Runtime and Store dependencies are absent.
 
-The maximum current public Portfolio config shape, including 64 route selections, fits the shared
-256 KiB config-custody ceiling. Naming, persistence, and lifecycle remain outside the domain.
+Native clients construct checked PortfolioSnapshotInput or PortfolioEnrichmentInput. Each collection
+retains its BalanceRequest and source-aligned BalanceExecutionConfig descriptors. The descriptors
+carry the caller's expected route reference plus opaque native facts; Portfolio checks count and
+common route agreement without decoding native configuration. Total sources remain bounded at 64.
 
-Four Pure States initialize, enter, resume and consolidate the cumulative context. A private root
-Operation composes checked EVM collection Operations in request order. `MapEvmBalanceFailure` is a
-ValueMap from the child's original failure to the public Portfolio failure. Program identity commits
-the exact admitted input and selected routes; child authoring receives the complete checked request.
+PortfolioSnapshotOperation and PortfolioEnrichmentOperation derive finite collection vectors from
+admitted demand. Each source uses shared BalanceSourceDefinition and ObserveBalance/BalanceRead.
+The native environment selects and injects its supporting States; Chain confirms and consolidates
+semantic balances. Portfolio checks request, ordinal, correlation and route at entry/resumption.
 
-The shipping planner selects the framework's stop defaults, with zero global and local recovery
-allowances. It supplies no lifecycle size estimates. Actual values and frames are checked by
-Runtime/Journal and accumulated run limits by Store. The domain has no Runtime, Store, provider,
-generic configuration lifecycle, or IO dependency.
+Snapshot collections retain confirmed shared balances and execution descriptors. Enrichment keeps
+caller-required sources or nonzero balances, filtering each source and descriptor together. Native
+clients own endpoint reconstruction, native configuration publication, and native product rendering.
+Semantic output identity remains distinct from the rendered representation.
 
-The entry point and public State definitions own their compiled-product inspection IDs and
-descriptions. This source metadata is not part of Program expansion or identity. The private root
-Operation is represented publicly by the entry point rather than admitted as a reusable Operation.
+Exact domain failures retain their native/shared originals. The native client decodes exact State
+and input contracts and passes a typed BalanceFailureCode to Portfolio's continuation projection.
+One private semantic check validates collection/context agreement. A mismatch is a projection error;
+it does not become a fabricated ConsolidationFailed. Genuine Portfolio originals remain unchanged.
 
-Focused contract tests cover exact route selection, 64/65-source planning, concrete native/token
-execution, and cold reconstruction of domain and operational failures. The full-width snapshot unit test
-covers completed prefixes and final snapshots with full-width balances and public anchor fields.
-
-`plan_snapshot` and `plan_enrichment` accept optional checked `PortfolioAdmission` metadata.
-Application supplies the exact source revision identity and verified enrichment linkage; direct
-library callers may use `None`. The shared sequence collects anchored observations, then selects
-either snapshot consolidation or candidate resolution. Enrichment requires a native source in each
-collection, retains all natives and nonzero tokens in order, and preserves quotes and route refs.
-`PortfolioEnrichmentOutput` is the checked publication input; no domain code owns config custody.
+The evolving cutover and verification ledger is in [dsl-phase-b.md](../../../docs/dsl-phase-b.md).
+Historical isolated proof evidence remains in [dsl-phase-a.md](../../../docs/dsl-phase-a.md).

@@ -7,39 +7,31 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
     let store = Arc::new(scripted_store::ScriptedStore::recording());
     let calls = Arc::new(Mutex::new(Vec::new()));
     let build = || {
-        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-        builder.register_effect::<Execute, Submit>().unwrap();
-        builder.register_map::<Identity<Never>>().unwrap();
-        builder.register_handler::<RetryUnknown>().unwrap();
         let seen = Arc::clone(&calls);
-        builder
-            .register_effect_adapter::<Submit, _, _>(
-                Number { value: 1 },
-                move |effect, command_ref, command| {
-                    seen.lock()
-                        .unwrap()
-                        .push((effect.clone(), command_ref.clone(), command.value));
-                    Box::pin(async {
-                        Err::<EffectAdapterOutcome<Number>, _>(AdapterError::Operational(
-                            Cause::Timeout { deadline_ms: 5000 },
-                        ))
-                    })
-                },
-            )
-            .unwrap();
-        builder.finish()
+        Resources::<(Flow, StopFlow)>::new(move |effect, command_ref, command| {
+            seen.lock()
+                .unwrap()
+                .push((effect.clone(), command_ref.clone(), command.value));
+            Box::pin(async {
+                Err::<EffectAdapterOutcome<Number>, _>(AdapterError::Operational(Cause::Timeout {
+                    deadline_ms: 5000,
+                }))
+            })
+        })
     };
-    let runtime = Runtime::new(build(), store.clone());
+    let resources = build();
+    let runtime = Runtime::new(store.clone());
     let run = RunId::from_digest(DigestBytes::from_array([71; 32]));
-    let program = expand_program(
+    let program = compile(
         EntryPointId::new("mfm.test/audited@1").unwrap(),
-        &Flow,
+        &Flow::default(),
         &Number { value: 9 },
+        &resources,
         ProgramLimits::new(1),
     )
     .unwrap();
     let first = runtime
-        .start(run.clone(), program, Number { value: 9 })
+        .start(run.clone(), &program, &Number { value: 9 })
         .await
         .unwrap();
     assert_eq!(first.head_sequence(), 4);
@@ -56,12 +48,13 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
         Cause::Timeout { deadline_ms: 5000 }
     ));
     assert_eq!(effect.call().input().decode::<Number>().unwrap().value, 9);
-    let cold = Runtime::new(build(), store.clone());
-    let reread = cold.read(&run).await.unwrap();
+    let cold = Runtime::new(store.clone());
+    let program = load(program.canonical_bytes(), &resources).unwrap();
+    let reread = cold.read(&run, &program).await.unwrap();
     assert_eq!(reread.head_digest(), first.head_digest());
     assert_eq!(calls.lock().unwrap().len(), 1);
     let InvocationFailure::RecoveryStopped { observed, .. } =
-        cold.resume(&run).await.err().unwrap()
+        cold.resume(&run, &program).await.err().unwrap()
     else {
         panic!("stopped")
     };
@@ -79,12 +72,11 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
         failure.1,
         RecoveryOutcome::Stop {
             reason: StopReason::Exhausted(RecoveryLimit::StateRetry),
-            root: None
         }
     );
     let InvocationFailure::RecoveryStopped {
         observed: repeated, ..
-    } = cold.resume(&run).await.err().unwrap()
+    } = cold.resume(&run, &program).await.err().unwrap()
     else {
         panic!("unresolved command remains available after exhausted recovery")
     };
@@ -94,7 +86,7 @@ async fn pending_retry_and_exhausted_stop_are_audited_without_changing_command_a
         assert_eq!(calls.len(), 3);
         assert!(calls.iter().all(|call| call == &calls[0]));
     }
-    let retained = cold.read(&run).await.unwrap();
+    let retained = cold.read(&run, &program).await.unwrap();
     assert_eq!(retained.head_digest(), repeated.head_digest());
     assert_eq!(original_count(&store.snapshot()), 3);
 }
@@ -106,46 +98,39 @@ async fn standard_unknown_stop_is_durable_and_explicit_resume_can_settle() {
     let store = Arc::new(MemoryStore::new());
     let calls = Arc::new(Mutex::new(Vec::new()));
     let build = || {
-        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-        builder.register_effect::<Execute, Submit>().unwrap();
-        builder.register_handler::<StandardRecovery>().unwrap();
         let seen = Arc::clone(&calls);
-        builder
-            .register_effect_adapter::<Submit, _, _>(
-                Number { value: 1 },
-                move |effect, command_ref, command| {
-                    let attempt = {
-                        let mut seen = seen.lock().unwrap();
-                        seen.push((effect.clone(), command_ref.clone(), command.value));
-                        seen.len()
-                    };
-                    Box::pin(async move {
-                        if attempt == 1 {
-                            Err(AdapterError::Operational(Cause::Timeout {
-                                deadline_ms: 5000,
-                            }))
-                        } else {
-                            Ok(EffectAdapterOutcome::Settled(Number {
-                                value: command.value,
-                            }))
-                        }
-                    })
-                },
-            )
-            .unwrap();
-        builder.finish()
+        Resources::<(Flow, StopFlow)>::new(move |effect, command_ref, command| {
+            let attempt = {
+                let mut seen = seen.lock().unwrap();
+                seen.push((effect.clone(), command_ref.clone(), command.value));
+                seen.len()
+            };
+            Box::pin(async move {
+                if attempt == 1 {
+                    Err(AdapterError::Operational(Cause::Timeout {
+                        deadline_ms: 5000,
+                    }))
+                } else {
+                    Ok(EffectAdapterOutcome::Settled(Number {
+                        value: command.value,
+                    }))
+                }
+            })
+        })
     };
-    let runtime = Runtime::new(build(), store.clone());
+    let resources = build();
+    let runtime = Runtime::new(store.clone());
     let run = RunId::from_digest(DigestBytes::from_array([72; 32]));
-    let program = expand_program(
+    let program = compile(
         EntryPointId::new("mfm.test/audited-stop@1").unwrap(),
-        &StopFlow,
+        &StopFlow::default(),
         &Number { value: 9 },
+        &resources,
         ProgramLimits::new(0),
     )
     .unwrap();
     let InvocationFailure::RecoveryStopped { observed, .. } = runtime
-        .start(run.clone(), program, Number { value: 9 })
+        .start(run.clone(), &program, &Number { value: 9 })
         .await
         .err()
         .unwrap()
@@ -153,8 +138,9 @@ async fn standard_unknown_stop_is_durable_and_explicit_resume_can_settle() {
         panic!("standard stop")
     };
     assert_eq!(observed.head_sequence(), 4);
-    let cold = Runtime::new(build(), store.clone());
-    let retained = cold.read(&run).await.unwrap();
+    let cold = Runtime::new(store.clone());
+    let program = load(program.canonical_bytes(), &resources).unwrap();
+    let retained = cold.read(&run, &program).await.unwrap();
     assert_eq!(retained.head_digest(), observed.head_digest());
     let RunViewState::EffectPending {
         latest_failure: Some(failure),
@@ -167,7 +153,6 @@ async fn standard_unknown_stop_is_durable_and_explicit_resume_can_settle() {
         failure.1,
         RecoveryOutcome::Stop {
             reason: StopReason::Requested,
-            root: None
         }
     );
     assert!(matches!(
@@ -175,12 +160,12 @@ async fn standard_unknown_stop_is_durable_and_explicit_resume_can_settle() {
         Cause::Timeout { deadline_ms: 5000 }
     ));
     assert_eq!(calls.lock().unwrap().len(), 1);
-    let settled = cold.resume(&run).await.unwrap();
+    let settled = cold.resume(&run, &program).await.unwrap();
     assert_eq!(settled.head_sequence(), 6);
     assert!(
         matches!(settled.state(), RunViewState::Succeeded(value) if value.decode::<Number>().unwrap().value == 9)
     );
-    let terminal = cold.resume(&run).await.unwrap();
+    let terminal = cold.resume(&run, &program).await.unwrap();
     assert_eq!(terminal.head_digest(), settled.head_digest());
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 2);
@@ -198,37 +183,31 @@ async fn ambiguous_failure_appends_acknowledge_neither_an_uncommitted_cause_nor_
         (2, AppendAction::RetainThenNotInserted, true),
     ] {
         let store = Arc::new(ScriptedStore::new([(3, action)]));
-        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-        builder.register_effect::<Execute, Submit>().unwrap();
-        builder.register_handler::<StandardRecovery>().unwrap();
+
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&calls);
-        builder
-            .register_effect_adapter::<Submit, _, _>(
-                Number { value: 1 },
-                move |id, command_ref, command| {
-                    seen.lock()
-                        .unwrap()
-                        .push((id.clone(), command_ref.clone(), command.value));
-                    Box::pin(async {
-                        Err::<EffectAdapterOutcome<Number>, _>(AdapterError::Operational(
-                            Cause::Timeout { deadline_ms: 5000 },
-                        ))
-                    })
-                },
-            )
-            .unwrap();
-        let runtime = Runtime::new(builder.finish(), store.clone());
+        let resources = Resources::<(Flow, StopFlow)>::new(move |id, command_ref, command| {
+            seen.lock()
+                .unwrap()
+                .push((id.clone(), command_ref.clone(), command.value));
+            Box::pin(async {
+                Err::<EffectAdapterOutcome<Number>, _>(AdapterError::Operational(Cause::Timeout {
+                    deadline_ms: 5000,
+                }))
+            })
+        });
+        let runtime = Runtime::new(store.clone());
         let run = RunId::from_digest(DigestBytes::from_array([80 + index; 32]));
-        let program = expand_program(
+        let program = compile(
             EntryPointId::new("mfm.test/ambiguous-failure@1").unwrap(),
-            &StopFlow,
+            &StopFlow::default(),
             &Number { value: 9 },
+            &resources,
             ProgramLimits::new(0),
         )
         .unwrap();
         let result = runtime
-            .start(run.clone(), program, Number { value: 9 })
+            .start(run.clone(), &program, &Number { value: 9 })
             .await;
         match action {
             AppendAction::RetainThenNotInserted => {
@@ -271,7 +250,7 @@ async fn ambiguous_failure_appends_acknowledge_neither_an_uncommitted_cause_nor_
                 ));
             }
         }
-        let cold = runtime.read(&run).await.unwrap();
+        let cold = runtime.read(&run, &program).await.unwrap();
         assert_eq!(cold.head_sequence(), if committed { 3 } else { 2 });
         assert_eq!(calls.lock().unwrap().len(), 1);
         let effect_id = if committed {
@@ -366,48 +345,44 @@ async fn cancellation_at_failure_append_exposes_only_the_complete_committed_pref
         });
         let calls = Arc::new(Mutex::new(Vec::new()));
         let build = || {
-            let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-            builder.register_effect::<Execute, Submit>().unwrap();
-            builder.register_handler::<StandardRecovery>().unwrap();
             let seen = Arc::clone(&calls);
-            builder
-                .register_effect_adapter::<Submit, _, _>(
-                    Number { value: 1 },
-                    move |id, command_ref, command| {
-                        seen.lock()
-                            .unwrap()
-                            .push((id.clone(), command_ref.clone(), command.value));
-                        Box::pin(async {
-                            Err::<EffectAdapterOutcome<Number>, _>(AdapterError::Operational(
-                                Cause::Timeout { deadline_ms: 5000 },
-                            ))
-                        })
-                    },
-                )
-                .unwrap();
-            builder.finish()
+            Resources::<(Flow, StopFlow)>::new(move |id, command_ref, command| {
+                seen.lock()
+                    .unwrap()
+                    .push((id.clone(), command_ref.clone(), command.value));
+                Box::pin(async {
+                    Err::<EffectAdapterOutcome<Number>, _>(AdapterError::Operational(
+                        Cause::Timeout { deadline_ms: 5000 },
+                    ))
+                })
+            })
         };
-        let runtime = Runtime::new(build(), store.clone());
+        let resources = build();
+        let runtime = Runtime::new(store.clone());
         let run = RunId::from_digest(DigestBytes::from_array([90 + u8::from(retain); 32]));
-        let program = expand_program(
+        let program = compile(
             EntryPointId::new("mfm.test/cancelled-failure@1").unwrap(),
-            &StopFlow,
+            &StopFlow::default(),
             &Number { value: 9 },
+            &resources,
             ProgramLimits::new(0),
         )
         .unwrap();
         let task_run = run.clone();
-        let task =
-            tokio::spawn(
-                async move { runtime.start(task_run, program, Number { value: 9 }).await },
-            );
+        let task_program = program.clone();
+        let task = tokio::spawn(async move {
+            runtime
+                .start(task_run, &task_program, &Number { value: 9 })
+                .await
+        });
         tokio::time::timeout(std::time::Duration::from_secs(5), store.entered.notified())
             .await
             .unwrap();
         task.abort();
         assert!(matches!(task.await, Err(error) if error.is_cancelled()));
-        let cold = Runtime::new(build(), store.clone());
-        let retained = cold.read(&run).await.unwrap();
+        let cold = Runtime::new(store.clone());
+        let program = load(program.canonical_bytes(), &resources).unwrap();
+        let retained = cold.read(&run, &program).await.unwrap();
         assert_eq!(retained.head_sequence(), if retain { 3 } else { 2 });
         let effect_id = if retain {
             let RunViewState::AwaitingRecovery {
@@ -435,7 +410,7 @@ async fn cancellation_at_failure_append_exposes_only_the_complete_committed_pref
         assert_eq!(calls.lock().unwrap().len(), 1);
         assert_eq!(effect_id, &calls.lock().unwrap()[0].0);
         let InvocationFailure::RecoveryStopped { observed, .. } =
-            cold.resume(&run).await.err().unwrap()
+            cold.resume(&run, &program).await.err().unwrap()
         else {
             panic!("acknowledged resumed failure")
         };
@@ -506,39 +481,36 @@ async fn current_record_validates_pending_failure_position_input_request_and_sto
         ),
     ] {
         let store = Arc::new(MemoryStore::new());
-        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-        builder.register_effect::<Execute, Submit>().unwrap();
-        builder.register_handler::<StandardRecovery>().unwrap();
-        builder.register_handler::<RetryUnknown>().unwrap();
+
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = Arc::clone(&calls);
-        builder
-            .register_effect_adapter::<Submit, _, _>(Number { value: 1 }, move |_, _, _| {
-                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Box::pin(async { Ok(EffectAdapterOutcome::<Number>::Pending) })
-            })
-            .unwrap();
-        let runtime = Runtime::new(builder.finish(), store.clone());
+        let resources = Resources::<(Flow, StopFlow)>::new(move |_, _, _| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(EffectAdapterOutcome::<Number>::Pending) })
+        });
+        let runtime = Runtime::new(store.clone());
         let run = RunId::from_digest(DigestBytes::from_array([92; 32]));
         let entry = EntryPointId::new("mfm.test/mismatched-failure@1").unwrap();
         let program = if reason == StopReason::Exhausted(RecoveryLimit::Run) {
-            expand_program(
+            compile(
                 entry,
-                &Flow,
+                &Flow::default(),
                 &Number { value: 9 },
+                &resources,
                 ProgramLimits::new(run_limit),
             )
         } else {
-            expand_program(
+            compile(
                 entry,
-                &StopFlow,
+                &StopFlow::default(),
                 &Number { value: 9 },
+                &resources,
                 ProgramLimits::new(run_limit),
             )
         }
         .unwrap();
         let pending = runtime
-            .start(run.clone(), program, Number { value: 9 })
+            .start(run.clone(), &program, &Number { value: 9 })
             .await
             .unwrap();
         let loaded = store.load_run(&run, None).await.unwrap().unwrap();
@@ -572,7 +544,7 @@ async fn current_record_validates_pending_failure_position_input_request_and_sto
             "failure": {"pending_effect": {"effect": effect, "original": original}},
             "classification": Classification::OutcomeUnknown,
             "request": request,
-            "outcome": RecoveryOutcome::Stop { reason, root: None },
+            "outcome": RecoveryOutcome::Stop { reason },
         }});
         let payload = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
             &serde_json::to_string(&payload).unwrap(),
@@ -589,15 +561,15 @@ async fn current_record_validates_pending_failure_position_input_request_and_sto
             store.append_run(&frame).await.unwrap(),
             mfm_store::AppendResult::Inserted
         );
-        let observed = runtime.read(&run).await;
+        let observed = runtime.read(&run, &program).await;
         if !wrong_visit && reported_input != 9 {
             assert!(observed.is_ok());
-            assert!(runtime.resume(&run).await.is_err());
+            assert!(runtime.resume(&run, &program).await.is_err());
         } else if valid {
             assert!(
                 matches!(observed.unwrap().state(), RunViewState::EffectPending {
                     latest_failure: Some(failure), ..
-                } if failure.1 == RecoveryOutcome::Stop { reason, root: None })
+                } if failure.1 == RecoveryOutcome::Stop { reason })
             );
         } else {
             assert!(observed.is_err());
@@ -623,8 +595,8 @@ async fn current_record_validates_pending_failure_position_input_request_and_sto
                 store.append_run(&forged).await.unwrap(),
                 mfm_store::AppendResult::Inserted
             );
-            assert!(runtime.read(&run).await.is_err());
-            assert!(runtime.resume(&run).await.is_err());
+            assert!(runtime.read(&run, &program).await.is_err());
+            assert!(runtime.resume(&run, &program).await.is_err());
         }
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
@@ -637,48 +609,47 @@ async fn competing_pending_failures_report_only_the_winning_exact_head_candidate
     let store = Arc::new(scripted_store::ScriptedStore::recording());
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-    builder.register_effect::<Execute, Submit>().unwrap();
-    builder.register_handler::<StandardRecovery>().unwrap();
+
     let seen = Arc::clone(&calls);
-    builder
-        .register_effect_adapter::<Submit, _, _>(Number { value: 1 }, move |_, _, _| {
-            let attempt = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let barrier = Arc::clone(&barrier);
-            Box::pin(async move {
-                if attempt == 0 {
-                    return Ok(EffectAdapterOutcome::<Number>::Pending);
-                }
-                barrier.wait().await;
-                Err(AdapterError::Operational(Cause::Timeout {
-                    deadline_ms: 5000 + attempt as u64,
-                }))
-            })
+    let resources = Resources::<(Flow, StopFlow)>::new(move |_, _, _| {
+        let attempt = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let barrier = Arc::clone(&barrier);
+        Box::pin(async move {
+            if attempt == 0 {
+                return Ok(EffectAdapterOutcome::<Number>::Pending);
+            }
+            barrier.wait().await;
+            Err(AdapterError::Operational(Cause::Timeout {
+                deadline_ms: 5000 + attempt as u64,
+            }))
         })
-        .unwrap();
-    let runtime = Arc::new(Runtime::new(builder.finish(), store.clone()));
+    });
+    let runtime = Arc::new(Runtime::new(store.clone()));
     let run = RunId::from_digest(DigestBytes::from_array([93; 32]));
-    let program = expand_program(
+    let program = compile(
         EntryPointId::new("mfm.test/competing-failures@1").unwrap(),
-        &StopFlow,
+        &StopFlow::default(),
         &Number { value: 9 },
+        &resources,
         ProgramLimits::new(0),
     )
     .unwrap();
     let pending = runtime
-        .start(run.clone(), program, Number { value: 9 })
+        .start(run.clone(), &program, &Number { value: 9 })
         .await
         .unwrap();
     assert_eq!(pending.head_sequence(), 2);
     let left = {
         let runtime = Arc::clone(&runtime);
         let run = run.clone();
-        tokio::spawn(async move { runtime.resume(&run).await })
+        let program = program.clone();
+        tokio::spawn(async move { runtime.resume(&run, &program).await })
     };
     let right = {
         let runtime = Arc::clone(&runtime);
         let run = run.clone();
-        tokio::spawn(async move { runtime.resume(&run).await })
+        let program = program.clone();
+        tokio::spawn(async move { runtime.resume(&run, &program).await })
     };
     let mut stopped = 0;
     let mut excluded = 0;
@@ -736,7 +707,10 @@ async fn competing_pending_failures_report_only_the_winning_exact_head_candidate
     assert_eq!(stopped, 1);
     assert_eq!(excluded, 1);
     assert!(observed.iter().any(|view| view.head_sequence() == 4));
-    assert_eq!(runtime.read(&run).await.unwrap().head_sequence(), 4);
+    assert_eq!(
+        runtime.read(&run, &program).await.unwrap().head_sequence(),
+        4
+    );
     assert_eq!(original_count(&store.snapshot()), 1);
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
 }

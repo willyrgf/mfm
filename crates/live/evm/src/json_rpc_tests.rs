@@ -112,13 +112,25 @@ fn target() -> EvmPhysicalTarget {
     }
 }
 
-fn intent(subject: serde_json::Value) -> EvmReadIntent {
-    serde_json::from_value(serde_json::json!({
-        "chain_id": 1337,
-        "subject": subject,
-        "route_ref": target().binding_ref().expect("binding"),
-    }))
-    .expect("checked intent")
+fn intent(subject: EvmReadSubject, token: Option<&str>) -> EvmReadIntent {
+    EvmReadIntent::new(
+        0,
+        mfm_chain::balance::DecimalScale::new(18).unwrap(),
+        target().chain_id,
+        EvmBalanceTarget::new(
+            EvmAddress::new(HOLDER).unwrap(),
+            token.map(|token| EvmAddress::new(token).unwrap()),
+        ),
+        target().binding_ref().unwrap(),
+        subject,
+    )
+    .unwrap()
+}
+fn checked_anchor() -> EvmBlockAnchor {
+    EvmBlockAnchor {
+        number: EvmU256::from_u64(17),
+        hash: EvmHash::new(BLOCK_HASH).unwrap(),
+    }
 }
 
 fn anchored_intent(subject: serde_json::Value) -> AnchoredContractCallIntent {
@@ -159,15 +171,6 @@ async fn observe_anchored(
     provider
         .observe_anchored_call(&intent_value_ref, &intent)
         .await
-}
-
-fn source(token: Option<&str>) -> serde_json::Value {
-    serde_json::json!({
-        "source_id": "wallet.native",
-        "chain_id": 1337,
-        "address": HOLDER,
-        "token": token,
-    })
 }
 
 fn anchor() -> serde_json::Value {
@@ -275,12 +278,9 @@ fn conversions_and_calldata_are_exact() {
 #[tokio::test]
 async fn chain_identity_reads_the_exact_json_rpc_envelope() {
     let stub = Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":"0x539"}"#.into()]);
-    let response = observe_broad(
-        stub.provider(),
-        intent(serde_json::json!({ "kind": "chain_identity" })),
-    )
-    .await
-    .expect("chain identity");
+    let response = observe_broad(stub.provider(), intent(EvmReadSubject::ChainIdentity, None))
+        .await
+        .expect("chain identity");
     assert!(matches!(
         response,
         EvmReadEvidence::Returned {
@@ -308,10 +308,12 @@ async fn native_balance_reads_the_committed_anchor_by_number() {
     ]);
     let response = observe_broad(
         stub.provider(),
-        intent(serde_json::json!({
-            "kind": "native_balance",
-            "value": { "source": source(None), "anchor": anchor() }
-        })),
+        intent(
+            EvmReadSubject::NativeBalance {
+                anchor: checked_anchor(),
+            },
+            None,
+        ),
     )
     .await
     .expect("native balance");
@@ -336,10 +338,12 @@ async fn anchor_confirmation_never_asks_for_the_moving_head() {
     )]);
     let response = observe_broad(
         stub.provider(),
-        intent(serde_json::json!({
-            "kind": "confirm_anchor",
-            "value": { "source": source(None), "anchor": anchor() }
-        })),
+        intent(
+            EvmReadSubject::ConfirmAnchor {
+                anchor: checked_anchor(),
+            },
+            None,
+        ),
     )
     .await
     .expect("confirmed anchor");
@@ -363,10 +367,12 @@ async fn token_decimals_splices_no_address_and_decodes_one_word() {
     let stub = Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":"0x0000000000000000000000000000000000000000000000000000000000000012"}"#.into()]);
     let response = observe_broad(
         stub.provider(),
-        intent(serde_json::json!({
-            "kind": "token_decimals",
-            "value": { "source": source(Some(TOKEN)), "anchor": anchor() }
-        })),
+        intent(
+            EvmReadSubject::TokenDecimals {
+                anchor: checked_anchor(),
+            },
+            Some(TOKEN),
+        ),
     )
     .await
     .expect("token decimals");
@@ -390,10 +396,12 @@ async fn token_balance_decodes_a_zero_padded_abi_word() {
     let stub = Stub::new(vec![r#"{"jsonrpc":"2.0","id":1,"result":"0x0000000000000000000000000000000000000000000000000000000000000001"}"#.into()]);
     let response = observe_broad(
         stub.provider(),
-        intent(serde_json::json!({
-            "kind": "token_balance",
-            "value": { "source": source(Some(TOKEN)), "anchor": anchor() }
-        })),
+        intent(
+            EvmReadSubject::TokenBalance {
+                anchor: checked_anchor(),
+            },
+            Some(TOKEN),
+        ),
     )
     .await
     .expect("token balance");
@@ -426,10 +434,12 @@ async fn malformed_or_wrong_sized_abi_data_is_unavailable() {
         let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result });
         let response = observe_broad(
             Stub::new(vec![(body.to_string())]).provider(),
-            intent(serde_json::json!({
-                "kind": "token_balance",
-                "value": { "source": source(Some(TOKEN)), "anchor": anchor() }
-            })),
+            intent(
+                EvmReadSubject::TokenBalance {
+                    anchor: checked_anchor(),
+                },
+                Some(TOKEN),
+            ),
         )
         .await;
         assert!(matches!(
@@ -444,10 +454,12 @@ async fn malformed_or_wrong_sized_abi_data_is_unavailable() {
 #[tokio::test]
 async fn rpc_errors_are_unavailable_but_empty_token_data_is_safe_failure() {
     let token_intent = || {
-        intent(serde_json::json!({
-            "kind": "token_decimals",
-            "value": { "source": source(Some(TOKEN)), "anchor": anchor() }
-        }))
+        intent(
+            EvmReadSubject::TokenDecimals {
+                anchor: checked_anchor(),
+            },
+            Some(TOKEN),
+        )
     };
     let rpc_error = observe_broad(
         Stub::new(vec![
@@ -484,7 +496,7 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
     ] {
         let response = observe_broad(
             Stub::new(vec![body.into()]).provider(),
-            intent(serde_json::json!({ "kind": "initial_anchor" })),
+            intent(EvmReadSubject::InitialAnchor, None),
         )
         .await;
         assert!(
@@ -502,7 +514,7 @@ async fn malformed_null_and_unreachable_ingress_is_unavailable() {
     let response = observe_broad(
         JsonRpcEvmProvider::connect(&EvmAdapterLocator::parse(url).expect("locator"))
             .expect("provider"),
-        intent(serde_json::json!({ "kind": "chain_identity" })),
+        intent(EvmReadSubject::ChainIdentity, None),
     )
     .await;
     assert!(matches!(
@@ -526,7 +538,7 @@ async fn incomplete_or_malformed_rpc_errors_are_unavailable() {
         let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "error": error });
         let response = observe_broad(
             Stub::new(vec![(body.to_string())]).provider(),
-            intent(serde_json::json!({ "kind": "chain_identity" })),
+            intent(EvmReadSubject::ChainIdentity, None),
         )
         .await;
         assert!(matches!(
@@ -594,7 +606,7 @@ async fn rpc_envelope_version_id_and_fields_are_exact() {
     ] {
         let response = observe_broad(
             Stub::new(vec![body.into()]).provider(),
-            intent(serde_json::json!({ "kind": "chain_identity" })),
+            intent(EvmReadSubject::ChainIdentity, None),
         )
         .await;
         assert!(
@@ -648,7 +660,7 @@ async fn redirects_never_leave_the_selected_endpoint() {
     let response = observe_broad(
         JsonRpcEvmProvider::connect(&EvmAdapterLocator::parse(redirect_url).expect("locator"))
             .expect("provider"),
-        intent(serde_json::json!({ "kind": "chain_identity" })),
+        intent(EvmReadSubject::ChainIdentity, None),
     )
     .await;
     assert!(matches!(
@@ -1006,11 +1018,7 @@ async fn transport_deadline_and_http_rate_limit_preserve_typed_operational_cause
             request
         });
         let provider = JsonRpcEvmProvider::connect(&locator).unwrap();
-        let response = observe_broad(
-            provider,
-            intent(serde_json::json!({ "kind": "chain_identity" })),
-        )
-        .await;
+        let response = observe_broad(provider, intent(EvmReadSubject::ChainIdentity, None)).await;
         if timeout {
             release.send(()).unwrap();
         }
@@ -1040,84 +1048,68 @@ async fn transport_deadline_and_http_rate_limit_preserve_typed_operational_cause
 // supplied message and raw JSON data retained.
 #[tokio::test]
 async fn rpc_codes_remain_distinct_in_committed_and_cold_domain_failures() {
+    use mfm_chain::balance::{
+        BalanceCollectionMetadata, BalanceContext, BalanceRequest, BalanceSource, DecimalScale,
+    };
+    use mfm_chain::{BalanceTarget, LedgerIdentity};
     use mfm_evm::{
-        CheckChainIdentity, EvmBalanceContext, EvmBalanceFailure, EvmBalanceRequest,
-        EvmChainIdentityRead,
+        CheckEvmBalanceChain, EvmBalanceBinding, EvmBalanceLedger, EvmBalanceObservation,
+        EvmBalanceRoute, EvmBalanceTarget, EvmChainIdentityRead,
     };
-    use mfm_program::{
-        Identity, NoParams, Occurrence, Operation, OperationExpansion, ProgramLimits,
-    };
-    use mfm_runtime::{RunViewState, Runtime, RuntimeAssemblyBuilder};
+    use mfm_program::{ProgramLimits, ResolvedRead};
+    use mfm_runtime::{RunViewState, Runtime};
+    use mfm_values::Object;
     use std::sync::Arc;
-
-    struct ReadChain {
-        target: EvmPhysicalTarget,
-    }
-    impl Operation for ReadChain {
-        type Input = EvmBalanceContext<EmptyContext>;
-        type Output = Self::Input;
-        type Failure = EvmBalanceFailure;
-        fn validate_input(&self, _: &Self::Input) -> mfm_program::Result<()> {
-            Ok(())
-        }
-        fn expand(
-            &self,
-            body: &mut OperationExpansion<Self::Input, Self::Output, Self::Failure>,
-        ) -> mfm_program::Result<()> {
-            body.read::<CheckChainIdentity<EmptyContext>, EvmChainIdentityRead, Identity<EvmBalanceFailure>>(
-                &self.target.binding_ref().unwrap(), NoParams, Occurrence::new())
-        }
-    }
+    type Source = ResolvedRead<
+        CheckEvmBalanceChain<EmptyContext>,
+        EvmChainIdentityRead,
+        EvmBalanceObservation,
+    >;
     let mut retained = Vec::new();
     for (ordinal, code) in [-32001, -32002].into_iter().enumerate() {
         let stub = Stub::new(vec![format!(
             r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":{code},"message":"secret-canary","data":{{"ratio":1.2300e-4}}}}}}"#
         )]);
-        let target = EvmPhysicalTarget {
-            chain_id: NonZeroU64::new(1).unwrap(),
-            endpoint_ref: EvmEndpoint::new("audit-fixture")
-                .unwrap()
-                .endpoint_ref()
-                .unwrap(),
-        };
-        let request = EvmBalanceRequest::new(
-            vec![EvmBalanceSource::new(
-                "wallet",
-                target.chain_id,
-                EvmAddress::from_bytes([1; 20]),
-                None,
-            )
-            .unwrap()],
-            18,
+        let route = EvmBalanceRoute::new(
+            NonZeroU64::new(1).unwrap(),
+            EvmEndpoint::new("audit-fixture").unwrap(),
+        );
+        let target = route.physical_target().unwrap();
+        let native_target = EvmBalanceTarget::new(EvmAddress::from_bytes([1; 20]), None);
+        let ledger = LedgerIdentity::new(
+            Object::from_value(&EvmBalanceLedger::new(target.chain_id)).unwrap(),
+        );
+        let source = BalanceSource::new(
+            "wallet".into(),
+            BalanceTarget::new(ledger, Object::from_value(&native_target).unwrap()),
         )
         .unwrap();
-        let input = EvmBalanceContext::new(
+        let scale = DecimalScale::new(18).unwrap();
+        let request = BalanceRequest::new(vec![source], scale).unwrap();
+        let input = BalanceContext::new(
             request,
             EmptyContext {},
-            0,
-            "collection".into(),
-            target.binding_ref().unwrap(),
-        )
-        .unwrap();
-        let program = mfm_program::expand_program(
+            BalanceCollectionMetadata::new(0, "collection".into(), route.route_ref().unwrap())
+                .unwrap(),
+        );
+        let resources =
+            crate::EvmResources::<Source>::new(vec![(route, Arc::new(stub.provider()))], vec![])
+                .unwrap();
+        let program = mfm_program::compile(
             mfm_ids::EntryPointId::new("mfm.test.evm/causal-read@1").unwrap(),
-            &ReadChain {
-                target: target.clone(),
-            },
+            &Source::new(EvmBalanceBinding::new(target, 0, native_target, scale)),
             &input,
+            &resources,
             ProgramLimits::new(0),
         )
         .unwrap();
-        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-        builder
-            .register_read::<CheckChainIdentity<EmptyContext>, EvmChainIdentityRead>()
-            .unwrap();
-        crate::register_evm_reads(&mut builder, target, Arc::new(stub.provider())).unwrap();
-        let runtime = Runtime::new(builder.finish(), Arc::new(mfm_store::MemoryStore::new()));
+        let runtime = Runtime::new(Arc::new(mfm_store::MemoryStore::new()));
         let run =
             mfm_ids::RunId::from_digest(mfm_ids::DigestBytes::from_array([ordinal as u8 + 1; 32]));
-        let hot = runtime.start(run.clone(), program, input).await.unwrap();
-        let cold = runtime.read(&run).await.unwrap();
+        let hot = runtime.start(run.clone(), &program, &input).await.unwrap();
+        let document = runtime.program_document(&run).await.unwrap();
+        let reconstructed = mfm_program::load(document.canonical_bytes(), &resources).unwrap();
+        let cold = runtime.read(&run, &reconstructed).await.unwrap();
         assert_eq!(hot.head_digest(), cold.head_digest());
         let mut errors = Vec::new();
         for view in [&hot, &cold] {
@@ -1547,4 +1539,41 @@ fn multi_node_source_cycle_stops_on_repeated_interface_pointer() {
         );
     }
     assert_eq!(evidence.as_value()["source_cycle"], true);
+}
+
+#[tokio::test]
+async fn transaction_presence_checks_exact_hash_and_preserves_rejection_diagnostics() {
+    let expected = EvmHash::from_bytes([3; 32]);
+    for present in [false, true] {
+        let result = if present {
+            serde_json::json!({"hash": expected, "blockHash": null})
+        } else {
+            serde_json::Value::Null
+        };
+        let stub = Stub::new(vec![
+            serde_json::json!({"jsonrpc":"2.0", "id":1, "result":result}).to_string(),
+        ]);
+        assert_eq!(
+            stub.provider().transaction_known(&expected).await.unwrap(),
+            present
+        );
+        assert_eq!(
+            stub.observed_requests(),
+            vec![
+                serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"eth_getTransactionByHash", "params":[expected]})
+            ]
+        );
+    }
+    let observed = EvmHash::from_bytes([4; 32]);
+    let stub = Stub::new(vec![
+        serde_json::json!({"jsonrpc":"2.0", "id":1, "result":{"hash":observed}}).to_string(),
+    ]);
+    let error = stub
+        .provider()
+        .transaction_known(&expected)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, AdapterError::Operational(cause) if matches!(&cause.provider_failure().failure, ProviderFailureKind::Rejected { field: RpcField::Result, cause: RpcRejection::HashMismatch { expected: wanted, observed: actual } } if wanted == &expected && actual == &observed))
+    );
 }

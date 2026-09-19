@@ -2189,6 +2189,7 @@ dependencies = [
  "getrandom 0.3.4",
  "mfm-canonical",
  "mfm-capabilities",
+ "mfm-chain",
  "mfm-config",
  "mfm-evm",
  "mfm-evm-live",
@@ -2229,6 +2230,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-chain"
+version = "0.1.0"
+dependencies = [
+ "mfm-capabilities",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-values",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "mfm-config"
 version = "0.1.0"
 dependencies = [
@@ -2246,13 +2261,18 @@ version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
+ "mfm-chain",
  "mfm-ids",
+ "mfm-journal",
  "mfm-program",
  "mfm-program-derive",
+ "mfm-runtime",
+ "mfm-store",
  "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -2265,11 +2285,14 @@ dependencies = [
  "getrandom 0.3.4",
  "k256",
  "mfm-app",
+ "mfm-canonical",
  "mfm-capabilities",
+ "mfm-chain",
  "mfm-evm",
  "mfm-ids",
  "mfm-journal",
  "mfm-keystore",
+ "mfm-portfolio",
  "mfm-program",
  "mfm-program-derive",
  "mfm-runtime",
@@ -2329,7 +2352,7 @@ name = "mfm-portfolio"
 version = "0.1.0"
 dependencies = [
  "mfm-capabilities",
- "mfm-evm",
+ "mfm-chain",
  "mfm-ids",
  "mfm-journal",
  "mfm-program",
@@ -2355,6 +2378,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
  "trybuild",
 ]
 
@@ -2388,6 +2412,7 @@ dependencies = [
  "mfm-evm-live",
  "mfm-ids",
  "mfm-journal",
+ "mfm-portfolio",
  "mfm-runtime",
  "mfm-store",
  "mfm-values",

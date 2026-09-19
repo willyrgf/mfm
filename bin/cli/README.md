@@ -61,6 +61,12 @@ text includes `contract_ref`, `value_ref`, and exact canonical `value`. Failed r
 Awaiting-recovery views include the original failure and complete executed input and intent/command
 facts. Awaiting-interpretation views include the retained command and accepted settlement evidence.
 Text renders all state fields from the prepared shared model, preserving raw canonical JSON.
+The `state` field names the shared state kind; every other field uses its JSON name and raw value.
+Portfolio success includes a native-client `product` projection alongside the exact semantic
+`value`. A domain failure includes `product_failure` when supported, alongside the unchanged exact
+`report`. Projection rejection is a reporting error with its causal diagnostic; the CLI never
+interprets native evidence or substitutes a different failure. Pending and recovery fields use the
+same nested JSON structures as JSON output.
 
 `--output json` is the stable automation surface shared with REST. It preserves the documented
 Application models: generic item lists, config revision summaries, start results, mechanical run

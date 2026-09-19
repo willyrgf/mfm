@@ -31,12 +31,12 @@ fn current_payload_alternatives_roundtrip_through_canonical_json() {
             request: RecoveryRequest::Stop,
             outcome: RecoveryOutcome::Stop {
                 reason: StopReason::Requested,
-                root: Some(object.clone()),
             },
         },
     ];
     for operation in operations {
         let record = RunRecord {
+            domain: RecordDomain::Current,
             program_ref: object.value_ref().clone(),
             operation,
             checkpoints: vec![Checkpoint {
@@ -70,13 +70,25 @@ fn current_payload_alternatives_roundtrip_through_canonical_json() {
 }
 
 #[test]
-fn record_decoding_rejects_obsolete_fields_and_accepts_ordinary_serde_sequences() {
+fn record_decoding_requires_current_domain_and_rejects_obsolete_fields() {
     let object = Object::from_value(&NoParams).unwrap();
     let reference = serde_json::to_string(object.value_ref()).unwrap();
     let object = serde_json::to_string(&object).unwrap();
     let operation = format!(r#"{{"admitted":{{"program":{object},"initial":{object}}}}}"#);
     let sequence = format!("[{reference},{operation},[],[],null]");
-    assert!(serde_json::from_str::<RunRecord>(&sequence).is_ok());
+    assert!(serde_json::from_str::<RunRecord>(&sequence).is_err());
+    let current = format!(
+        r#"{{"domain":"mfm.runtime-record.v1","program_ref":{reference},"operation":{operation},"checkpoints":[],"usage":[],"effect_barrier":null}}"#
+    );
+    assert!(serde_json::from_str::<RunRecord>(&current).is_ok());
+    assert!(serde_json::from_str::<RunRecord>(
+        &current.replace("mfm.runtime-record.v1", "mfm.runtime-record.v0")
+    )
+    .is_err());
+    assert!(serde_json::from_str::<RunRecord>(
+        &current.replace("\"domain\":\"mfm.runtime-record.v1\",", "")
+    )
+    .is_err());
     for wire in [
         format!(r#"{{"program_ref":{reference},"state":{{}},"facts":{operation}}}"#),
         format!(

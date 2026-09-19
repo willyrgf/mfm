@@ -38,7 +38,7 @@ impl Store for SnapshotStore {
 async fn cold_inspection_rejects_locally_inconsistent_current_records_without_callbacks() {
     let store = Arc::new(MemoryStore::new());
     let calls = Arc::new(AtomicUsize::new(0));
-    let live = runtime(
+    let (live, resources) = runtime(
         store.clone(),
         Arc::new(AtomicBool::new(true)),
         calls.clone(),
@@ -47,15 +47,16 @@ async fn cold_inspection_rejects_locally_inconsistent_current_records_without_ca
         value: 9,
         continuation: "current record validation".into(),
     };
-    let program = mfm_program::expand_program(
+    let program = mfm_program::compile(
         EntryPointId::new("mfm.test/current-validation@1").unwrap(),
-        &Flow,
+        &Flow::default(),
         &input,
+        &resources,
         ProgramLimits::new(1),
     )
     .unwrap();
     let run = RunId::from_digest(DigestBytes::from_array([155; 32]));
-    live.start(run.clone(), program, input).await.unwrap();
+    live.start(run.clone(), &program, &input).await.unwrap();
     let loaded = store.load_run(&run, None).await.unwrap().unwrap();
     let latest = decode_frame(loaded.latest()).unwrap();
     let payload: serde_json::Value = serde_json::from_slice(latest.payload().as_bytes()).unwrap();
@@ -145,13 +146,14 @@ async fn cold_inspection_rejects_locally_inconsistent_current_records_without_ca
             admission: loaded.admission().clone(),
             latest: Arc::from(changed.canonical_bytes()),
         };
-        let cold = runtime(
+        let (cold, resources) = runtime(
             Arc::new(snapshot),
             Arc::new(AtomicBool::new(true)),
             calls.clone(),
         );
+        let program = mfm_program::load(program.canonical_bytes(), &resources).unwrap();
         if mutation == 5 {
-            let observed = cold.read(&run).await.unwrap();
+            let observed = cold.read(&run, &program).await.unwrap();
             let RunViewState::Succeeded(output) = observed.state() else {
                 panic!("locally valid output")
             };
@@ -166,7 +168,7 @@ async fn cold_inspection_rejects_locally_inconsistent_current_records_without_ca
                     ..
                 },
             ..
-        } = cold.read(&run).await.err().unwrap()
+        } = cold.read(&run, &program).await.err().unwrap()
         else {
             panic!("mutation {mutation} must retain a native restoration cause")
         };
@@ -214,13 +216,9 @@ async fn admission_and_latest_cannot_disagree_when_the_head_is_admission() {
         admission: Arc::from(admission.canonical_bytes()),
         latest: Arc::from(latest.canonical_bytes()),
     };
-    let cold = runtime(
-        Arc::new(snapshot),
-        Arc::new(AtomicBool::new(true)),
-        Arc::new(AtomicUsize::new(0)),
-    );
+    let cold = Runtime::new(Arc::new(snapshot));
     assert!(matches!(
-        cold.read(&run).await,
+        cold.program_document(&run).await,
         Err(InvocationFailure::Execution {
             error: RuntimeError::InvalidHistory,
             ..
@@ -228,22 +226,27 @@ async fn admission_and_latest_cannot_disagree_when_the_head_is_admission() {
     ));
 }
 
-struct WideAllowances;
-impl Operation for WideAllowances {
-    type Input = Input;
-    type Output = Input;
-    type Failure = Never;
-    fn validate_input(&self, _: &Input) -> mfm_program::Result<()> {
-        Ok(())
+struct WidePolicy;
+impl mfm_program::OperationDefaults for WidePolicy {
+    type Handler = mfm_program::Stop;
+    type Targets = ();
+}
+impl mfm_program::ResolveDefaults<Input> for WidePolicy {
+    fn resolve(_: &Input) -> mfm_program::Result<mfm_program::PolicyValues<mfm_program::Stop>> {
+        Ok(mfm_program::PolicyValues {
+            handler: None,
+            retries: Some(u32::MAX),
+            restarts: Some(u32::MAX),
+        })
     }
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Input, Input, Never>,
-    ) -> mfm_program::Result<()> {
-        body.allowances(RecoveryAllowances::new(u32::MAX, u32::MAX))?;
-        body.pure::<Increment, Identity<Never>>(NoParams, Occurrence::new())?;
-        body.pure::<Increment, Identity<Never>>(NoParams, Occurrence::new())
-    }
+}
+type WideAllowances = mfm_program::Operation<
+    (mfm_program::Pure<Increment>, mfm_program::Pure<Increment>),
+    WidePolicy,
+>;
+struct WideResources;
+impl mfm_program::ProgramEnvironment for WideResources {
+    type Sources = WideAllowances;
 }
 
 // Current recovery counters must fit the run allowance without arithmetic overflow; inspection
@@ -257,25 +260,22 @@ async fn current_usage_checks_the_derived_sum_without_reconstructing_historical_
         (3, u32::MAX, u32::MAX, 1, false),
     ] {
         let store = Arc::new(MemoryStore::new());
-        let assembly = || {
-            let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-            builder.register_pure::<Increment>().unwrap();
-            builder.finish()
-        };
+        let resources = WideResources;
         let input = Input {
             value: 9,
             continuation: "current usage bounds".into(),
         };
-        let program = mfm_program::expand_program(
+        let program = mfm_program::compile(
             EntryPointId::new("mfm.test/current-usage@1").unwrap(),
-            &WideAllowances,
+            &WideAllowances::default(),
             &input,
+            &resources,
             ProgramLimits::new(limit),
         )
         .unwrap();
         let run = RunId::from_digest(DigestBytes::from_array([170 + index; 32]));
-        let live = Runtime::new(assembly(), store.clone());
-        let completed = live.start(run.clone(), program, input).await.unwrap();
+        let live = Runtime::new(store.clone());
+        let completed = live.start(run.clone(), &program, &input).await.unwrap();
         let loaded = store.load_run(&run, None).await.unwrap().unwrap();
         let latest = decode_frame(loaded.latest()).unwrap();
         let mut payload: serde_json::Value =
@@ -303,8 +303,8 @@ async fn current_usage_checks_the_derived_sum_without_reconstructing_historical_
             admission: loaded.admission().clone(),
             latest: Arc::from(changed.canonical_bytes()),
         };
-        let cold = Runtime::new(assembly(), Arc::new(snapshot));
-        let result = cold.read(&run).await;
+        let cold = Runtime::new(Arc::new(snapshot));
+        let result = cold.read(&run, &program).await;
         if accepted {
             let observed = result.unwrap();
             let (RunViewState::Succeeded(actual), RunViewState::Succeeded(expected)) =

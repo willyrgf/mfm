@@ -12,6 +12,7 @@ domain = "evm"
 domain-role = "source"
 
 [dependencies]
+mfm-chain = { path = "../chain" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-ids = { path = "../../kernel/ids" }
@@ -22,3 +23,10 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 serde_json = { workspace = true }
+
+[dev-dependencies]
+mfm-journal = { path = "../../kernel/journal" }
+mfm-runtime = { path = "../../kernel/runtime" }
+mfm-store = { path = "../../kernel/store" }
+# Exercise native callbacks through their existing blocking executor.
+tokio = { workspace = true }

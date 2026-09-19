@@ -1,14 +1,12 @@
 # Known limitations
 
-- Adapter error chains are not yet preserved end to end. SQLx, signer, custody and application startup
-  conversions still discard source layers. EVM transport capture now retains reviewed causes, but
-  internal State failures and recovery-before-commit still require the RFC lifecycle cutover. The new repository rule
-  requires preservation; [the adapter error audit](adapter-error-audit.md) records concrete gaps,
-  secret-free retention constraints and coherent remediation scope. Durable typed failure records
-  must not be described as retaining raw client errors already discarded upstream.
+- Run Store, transaction authority, executing signer, native callbacks and Application run surfaces
+  preserve their selected causal contracts. Other PostgreSQL paths, keystore startup/import,
+  cryptographic construction, bootstrap and non-run transports retain first-loss gaps documented
+  in [the adapter error audit](adapter-error-audit.md). This cutover does not claim universal custody.
 - PostgreSQL claims primary crash/restart durability only. It does not claim safe writable rollback,
   host-loss failover, quorum, replica, or multi-primary authority.
-- Trusted Rust State implementations, assembly, and adapters are in the process trust base.
+- Trusted Rust State implementations, compiler environments, and adapters are in the process trust base.
 - Runtime has caller-driven progression only; it owns no background scheduler or timeout policy.
 - Current product entry points are `mfm.portfolio/snapshot@1` and bounded candidate enrichment
   `mfm.portfolio/enrich@1`. Enrichment does not discover assets outside the supplied candidate list.
@@ -32,10 +30,10 @@
 MFM supports three public activities: selecting an existing operation, composing Operations/States,
 and implementing a new State. Their caller responsibilities and proposed improvements are recorded
 in the [public interfaces and tests RFC](../RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md).
-Current authoring requires separately maintained executable registrations, and ordinary EVM callers
-still supply execution/result-handling glue. Improving configured products alone does not establish
-usable framework composition or extension. Custom Operations, States, and intentional product maps
-are legitimate in tests of those public authoring contracts.
+Typed DSL construction now derives executable requirements and compiles a complete immutable
+Program before Runtime admission. Native implementations own EVM planning and exact codecs;
+maintained lifecycle Operations and reports replace fixture-owned execution/result glue. Custom
+Operations and States remain legitimate tests of framework authoring and extension contracts.
 
 ### Downstream component discovery in the DSL refactor
 
@@ -44,16 +42,17 @@ new executable semantics must publish the new source once in their integration's
 component set through ProgramEnvironment::Sources on the maintained resource environment. Its
 native families supply their dependent injected implementations and codecs through the same discovery
 walk. Stored implementation identities cannot instantiate Rust code absent from that support set.
-Automatic discovery of arbitrary downstream State implementations is deferred; this is a target
-design limitation, not a claim that the new construction API is implemented.
+Automatic discovery of arbitrary downstream State implementations is deferred. The current typed
+compiler derives requirements from the explicitly published source set; production acceptance is
+tracked in [dsl-phase-b.md](dsl-phase-b.md).
 
 Consumers selecting or recomposing installed components need no registration-list changes. The
 framework must derive each published source's State, codec, handler and injected-support requirements
 instead of requiring separate executable lists. The original Operation/composition type must not be
 required at each cold load to compensate for missing discovery infrastructure.
 
-During implementation, place a comment explaining this constraint at the source-publication site
-and link it here. Revisit automatic discovery later without weakening exact implementation matching,
+The native Portfolio resource alias documents this constraint at the source-publication site.
+Revisit automatic discovery later without weakening exact implementation matching,
 inward dependencies or explicit failure when required code is unavailable.
 
 ## Configuration-driven workflows
@@ -63,27 +62,18 @@ should supply supported workflow/input and execution options and inspect checked
 separates this product capability from improvements to the three public usage paths.
 The following are missing capabilities, not current API guarantees:
 
-- A production composition/execution entry point for supported EVM workflows that owns dependency
-  lifecycle, exact State/adapter assembly, and use of the existing Runtime. The consumer E2E still
-  implements assembly and progression around production primitives; it does not contain a second
-  Runtime engine. The current Portfolio composition does not provide this EVM product surface.
-- Bounded configuration of supported operation order, ABI/function selection, and static typed
-  arguments, with production-owned validation, encoding/decoding, sequence construction, and
-  executable registration. ABI choices and values should be configuration rather than custom
-  test State implementations. The initial supported ABI/type catalogue remains to be specified.
+- A general configuration-driven mutation product with deployment authorization, finality and
+  persistent key custody. Maintained typed lifecycle Operations support the agreed scalar ABI and
+  native recipes; arbitrary ABI/function catalogues and dynamic configuration of operation order
+  are not claimed. Application's shipping entry points remain observational Portfolio products.
 - RPC fee-discovery Read States and production fee-selection logic. Observation evidence must be
   retained before deterministic transaction construction, with configured bounds/rules. A resumed
   acknowledged prepare must reuse its original command and fees rather than refresh them.
-- Simple configuration of supported terminal failure classes and production-owned classification,
-  propagation, and report construction. Consumers should not write typed maps merely
-  to select terminal behavior. Configuring a class does not make an infrastructure error into an
-  authenticated durable domain failure.
-- Production typed success/failure reports containing configured names/order, declared public
-  inputs and execution facts, available outputs, and supported consistency/expectation results.
-  Result delivery should reuse existing exact-contract decoding and retain declared facts within
-  report bounds, replacing repeated consumer-side JSON decoding and context reconstruction.
+- A general configuration catalogue for mutation failure policy and reporting beyond the maintained
+  checked lifecycle reports and intrinsic classification. Portfolio now has actual native-to-product
+  failure projection beside exact retained reports; that does not define an arbitrary workflow UI.
 - **Deferred general output references:** configuration such as “use output Y of State Z as ABI
-  argument X” is not generally supported. Existing `CallCreatedAt` and `ObserveAt` recipes provide
+  argument X” is not generally supported. Maintained configuration/observation requests use actual typed deployed predecessors for
   specific checked dependencies. General references need exact type/field checks, dependency
   order, branch-result availability, and deterministic identity. Start with static configured
   arguments and supported built-in connections; do not imply a dynamic untyped lookup facility.

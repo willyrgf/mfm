@@ -32,7 +32,7 @@ pub enum ObservedSize {
 #[mfm(
     namespace = "mfm.evm",
     name = "rpc-method",
-    version = "1",
+    version = "2",
     schema = "mfm.evm-rpc-method"
 )]
 pub enum EvmRpcMethod {
@@ -50,6 +50,8 @@ pub enum EvmRpcMethod {
     GetTransactionCount,
     /// Transaction receipt.
     GetTransactionReceipt,
+    /// Exact transaction presence, pending or mined.
+    GetTransactionByHash,
     /// Exact signed transaction submission.
     SendRawTransaction,
     /// Development node accounts.
@@ -68,6 +70,7 @@ impl EvmRpcMethod {
             Self::GetCode => "eth_getCode",
             Self::GetTransactionCount => "eth_getTransactionCount",
             Self::GetTransactionReceipt => "eth_getTransactionReceipt",
+            Self::GetTransactionByHash => "eth_getTransactionByHash",
             Self::SendRawTransaction => "eth_sendRawTransaction",
             Self::Accounts => "eth_accounts",
             Self::SendTransaction => "eth_sendTransaction",
@@ -239,7 +242,7 @@ pub enum ProviderFailureKind {
 #[mfm(
     namespace = "mfm.evm",
     name = "provider-failure",
-    version = "1",
+    version = "2",
     schema = "mfm.evm-provider-failure"
 )]
 pub struct ProviderFailure {
@@ -280,7 +283,7 @@ pub enum EvmOperationalKind {
 #[mfm(
     namespace = "mfm.evm",
     name = "operational-error",
-    version = "2",
+    version = "3",
     schema = "mfm.evm-operational-error"
 )]
 pub struct EvmOperationalError {
@@ -312,7 +315,7 @@ impl EvmOperationalError {
 #[mfm(
     namespace = "mfm.evm",
     name = "transaction-provider-operation",
-    version = "1",
+    version = "2",
     schema = "mfm.evm-transaction-provider-operation"
 )]
 pub enum TransactionProviderOperation {
@@ -322,6 +325,8 @@ pub enum TransactionProviderOperation {
     ObserveNonce,
     /// Observe a submitted transaction's receipt.
     Receipt,
+    /// Reconcile presence before rebroadcasting retained bytes.
+    TransactionKnown,
     /// Submit retained signed bytes.
     Submit,
     /// Confirm the receipt's canonical block.

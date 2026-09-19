@@ -1,32 +1,28 @@
 # Portfolio snapshot
 
-`plan_snapshot(selector, config, targets, admission)` returns the checked Program and typed C0. Selector and
-configuration are checked secret-free authoring inputs. Targets are nonempty, strictly sorted and
-unique by chain ID, and exactly cover the selected chains. Their refs are retained in Program and C0.
+The native client admits network configuration into checked semantic Portfolio inputs. Portfolio
+composes initialize, collection entry, shared Chain collection, checked resumption and final Pure
+consolidation. The compiler asks native capability implementations to inject supporting States and
+produces the complete immutable Program before Runtime admission. Portfolio neither plans EVM
+Reads nor decodes ABI or renders EVM output.
 
-Planning constructs checked owned `CollectEvmBalances<PortfolioContinuation>` values, then expands
-one private Portfolio root Operation. The root composes each child with an explicit ValueMap from
-EvmBalanceFailure to PortfolioSnapshotFailure. It knows typed contracts, not child declaration
-counts or indices. Normal completion resumes the next collection or final consolidation.
+Up to 64 total sources are accepted. The cumulative context retains the complete request, caller
+continuation, source order, expected route and checked observations. Native anchor checks prevent
+mixing blocks. Shared Chain owns balance arithmetic; Portfolio verifies collection ordinal,
+request and metadata agreement before accepting the completed handoff. Shipping policies select
+Stop with zero recovery allowances; resource binding does not enable retries.
 
-Each source expands check-chain, initial-anchor, native or token balance Reads, and confirm-anchor.
-Token sources additionally read decimals. Planning chooses the typed source implementation directly.
-Implementations and adapters register once; their occurrences repeat in the immutable sequence.
-Up to 64 total sources are accepted; 65 are rejected.
+Runtime retains exact State/native originals and invocation phases. Native clients decode those
+contracts using decoder dispatch derived from the owning State definitions. Portfolio validates
+collection/context agreement and projects checked product failure codes. Application coordinates
+this projection beside the unchanged exact failure report; Runtime has no presentation callback.
 
-The cumulative context retains the complete admitted request, caller continuation, route identity,
-source order, and checked observations. Initial and final anchor checks prevent combining balances
-from different blocks. Intrinsic EVM classification marks AnchorChanged as InputInvalidated and reviewed Read operational
-causes as Retryable. Shipping snapshot execution selects Stop with zero
-recovery allowances; registration alone never enables retries or restarts.
+The native client converts semantic success into the public snapshot/report. Read and progress
+load the retained complete Program and admitted context after configuration deletion. Public
+native route descriptors remain in that context without credentials or live handles.
 
-A stopped child failure retains both its original cause and mapped Portfolio root failure in the
-canonical FailureReport. Later normal work is suppressed. Final Pure consolidation builds the frozen
-snapshot/report with checked decimal-string arithmetic. Read/progress reconstruct from admission and
-history after configuration deletion, without consulting configuration custody.
-
-`plan_enrichment` takes the same checked inputs and authors the shared collection prefix followed
-by `ResolvePortfolioAssets`. It preserves configured quotes, all native candidates, and nonzero
-tokens. Every collection must contain a native source. Its checked output includes resolved config,
-selector, route bindings, and collection anchors; it contains no self-referential run/head linkage.
-Application adds and verifies that linkage during explicit publication and dependent admission.
+Enrichment uses the same collection prefix followed by `ResolvePortfolioAssets`. It preserves
+quotes, required native sources and nonzero tokens in candidate order. The native client builds
+publication configuration from checked semantic results and retained public route information.
+Application qualifies run/head/output provenance and coordinates repository import. Publication
+requires neither source configuration nor provider IO. See [enrichment](recovery-enrichment-design.md).

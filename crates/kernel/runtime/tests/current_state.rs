@@ -1,14 +1,11 @@
 use mfm_capabilities::{AdapterError, ReadCapabilityContract};
 use mfm_ids::{ContentRef, DigestBytes, EntryPointId, RunId, StableId};
 use mfm_program::{
-    Classification, ClassifyError, Handler, HandlerBinding, Identity, Never, NoParams, Occurrence,
-    Operation, OperationExpansion, ProgramError, ProgramLimits, ProposedStateOutcome, PureState,
-    ReadState, RecoveryAllowances, RecoveryContext, RecoveryRequest, State,
+    Classification, ClassifyError, Handler, Identity, Never, NoParams, ProgramError, ProgramLimits,
+    ProposedStateOutcome, PureState, ReadState, RecoveryContext, RecoveryRequest, State,
 };
 use mfm_program_derive::MfmValue;
-use mfm_runtime::{
-    Failure, InvocationFailure, RunViewState, Runtime, RuntimeAssemblyBuilder, RuntimeError,
-};
+use mfm_runtime::{Failure, InvocationFailure, RunViewState, Runtime, RuntimeError};
 use mfm_store::{MemoryStore, Store};
 use mfm_values::InvocationDiagnostic;
 use serde::{Deserialize, Serialize};
@@ -101,7 +98,6 @@ impl State for Read {
 impl ReadCapabilityContract for Observation {
     type Intent = Request;
     type Evidence = Request;
-    type OperationalError = Outage;
     fn contract_id() -> mfm_capabilities::Result<StableId> {
         StableId::new("mfm.test.current-observation@1")
             .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
@@ -109,6 +105,7 @@ impl ReadCapabilityContract for Observation {
     fn bind_evidence(
         _: &ContentRef,
         intent: &Request,
+        _: &ContentRef,
         evidence: &Request,
     ) -> Result<(), InvocationDiagnostic> {
         if intent.value == evidence.value {
@@ -123,20 +120,9 @@ impl ReadCapabilityContract for Observation {
         }
     }
 }
-impl mfm_program::CapabilityInjection<Read> for Observation {
-    type Setup = NoParams;
+impl mfm_program::ReadSelection<Observation> for Read {
     type ExpandedInput = Input;
     type ExpandedOutput = Input;
-    type ExpandedFailure = Never;
-    type FailureMap = Identity<Never>;
-    fn failure_map_params(_: &NoParams) -> mfm_program::Result<NoParams> {
-        Ok(NoParams)
-    }
-    fn original_binding_ref(setup: &NoParams) -> mfm_program::Result<ContentRef> {
-        mfm_values::canonicalize_mfm_value(setup)
-            .map(|(_, reference)| reference)
-            .map_err(|_| ProgramError::InvalidContract)
-    }
 }
 impl ReadState<Observation> for Read {
     fn prepare(input: &Input) -> Result<Request, InvocationDiagnostic> {
@@ -149,45 +135,55 @@ impl ReadState<Observation> for Read {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
-struct Flow;
-impl Operation for Flow {
-    type Input = Input;
-    type Output = Input;
-    type Failure = Never;
-    fn validate_input(&self, _: &Input) -> mfm_program::Result<()> {
-        Ok(())
-    }
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Input, Input, Never>,
-    ) -> mfm_program::Result<()> {
-        body.handler(HandlerBinding::new::<Policy>(NoParams)?)?;
-        body.allowances(RecoveryAllowances::new(1, 0))?;
-        body.pure::<Increment, Identity<Never>>(NoParams, Occurrence::new())?;
-        body.read::<Read, Observation, Identity<Never>>(&NoParams, NoParams, Occurrence::new())
+#[derive(Default)]
+struct FlowDefinition;
+impl mfm_program::OperationDefinition for FlowDefinition {
+    type Body = (
+        mfm_program::Pure<Increment>,
+        mfm_program::ResolvedRead<Read, Observation, Native<Outage>>,
+    );
+}
+impl mfm_program::Plan<Input> for FlowDefinition {
+    type Config = Input;
+    fn plan<'a>(&'a self, input: &'a Input) -> mfm_program::Result<(&'a Input, Self::Body)> {
+        Ok((
+            input,
+            (Default::default(), mfm_program::ResolvedRead::new(NoParams)),
+        ))
     }
 }
-fn runtime(store: Arc<dyn Store>, available: Arc<AtomicBool>, calls: Arc<AtomicUsize>) -> Runtime {
-    let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-    builder.register_pure::<Increment>().unwrap();
-    builder.register_read::<Read, Observation>().unwrap();
-    builder.register_handler::<Policy>().unwrap();
-    builder
-        .register_adapter::<Observation, _, _>(NoParams, move |_, intent| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            let available = available.load(Ordering::SeqCst);
-            let value = intent.value;
-            Box::pin(async move {
-                if available {
-                    Ok(Request { value })
-                } else {
-                    Err(AdapterError::Operational(Outage { deadline_ms: 731 }))
-                }
-            })
+struct FlowPolicy;
+impl mfm_program::OperationDefaults for FlowPolicy {
+    type Handler = Policy;
+    type Targets = ();
+}
+impl mfm_program::ResolveDefaults<Input> for FlowPolicy {
+    fn resolve(_: &Input) -> mfm_program::Result<mfm_program::PolicyValues<Policy>> {
+        Ok(mfm_program::PolicyValues {
+            handler: Some(NoParams),
+            retries: Some(1),
+            restarts: Some(0),
         })
-        .unwrap();
-    Runtime::new(builder.finish(), store)
+    }
 }
+type Flow = mfm_program::Operation<FlowDefinition, FlowPolicy>;
+fn runtime(
+    store: Arc<dyn Store>,
+    available: Arc<AtomicBool>,
+    calls: Arc<AtomicUsize>,
+) -> (Runtime, Resources<Flow>) {
+    (
+        Runtime::new(store),
+        Resources {
+            available,
+            calls,
+            source: std::marker::PhantomData,
+        },
+    )
+}
+#[path = "current_state/resources.rs"]
+mod resources;
+use resources::{Native, Resources};
 
 // A broken recovery handler must not lose the provider failure; resume must retry policy before
 // allowing another provider call.
@@ -202,17 +198,18 @@ async fn original_commits_before_policy_failure_and_cold_resume_retries_only_rec
         value: 9,
         continuation: "complete caller continuation".into(),
     };
-    let program = mfm_program::expand_program(
+    let (runtime, resources) = runtime(store.clone(), available.clone(), calls.clone());
+    let program = mfm_program::compile(
         EntryPointId::new("mfm.test/current@1").unwrap(),
-        &Flow,
+        &Flow::default(),
         &input,
+        &resources,
         ProgramLimits::new(1),
     )
     .unwrap();
     let run = RunId::from_digest(DigestBytes::from_array([121; 32]));
-    let runtime = runtime(store.clone(), available.clone(), calls.clone());
     let error = runtime
-        .start(run.clone(), program, input)
+        .start(run.clone(), &program, &input)
         .await
         .err()
         .expect("handler failure");
@@ -250,12 +247,13 @@ async fn original_commits_before_policy_failure_and_cold_resume_retries_only_rec
     assert!(payload.get("state").is_none());
     assert!(payload["operation"].get("failed").is_some());
     assert!(payload["operation"].get("recovered").is_none());
-    let cold = runtime.read(&run).await.unwrap();
+    let program = mfm_program::load(program.canonical_bytes(), &resources).unwrap();
+    let cold = runtime.read(&run, &program).await.unwrap();
     assert_eq!(cold.head_digest(), observed.head_digest());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(CLASSIFICATIONS.load(Ordering::SeqCst), 1);
     HANDLER_AVAILABLE.store(true, Ordering::SeqCst);
-    let retry = runtime.resume(&run).await.unwrap();
+    let retry = runtime.resume(&run, &program).await.unwrap();
     assert_eq!(retry.head_sequence(), 4);
     assert!(matches!(
         retry.state(),
@@ -266,7 +264,7 @@ async fn original_commits_before_policy_failure_and_cold_resume_retries_only_rec
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     available.store(true, Ordering::SeqCst);
-    let done = runtime.resume(&run).await.unwrap();
+    let done = runtime.resume(&run, &program).await.unwrap();
     assert_eq!(done.head_sequence(), 5);
     let RunViewState::Succeeded(output) = done.state() else {
         panic!("success")
@@ -328,7 +326,7 @@ async fn recording_failure_retains_admitted_original_and_exact_candidate_without
         loads: AtomicUsize::new(0),
     });
     let calls = Arc::new(AtomicUsize::new(0));
-    let runtime = runtime(
+    let (runtime, resources) = runtime(
         store.clone(),
         Arc::new(AtomicBool::new(false)),
         calls.clone(),
@@ -337,16 +335,17 @@ async fn recording_failure_retains_admitted_original_and_exact_candidate_without
         value: 9,
         continuation: "retained before recording".into(),
     };
-    let program = mfm_program::expand_program(
+    let program = mfm_program::compile(
         EntryPointId::new("mfm.test/current-recording@1").unwrap(),
-        &Flow,
+        &Flow::default(),
         &input,
+        &resources,
         ProgramLimits::new(1),
     )
     .unwrap();
     let run = RunId::from_digest(DigestBytes::from_array([122; 32]));
     let error = runtime
-        .start(run.clone(), program, input)
+        .start(run.clone(), &program, &input)
         .await
         .err()
         .unwrap();
@@ -395,7 +394,8 @@ async fn recording_failure_retains_admitted_original_and_exact_candidate_without
     );
     assert!(projected["store"]["candidate"].get("payload").is_none());
     assert_eq!(store.loads.load(Ordering::SeqCst), 0);
-    let cold = runtime.read(&run).await.unwrap();
+    let program = mfm_program::load(program.canonical_bytes(), &resources).unwrap();
+    let cold = runtime.read(&run, &program).await.unwrap();
     assert_eq!(cold.head_digest(), observed.head_digest());
     assert!(matches!(cold.state(), RunViewState::Runnable { .. }));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -416,19 +416,21 @@ impl State for Effect {
 impl mfm_capabilities::EffectCapabilityContract for Submit {
     type Command = Request;
     type Evidence = Request;
-    type OperationalError = Never;
     fn contract_id() -> mfm_capabilities::Result<StableId> {
         StableId::new("mfm.test.current-submit@1")
             .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
     }
     fn bind_evidence(
         _: &mfm_ids::EffectId,
+        _: &ContentRef,
         command: &Request,
+        evidence_ref: &ContentRef,
         evidence: &Request,
     ) -> Result<(), InvocationDiagnostic> {
         Observation::bind_evidence(
             &mfm_program::nominal_contract_ref::<Request>().unwrap(),
             command,
+            evidence_ref,
             evidence,
         )
     }
@@ -456,36 +458,11 @@ impl mfm_program::EffectState<Submit> for Effect {
         }
     }
 }
-impl mfm_program::CapabilityInjection<Effect> for Submit {
-    type Setup = NoParams;
+impl mfm_program::EffectSelection<Submit> for Effect {
     type ExpandedInput = Input;
     type ExpandedOutput = Input;
-    type ExpandedFailure = Never;
-    type FailureMap = Identity<Never>;
-    fn failure_map_params(_: &NoParams) -> mfm_program::Result<NoParams> {
-        Ok(NoParams)
-    }
-    fn original_binding_ref(setup: &NoParams) -> mfm_program::Result<ContentRef> {
-        mfm_values::canonicalize_mfm_value(setup)
-            .map(|(_, reference)| reference)
-            .map_err(|_| ProgramError::InvalidContract)
-    }
 }
-struct EffectFlow;
-impl Operation for EffectFlow {
-    type Input = Input;
-    type Output = Input;
-    type Failure = Never;
-    fn validate_input(&self, _: &Input) -> mfm_program::Result<()> {
-        Ok(())
-    }
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Input, Input, Never>,
-    ) -> mfm_program::Result<()> {
-        body.effect::<Effect, Submit, Identity<Never>>(&NoParams, NoParams, Occurrence::new())
-    }
-}
+type EffectFlow = mfm_program::ResolvedEffect<Effect, Submit, Native<Never>>;
 // Once settlement is stored, an interpreter failure must be recoverable without submitting the
 // external command again.
 #[tokio::test]
@@ -494,46 +471,35 @@ async fn pending_command_settles_before_interpretation_and_resume_enters_no_adap
     PREPARATIONS.store(0, Ordering::SeqCst);
     let calls = Arc::new(AtomicUsize::new(0));
     let store = Arc::new(MemoryStore::new());
-    let build = || {
-        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-        builder.register_effect::<Effect, Submit>().unwrap();
-        let calls = Arc::clone(&calls);
-        builder
-            .register_effect_adapter::<Submit, _, _>(NoParams, move |_, _, command| {
-                let attempt = calls.fetch_add(1, Ordering::SeqCst);
-                let value = command.value;
-                Box::pin(async move {
-                    Ok(if attempt == 0 {
-                        mfm_runtime::EffectAdapterOutcome::Pending
-                    } else {
-                        mfm_runtime::EffectAdapterOutcome::Settled(Request { value })
-                    })
-                })
-            })
-            .unwrap();
-        Runtime::new(builder.finish(), store.clone())
+    let resources = Resources::<EffectFlow> {
+        available: Arc::new(AtomicBool::new(true)),
+        calls: calls.clone(),
+        source: std::marker::PhantomData,
     };
+    let build = || Runtime::new(store.clone());
     let input = Input {
         value: 17,
         continuation: "settled input".into(),
     };
-    let program = mfm_program::expand_program(
+    let program = mfm_program::compile(
         EntryPointId::new("mfm.test/current-effect@1").unwrap(),
-        &EffectFlow,
+        &EffectFlow::new(NoParams),
         &input,
+        &resources,
         ProgramLimits::new(0),
     )
     .unwrap();
     let run = RunId::from_digest(DigestBytes::from_array([123; 32]));
     let runtime = build();
-    let pending = runtime.start(run.clone(), program, input).await.unwrap();
+    let pending = runtime.start(run.clone(), &program, &input).await.unwrap();
     assert_eq!(pending.head_sequence(), 2);
     assert!(matches!(
         pending.state(),
         RunViewState::EffectPending { .. }
     ));
     assert_eq!(PREPARATIONS.load(Ordering::SeqCst), 2);
-    let failure = build().resume(&run).await.err().unwrap();
+    let program = mfm_program::load(program.canonical_bytes(), &resources).unwrap();
+    let failure = build().resume(&run, &program).await.err().unwrap();
     let InvocationFailure::Execution {
         error: RuntimeError::Native { cause, .. },
         last_observed: Some(observed),
@@ -561,10 +527,10 @@ async fn pending_command_settles_before_interpretation_and_resume_enters_no_adap
     );
     assert_eq!(settlement.evidence().decode::<Request>().unwrap().value, 17);
     assert_eq!(PREPARATIONS.load(Ordering::SeqCst), 3);
-    let inspected = build().read(&run).await.unwrap();
+    let inspected = build().read(&run, &program).await.unwrap();
     assert_eq!(inspected.head_digest(), observed.head_digest());
     INTERPRETER_AVAILABLE.store(true, Ordering::SeqCst);
-    let finished = build().resume(&run).await.unwrap();
+    let finished = build().resume(&run, &program).await.unwrap();
     assert!(matches!(finished.state(), RunViewState::Succeeded(_)));
     assert_eq!(finished.head_sequence(), 4);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -584,7 +550,6 @@ struct Refresh;
 impl ReadCapabilityContract for Refresh {
     type Intent = Request;
     type Evidence = Request;
-    type OperationalError = Invalidated;
     fn contract_id() -> mfm_capabilities::Result<StableId> {
         StableId::new("mfm.test.current-refresh@1")
             .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
@@ -592,9 +557,10 @@ impl ReadCapabilityContract for Refresh {
     fn bind_evidence(
         reference: &ContentRef,
         intent: &Request,
+        _: &ContentRef,
         evidence: &Request,
     ) -> Result<(), InvocationDiagnostic> {
-        Observation::bind_evidence(reference, intent, evidence)
+        Observation::bind_evidence(reference, intent, reference, evidence)
     }
 }
 impl ReadState<Refresh> for Read {
@@ -608,20 +574,9 @@ impl ReadState<Refresh> for Read {
         Ok(ProposedStateOutcome::Success { output: input })
     }
 }
-impl mfm_program::CapabilityInjection<Read> for Refresh {
-    type Setup = NoParams;
+impl mfm_program::ReadSelection<Refresh> for Read {
     type ExpandedInput = Input;
     type ExpandedOutput = Input;
-    type ExpandedFailure = Never;
-    type FailureMap = Identity<Never>;
-    fn failure_map_params(_: &NoParams) -> mfm_program::Result<NoParams> {
-        Ok(NoParams)
-    }
-    fn original_binding_ref(setup: &NoParams) -> mfm_program::Result<ContentRef> {
-        mfm_values::canonicalize_mfm_value(setup)
-            .map(|(_, reference)| reference)
-            .map_err(|_| ProgramError::InvalidContract)
-    }
 }
 struct Rewind;
 impl Handler for Rewind {
@@ -642,71 +597,96 @@ impl Handler for Rewind {
             .unwrap_or(RecoveryRequest::Stop))
     }
 }
-struct Checkpoints;
-impl Operation for Checkpoints {
-    type Input = Input;
-    type Output = Input;
-    type Failure = Never;
-    fn validate_input(&self, _: &Input) -> mfm_program::Result<()> {
-        Ok(())
-    }
-    fn expand(
-        &self,
-        body: &mut OperationExpansion<Input, Input, Never>,
-    ) -> mfm_program::Result<()> {
-        let outer = body.checkpoint::<Input>()?;
-        body.pure::<Increment, Identity<Never>>(NoParams, Occurrence::new())?;
-        let inner = body.checkpoint::<Input>()?;
-        body.pure::<Increment, Identity<Never>>(NoParams, Occurrence::new())?;
-        body.handler(
-            HandlerBinding::new::<Rewind>(NoParams)?
-                .checkpoint(&outer)?
-                .checkpoint(&inner)?,
-        )?;
-        body.allowances(RecoveryAllowances::new(0, 1))?;
-        body.read::<Read, Refresh, Identity<Never>>(&NoParams, NoParams, Occurrence::new())
+struct Outer;
+struct Inner;
+impl mfm_program::CheckpointMarker for Outer {
+    type Context = Input;
+}
+impl mfm_program::CheckpointMarker for Inner {
+    type Context = Input;
+}
+struct NoRecovery;
+impl mfm_program::OperationDefaults for NoRecovery {
+    type Handler = mfm_program::Stop;
+    type Targets = ();
+}
+impl mfm_program::ResolveDefaults<Input> for NoRecovery {
+    fn resolve(_: &Input) -> mfm_program::Result<mfm_program::PolicyValues<mfm_program::Stop>> {
+        Ok(mfm_program::PolicyValues {
+            handler: Some(NoParams),
+            retries: Some(0),
+            restarts: Some(0),
+        })
     }
 }
+type IncrementOnly = mfm_program::Operation<(mfm_program::Pure<Increment>,), NoRecovery>;
+#[derive(Default)]
+struct CheckpointDefinition;
+impl mfm_program::OperationDefinition for CheckpointDefinition {
+    type Body = (
+        mfm_program::Checkpoint<Outer>,
+        IncrementOnly,
+        mfm_program::Checkpoint<Inner>,
+        IncrementOnly,
+        mfm_program::ResolvedRead<Read, Refresh, Native<Invalidated>>,
+    );
+}
+impl mfm_program::Plan<Input> for CheckpointDefinition {
+    type Config = Input;
+    fn plan<'a>(&'a self, input: &'a Input) -> mfm_program::Result<(&'a Input, Self::Body)> {
+        Ok((
+            input,
+            (
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                mfm_program::ResolvedRead::new(NoParams),
+            ),
+        ))
+    }
+}
+struct CheckpointPolicy;
+impl mfm_program::OperationDefaults for CheckpointPolicy {
+    type Handler = Rewind;
+    type Targets = (Outer, Inner);
+}
+impl mfm_program::ResolveDefaults<Input> for CheckpointPolicy {
+    fn resolve(_: &Input) -> mfm_program::Result<mfm_program::PolicyValues<Rewind>> {
+        Ok(mfm_program::PolicyValues {
+            handler: Some(NoParams),
+            retries: Some(0),
+            restarts: Some(1),
+        })
+    }
+}
+type Checkpoints = mfm_program::Operation<CheckpointDefinition, CheckpointPolicy>;
 // Restart must restore the chosen checkpoint, discard later checkpoints and retain spent
 // recovery allowance.
 #[tokio::test]
 async fn restart_restores_its_complete_input_prunes_later_checkpoints_and_keeps_usage() {
     let store = Arc::new(MemoryStore::new());
     let available = Arc::new(AtomicBool::new(false));
-    let build = || {
-        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-        builder.register_pure::<Increment>().unwrap();
-        builder.register_read::<Read, Refresh>().unwrap();
-        builder.register_handler::<Rewind>().unwrap();
-        let available = Arc::clone(&available);
-        builder
-            .register_adapter::<Refresh, _, _>(NoParams, move |_, intent| {
-                let available = available.load(Ordering::SeqCst);
-                let value = intent.value;
-                Box::pin(async move {
-                    if available {
-                        Ok(Request { value })
-                    } else {
-                        Err(AdapterError::Operational(Invalidated { anchor: 29 }))
-                    }
-                })
-            })
-            .unwrap();
-        Runtime::new(builder.finish(), store.clone())
+    let resources = Resources::<Checkpoints> {
+        available: available.clone(),
+        calls: Arc::new(AtomicUsize::new(0)),
+        source: std::marker::PhantomData,
     };
+    let build = || Runtime::new(store.clone());
     let input = Input {
         value: 9,
         continuation: "checkpoint input".into(),
     };
-    let program = mfm_program::expand_program(
+    let program = mfm_program::compile(
         EntryPointId::new("mfm.test/current-checkpoints@1").unwrap(),
-        &Checkpoints,
+        &Checkpoints::default(),
         &input,
+        &resources,
         ProgramLimits::new(1),
     )
     .unwrap();
     let run = RunId::from_digest(DigestBytes::from_array([124; 32]));
-    let restarted = build().start(run.clone(), program, input).await.unwrap();
+    let restarted = build().start(run.clone(), &program, &input).await.unwrap();
     assert_eq!(restarted.head_sequence(), 5);
     let RunViewState::Runnable {
         position,
@@ -733,11 +713,12 @@ async fn restart_restores_its_complete_input_prunes_later_checkpoints_and_keeps_
     assert_eq!(current["checkpoints"][0]["input"]["canonical"]["value"], 9);
     assert_eq!(current["usage"][2]["restarts"], 1);
     assert_eq!(
-        build().read(&run).await.unwrap().head_digest(),
+        build().read(&run, &program).await.unwrap().head_digest(),
         restarted.head_digest()
     );
+    let program = mfm_program::load(program.canonical_bytes(), &resources).unwrap();
     available.store(true, Ordering::SeqCst);
-    let finished = build().resume(&run).await.unwrap();
+    let finished = build().resume(&run, &program).await.unwrap();
     assert_eq!(finished.head_sequence(), 8);
     let RunViewState::Succeeded(output) = finished.state() else {
         panic!("success after restore")
@@ -748,17 +729,8 @@ async fn restart_restores_its_complete_input_prunes_later_checkpoints_and_keeps_
 #[path = "current_state/collision.rs"]
 mod collision;
 
-#[path = "current_state/constructors.rs"]
-mod constructors;
-
 #[path = "current_state/validation.rs"]
 mod validation;
 
-#[path = "current_state/sizes.rs"]
-mod sizes;
-
-#[path = "current_state/terminal.rs"]
-mod terminal;
-
-#[path = "current_state/capacity.rs"]
-mod capacity;
+#[path = "current_state/bootstrap.rs"]
+mod bootstrap;

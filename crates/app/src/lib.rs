@@ -7,13 +7,16 @@ use std::sync::Arc;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_config::{ConfigImportResult, ConfigRepository, ConfigRepositoryError};
-use mfm_evm::{EvmEndpoint, EvmPhysicalTarget};
-use mfm_evm_live::{register_evm_reads, EvmAdapterLocator, EvmReadProvider, JsonRpcEvmProvider};
-use mfm_ids::{ContentRef, RunId};
+use mfm_evm::EvmBalanceRoute;
+use mfm_evm_live::client::portfolio::{self as native, EvmPortfolioConfig, PortfolioResources};
+use mfm_evm_live::{EvmAdapterLocator, EvmReadProvider, JsonRpcEvmProvider};
+pub use mfm_evm_live::{EvmBindingView as PublicBindingView, MAX_EVM_BINDINGS};
+use mfm_ids::RunId;
 use mfm_portfolio::{
-    EnrichmentProvenance, PortfolioEnrichmentOutput, PortfolioError, PortfolioSnapshotInput,
+    EnrichmentProvenance, PortfolioEnrichmentInput, PortfolioEnrichmentOutput,
+    PortfolioSnapshotInput,
 };
-use mfm_runtime::{InvocationFailure, RunView, Runtime, RuntimeAssemblyBuilder, RuntimeError};
+use mfm_runtime::{InvocationFailure, RunView, Runtime, RuntimeError};
 use mfm_storage_postgres::{
     provision_postgres as provision_postgres_backend, AdminPostgresLocator, PostgresBackend,
     RuntimePostgresLocator,
@@ -45,18 +48,8 @@ pub use mfm_store::{RunPage, RunPageLimit};
 use config::ENTRY_POINTS;
 use deployment::resolve_environment;
 
-/// Maximum number of EVM capability bindings in one composed Runtime.
-pub const MAX_EVM_BINDINGS: usize = 256;
-
-/// Registers every Portfolio and EVM State implementation the snapshot Program declares.
-pub(crate) fn register_portfolio_states(
-    builder: &mut RuntimeAssemblyBuilder,
-) -> mfm_runtime::Result<()> {
-    inspection::register_states(builder)
-}
-
 /// Redaction-safe live composition failure.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum ComposeError {
     /// Deployment path, bytes, or strict TOML were invalid or unavailable.
     #[error("deployment bootstrap is invalid or unavailable")]
@@ -76,128 +69,15 @@ pub enum ComposeError {
     /// An EVM locator or HTTP client could not be constructed.
     #[error("evm provider transport could not be constructed")]
     Provider,
-    /// Typed binding or immutable Runtime assembly construction failed.
+    /// Typed native resource or immutable Program construction failed.
     #[error("application composition is invalid")]
     Assembly,
+    /// Native resource admission retains its reviewed causal data.
+    #[error("native resource admission failed")]
+    Native(mfm_values::InvocationDiagnostic),
 }
 
-/// One public capability binding derived from the exact typed live binding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PublicBindingView {
-    /// One EVM observational route.
-    Evm {
-        /// Public chain identity.
-        chain_id: u64,
-        /// Stable public endpoint name.
-        endpoint_id: String,
-        /// Exact adapter binding reference derived from the physical target.
-        binding_ref: ContentRef,
-    },
-}
-
-struct BoundEvmRoute {
-    target: EvmPhysicalTarget,
-    endpoint_id: String,
-    provider: Arc<dyn EvmReadProvider>,
-}
-
-/// Checked typed capability bindings consumed by one [`ComposedRuntime`].
-pub struct BoundCapabilitySet {
-    evm: Vec<BoundEvmRoute>,
-}
-
-impl BoundCapabilitySet {
-    /// Checks one stable, strictly ordered EVM route set.
-    ///
-    /// Empty sets are valid; at most 256 routes are accepted.
-    pub fn new(
-        routes: Vec<(u64, EvmEndpoint, Arc<dyn EvmReadProvider>)>,
-    ) -> Result<Self, ComposeError> {
-        if routes.len() > MAX_EVM_BINDINGS
-            || routes.windows(2).any(|pair| {
-                (pair[0].0, pair[0].1.endpoint_id()) >= (pair[1].0, pair[1].1.endpoint_id())
-            })
-        {
-            return Err(ComposeError::Assembly);
-        }
-        let mut evm = Vec::new();
-        evm.try_reserve_exact(routes.len())
-            .map_err(|_| ComposeError::Assembly)?;
-        for (chain_id, endpoint, provider) in routes {
-            let chain_id = NonZeroU64::new(chain_id).ok_or(ComposeError::Assembly)?;
-            let endpoint_ref = endpoint
-                .endpoint_ref()
-                .map_err(|_| ComposeError::Assembly)?;
-            let target = EvmPhysicalTarget {
-                chain_id,
-                endpoint_ref,
-            };
-            evm.push(BoundEvmRoute {
-                target,
-                endpoint_id: endpoint.endpoint_id().to_owned(),
-                provider,
-            });
-        }
-        Ok(Self { evm })
-    }
-}
-
-/// One Runtime, RunIndex, typed planning targets, and exact public binding views built together.
-pub struct ComposedRuntime {
-    runtime: Runtime,
-    run_index: Arc<dyn RunIndex>,
-    targets: Vec<EvmPhysicalTarget>,
-    bindings: Vec<PublicBindingView>,
-}
-
-impl ComposedRuntime {
-    /// Builds the complete Portfolio assembly from one backend and checked binding set.
-    pub fn compose<B>(backend: Arc<B>, bindings: BoundCapabilitySet) -> Result<Self, ComposeError>
-    where
-        B: Store + RunIndex + 'static,
-    {
-        let mut builder = RuntimeAssemblyBuilder::new().map_err(|_| ComposeError::Assembly)?;
-        register_portfolio_states(&mut builder).map_err(|_| ComposeError::Assembly)?;
-        let mut targets = Vec::new();
-        let mut views = Vec::new();
-        targets
-            .try_reserve_exact(bindings.evm.len())
-            .map_err(|_| ComposeError::Assembly)?;
-        views
-            .try_reserve_exact(bindings.evm.len())
-            .map_err(|_| ComposeError::Assembly)?;
-        for binding in bindings.evm {
-            let binding_ref = binding
-                .target
-                .binding_ref()
-                .map_err(|_| ComposeError::Assembly)?;
-            views.push(PublicBindingView::Evm {
-                chain_id: binding.target.chain_id.get(),
-                endpoint_id: binding.endpoint_id,
-                binding_ref,
-            });
-            targets.push(binding.target.clone());
-            register_evm_reads(&mut builder, binding.target, binding.provider)
-                .map_err(|_| ComposeError::Assembly)?;
-        }
-        let assembly = builder.finish();
-        let store: Arc<dyn Store> = backend.clone();
-        let run_index: Arc<dyn RunIndex> = backend;
-        Ok(Self {
-            runtime: Runtime::new(assembly, store),
-            run_index,
-            targets,
-            bindings: views,
-        })
-    }
-
-    fn has_targets(&self, targets: &[EvmPhysicalTarget]) -> bool {
-        targets.iter().all(|target| self.targets.contains(target))
-    }
-}
-
-/// Stable request-level application failure.
+/// Stable redacted request classification; invocation failures retain their audit separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum RequestError {
     /// The selected config name is absent.
@@ -326,6 +206,10 @@ pub struct SerializableClientError<'a> {
 }
 
 enum ClientErrorDetail<'a> {
+    Construction {
+        run_id: &'a RunId,
+        cause: &'a mfm_values::InvocationDiagnostic,
+    },
     None,
     RunId(&'a RunId),
     Recovery {
@@ -374,6 +258,9 @@ impl<'a> SerializableClientError<'a> {
             message,
             diagnostic: None,
             detail: match error {
+                RunRequestError::Construction { run_id, cause } => {
+                    ClientErrorDetail::Construction { run_id, cause }
+                }
                 RunRequestError::Request(_) => ClientErrorDetail::None,
                 RunRequestError::AppendIndeterminate {
                     recovery,
@@ -400,6 +287,10 @@ impl Serialize for SerializableClientError<'_> {
         state.serialize_entry("code", self.code)?;
         state.serialize_entry("message", self.message)?;
         match &self.detail {
+            ClientErrorDetail::Construction { run_id, cause } => {
+                state.serialize_entry("run_id", run_id)?;
+                state.serialize_entry("diagnostic", cause)?;
+            }
             ClientErrorDetail::None => {}
             ClientErrorDetail::RunId(run_id) => state.serialize_entry("run_id", run_id)?,
             ClientErrorDetail::Recovery {
@@ -440,6 +331,14 @@ impl Serialize for SerializableClientError<'_> {
 // exceptional path and changing the variant to an allocation-shaped API would weaken that contract.
 #[allow(clippy::large_enum_variant)]
 pub enum RunRequestError {
+    /// Construction or cold association failed before Runtime execution.
+    #[error("program construction failed")]
+    Construction {
+        /// Requested run identity.
+        run_id: RunId,
+        /// Original reviewed owner diagnostics.
+        cause: mfm_values::InvocationDiagnostic,
+    },
     /// Ordinary shared request failure.
     #[error("{0}")]
     Request(RequestError),
@@ -489,6 +388,7 @@ impl RunRequestError {
     /// Returns the stable machine-readable error code.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::Construction { .. } => "incompatible_assembly",
             Self::Request(error) => error.code(),
             Self::AppendIndeterminate { .. } => "run_append_indeterminate",
             Self::Invocation(InvocationFailure::Execution { error, .. }) => {
@@ -501,6 +401,7 @@ impl RunRequestError {
     /// Returns the reviewed request category when the invocation has an execution fault.
     pub fn request_error(&self) -> Option<RequestError> {
         match self {
+            Self::Construction { .. } => Some(RequestError::IncompatibleAssembly),
             Self::Request(error) => Some(*error),
             Self::Invocation(InvocationFailure::Execution { error, .. }) => {
                 Some(map_runtime_error(error))
@@ -513,7 +414,7 @@ impl RunRequestError {
     /// Returns recovery identity only for an ambiguously acknowledged append.
     pub const fn recovery(&self) -> Option<&RunRecovery> {
         match self {
-            Self::Request(_) | Self::Invocation(_) => None,
+            Self::Construction { .. } | Self::Request(_) | Self::Invocation(_) => None,
             Self::AppendIndeterminate { recovery, .. } => Some(recovery),
         }
     }
@@ -587,16 +488,65 @@ impl<'a, T> ItemList<'a, T> {
     }
 }
 
+fn construction_failure(
+    run_id: &RunId,
+    operation: &'static str,
+    cause: &impl Serialize,
+) -> RunRequestError {
+    RunRequestError::Construction {
+        run_id: run_id.clone(),
+        cause: mfm_values::InvocationDiagnostic::from_fields(
+            "program_construction",
+            operation,
+            cause,
+            None,
+        ),
+    }
+}
+
+fn admitted_identity(run: &RunView) -> Result<mfm_portfolio::PortfolioAdmission, RequestError> {
+    let identity = match run.entry_point().as_str() {
+        mfm_portfolio::PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID => run
+            .admitted_context()
+            .decode::<PortfolioSnapshotInput>()
+            .map_err(|_| RequestError::RunAdmissionConflict)?
+            .admission()
+            .cloned(),
+        mfm_portfolio::PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID => run
+            .admitted_context()
+            .decode::<PortfolioEnrichmentInput>()
+            .map_err(|_| RequestError::RunAdmissionConflict)?
+            .admission()
+            .cloned(),
+        _ => return Err(RequestError::RunAdmissionConflict),
+    };
+    identity.ok_or(RequestError::RunAdmissionConflict)
+}
+
 /// Transport-neutral application use-case surface.
 pub struct Application {
-    composed: ComposedRuntime,
+    runtime: Runtime,
+    resources: Arc<PortfolioResources>,
+    run_index: Arc<dyn RunIndex>,
     configs: Arc<dyn ConfigRepository>,
 }
 
 impl Application {
-    /// Constructs an Application from one checked Runtime/index composition and config repository.
-    pub fn from_parts(composed: ComposedRuntime, configs: Arc<dyn ConfigRepository>) -> Self {
-        Self { composed, configs }
+    /// Coordinates explicit native resources, mechanical persistence, and configuration storage.
+    pub fn from_parts<B>(
+        backend: Arc<B>,
+        resources: PortfolioResources,
+        configs: Arc<dyn ConfigRepository>,
+    ) -> Self
+    where
+        B: Store + RunIndex + 'static,
+    {
+        Self {
+            runtime: Runtime::new(backend.clone()),
+            run_index: backend,
+            resources: Arc::new(resources),
+            configs,
+        }
     }
 
     /// Resolves private locators once and constructs the production PostgreSQL/EVM Application.
@@ -615,7 +565,13 @@ impl Application {
             let provider: Arc<dyn EvmReadProvider> = Arc::new(
                 JsonRpcEvmProvider::connect(&locator).map_err(|_| ComposeError::Provider)?,
             );
-            routes.push((route.chain_id(), route.endpoint().clone(), provider));
+            routes.push((
+                EvmBalanceRoute::new(
+                    NonZeroU64::new(route.chain_id()).ok_or(ComposeError::Assembly)?,
+                    route.endpoint().clone(),
+                ),
+                provider,
+            ));
         }
         let postgres = Arc::new(
             PostgresBackend::connect(&postgres_locator)
@@ -623,9 +579,8 @@ impl Application {
                 .map_err(|_| ComposeError::Postgres)?,
         );
         let configs: Arc<dyn ConfigRepository> = postgres.clone();
-        let bindings = BoundCapabilitySet::new(routes)?;
-        let composed = ComposedRuntime::compose(postgres, bindings)?;
-        Ok(Self::from_parts(composed, configs))
+        let resources = PortfolioResources::new(routes, vec![]).map_err(ComposeError::Native)?;
+        Ok(Self::from_parts(postgres, resources, configs))
     }
 
     /// Returns the strictly ordered compiled entry points.
@@ -634,13 +589,13 @@ impl Application {
     }
 
     /// Returns every definition admitted by the compiled product composition.
-    pub fn components() -> Vec<ComponentSummary> {
+    pub fn components() -> mfm_program::Result<Vec<ComponentSummary>> {
         inspection::components()
     }
 
     /// Returns stable public bindings derived from the exact composed adapter targets.
-    pub fn bindings(&self) -> &[PublicBindingView] {
-        &self.composed.bindings
+    pub fn bindings(&self) -> Result<Vec<PublicBindingView>, mfm_values::InvocationDiagnostic> {
+        self.resources.bindings()
     }
 
     /// Validates and conditionally imports one complete config revision.
@@ -649,15 +604,6 @@ impl Application {
         name: ConfigName,
         document: ConfigDocument,
     ) -> Result<ImportOutcome, RequestError> {
-        let document = tokio::task::spawn_blocking(move || match document.plan(None) {
-            Ok(_) => Ok(document),
-            Err(PortfolioError::InvalidValue) => Err(RequestError::InvalidConfigDocument),
-            Err(PortfolioError::InvalidContinuation | PortfolioError::Program) => {
-                Err(RequestError::Internal)
-            }
-        })
-        .await
-        .map_err(|_| RequestError::Internal)??;
         let summary = document.summary(name.clone());
         let entry = document
             .revision(name)
@@ -715,7 +661,6 @@ impl Application {
         run_id: &RunId,
     ) -> Result<ImportOutcome, RunRequestError> {
         let observed = self.read_run(run_id).await?;
-        let bindings = self.composed.bindings.clone();
         let document = tokio::task::spawn_blocking(move || {
             let mfm_runtime::RunViewState::Succeeded(value) = observed.state() else {
                 return Err(RequestError::InvalidEnrichment);
@@ -729,29 +674,7 @@ impl Application {
                 value.value_ref().clone(),
             )
             .map_err(|_| RequestError::InvalidEnrichment)?;
-            let mut routes = std::collections::BTreeMap::new();
-            for (chain, reference) in output.bindings() {
-                let endpoint = bindings
-                    .iter()
-                    .find_map(|binding| match binding {
-                        PublicBindingView::Evm {
-                            chain_id,
-                            endpoint_id,
-                            binding_ref,
-                        } if *chain_id == chain.get() && binding_ref == reference => {
-                            Some(endpoint_id.clone())
-                        }
-                        _ => None,
-                    })
-                    .ok_or(RequestError::BindingUnbound)?;
-                if routes
-                    .insert(chain.get(), endpoint.clone())
-                    .is_some_and(|previous| previous != endpoint)
-                {
-                    return Err(RequestError::BindingUnbound);
-                }
-            }
-            ConfigDocument::from_enrichment(output, provenance, routes.into_iter().collect())
+            ConfigDocument::from_enrichment(output, provenance)
                 .map_err(|_| RequestError::InvalidEnrichment)
         })
         .await
@@ -767,20 +690,14 @@ impl Application {
         run_id: RunId,
         selection: &ConfigSelection,
     ) -> Result<StartRunResult, RunRequestError> {
-        match self.composed.runtime.read(&run_id).await {
+        match self.read_run(&run_id).await {
             Ok(run) => {
                 let config = tokio::task::spawn_blocking(move || {
-                    let input = run
-                        .admitted_context()
-                        .decode::<PortfolioSnapshotInput>()
-                        .map_err(|_| RequestError::RunAdmissionConflict)?;
-                    let identity = input
-                        .admission()
-                        .ok_or(RequestError::RunAdmissionConflict)?;
+                    let identity = admitted_identity(&run)?;
                     if identity.entry_point() != run.entry_point() {
                         return Err(RequestError::RunAdmissionConflict);
                     }
-                    let config = ConfigSummary::from_admission(identity);
+                    let config = ConfigSummary::from_admission(&identity);
                     Ok::<_, RequestError>(config)
                 })
                 .await
@@ -788,14 +705,15 @@ impl Application {
                 if config.name() != selection.name() || config.digest() != selection.digest() {
                     return Err(RequestError::RunAdmissionConflict.into());
                 }
-                let result = self.composed.runtime.resume(&run_id).await;
+                let program = self.retained_program(&run_id).await?;
+                let result = self.runtime.resume(&run_id, &program).await;
                 return StartRunResult::from_runtime(run_id, config, result);
             }
-            Err(InvocationFailure::Execution {
+            Err(RunRequestError::Invocation(InvocationFailure::Execution {
                 error: RuntimeError::Absent,
                 ..
-            }) => {}
-            Err(error) => return Err(RunRequestError::Invocation(error)),
+            })) => {}
+            Err(error) => return Err(error),
         }
         let entry = self
             .configs
@@ -815,63 +733,89 @@ impl Application {
         } else {
             None
         };
-        let (document, config, program, c0) = tokio::task::spawn_blocking(move || {
-            if let (Some(provenance), Some(observed)) = (document.enrichment(), observed) {
-                let mfm_runtime::RunViewState::Succeeded(value) = observed.state() else {
-                    return Err(RequestError::InvalidEnrichment);
-                };
-                let output = value
-                    .decode::<PortfolioEnrichmentOutput>()
-                    .map_err(|_| RequestError::InvalidEnrichment)?;
-                if observed.head_digest() != provenance.head()
-                    || value.value_ref() != provenance.output()
-                    || !document.matches_enrichment(output)
-                {
-                    return Err(RequestError::InvalidEnrichment);
-                }
+        if let (Some(provenance), Some(observed)) = (document.enrichment(), observed) {
+            let value = observed.success().ok_or(RequestError::InvalidEnrichment)?;
+            let output = value
+                .decode::<PortfolioEnrichmentOutput>()
+                .map_err(|cause| construction_failure(&run_id, "decode_enrichment", &cause))?;
+            if observed.head_digest() != provenance.head()
+                || value.value_ref() != provenance.output()
+                || !document
+                    .matches_enrichment(&output)
+                    .map_err(|cause| construction_failure(&run_id, "match_enrichment", &cause))?
+            {
+                return Err(RequestError::InvalidEnrichment.into());
             }
-            let admission = document.admission(&name);
-            let (program, c0) = document
-                .plan(Some(admission))
-                .map_err(|error| match error {
-                    PortfolioError::InvalidValue => RequestError::InvalidRetainedConfig,
-                    _ => RequestError::Internal,
-                })?;
-            let config = document.summary(name);
-            Ok::<_, RequestError>((document, config, program, c0))
-        })
-        .await
-        .map_err(|_| RequestError::Internal)??;
-        if !self.composed.has_targets(document.targets()) {
-            return Err(RequestError::BindingUnbound.into());
         }
-        let result = self
-            .composed
-            .runtime
-            .start(run_id.clone(), program, c0)
-            .await;
+        let admission = document.admission(&name);
+        let config = document.summary(name);
+        let result = match document.native() {
+            EvmPortfolioConfig::Snapshot(_) => {
+                let input = native::admit_snapshot(document.native(), Some(admission))
+                    .map_err(|cause| construction_failure(&run_id, "admit_snapshot", &cause))?;
+                let program = mfm_program::compile(
+                    document.entry_point(),
+                    &mfm_portfolio::PortfolioSnapshotOperation::default(),
+                    &input,
+                    self.resources.as_ref(),
+                    mfm_program::ProgramLimits::new(0),
+                )
+                .map_err(|cause| construction_failure(&run_id, "compile_snapshot", &cause))?;
+                self.runtime.start(run_id.clone(), &program, &input).await
+            }
+            EvmPortfolioConfig::Enrichment(_) => {
+                let input = native::admit_enrichment(document.native(), Some(admission))
+                    .map_err(|cause| construction_failure(&run_id, "admit_enrichment", &cause))?;
+                let program = mfm_program::compile(
+                    document.entry_point(),
+                    &mfm_portfolio::PortfolioEnrichmentOperation::default(),
+                    &input,
+                    self.resources.as_ref(),
+                    mfm_program::ProgramLimits::new(0),
+                )
+                .map_err(|cause| construction_failure(&run_id, "compile_enrichment", &cause))?;
+                self.runtime.start(run_id.clone(), &program, &input).await
+            }
+        };
         StartRunResult::from_runtime(run_id, config, result)
     }
 
     /// Progresses one retained run under its exact immutable assembly.
     pub async fn progress_run(&self, run_id: &RunId) -> Result<RunView, RunRequestError> {
-        self.composed.runtime.resume(run_id).await.map_err(|error| {
-            RunRequestError::from_invocation(
-                error,
-                RunRecovery::Progress {
-                    run_id: run_id.clone(),
-                },
-            )
-        })
+        let program = self.retained_program(run_id).await?;
+        self.runtime
+            .resume(run_id, &program)
+            .await
+            .map_err(|error| {
+                RunRequestError::from_invocation(
+                    error,
+                    RunRecovery::Progress {
+                        run_id: run_id.clone(),
+                    },
+                )
+            })
     }
 
     /// Reads one retained run without progression.
     pub async fn read_run(&self, run_id: &RunId) -> Result<RunView, RunRequestError> {
-        self.composed
-            .runtime
-            .read(run_id)
+        let program = self.retained_program(run_id).await?;
+        self.runtime
+            .read(run_id, &program)
             .await
             .map_err(RunRequestError::Invocation)
+    }
+
+    async fn retained_program(
+        &self,
+        run_id: &RunId,
+    ) -> Result<mfm_program::Program, RunRequestError> {
+        let document = self
+            .runtime
+            .program_document(run_id)
+            .await
+            .map_err(RunRequestError::Invocation)?;
+        mfm_program::load(document.canonical_bytes(), self.resources.as_ref())
+            .map_err(|cause| construction_failure(run_id, "load_program", &cause))
     }
 
     /// Lists one mechanical keyset page of current run heads.
@@ -880,8 +824,7 @@ impl Application {
         after: Option<&RunId>,
         limit: RunPageLimit,
     ) -> Result<RunPage, RequestError> {
-        self.composed
-            .run_index
+        self.run_index
             .list_runs(after, limit)
             .await
             .map_err(map_run_index_error)
@@ -962,7 +905,6 @@ fn map_runtime_error(error: &RuntimeError) -> RequestError {
         RuntimeError::AdmissionConflict => RequestError::RunAdmissionConflict,
         RuntimeError::Store(error) => map_store_error(error),
         RuntimeError::InvalidHistory => RequestError::InvalidRunHistory,
-        RuntimeError::IncompatibleAssembly => RequestError::IncompatibleAssembly,
         RuntimeError::SizeLimit { .. } => RequestError::SizeLimitExceeded,
         RuntimeError::ArithmeticOverflow => RequestError::CapacityArithmeticOverflow,
         RuntimeError::Recording { failure, .. } => match failure.as_ref() {
@@ -1116,7 +1058,8 @@ mod tests {
                 "items": [{"entry_point": "mfm.portfolio/enrich@1"}, {"entry_point": "mfm.portfolio/snapshot@1"}]
             })
         );
-        let ids = Application::components()
+        let components = Application::components().unwrap();
+        let ids = components
             .iter()
             .map(|component| (component.kind(), component.id()))
             .collect::<Vec<_>>();
@@ -1127,53 +1070,54 @@ mod tests {
                 (ComponentKind::EntryPoint, "mfm.portfolio/snapshot@1"),
                 (
                     ComponentKind::Operation,
-                    "mfm.evm.operation.collect-balances@2",
+                    "mfm.portfolio.operation.enrichment@1"
+                ),
+                (
+                    ComponentKind::Operation,
+                    "mfm.portfolio.operation.snapshot@1"
+                ),
+                (ComponentKind::PureState, "mfm.chain.consolidate-balances@1"),
+                (
+                    ComponentKind::PureState,
+                    "mfm.portfolio.state.consolidate@1"
                 ),
                 (
                     ComponentKind::PureState,
-                    "mfm.evm.state.consolidate-balance-collection@1",
+                    "mfm.portfolio.state.enter-collection@1"
                 ),
                 (
                     ComponentKind::PureState,
-                    "mfm.portfolio.state.consolidate@1",
+                    "mfm.portfolio.state.enter-enrichment-collection@1"
                 ),
                 (
                     ComponentKind::PureState,
-                    "mfm.portfolio.state.enter-collection@1",
+                    "mfm.portfolio.state.initialize-enrichment@1"
                 ),
                 (ComponentKind::PureState, "mfm.portfolio.state.initialize@1"),
                 (
                     ComponentKind::PureState,
-                    "mfm.portfolio.state.resolve-assets@1",
+                    "mfm.portfolio.state.resolve-assets@1"
                 ),
                 (
                     ComponentKind::PureState,
-                    "mfm.portfolio.state.resume-collection@1",
+                    "mfm.portfolio.state.resume-collection@1"
+                ),
+                (
+                    ComponentKind::PureState,
+                    "mfm.portfolio.state.resume-enrichment-collection@1"
+                ),
+                (ComponentKind::ReadState, "mfm.chain.observe-balance@1"),
+                (ComponentKind::ReadState, "mfm.evm.check-balance-chain@1"),
+                (ComponentKind::ReadState, "mfm.evm.confirm-balance-anchor@1"),
+                (
+                    ComponentKind::ReadState,
+                    "mfm.evm.initial-native-balance-anchor@1"
                 ),
                 (
                     ComponentKind::ReadState,
-                    "mfm.evm.state.check-chain-identity@1",
+                    "mfm.evm.initial-token-balance-anchor@1"
                 ),
-                (
-                    ComponentKind::ReadState,
-                    "mfm.evm.state.confirm-balance-anchor@2",
-                ),
-                (
-                    ComponentKind::ReadState,
-                    "mfm.evm.state.read-initial-anchor@2",
-                ),
-                (
-                    ComponentKind::ReadState,
-                    "mfm.evm.state.read-native-balance@1",
-                ),
-                (
-                    ComponentKind::ReadState,
-                    "mfm.evm.state.read-token-balance@1",
-                ),
-                (
-                    ComponentKind::ReadState,
-                    "mfm.evm.state.read-token-decimals@1",
-                ),
+                (ComponentKind::ReadState, "mfm.evm.read-token-decimals@1"),
             ]
         );
     }
@@ -1278,3 +1222,6 @@ mod tests {
         assert_eq!(wire["invocation"]["last_observed"], serde_json::Value::Null);
     }
 }
+
+#[cfg(test)]
+mod construction_tests;

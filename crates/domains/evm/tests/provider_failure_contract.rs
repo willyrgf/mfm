@@ -64,8 +64,8 @@ fn causal_contracts_preserve_diagnostic_text_through_whole_owner_admission() {
 fn diagnostic_owner_schema_identity() {
     use mfm_values::MfmValue;
     for (schema, identity, bytes) in [
-        (EvmOperationalError::schema_descriptor().unwrap(), "schema:mfm.evm-operational-error:2:sha256-jcs-v1:c8945cd8c4d79caab00e0f3b75b5f8f9c41b4ff63dcbae466b1677d88f45d67c", 11677),
-        (EvmTransactionOperationalError::schema_descriptor().unwrap(), "schema:mfm.evm-transaction-operational-error:3:sha256-jcs-v1:2292902eaf07f4fe168ab33b496a1eb0913203f3010c41db59fe0ce9d0c56a81", 13227),
+        (EvmOperationalError::schema_descriptor().unwrap(), "schema:mfm.evm-operational-error:3:sha256-jcs-v1:40cb1920449b8270da4ef453fc654762a18e7165305cd402e716ef5bfd08fd95", 12756),
+        (EvmTransactionOperationalError::schema_descriptor().unwrap(), "schema:mfm.evm-transaction-operational-error:4:sha256-jcs-v1:cc11620d29b5503c3bdea1a162847b3522d71d64fd26228c0825395f14739985", 14359),
     ] {
         assert_eq!(schema.schema_id().unwrap().to_string(), identity);
         assert_eq!(schema.identity_canonical_json().unwrap().as_bytes().len(), bytes);
@@ -115,4 +115,46 @@ fn authority_and_signer_owners_keep_diagnostic_admission_and_reject_old_contract
             .decode::<EvmTransactionOperationalError>()
             .is_err());
     }
+}
+
+#[test]
+fn scalar_rejection_survives_the_complete_provider_original_with_its_classification() {
+    use mfm_program::{Classification, ClassifyError};
+    use mfm_values::Unsigned256Error;
+    let scalar = EvmU256::new("01").unwrap_err();
+    let error = EvmTransactionOperationalError::Provider {
+        operation: TransactionProviderOperation::CanonicalBlock,
+        cause: EvmOperationalError::new(
+            EvmOperationalKind::Unavailable,
+            ProviderFailure {
+                method: EvmRpcMethod::GetBlockByNumber,
+                stage: RpcStage::Validation,
+                failure: ProviderFailureKind::Rejected {
+                    field: RpcField::Block,
+                    cause: RpcRejection::Domain { cause: scalar },
+                },
+                diagnostics: DiagnosticEvidence::from_value(
+                    serde_json::json!({"operation": "decode_block_number"}),
+                ),
+            },
+        ),
+    };
+    let object = Object::from_value(&error).unwrap();
+    let cold = object.decode::<EvmTransactionOperationalError>().unwrap();
+    assert_eq!(cold, error);
+    assert_eq!(cold.classify(), Classification::OutcomeUnknown);
+    let mut source: &(dyn std::error::Error + 'static) = &cold;
+    while let Some(next) = source.source() {
+        source = next;
+    }
+    assert_eq!(source.downcast_ref(), Some(&Unsigned256Error::NonCanonical));
+    // The former descriptor lacks the constructor cause and transaction-presence method.
+    // Exact admission must not fall back to a familiar type name.
+    let previous = mfm_ids::SchemaId::parse(
+        "schema:mfm.evm-transaction-operational-error:3:sha256-jcs-v1:2292902eaf07f4fe168ab33b496a1eb0913203f3010c41db59fe0ce9d0c56a81",
+    ).unwrap();
+    let old_ref =
+        mfm_ids::ContentRef::new(previous, object.value_ref().content_digest().clone()).unwrap();
+    let old = Object::from_canonical(old_ref, object.canonical_bytes()).unwrap();
+    assert!(old.decode::<EvmTransactionOperationalError>().is_err());
 }

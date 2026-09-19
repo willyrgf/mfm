@@ -1,0 +1,13 @@
+error[E0271]: type mismatch resolving `<Effect<Deploy, Transaction> as AuthoringSource>::Input == Prepared`
+  --> tests/ui/source_expanded.rs:10:23
+   |
+10 |     requires_prepared(&Effect::<Deploy, Transaction>::default());
+   |     ----------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Prepared`, found `Input`
+   |     |
+   |     required by a bound introduced by this call
+   |
+note: required by a bound in `requires_prepared`
+  --> tests/ui/source_expanded.rs:8:41
+   |
+ 8 | fn requires_prepared<S: AuthoringSource<Input = Prepared>>(_: &S) {}
+   |                                         ^^^^^^^^^^^^^^^^ required by this bound in `requires_prepared`

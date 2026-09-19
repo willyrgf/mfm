@@ -2179,13 +2179,13 @@ migration reader, or claim old Programs run with unavailable ABIs.
 | Duplicate decimal/range implementation | Shared Unsigned256 mechanics with exact owning schemas preserved or deliberately versioned |
 
 Current implementation references for this cutover are
-[authoring](crates/kernel/program/src/authoring.rs),
+[typed authoring](crates/kernel/program/src/typed_source.rs),
 [capability contracts](crates/kernel/capabilities/src/lib.rs),
-[assembly](crates/kernel/runtime/src/assembly.rs),
+[complete Program construction](crates/kernel/program/src/construction.rs),
 [execution](crates/kernel/runtime/src/engine.rs),
 [native transaction stages](crates/domains/evm/src/transaction/stages.rs),
-[fixture composition](crates/live/evm/tests/support/contract_workflow.rs), and
-[application inventory](crates/app/src/inspection.rs). These describe migration inputs, not parallel
+[maintained lifecycle acceptance](crates/live/evm/tests/evm_contract_effect_e2e.rs), and
+[application inventory](crates/app/src/inspection.rs). These references identify the current owners after the production cutover, not parallel
 public designs to preserve.
 
 Do not implement recompose, author_operation, State::expand, `Deploy<C>`, replacement StateDefinition
@@ -2455,7 +2455,7 @@ queue internals, key slots, secret material and signed-wire custody out of Progr
 
 ### 15.2 Callback split and acknowledgement boundaries
 
-Current [assembly callbacks](crates/kernel/runtime/src/assembly.rs) delegate to generic engine
+Current [typed callbacks](crates/kernel/program/src/callback.rs) delegate to generic engine
 runners carrying DriverContext/DriverDisposition. The [engine](crates/kernel/runtime/src/engine.rs)
 combines typed invocation with recording and recovery. The replacement must separate these actions:
 
@@ -2587,7 +2587,7 @@ nix develop -c cargo test -p mfm-runtime --test current_state \
   sizes::unrecordable_original_reports_known_slot_and_encoding_cause_without_append -- --exact
 ```
 
-That [regression](crates/kernel/runtime/tests/current_state/sizes.rs) checks the actual engine's
+That [regression](crates/kernel/runtime/tests/original_encoding.rs) checks the actual engine's
 ReadAdapter/Encode provenance, one serialization, retained known failure context, and unchanged
 acknowledged head. Preserve and migrate it during the callback split. Passing the current engine
 establishes the baseline; it does not certify an unimplemented replacement. The prototype extraction

@@ -5,9 +5,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use mfm_app::{
-    Application, BoundCapabilitySet, ComposedRuntime, ConfigDocument, ConfigDocumentError,
-    ConfigSelection, ImportOutcome, PublicBindingView, RequestError, RunPageLimit, RunRecovery,
-    SerializableRunView, MAX_CONFIG_DOCUMENT_BYTES, MAX_EVM_BINDINGS,
+    Application, ConfigDocument, ConfigDocumentError, ConfigSelection, ImportOutcome,
+    PublicBindingView, RequestError, RunPageLimit, RunRecovery, SerializableRunView,
+    MAX_CONFIG_DOCUMENT_BYTES, MAX_EVM_BINDINGS,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::AdapterError;
@@ -16,13 +16,13 @@ use mfm_config::{
     ConfigRevision, MemoryConfigRepository,
 };
 use mfm_evm::{
-    AnchoredContractCallEvidence, AnchoredContractCallIntent, EvmBalanceFailure, EvmBlockAnchor,
+    AnchoredContractCallEvidence, AnchoredContractCallIntent, EvmBalanceRoute, EvmBlockAnchor,
     EvmEndpoint, EvmHash, EvmOperationalError, EvmOperationalKind, EvmReadEvidence, EvmReadIntent,
     EvmReadSubject, EvmReadValue, EvmTokenDecimals, EvmU256,
 };
 use mfm_evm_live::{EvmReadProvider, ProviderFuture};
 use mfm_ids::{ConfigName, ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId};
-use mfm_portfolio::{PortfolioEnrichmentOutput, PortfolioSnapshotFailure, PortfolioSnapshotOutput};
+use mfm_portfolio::{PortfolioEnrichmentOutput, PortfolioSnapshotOutput};
 use mfm_runtime::{Failure, RunViewState};
 use mfm_store::{AppendResult, MemoryStore, Store, StoreError};
 use mfm_values::{MfmValue, Object};
@@ -55,11 +55,12 @@ const NATIVE_SNAPSHOT: &str = r#"{
 #[derive(Clone, Copy)]
 enum ProviderMode {
     Ready,
+    Candidates,
     Blocked,
     Timeout,
     RejectBalance,
     TimeoutTokenDecimals,
-    TimeoutTokenBalance(&'static str),
+    TimeoutTokenBalance(u32),
 }
 
 struct Provider {
@@ -96,8 +97,8 @@ impl EvmReadProvider for Provider {
                 }
                 (
                     ProviderMode::TimeoutTokenBalance(expected),
-                    EvmReadSubject::TokenBalance { source, .. },
-                ) => source.source_id() == expected,
+                    EvmReadSubject::TokenBalance { .. },
+                ) => intent.source_ordinal() == expected,
                 _ => false,
             };
             if times_out {
@@ -127,7 +128,12 @@ impl EvmReadProvider for Provider {
                         hash: EvmHash::new(ANCHOR).expect("hash"),
                     })
                 }
-                EvmReadSubject::NativeBalance { source, .. } if source.source_id() == "native" => {
+                EvmReadSubject::NativeBalance { .. }
+                    if matches!(
+                        mode,
+                        ProviderMode::Candidates | ProviderMode::TimeoutTokenBalance(_)
+                    ) =>
+                {
                     EvmReadValue::RawUnits(EvmU256::from_u64(0))
                 }
                 EvmReadSubject::NativeBalance { .. } => {
@@ -136,10 +142,24 @@ impl EvmReadProvider for Provider {
                 EvmReadSubject::TokenDecimals { .. } => {
                     EvmReadValue::TokenDecimals(EvmTokenDecimals::new(18).expect("decimals"))
                 }
-                EvmReadSubject::TokenBalance { source, .. } if source.source_id() == "funded" => {
+                EvmReadSubject::TokenBalance { .. }
+                    if matches!(
+                        mode,
+                        ProviderMode::Candidates | ProviderMode::TimeoutTokenBalance(_)
+                    ) && intent.target().token().is_some_and(|token| {
+                        token.to_string() == "0x0000000000000000000000000000000000000002"
+                    }) =>
+                {
                     EvmReadValue::RawUnits(EvmU256::from_u64(1))
                 }
-                EvmReadSubject::TokenBalance { source, .. } if source.source_id() == "empty" => {
+                EvmReadSubject::TokenBalance { .. }
+                    if matches!(
+                        mode,
+                        ProviderMode::Candidates | ProviderMode::TimeoutTokenBalance(_)
+                    ) && intent.target().token().is_some_and(|token| {
+                        token.to_string() == "0x0000000000000000000000000000000000000003"
+                    }) =>
+                {
                     EvmReadValue::RawUnits(EvmU256::from_u64(0))
                 }
                 EvmReadSubject::TokenBalance { .. } => {
@@ -188,18 +208,18 @@ where
         .iter()
         .map(|(chain_id, endpoint_id, provider)| {
             (
-                *chain_id,
-                EvmEndpoint::new(*endpoint_id).expect("endpoint"),
+                EvmBalanceRoute::new(
+                    NonZeroU64::new(*chain_id).unwrap(),
+                    EvmEndpoint::new(*endpoint_id).expect("endpoint"),
+                ),
                 provider.clone() as Arc<dyn EvmReadProvider>,
             )
         })
         .collect();
     Application::from_parts(
-        ComposedRuntime::compose(
-            backend,
-            BoundCapabilitySet::new(bindings).expect("bindings"),
-        )
-        .expect("composition"),
+        backend,
+        mfm_evm_live::client::portfolio::PortfolioResources::new(bindings, vec![])
+            .expect("bindings"),
         configs,
     )
 }
@@ -348,27 +368,35 @@ impl ConfigRepository for LostPublicationAck {
 fn bound_routes_reject_duplicates_and_over_capacity() {
     let duplicate = vec![
         (
-            1,
-            EvmEndpoint::new("alpha").expect("endpoint"),
+            EvmBalanceRoute::new(
+                NonZeroU64::new(1).unwrap(),
+                EvmEndpoint::new("alpha").expect("endpoint"),
+            ),
             provider(1) as Arc<dyn EvmReadProvider>,
         ),
         (
-            1,
-            EvmEndpoint::new("alpha").expect("endpoint"),
+            EvmBalanceRoute::new(
+                NonZeroU64::new(1).unwrap(),
+                EvmEndpoint::new("alpha").expect("endpoint"),
+            ),
             provider(1) as Arc<dyn EvmReadProvider>,
         ),
     ];
-    assert!(BoundCapabilitySet::new(duplicate).is_err());
+    assert!(mfm_evm_live::client::portfolio::PortfolioResources::new(duplicate, vec![]).is_err());
     let over_capacity = (0..=MAX_EVM_BINDINGS)
         .map(|index| {
             (
-                (index + 1) as u64,
-                EvmEndpoint::new("endpoint").expect("endpoint"),
+                EvmBalanceRoute::new(
+                    NonZeroU64::new((index + 1) as u64).unwrap(),
+                    EvmEndpoint::new("endpoint").expect("endpoint"),
+                ),
                 provider((index + 1) as u64) as Arc<dyn EvmReadProvider>,
             )
         })
         .collect();
-    assert!(BoundCapabilitySet::new(over_capacity).is_err());
+    assert!(
+        mfm_evm_live::client::portfolio::PortfolioResources::new(over_capacity, vec![]).is_err()
+    );
 }
 
 // Starting a selected config revision must produce the documented portfolio output and expose
@@ -405,7 +433,7 @@ async fn snapshot_starts_from_exact_revision_and_returns_holdings() {
         chain_id,
         endpoint_id,
         binding_ref,
-    } = &app.bindings()[0];
+    } = &app.bindings().unwrap()[0];
     assert_eq!(*chain_id, 1);
     assert_eq!(endpoint_id, "alpha");
     assert_eq!(
@@ -434,7 +462,7 @@ async fn snapshot_starts_from_exact_revision_and_returns_holdings() {
     };
     let output = value.decode::<PortfolioSnapshotOutput>().expect("output");
     assert_eq!(
-        serde_json::to_value(&output).expect("json"),
+        mfm_evm_live::client::portfolio::render_snapshot(&output).unwrap(),
         serde_json::from_str::<serde_json::Value>(include_str!(
             "../../../docs/contracts/evm-portfolio/portfolio-snapshot.json"
         ))
@@ -526,9 +554,10 @@ async fn snapshot_records_a_durable_provider_failure() {
         .expect("start");
     let model = serde_json::to_value(SerializableRunView::new(started.run()).unwrap()).unwrap();
     assert_eq!(model["state"]["kind"], "failed");
-    assert_eq!(model["state"]["report"]["cause"]["kind"], "adapter");
+    assert!(model["state"]["report"]["failure"]["read"].is_object());
+    assert!(model["state"].get("product_failure").is_none());
     assert_eq!(
-        model["state"]["report"]["cause"]["error"]["canonical"]["kind"],
+        model["state"]["report"]["failure"]["read"]["original"]["canonical"]["kind"],
         "timeout"
     );
     let cold = app.read_run(&run_id).await.expect("cold");
@@ -600,7 +629,10 @@ async fn snapshot_token_holdings_and_typed_read_failures() {
     let RunViewState::Succeeded(value) = token_started.run().state() else {
         panic!("token snapshot must succeed");
     };
-    let output = serde_json::to_value(value.decode::<PortfolioSnapshotOutput>().unwrap()).unwrap();
+    let output = mfm_evm_live::client::portfolio::render_snapshot(
+        &value.decode::<PortfolioSnapshotOutput>().unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         output["snapshot"]["collections"][0]["holdings"][0]["amount_dec"],
         "1.000000000000000000"
@@ -636,21 +668,11 @@ async fn snapshot_token_holdings_and_typed_read_failures() {
     let Failure::Domain { original, .. } = report.failure() else {
         panic!("domain failure");
     };
-    assert!(matches!(
-        original.decode::<EvmBalanceFailure>().unwrap(),
-        EvmBalanceFailure::SourceUnavailable {
-            collection_ordinal: 0,
-            ..
-        }
-    ));
-    assert!(matches!(
-        report
-            .root()
-            .unwrap()
-            .decode::<PortfolioSnapshotFailure>()
-            .unwrap(),
-        PortfolioSnapshotFailure::CollectionFailed { ordinal: 0, .. }
-    ));
+    assert!(original
+        .decode::<mfm_chain::balance::ObserveBalanceFailure>()
+        .is_ok());
+    let rendered = serde_json::to_value(SerializableRunView::new(rejected.run()).unwrap()).unwrap();
+    assert_eq!(rendered["state"]["product_failure"]["value"]["ordinal"], 0);
     let cold = app
         .read_run(&RunId::from_digest(DigestBytes::from_array([3; 32])))
         .await
@@ -688,7 +710,10 @@ async fn snapshot_token_holdings_and_typed_read_failures() {
         panic!("Read facts");
     };
     let wire = serde_json::from_slice::<serde_json::Value>(call.input().canonical_bytes()).unwrap();
-    assert_eq!(wire["metadata"]["collection_ordinal"], 0);
+    assert_eq!(
+        wire["checked"]["context"]["metadata"]["collection_ordinal"],
+        0
+    );
 }
 
 // Import is deployment-independent, but starting a run must reject missing bindings and
@@ -720,17 +745,15 @@ async fn config_rejects_malformed_unbound_and_forged_rows_before_admission() {
         br#"{"value":1.5}"#,
         b"\xff",
     ] {
-        assert_eq!(
-            ConfigDocument::new(malformed.to_vec()).await.err(),
-            Some(ConfigDocumentError::Malformed)
-        );
+        assert!(matches!(
+            ConfigDocument::new(malformed.to_vec()).await,
+            Err(ConfigDocumentError::Malformed)
+        ));
     }
-    assert_eq!(
-        ConfigDocument::new(vec![b'x'; MAX_CONFIG_DOCUMENT_BYTES + 1])
-            .await
-            .err(),
-        Some(ConfigDocumentError::TooLarge)
-    );
+    assert!(matches!(
+        ConfigDocument::new(vec![b'x'; MAX_CONFIG_DOCUMENT_BYTES + 1]).await,
+        Err(ConfigDocumentError::TooLarge)
+    ));
 
     let invalid = ConfigDocument::new(
         serde_json::to_vec(&serde_json::json!({
@@ -759,12 +782,9 @@ async fn config_rejects_malformed_unbound_and_forged_rows_before_admission() {
         .unwrap(),
     )
     .await
-    .expect("typed document");
-    assert_eq!(
-        app.import_config(ConfigName::new("invalid").expect("name"), invalid)
-            .await,
-        Err(RequestError::InvalidConfigDocument)
-    );
+    .err()
+    .expect("native client rejects selector mismatch during admission");
+    assert_eq!(invalid.code(), "invalid_config_document");
 
     let unbound = app
         .import_config(
@@ -809,9 +829,7 @@ async fn config_rejects_malformed_unbound_and_forged_rows_before_admission() {
             )
         )
         .await,
-        Err(mfm_app::RunRequestError::Request(
-            RequestError::BindingUnbound
-        ))
+        Err(mfm_app::RunRequestError::Construction { .. })
     ));
     assert!(app
         .list_runs(None, RunPageLimit::default())
@@ -1063,6 +1081,7 @@ async fn enrichment_keeps_native_and_nonzero_candidates() {
         }
     });
     let provider = provider(1);
+    *provider.mode.lock().unwrap() = ProviderMode::Candidates;
     let app = open(
         &[(1, "alpha", provider.clone())],
         Arc::new(MemoryStore::new()),
@@ -1093,7 +1112,7 @@ async fn enrichment_keeps_native_and_nonzero_candidates() {
     let output = value
         .decode::<PortfolioEnrichmentOutput>()
         .expect("enrichment");
-    let wire = serde_json::to_value(&output).unwrap();
+    let wire = mfm_evm_live::client::portfolio::render_enrichment(&output).unwrap();
     assert_eq!(wire["quote"], "usd");
     let sources = wire["collections"][0]["config"]["request"]["sources"]
         .as_array()
@@ -1102,7 +1121,7 @@ async fn enrichment_keeps_native_and_nonzero_candidates() {
     assert_eq!(sources[0]["source_id"], "funded");
     assert_eq!(sources[1]["source_id"], "native");
 
-    *provider.mode.lock().unwrap() = ProviderMode::TimeoutTokenBalance("empty");
+    *provider.mode.lock().unwrap() = ProviderMode::TimeoutTokenBalance(2);
     let failed_id = RunId::from_digest(DigestBytes::from_array([91; 32]));
     let failed = app
         .start_run(
@@ -1129,13 +1148,24 @@ async fn enrichment_keeps_native_and_nonzero_candidates() {
     let Failure::Read { call, intent, .. } = report.failure() else {
         panic!("the later candidate's balance lookup must fail");
     };
-    assert!(matches!(
-        intent.decode::<EvmReadIntent>().unwrap().subject(),
-        EvmReadSubject::TokenBalance { source, .. } if source.source_id() == "empty"
-    ));
+    let observed = intent
+        .decode::<mfm_chain::balance::ReadBalanceAt>()
+        .unwrap();
+    let prepared = call
+        .input()
+        .decode::<mfm_chain::balance::PreparedBalance<mfm_portfolio::EnrichmentContinuation>>()
+        .unwrap();
+    assert_eq!(
+        prepared.context().active_source().unwrap().source_id(),
+        "empty"
+    );
+    assert_eq!(
+        observed.target(),
+        prepared.context().active_source().unwrap().target()
+    );
     let context: serde_json::Value =
         serde_json::from_slice(call.input().canonical_bytes()).unwrap();
-    let completed = context["completed"].as_array().unwrap();
+    let completed = context["context"]["completed"].as_array().unwrap();
     assert_eq!(completed.len(), 2);
     assert_eq!(completed[0]["source"]["source_id"], "funded");
     assert_eq!(completed[0]["raw_units"], "1");
@@ -1298,7 +1328,7 @@ async fn enrichment_publish_rejects_incomplete_forged_and_lost_ack() {
 // succeeds; malformed stored identities fail during inspection.
 #[tokio::test]
 async fn shipping_metadata_constructor_cases_reach_native_materialization_after_schema_admission() {
-    type BalanceInput = mfm_evm::EvmBalanceContext<mfm_portfolio::PortfolioContinuation>;
+    type BalanceInput = mfm_chain::balance::BalanceContext<mfm_portfolio::PortfolioContinuation>;
     let backend = Arc::new(FaultStore::new());
     let provider = provider(1);
     *provider.mode.lock().unwrap() = ProviderMode::Blocked;
@@ -1364,8 +1394,8 @@ async fn shipping_metadata_constructor_cases_reach_native_materialization_after_
             assert!(serde_json::from_slice::<BalanceInput>(object.canonical_bytes()).is_err());
             let native = object.decode::<BalanceInput>().err().unwrap();
             let projected = native.details().as_value().clone();
-            assert_eq!(native.code(), "constructor_error");
-            assert_eq!(projected["metadata"]["location"], "metadata.correlation");
+            assert_eq!(native.code(), "json_error");
+            assert!(projected.to_string().contains("public text"), "{projected}");
             Some(projected)
         };
         let mut current = commit.clone();

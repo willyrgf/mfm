@@ -38,6 +38,7 @@ nix develop -c cargo test -p mfm-program -p mfm-journal --all-targets
 nix develop -c cargo test -p mfm-store --all-targets
 nix develop -c cargo test -p mfm-storage-postgres --lib
 nix develop -c cargo test -p mfm-runtime --all-targets
+nix develop -c cargo test -p mfm-chain --all-targets
 nix develop -c cargo test -p mfm-evm -p mfm-portfolio -p mfm-evm-live --all-targets
 nix develop -c cargo test -p mfm-app --all-targets
 nix develop -c cargo test -p mfm --all-targets
@@ -90,7 +91,7 @@ after they are staged in Git.
 | `nix run .#model-check` | Admit the compiled model without project tasks. |
 | `nix run .#run -- --task postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
 | `nix run .#run -- --task client-e2e` | Generate and interrupt an exact historical REST run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it against Reth, validate and reload its exact snapshot through the CLI, then reimport the same revision and require an independent CLI-generated run to produce the same semantic result. Also preserve one supplied operational provider error through cold REST and CLI observations, and run candidate enrichment through REST, delete its config, publish via REST, repeat publication through CLI, execute the dependent snapshot and recover its exact start after deleting the published revision. |
-| `nix run .#run -- --task effect-e2e` | Generate and fund an ephemeral keystore wallet, lose the first committed reservation acknowledgement before broadcast, cold-recover deployment and configuration through two expanded four-State transaction sequences, retain both complete transaction histories and anchored evidence in a typed report, decode the getter as 42, prove pending nonce `0 -> 2`, send an external wallet transfer and run a fresh transaction to prove `2 -> 4`, and prove a fresh cold read/resume changes neither the terminal head/value nor the nonce. Exercise actual authority SQL failure, internal retained-epoch rejection without append, and closed-owner signing failure through Live/Runtime and cold App observation. |
+| `nix run .#run -- --task effect-e2e` | Run maintained scalar recipes and lifecycle tests with pinned solc, then the PostgreSQL/keystore lifecycle on ten-second interval-mining Reth. Lose the first reservation acknowledgement, cancel after actual broadcast and cold-recover exact retained commands without re-signing. Check lifecycle 42, an existing-address call after external nonce advance, and composed lifecycle 84 (`0 -> 2 -> 3 -> 4 -> 6`). Assert real absent receipts, known transactions and five unique native submissions. Preserve SQL causes, local epoch rejection without append, closed-signer custody and exact terminal cold replay. |
 | `nix run .#run -- --task capacity-app` | Run the EVM, Portfolio and App test suites. |
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |

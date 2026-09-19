@@ -24,3 +24,9 @@ validation delegates to the corresponding checked identity type.
 
 The only derives are `MfmValue` and `PersistedSchema`. The reserved `Never` root-schema descriptor is
 the one narrow empty-enum exception; no JSON value can inhabit it.
+
+`Unsigned256` owns canonical unsigned decimal construction, the full 256-bit range, and checked
+addition. Its serde decoder shares construction checks. `checked_add` returns `None` only for
+arithmetic overflow; constructor failures distinguish noncanonical text from out-of-range integers
+without retaining rejected text. Native domains can reuse its mechanics while retaining their own
+nominal schema identities.

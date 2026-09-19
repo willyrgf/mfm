@@ -9,30 +9,27 @@ pub enum Execution {
     Pure {},
     /// Duplicate-safe observation with one fused conclusion.
     Read {
-        /// Exact capability implementation contract.
-        capability_contract_ref: ContentRef,
-        /// Exact prepared intent schema.
-        intent_contract_ref: ContentRef,
-        /// Exact accepted evidence schema.
-        evidence_contract_ref: ContentRef,
-        /// Exact operational error schema.
-        error_contract_ref: ContentRef,
+        /// Exact semantic and native implementation/value contracts.
+        abi: NativeAbi,
         /// Pre-bound observational route.
         binding_ref: ContentRef,
     },
     /// Retained command authority followed by settlement.
     Effect {
-        /// Exact capability implementation contract.
-        capability_contract_ref: ContentRef,
-        /// Exact prepared command schema.
-        command_contract_ref: ContentRef,
-        /// Exact accepted evidence schema.
-        evidence_contract_ref: ContentRef,
-        /// Exact operational error schema.
-        error_contract_ref: ContentRef,
+        /// Exact semantic and native implementation/value contracts.
+        abi: NativeAbi,
         /// Pre-bound mutating route.
         binding_ref: ContentRef,
     },
+}
+
+impl Execution {
+    pub(crate) fn native(&self) -> Option<&NativeAbi> {
+        match self {
+            Self::Pure {} => None,
+            Self::Read { abi, .. } | Self::Effect { abi, .. } => Some(abi),
+        }
+    }
 }
 
 /// One immutable typed State and its fully selected recovery contracts.
@@ -49,7 +46,6 @@ pub(crate) struct StateData {
     pub(crate) failure_contract_ref: ContentRef,
     pub(crate) execution: Execution,
     pub(crate) handler: HandlerBinding,
-    pub(crate) root_maps: Vec<MapBinding>,
     #[serde(deserialize_with = "decode_targets")]
     pub(crate) recovery_targets: Vec<RecoveryTarget>,
     pub(crate) allowances: RecoveryAllowances,
@@ -79,10 +75,6 @@ impl StateDeclaration {
     pub const fn handler(&self) -> &HandlerBinding {
         &self.0.handler
     }
-    /// Explicit ordered mapping path from original failure to root failure.
-    pub fn root_maps(&self) -> &[MapBinding] {
-        &self.0.root_maps
-    }
     /// Lowered permitted targets, in author-selected order.
     pub fn recovery_targets(&self) -> &[RecoveryTarget] {
         &self.0.recovery_targets
@@ -95,68 +87,62 @@ impl StateDeclaration {
 
 /// Immutable content-addressed ordered State sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Program {
+pub(crate) struct ProgramDocument {
     entry_point_id: EntryPointId,
     admitted_context_contract_ref: ContentRef,
     initial_value_ref: ContentRef,
     root_success_contract_ref: ContentRef,
-    root_failure_contract_ref: ContentRef,
     declarations: Vec<StateDeclaration>,
+    pub(crate) bindings: Vec<mfm_values::Object>,
     limits: ProgramLimits,
     canonical_bytes: PlainCanonicalJsonBytes,
     content_ref: ContentRef,
 }
-impl Program {
+impl ProgramDocument {
     pub(crate) fn new(
         entry_point_id: EntryPointId,
         admitted: ContentRef,
         initial_value_ref: ContentRef,
         success: ContentRef,
-        failure: ContentRef,
         declarations: Vec<StateData>,
         limits: ProgramLimits,
+        bindings: Vec<mfm_values::Object>,
     ) -> Result<Self> {
-        validate(&admitted, &success, &failure, &declarations)?;
+        validate(&admitted, &success, &declarations)?;
+        validate_bindings(&declarations, &bindings)?;
         if initial_value_ref.schema_id() != admitted.schema_id() {
             return Err(ProgramError::InvalidContract);
         }
         let wire = ProgramWire {
-            domain: "mfm.program.v8".into(),
+            domain: "mfm.program.v9".into(),
             entry_point_id: entry_point_id.clone(),
             admitted_context_contract_ref: admitted.clone(),
             initial_value_ref: initial_value_ref.clone(),
             root_success_contract_ref: success.clone(),
-            root_failure_contract_ref: failure.clone(),
             limits,
             declarations: &declarations,
+            bindings: &bindings,
         };
-        let json = serde_json::to_string(&wire).map_err(|_| ProgramError::Canonical)?;
-        let canonical_bytes =
-            PlainCanonicalJsonBytes::from_json_str(&json).map_err(|_| ProgramError::Canonical)?;
-        if canonical_bytes.as_bytes().len() > MAX_RUN_OBJECT_CANONICAL_BYTES {
-            return Err(ProgramError::Capacity);
-        }
+        let canonical_bytes = wire.canonical(MAX_RUN_OBJECT_CANONICAL_BYTES)?;
         let schema = SchemaIdentity::new(
             SchemaKind::PersistedContract,
             None,
             "mfm-program-document",
-            SchemaVersion::new("8").map_err(|_| ProgramError::InvalidContract)?,
+            SchemaVersion::new("9")?,
             SchemaShape::CanonicalJsonTerminal {
                 profile: CanonicalJsonProfile::GeneralFloatFree,
             },
         )
-        .and_then(|identity| identity.schema_id())
-        .map_err(|_| ProgramError::InvalidContract)?;
-        let content_ref = ContentRef::new(schema, raw_content_digest(canonical_bytes.as_bytes()))
-            .map_err(|_| ProgramError::InvalidContract)?;
+        .and_then(|identity| identity.schema_id())?;
+        let content_ref = ContentRef::new(schema, raw_content_digest(canonical_bytes.as_bytes()))?;
         Ok(Self {
             entry_point_id,
             admitted_context_contract_ref: admitted,
             initial_value_ref,
             root_success_contract_ref: success,
-            root_failure_contract_ref: failure,
             declarations: declarations.into_iter().map(StateDeclaration).collect(),
             limits,
+            bindings,
             canonical_bytes,
             content_ref,
         })
@@ -167,15 +153,16 @@ impl Program {
     }
 
     /// Decodes the sole current canonical Program format and checks every structural contract.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() > MAX_RUN_OBJECT_CANONICAL_BYTES {
-            return Err(ProgramError::Capacity);
-        }
-        PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
-            .map_err(|_| ProgramError::Canonical)?;
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
+        mfm_values::SizeLimitExceeded::check(
+            bytes.len() as u64,
+            MAX_RUN_OBJECT_CANONICAL_BYTES as u64,
+        )
+        .map_err(mfm_values::ValueError::SizeLimit)?;
+        PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)?;
         let wire: ProgramWire =
-            serde_json::from_slice(bytes).map_err(|_| ProgramError::Canonical)?;
-        if wire.domain != "mfm.program.v8" {
+            serde_json::from_slice(bytes).map_err(mfm_canonical::JsonError::new)?;
+        if wire.domain != "mfm.program.v9" {
             return Err(ProgramError::Canonical);
         }
         let program = Self::new(
@@ -183,9 +170,9 @@ impl Program {
             wire.admitted_context_contract_ref,
             wire.initial_value_ref,
             wire.root_success_contract_ref,
-            wire.root_failure_contract_ref,
             wire.declarations,
             wire.limits,
+            wire.bindings,
         )?;
         if program.canonical_bytes() != bytes {
             return Err(ProgramError::Canonical);
@@ -203,10 +190,6 @@ impl Program {
     /// Terminal success contract.
     pub const fn root_success_contract_ref(&self) -> &ContentRef {
         &self.root_success_contract_ref
-    }
-    /// Terminal domain failure contract.
-    pub const fn root_failure_contract_ref(&self) -> &ContentRef {
-        &self.root_failure_contract_ref
     }
     /// Ordered State declarations; normal success advances by one.
     pub fn declarations(&self) -> &[StateDeclaration] {
@@ -226,12 +209,7 @@ impl Program {
     }
 }
 
-fn validate(
-    admitted: &ContentRef,
-    success: &ContentRef,
-    failure: &ContentRef,
-    states: &[StateData],
-) -> Result<()> {
+fn validate(admitted: &ContentRef, success: &ContentRef, states: &[StateData]) -> Result<()> {
     if states.len() > MAX_STATES {
         return Err(ProgramError::Capacity);
     }
@@ -240,7 +218,7 @@ fn validate(
         return Err(ProgramError::InvalidContract);
     }
     if states.is_empty() {
-        return if admitted == success && failure == &never {
+        return if admitted == success {
             Ok(())
         } else {
             Err(ProgramError::InvalidContract)
@@ -252,19 +230,6 @@ fn validate(
             || state.output_contract_ref == never
             || !state.handler.params().matches(state.handler.abi().params())
         {
-            return Err(ProgramError::InvalidContract);
-        }
-        if state.root_maps.len() > 64 {
-            return Err(ProgramError::Capacity);
-        }
-        let mut root = &state.failure_contract_ref;
-        for map in &state.root_maps {
-            if map.abi().input() != root || !map.params().matches(map.abi().params()) {
-                return Err(ProgramError::InvalidContract);
-            }
-            root = map.abi().output();
-        }
-        if root != failure {
             return Err(ProgramError::InvalidContract);
         }
         let mut targets = std::collections::BTreeSet::new();
@@ -283,16 +248,26 @@ fn validate(
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProgramWire<D = Vec<StateData>> {
+struct ProgramWire<D = Vec<StateData>, B = Vec<mfm_values::Object>> {
     domain: String,
     entry_point_id: EntryPointId,
     admitted_context_contract_ref: ContentRef,
     initial_value_ref: ContentRef,
     root_success_contract_ref: ContentRef,
-    root_failure_contract_ref: ContentRef,
     declarations: D,
+    bindings: B,
     limits: ProgramLimits,
 }
+impl<D: Serialize, B: Serialize> ProgramWire<D, B> {
+    fn canonical(&self, limit: usize) -> Result<PlainCanonicalJsonBytes> {
+        let json = mfm_canonical::to_json_bounded(self, limit)?;
+        let canonical = PlainCanonicalJsonBytes::from_json_str(&json)?;
+        mfm_values::SizeLimitExceeded::check(canonical.as_bytes().len() as u64, limit as u64)
+            .map_err(mfm_values::ValueError::SizeLimit)?;
+        Ok(canonical)
+    }
+}
+
 fn decode_targets<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Vec<RecoveryTarget>, D::Error> {
@@ -303,3 +278,153 @@ fn decode_targets<'de, D: serde::Deserializer<'de>>(
             .collect()
     })
 }
+
+fn validate_bindings(states: &[StateData], bindings: &[mfm_values::Object]) -> Result<()> {
+    if bindings
+        .windows(2)
+        .any(|pair| pair[0].value_ref() >= pair[1].value_ref())
+    {
+        return Err(ProgramError::InvalidContract);
+    }
+    let selected: std::collections::BTreeSet<_> = states
+        .iter()
+        .filter_map(|state| match &state.execution {
+            Execution::Pure {} => None,
+            Execution::Read { binding_ref, .. } | Execution::Effect { binding_ref, .. } => {
+                Some(binding_ref)
+            }
+        })
+        .collect();
+    if selected.len() != bindings.len()
+        || bindings
+            .iter()
+            .any(|binding| !selected.contains(binding.value_ref()))
+    {
+        return Err(ProgramError::InvalidContract);
+    }
+    Ok(())
+}
+
+/// Complete immutable document and its already-bound executable realization.
+#[derive(Clone)]
+pub struct Program {
+    inner: std::sync::Arc<ProgramInner>,
+}
+struct ProgramInner {
+    document: ProgramDocument,
+    executables: Box<[crate::executable::ExecutableState]>,
+    contracts: std::collections::BTreeMap<ContentRef, SchemaDescriptor>,
+}
+impl Program {
+    pub(crate) fn freeze(
+        document: ProgramDocument,
+        executables: Vec<crate::executable::ExecutableState>,
+        mut contracts: std::collections::BTreeMap<ContentRef, SchemaDescriptor>,
+    ) -> Result<Self> {
+        if document.declarations.len() != executables.len() {
+            return Err(ProgramError::InvalidContract);
+        }
+        let required: std::collections::BTreeSet<_> = [
+            document.admitted_context_contract_ref(),
+            document.root_success_contract_ref(),
+        ]
+        .into_iter()
+        .chain(document.declarations().iter().flat_map(|state| {
+            [
+                state.input_contract_ref(),
+                state.output_contract_ref(),
+                state.failure_contract_ref(),
+                state.handler().abi().params(),
+            ]
+        }))
+        .chain(document.declarations().iter().flat_map(|state| {
+            state
+                .execution()
+                .native()
+                .into_iter()
+                .flat_map(NativeAbi::contracts)
+        }))
+        .collect();
+        if required
+            .iter()
+            .any(|reference| !contracts.contains_key(*reference))
+        {
+            return Err(ProgramError::InvalidContract);
+        }
+        contracts.retain(|reference, _| required.contains(reference));
+        Ok(Self {
+            inner: std::sync::Arc::new(ProgramInner {
+                document,
+                executables: executables.into_boxed_slice(),
+                contracts,
+            }),
+        })
+    }
+    /// Exact admitted input commitment.
+    pub fn initial_value_ref(&self) -> &ContentRef {
+        self.inner.document.initial_value_ref()
+    }
+    /// Entry-point identity.
+    pub fn entry_point_id(&self) -> &EntryPointId {
+        self.inner.document.entry_point_id()
+    }
+    /// Exact root input contract.
+    pub fn admitted_context_contract_ref(&self) -> &ContentRef {
+        self.inner.document.admitted_context_contract_ref()
+    }
+    /// Exact terminal success contract.
+    pub fn root_success_contract_ref(&self) -> &ContentRef {
+        self.inner.document.root_success_contract_ref()
+    }
+    /// Expanded ordered declarations.
+    pub fn declarations(&self) -> &[StateDeclaration] {
+        self.inner.document.declarations()
+    }
+    /// Program-wide recovery allowance.
+    pub fn limits(&self) -> ProgramLimits {
+        self.inner.document.limits()
+    }
+    /// Complete canonical document, excluding executable handles.
+    pub fn canonical_bytes(&self) -> &[u8] {
+        self.inner.document.canonical_bytes()
+    }
+    /// Document identity, independent of executable pointer identity.
+    pub fn content_ref(&self) -> &ContentRef {
+        self.inner.document.content_ref()
+    }
+    /// Canonical public binding Objects in deterministic reference order.
+    pub fn bindings(&self) -> &[mfm_values::Object] {
+        &self.inner.document.bindings
+    }
+    /// Kernel-only checked access to the corresponding executable occurrence.
+    #[doc(hidden)]
+    pub fn executable(
+        &self,
+        position: mfm_ids::StatePosition,
+    ) -> Option<&crate::executable::ExecutableState> {
+        self.inner.executables.get(position.index())
+    }
+    /// Kernel-only admission against an exact contract derived during construction.
+    #[doc(hidden)]
+    pub fn admit(
+        &self,
+        value: &mfm_values::Object,
+        expected: &ContentRef,
+    ) -> std::result::Result<(), mfm_values::InvocationDiagnostic> {
+        let descriptor = self.inner.contracts.get(expected).ok_or_else(|| {
+            mfm_values::InvocationDiagnostic::from_fields(
+                "program_contract",
+                "admit",
+                expected,
+                None,
+            )
+        })?;
+        value
+            .admit(descriptor)
+            .map_err(|cause| cause.into_diagnostic("admit"))
+    }
+}
+
+#[cfg(test)]
+#[path = "program/tests.rs"]
+mod tests;

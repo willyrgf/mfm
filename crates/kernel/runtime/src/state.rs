@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests;
 
-use crate::assembly::ExecutableProgram;
 use crate::{Result, RuntimeError};
 use mfm_ids::{ContentRef, EffectId, ExecutionPosition, RunId, StatePosition, VisitId};
+use mfm_program::Program;
 use mfm_program::{
     Classification, Execution, RecoveryDenial, RecoveryLimit, RecoveryRequest, RecoveryUsage,
     StopReason,
@@ -12,8 +12,15 @@ use mfm_values::Object;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum RecordDomain {
+    #[serde(rename = "mfm.runtime-record.v1")]
+    Current,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RunRecord {
+    pub(crate) domain: RecordDomain,
     pub(crate) program_ref: ContentRef,
     pub(crate) operation: RecordedOperation,
     pub(crate) checkpoints: Vec<Checkpoint>,
@@ -140,8 +147,6 @@ pub enum RecoveryOutcome {
     Stop {
         /// Exact reason the request did not authorize another action.
         reason: StopReason,
-        /// Mapped domain root; absent for operational failures.
-        root: Option<Object>,
     },
 }
 
@@ -211,13 +216,10 @@ impl Failure {
     }
 }
 impl RunRecord {
-    pub(crate) fn initial(
-        executable: &ExecutableProgram,
-        program: Object,
-        initial: Object,
-    ) -> Result<Self> {
+    pub(crate) fn initial(executable: &Program, program: Object, initial: Object) -> Result<Self> {
         let mut record = Self {
-            program_ref: executable.program.content_ref().clone(),
+            domain: RecordDomain::Current,
+            program_ref: executable.content_ref().clone(),
             operation: RecordedOperation::Admitted { program, initial },
             checkpoints: Vec::new(),
             usage: vec![
@@ -225,19 +227,23 @@ impl RunRecord {
                     retries: 0,
                     restarts: 0
                 };
-                executable.declarations.len()
+                executable.declarations().len()
             ],
             effect_barrier: None,
         };
         record.enter(executable)?;
         Ok(record)
     }
-    pub(crate) fn enter(&mut self, executable: &ExecutableProgram) -> Result<()> {
+    pub(crate) fn enter(&mut self, executable: &Program) -> Result<()> {
         if let Continuation::Runnable {
             position, input, ..
         } = self.continuation(executable)?
         {
-            if executable.declarations[position.state.index()].is_checkpoint {
+            if executable
+                .executable(position.state)
+                .ok_or_else(|| invalid(StateInvariant::Position))?
+                .is_checkpoint()
+            {
                 let checkpoint = Checkpoint {
                     position: position.state,
                     input: input.clone(),
@@ -273,12 +279,11 @@ impl RunRecord {
     }
     pub(crate) fn eligible(
         &self,
-        executable: &ExecutableProgram,
+        executable: &Program,
         from: StatePosition,
         target: StatePosition,
     ) -> bool {
         executable
-            .program
             .declarations()
             .get(from.index())
             .is_some_and(|declaration| {
@@ -293,21 +298,21 @@ impl RunRecord {
                 .any(|checkpoint| checkpoint.position == target)
             && target <= from
             && self.effect_barrier.is_none_or(|barrier| target > barrier)
-            && executable.program.declarations()[target.index()..=from.index()]
+            && executable.declarations()[target.index()..=from.index()]
                 .iter()
                 .any(|declaration| matches!(declaration.execution(), Execution::Read { .. }))
     }
     pub(crate) fn authorize(
         &self,
-        executable: &ExecutableProgram,
+        executable: &Program,
         failure: &Failure,
         request: RecoveryRequest,
     ) -> Result<RecoveryOutcome> {
         use mfm_program::ExecutionPhase;
         let position = failure.call().position.state;
         let used = self.usage(position)?;
-        let allowance = executable.program.declarations()[position.index()].allowances();
-        let stop = |reason| Ok(RecoveryOutcome::Stop { reason, root: None });
+        let allowance = executable.declarations()[position.index()].allowances();
+        let stop = |reason| Ok(RecoveryOutcome::Stop { reason });
         match request {
             RecoveryRequest::Stop => return stop(StopReason::Requested),
             RecoveryRequest::RetryState => match failure.phase() {
@@ -344,7 +349,7 @@ impl RunRecord {
             RecoveryRequest::Restart(_) if used.state_restarts >= allowance.restarts() => {
                 stop(StopReason::Exhausted(RecoveryLimit::StateRestart))
             }
-            _ if used.run_decisions >= executable.program.limits().max_recovery_decisions() => {
+            _ if used.run_decisions >= executable.limits().max_recovery_decisions() => {
                 stop(StopReason::Exhausted(RecoveryLimit::Run))
             }
             RecoveryRequest::RetryState => Ok(RecoveryOutcome::Retry),
@@ -362,22 +367,22 @@ impl RunRecord {
         &self,
         run_id: &RunId,
         sequence: u64,
-        executable: &ExecutableProgram,
+        executable: &Program,
         loaded: bool,
     ) -> Result<()> {
-        if &self.program_ref != executable.program.content_ref() {
+        if &self.program_ref != executable.content_ref() {
             return Err(invalid(StateInvariant::Identity {
                 field: "program_ref",
-                expected: Box::new(executable.program.content_ref().clone()),
+                expected: Box::new(executable.content_ref().clone()),
                 actual: Box::new(self.program_ref.clone()),
             }));
         }
         let state = self;
-        if state.usage.len() != executable.declarations.len() {
+        if state.usage.len() != executable.declarations().len() {
             return Err(invalid(StateInvariant::Usage));
         }
         let mut total = 0u32;
-        for (used, declaration) in state.usage.iter().zip(executable.program.declarations()) {
+        for (used, declaration) in state.usage.iter().zip(executable.declarations()) {
             if used.retries > declaration.allowances().retries()
                 || used.restarts > declaration.allowances().restarts()
             {
@@ -388,7 +393,7 @@ impl RunRecord {
                 .and_then(|sum| sum.checked_add(used.restarts))
                 .ok_or_else(|| invalid(StateInvariant::Usage))?;
         }
-        if total > executable.program.limits().max_recovery_decisions() {
+        if total > executable.limits().max_recovery_decisions() {
             return Err(invalid(StateInvariant::Usage));
         }
         let check = |object: &Object, expected: &ContentRef| -> Result<()> {
@@ -400,18 +405,14 @@ impl RunRecord {
                 }));
             }
             if loaded {
-                executable
-                    ._assembly
-                    .values
-                    .get(expected)
-                    .ok_or_else(|| invalid(StateInvariant::Contract))?
-                    .admit(object)?;
+                executable.admit(object, expected).map_err(|cause| {
+                    RuntimeError::at(crate::Operation::Restore, crate::Stage::Decode, cause)
+                })?;
             }
             Ok(())
         };
         let call = |call: &Call| -> Result<()> {
             let declaration = executable
-                .program
                 .declarations()
                 .get(call.position.state.index())
                 .ok_or_else(|| invalid(StateInvariant::Position))?;
@@ -419,14 +420,12 @@ impl RunRecord {
         };
         let effect = |effect: &EffectCall| -> Result<()> {
             call(&effect.call)?;
-            let Execution::Effect {
-                command_contract_ref,
-                ..
-            } = executable.program.declarations()[effect.call.position.state.index()].execution()
+            let Execution::Effect { abi, .. } =
+                executable.declarations()[effect.call.position.state.index()].execution()
             else {
                 return Err(invalid(StateInvariant::Mode));
             };
-            check(&effect.command, command_contract_ref)?;
+            check(&effect.command, abi.request())?;
             let expected = crate::engine::derive_effect_id(
                 run_id,
                 &self.program_ref,
@@ -442,34 +441,26 @@ impl RunRecord {
         };
         let settlement = |settlement: &Settlement| -> Result<()> {
             effect(&settlement.effect)?;
-            let Execution::Effect {
-                evidence_contract_ref,
-                ..
-            } = executable.program.declarations()[settlement.effect.call.position.state.index()]
-                .execution()
-            else {
+            let Execution::Effect { abi, .. } = executable.declarations()
+                [settlement.effect.call.position.state.index()]
+            .execution() else {
                 return Err(invalid(StateInvariant::Mode));
             };
-            check(&settlement.evidence, evidence_contract_ref)
+            check(&settlement.evidence, abi.native_evidence())
         };
         let state_call = |value: &StateCall| -> Result<()> {
             call(value.call())?;
-            let declaration =
-                &executable.program.declarations()[value.call().position.state.index()];
+            let declaration = &executable.declarations()[value.call().position.state.index()];
             match (value, declaration.execution()) {
                 (StateCall::Pure(_), Execution::Pure { .. }) => Ok(()),
                 (
                     StateCall::Read {
                         intent, evidence, ..
                     },
-                    Execution::Read {
-                        intent_contract_ref,
-                        evidence_contract_ref,
-                        ..
-                    },
+                    Execution::Read { abi, .. },
                 ) => {
-                    check(intent, intent_contract_ref)?;
-                    check(evidence, evidence_contract_ref)
+                    check(intent, abi.request())?;
+                    check(evidence, abi.native_evidence())
                 }
                 (StateCall::Effect(value), Execution::Effect { .. }) => settlement(value),
                 _ => Err(invalid(StateInvariant::Mode)),
@@ -481,7 +472,7 @@ impl RunRecord {
                     state_call(call)?;
                     check(
                         original,
-                        executable.program.declarations()[call.call().position.state.index()]
+                        executable.declarations()[call.call().position.state.index()]
                             .failure_contract_ref(),
                     )
                 }
@@ -491,30 +482,25 @@ impl RunRecord {
                     original,
                 } => {
                     call(value)?;
-                    let Execution::Read {
-                        intent_contract_ref,
-                        error_contract_ref,
-                        ..
-                    } = executable.program.declarations()[value.position.state.index()].execution()
+                    let Execution::Read { abi, .. } =
+                        executable.declarations()[value.position.state.index()].execution()
                     else {
                         return Err(invalid(StateInvariant::Mode));
                     };
-                    check(intent, intent_contract_ref)?;
-                    check(original, error_contract_ref)
+                    check(intent, abi.request())?;
+                    check(original, abi.operational_error())
                 }
                 Failure::PendingEffect {
                     effect: value,
                     original,
                 } => {
                     effect(value)?;
-                    let Execution::Effect {
-                        error_contract_ref, ..
-                    } = executable.program.declarations()[value.call.position.state.index()]
-                        .execution()
+                    let Execution::Effect { abi, .. } =
+                        executable.declarations()[value.call.position.state.index()].execution()
                     else {
                         return Err(invalid(StateInvariant::Mode));
                     };
-                    check(original, error_contract_ref)
+                    check(original, abi.operational_error())
                 }
             }
         };
@@ -524,8 +510,8 @@ impl RunRecord {
         match &self.operation {
             RecordedOperation::Admitted { program, initial } => {
                 if program.value_ref() != &self.program_ref
-                    || program.canonical_bytes() != executable.program.canonical_bytes()
-                    || initial.value_ref() != executable.program.initial_value_ref()
+                    || program.canonical_bytes() != executable.canonical_bytes()
+                    || initial.value_ref() != executable.initial_value_ref()
                     || self
                         .usage
                         .iter()
@@ -534,13 +520,13 @@ impl RunRecord {
                 {
                     return Err(invalid(StateInvariant::Facts));
                 }
-                check(initial, executable.program.admitted_context_contract_ref())?;
+                check(initial, executable.admitted_context_contract_ref())?;
             }
             RecordedOperation::Succeeded { call, output } => {
                 state_call(call)?;
                 check(
                     output,
-                    executable.program.declarations()[call.call().position.state.index()]
+                    executable.declarations()[call.call().position.state.index()]
                         .output_contract_ref(),
                 )?;
             }
@@ -583,17 +569,10 @@ impl RunRecord {
                             return Err(invalid(StateInvariant::Facts));
                         }
                     }
-                    RecoveryOutcome::Stop { reason, root } => {
+                    RecoveryOutcome::Stop { reason } => {
                         if !matches!(self.authorize(executable, value, *request)?, RecoveryOutcome::Stop { reason: expected, .. } if expected == *reason)
                         {
                             return Err(invalid(StateInvariant::Facts));
-                        }
-                        match (value, root) {
-                            (Failure::Domain { .. }, Some(root)) => {
-                                check(root, executable.program.root_failure_contract_ref())?
-                            }
-                            (Failure::Read { .. } | Failure::PendingEffect { .. }, None) => {}
-                            _ => return Err(invalid(StateInvariant::Facts)),
                         }
                     }
                 }
@@ -606,14 +585,13 @@ impl RunRecord {
         } = &continuation
         {
             let declaration = executable
-                .program
                 .declarations()
                 .get(position.state.index())
                 .ok_or_else(|| invalid(StateInvariant::Position))?;
             check(input, declaration.input_contract_ref())?;
         }
         if let Continuation::Succeeded { output, .. } = &continuation {
-            check(output, executable.program.root_success_contract_ref())?;
+            check(output, executable.root_success_contract_ref())?;
         }
         if self
             .checkpoints
@@ -624,25 +602,23 @@ impl RunRecord {
         }
         for checkpoint in &self.checkpoints {
             let declaration = executable
-                .declarations
-                .get(checkpoint.position.index())
+                .executable(checkpoint.position)
                 .ok_or_else(|| invalid(StateInvariant::Checkpoint))?;
-            if !declaration.is_checkpoint
+            if !declaration.is_checkpoint()
                 || active.is_none_or(|(position, _)| checkpoint.position > position.state)
             {
                 return Err(invalid(StateInvariant::Checkpoint));
             }
             check(
                 &checkpoint.input,
-                executable.program.declarations()[checkpoint.position.index()].input_contract_ref(),
+                executable.declarations()[checkpoint.position.index()].input_contract_ref(),
             )?;
         }
         if let Some((position, input)) = active {
             let declaration = executable
-                .declarations
-                .get(position.state.index())
+                .executable(position.state)
                 .ok_or_else(|| invalid(StateInvariant::Position))?;
-            if declaration.is_checkpoint
+            if declaration.is_checkpoint()
                 && !self.checkpoints.iter().any(|checkpoint| {
                     checkpoint.position == position.state && &checkpoint.input == input
                 })
@@ -653,7 +629,6 @@ impl RunRecord {
         if let Some(barrier) = self.effect_barrier {
             if !matches!(
                 executable
-                    .program
                     .declarations()
                     .get(barrier.index())
                     .map(|declaration| declaration.execution()),
@@ -745,19 +720,7 @@ impl RunRecord {
             RecordedOperation::Admitted { program, initial } => object(program) + object(initial),
             RecordedOperation::Succeeded { call, output } => state_call(call) + object(output),
             RecordedOperation::Failed(value) => failure(value),
-            RecordedOperation::Recovered {
-                failure: value,
-                outcome,
-                ..
-            } => {
-                failure(value)
-                    + match outcome {
-                        RecoveryOutcome::Stop {
-                            root: Some(root), ..
-                        } => object(root),
-                        _ => 0,
-                    }
-            }
+            RecordedOperation::Recovered { failure: value, .. } => failure(value),
             RecordedOperation::EffectPrepared(value) => effect(value),
             RecordedOperation::EffectSettled(value) => settlement(value),
         };
@@ -788,7 +751,6 @@ pub(crate) enum Continuation<'a> {
     Failed {
         failure: &'a Failure,
         reason: StopReason,
-        root: Option<&'a Object>,
     },
 }
 impl Continuation<'_> {
@@ -806,7 +768,7 @@ impl Continuation<'_> {
     }
 }
 impl RunRecord {
-    pub(crate) fn continuation(&self, executable: &ExecutableProgram) -> Result<Continuation<'_>> {
+    pub(crate) fn continuation(&self, executable: &Program) -> Result<Continuation<'_>> {
         let position_error = |source| {
             RuntimeError::native(
                 crate::Operation::Restore,
@@ -826,7 +788,7 @@ impl RunRecord {
         let next_visit =
             |position: ExecutionPosition| position.visit.checked_next().map_err(position_error);
         Ok(match &self.operation {
-            RecordedOperation::Admitted { initial, .. } if executable.declarations.is_empty() => {
+            RecordedOperation::Admitted { initial, .. } if executable.declarations().is_empty() => {
                 Continuation::Succeeded {
                     output: initial,
                     completed: None,
@@ -840,7 +802,7 @@ impl RunRecord {
             ),
             RecordedOperation::Succeeded { call, output } => {
                 let position = call.call().position;
-                if position.state.index() + 1 == executable.declarations.len() {
+                if position.state.index() + 1 == executable.declarations().len() {
                     Continuation::Succeeded {
                         output,
                         completed: Some(call.call()),
@@ -894,10 +856,9 @@ impl RunRecord {
                             },
                         )
                     }
-                    (_, RecoveryOutcome::Stop { reason, root }) => Continuation::Failed {
+                    (_, RecoveryOutcome::Stop { reason }) => Continuation::Failed {
                         failure,
                         reason: *reason,
-                        root: root.as_ref(),
                     },
                 }
             }

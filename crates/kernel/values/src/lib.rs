@@ -35,15 +35,15 @@ pub use mfm_canonical::limits::{
     MAX_ARRAY_ITEMS, MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES, MAX_OBJECT_ENTRIES, MAX_STRING_UTF8_BYTES,
 };
 
+mod unsigned256;
+pub use unsigned256::{Unsigned256, Unsigned256Error};
+
 mod diagnostic;
 mod size;
 pub use diagnostic::{DiagnosticEvidence, InvocationDiagnostic};
 pub use size::{SizeResource, SizeViolation};
 mod object;
 pub use object::Object;
-
-mod context;
-pub use self::context::ContextSlot;
 
 mod persisted;
 pub use self::persisted::{
@@ -976,6 +976,24 @@ impl SchemaShape {
             FieldDescriptor::required(
                 "schema_id",
                 Self::identity_string(StringGrammar::SchemaId, 512),
+            ),
+        ])
+    }
+
+    /// Describes the structural wire of a nested retained [`Object`].
+    ///
+    /// The payload may contain trusted dependency diagnostics, so this shape does not rescan it
+    /// for secret markers. It certifies neither secret absence nor native protocol semantics.
+    /// Schema admission checks structure only; typed decoding through `Object::Deserialize`
+    /// additionally verifies the nested canonical bytes, content digest and object bound.
+    pub fn object() -> Result<Self> {
+        Self::named_struct(vec![
+            FieldDescriptor::required("value_ref", Self::content_ref()?),
+            FieldDescriptor::required(
+                "canonical",
+                Self::CanonicalJsonTerminal {
+                    profile: CanonicalJsonProfile::DiagnosticFloatFree,
+                },
             ),
         ])
     }

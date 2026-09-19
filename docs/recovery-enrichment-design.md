@@ -12,7 +12,7 @@ collection so publication never needs an empty-collection contract. Preserve can
 source IDs, account and chain identity, quotes and route bindings.
 
 The Portfolio enrichment entry point uses the `ResolvePortfolioAssets` Pure State and the common
-initialize/enter/`CollectEvmBalances`/resume authoring prefix, selecting the final State
+initialize/enter/shared Chain collection/resume authoring prefix, selecting the final State
 according to the entry point. It reuses anchored provider Reads and the aggregate 64-source
 bound. Provider or integrity failures fail the enrichment run instead of silently excluding assets.
 Dependent execution continues to read token decimals through the ordinary anchored contract.
@@ -28,8 +28,9 @@ assets. The output contains no self-referential RunId/head/output linkage.
 `Application::publish_enrichment(destination_name, enrichment_run_id)` reads the run, requires
 successful completion with the exact output schema, validates resolved values and pre-bound routes,
 and constructs a canonical snapshot config with provenance: enrichment RunId, terminal head and
-exact output reference. Convert route references through the immutable composition's public
-binding inventory; reject missing/inconsistent bindings and never resolve arbitrary new endpoints.
+exact output reference. The native client reconstructs native configuration from retained public route descriptors,
+qualifying their expected references without live handles or source configuration. Reject inconsistent
+route and semantic collection facts.
 Use the existing opaque `ConfigRepository::import_config` and its Created/Unchanged result.
 Publication accepts no replacement discovery request or resolved values. Repetition, including
 a lost acknowledgement, reads the same output and imports the same revision without discovery IO.

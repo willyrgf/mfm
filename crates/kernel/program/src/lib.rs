@@ -1,15 +1,14 @@
 #![warn(missing_docs)]
 //! Typed deterministic authoring and checked immutable linear Program contracts.
 //!
-//! A Program is the sole persisted control document. Runtime associates its
-//! immutable declarations with typed implementations. Authoring callbacks and
-//! capability injection are erased before construction; this crate performs no IO.
-//! Operation implementations compose children only through `OperationExpansion`, and capability
-//! policies use typed `OperationExpansion` scopes for their before and after sequences. Direct trait callback calls bypass
-//! kernel callback accounting and are forbidden in reviewed production code; checked Program
-//! construction, not this trusted-code rule, remains the persisted definition boundary.
+//! A Program owns its checked control document, exact value contracts and mandatory executable
+//! occurrences. Typed source traversal performs deterministic construction without IO; cold loading
+//! discovers installed source types without fresh planning. Runtime invokes the already-bound
+//! callbacks and retains all continuation, acknowledgement and recovery authority.
+//!
+//! See the [capability authoring guide](https://github.com/willyrgf/mfm/blob/main/docs/capability-authoring.md)
+//! for consumer, State and native implementation responsibilities.
 
-#[cfg(test)]
 extern crate self as mfm_program;
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
@@ -24,19 +23,30 @@ use mfm_values::{
 };
 use serde::{Deserialize, Serialize};
 
-mod authoring;
+/// Internal execution boundary for the kernel; not an authoring or registration API.
+#[doc(hidden)]
+pub mod callback;
+
+mod construction;
+mod native;
+mod native_abi;
+pub use native::*;
+pub use native_abi::{effect_implementation_ref, read_implementation_ref, NativeAbi};
+#[doc(hidden)]
+pub mod executable;
 mod recovery;
+mod typed_source;
+pub use construction::{compile, components, load, Component, ComponentKind, ProgramEnvironment};
 pub use recovery::{
-    Checkpoint, Classification, ClassifyError, ExecutionPhase, FromNever, Handler, HandlerAbi,
-    HandlerBinding, Identity, MapAbi, MapBinding, NoParams, Occurrence, PolicyParams,
-    ProgramLimits, RecoveryAllowances, RecoveryContext, RecoveryDenial, RecoveryLimit,
-    RecoveryRequest, RecoveryTarget, RecoveryUsage, StandardRecovery, Stop, StopReason, ValueMap,
+    Classification, ClassifyError, ExecutionPhase, Handler, HandlerAbi, HandlerBinding, NoParams,
+    PolicyParams, ProgramLimits, RecoveryAllowances, RecoveryContext, RecoveryDenial,
+    RecoveryLimit, RecoveryRequest, RecoveryTarget, RecoveryUsage, StandardRecovery, Stop,
+    StopReason,
 };
+pub use typed_source::*;
 
 #[cfg(test)]
 mod tests;
-
-pub use authoring::{expand_program, CapabilityInjection, Operation, OperationExpansion};
 
 const MAX_STATES: usize = 65_535;
 
@@ -44,9 +54,30 @@ const MAX_STATES: usize = 65_535;
 pub type Result<T> = std::result::Result<T, ProgramError>;
 
 /// Redaction-safe Program failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, thiserror::Error)]
+#[derive(Debug, Serialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgramError {
+    /// Reviewed immutable construction or binding cause at its originating operation.
+    #[error("program construction failed")]
+    Diagnostic(mfm_values::InvocationDiagnostic),
+    /// A checked implementation identity failed, retaining its grammar and rejection reason.
+    #[error("program implementation identity is invalid")]
+    Identity(#[from] mfm_ids::CheckedStringError),
+    /// Exact value construction or schema derivation cause.
+    #[error("program value construction failed")]
+    Value(#[from] mfm_values::ValueError),
+    /// Exact content/schema identity construction cause.
+    #[error("program schema identity failed")]
+    SchemaIdentity(#[from] mfm_ids::IdentityError),
+    /// Exact capability identity cause.
+    #[error("program capability identity failed")]
+    Capability(#[from] mfm_capabilities::CapabilityError),
+    /// Canonical encoder or grammar cause.
+    #[error("program canonical encoding failed")]
+    Encoding(#[from] mfm_canonical::CanonicalError),
+    /// Stored Program decoding category, location and rejection reason.
+    #[error("program JSON decoding failed")]
+    Json(#[from] mfm_canonical::JsonError),
     /// Canonical bytes were malformed, noncanonical, or used an unknown wire.
     #[error("program canonical bytes are invalid")]
     Canonical,
@@ -69,6 +100,11 @@ pub trait State: Send + Sync + 'static {
 
     /// Returns the stable implementation identity.
     fn state_id() -> Result<StableId>;
+
+    /// Non-semantic description for installed-code inspection.
+    fn description() -> &'static str {
+        ""
+    }
 }
 
 /// The only proposed typed State outcomes.
@@ -191,31 +227,26 @@ impl MfmValue for Never {
 
 /// Derives the retained v1 implementation reference for a State.
 pub fn state_implementation_ref<S: State>() -> Result<ContentRef> {
-    implementation_ref(
-        "mfm.state-implementation",
-        S::state_id().map_err(|_| ProgramError::InvalidContract)?,
-    )
+    implementation_ref("mfm.state-implementation", S::state_id()?)
 }
 
-/// Derives the exact Read capability identity, including its operational-error contract.
+/// Derives the exact Read capability identity, including its semantic request and evidence contracts.
 pub fn capability_contract_ref<C: ReadCapabilityContract>() -> Result<ContentRef> {
     capability_ref(
         "read",
-        C::contract_id().map_err(|_| ProgramError::InvalidContract)?,
+        C::contract_id()?,
         nominal_contract_ref::<C::Intent>()?,
         nominal_contract_ref::<C::Evidence>()?,
-        nominal_contract_ref::<C::OperationalError>()?,
     )
 }
 
-/// Derives the exact Effect capability identity, including its operational-error contract.
+/// Derives the exact Effect capability identity, including its semantic request and evidence contracts.
 pub fn effect_capability_contract_ref<C: EffectCapabilityContract>() -> Result<ContentRef> {
     capability_ref(
         "effect",
-        C::contract_id().map_err(|_| ProgramError::InvalidContract)?,
+        C::contract_id()?,
         nominal_contract_ref::<C::Command>()?,
         nominal_contract_ref::<C::Evidence>()?,
-        nominal_contract_ref::<C::OperationalError>()?,
     )
 }
 
@@ -224,7 +255,6 @@ fn capability_ref(
     implementation: StableId,
     request: ContentRef,
     evidence: ContentRef,
-    operational_error: ContentRef,
 ) -> Result<ContentRef> {
     #[derive(Serialize)]
     struct Contract<'a> {
@@ -233,28 +263,26 @@ fn capability_ref(
         implementation: StableId,
         request: ContentRef,
         evidence: ContentRef,
-        operational_error: ContentRef,
     }
     let json = serde_json::to_string(&Contract {
-        domain: "mfm.capability-contract.v2",
+        domain: "mfm.capability-contract.v3",
         mode,
         implementation,
         request,
         evidence,
-        operational_error,
     })
-    .map_err(|_| ProgramError::Canonical)?;
-    let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
-        .map_err(|_| ProgramError::Canonical)?;
+    .map_err(mfm_canonical::JsonError::new)?;
+    let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)?;
     let schema = SchemaId::new(
         "mfm.capability-contract",
-        "2",
+        "3",
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([0; 32]),
-    )
-    .map_err(|_| ProgramError::InvalidContract)?;
-    ContentRef::new(schema, raw_content_digest(canonical.as_bytes()))
-        .map_err(|_| ProgramError::InvalidContract)
+    )?;
+    Ok(ContentRef::new(
+        schema,
+        raw_content_digest(canonical.as_bytes()),
+    )?)
 }
 
 fn implementation_ref(schema_name: &str, id: StableId) -> Result<ContentRef> {
@@ -263,10 +291,11 @@ fn implementation_ref(schema_name: &str, id: StableId) -> Result<ContentRef> {
         "1",
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([0; 32]),
-    )
-    .map_err(|_| ProgramError::InvalidContract)?;
-    ContentRef::new(schema, raw_content_digest(id.as_str().as_bytes()))
-        .map_err(|_| ProgramError::InvalidContract)
+    )?;
+    Ok(ContentRef::new(
+        schema,
+        raw_content_digest(id.as_str().as_bytes()),
+    )?)
 }
 
 /// Derives the nominal contract reference for a typed value.
@@ -275,17 +304,13 @@ pub fn nominal_contract_ref<T: MfmValue>() -> Result<ContentRef> {
 }
 
 pub(crate) fn derive_nominal_contract<T: MfmValue>() -> Result<(ContentRef, SchemaDescriptor)> {
-    let descriptor = T::schema_descriptor().map_err(|_| ProgramError::InvalidContract)?;
-    let schema = descriptor
-        .identity()
-        .schema_id()
-        .map_err(|_| ProgramError::InvalidContract)?;
-    let semantic = T::semantic_id().map_err(|_| ProgramError::InvalidContract)?;
+    let descriptor = T::schema_descriptor()?;
+    let schema = descriptor.identity().schema_id()?;
+    let semantic = T::semantic_id()?;
     if descriptor.identity().semantic_type_id.as_ref() != Some(&semantic) {
         return Err(ProgramError::InvalidContract);
     }
-    let contract_ref = ContentRef::new(schema, raw_content_digest(b"mfm.contract.v1"))
-        .map_err(|_| ProgramError::InvalidContract)?;
+    let contract_ref = ContentRef::new(schema, raw_content_digest(b"mfm.contract.v1"))?;
     Ok((contract_ref, descriptor))
 }
 

@@ -1,0 +1,21 @@
+error[E0271]: type mismatch resolving `<Operation<(Pure<Validate>, Pure<Finish>)> as AuthoringSource>::Input == Deployed`
+  --> tests/ui/source_nested.rs:10:13
+   |
+10 |       accepts(&Operation::new((
+   |  _____-------_^
+   | |     |
+   | |     required by a bound introduced by this call
+11 | |         Effect::<Deploy, Transaction>::default(),
+12 | |         Operation::new((Pure::<Validate>::default(), Pure::<Finish>::default())),
+13 | |     )));
+   | |______^ expected `Deployed`, found `Observed`
+   |
+   = note: required for `(mfm_program::Effect<contracts::Deploy, contracts::Transaction>, mfm_program::Operation<(mfm_program::Pure<contracts::Validate>, mfm_program::Pure<contracts::Finish>)>)` to implement `mfm_program::AuthoringSource`
+   = note: required for `(mfm_program::Effect<contracts::Deploy, contracts::Transaction>, mfm_program::Operation<(mfm_program::Pure<contracts::Validate>, mfm_program::Pure<contracts::Finish>)>)` to implement `OperationDefinition`
+   = note: 1 redundant requirement hidden
+   = note: required for `mfm_program::Operation<(mfm_program::Effect<contracts::Deploy, contracts::Transaction>, mfm_program::Operation<(mfm_program::Pure<contracts::Validate>, mfm_program::Pure<contracts::Finish>)>)>` to implement `mfm_program::AuthoringSource`
+note: required by a bound in `accepts`
+  --> tests/ui/source_nested.rs:7:15
+   |
+ 7 | fn accepts<S: AuthoringSource>(_: &S) {}
+   |               ^^^^^^^^^^^^^^^ required by this bound in `accepts`

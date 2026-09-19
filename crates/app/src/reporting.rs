@@ -81,6 +81,11 @@ pub(super) fn run_fields<S: SerializeMap>(
         state.serialize_entry("recovery", recovery)?;
     }
     let invocation = match error {
+        RunRequestError::Construction { run_id, cause } => {
+            state.serialize_entry("run_id", run_id)?;
+            state.serialize_entry("diagnostic", cause)?;
+            return Ok(());
+        }
         RunRequestError::Request(_) => return Ok(()),
         RunRequestError::Invocation(invocation)
         | RunRequestError::AppendIndeterminate { invocation, .. } => invocation,

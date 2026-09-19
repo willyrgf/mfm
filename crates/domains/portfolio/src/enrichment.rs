@@ -1,7 +1,188 @@
-//! Explicit candidate selection and immutable admission provenance.
-
+//! Semantic candidate selection and immutable admission provenance.
 use super::*;
+use mfm_chain::ObservationPoint;
 use mfm_ids::{ConfigName, ContentDigest, DigestAlgorithm, DigestBytes, RunId};
+use mfm_values::InvocationDiagnostic;
+
+fn validate_candidates(
+    input: &PortfolioSnapshotInput,
+    required: &[String],
+) -> Result<(), PortfolioError> {
+    if duplicate_text(required.iter().map(String::as_str))
+        || required.iter().any(|id| {
+            !input.collections.iter().any(|demand| {
+                demand
+                    .request
+                    .sources()
+                    .iter()
+                    .any(|source| source.source_id() == id)
+            })
+        })
+        || input.collections.iter().any(|demand| {
+            !demand
+                .request
+                .sources()
+                .iter()
+                .any(|source| required.iter().any(|id| id == source.source_id()))
+        })
+    {
+        return Err(PortfolioError::InvalidValue);
+    }
+    Ok(())
+}
+
+/// Candidate progress and caller-required source identities, without native asset interpretation.
+#[derive(Debug, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "enrichment-continuation",
+    version = "2",
+    schema = "mfm.portfolio-enrichment-continuation"
+)]
+pub struct EnrichmentContinuation {
+    progress: PortfolioContinuation,
+    required_sources: Vec<String>,
+}
+impl_checked_deserialize!(EnrichmentContinuation { progress: PortfolioContinuation, required_sources: Vec<String> });
+impl EnrichmentContinuation {
+    /// Projects an exact collection failure only after checking its retained enrichment context.
+    pub fn project_collection_failure(
+        context: &BalanceContext<Self>,
+        code: BalanceFailureCode,
+    ) -> Result<PortfolioSnapshotFailure, InvocationDiagnostic> {
+        context
+            .caller()
+            .validate()
+            .map_err(|cause| cause.into_diagnostic("project_enrichment_failure"))?;
+        collection::project_failure(context, &context.caller().progress, code)
+    }
+    fn new(
+        progress: PortfolioContinuation,
+        required_sources: Vec<String>,
+    ) -> Result<Self, PortfolioError> {
+        let value = Self {
+            progress,
+            required_sources,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+    fn validate(&self) -> Result<(), PortfolioError> {
+        self.progress.validate()?;
+        validate_candidates(&self.progress.input, &self.required_sources)
+    }
+}
+
+/// Checked candidate discovery demand and native-client-selected required sources.
+#[derive(Debug, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "enrichment-input",
+    version = "2",
+    schema = "mfm.portfolio-enrichment-input"
+)]
+pub struct PortfolioEnrichmentInput {
+    pub(super) input: PortfolioSnapshotInput,
+    required_sources: Vec<String>,
+}
+impl_checked_deserialize!(PortfolioEnrichmentInput { input: PortfolioSnapshotInput, required_sources: Vec<String> });
+impl PortfolioEnrichmentInput {
+    /// Checks required-source membership, uniqueness and coverage for every collection.
+    pub fn new(
+        input: PortfolioSnapshotInput,
+        required_sources: Vec<String>,
+    ) -> Result<Self, PortfolioError> {
+        let value = Self {
+            input,
+            required_sources,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+    pub(super) fn validate(&self) -> Result<(), PortfolioError> {
+        self.input.validate()?;
+        validate_candidates(&self.input, &self.required_sources)
+    }
+    /// Exact admitted source revision and enrichment linkage, when supplied.
+    pub fn admission(&self) -> Option<&PortfolioAdmission> {
+        self.input.admission()
+    }
+    /// Checked semantic collection admission.
+    pub fn snapshot_input(&self) -> &PortfolioSnapshotInput {
+        &self.input
+    }
+}
+
+/// Initializes checked candidate collection progress.
+pub struct InitializeEnrichment;
+/// Enters a shared collection with an enrichment continuation.
+pub struct EnterEnrichmentCollection;
+/// Resumes enrichment after confirmation of every source.
+pub struct ResumeEnrichmentCollection;
+impl_portfolio_state!(
+    InitializeEnrichment,
+    PortfolioEnrichmentInput,
+    EnrichmentContinuation,
+    "mfm.portfolio.state.initialize-enrichment@1",
+    "Initializes checked enrichment progress."
+);
+impl_portfolio_state!(
+    EnterEnrichmentCollection,
+    EnrichmentContinuation,
+    BalanceContext<EnrichmentContinuation>,
+    "mfm.portfolio.state.enter-enrichment-collection@1",
+    "Enters the next enrichment collection."
+);
+impl_portfolio_state!(
+    ResumeEnrichmentCollection,
+    BalanceCollectionCompletion<EnrichmentContinuation>,
+    EnrichmentContinuation,
+    "mfm.portfolio.state.resume-enrichment-collection@1",
+    "Resumes enrichment after confirmed collection."
+);
+impl PureState for InitializeEnrichment {
+    fn evaluate(
+        input: Self::Input,
+    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::InvocationDiagnostic>
+    {
+        PortfolioContinuation::new(input.input, vec![])
+            .and_then(|progress| EnrichmentContinuation::new(progress, input.required_sources))
+            .map(portfolio_success)
+            .map_err(|source| source.into_diagnostic("initialize_enrichment"))
+    }
+}
+impl PureState for EnterEnrichmentCollection {
+    fn evaluate(
+        input: Self::Input,
+    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::InvocationDiagnostic>
+    {
+        let (request, metadata) = collection::enter(&input.progress)?;
+        Ok(portfolio_success(BalanceContext::new(
+            request, input, metadata,
+        )))
+    }
+}
+impl PureState for ResumeEnrichmentCollection {
+    fn evaluate(
+        input: Self::Input,
+    ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::InvocationDiagnostic>
+    {
+        let (context, total_scaled) = input.into_parts();
+        let (request, continuation, metadata, confirmed) = context.into_parts();
+        let progress = collection::resume(
+            continuation.progress,
+            request,
+            metadata,
+            confirmed,
+            total_scaled,
+        )?;
+        EnrichmentContinuation::new(progress, continuation.required_sources)
+            .map(portfolio_success)
+            .map_err(|source| source.into_diagnostic("resume_enrichment_collection"))
+    }
+}
 
 /// Entry point for resolving a caller-supplied candidate asset list.
 pub const PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID: &str = "mfm.portfolio/enrich@1";
@@ -95,18 +276,33 @@ impl PortfolioAdmission {
     }
 }
 
-/// One resolved collection's exact public binding and observed anchor.
+/// Filtered semantic demand and its confirmed common observation point.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
-struct EnrichmentCollection {
-    config: PortfolioCollectionConfig,
-    route_ref: ContentRef,
-    anchor: PortfolioAnchor,
+pub struct EnrichmentCollection {
+    demand: PortfolioCollectionDemand,
+    observed_at: ObservationPoint,
+}
+impl EnrichmentCollection {
+    /// Retained source-aligned demand for configuration-free native publication.
+    pub fn demand(&self) -> &PortfolioCollectionDemand {
+        &self.demand
+    }
+    /// Confirmed point at which candidate inclusion was determined.
+    pub fn observed_at(&self) -> &ObservationPoint {
+        &self.observed_at
+    }
 }
 
-/// Checked candidate selection; each resolved collection retains its exact binding and anchor.
+/// Checked selected sources retaining public execution descriptors for cold publication.
 #[derive(Debug, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "enrichment-output",
+    version = "2",
+    schema = "mfm.portfolio-enrichment-output"
+)]
 pub struct PortfolioEnrichmentOutput {
     portfolio_id: PortfolioId,
     quotes: Vec<QuoteCode>,
@@ -114,152 +310,112 @@ pub struct PortfolioEnrichmentOutput {
     collections: Vec<EnrichmentCollection>,
 }
 impl_checked_deserialize!(PortfolioEnrichmentOutput {
-    portfolio_id: PortfolioId,
-    quotes: Vec<QuoteCode>,
-    quote: QuoteCode,
-    collections: Vec<EnrichmentCollection>,
+    portfolio_id: PortfolioId, quotes: Vec<QuoteCode>, quote: QuoteCode, collections: Vec<EnrichmentCollection>,
 });
 impl PortfolioEnrichmentOutput {
     fn validate(&self) -> Result<(), PortfolioError> {
-        validate_config_parts(
+        validate_demand_parts(
             &self.portfolio_id,
+            &self.quote,
             &self.quotes,
-            self.collections.iter().map(|collection| &collection.config),
+            self.collections.iter().map(|collection| &collection.demand),
         )?;
-        if !self.quotes.contains(&self.quote)
-            || self.collections.iter().any(|collection| {
-                collection.anchor.validate().is_err()
-                    || !collection
-                        .config
-                        .request
-                        .sources()
-                        .iter()
-                        .any(|source| source.token().is_none())
-            })
-        {
-            return Err(PortfolioError::InvalidValue);
+        if self.collections.iter().any(|collection| {
+            collection
+                .demand
+                .request
+                .sources()
+                .iter()
+                .any(|source| source.target().ledger() != collection.observed_at.ledger())
+        }) {
+            return Err(PortfolioError::InvalidContinuation);
         }
         Ok(())
     }
-
-    /// Moves the selected collections into a snapshot configuration and matching selector.
-    pub fn into_snapshot_config(self) -> (PortfolioConfig, PortfolioSnapshotSelector) {
-        let selector = PortfolioSnapshotSelector {
-            target: self.portfolio_id.clone(),
-            quote: self.quote,
-        };
-        let config = PortfolioConfig {
-            portfolio_id: self.portfolio_id,
-            quotes: self.quotes,
-            collections: self
-                .collections
-                .into_iter()
-                .map(|collection| collection.config)
-                .collect(),
-        };
-        (config, selector)
+    /// Portfolio identity selected by admission.
+    pub fn portfolio_id(&self) -> &PortfolioId {
+        &self.portfolio_id
     }
-
-    /// Returns declaration-ordered chain and binding references for publication verification.
-    pub fn bindings(&self) -> impl Iterator<Item = (NonZeroU64, &ContentRef)> {
-        self.collections.iter().flat_map(|collection| {
-            // The checked request is nonempty and all its sources have the same chain.
-            collection
-                .config
-                .request
-                .sources()
-                .first()
-                .map(|source| (source.chain_id(), &collection.route_ref))
-        })
+    /// Admitted supported quote currencies.
+    pub fn quotes(&self) -> &[QuoteCode] {
+        &self.quotes
+    }
+    /// Selected quote currency.
+    pub fn quote(&self) -> &QuoteCode {
+        &self.quote
+    }
+    /// Filtered source/descriptor pairs and their observation points.
+    pub fn collections(&self) -> &[EnrichmentCollection] {
+        &self.collections
     }
 }
 
-/// Retains native sources and tokens with nonzero balance at the verified collection anchor.
+/// Retains required sources and nonzero observed balances without interpreting native asset tags.
 pub struct ResolvePortfolioAssets;
 impl_portfolio_state!(
     ResolvePortfolioAssets,
-    PortfolioContinuation,
+    EnrichmentContinuation,
     PortfolioEnrichmentOutput,
     "mfm.portfolio.state.resolve-assets@1",
-    "Resolves configured asset candidates at verified anchors."
+    "Retains required and nonzero confirmed candidate sources."
 );
 impl PureState for ResolvePortfolioAssets {
     fn evaluate(
-        input: PortfolioContinuation,
+        input: Self::Input,
     ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::InvocationDiagnostic>
     {
         let resolve = || -> Result<PortfolioEnrichmentOutput, PortfolioError> {
             input.validate()?;
-            if input.completed_collections.len() != input.input.collections.len() {
+            if input.progress.next_collection_ordinal().is_some() {
                 return Err(PortfolioError::InvalidContinuation);
             }
-            let mut collections = Vec::with_capacity(input.input.collections.len());
+            let mut collections = Vec::with_capacity(input.progress.completed_collections.len());
             for (demand, result) in input
+                .progress
                 .input
                 .collections
                 .iter()
-                .zip(&input.completed_collections)
+                .zip(&input.progress.completed_collections)
             {
-                let sources = demand
-                    .request
-                    .sources()
-                    .iter()
-                    .zip(&result.holdings)
-                    .filter(|(source, holding)| {
-                        source.token().is_none() || holding.raw_units != "0"
-                    })
-                    .map(|(source, _)| source.clone())
-                    .collect();
+                let first = result
+                    .balances
+                    .first()
+                    .ok_or(PortfolioError::InvalidContinuation)?;
+                let mut sources = Vec::new();
+                let mut executions = Vec::new();
+                for (balance, execution) in result.balances.iter().zip(&demand.executions) {
+                    if input
+                        .required_sources
+                        .iter()
+                        .any(|id| id == balance.source().source_id())
+                        || balance.raw_units().as_str() != "0"
+                    {
+                        sources.push(balance.source().clone());
+                        executions.push(execution.clone());
+                    }
+                }
                 collections.push(EnrichmentCollection {
-                    config: PortfolioCollectionConfig {
-                        correlation: demand.correlation.clone(),
-                        request: EvmBalanceRequest::new(sources, demand.request.decimals())
-                            .map_err(|_| PortfolioError::InvalidValue)?,
-                    },
-                    route_ref: demand.route_ref.clone(),
-                    anchor: result.anchor.clone(),
+                    demand: PortfolioCollectionDemand::new(
+                        demand.correlation.clone(),
+                        BalanceRequest::new(sources, demand.request.decimals())?,
+                        executions,
+                    )?,
+                    observed_at: first.observed_at().clone(),
                 });
             }
             let output = PortfolioEnrichmentOutput {
-                portfolio_id: input.input.portfolio_id,
-                quotes: input.input.quotes,
-                quote: input.input.quote,
+                portfolio_id: input.progress.input.portfolio_id,
+                quotes: input.progress.input.quotes,
+                quote: input.progress.input.quote,
                 collections,
             };
             output.validate()?;
             Ok(output)
         };
-        Ok(match resolve() {
-            Ok(output) => portfolio_success(output),
-            Err(_) => portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed),
-        })
+        resolve()
+            .map(portfolio_success)
+            .map_err(|source| source.into_diagnostic("resolve_portfolio_assets"))
     }
-}
-
-/// Plans bounded anchored candidate discovery without implicit publication or dependent admission.
-pub fn plan_enrichment(
-    selector: PortfolioSnapshotSelector,
-    config: &PortfolioConfig,
-    targets: &[EvmPhysicalTarget],
-    admission: Option<PortfolioAdmission>,
-) -> Result<(Program, PortfolioSnapshotInput), PortfolioError> {
-    if config.collections.iter().any(|collection| {
-        !collection
-            .request
-            .sources()
-            .iter()
-            .any(|source| source.token().is_none())
-    }) {
-        return Err(PortfolioError::InvalidValue);
-    }
-    plan::<ResolvePortfolioAssets>(
-        selector,
-        config,
-        targets,
-        admission,
-        EntryPointId::new(PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID)
-            .map_err(|_| PortfolioError::Program)?,
-    )
 }
 
 #[cfg(test)]

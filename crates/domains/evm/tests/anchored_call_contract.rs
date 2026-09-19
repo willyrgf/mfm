@@ -1,21 +1,12 @@
 use std::num::NonZeroU64;
 
-use mfm_capabilities::ReadCapabilityContract;
 use mfm_evm::{
     AnchoredContractCallEvidence, AnchoredContractCallFailureReason, AnchoredContractCallIntent,
-    AnchoredContractCallResult, AnchoredObservationFacts, Called, CheckedCallPlan,
-    CheckedObservationPlan, CompletedTransactionFacts, EvmAddress, EvmAnchoredContractCallRead,
-    EvmAuthorityEpoch, EvmBlockAnchor, EvmChainInstance, EvmHash, EvmTransactionBinding,
-    EvmTransactionReceipt, EvmTransactionRoute, EvmTransactionSettlement, EvmU256,
-    ExecutedTransactionFacts, NonceDomain, ObserveAt, PreparedEvmTransactionEvidence,
-    PreparedTransactionFacts, ReadAnchoredContractCall, Reservation, ReservedEvmTransaction,
-    EVM_ANCHORED_CONTRACT_CALL_CAPABILITY_ID, MAX_EVM_CALL_RETURN_BYTES,
+    AnchoredContractCallResult, EvmAddress, EvmBlockAnchor, EvmChainInstance, EvmHash,
+    EvmTransactionRoute, EvmU256, MAX_EVM_CALLDATA_BYTES, MAX_EVM_CALL_RETURN_BYTES,
 };
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, EffectId, SchemaId};
-use mfm_program::{CapabilityInjection, ProposedStateOutcome, ReadState};
-use mfm_program_derive::{MfmContext, MfmValue};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_values::{canonicalize_mfm_value, MfmValue as MfmValueTrait};
-use serde::{Deserialize, Serialize};
 
 fn endpoint_ref() -> ContentRef {
     ContentRef::new(
@@ -49,9 +40,14 @@ fn anchor(number: u64, byte: &str) -> EvmBlockAnchor {
 }
 
 fn intent() -> AnchoredContractCallIntent {
-    CheckedObservationPlan::new(route(), vec![0xde, 0xad, 0xbe, 0xef])
-        .unwrap()
-        .intent_for(EvmAddress::from_bytes([0x33; 20]), anchor(7, "bb"))
+    AnchoredContractCallIntent::new(
+        NonZeroU64::new(1).unwrap(),
+        route().binding_ref().unwrap(),
+        anchor(7, "bb"),
+        EvmAddress::from_bytes([0x33; 20]),
+        vec![0xde, 0xad, 0xbe, 0xef],
+    )
+    .unwrap()
 }
 
 fn schema_id<T: MfmValueTrait>() -> String {
@@ -77,59 +73,6 @@ fn assert_contract<T: MfmValueTrait>(
             .as_str(),
         canonical
     );
-}
-
-// The injected observation and its intent must resolve to the same transaction route.
-#[test]
-fn anchored_intent_route_and_capability_are_exact() {
-    assert_eq!(
-        EvmAnchoredContractCallRead::contract_id().unwrap().as_str(),
-        EVM_ANCHORED_CONTRACT_CALL_CAPABILITY_ID
-    );
-    assert_eq!(intent().route_ref(), &route().binding_ref().unwrap());
-    assert_eq!(
-        <EvmAnchoredContractCallRead as CapabilityInjection<Observe>>::original_binding_ref(
-            &route()
-        )
-        .unwrap(),
-        route().binding_ref().unwrap()
-    );
-}
-
-// A response for another block or intent must not be accepted as evidence for the requested
-// anchored call.
-#[test]
-fn anchored_capability_binds_only_the_exact_result_anchor() {
-    let input = intent();
-    let (_, intent_value_ref) = canonicalize_mfm_value(&input).expect("intent ref");
-
-    let result =
-        AnchoredContractCallResult::new(anchor(7, "bb"), vec![1, 2, 3]).expect("anchored result");
-    let returned = AnchoredContractCallEvidence::returned(intent_value_ref.clone(), result.clone());
-    EvmAnchoredContractCallRead::bind_evidence(&intent_value_ref, &input, &returned)
-        .expect("bound result");
-    for terminal in [
-        AnchoredContractCallEvidence::rejected(intent_value_ref.clone()),
-        AnchoredContractCallEvidence::safe_failure(intent_value_ref.clone()),
-        AnchoredContractCallEvidence::integrity_blocked(intent_value_ref.clone()),
-    ] {
-        EvmAnchoredContractCallRead::bind_evidence(&intent_value_ref, &input, &terminal)
-            .expect("bound terminal evidence");
-    }
-    let wrong_anchor = AnchoredContractCallEvidence::returned(
-        intent_value_ref.clone(),
-        AnchoredContractCallResult::new(anchor(8, "cc"), vec![]).expect("wrong anchor"),
-    );
-    assert!(
-        EvmAnchoredContractCallRead::bind_evidence(&intent_value_ref, &input, &wrong_anchor)
-            .is_err()
-    );
-    assert!(EvmAnchoredContractCallRead::bind_evidence(
-        &route().binding_ref().expect("different value ref"),
-        &input,
-        &returned,
-    )
-    .is_err());
 }
 
 // Even unsuccessful anchored-call evidence must identify the request it answers in the persisted
@@ -161,65 +104,6 @@ fn every_anchored_terminal_evidence_wire_carries_the_exact_intent_ref() {
     }
 }
 
-// Evidence must not be reused after changing the route, block, target or calldata of a call.
-#[test]
-fn anchored_evidence_rejects_every_cross_intent_substitution() {
-    let original = intent();
-    let (_, original_ref) = canonicalize_mfm_value(&original).expect("original ref");
-    let evidence = AnchoredContractCallEvidence::returned(
-        original_ref.clone(),
-        AnchoredContractCallResult::new(original.anchor().clone(), vec![1]).expect("result"),
-    );
-    EvmAnchoredContractCallRead::bind_evidence(&original_ref, &original, &evidence)
-        .expect("original binding");
-
-    let alternatives = [
-        AnchoredContractCallIntent::new(
-            original.chain_id(),
-            endpoint_ref(),
-            original.anchor().clone(),
-            original.target().clone(),
-            original.calldata().to_vec(),
-        )
-        .expect("different route"),
-        AnchoredContractCallIntent::new(
-            original.chain_id(),
-            original.route_ref().clone(),
-            anchor(8, "cc"),
-            original.target().clone(),
-            original.calldata().to_vec(),
-        )
-        .expect("different anchor"),
-        AnchoredContractCallIntent::new(
-            original.chain_id(),
-            original.route_ref().clone(),
-            original.anchor().clone(),
-            EvmAddress::new("0x4444444444444444444444444444444444444444")
-                .expect("different target"),
-            original.calldata().to_vec(),
-        )
-        .expect("different target intent"),
-        AnchoredContractCallIntent::new(
-            original.chain_id(),
-            original.route_ref().clone(),
-            original.anchor().clone(),
-            original.target().clone(),
-            vec![0xca, 0xfe],
-        )
-        .expect("different calldata"),
-    ];
-
-    for alternative in alternatives {
-        let (_, alternative_ref) = canonicalize_mfm_value(&alternative).expect("alternative ref");
-        assert!(EvmAnchoredContractCallRead::bind_evidence(
-            &alternative_ref,
-            &alternative,
-            &evidence,
-        )
-        .is_err());
-    }
-}
-
 // Deserialization must enforce call bounds and the current closed wire format instead of
 // bypassing typed validation.
 #[test]
@@ -234,6 +118,35 @@ fn anchored_bytes_and_decode_paths_enforce_every_bound_and_closed_shape() {
     )
     .is_err());
 
+    let native = intent();
+    let maximum = AnchoredContractCallIntent::new(
+        native.chain_id(),
+        native.route_ref().clone(),
+        native.anchor().clone(),
+        native.target().clone(),
+        vec![0; MAX_EVM_CALLDATA_BYTES],
+    )
+    .unwrap();
+    let maximum_wire = serde_json::to_value(&maximum).unwrap();
+    assert_eq!(
+        serde_json::from_value::<AnchoredContractCallIntent>(maximum_wire.clone()).unwrap(),
+        maximum
+    );
+    let mut oversized = maximum_wire;
+    oversized["calldata"] = serde_json::json!(mfm_canonical::CanonicalBytes::new(vec![
+        0;
+        MAX_EVM_CALLDATA_BYTES
+            + 1
+    ]));
+    assert!(serde_json::from_value::<AnchoredContractCallIntent>(oversized).is_err());
+    assert!(AnchoredContractCallIntent::new(
+        native.chain_id(),
+        native.route_ref().clone(),
+        native.anchor().clone(),
+        native.target().clone(),
+        vec![0; MAX_EVM_CALLDATA_BYTES + 1]
+    )
+    .is_err());
     let wire = serde_json::to_value(intent()).expect("context wire");
     let mut wrong_operation = wire.clone();
     wrong_operation["operation"] = serde_json::json!("mfm.evm.read-native-balance@1");
@@ -293,157 +206,4 @@ fn anchored_value_contracts_are_exact() {
         "schema:mfm.evm-anchored-contract-call-failure-reason:1:sha256-jcs-v1:205a413c0c19108f6624dbf83e1be39d506cc5c4887d57ae3a13a97e92b38110",
         r#"{"kind":"rejected"}"#,
     );
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmContext)]
-#[context(namespace = "mfm.test.observation")]
-#[serde(deny_unknown_fields)]
-struct Workflow<T, O> {
-    transaction: T,
-    observation: O,
-    unrelated: u64,
-}
-type Initial = Workflow<CompletedTransactionFacts<Called>, CheckedObservationPlan>;
-type Observe =
-    ReadAnchoredContractCall<Initial, ObserveAt<WorkflowObservationSlot, WorkflowTransactionSlot>>;
-
-fn workflow() -> Initial {
-    let binding = EvmTransactionBinding {
-        route: route(),
-        authority_epoch: EvmAuthorityEpoch::new([1; 32]),
-        sender: EvmAddress::from_bytes([2; 20]),
-    };
-    let command = CheckedCallPlan::new(
-        binding,
-        vec![1],
-        EvmU256::from_u64(0),
-        NonZeroU64::new(1).unwrap(),
-        1_u128,
-        2_u128,
-    )
-    .unwrap()
-    .command_for(EvmAddress::from_bytes([0x33; 20]));
-    let reservation = Reservation::new(
-        EffectId::from_digest(DigestBytes::from_array([1; 32])),
-        canonicalize_mfm_value(&command).unwrap().1,
-        NonceDomain::from_binding(command.binding()),
-        0,
-    )
-    .unwrap();
-    let reserved = ReservedEvmTransaction::new(command, reservation).unwrap();
-    let prepared = PreparedTransactionFacts::new(
-        reserved,
-        PreparedEvmTransactionEvidence {
-            effect_id: EffectId::from_digest(DigestBytes::from_array([2; 32])),
-            transaction_hash: EvmHash::from_bytes([3; 32]),
-        },
-    );
-    let executed = ExecutedTransactionFacts::new(
-        prepared,
-        EvmTransactionSettlement::called(
-            EffectId::from_digest(DigestBytes::from_array([3; 32])),
-            0,
-            EvmTransactionReceipt {
-                block_anchor: anchor(7, "bb"),
-                transaction_hash: EvmHash::from_bytes([3; 32]),
-            },
-        ),
-    )
-    .unwrap();
-    Workflow {
-        transaction: CompletedTransactionFacts::new(executed).unwrap(),
-        observation: CheckedObservationPlan::new(route(), vec![0xde, 0xad, 0xbe, 0xef]).unwrap(),
-        unrelated: 4,
-    }
-}
-
-// Observation must preserve prior transaction facts and sibling context on success or failure,
-// and reject evidence that belongs to another call.
-#[test]
-fn observation_recipe_retains_success_and_each_failure_and_rejects_local_mismatches() {
-    let input = workflow();
-    assert_eq!(Observe::prepare(&input).unwrap(), intent());
-    let reference = canonicalize_mfm_value(&intent()).unwrap().1;
-    for evidence in [
-        AnchoredContractCallEvidence::returned(
-            reference.clone(),
-            AnchoredContractCallResult::new(anchor(7, "bb"), vec![1, 2, 3]).unwrap(),
-        ),
-        AnchoredContractCallEvidence::rejected(reference.clone()),
-        AnchoredContractCallEvidence::safe_failure(reference.clone()),
-        AnchoredContractCallEvidence::integrity_blocked(reference.clone()),
-    ] {
-        let expected = AnchoredObservationFacts::new(intent(), evidence.clone()).unwrap();
-        let context = match Observe::interpret(input.clone(), &evidence).unwrap() {
-            ProposedStateOutcome::Success { output } => {
-                assert!(expected.failure_reason().is_none());
-                output
-            }
-            ProposedStateOutcome::Failure { failure } => {
-                assert_eq!(Some(failure.reason()), expected.failure_reason());
-                failure.into_context()
-            }
-        };
-        assert_eq!(context.transaction, input.transaction);
-        assert_eq!(context.unrelated, 4);
-        assert_eq!(context.observation, expected);
-        let wire = serde_json::to_value(&context.observation).unwrap();
-        assert_eq!(
-            serde_json::from_value::<AnchoredObservationFacts>(wire.clone()).unwrap(),
-            expected
-        );
-        let mut hostile = wire;
-        hostile["intent"]["target"] = serde_json::json!(EvmAddress::from_bytes([8; 20]));
-        assert!(serde_json::from_value::<AnchoredObservationFacts>(hostile).is_err());
-    }
-    let wrong_ref = AnchoredContractCallEvidence::rejected(endpoint_ref());
-    assert!(Observe::interpret(input.clone(), &wrong_ref).is_err());
-    let wrong_anchor = AnchoredContractCallEvidence::returned(
-        reference,
-        AnchoredContractCallResult::new(anchor(8, "cc"), vec![]).unwrap(),
-    );
-    assert!(Observe::interpret(input.clone(), &wrong_anchor).is_err());
-    for route in [
-        EvmTransactionRoute {
-            chain_instance: route().chain_instance.clone(),
-            endpoint_ref: route().binding_ref().unwrap(),
-        },
-        EvmTransactionRoute {
-            chain_instance: EvmChainInstance {
-                chain_id: NonZeroU64::new(2).unwrap(),
-                expected_genesis_hash: EvmHash::from_bytes([0xaa; 32]),
-            },
-            endpoint_ref: endpoint_ref(),
-        },
-    ] {
-        let mut mismatch = input.clone();
-        mismatch.observation = CheckedObservationPlan::new(route, vec![]).unwrap();
-        assert!(Observe::prepare(&mismatch).is_err());
-    }
-}
-
-// Loading a call plan must preserve its bounds so selecting the target and block later cannot
-// bypass them.
-#[test]
-fn checked_observation_plan_bounds_survive_deserialization_and_late_anchor_selection() {
-    let plan = CheckedObservationPlan::new(route(), vec![0; 131_072]).unwrap();
-    let target = EvmAddress::from_bytes([1; 20]);
-    assert_eq!(
-        plan.intent_for(target.clone(), anchor(9, "dd")),
-        AnchoredContractCallIntent::new(
-            NonZeroU64::new(1).unwrap(),
-            route().binding_ref().unwrap(),
-            anchor(9, "dd"),
-            target,
-            vec![0; 131_072]
-        )
-        .unwrap()
-    );
-    assert!(CheckedObservationPlan::new(route(), vec![0; 131_073]).is_err());
-    let mut wire = serde_json::to_value(&plan).unwrap();
-    wire["calldata"] = serde_json::json!(mfm_canonical::CanonicalBytes::new(vec![0; 131_073]));
-    assert!(serde_json::from_value::<CheckedObservationPlan>(wire).is_err());
-    let mut wire = serde_json::to_value(&plan).unwrap();
-    wire["chain_id"] = serde_json::json!(0);
-    assert!(serde_json::from_value::<CheckedObservationPlan>(wire).is_err());
 }

@@ -13,15 +13,16 @@ lifecycle, a max-width fixture, or a 32 MiB payload that only proves a hardcoded
 | Stored config lifecycle | Unchanged import, absent digest, idempotent delete, admitted run after delete, one exact start | Transport e2e already uses two revisions and resumes after delete. |
 | 32 MiB object/report payloads | `to_json_bounded` and `SizeLimitExceeded::check` with small limits; Runtime size projection | Production constants stay 32 MiB. Tests do not allocate that maximum. |
 | Type-restating and parallel-model tests | Application use cases through public methods; one collection-restart policy; frozen public wires; one representative RunRecord roundtrip | Deleted Parent/Child policy scaffolding, constructor field-equals-input asserts, Program declaration-index freezes, RecoveryOutcome cartesian expansion, and same-crate SQL `contains` table-name checks. |
-| Runtime contract fixtures | One synthetic program in `crates/kernel/runtime/tests/support/program.rs`; unique Effect/Read/assembly facts stay in `runtime_contract.rs` | The scenario file no longer rebuilds the program types inline. Hostile Store helpers live with `ScriptedStore`. |
+| Runtime contract fixtures | One synthetic program in `crates/kernel/runtime/tests/support/program.rs`; unique Effect/Read/construction facts stay in `runtime_contract.rs` | The scenario file no longer rebuilds the program types inline. Hostile Store helpers live with `ScriptedStore`. |
 | App scenario setup | Distinct run IDs, native/token outcomes, later-candidate failure and exact Start/Progress recovery identity | Four repeated Application compositions and three repeated imports inside scenarios. Each test still owns its own provider, Store and repository. |
 
 ## Retained unique tests
 
 - [`pending_effect_reuses_identical_wire_and_cold_projection_needs_no_signer_call`](../crates/live/evm/src/transaction_tests.rs)
 - [`custody_acknowledgement_loss_recovers_each_stage`](../crates/live/evm/src/transaction_tests.rs)
-- [`selecting_another_same_typed_source_requires_its_own_assembly_before_io`](../crates/live/evm/tests/generic_transaction_runtime.rs)
-- [`one_transaction_state_selects_multiple_exact_generic_codecs_hot_and_cold`](../crates/live/evm/tests/generic_transaction_runtime.rs)
+- [Native request, binding and implementation qualification](../crates/domains/evm/tests/native_preparation.rs)
+- [Maintained deployment and existing-address request specializations](../crates/live/evm/tests/evm_contract_effect_e2e.rs)
+- [Exact generic codec ownership](../crates/kernel/runtime/tests/exact_contracts.rs)
 - [`snapshot_token_holdings_and_typed_read_failures`](../crates/app/tests/use_cases.rs)
 - [`enrichment_keeps_native_and_nonzero_candidates`](../crates/app/tests/use_cases.rs)
 - [`enrichment_publish_rejects_incomplete_forged_and_lost_ack`](../crates/app/tests/use_cases.rs)
@@ -48,7 +49,7 @@ replaces another only for the guarantees it actually checks.
 | Snapshot results and original/root failure mapping | [App use cases](../crates/app/tests/use_cases.rs) | Assert product output and cold public failure meaning; generic Runtime recovery does not prove domain mapping. |
 | Candidate filtering and publication eligibility | [App use cases](../crates/app/tests/use_cases.rs) | Keep zero-balance native assets, remove zero-balance tokens, and reject publication when a later candidate fails after earlier observations succeeded. |
 | Config deletion, repeat publication and dependent execution across transports | Managed [client e2e](../bin/rest-api/tests/client_execution_e2e.rs) | App scenarios own hostile provenance and lost repository acknowledgement, not another full transport lifecycle. |
-| Bounded serialization and physical append limits | [Bounded JSON](../crates/kernel/canonical/src/bounded.rs), [Journal frames](../crates/kernel/journal/tests/frame_contract.rs), [Store scenarios](../crates/kernel/store/tests/support/scenarios.rs) | [Runtime size projection](../crates/kernel/runtime/tests/current_state/sizes.rs) owns caller-visible size classification; small-limit comparison tests alone do not prove every caller's wiring. |
+| Bounded serialization and physical append limits | [Bounded JSON](../crates/kernel/canonical/src/bounded.rs), [Journal frames](../crates/kernel/journal/tests/frame_contract.rs), [Store scenarios](../crates/kernel/store/tests/support/scenarios.rs) | [Runtime size projection](../crates/kernel/runtime/tests/original_encoding.rs) owns caller-visible size classification; small-limit comparison tests alone do not prove every caller's wiring. |
 
 ## Local cost measurements
 

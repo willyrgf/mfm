@@ -47,10 +47,14 @@ enum State<'a> {
     Succeeded {
         #[serde(flatten)]
         value: Object<'a>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        product: Option<serde_json::Value>,
     },
     Failed {
         value_ref: &'a ContentRef,
         report: &'a RawValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        product_failure: Option<mfm_portfolio::PortfolioSnapshotFailure>,
     },
 }
 
@@ -236,8 +240,10 @@ impl<'a> SerializableRunView<'a> {
             },
             RunViewState::Succeeded(value) => State::Succeeded {
                 value: Object::new(value)?,
+                product: product_success(view.entry_point(), value)?,
             },
             RunViewState::Failed(report) => State::Failed {
+                product_failure: product_failure(view.entry_point(), report)?,
                 value_ref: report.value_ref(),
                 report: serde_json::from_slice(report.canonical_bytes()).map_err(|source| {
                     InvocationDiagnostic::from_fields(
@@ -326,5 +332,43 @@ fn stop_reason(reason: mfm_program::StopReason) -> &'static str {
         StopReason::Disallowed(RecoveryDenial::CheckpointUnavailable) => "checkpoint_unavailable",
         StopReason::Disallowed(RecoveryDenial::EffectBarrier) => "effect_barrier",
         StopReason::Disallowed(RecoveryDenial::EffectSettled) => "effect_settled",
+    }
+}
+
+fn product_success(
+    entry: &mfm_ids::EntryPointId,
+    value: &mfm_values::Object,
+) -> Result<Option<serde_json::Value>, InvocationDiagnostic> {
+    use mfm_evm_live::client::portfolio as native;
+    let projected = match entry.as_str() {
+        mfm_portfolio::PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID => {
+            native::render_snapshot(&value.decode::<mfm_portfolio::PortfolioSnapshotOutput>()?)
+        }
+        mfm_portfolio::PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID => {
+            native::render_enrichment(&value.decode::<mfm_portfolio::PortfolioEnrichmentOutput>()?)
+        }
+        _ => return Ok(None),
+    };
+    projected.map(Some).map_err(|cause| {
+        InvocationDiagnostic::from_fields("native_projection", "product_success", &cause, None)
+    })
+}
+fn product_failure(
+    entry: &mfm_ids::EntryPointId,
+    report: &mfm_runtime::FailureReport,
+) -> Result<Option<mfm_portfolio::PortfolioSnapshotFailure>, InvocationDiagnostic> {
+    use mfm_evm_live::client::portfolio as native;
+    let mfm_runtime::Failure::Domain { call, original } = report.failure() else {
+        return Ok(None);
+    };
+    match entry.as_str() {
+        mfm_portfolio::PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID => {
+            native::snapshot_failure(report.declaration(), call.call().input(), original).map(Some)
+        }
+        mfm_portfolio::PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID => {
+            native::enrichment_failure(report.declaration(), call.call().input(), original)
+                .map(Some)
+        }
+        _ => Ok(None),
     }
 }

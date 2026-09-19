@@ -6,7 +6,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
-    /// Admission and executable association.
+    /// Exact Program and input admission.
     Admission,
     /// Loading and validating the selected stored rows.
     Restore,
@@ -30,8 +30,6 @@ pub enum Operation {
     EffectInterpret,
     /// Classification, handler invocation and authorization.
     Recovery,
-    /// Root failure mapping.
-    RootMap,
     /// Complete commit encoding and recording.
     Record,
     /// Public observation construction.

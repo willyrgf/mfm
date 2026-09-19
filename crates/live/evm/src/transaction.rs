@@ -1,25 +1,21 @@
 //! Explicit reservation, preparation, and execution adapters for EVM transaction States.
 
-use std::sync::Arc;
-
 use crate::error::{invariant, AdapterFailure, TaskOperation};
-use mfm_capabilities::AdapterError;
-use mfm_capabilities::EffectCapabilityContract;
+use mfm_capabilities::{AdapterError, EffectAdapterOutcome};
 use mfm_evm::custody::{
     AuthorityError, EvmTransactionAuthority, ExactRawTransaction, NonceDomain, PreparedRecord,
     Reservation,
 };
 use mfm_evm::{
     Eip1559TransactionCommand, EvmAddress, EvmBlockAnchor, EvmChainInstance, EvmHash,
-    EvmTransactionBinding, EvmTransactionEffect, EvmTransactionReceipt, EvmTransactionSettlement,
+    EvmTransactionBinding, EvmTransactionReceipt, EvmTransactionSettlement,
 };
 use mfm_evm::{
     EvmOperationalError, EvmOperationalKind, EvmRpcMethod, EvmTransactionOperationalError,
     ProviderFailure, ProviderFailureKind, RpcField, RpcRejection, RpcStage,
     TransactionProviderOperation,
 };
-use mfm_ids::{ContentRef, EffectId, StableId};
-use mfm_runtime::{EffectAdapterOutcome, RuntimeAssemblyBuilder, RuntimeError};
+use mfm_ids::{ContentRef, EffectId};
 use mfm_signing::{recover_public_key, Secp256k1Signer};
 
 use crate::codec::{
@@ -113,6 +109,9 @@ pub trait EvmTransactionProvider: Send + Sync + 'static {
         transaction_hash: &'a EvmHash,
     ) -> ProviderFuture<'a, Option<ProviderReceipt>>;
 
+    /// Checks whether the exact retained transaction is already known to the endpoint.
+    fn transaction_known<'a>(&'a self, transaction_hash: &'a EvmHash) -> ProviderFuture<'a, bool>;
+
     /// Observes the current canonical identity of one exact block number.
     fn canonical_block<'a>(
         &'a self,
@@ -126,89 +125,7 @@ pub trait EvmTransactionProvider: Send + Sync + 'static {
     ) -> ProviderFuture<'a, EvmHash>;
 }
 
-use mfm_evm::{
-    EvmNonceReservationEffect, EvmTransactionPreparationEffect, PreparedEvmTransaction,
-    PreparedEvmTransactionEvidence, ReservedEvmTransaction,
-};
-
-/// Registers the three transaction adapters under one public binding.
-/// State implementations are registered separately by application composition.
-pub fn register_evm_transaction_adapters(
-    builder: &mut RuntimeAssemblyBuilder,
-    binding: EvmTransactionBinding,
-    signer: Arc<dyn Secp256k1Signer>,
-    authority: Arc<dyn EvmTransactionAuthority>,
-    provider: Arc<dyn EvmTransactionProvider>,
-) -> mfm_runtime::Result<()> {
-    let purpose = StableId::new(EVM_EIP1559_SIGNING_PURPOSE_ID)
-        .map_err(|_| RuntimeError::IncompatibleAssembly)?;
-    if (&binding.authority_epoch) != authority.authority_epoch()
-        || signer.purpose() != &purpose
-        || ethereum_address(signer.public_key()) != binding.sender
-    {
-        return Err(RuntimeError::IncompatibleAssembly);
-    }
-    let reserve_binding = binding.clone();
-    let reserve_authority = authority.clone();
-    let reserve_provider = provider.clone();
-    builder.register_effect_adapter::<EvmNonceReservationEffect, EvmTransactionBinding, _>(
-        binding.clone(),
-        move |id, reference, command| {
-            let (id, reference, command) = (id.clone(), reference.clone(), command.clone());
-            let (binding, authority, provider) = (
-                reserve_binding.clone(),
-                reserve_authority.clone(),
-                reserve_provider.clone(),
-            );
-            Box::pin(async move {
-                reserve_nonce(
-                    &binding,
-                    authority.as_ref(),
-                    provider.as_ref(),
-                    &id,
-                    &reference,
-                    &command,
-                )
-                .await
-            })
-        },
-    )?;
-    let prepare_binding = binding.clone();
-    let prepare_authority = authority.clone();
-    builder.register_effect_adapter::<EvmTransactionPreparationEffect, EvmTransactionBinding, _>(
-        binding.clone(),
-        move |id, _, command| {
-            let (id, command) = (id.clone(), command.clone());
-            let (binding, authority, signer) = (
-                prepare_binding.clone(),
-                prepare_authority.clone(),
-                signer.clone(),
-            );
-            Box::pin(async move {
-                prepare_transaction(&binding, authority.as_ref(), signer.as_ref(), &id, &command)
-                    .await
-            })
-        },
-    )?;
-    builder.register_effect_adapter::<EvmTransactionEffect, EvmTransactionBinding, _>(
-        binding.clone(),
-        move |id, _, command| {
-            let (id, command) = (id.clone(), command.clone());
-            let (binding, authority, provider) =
-                (binding.clone(), authority.clone(), provider.clone());
-            Box::pin(async move {
-                execute_transaction(
-                    &binding,
-                    authority.as_ref(),
-                    provider.as_ref(),
-                    &id,
-                    &command,
-                )
-                .await
-            })
-        },
-    )
-}
+use mfm_evm::{PreparedEvmTransaction, PreparedEvmTransactionEvidence, ReservedEvmTransaction};
 
 fn check_binding(
     binding: &EvmTransactionBinding,
@@ -229,7 +146,7 @@ fn check_binding(
     }
     Ok(())
 }
-async fn reserve_nonce(
+pub(crate) async fn reserve_nonce(
     binding: &EvmTransactionBinding,
     authority: &dyn EvmTransactionAuthority,
     provider: &dyn EvmTransactionProvider,
@@ -260,8 +177,6 @@ async fn reserve_nonce(
         reference,
         &NonceDomain::from_binding(binding),
     )?;
-    EvmNonceReservationEffect::bind_evidence(id, command, &reservation)
-        .map_err(AdapterError::Invariant)?;
     Ok(EffectAdapterOutcome::Settled(reservation))
 }
 async fn load_reserved(
@@ -304,7 +219,7 @@ async fn qualify_prepared(
     .await
     .map_err(|source| invariant(AdapterFailure::task(TaskOperation::QualifyPrepared, source)))?
 }
-async fn prepare_transaction(
+pub(crate) async fn prepare_transaction(
     binding: &EvmTransactionBinding,
     authority: &dyn EvmTransactionAuthority,
     signer: &dyn Secp256k1Signer,
@@ -390,7 +305,7 @@ async fn prepare_transaction(
         },
     ))
 }
-async fn execute_transaction(
+pub(crate) async fn execute_transaction(
     binding: &EvmTransactionBinding,
     authority: &dyn EvmTransactionAuthority,
     provider: &dyn EvmTransactionProvider,
@@ -421,34 +336,45 @@ async fn execute_transaction(
         .await
         .map_err(|error| map_provider_error(TransactionProviderOperation::Receipt, error))?
     else {
-        let submitted = provider
-            .submit_raw(prepared.raw_transaction())
+        if !provider
+            .transaction_known(command.transaction_hash())
             .await
-            .map_err(|error| map_provider_error(TransactionProviderOperation::Submit, error))?;
-        if &submitted != command.transaction_hash() {
-            return Err(AdapterError::Operational(
-                EvmTransactionOperationalError::Provider {
-                    operation: TransactionProviderOperation::Submit,
-                    cause: EvmOperationalError::new(
-                        EvmOperationalKind::Unavailable,
-                        ProviderFailure {
-                            method: EvmRpcMethod::SendRawTransaction,
-                            stage: RpcStage::Validation,
-                            failure: ProviderFailureKind::Rejected {
-                                field: RpcField::Result,
-                                cause: RpcRejection::HashMismatch {
-                                    expected: command.transaction_hash().clone(),
-                                    observed: submitted,
+            .map_err(|error| {
+                map_provider_error(TransactionProviderOperation::TransactionKnown, error)
+            })?
+        {
+            let submitted = provider
+                .submit_raw(prepared.raw_transaction())
+                .await
+                .map_err(|error| map_provider_error(TransactionProviderOperation::Submit, error))?;
+            if &submitted != command.transaction_hash() {
+                return Err(AdapterError::Operational(
+                    EvmTransactionOperationalError::Provider {
+                        operation: TransactionProviderOperation::Submit,
+                        cause: EvmOperationalError::new(
+                            EvmOperationalKind::Unavailable,
+                            ProviderFailure {
+                                method: EvmRpcMethod::SendRawTransaction,
+                                stage: RpcStage::Validation,
+                                failure: ProviderFailureKind::Rejected {
+                                    field: RpcField::Result,
+                                    cause: RpcRejection::HashMismatch {
+                                        expected: command.transaction_hash().clone(),
+                                        observed: submitted,
+                                    },
                                 },
+                                diagnostics: mfm_values::DiagnosticEvidence::from_value(
+                                    serde_json::json!({"response": null, "sources": []}),
+                                ),
                             },
-                            diagnostics: mfm_values::DiagnosticEvidence::from_value(
-                                serde_json::json!({"response": null, "sources": []}),
-                            ),
-                        },
-                    ),
-                },
-            ));
+                        ),
+                    },
+                ));
+            }
         }
+        // The retained command remains authoritative across cancellation, including cancellation
+        // after submission. The next invocation reconciles receipt and pool status again.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         return Ok(EffectAdapterOutcome::Pending);
     };
     let evidence = validate_receipt(
@@ -486,7 +412,9 @@ async fn execute_transaction(
             },
         ));
     }
-    EvmTransactionEffect::bind_evidence(id, command, &evidence).map_err(AdapterError::Invariant)?;
+    evidence
+        .qualify(id, command)
+        .map_err(AdapterError::Invariant)?;
     Ok(EffectAdapterOutcome::Settled(evidence))
 }
 fn validate_receipt(

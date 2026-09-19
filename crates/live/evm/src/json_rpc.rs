@@ -19,7 +19,7 @@ use reqwest::StatusCode;
 mod capture;
 use mfm_evm::{
     AnchoredContractCallEvidence, AnchoredContractCallIntent, AnchoredContractCallResult,
-    EvmAddress, EvmBalanceSource, EvmBlockAnchor, EvmChainInstance, EvmHash, EvmReadEvidence,
+    EvmAddress, EvmBalanceTarget, EvmBlockAnchor, EvmChainInstance, EvmHash, EvmReadEvidence,
     EvmReadIntent, EvmReadSubject, EvmReadValue, EvmTokenDecimals, EvmU256,
     MAX_EVM_CALL_RETURN_BYTES,
 };
@@ -281,7 +281,7 @@ impl JsonRpcEvmProvider {
 
     async fn token_contract_call<U>(
         &self,
-        source: &EvmBalanceSource,
+        source: &EvmBalanceTarget,
         anchor: &EvmBlockAnchor,
         data: String,
         field: RpcField,
@@ -289,7 +289,7 @@ impl JsonRpcEvmProvider {
     ) -> Result<Option<U>, AdapterError<EvmOperationalError>> {
         let token = source.token().ok_or_else(|| {
             invariant(AdapterFailure::MissingToken {
-                balance_source: source.clone(),
+                balance_target: source.clone(),
             })
         })?;
         let tag = block_tag(&anchor.number)?;
@@ -310,6 +310,7 @@ impl JsonRpcEvmProvider {
         intent_value_ref: &ContentRef,
         intent: &EvmReadIntent,
     ) -> Result<EvmReadEvidence, AdapterError<EvmOperationalError>> {
+        let target = intent.target();
         let value = match intent.subject() {
             EvmReadSubject::ChainIdentity => {
                 let chain_id = self.chain_id().await?;
@@ -318,10 +319,10 @@ impl JsonRpcEvmProvider {
             EvmReadSubject::InitialAnchor => {
                 EvmReadValue::Anchor(self.broad_anchor("latest").await?)
             }
-            EvmReadSubject::NativeBalance { source, anchor } => {
+            EvmReadSubject::NativeBalance { anchor } => {
                 let tag = block_tag(&anchor.number)?;
                 EvmReadValue::RawUnits(
-                    self.rpc::<_, String>(EvmRpcMethod::GetBalance, &(source.address(), tag))
+                    self.rpc::<_, String>(EvmRpcMethod::GetBalance, &(target.account(), tag))
                         .await?
                         .checked(RpcField::Result, |value| {
                             EvmU256::new(RpcQuantity::parse(&value)?.decimal())
@@ -329,10 +330,10 @@ impl JsonRpcEvmProvider {
                         })?,
                 )
             }
-            EvmReadSubject::TokenDecimals { source, anchor } => {
+            EvmReadSubject::TokenDecimals { anchor } => {
                 let Some(decimals) = self
                     .token_contract_call(
-                        source,
+                        target,
                         anchor,
                         decimals_calldata(),
                         RpcField::Decimals,
@@ -349,11 +350,11 @@ impl JsonRpcEvmProvider {
                 };
                 EvmReadValue::TokenDecimals(decimals)
             }
-            EvmReadSubject::TokenBalance { source, anchor } => {
-                let holder = Address::from(*source.address().as_bytes());
+            EvmReadSubject::TokenBalance { anchor } => {
+                let holder = Address::from(*target.account().as_bytes());
                 let Some(units) = self
                     .token_contract_call(
-                        source,
+                        target,
                         anchor,
                         balance_of_calldata(&holder),
                         RpcField::AbiWord,
@@ -535,6 +536,28 @@ impl EvmTransactionProvider for JsonRpcEvmProvider {
             .await?
             .checked(RpcField::ReceiptOutcome, |value| {
                 value.map(parse_receipt).transpose()
+            })
+        })
+    }
+
+    fn transaction_known<'a>(&'a self, transaction_hash: &'a EvmHash) -> ProviderFuture<'a, bool> {
+        #[derive(serde::Deserialize)]
+        struct TransactionIdentity {
+            hash: EvmHash,
+        }
+        Box::pin(async move {
+            self.rpc::<_, Option<TransactionIdentity>>(
+                EvmRpcMethod::GetTransactionByHash,
+                &(transaction_hash,),
+            )
+            .await?
+            .checked(RpcField::Result, |value| match value {
+                None => Ok(false),
+                Some(value) if &value.hash == transaction_hash => Ok(true),
+                Some(value) => Err(RpcRejection::HashMismatch {
+                    expected: transaction_hash.clone(),
+                    observed: value.hash,
+                }),
             })
         })
     }

@@ -2,7 +2,6 @@
 name = "mfm-portfolio"
 version = "0.1.0"
 edition = "2021"
-autotests = false
 description = "Secret-free sequential Portfolio contexts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
@@ -13,7 +12,7 @@ domain = "portfolio"
 domain-role = "aggregate"
 
 [dependencies]
-mfm-evm = { path = "../evm" }
+mfm-chain = { path = "../chain" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }
@@ -28,11 +27,3 @@ mfm-runtime = { path = "../../kernel/runtime" }
 mfm-store = { path = "../../kernel/store" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
-
-[[test]]
-name = "planning_contract"
-path = "tests/planning_contract.rs"
-
-[[test]]
-name = "recovery_policy"
-path = "tests/recovery_policy.rs"

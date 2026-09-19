@@ -1,6 +1,13 @@
 # mfm-program-derive
 
-Small consuming-crate derives for `MfmValue`, `PersistedSchema`, and `MfmContext`. Schema expansion
+Nested `Object` fields use Values' structural Object shape, including when fully qualified.
+The derive does not make `Object` an `MfmValue` or certify its native protocol. Typed decoding
+retains the checked Object decoder; descriptor admission alone does not prove nested digest equality.
+
+Unit structs use the existing unit schema shape and Serde's `null` representation. Their nominal
+identity remains distinct from other unit contracts and from empty named structs (`{}`).
+
+Small consuming-crate derives for `MfmValue` and `PersistedSchema`. Schema expansion
 emits checked metadata and delegates canonical qualification to `mfm-values`; it does not create
 execution or configuration APIs.
 
@@ -16,14 +23,3 @@ The derive emits only an override of the existing `decode_native(&[u8])` method.
 returns `Result<Self, mfm_values::InvocationDiagnostic>` and shares the owner's checked construction with
 ordinary deserialization, preserving typed constructor causes at Runtime entry. This attribute
 does not change schema identity and is not supported by `PersistedSchema`.
-
-`MfmContext` requires `#[context(namespace = "...")]` on a named struct. Each replaceable field
-is a distinct bare type parameter used exactly once. Bounds, defaults, where clauses, lifetime and
-const parameters, nested parameter occurrences, and opaque type macros are unsupported. It emits
-`<Struct><FieldInPascalCase>Slot` markers with the context's visibility, implementing
-`mfm_values::ContextSlot` for borrowing and replacing that field. Replacement moves all siblings
-without `Clone` and accepts every `MfmValue`. Slot identities are `<namespace>/slot/<field>` and
-remain the same across replacement types. Context namespaces are explicit caller-owned identities;
-`slot_id()` checks the resulting `StableId` grammar and length. Serde and `MfmValue` continue to
-own encoding and exact schemas. This mechanical primitive does not enforce accumulation or history
-provenance; domain stage types and checked fact constructors own those constraints.

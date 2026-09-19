@@ -1,0 +1,11 @@
+error[E0603]: module `construction` is private
+ --> tests/ui/private_draft.rs:1:18
+  |
+1 | use mfm_program::construction::Draft;
+  |                  ^^^^^^^^^^^^ private module
+  |
+note: the module `construction` is defined here
+ --> src/lib.rs
+  |
+  | mod construction;
+  | ^^^^^^^^^^^^^^^^

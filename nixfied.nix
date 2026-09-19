@@ -1,5 +1,6 @@
 {
   lib,
+  config,
   nixfiedLib,
   pkgs,
   adapters,
@@ -160,9 +161,9 @@ let
         ''}
       '' ];
     }) // { requires = [ "postgres" ]; };
-  localEvmRun = cargoArgs: ''
+  localEvmRun = rethService: cargoArgs: ''
     set -euo pipefail
-    rpc_url="http://''${host:reth}:''${port:reth}"
+    rpc_url="http://''${host:${rethService}}:''${port:${rethService}}"
     export MFM_TEST_EVM_ADAPTER_LOCATOR="$rpc_url"
     export HTTP_PROXY="http://127.0.0.1:1" HTTPS_PROXY="http://127.0.0.1:1"
     export ALL_PROXY="http://127.0.0.1:1" http_proxy="http://127.0.0.1:1"
@@ -170,8 +171,8 @@ let
     export NO_PROXY="" no_proxy=""
     ${cargoArgs}
   '';
-  localPostgresEvmRun = cargoArgs:
-    localPostgresRun (localEvmRun ''
+  localPostgresEvmRun = rethService: cargoArgs:
+    localPostgresRun (localEvmRun rethService ''
       env -u PGSERVICE -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE \
         -u PGPASSWORD -u PGPASSFILE \
         psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
@@ -188,6 +189,41 @@ in
     adapters.postgres
     adapters.reth
   ];
+
+  # Reuse the pinned adapter's probes and containment with a separate interval-mining fixture.
+  # Client acceptance retains its instant-seal chain and stable historical snapshot assumptions.
+  nixfied.closures.reth-delayed-node = {
+    package = pkgs.reth;
+    executable = "bin/reth";
+    effects = [ "process" "network-listener" "file-write" ];
+  };
+  nixfied.services.reth-delayed = {
+    endpoints = {
+      reth-delayed-http = { };
+      reth-delayed-ws = { };
+      reth-delayed-authrpc = { };
+    };
+    primaryEndpoint = "reth-delayed-http";
+    logRefs = [ "service.reth-delayed" ];
+    stateRefs = [ "slot" ];
+    containment = "process-tree";
+    lifecycle = {
+      ready = config.nixfied.services.reth.lifecycle.ready;
+      health = config.nixfied.services.reth.lifecycle.health;
+      stop = config.nixfied.services.reth.lifecycle.stop;
+      start.invocation = {
+        tools = [ "reth-delayed-node" ];
+        run = [
+          "reth" "node" "--dev" "--dev.block-time" "10s"
+          "--datadir" "\${stateDir}/reth-delayed"
+          "--ipcdisable"
+          "--http" "--http.addr" "127.0.0.1" "--http.port" "\${port:reth-delayed-http}"
+          "--ws" "--ws.addr" "127.0.0.1" "--ws.port" "\${port:reth-delayed-ws}"
+          "--authrpc.addr" "127.0.0.1" "--authrpc.port" "\${port:reth-delayed-authrpc}"
+        ];
+      };
+    };
+  };
 
   nixfied.project.projectId = "mfm";
   nixfied.project.name = "MFM";
@@ -311,7 +347,7 @@ in
         run = [
           "bash"
           "-c"
-          (localPostgresEvmRun ''
+          (localPostgresEvmRun "reth" ''
             export MFM_E2E_ADMIN_POSTGRES_LOCATOR="$MFM_TEST_ADMIN_POSTGRES_LOCATOR"
             export MFM_E2E_RUNTIME_POSTGRES_LOCATOR="$MFM_TEST_RUNTIME_POSTGRES_LOCATOR"
             export MFM_E2E_EVM_ADAPTER_LOCATOR="$MFM_TEST_EVM_ADAPTER_LOCATOR"
@@ -339,13 +375,15 @@ in
         run = [
           "bash"
           "-c"
-          (localPostgresEvmRun ''
+          (localPostgresEvmRun "reth-delayed" ''
             fixture_dir="$(mktemp -d)"
             trap 'rm -rf "$fixture_dir"' EXIT
             solc --bin --overwrite --evm-version cancun \
               --output-dir "$fixture_dir" \
               crates/live/evm/tests/fixtures/MfmEffectFixture.sol >/dev/null
             export MFM_EFFECT_E2E_INITCODE_PATH="$fixture_dir/MfmEffectFixture.bin"
+            cargo test -p mfm-evm --test scalar_recipes --test lifecycle_runtime -- \
+              --include-ignored --test-threads=1
             cargo test -p mfm-evm-live --test evm_contract_effect_e2e -- \
               --ignored --exact evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance
           '')
@@ -359,7 +397,7 @@ in
       // {
         requires = [
           "postgres"
-          "reth"
+          "reth-delayed"
         ];
       };
     doc-tests = cargoLeaf {

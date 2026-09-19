@@ -1,24 +1,19 @@
 #[cfg(test)]
 mod tests;
 
-use crate::assembly::{
-    AssemblyInner, ErasedEffectAdapterCallback, ErasedReadAdapterCallback, ExecutableMode,
-    ExecutableProgram, RuntimeAssembly,
-};
 use crate::state::*;
 use crate::{
-    CandidatePresence, EffectAdapterOutcome, InvocationFailure, Operation, RecordingFailure,
-    Result, RunView, RunViewState, RuntimeError, Stage,
+    CandidatePresence, InvocationFailure, Operation, RecordingFailure, Result, RunView,
+    RunViewState, RuntimeError, Stage,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::{EffectCapabilityContract, ReadCapabilityContract};
+use mfm_capabilities::EffectAdapterOutcome;
 use mfm_ids::{ContentRef, EffectId, ExecutionPosition, RunId};
 use mfm_journal::{decode_frame, seal_frame, EncodedRunFrame};
-use mfm_program::{
-    ClassifyError, EffectState, Program, ProposedStateOutcome, PureState, ReadState,
-};
+use mfm_program::executable::ExecutableMode;
+use mfm_program::{callback, Program, ProposedStateOutcome};
 use mfm_store::{AppendResult, LoadedRun, RunSummary, Store};
-use mfm_values::{InvocationDiagnostic, MfmValue, Object};
+use mfm_values::{InvocationDiagnostic, Object};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -26,18 +21,24 @@ use std::sync::Arc;
 pub(crate) struct Driver {
     admission: Arc<RunRecord>,
     current: Arc<RunRecord>,
-    executable: Arc<ExecutableProgram>,
+    program: Program,
     head: RunSummary,
 }
-pub(crate) struct DriverContext<'a> {
+struct DriverContext<'a> {
     store: &'a Arc<dyn Store>,
     driver: Driver,
 }
-pub(crate) enum DriverDisposition {
+enum DriverDisposition {
     Continue(Driver),
-    Yield(RunView),
+    Yield(Driver, RunView),
     Failed(InvocationFailure),
 }
+#[derive(Clone, Copy)]
+pub(crate) enum Advancement {
+    Manual,
+    Terminal,
+}
+
 fn invocation(
     run_id: RunId,
     error: RuntimeError,
@@ -48,11 +49,6 @@ fn invocation(
         error,
         last_observed,
     }
-}
-fn decode<T: MfmValue>(object: &Object, operation: Operation) -> Result<T> {
-    object
-        .decode::<T>()
-        .map_err(|cause| RuntimeError::at(operation, Stage::Decode, cause))
 }
 fn canonical<T: Serialize>(value: &T, operation: Operation) -> Result<PlainCanonicalJsonBytes> {
     let error = |source: mfm_canonical::CanonicalError| {
@@ -96,98 +92,19 @@ pub(crate) async fn run_blocking<T: Send + 'static, F: FnOnce() -> Result<T> + S
         )
     })?
 }
-pub(crate) async fn encode<T: MfmValue>(value: T, operation: Operation) -> Result<Object> {
-    run_blocking(operation, move || {
-        Object::from_value(&value).map_err(|source| {
-            RuntimeError::at(operation, Stage::Encode, source.into_diagnostic("encode"))
-        })
-    })
-    .await
-}
-pub(crate) async fn encode_failure<E: MfmValue>(
-    error: E,
-    operation: Operation,
-    position: ExecutionPosition,
-    failure_contract: &ContentRef,
-) -> Result<Object> {
-    #[derive(Serialize)]
-    struct Fields<'a, T: ?Sized> {
-        encoding_target: &'static str,
-        position: ExecutionPosition,
-        failure_contract: &'a ContentRef,
-        original_detail: &'static str,
-        original_identity: &'static str,
-        encoding: &'a T,
-    }
-    let result = tokio::task::spawn_blocking(move || Object::from_value(&error)).await;
-    let diagnostic = match result {
-        Ok(Ok(object)) => return Ok(object),
-        Ok(Err(error)) => {
-            let size = match &error {
-                mfm_values::ValueError::SizeLimit(size) => {
-                    Some(mfm_values::SizeViolation::measured(
-                        mfm_values::SizeResource::CanonicalObject,
-                        *size,
-                    ))
-                }
-                mfm_values::ValueError::Canonical(source) => {
-                    source
-                        .serialization_bound()
-                        .map(|(limit, observed_at_least)| {
-                            mfm_values::SizeViolation::SerializationBound {
-                                resource: mfm_values::SizeResource::CanonicalObject,
-                                limit: limit as u64,
-                                observed_at_least: observed_at_least as u64,
-                            }
-                        })
-                }
-                _ => None,
-            };
-            InvocationDiagnostic::from_fields(
-                "value_error",
-                "encode_failure",
-                &Fields {
-                    encoding_target: "declared_failure",
-                    position,
-                    failure_contract,
-                    original_detail: "unavailable",
-                    original_identity: "unavailable",
-                    encoding: &error,
-                },
-                size,
-            )
-        }
-        Err(error) => InvocationDiagnostic::from_fields(
-            "task_failure",
-            "encode_failure",
-            &Fields {
-                encoding_target: "declared_failure",
-                position,
-                failure_contract,
-                original_detail: "unavailable",
-                original_identity: "unavailable",
-                encoding: if error.is_panic() {
-                    "panicked"
-                } else {
-                    "cancelled"
-                },
-            },
-            None,
-        ),
-    };
-    Err(RuntimeError::at(operation, Stage::Encode, diagnostic))
-}
 
-pub(crate) async fn start<T: MfmValue>(
-    assembly: Arc<AssemblyInner>,
+pub(crate) async fn admit(
     store: Arc<dyn Store>,
     run_id: RunId,
     program: Program,
-    c0: T,
+    initial: Object,
+    advancement: Advancement,
 ) -> std::result::Result<RunView, InvocationFailure> {
     let identity = run_id.clone();
-    let (executable, commit, candidate) = run_blocking(Operation::Admission, move || {
-        let initial = Object::from_value(&c0).map_err(RuntimeError::from)?;
+    let (program, commit, candidate) = run_blocking(Operation::Admission, move || {
+        program
+            .admit(&initial, program.admitted_context_contract_ref())
+            .map_err(|cause| RuntimeError::at(Operation::Admission, Stage::Decode, cause))?;
         if initial.value_ref() != program.initial_value_ref() {
             return Err(RuntimeError::at(
                 Operation::Admission,
@@ -204,15 +121,12 @@ pub(crate) async fn start<T: MfmValue>(
                 ),
             ));
         }
-        let executable = Arc::new(RuntimeAssembly { inner: assembly }.associate(program)?);
-        let program = Object::from_canonical(
-            executable.program.content_ref().clone(),
-            executable.program.canonical_bytes(),
-        )
-        .map_err(RuntimeError::from)?;
-        let commit = Arc::new(RunRecord::initial(&executable, program, initial)?);
-        let candidate = seal(&identity, 1, None, &commit, &executable)?;
-        Ok((executable, commit, candidate))
+        let document =
+            Object::from_canonical(program.content_ref().clone(), program.canonical_bytes())
+                .map_err(RuntimeError::from)?;
+        let commit = Arc::new(RunRecord::initial(&program, document, initial)?);
+        let candidate = seal(&identity, 1, None, &commit, &program)?;
+        Ok((program, commit, candidate))
     })
     .await
     .map_err(|error| invocation(run_id.clone(), error, None))?;
@@ -244,7 +158,7 @@ pub(crate) async fn start<T: MfmValue>(
             let driver = Driver {
                 admission: Arc::clone(&commit),
                 current: commit,
-                executable,
+                program,
                 head,
             };
             let observed = project(&driver).await.map_err(|cause| {
@@ -257,7 +171,7 @@ pub(crate) async fn start<T: MfmValue>(
                     None,
                 )
             })?;
-            advance(store, driver, observed).await
+            advance(store, driver, observed, advancement).await
         }
         Ok(AppendResult::NotInserted) => {
             let loaded = store
@@ -266,15 +180,20 @@ pub(crate) async fn start<T: MfmValue>(
                 .map_err(|source| invocation(run_id.clone(), RuntimeError::Store(source), None))?
                 .ok_or_else(|| invocation(run_id.clone(), RuntimeError::Absent, None))?;
             let proposed = Arc::clone(&commit);
-            run_blocking(Operation::Restore, move || {
-                let driver = restore(executable._assembly.clone(), &run_id, loaded, None)?;
+            let (driver, observed) = run_blocking(Operation::Restore, move || {
+                let driver = restore(program, &run_id, loaded, None)?;
                 if driver.admission.operation != proposed.operation {
                     return Err(RuntimeError::AdmissionConflict);
                 }
-                view(&driver)
+                let observed = view(&driver)?;
+                Ok((driver, observed))
             })
             .await
-            .map_err(|error| invocation(candidate.run_id().clone(), error, None))
+            .map_err(|error| invocation(candidate.run_id().clone(), error, None))?;
+            match advancement {
+                Advancement::Manual => Ok(observed),
+                Advancement::Terminal => advance(store, driver, observed, advancement).await,
+            }
         }
         Err(source) => Err(invocation(
             run_id,
@@ -291,35 +210,31 @@ pub(crate) async fn start<T: MfmValue>(
     }
 }
 pub(crate) async fn resume(
-    assembly: Arc<AssemblyInner>,
+    program: Program,
     store: Arc<dyn Store>,
     run_id: RunId,
 ) -> std::result::Result<RunView, InvocationFailure> {
-    let driver = load(assembly, &store, &run_id)
+    let driver = load(program, &store, &run_id)
         .await
         .map_err(|error| invocation(run_id.clone(), error, None))?;
     let observed = project(&driver)
         .await
         .map_err(|error| invocation(run_id, error, None))?;
-    advance(store, driver, observed).await
+    advance(store, driver, observed, Advancement::Manual).await
 }
 pub(crate) async fn read(
-    assembly: Arc<AssemblyInner>,
+    program: Program,
     store: Arc<dyn Store>,
     run_id: RunId,
 ) -> std::result::Result<RunView, InvocationFailure> {
-    let driver = load(assembly, &store, &run_id)
+    let driver = load(program, &store, &run_id)
         .await
         .map_err(|error| invocation(run_id.clone(), error, None))?;
     run_blocking(Operation::Project, move || view(&driver))
         .await
         .map_err(|error| invocation(run_id, error, None))
 }
-async fn load(
-    assembly: Arc<AssemblyInner>,
-    store: &Arc<dyn Store>,
-    run_id: &RunId,
-) -> Result<Driver> {
+async fn load(program: Program, store: &Arc<dyn Store>, run_id: &RunId) -> Result<Driver> {
     let loaded = store
         .load_run(run_id, None)
         .await
@@ -327,7 +242,7 @@ async fn load(
         .ok_or(RuntimeError::Absent)?;
     let run_id = run_id.clone();
     run_blocking(Operation::Restore, move || {
-        restore(assembly, &run_id, loaded, None)
+        restore(program, &run_id, loaded, None)
     })
     .await
 }
@@ -404,69 +319,118 @@ fn bound_frames(
     Ok((admission, latest, probed))
 }
 fn restore(
-    assembly: Arc<AssemblyInner>,
+    program: Program,
     run_id: &RunId,
     loaded: LoadedRun,
     probe: Option<u64>,
 ) -> Result<Driver> {
     let (admission_frame, latest_frame, _) = bound_frames(run_id, &loaded, probe)?;
     restore_frames(
-        assembly,
+        program,
         run_id,
         loaded.head().clone(),
         admission_frame,
         latest_frame,
     )
 }
+fn decode_record(frame: &EncodedRunFrame) -> Result<Arc<RunRecord>> {
+    serde_json::from_slice::<RunRecord>(frame.payload().as_bytes())
+        .map(Arc::new)
+        .map_err(|source| {
+            RuntimeError::at(
+                Operation::Restore,
+                Stage::Decode,
+                InvocationDiagnostic::from_fields(
+                    "json_error",
+                    "decode_record",
+                    &mfm_canonical::JsonError::new(source),
+                    None,
+                ),
+            )
+        })
+}
+
+fn admitted_program<'a>(frame: &EncodedRunFrame, record: &'a RunRecord) -> Result<&'a Object> {
+    let RecordedOperation::Admitted { program, .. } = &record.operation else {
+        return Err(RuntimeError::InvalidHistory);
+    };
+    if program.value_ref() != &record.program_ref {
+        return Err(RuntimeError::at(
+            Operation::Restore,
+            Stage::Decode,
+            InvocationDiagnostic::from_fields(
+                "runtime_invariant",
+                "admitted_program",
+                &StateInvariant::Identity {
+                    field: "program_ref",
+                    expected: Box::new(record.program_ref.clone()),
+                    actual: Box::new(program.value_ref().clone()),
+                },
+                None,
+            ),
+        ));
+    }
+    check_metadata(frame, record)?;
+    Ok(program)
+}
+
+pub(crate) async fn program_document(
+    store: &Arc<dyn Store>,
+    run_id: RunId,
+) -> std::result::Result<Object, InvocationFailure> {
+    let loaded = store
+        .load_run(&run_id, None)
+        .await
+        .map_err(|cause| invocation(run_id.clone(), RuntimeError::Store(cause), None))?
+        .ok_or_else(|| invocation(run_id.clone(), RuntimeError::Absent, None))?;
+    let identity = run_id.clone();
+    run_blocking(Operation::Restore, move || {
+        let (admission_frame, _, _) = bound_frames(&identity, &loaded, None)?;
+        let admission = decode_record(&admission_frame)?;
+        admitted_program(&admission_frame, &admission).cloned()
+    })
+    .await
+    .map_err(|cause| invocation(run_id, cause, None))
+}
+
 fn restore_frames(
-    assembly: Arc<AssemblyInner>,
+    program: Program,
     run_id: &RunId,
     head: RunSummary,
     admission_frame: EncodedRunFrame,
     latest_frame: EncodedRunFrame,
 ) -> Result<Driver> {
-    let decode_commit = |frame: &EncodedRunFrame| -> Result<Arc<RunRecord>> {
-        serde_json::from_slice::<RunRecord>(frame.payload().as_bytes())
-            .map(Arc::new)
-            .map_err(|source| {
-                RuntimeError::at(
-                    Operation::Restore,
-                    Stage::Decode,
-                    InvocationDiagnostic::from_fields(
-                        "json_error",
-                        "restore_frames",
-                        &mfm_canonical::JsonError::new(source),
-                        None,
-                    ),
-                )
-            })
-    };
-    let admission = decode_commit(&admission_frame)?;
-    let RecordedOperation::Admitted { program, .. } = &admission.operation else {
-        return Err(RuntimeError::InvalidHistory);
-    };
-    let program = Program::decode_canonical(program.canonical_bytes()).map_err(|source| {
-        RuntimeError::at(
+    let admission = decode_record(&admission_frame)?;
+    let retained = admitted_program(&admission_frame, &admission)?;
+    if retained.value_ref() != program.content_ref() {
+        return Err(RuntimeError::at(
             Operation::Restore,
             Stage::Decode,
-            InvocationDiagnostic::from_fields("runtime_invariant", "restore_frames", &source, None),
-        )
-    })?;
-    let executable = Arc::new(RuntimeAssembly { inner: assembly }.associate(program)?);
-    admission.validate_current(run_id, 1, &executable, true)?;
-    check_metadata(&admission_frame, &admission)?;
+            InvocationDiagnostic::from_fields(
+                "runtime_invariant",
+                "restore_frames",
+                &StateInvariant::Identity {
+                    field: "program_ref",
+                    expected: Box::new(program.content_ref().clone()),
+                    actual: Box::new(retained.value_ref().clone()),
+                },
+                None,
+            ),
+        ));
+    }
+    admission.validate_current(run_id, 1, &program, true)?;
     let current = if head.head_sequence() == 1 {
         Arc::clone(&admission)
     } else {
-        let commit = decode_commit(&latest_frame)?;
-        commit.validate_current(run_id, latest_frame.run_sequence(), &executable, true)?;
+        let commit = decode_record(&latest_frame)?;
+        commit.validate_current(run_id, latest_frame.run_sequence(), &program, true)?;
         check_metadata(&latest_frame, &commit)?;
         commit
     };
     Ok(Driver {
         admission,
         current,
-        executable,
+        program,
         head,
     })
 }
@@ -474,12 +438,13 @@ async fn advance(
     store: Arc<dyn Store>,
     mut driver: Driver,
     mut observed: RunView,
+    advancement: Advancement,
 ) -> std::result::Result<RunView, InvocationFailure> {
     loop {
         let run_id = driver.head.run_id().clone();
         let continuation = driver
             .current
-            .continuation(&driver.executable)
+            .continuation(&driver.program)
             .map_err(|error| invocation(run_id.clone(), error, None))?;
         let position = match &continuation {
             Continuation::Succeeded { .. } | Continuation::Failed { .. } => return Ok(observed),
@@ -495,22 +460,24 @@ async fn advance(
             store: &store,
             driver,
         };
-        let executable = Arc::clone(&context.driver.executable);
-        let result = match &executable.declarations[position.state.index()].mode {
-            ExecutableMode::Pure { start } => start(context).await,
-            ExecutableMode::Read { start, adapter, .. } => {
-                start(context, Arc::clone(adapter)).await
+        let program = context.driver.program.clone();
+        let Some(executable) = program.executable(position.state) else {
+            return Err(invocation(
+                run_id,
+                RuntimeError::InvalidHistory,
+                Some(observed),
+            ));
+        };
+        let result = match executable.mode() {
+            ExecutableMode::Pure { callbacks } => start_pure(context, callbacks).await,
+            ExecutableMode::Read { callbacks, adapter } => {
+                start_read(context, callbacks, Arc::clone(adapter)).await
             }
-            ExecutableMode::Effect {
-                prepare,
-                start_pending,
-                adapter,
-                ..
-            } => {
+            ExecutableMode::Effect { callbacks, adapter } => {
                 if runnable {
-                    prepare(context).await
+                    start_effect(context, callbacks).await
                 } else {
-                    start_pending(context, Arc::clone(adapter)).await
+                    start_pending_effect(context, callbacks, Arc::clone(adapter)).await
                 }
             }
         };
@@ -532,7 +499,13 @@ async fn advance(
                 })?;
                 driver = next;
             }
-            DriverDisposition::Yield(observed) => return Ok(observed),
+            DriverDisposition::Yield(next, checked) => match advancement {
+                Advancement::Manual => return Ok(checked),
+                Advancement::Terminal => {
+                    driver = next;
+                    observed = checked;
+                }
+            },
             DriverDisposition::Failed(failure) => return Err(failure),
         }
     }
@@ -542,16 +515,11 @@ fn seal(
     sequence: u64,
     previous: Option<&mfm_ids::ContentDigest>,
     commit: &RunRecord,
-    executable: &ExecutableProgram,
+    program: &Program,
 ) -> Result<EncodedRunFrame> {
-    commit.validate_current(run_id, sequence, executable, false)?;
-    if let Continuation::Failed {
-        failure,
-        reason,
-        root,
-    } = commit.continuation(executable)?
-    {
-        failure_report(commit, failure, reason, root)?;
+    commit.validate_current(run_id, sequence, program, false)?;
+    if let Continuation::Failed { failure, reason } = commit.continuation(program)? {
+        failure_report(run_id, program, commit, failure, reason)?;
     }
     let payload = canonical(commit, Operation::Record)?;
     let candidate = seal_frame(run_id, sequence, previous, &payload).map_err(|source| {
@@ -602,7 +570,7 @@ async fn record(
     let DriverContext { store, driver } = context;
     let commit = Arc::new(next);
     let next_commit = Arc::clone(&commit);
-    let executable = Arc::clone(&driver.executable);
+    let program = driver.program.clone();
     let head = driver.head.clone();
     let candidate = run_blocking(operation, move || {
         seal(
@@ -612,7 +580,7 @@ async fn record(
                 .ok_or(RuntimeError::ArithmeticOverflow)?,
             Some(head.head_digest()),
             &next_commit,
-            &executable,
+            &program,
         )
     })
     .await
@@ -669,18 +637,17 @@ async fn record(
                     InvocationFailure::RecoveryStopped { observed },
                 ));
             }
-            Ok(
-                if matches!(next.current.operation, RecordedOperation::Recovered { .. }) {
-                    DriverDisposition::Yield(project(&next).await.map_err(|cause| {
-                        RuntimeError::Projection {
-                            acknowledged: Box::new(next.head.clone()),
-                            cause: Box::new(cause),
-                        }
-                    })?)
-                } else {
-                    DriverDisposition::Continue(next)
-                },
-            )
+            if matches!(next.current.operation, RecordedOperation::Recovered { .. }) {
+                let observed = project(&next)
+                    .await
+                    .map_err(|cause| RuntimeError::Projection {
+                        acknowledged: Box::new(next.head.clone()),
+                        cause: Box::new(cause),
+                    })?;
+                Ok(DriverDisposition::Yield(next, observed))
+            } else {
+                Ok(DriverDisposition::Continue(next))
+            }
         }
         Ok(AppendResult::NotInserted) => {
             let original = match &commit.operation {
@@ -722,7 +689,7 @@ async fn reconcile(
     let sequence = candidate.run_sequence();
     let loaded = store.load_run(driver.head.run_id(), Some(sequence)).await;
     let run_id = driver.head.run_id().clone();
-    let assembly = Arc::clone(&driver.executable._assembly);
+    let program = driver.program.clone();
     let compared = candidate.clone();
     let result = match loaded {
         Ok(Some(loaded)) => {
@@ -736,9 +703,11 @@ async fn reconcile(
                     None => CandidatePresence::Absent,
                 };
                 let summary = loaded.head().clone();
-                let restored =
-                    restore_frames(assembly, &run_id, summary.clone(), admission, latest)
-                        .and_then(|restored| view(&restored));
+                let restored = restore_frames(program, &run_id, summary.clone(), admission, latest)
+                    .and_then(|restored| {
+                        let observed = view(&restored)?;
+                        Ok((restored, observed))
+                    });
                 Ok((summary, presence, restored))
             })
             .await
@@ -747,11 +716,23 @@ async fn reconcile(
         Err(source) => Err(RuntimeError::Store(source)),
     };
     let (observation, checked_view, reload_cause) = match result {
-        Ok((_, CandidatePresence::Present, Ok(observed))) => {
-            return Ok(DriverDisposition::Yield(observed))
+        Ok((_, CandidatePresence::Present, Ok((restored, observed)))) => {
+            if matches!(
+                &restored.current.operation,
+                RecordedOperation::Recovered {
+                    failure: Failure::PendingEffect { .. },
+                    outcome: RecoveryOutcome::Stop { .. },
+                    ..
+                }
+            ) {
+                return Ok(DriverDisposition::Failed(
+                    InvocationFailure::RecoveryStopped { observed },
+                ));
+            }
+            return Ok(DriverDisposition::Yield(restored, observed));
         }
         Ok((summary, presence, restored)) => match restored {
-            Ok(observed) => (Some((Box::new(summary), presence)), Some(observed), None),
+            Ok((_, observed)) => (Some((Box::new(summary), presence)), Some(observed), None),
             Err(cause) => (
                 Some((Box::new(summary), presence)),
                 None,
@@ -781,7 +762,7 @@ async fn reconcile(
 }
 
 fn runnable(driver: &Driver) -> Result<Call> {
-    match driver.current.continuation(&driver.executable)? {
+    match driver.current.continuation(&driver.program)? {
         Continuation::Runnable {
             position, input, ..
         } => Ok(Call {
@@ -791,26 +772,19 @@ fn runnable(driver: &Driver) -> Result<Call> {
         _ => Err(RuntimeError::InvalidHistory),
     }
 }
-async fn conclude<O: MfmValue, F: MfmValue>(
+async fn conclude(
     context: DriverContext<'_>,
     call: StateCall,
-    outcome: ProposedStateOutcome<O, F>,
+    outcome: callback::Outcome,
     operation: Operation,
 ) -> Result<DriverDisposition> {
     let mut next = (*context.driver.current).clone();
     match outcome {
         ProposedStateOutcome::Success { output } => {
-            next.operation = RecordedOperation::Succeeded {
-                call,
-                output: encode(output, operation).await?,
-            };
-            next.enter(&context.driver.executable)?;
+            next.operation = RecordedOperation::Succeeded { call, output };
+            next.enter(&context.driver.program)?;
         }
-        ProposedStateOutcome::Failure { failure } => {
-            let position = call.call().position;
-            let contract = context.driver.executable.program.declarations()[position.state.index()]
-                .failure_contract_ref();
-            let original = encode_failure(failure, operation, position, contract).await?;
+        ProposedStateOutcome::Failure { failure: original } => {
             next.operation = RecordedOperation::Failed(Failure::Domain { call, original });
         }
     };
@@ -825,25 +799,23 @@ async fn operational(
     next.operation = RecordedOperation::Failed(failure);
     record(context, next, operation).await
 }
-pub(crate) async fn start_pure<S: PureState>(
+async fn start_pure(
     context: DriverContext<'_>,
+    callbacks: &callback::PureCallbacks,
 ) -> Result<DriverDisposition> {
     if matches!(
         context
             .driver
             .current
-            .continuation(&context.driver.executable)?,
+            .continuation(&context.driver.program)?,
         Continuation::AwaitingRecovery(_)
     ) {
-        return recover::<S::Failure, mfm_program::Never>(context).await;
+        return recover(context, callbacks.classify, callbacks.classify).await;
     }
     let call = runnable(&context.driver)?;
-    let input = call.input.clone();
-    let outcome = run_blocking(Operation::PureEvaluate, move || {
-        S::evaluate(decode::<S::Input>(&input, Operation::PureEvaluate)?)
-            .map_err(|cause| RuntimeError::native(Operation::PureEvaluate, cause))
-    })
-    .await?;
+    let outcome = (callbacks.evaluate)(call.input.clone(), call.position)
+        .await
+        .map_err(|error| RuntimeError::callback(Operation::PureEvaluate, error))?;
     conclude(
         context,
         StateCall::Pure(call),
@@ -852,65 +824,52 @@ pub(crate) async fn start_pure<S: PureState>(
     )
     .await
 }
-pub(crate) async fn start_read<S: ReadState<C>, C: ReadCapabilityContract>(
+async fn start_read(
     context: DriverContext<'_>,
-    adapter: Arc<ErasedReadAdapterCallback>,
-) -> Result<DriverDisposition>
-where
-    C::OperationalError: ClassifyError,
-{
+    callbacks: &callback::ReadCallbacks,
+    adapter: Arc<callback::ErasedReadAdapterCallback>,
+) -> Result<DriverDisposition> {
     if matches!(
         context
             .driver
             .current
-            .continuation(&context.driver.executable)?,
+            .continuation(&context.driver.program)?,
         Continuation::AwaitingRecovery(_)
     ) {
-        return recover::<S::Failure, C::OperationalError>(context).await;
+        return recover(context, callbacks.classify, callbacks.classify_operational).await;
     }
     let call = runnable(&context.driver)?;
-    let input = call.input.clone();
-    let (input, intent) = run_blocking(Operation::ReadPrepare, move || {
-        let input = decode::<S::Input>(&input, Operation::ReadPrepare)?;
-        let intent = S::prepare(&input)
-            .map_err(|cause| RuntimeError::native(Operation::ReadPrepare, cause))?;
-        let intent = Object::from_value(&intent).map_err(|source| {
-            RuntimeError::at(
-                Operation::ReadPrepare,
-                Stage::Encode,
-                source.into_diagnostic("start_read"),
-            )
-        })?;
-        Ok((input, intent))
-    })
-    .await?;
-    let mfm_program::Execution::Read {
-        error_contract_ref, ..
-    } = context.driver.executable.program.declarations()[call.position.state.index()].execution()
-    else {
-        return Err(RuntimeError::IncompatibleAssembly);
-    };
-    match adapter(call.position, error_contract_ref, &intent).await? {
+    let intent = (callbacks.prepare)(call.input.clone())
+        .await
+        .map_err(|error| RuntimeError::callback(Operation::ReadPrepare, error))?;
+    match adapter(call.position, &intent)
+        .await
+        .map_err(|error| RuntimeError::callback(Operation::ReadAdapter, error))?
+    {
         Err(original) => {
-            let failure = Failure::Read {
-                call,
-                intent,
-                original,
-            };
-            operational(context, failure, Operation::ReadAdapter).await
+            operational(
+                context,
+                Failure::Read {
+                    call,
+                    intent,
+                    original,
+                },
+                Operation::ReadAdapter,
+            )
+            .await
         }
         Ok(evidence) => {
-            let retained_intent = intent.clone();
-            let retained_evidence = evidence.clone();
-            let outcome = run_blocking(Operation::ReadInterpret, move || {
-                let intent = decode::<C::Intent>(&retained_intent, Operation::ReadBind)?;
-                let evidence = decode::<C::Evidence>(&retained_evidence, Operation::ReadBind)?;
-                C::bind_evidence(retained_intent.value_ref(), &intent, &evidence)
-                    .map_err(|cause| RuntimeError::native(Operation::ReadBind, cause))?;
-                S::interpret(input, &evidence)
-                    .map_err(|cause| RuntimeError::native(Operation::ReadInterpret, cause))
-            })
-            .await?;
+            (callbacks.bind)(intent.clone(), evidence.clone())
+                .await
+                .map_err(|error| RuntimeError::callback(Operation::ReadBind, error))?;
+            let outcome = (callbacks.interpret)(
+                call.input.clone(),
+                intent.clone(),
+                evidence.clone(),
+                call.position,
+            )
+            .await
+            .map_err(|error| RuntimeError::callback(Operation::ReadInterpret, error))?;
             conclude(
                 context,
                 StateCall::Read {
@@ -925,73 +884,59 @@ where
         }
     }
 }
-pub(crate) async fn start_effect<S: EffectState<C>, C: EffectCapabilityContract>(
+async fn start_effect(
     context: DriverContext<'_>,
+    callbacks: &callback::EffectCallbacks,
 ) -> Result<DriverDisposition> {
     let call = runnable(&context.driver)?;
-    let input = call.input.clone();
-    let command = run_blocking(Operation::EffectPrepare, move || {
-        let input = decode::<S::Input>(&input, Operation::EffectPrepare)?;
-        let command = S::prepare(&input)
-            .map_err(|cause| RuntimeError::native(Operation::EffectPrepare, cause))?;
-        Object::from_value(&command).map_err(|source| {
-            RuntimeError::at(
-                Operation::EffectPrepare,
-                Stage::Encode,
-                source.into_diagnostic("start_effect"),
-            )
-        })
-    })
-    .await?;
+    let command = (callbacks.prepare)(call.input.clone())
+        .await
+        .map_err(|error| RuntimeError::callback(Operation::EffectPrepare, error))?;
     let effect_id = derive_effect_id(
         context.driver.head.run_id(),
         &context.driver.current.program_ref,
         call.position,
         command.value_ref(),
     )?;
+    (callbacks.validate_command)(command.clone())
+        .await
+        .map_err(|error| RuntimeError::callback(Operation::EffectPrepare, error))?;
     let mut next = (*context.driver.current).clone();
     next.effect_barrier = Some(call.position.state);
-    let effect = EffectCall {
+    next.operation = RecordedOperation::EffectPrepared(EffectCall {
         call,
         effect_id,
         command,
-    };
-    next.operation = RecordedOperation::EffectPrepared(effect);
+    });
     record(context, next, Operation::EffectPrepare).await
 }
-pub(crate) async fn start_pending_effect<S: EffectState<C>, C: EffectCapabilityContract>(
+async fn start_pending_effect(
     context: DriverContext<'_>,
-    adapter: Arc<ErasedEffectAdapterCallback>,
-) -> Result<DriverDisposition>
-where
-    C::OperationalError: ClassifyError,
-{
+    callbacks: &callback::EffectCallbacks,
+    adapter: Arc<callback::ErasedEffectAdapterCallback>,
+) -> Result<DriverDisposition> {
     match context
         .driver
         .current
-        .continuation(&context.driver.executable)?
+        .continuation(&context.driver.program)?
     {
         Continuation::AwaitingRecovery(_) => {
-            return recover::<S::Failure, C::OperationalError>(context).await
+            return recover(context, callbacks.classify, callbacks.classify_operational).await;
         }
         Continuation::AwaitingInterpretation(settlement) => {
-            let retained = settlement.clone();
             let settlement = settlement.clone();
-            let outcome = run_blocking(Operation::EffectInterpret, move || {
-                let input =
-                    decode::<S::Input>(&settlement.effect.call.input, Operation::EffectInterpret)?;
-                let command =
-                    decode::<C::Command>(&settlement.effect.command, Operation::EffectBind)?;
-                let evidence = decode::<C::Evidence>(&settlement.evidence, Operation::EffectBind)?;
-                C::bind_evidence(&settlement.effect.effect_id, &command, &evidence)
-                    .map_err(|cause| RuntimeError::native(Operation::EffectBind, cause))?;
-                S::interpret(input, &evidence)
-                    .map_err(|cause| RuntimeError::native(Operation::EffectInterpret, cause))
-            })
-            .await?;
+            let outcome = (callbacks.interpret)(
+                settlement.effect.call.input.clone(),
+                settlement.effect.effect_id.clone(),
+                settlement.effect.command.clone(),
+                settlement.evidence.clone(),
+                settlement.effect.call.position,
+            )
+            .await
+            .map_err(|error| RuntimeError::callback(Operation::EffectInterpret, error))?;
             return conclude(
                 context,
-                StateCall::Effect(retained),
+                StateCall::Effect(settlement),
                 outcome,
                 Operation::EffectInterpret,
             )
@@ -1002,51 +947,28 @@ where
     let Continuation::EffectPending { effect, .. } = context
         .driver
         .current
-        .continuation(&context.driver.executable)?
+        .continuation(&context.driver.program)?
     else {
         return Err(RuntimeError::InvalidHistory);
     };
     let effect = effect.clone();
-    let retained = effect.clone();
-    run_blocking(Operation::EffectPrepare, move || {
-        let input = decode::<S::Input>(&retained.call.input, Operation::EffectPrepare)?;
-        let command = S::prepare(&input)
-            .map_err(|cause| RuntimeError::native(Operation::EffectPrepare, cause))?;
-        let prepared = Object::from_value(&command).map_err(|source| {
-            RuntimeError::at(
-                Operation::EffectPrepare,
-                Stage::Encode,
-                source.into_diagnostic("start_effect"),
-            )
-        })?;
-        if prepared != retained.command {
-            return Err(RuntimeError::native(
-                Operation::EffectPrepare,
-                InvocationDiagnostic::from_fields(
-                    "runtime_invariant",
-                    "start_pending_effect",
-                    &StateInvariant::Contract,
-                    None,
-                ),
-            ));
-        }
-        Ok(())
-    })
-    .await?;
-    let mfm_program::Execution::Effect {
-        error_contract_ref, ..
-    } = context.driver.executable.program.declarations()[effect.call.position.state.index()]
-        .execution()
-    else {
-        return Err(RuntimeError::IncompatibleAssembly);
-    };
-    match adapter(
-        effect.call.position,
-        error_contract_ref,
-        &effect.effect_id,
-        &effect.command,
-    )
-    .await?
+    let prepared = (callbacks.prepare)(effect.call.input.clone())
+        .await
+        .map_err(|error| RuntimeError::callback(Operation::EffectPrepare, error))?;
+    if prepared != effect.command {
+        return Err(RuntimeError::native(
+            Operation::EffectPrepare,
+            InvocationDiagnostic::from_fields(
+                "runtime_invariant",
+                "start_pending_effect",
+                &StateInvariant::Contract,
+                None,
+            ),
+        ));
+    }
+    match adapter(effect.call.position, &effect.effect_id, &effect.command)
+        .await
+        .map_err(|error| RuntimeError::callback(Operation::EffectAdapter, error))?
     {
         Err(original) => {
             operational(
@@ -1057,53 +979,52 @@ where
             .await
         }
         Ok(EffectAdapterOutcome::Pending) => {
-            Ok(DriverDisposition::Yield(project(&context.driver).await?))
+            let observed = project(&context.driver).await?;
+            Ok(DriverDisposition::Yield(context.driver, observed))
         }
         Ok(EffectAdapterOutcome::Settled(evidence)) => {
-            let settlement = Settlement { effect, evidence };
-            let retained = settlement.clone();
-            run_blocking(Operation::EffectBind, move || {
-                let command =
-                    decode::<C::Command>(&retained.effect.command, Operation::EffectBind)?;
-                let evidence = decode::<C::Evidence>(&retained.evidence, Operation::EffectBind)?;
-                C::bind_evidence(&retained.effect.effect_id, &command, &evidence)
-                    .map_err(|cause| RuntimeError::native(Operation::EffectBind, cause))
-            })
-            .await?;
+            (callbacks.bind)(
+                effect.effect_id.clone(),
+                effect.command.clone(),
+                evidence.clone(),
+            )
+            .await
+            .map_err(|error| RuntimeError::callback(Operation::EffectBind, error))?;
             let mut next = (*context.driver.current).clone();
-            next.operation = RecordedOperation::EffectSettled(settlement);
+            next.operation = RecordedOperation::EffectSettled(Settlement { effect, evidence });
             record(context, next, Operation::EffectBind).await
         }
     }
 }
-async fn recover<D: ClassifyError, E: ClassifyError>(
+async fn recover(
     context: DriverContext<'_>,
+    classify: callback::Classifier,
+    classify_operational: callback::Classifier,
 ) -> Result<DriverDisposition> {
     let current = Arc::clone(&context.driver.current);
-    let executable = Arc::clone(&context.driver.executable);
+    let program = context.driver.program.clone();
+    let Continuation::AwaitingRecovery(failure) = current.continuation(&program)? else {
+        return Err(RuntimeError::InvalidHistory);
+    };
+    let classification = match failure {
+        Failure::Domain { original, .. } => classify(original.clone()).await,
+        Failure::Read { original, .. } | Failure::PendingEffect { original, .. } => {
+            classify_operational(original.clone()).await
+        }
+    }
+    .map_err(|error| RuntimeError::callback(Operation::Recovery, error))?;
     let next = run_blocking(Operation::Recovery, move || {
-        let Continuation::AwaitingRecovery(failure) = current.continuation(&executable)? else {
+        let Continuation::AwaitingRecovery(failure) = current.continuation(&program)? else {
             return Err(RuntimeError::InvalidHistory);
         };
-        let classification = match failure {
-            Failure::Domain { original, .. } => {
-                decode::<D>(original, Operation::Recovery)?.classify()
-            }
-            Failure::Read { original, .. } => {
-                decode::<E>(original, Operation::Recovery)?.classify()
-            }
-            Failure::PendingEffect { original, .. } => {
-                decode::<E>(original, Operation::Recovery)?.classify()
-            }
-        };
         let position = failure.call().position;
-        let declaration = &executable.program.declarations()[position.state.index()];
+        let declaration = &program.declarations()[position.state.index()];
         let used = current.usage(position.state)?;
         let declared = declaration.recovery_targets();
         let eligible: Vec<_> = declared
             .iter()
             .copied()
-            .filter(|target| current.eligible(&executable, position.state, target.position()))
+            .filter(|target| current.eligible(&program, position.state, target.position()))
             .collect();
         let policy_context = mfm_program::RecoveryContext::new(
             failure.phase(),
@@ -1119,8 +1040,7 @@ async fn recover<D: ClassifyError, E: ClassifyError>(
                     .checked_sub(used.state_restarts)
                     .ok_or(RuntimeError::InvalidHistory)?,
             ),
-            executable
-                .program
+            program
                 .limits()
                 .max_recovery_decisions()
                 .checked_sub(used.run_decisions)
@@ -1128,10 +1048,12 @@ async fn recover<D: ClassifyError, E: ClassifyError>(
             declared,
             &eligible,
         );
-        let request = executable.declarations[position.state.index()]
-            .recovery
-            .request(classification, &policy_context)?;
-        let mut outcome = current.authorize(&executable, failure, request)?;
+        let request = program
+            .executable(position.state)
+            .ok_or(RuntimeError::InvalidHistory)?
+            .request(classification, &policy_context)
+            .map_err(|cause| RuntimeError::callback(Operation::Recovery, cause))?;
+        let mut outcome = current.authorize(&program, failure, request)?;
         let mut next = (*current).clone();
         match &mut outcome {
             RecoveryOutcome::Retry => {
@@ -1148,15 +1070,7 @@ async fn recover<D: ClassifyError, E: ClassifyError>(
                 next.checkpoints
                     .retain(|entry| entry.position <= *checkpoint);
             }
-            RecoveryOutcome::Stop { root, .. } => {
-                if let Failure::Domain { original, .. } = failure {
-                    *root = Some(
-                        executable.declarations[position.state.index()]
-                            .root_map
-                            .apply(original.clone())?,
-                    );
-                }
-            }
+            RecoveryOutcome::Stop { .. } => {}
         }
         next.operation = RecordedOperation::Recovered {
             failure: failure.clone(),
@@ -1164,7 +1078,7 @@ async fn recover<D: ClassifyError, E: ClassifyError>(
             request,
             outcome,
         };
-        next.enter(&executable)?;
+        next.enter(&program)?;
         Ok(next)
     })
     .await?;
@@ -1198,22 +1112,29 @@ pub(crate) fn derive_effect_id(
     Ok(EffectId::from_digest(canonical.digest_bytes()))
 }
 fn failure_report(
+    run_id: &RunId,
+    program: &Program,
     record: &RunRecord,
     failure: &Failure,
     reason: mfm_program::StopReason,
-    root: Option<&Object>,
 ) -> Result<crate::FailureReport> {
+    let declaration = program
+        .declarations()
+        .get(failure.call().position.state.index())
+        .ok_or(RuntimeError::InvalidHistory)?;
     crate::FailureReport::new(
+        run_id,
+        program.content_ref(),
+        declaration,
         failure.clone(),
         reason,
         record.usage(failure.call().position.state)?,
-        root.cloned(),
     )
 }
 fn view(driver: &Driver) -> Result<RunView> {
     #[cfg(test)]
     tests::projection_fault(driver)?;
-    let state = match driver.current.continuation(&driver.executable)? {
+    let state = match driver.current.continuation(&driver.program)? {
         Continuation::Runnable {
             position, reason, ..
         } => RunViewState::Runnable { position, reason },
@@ -1231,12 +1152,20 @@ fn view(driver: &Driver) -> Result<RunView> {
         Continuation::AwaitingInterpretation(settlement) => RunViewState::AwaitingInterpretation {
             settlement: settlement.clone(),
         },
-        Continuation::Succeeded { output, .. } => RunViewState::Succeeded(output.clone()),
-        Continuation::Failed {
+        Continuation::Succeeded { output, .. } => {
+            driver
+                .program
+                .admit(output, driver.program.root_success_contract_ref())
+                .map_err(|cause| RuntimeError::at(Operation::Project, Stage::Decode, cause))?;
+            RunViewState::Succeeded(output.clone())
+        }
+        Continuation::Failed { failure, reason } => RunViewState::Failed(failure_report(
+            driver.head.run_id(),
+            &driver.program,
+            &driver.current,
             failure,
             reason,
-            root,
-        } => RunViewState::Failed(failure_report(&driver.current, failure, reason, root)?),
+        )?),
     };
     let RecordedOperation::Admitted { initial, .. } = &driver.admission.operation else {
         return Err(RuntimeError::InvalidHistory);
@@ -1247,6 +1176,6 @@ fn view(driver: &Driver) -> Result<RunView> {
         head_digest: driver.head.head_digest().clone(),
         state,
         admitted_context: Arc::new(initial.clone()),
-        entry_point: driver.executable.program.entry_point_id().clone(),
+        entry_point: driver.program.entry_point_id().clone(),
     })
 }

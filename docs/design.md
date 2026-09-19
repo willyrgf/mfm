@@ -1,31 +1,31 @@
 # Design
 
-MFM durably proves caller-driven execution of an immutable typed Program. Program contains an
-ordered sequence of State declarations with exact input, output and original failure contracts,
-selected recovery policies and parameters, explicit root failure maps, scoped checkpoint positions,
-and finite recovery allowances. Success advances linearly; recovery is a Runtime transition.
-`Never` remains the uninhabited failure contract.
+MFM durably proves caller-driven execution of a complete immutable typed Program. Program contains
+an ordered sequence of State declarations with exact input, output and original failure contracts,
+selected native implementations and public bindings, typed callbacks, recovery policies, scoped
+checkpoint positions and finite allowances. Success advances linearly; recovery is a Runtime
+transition. `Never` remains the uninhabited failure contract. No root failure map is retained.
 
-Source code authors the sequence through a deterministic `Operation`. Its required `validate_input`
-check establishes agreement between root planning assumptions and the initial value before expansion.
-`expand_program(entry, operation, input, limits)` qualifies that input and commits its exact value
-reference into Program v8. Runtime rejects input substitution before genesis or provider entry;
-cold reconstruction checks genesis against the same commitment. Parent planning and deterministic
-States establish future child input agreement. No authoring callback enters Runtime. Multiple RunIds
-may reuse the same exact Program/input pair.
+Sealed typed sources compose `Pure`, `Read`, `Effect`, tuples, endomorphic vectors, checkpoints and
+maintained `Operation<Definition, Defaults>` scopes. `Plan` borrows a checked local configuration;
+it never simulates future State input. `From<Definition>` supports explicit definitions with the
+same maintained defaults as default construction. `compile(entry, source, input, resources, limits)`
+lowers one private draft, checks exact associations, and commits the input value reference into
+Program v9. `load(bytes, resources)` discovers the environment's source types and attaches exact
+native resources without Plan, source configuration or fabricated setup. Both return the same
+complete non-generic Program. Runtime rejects input substitution before admission or provider entry.
+Multiple RunIds may reuse the same exact Program/input pair.
 
-OperationExpansion lowers Pure/Read/Effect States and child Operations through one private symbolic
-draft. Scoped checkpoint tokens cannot be captured for direct installation in another scope, while
-inherited installed bindings retain their owning scope for final relocation. Operations, callbacks,
-and injection setup remain authoring-only. Program retains one selected handler implementation,
-its exact parameter contract and qualified immutable parameters, checked target list, and allowances.
-Selection is occurrence override, nearest explicit enclosing Operation, then framework Stop.
-Replacement changes parameters and targets together; allowances inherit independently, including
-explicit zero. Program v8 rejects superseded descriptors.
+One nesting guard rejects excessive depth before Plan or native injection. Checkpoint marker types
+resolve to unique qualified positions; construction failures retain reviewed identities, positions
+and rejection reasons. Maintained defaults select handler parameters and checkpoint targets as one
+unit; allowances inherit independently, including explicit zero. The default is Stop with zero
+allowances. Complete document serialization, including aggregate bindings, uses the bounded encoder;
+cold byte limits are checked before parsing/copying. Program v9 rejects superseded descriptors.
 
 Changes to intrinsic classification semantics require revision of the exact error contract identity.
 Errors implement the pure `ClassifyError` projection into `Retryable`, `OutcomeUnknown`,
-`InputInvalidated` or `Permanent`. Typed Runtime runners classify each retained original cause directly. One static handler receives
+`InputInvalidated` or `Permanent`. Program-owned typed callbacks classify each retained original cause directly. One static handler receives
 that `Classification` and the derived `RecoveryContext`; original causes, complete executed inputs
 and exact requests remain separately retained. There is no classifier registry,
 policy-facing mapped incident, or classifier veto. Runtime alone authorizes the handler request.
@@ -39,7 +39,7 @@ method, stage, local checked facts and Values-owned diagnostic data. Response st
 message and original RPC data text are observations separate from ordered exposed source ancestry.
 Diagnostic text uses the `diagnostic_float_free` persisted profile: ordinary numeric, structural
 and actual-size limits apply, while dependency-supplied text bypasses the generic secret-marker
-check. Ordinary Program/context strings retain that check. The derived FailureReport v5 uses the
+check. Ordinary Program/context strings retain that check. The derived FailureReport v6 uses the
 same diagnostic profile for its already admitted Objects. No independent diagnostic quota applies. Runtime commits this exact original before classification or policy and retains it through cold
 observation. Remaining upstream first-loss gaps are tracked in the owner audit inventory.
 
@@ -61,7 +61,7 @@ before termination; no exact cyclic-object visit count is promised across compil
 There is no identity registry, message comparison or diagnostic budget.
 
 
-Transaction operational error v3 retains required diagnostic evidence on AuthorityUnavailable and
+Transaction operational error v4 retains required diagnostic evidence on AuthorityUnavailable and
 SignerUnavailable. The provider variant and typed classifications are unchanged. Authority's port
 returns either unavailable evidence or the final internal invocation diagnostic; Live moves these
 through the existing operational/invariant routes. PostgreSQL owns extraction of selected execution
@@ -69,38 +69,124 @@ SQL and retained-fact causes. Executing keystore failures carry SignFailed evide
 the owner reply and into SignerUnavailable. Existing signer Invalid/Failed values retain their unit
 kind honestly; checked primitive constructors remain outside this enrichment.
 
-The v3 error changes the content-addressed capability/State ABIs of Programs using it. Current
-assemblies reject v2 contracts before admission; no old decoder or history rewrite is provided.
-No deployment replacement is performed by this implementation. Before rollout, inventory existing
-v2 runs and decide their handling explicitly; this source change does not authorize their deletion
-or promise continuation under the v3-only assembly. Journal v6 and unaffected value schemas stay current.
+The current error changes the content-addressed native capability/State ABIs of Programs using it.
+Cold association rejects superseded contracts; no legacy decoder or history rewrite is provided.
+Journal and unaffected value schemas retain their current identities. Deployment data handling is
+outside this source cutover and must not be confused with verification of new executions.
 
 The framework and shipping Portfolio default to Stop with zero global/local allowances. EVM's
 Read operational causes are Retryable; `AnchorChanged` is InputInvalidated. Transaction provider and
 authority failures are OutcomeUnknown; signer unavailability before prepared-wire retention is
 Retryable. Authenticated transaction reversion is a Permanent domain settlement failure.
-`CollectEvmBalances` inherits its caller's selected handler.
+Shared collection operations inherit their caller's selected handler.
 
 Pure States deterministically map typed input to typed success/failure. Read States deterministically
 prepare typed intent, then interpret typed evidence. Effect States deterministically prepare a
-complete command and interpret typed settlement evidence. Runtime associates all values,
-mode-specific State executables, recovery callbacks, and exact `(capability contract, binding ref)`
-adapters before execution. A semantic type ID names a value family and may have multiple exact
+complete command and interpret typed settlement evidence. Program construction associates all values, mode-specific State executables, recovery callbacks
+and exact native adapters before returning the executable Program. A semantic type ID names a value family and may have multiple exact
 generic schemas; only the exact content ref selects a codec. State association likewise uses the
 exact implementation/input/output/failure ABI, so one implementation identity may own multiple
 generic ABIs without ambiguity. Read callbacks and evidence binding receive the exact intent value
 ref; Effect callbacks receive the exact command value ref used for `EffectId` derivation. These are
 instance refs, never shared codec contract refs. State code has no ambient IO.
 
-Contexts remain ordinary immutable `MfmValue` snapshots. `ContextSlot<C>` borrows one typed
-field or moves its replacement and every unchanged sibling into a new exact value type.
-`MfmContext` derives this reconstruction for distinct bare generic fields of a named record;
-it introduces no Runtime context service, codec, or scheduler. Slot identity uses an explicit
-context namespace and stable field name. Domain stage types and checked fact constructors, not
-the mechanical slot primitive, own preservation of preceding facts.
+Values owns `Unsigned256`, the checked canonical decimal integer in `0..=2^256-1`, including
+checked addition. EVM's `EvmU256` delegates grammar/range checking to that owner while preserving
+its native v1 schema and decimal wire. Shared and native scalars remain nominally distinct.
+Chain's shared `BalanceRequest` admits 1 through 64 declaration-ordered sources with unique public
+IDs and one exact ledger envelope. Source IDs retain the existing nonempty, 256-byte, control and
+secret-marker checks; `DecimalScale` admits 0 through 30. Typed constructors and stored decoding use
+the same invariant checks. `BalanceRead` binds every outcome to its exact intent and native original,
+and an Observed outcome to the requested point. Unsuccessful authenticated outcomes remain explicit
+Rejected, SafeFailure or IntegrityBlocked evidence with no invented amount. Native implementations
+own protocol qualification. Shared BalanceContext, PreparedBalance and CandidateBalance retain exact
+typed continuation and derive the active source from completed prefix length. ObserveBalance creates
+only candidates or declared Permanent observation failures. Candidate construction/decoding performs
+no scaling or completion. Native confirmation must compare anchors before shared append, whose nested
+result separates local invocation errors from arithmetic rejection. Completed-prefix decoding checks
+order, ledger, common point and individual scaling, allowing total overflow to remain a consolidation
+failure. Protocol observation and acknowledgement are exercised through explicit native adapters;
+verification scope and managed acceptance are recorded in [the Phase B ledger](dsl-phase-b.md).
+ConsolidateBalanceCollection rejects an incomplete context with a local diagnostic retaining expected
+and completed counts. Aggregate overflow is a declared BalanceCollectionFailure after all sources
+confirmed. BalanceCollectionCompletion retains that context and the canonical total; decoding
+requires completeness and recomputes the total, rejecting forged totals or overflowing stored
+completions. Native confirmation grants no aggregate-success guarantee. The caller consumes the
+checked completion to resume its own typed continuation and construct its product output.
+Native client admission returns checked semantic Portfolio input rather than a resource-free
+Program. Maintained snapshot/enrichment Operations derive collection/source vectors from that input.
+Shared `BalanceSourceDefinition` carries source, ordinal, scale and an opaque native execution
+descriptor alongside the independent expected route. Native configuration decoding and route
+qualification belong to the native implementation/client. Portfolio retains semantic collection
+metadata and requires request/descriptor count and route agreement. Enrichment pairs each required
+source with its descriptor, validates membership/coverage, and keeps required or nonzero observed
+sources. Native clients choose native-specific required sources and construct publication wire from
+retained public descriptors. Portfolio contains no EVM planner, decoder or renderer.
+Chain's private eighty-digit decimal arithmetic preserves full-width raw U256 inputs, canonical zero,
+dust-to-zero and exact-remainder scaling. Capacity failures retain the actual digit count when rejected
+and whether scaling or summation failed. Failure decoding checks the eighty-digit limit, possible
+operation bounds and the supplied facts of an inexact scale. Values' `SizeLimitExceeded` now has a
+checked typed-value contract; decoding requires actual greater than limit. Collection consumers still
+require migration from the previous EVM arithmetic before these guarantees describe integrated runs.
+EVM domain construction error v3 retains `Unsigned256Error` and checked `DecimalScaleError` as concrete
+sources and persisted causes rather than collapsing construction rejection into `InvalidValue`. No rejected input text is
+retained. The nested provider/transaction operational-error schema hashes therefore change, and exact
+association rejects their former ABIs; their classification semantics stay unchanged. Transaction
+commands, native scalar identities and evidence retain their prior contracts.
+
+Native balance intent and subject v2 retain one account/asset target and stage-only subjects. The
+intent also retains source ordinal, collection scale, chain ID and route reference for selected
+supporting-binding admission. Its external subject tagging replaces the old source-bearing wire and
+custom decoder; old intent shapes are rejected. EvmBalanceLedger preserves chain-ID-only balance
+qualification without a placeholder genesis hash. Supporting identity native implementations check
+all retained qualification facts against EvmBalanceBinding and preserve original EvmReadEvidence.
+Supporting native States check chain identity, initial anchor, optional token decimals and final
+anchor confirmation while retaining the shared typed continuation. Every source agrees with the
+first completed observation point. Final confirmation uses the retained full-width block number;
+an authenticated changed anchor is InputInvalidated before arithmetic admission. Authenticated
+rejection, safe failure, wrong chain and integrity block are Permanent, with distinguishable
+failure payloads. Local evidence identity/type mismatches remain invocation errors. Changed-anchor
+failure decoding rejects equal anchors; arithmetic failure retains its concrete shared source.
+These State fixtures do not prove adapter IO, durable original custody or Runtime scheduling.
+EvmNativeBalance and EvmTokenBalance translate the designated shared balance intent and project all
+four native outcome variants without re-encoding the original. They reject mismatched ledger,
+account/asset and native evidence identity/type. Their fixed prefixes contain two and three Reads
+respectively; both inject one confirmation Read as suffix. Focused resolved-source construction and
+cold-loading tests cover nine Reads followed by shared consolidation; application selection and actual Runtime
+execution still require integration. ReadBalanceAt v2 retains the collection's public route reference.
+Native translation checks it against the designated binding before IO. A cold Program with an
+alternate designated route is rejected at invocation, even when its complete document and initial
+value are otherwise admissible. This preserves the distinction between Program content identity
+and agreement with the caller's retained route.
+
+The shared Chain `CheckedAdd` Pure State consumes `CheckedAddition` and returns `Unsigned256`
+or the exact Permanent `AdditionOverflow` original. Both operands remain in the complete State
+input; the empty overflow payload does not duplicate them. Input constructors retain the rejected
+operand and concrete scalar cause. Program's checked implementation-identity conversion retains
+its originating checked-string grammar/reason through State implementation-ref derivation.
+
+Shared contract lifecycle contexts require Applied deployment/configuration evidence and consistent
+ledger envelopes. Observed context binds to the semantic intent reconstructed from the deployed
+locator and configuration settlement's exact point. It may contain a scalar mismatch, which Validate
+classifies as its Permanent domain failure; validated context and the flattened report require
+equality with effective configuration. The report retains request, effective, deployment,
+configuration and observation once, and its decoder reuses the same borrowed checks. These checks
+do not authenticate native evidence, reconstruct unavailable prepared commands, equate request-specific
+implementation ABIs, or constrain effective configuration to one particular arithmetic composition.
+
+Exact native implementation references use the complete v2 descriptor: selected family identity,
+semantic capability (including mode), semantic request/evidence, native request/evidence, operational
+error and binding contracts. Program's typed reference helpers and constructor share this derivation.
+The configured family StableId remains a selection key, not an exact implementation ABI reference.
+Supporting preparation derives the designated ABI from installed types and binding identity from
+the retained command; it does not add a configuration lookup or occurrence-specific identity cache.
+
+Contexts are ordinary immutable `MfmValue` snapshots. Maintained shared predecessor and result
+contracts own preservation of earlier facts; native recipes consume those typed requests. No
+caller-defined slot projection, context service or Runtime codec registration is required.
 
 Pure evaluation and Read/Effect interpretation return a proposed domain outcome or a reviewed
-Values-owned `InvocationDiagnostic`. Preparation, typed decoding, handlers and maps forward the same
+Values-owned `InvocationDiagnostic`. Preparation, typed decoding and handlers forward the same
 immutable data. Runtime retains the actual operation/stage in `InvocationFailure`; internal errors
 never become persisted Program values or fault records. Pure and Read internal failures preserve
 the current head. Effect interpretation runs only after accepted settlement is committed, so its
@@ -110,20 +196,48 @@ size. There is no native error custody, reporting quota, source downcast or rece
 Only authenticated transaction reversion produces a reversion outcome; local action mismatches
 remain internal execution errors.
 
-Each Read or Effect occurrence applies the exact capability/State pair's authoring-time injection
-policy. Before and after hooks use typed `OperationExpansion` scopes with the same linear State,
-child Operation, handler and checkpoint authoring as Operations. The kernel inserts the
-designated occurrence once between them. Hooks perform no IO or adapter registration and cannot
-modify the designated occurrence. Nested hooks share a 16-level callback bound, counting the root as one, and the declaration
-bounds. Before/after hooks are sibling levels. Nested entry is checked before descriptor
-construction; suspended occurrence descriptors remain boxed during prefix authoring. Failed
-expansions leave the parent draft unchanged. Trusted callbacks compose through OperationExpansion;
-this is not a sandbox for unrestricted Rust recursion or stack allocation.
-Empty hooks require identical input/output contracts. The complete expansion owns its input,
-output, expanded failure contract and explicit designated-to-expanded failure map. Original failures
-skip the after hook, which is a success continuation. Every suffix is checked before merging.
+Runtime's `program_document` is a read-only bootstrap, not a RunView or authority token. One existing
+Store admission/latest snapshot supplies both qualified Journal envelopes. The shared admission
+parser checks the admission variant, Program Object/reference agreement and metadata bounds, then
+returns that retained Object without re-encoding or executable association. It checks snapshot
+RunId, sequence and head linkage through the ordinary frame qualifier. Program owns canonical
+Program validation; bootstrap does not parse the latest Runtime record or validate continuation.
+Malformed admission decoding retains parser category, location and rejection reason. All failures
+carry the requested RunId and no fabricated last observation. Later read/resume obtains a fresh
+snapshot; progress after extraction is allowed and extraction grants no append authority.
 
-Runtime admits `(RunId, Program, C0)` and persists one complete `RunRecord`: `program_ref`,
+Program's kernel `callback` module owns typed State evaluation, preparation, evidence binding,
+interpretation and original classification, plus bound adapter invocation, native decoding,
+proposed-value/original encoding and panic containment. Outcome and adapter wrappers capture their
+exact original contract at construction; Runtime supplies the position, retains the complete call
+and command facts, and adds the operation. Runtime State runners are nongeneric and never pass
+DriverContext or append authority into Program. Evidence binding and interpretation are separate
+calls; an acknowledged Effect settlement remains authoritative when interpretation fails. Capabilities owns `CallbackFailure`, carrying Decode, Execute or
+Encode together with the original immutable invocation diagnostic. Runtime attaches its actual
+operation and forwards that diagnostic without recapture. A failed first original encoding retains
+the known position, declared failure contract and encoding cause, with original detail/identity
+explicitly unavailable; it never retries serialization. Ordinary encoding-job panics report Encode,
+and adapter native-decode failures/panics report Decode. Panic payloads are excluded from returned
+diagnostics; this does not control the process panic hook. IO remains in the async adapter future,
+while pure decode, execution and encode jobs are immediately awaited. Outcome/adapter wrappers
+do not classify an original or make a durable-recording claim. The separate classifier is invoked
+only after Runtime acknowledges the original; its decode/execution failure leaves that acknowledged
+original awaiting recovery. Capabilities owns `EffectAdapterOutcome` Pending/Settled.
+
+Each Read or Effect selection resolves one installed native implementation. Its typed injection
+returns a prefix and success suffix; the compiler inserts the designated State exactly once.
+Supporting selections reuse the same compiler and binders. No hook performs IO, mutates the
+selected occurrence, installs callbacks through Runtime, or maps originals into a root failure.
+Empty hooks require equal endpoint contracts. Nested scopes share the single depth guard, checked
+before planning/injection; siblings do not accumulate depth. Construction returns no partial Program.
+This is not a sandbox for unrestricted Rust recursion or stack allocation.
+
+Runtime's `execute` and `start` accept a complete Program and borrowed input. Their shared admission
+encodes once synchronously with panic containment, an explicit exception to the blocking-work rule.
+Encoding faults retain the requested RunId and Encode phase without inventing an observation. Exact
+input contract and value commitment are checked before persisting one `RunRecord`. Execute continues
+the existing driver to a checked terminal result; start returns at a manual progression boundary.
+The current record requires domain `mfm.runtime-record.v1` and contains `program_ref`,
 `checkpoints`, `usage`, `effect_barrier`, and `operation`. `RecordedOperation` retains admission,
 State success/failure, Effect preparation/settlement, or recovery. Its operation is the sole source
 of the current input, cursor and phase. A private borrowed selector computes the permitted next
@@ -132,25 +246,28 @@ Program succeeds in admission. Other Programs start at State 0/visit 0; a succes
 State with its output and a fresh visit, or becomes terminal success at the final declaration.
 
 Every declared domain or operational failure is committed as `Failed(Failure)` before
-classification, handler invocation, authorization, or root mapping. `Failure` owns its Pure/Read/
+classification, handler invocation or authorization. `Failure` owns its Pure/Read/
 Effect operation and original once. A separate `Recovered` operation retains that failure,
 classification, request and `RecoveryOutcome`. Retry/restart spend the applicable allowance once
 and yield. Restart restores the selected checkpoint at a fresh visit and prunes later checkpoint
-inputs without resetting accumulated usage. Stop stores a mapped root only for domain failures;
-Read and pending-Effect Stop forbid a root. Terminal reports derive from that failure and outcome.
-A policy, mapping or recording failure leaves the committed original authoritative. Restoration
-selects authorized work without repeating classification, mapping or charging a grant.
+inputs without resetting accumulated usage. Stop retains its reason without a mapped root.
+Terminal reports derive from the complete original failure and outcome. A policy or recording
+failure leaves the committed original authoritative. Restoration selects authorized work without
+repeating classification or charging a grant.
 
 Current validation checks operation contracts, positions, recovery authorization, sorted active
 checkpoints and Effect identity/barriers. It does not compare a second phase or scan historical
 transitions. Typed operation entry owns native input/intent/command/evidence consistency; a locally
 valid substituted input is not authenticated by historical agreement. Public `FailureReport` owns
-`Failure`, reason, usage and optional root, with borrowing typed accessors and its bounded canonical
-artifact. Pending views own the unchanged `EffectCall` and optional original/outcome pair.
+`Failure`, reason and usage, with borrowing typed accessors and its bounded canonical
+artifact. The v6 report includes RunId, Program ref, State implementation ref, execution ABI and the
+complete serialized Failure, including its input, intent or command, native evidence and original
+where applicable. It is a diagnostic projection, not execution authority. Pending views own the unchanged `EffectCall` and optional original/outcome pair.
 `RecoveryStopped` owns only its observed view; serializers borrow the pending facts for its existing
 wire fields and status.
 
-Effect execution commits the complete input, command and derived EffectId before adapter entry.
+Effect execution validates selected native command extraction before committing the complete input,
+semantic command and derived EffectId. Adapter entry follows acknowledgement.
 Pending returns the unchanged view without a record. Operational failure first commits the original
 while retaining that authority, then a separate recovery decision returns to EffectPending. Retry
 spends allowance and yields; Stop ends the invocation with `RecoveryStopped`, but explicit resume
@@ -162,6 +279,13 @@ position. There is no pending-failure quota or future-capacity reservation.
 Journal owns only the canonical `mfm.run.frame.v6` envelope: RunId, sequence, previous head and
 opaque canonical payload. Its recursive head is SHA-256 over exact frame bytes. Runtime owns the
 payload and current-operation relationships; Values owns each Object's exact value ref and canonical bytes.
+Typed values may retain nested Objects using Values' structural `SchemaShape::object()` shape.
+Its canonical payload uses the diagnostic float-free profile so generic custody preserves supplied
+diagnostic text. This neither certifies secret absence nor permits deliberately adding MFM secrets.
+Structural schema admission does not validate the nested content hash; checked typed decoding uses
+`Object::Deserialize` for exact canonical bytes, identities, hashes and bounds. The native owner
+must separately establish the selected nominal contract and any ledger or protocol relationships.
+
 Objects carry neither duplicated contract refs nor native caches. Public contract refs are derived
 when needed. Frames have no object table, back-reference resolver, or Journal lifecycle sum.
 Values implements checked `Object::Deserialize`; Runtime derives decoding on its current payload
@@ -212,7 +336,7 @@ acknowledged continuation and any unresolved command authority.
 Hot advancement and cold restore use the same current-state checks. Native materialization occurs
 at the selected typed callback. Before reconciling an unresolved Effect, Runtime deterministically
 re-prepares and compares its exact command and identity. It does not rerun completed interpretations,
-classifiers, handlers or maps merely to read a run. Public RunView derives from admission, current
+classifiers or handlers merely to read a run. Public RunView derives from admission, current
 commit and head; it does not expose the private checkpoint/usage representation wholesale.
 
 Signing owns the checked transient recoverable-secp256k1 public key, 32-byte digest, low-S compact
@@ -228,7 +352,7 @@ owner loop.
 Portfolio admission retains checked `ConfigName` and `DigestBytes` identities. Their named value
 grammars delegate to IDs; raw strings are checked at ingress, not re-parsed by Application.
 
-Inline failure reports retain original and mapped payloads even when identical. Each report is
+Inline failure reports retain the complete executed call and original without root mapping. Each report is
 limited to 32 MiB independently of its individually qualified cause values. Admission reserves
 neither future frames nor combined reports. Report overflow returns `size_limit_exceeded`
 before the terminal append, preserving the acknowledged AwaitingRecovery head and its original facts and any
@@ -248,71 +372,87 @@ The sole transaction command is nonce-free EIP-1559 type 2 with an empty access 
 bounded Create or Call action. Its complete factories and checked deserializer enforce input bounds,
 priority-fee ordering and nonzero gas. Plans and commands retain one shared nested parameter
 product. Its private fee amounts store `u128` and serialize as canonical decimal strings; factories
-accept `u128` fees and checked decoding rejects noncanonical spelling and overflow. `CheckedCreatePlan` and
-`CheckedCallPlan` share these validation owners; the latter has no target. `CheckedTargetCallPlan`
-adds a required target for an ordinary call. Deserialization preserves all plan checks.
+accept `u128` fees and checked decoding rejects noncanonical spelling and overflow. Native recipes
+use `Eip1559Options` and the checked command factories for creation and existing-address calls;
+there is no separate checked-plan wrapper.
 
-`EvmTransaction<C, R>` authors a transaction with one selected `TransactionRecipe<C>`.
-`CreateAt`, `CallCreatedAt`, and `CallAt` select checked plans and, for creation-dependent calls,
-a required successful creation address. The reservation State's deterministic prepare callback
-constructs the complete command before nonce reservation or IO. Capability injection expands
-`ExecuteEvmTransaction<C, R>` into `ReserveEvmNonce`, `PrepareEvmTransaction`, the designated
-execution Effect, and `ProjectEvmTransactionOutcome`, all with the same initial context and recipe.
-The first three have `Never` domain failure; only authenticated reversion reaches projection's
-typed `EvmTransactionFailure<ExecutedContext<C, R>>`. The recipe's sealed `Created` or `Called`
-mode controls both command checking and projection. A local mode mismatch is Internal.
+EVM supporting States consume the complete typed semantic request. ReserveEvmNonce<R> constructs
+its nonce-free command before reservation acknowledgement and retains ReservedRequest<R>, containing
+only that request and ReservedEvmTransaction. Checked construction/decoding rejects request/command
+mismatch. Reserved descriptor construction preserves canonical identity failure causes and distinguishes
+command reference from nonce-domain mismatch.
 
-Each stage replaces one named field while preserving siblings. `ReservedEvmTransaction` retains
-the complete command and reservation; `PreparedTransactionFacts` retains those plus full
-preparation evidence; `ExecutedTransactionFacts` retains those plus full settlement;
-`CompletedTransactionFacts<Created/Called>` adds the checked address or target. No fact nests a
-preceding workflow context. Fact constructors and decoders check command reference, nonce domain,
-settlement nonce/hash/action, and projection agreement. Runtime binds EffectId provenance in its opaque Journal payload; decoding arbitrary JSON does not establish that a transaction ran. The reserved and
-prepared capability command descriptors remain separate from these report records. Pending
-execution manufactures no completed facts. Signed wire never enters Program or Journal.
+The concrete scalar recipes qualify EvmScalarContractArtifact against the exact maintained
+MfmEffectFixture.sol output from solc 0.8.33, Cancun, without optimizer, using the managed source
+path. The artifact's SHA-256 identity binds its supported configure/value ABI; arbitrary bounded
+initcode does not establish scalar-contract semantics. Compiler output stays temporary. Native
+execution options reuse the existing nonzero gas and canonical u128 fee representation/order checks.
+Deployment transfers zero value and uses the qualified creation bytes; configuration transfers zero
+value and encodes the retained effective scalar into one full-width ABI word. Shared contexts never
+decode calldata. Native binding resolution checks the selected family, artifact and exact ledger
+before returning the public binding.
 
-Executable identity hashes a canonical domain-separated descriptor containing implementation
-version, stage, explicit recipe identity, ordered selected slots, and outcome mode. Exact value
-schemas remain additional ABI association keys. Cold reconciliation re-prepares unresolved commands
-from exact inputs without rerunning completed interpretation. A successful three-Effect transaction
-and final Pure projection add ten frames after admission under Program v8 and Journal frame v6: each
-Effect prepares, commits settlement, and commits interpretation separately.
+PrepareEvmTransaction<R> consumes the checked pair and retains a public PreparedEvmTransaction Object
+inside shared PreparedTransaction<R>. Its binding reference derives from the retained command's
+binding; its designated implementation reference comes from Program's exact typed descriptor helper.
+No fresh configuration or runtime registry is consulted. Signed bytes remain in the authority.
 
-Terminal reporting uses existing checked execution facts and settlement outcomes; there is no
-separate persisted outcome projection. Products own root failure policy. The fixture reports retain
-checked original plans once and an executed evidence prefix containing reservation, preparation,
-and settlement. Continuation presence must agree with authenticated success or reversion. Checked
-root decoding reconstructs commands and checks exact evidence references, target and observation
-linkage. The root failure reason is derived from that prefix, never independently supplied.
+The designated EVM implementation checks selected implementation/binding identity, the exact native
+schema and request/command correspondence before execution. Settlement projection preserves existing
+EffectId, nonce, transaction-hash and action checks, retains its exact original Object, and constructs
+shared ledger/transaction/point envelopes. Reversion becomes Rejected with unavailable reason; shared
+Deploy/Configure return their own semantic failures. Supporting reservation/preparation remain distinct
+native protocols with identity translation. Preparation's authority-side command/wire checks remain
+necessary: its public evidence alone carries only EffectId and hash.
+
+Slot recipes, cumulative phase-fact wrappers, ExecuteEvmTransaction, the mandatory Pure outcome
+projection and their wrapper Operation are removed. Shared lifecycle callers use the existing
+compiler/capability/Runtime path. Intent, anchor, ABI and exact original-evidence checks remain native
+responsibilities. [The Phase B ledger](dsl-phase-b.md) distinguishes verified paths from remaining
+consumer migration and managed acceptance; supporting-State tests alone do not prove custody recovery.
 
 The broad EVM Read intent fixes only a nonzero chain ID, physical-route content ref, and one of six
 balance subjects; that subject is the operation discriminator. Its returned sum contains checked
-chain IDs, anchors, raw units, or token decimals bounded to 0 through 30. The context-preserving
-anchored contract-call Read has separate intent and evidence types fixing a transaction-route
-content ref, target, bounded calldata, and exact block anchor. Every broad and anchored evidence
-outcome carries Runtime's exact qualified intent value ref, which the capability binder checks
-before its typed subject/result relationship. Returned anchored evidence additionally contains the
-same anchor and bounded return bytes. Rejected, safe-failure, and integrity-blocked evidence project
-to a closed failure reason. `ObserveAt` combines a checked observation plan with a selected
-completed call's target and receipt anchor. It rejects cross-field chain/route mismatches before
-provider entry. `ReadAnchoredContractCall<C, R>` constructs the intent during prepare, and retains
-the exact intent and all accepted evidence in `AnchoredObservationFacts`, including domain failure
-evidence. ABI decoding and product reporting remain explicit product semantics. These domain contracts perform no provider, signing, nonce, or persistence IO; the
-authority and live adapter remain separate downstream responsibilities.
+chain IDs, anchors, raw units, or token decimals bounded to 0 through 30. The anchored contract-call Read has separate native intent and evidence types fixing a
+transaction-route content ref, target, bounded calldata, and exact block anchor. Every native outcome
+carries the exact qualified intent value ref. EvmContractReadImplementation binds ContractRead to
+EvmTransactionRoute, resolved through LifecyclePlanning from retained native configuration. Observe
+has identity prefix and suffix; no observation-plan State or cumulative slot context is introduced.
+Native translation checks the complete chain instance and decodes exact locator/point contracts.
+Projection checks reconstructed native intent, evidence intent identity, returned anchor and exactly
+one 32-byte getter result. Full-width decimal decoding belongs to EVM and creates ConfigurationValue;
+Rejected, SafeFailure and IntegrityBlocked preserve their corresponding semantic outcomes and exact
+native original Object. The live provider remains responsible for matching its route before IO.
 
-`register_evm_transaction_adapters` registers three callbacks under the same binding; application
-composition separately calls `register_evm_transaction_states::<C, R>` for the four exact State ABIs. Reservation captures only
-binding, custody, and provider; preparation captures binding, custody, and signer; execution
-captures binding, custody, and provider. Registration checks epoch, signing purpose, and sender.
+ContractExecutionConfig v2 retains the caller's expected observation_route_ref independently of
+native configuration and selected bindings. Shared Observe copies it into ReadContractValue v2,
+and shared observation/report consistency reconstructs that complete intent. One EVM route
+qualification function checks the native route's content identity during configuration resolution
+and before native Read invocation, including cold-loaded Programs. Same-ledger endpoint disagreement
+is an invocation-only internal binding failure with expected/actual public references retained;
+it is never authenticated IntegrityBlocked evidence. No provider or outcome append occurs on
+rejection. Runtime's initial admission frame remains distinct from Read execution; cold retry leaves
+that head unchanged and makes no append call. Missing route fields in old wires are rejected;
+changed nested descriptors update dependent schema identities without a compatibility decoder.
+The previous ObserveAt/AnchoredObservationFacts machinery remains superseded; complete production
+consumer migration is separate from the isolated proof.
+
+`EvmResources<Sources>` implements the existing environment and native binding contracts. Checked
+transaction resources qualify authority epoch, signing purpose and sender at construction. Native
+injection discovers reservation and preparation States automatically. Reservation captures only
+binding, custody and provider; preparation captures binding, custody and signer; execution captures
+binding, custody and provider. No registration helper or second executable assembly remains.
 Each adapter checks its command binding before IO. Reservation loads existing custody before
 observing chain and pending nonce. Preparation reuses retained wire before signing and validates
 the actual immutable winner returned by custody. Execution decodes and qualifies exact retained
 wire and recovers its sender without a signer handle. Pure hashing, encoding, decoding, and recovery
 run in immediately awaited blocking work; IO and custody handles stay outside those closures.
 
-Execution checks receipt before submitting at most once per invocation. A matching submission
-returns Pending; transport failure, dropped acknowledgement, malformed response, or hash mismatch
-is Unavailable. Settlement requires a validated receipt and matching canonical block identity.
+Execution first checks the receipt, then transaction-known status. It submits the exact retained
+wire at most once only when absent. Pending awaits one private second inside the native adapter;
+there is no Runtime deadline, background task or replacement command. Cancellation preserves the
+retained command for later reconciliation. Receipt, lookup and submission provider errors retain
+their actual owner errors and causal diagnostics unchanged. Settlement requires a validated receipt and matching canonical block identity.
 Runtime retains settlement in the opaque Journal payload before interpretation; cold completed
 runs need no provider or signer call. This
 canonical-receipt policy is limited to the pinned non-reorging development fixture and is not
@@ -387,21 +527,24 @@ endpoint_ref }`. Planning and adapter registration derive the same content ref. 
 client handles are process-local and never persisted. Wrong local route/chain is `Internal` before
 provider entry; only authenticated external evidence may become `IntegrityBlocked`.
 
-Live composition accepts an empty or strictly sorted, unique set of at most 256 EVM bindings.
-Multiple endpoints may bind one chain. One `ComposedRuntime` derives its immutable assembly,
-planning targets, public `(chain_id, endpoint_id, binding_ref)` views, Store, and RunIndex from that
-single checked input and concrete backend; there is no singular one-route assembly constructor.
+Live composition accepts an empty or checked bounded set of native resources. Multiple endpoints
+may bind one ledger. `EvmResources` owns exact read/transaction binding and derives public binding
+views from those same records without a duplicate cache. Public endpoint names and independently
+qualified route references remain in native execution descriptors for configuration-deleted
+publication; they are not derived from whichever binding happens to be selected.
 
-Application owns the transport-neutral client surface. A strict XDG/HOME- or override-selected
+Application owns thin transport-neutral coordination. A strict XDG/HOME- or override-selected
 `deployment.toml` names environment resolvers for the runtime PostgreSQL locator and stable public
-EVM bindings; it contains no locator values and has no product lifecycle. Production composition
-resolves each raw private locator once, constructs local PostgreSQL and stock EVM HTTP(S) clients,
-and derives Runtime registrations, planning targets, public binding views, Store, and RunIndex from
-the same checked binding set. The EVM client uses no ambient proxy, redirect, referer propagation, or
-automatic retry.
+EVM bindings; it contains no locator values and has no product lifecycle. Composition resolves each
+private locator once and constructs PostgreSQL, stock EVM clients and checked native resources.
+The concrete backend supplies Store, RunIndex and configuration custody. Native clients admit native
+configuration and render semantic outputs; Portfolio owns collection semantics and checked product
+projections. Application calls compile/load and Runtime, with no native decoding, registration loop,
+handwritten component table or duplicate binding cache. The EVM HTTP client has no ambient proxy,
+redirect, referer propagation or automatic retry.
 
 The configuration repository retains complete, individually bounded canonical documents tagged by
-the exact entry point. Import validates and plans the document before atomically creating or
+the exact entry point. The native client admits the document before atomically creating or
 comparing one immutable revision. New admission requires an exact retained name and `sha256-jcs-v1`
 digest and checks every requested binding before appending genesis. Start first reads the requested
 RunId: a matching retained source identity resumes without requiring configuration custody; a
@@ -410,8 +553,8 @@ config summary and run view. The management surface exposes import, complete unp
 idempotent exact delete. Deletion does not revoke runs already admitted from that revision. The shared
 surface also owns compiled component, entry-point, and binding discovery, run progress/read, and
 mechanical run-head listing. Compiled component discovery is an unexpanded inventory of the public
-entry points and reusable Operations admitted by Application composition plus the exact States that
-the same composition registers with Runtime.
+entry points and reusable Operations plus States derived from the environment's owning source
+definitions. Inspection requires neither Plan nor live handles.
 
 Candidate enrichment uses ordinary anchored balance Reads and a final Pure selection State. It
 retains every native source and tokens with nonzero raw balance, preserving candidate order,
@@ -457,3 +600,7 @@ snapshot configuration and selector. Publication retains the exact output ref in
 changed output identity changes the configuration revision, while repeated publication of the
 same qualified terminal output is idempotent. Superseded output schemas are rejected; histories
 and existing revisions are never rewritten.
+
+ContractValueEvidence v2 retains its exact native original and a ContractValueOutcome. Only Observed
+carries a point and scalar. Rejected, SafeFailure and IntegrityBlocked become corresponding declared
+Permanent Observe failures; they cannot construct ObservedConfiguration or a successful report.

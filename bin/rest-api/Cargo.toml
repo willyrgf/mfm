@@ -25,6 +25,7 @@ tokio = { workspace = true }
 tokio-stream = { version = "=0.1.19", default-features = false }
 
 [dev-dependencies]
+mfm-portfolio = { path = "../../crates/domains/portfolio" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-journal = { path = "../../crates/kernel/journal" }
 reqwest = { workspace = true }

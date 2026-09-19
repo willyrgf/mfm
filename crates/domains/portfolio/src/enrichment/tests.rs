@@ -1,4 +1,12 @@
 use super::*;
+use mfm_chain::balance::BalanceSource;
+use mfm_chain::{BalanceTarget, LedgerIdentity};
+use mfm_values::Object;
+#[derive(Debug, Clone, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct Fact {
+    text: String,
+}
 
 #[test]
 fn source_revision_hex_is_checked_and_survives_canonical_value_qualification() {
@@ -35,28 +43,69 @@ fn source_revision_hex_is_checked_and_survives_canonical_value_qualification() {
 }
 
 #[test]
-fn enrichment_rejects_collections_without_a_native_candidate() {
-    let config: PortfolioConfig = serde_json::from_value(serde_json::json!({
-        "portfolio_id": "candidates", "quotes": ["usd"], "collections": [{
-            "correlation": "tokens", "request": {"decimals": 18, "sources": [{
-                "source_id": "token", "chain_id": 1, "address": format!("0x{}", "1".repeat(40)),
-                "token": format!("0x{}", "2".repeat(40))
-            }]}
-        }]
-    }))
-    .unwrap();
-    let selector =
-        serde_json::from_value(serde_json::json!({"target": "candidates", "quote": "usd"}))
+fn enrichment_checks_required_source_membership_and_collection_coverage() {
+    for (required, accepted) in [
+        (vec![], false),
+        (vec!["missing".into()], false),
+        (vec!["source-0".into()], false),
+        (vec!["source-0".into(), "source-2".into()], true),
+    ] {
+        let collections = 2;
+        let sources_per_collection = 2;
+        let scale = 0;
+        let input = {
+            let label = |index: usize| format!("source-{index}");
+            let ledger = LedgerIdentity::new(
+                Object::from_value(&Fact {
+                    text: "independent-ledger".into(),
+                })
+                .unwrap(),
+            );
+            let route = Object::from_value(&Fact {
+                text: "independent-route".into(),
+            })
             .unwrap();
-    let target = EvmPhysicalTarget {
-        chain_id: NonZeroU64::new(1).unwrap(),
-        endpoint_ref: mfm_evm::EvmEndpoint::new("candidate")
+            let collections = (0..collections)
+                .map(|ordinal| {
+                    let sources = (0..sources_per_collection)
+                        .map(|source| {
+                            BalanceSource::new(
+                                label(ordinal * sources_per_collection + source),
+                                BalanceTarget::new(
+                                    ledger.clone(),
+                                    Object::from_value(&Fact {
+                                        text: label(source),
+                                    })
+                                    .unwrap(),
+                                ),
+                            )
+                            .unwrap()
+                        })
+                        .collect();
+                    let request =
+                        BalanceRequest::new(sources, DecimalScale::new(scale).unwrap()).unwrap();
+                    let executions = (0..sources_per_collection)
+                        .map(|_| {
+                            BalanceExecutionConfig::new(route.value_ref().clone(), route.clone())
+                        })
+                        .collect();
+                    PortfolioCollectionDemand::new(label(ordinal), request, executions).unwrap()
+                })
+                .collect();
+            PortfolioSnapshotInput::new(
+                PortfolioId {
+                    value: "portfolio".into(),
+                },
+                collections,
+                QuoteCode::Usd,
+                vec![QuoteCode::Usd, QuoteCode::Eur],
+                None,
+            )
             .unwrap()
-            .endpoint_ref()
-            .unwrap(),
-    };
-    assert!(matches!(
-        plan_enrichment(selector, &config, &[target], None),
-        Err(PortfolioError::InvalidValue)
-    ));
+        };
+        assert_eq!(
+            PortfolioEnrichmentInput::new(input, required).is_ok(),
+            accepted
+        );
+    }
 }

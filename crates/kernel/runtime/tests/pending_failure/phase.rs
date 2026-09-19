@@ -29,20 +29,9 @@ impl EffectState<Submit> for FailureState {
         Self::evaluate(input)
     }
 }
-impl CapabilityInjection<FailureState> for Submit {
-    type Setup = Number;
+impl EffectSelection<Submit> for FailureState {
     type ExpandedInput = Number;
     type ExpandedOutput = Number;
-    type ExpandedFailure = Cause;
-    type FailureMap = Identity<Cause>;
-    fn failure_map_params(_: &Number) -> mfm_program::Result<NoParams> {
-        Ok(NoParams)
-    }
-    fn original_binding_ref(setup: &Number) -> mfm_program::Result<ContentRef> {
-        mfm_values::canonicalize_mfm_value(setup)
-            .map(|(_, reference)| reference)
-            .map_err(|_| ProgramError::InvalidContract)
-    }
 }
 struct RestartDeclared;
 impl Handler for RestartDeclared {
@@ -70,39 +59,47 @@ impl Handler for RestartDeclared {
             })
     }
 }
-struct PhaseOperation {
+struct BeforeFailure;
+impl CheckpointMarker for BeforeFailure {
+    type Context = Number;
+}
+struct PhaseDefinition {
     effect: bool,
-    restart: bool,
 }
-impl Operation for PhaseOperation {
-    type Input = Number;
-    type Output = Number;
-    type Failure = Cause;
-    fn validate_input(&self, _: &Number) -> mfm_program::Result<()> {
-        Ok(())
-    }
-    fn expand(
-        &self,
-        scope: &mut OperationExpansion<Number, Number, Cause>,
-    ) -> mfm_program::Result<()> {
-        let checkpoint = scope.checkpoint::<Number>()?;
-        scope.handler(if self.restart {
-            HandlerBinding::new::<RestartDeclared>(NoParams)?.checkpoint(&checkpoint)?
+impl OperationDefinition for PhaseDefinition {
+    type Body = (
+        Checkpoint<BeforeFailure>,
+        Vec<Pure<FailureState>>,
+        Vec<ResolvedEffect<FailureState, Submit, Native<Cause>>>,
+    );
+}
+impl Plan<Number> for PhaseDefinition {
+    type Config = Number;
+    fn plan<'a>(&'a self, input: &'a Number) -> mfm_program::Result<(&'a Number, Self::Body)> {
+        let (pure, effect) = if self.effect {
+            (vec![], vec![ResolvedEffect::new(Number { value: 1 })])
         } else {
-            HandlerBinding::new::<RetryUnknown>(NoParams)?
-        })?;
-        scope.allowances(RecoveryAllowances::new(3, 3))?;
-        if self.effect {
-            scope.effect::<FailureState, Submit, Identity<Cause>>(
-                &Number { value: 1 },
-                NoParams,
-                Occurrence::new(),
-            )
-        } else {
-            scope.pure::<FailureState, Identity<Cause>>(NoParams, Occurrence::new())
-        }
+            (vec![Pure::default()], vec![])
+        };
+        Ok((input, (Checkpoint::default(), pure, effect)))
     }
 }
+struct RestartPolicy;
+impl OperationDefaults for RestartPolicy {
+    type Handler = RestartDeclared;
+    type Targets = (BeforeFailure,);
+}
+impl ResolveDefaults<Number> for RestartPolicy {
+    fn resolve(_: &Number) -> mfm_program::Result<PolicyValues<RestartDeclared>> {
+        Ok(PolicyValues {
+            handler: Some(NoParams),
+            retries: Some(3),
+            restarts: Some(3),
+        })
+    }
+}
+type RetryPhase = Operation<PhaseDefinition, Policy<RetryUnknown, 3>>;
+type RestartPhase = Operation<PhaseDefinition, RestartPolicy>;
 
 // A handler request cannot override Runtime safety rules or spend recovery allowance on a denied
 // action.
@@ -117,37 +114,35 @@ async fn runtime_denies_pure_retry_ineligible_restart_and_settled_effect_retry()
     .enumerate()
     {
         let store = Arc::new(MemoryStore::new());
-        let mut builder = RuntimeAssemblyBuilder::new().unwrap();
-        if effect {
-            builder.register_effect::<FailureState, Submit>().unwrap();
-        } else {
-            builder.register_pure::<FailureState>().unwrap();
-        }
-        builder.register_handler::<RetryUnknown>().unwrap();
-        builder.register_handler::<RestartDeclared>().unwrap();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = Arc::clone(&calls);
-        builder
-            .register_effect_adapter::<Submit, _, _>(Number { value: 1 }, move |_, _, command| {
-                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Box::pin(async move {
-                    Ok(EffectAdapterOutcome::Settled(Number {
-                        value: command.value,
-                    }))
-                })
-            })
-            .unwrap();
-        let runtime = Runtime::new(builder.finish(), store);
+        let resources = Resources::<(RetryPhase, RestartPhase)>::new(move |_, _, command| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Ok(EffectAdapterOutcome::Settled(command)) })
+        });
+        let runtime = Runtime::new(store);
         let run = RunId::from_digest(DigestBytes::from_array([94 + case as u8; 32]));
-        let program = expand_program(
-            EntryPointId::new("mfm.test/phase-denial@1").unwrap(),
-            &PhaseOperation { effect, restart },
-            &Number { value: 9 },
-            ProgramLimits::new(6),
-        )
+        let entry = EntryPointId::new("mfm.test/phase-denial@1").unwrap();
+        let program = if restart {
+            compile(
+                entry,
+                &RestartPhase::from(PhaseDefinition { effect }),
+                &Number { value: 9 },
+                &resources,
+                ProgramLimits::new(6),
+            )
+        } else {
+            compile(
+                entry,
+                &RetryPhase::from(PhaseDefinition { effect }),
+                &Number { value: 9 },
+                &resources,
+                ProgramLimits::new(6),
+            )
+        }
         .unwrap();
         let terminal = runtime
-            .start(run.clone(), program, Number { value: 9 })
+            .start(run.clone(), &program, &Number { value: 9 })
             .await
             .unwrap();
         let RunViewState::Failed(report) = terminal.state() else {
@@ -156,7 +151,7 @@ async fn runtime_denies_pure_retry_ineligible_restart_and_settled_effect_retry()
         assert_eq!(report.reason(), &StopReason::Disallowed(denial));
         assert_eq!(report.usage().run_decisions, 0);
         assert_eq!(report.usage().state_retries, 0);
-        let cold = runtime.resume(&run).await.unwrap();
+        let cold = runtime.resume(&run, &program).await.unwrap();
         assert_eq!(cold.head_digest(), terminal.head_digest());
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),

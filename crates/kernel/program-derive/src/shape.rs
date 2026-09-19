@@ -51,9 +51,16 @@ pub(super) fn schema_shape_tokens(
                 default_bounds: field_output.default_bounds,
             })
         }
+        Data::Struct(DataStruct {
+            fields: Fields::Unit,
+            ..
+        }) => Ok(SchemaShapeOutput {
+            shape: quote!(::mfm_values::SchemaShape::Unit),
+            default_bounds: Vec::new(),
+        }),
         Data::Struct(other) => Err(syn::Error::new(
             other.fields.span(),
-            "MFM derives support named structs only in v1",
+            "MFM derives require named fields, a unit struct or a transparent newtype",
         )),
         Data::Enum(data) => enum_shape_tokens(data, rename_all, kind, attrs, generic_params),
         Data::Union(data) => Err(syn::Error::new(
@@ -449,7 +456,7 @@ fn shape_tokens_for_path(
         }));
     }
 
-    if let Some(shape) = checked_identity_shape(&ident) {
+    if let Some(shape) = checked_framework_shape(&ident) {
         return Ok(shape);
     }
 
@@ -600,12 +607,13 @@ fn is_type_named(ty: &Type, expected: &str) -> bool {
     matches!(ty, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == expected))
 }
 
-/// Maps a checked identity type to its bounded-string shape and grammar.
+/// Maps checked framework fields to their owned structural shapes.
 ///
 /// The grammar is enforced by the checked Rust owner; the descriptor only names
 /// it, so a persisted contract never restates an identity's regular expression.
-fn checked_identity_shape(ident: &str) -> Option<proc_macro2::TokenStream> {
+fn checked_framework_shape(ident: &str) -> Option<proc_macro2::TokenStream> {
     let grammar_and_bound = match ident {
+        "Object" => return Some(quote!(::mfm_values::SchemaShape::object()?)),
         "ContentRef" => {
             return Some(quote!(::mfm_values::SchemaShape::content_ref()?));
         }
