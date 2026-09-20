@@ -147,13 +147,15 @@ an authenticated changed anchor is InputInvalidated before arithmetic admission.
 rejection, safe failure, wrong chain and integrity block are Permanent, with distinguishable
 failure payloads. Local evidence identity/type mismatches remain invocation errors. Changed-anchor
 failure decoding rejects equal anchors; arithmetic failure retains its concrete shared source.
-These State fixtures do not prove adapter IO, durable original custody or Runtime scheduling.
+Native boundary tests cover State qualification; production cold execution and failure projection
+through actual adapters and Runtime are recorded in docs/dsl-phase-b.md.
 EvmNativeBalance and EvmTokenBalance translate the designated shared balance intent and project all
 four native outcome variants without re-encoding the original. They reject mismatched ledger,
 account/asset and native evidence identity/type. Their fixed prefixes contain two and three Reads
 respectively; both inject one confirmation Read as suffix. Focused resolved-source construction and
-cold-loading tests cover nine Reads followed by shared consolidation; application selection and actual Runtime
-execution still require integration. ReadBalanceAt v2 retains the collection's public route reference.
+cold-loading tests cover nine Reads followed by shared consolidation. Application selection, both
+continuations and actual cold Runtime execution pass production acceptance. ReadBalanceAt v2
+retains the collection's public route reference.
 Native translation checks it against the designated binding before IO. A cold Program with an
 alternate designated route is rejected at invocation, even when its complete document and initial
 value are otherwise admissible. This preserves the distinction between Program content identity
@@ -523,7 +525,7 @@ SQLx, overwrites every ambient-derived value that can affect this plaintext conn
 influence the resulting authority.
 
 EVM physical route identity is the domain-owned, secret-free `EvmPhysicalTarget { chain_id,
-endpoint_ref }`. Planning and adapter registration derive the same content ref. Credentials and
+endpoint_ref }`. Native construction and resource binding qualify the same content ref. Credentials and
 client handles are process-local and never persisted. Wrong local route/chain is `Internal` before
 provider entry; only authenticated external evidence may become `IntegrityBlocked`.
 

@@ -47,26 +47,26 @@ epoch, signing purpose, and public-key-derived sender. Each invocation compares 
 and exact command value ref before IO, then asks the separate `EvmTransactionProvider` facet to
 recheck chain ID and genesis at the selected endpoint.
 
-The transaction provider exposes only checked chain-instance, pending-nonce, receipt,
-canonical-block, transaction-known, and exact-raw-submission operations. Execution has one loop-free sequence per
-caller invocation:
+The transaction provider exposes checked chain-instance, pending-nonce, receipt, canonical-block,
+transaction-known and exact-raw-submission operations. The native supporting States and designated
+Effect have separate responsibilities:
 
-1. Load the append-only authority and return settled evidence immediately when it already exists.
-2. For any non-settled state, verify chain identity once. Observe the pending nonce only when a
-   reservation is absent, then reserve or compare the exact
-   Effect ID and command reference.
-3. Sign the fixed type-2, empty-access-list transaction only when prepared bytes are absent, and
-   retain its exact raw bytes and hash before provider submission.
-4. Check the receipt first, then transaction-known status if absent. A known transaction is not
-   rebroadcast. Only an absent transaction permits submission of the exact retained bytes.
-   Await private native pacing before returning Pending; cancellation creates no background task
-   and changes no command authority. Provider errors pass through unchanged. Runtime owns no timer.
-5. On a later invocation, validate one present receipt, require its block identity to equal the
-   provider's current canonical block at that number, and retain the resulting settlement.
+1. Reservation loads existing authority first. Only an absent reservation requires observing the
+   pending nonce and allocating the immutable first winner for the exact Effect/command.
+2. Preparation loads that reservation and signs only when prepared bytes are absent. It retains
+   the exact raw bytes and hash before any submission and qualifies the first prepared winner.
+3. Execution checks the retained descriptor and raw bytes, verifies chain identity, then checks
+   the receipt. If absent, it checks transaction-known status and submits the retained bytes only
+   when the transaction is absent. The signer is never invoked during execution.
+4. Pending awaits private native pacing before returning. Cancellation creates no background task
+   and changes no command authority. Actual provider errors pass through unchanged; Runtime owns
+   no timer or polling deadline.
+5. A present receipt must match the retained transaction and canonical block at its stated number.
+   Runtime retains the qualified settlement in Journal before interpretation. Custody retains only
+   reservations and prepared bytes, not settlement. Terminal cold replay needs no provider call.
 
-Every retry therefore reuses the retained first winner's Effect ID, command, nonce, signature, hash,
-and raw bytes. A different concurrent Prepared or Settled candidate returns `Unavailable` and is
-resolved by reloading before any signer or provider retry.
+Every retry reuses the retained first winner's Effect ID, command, nonce, signature, hash and raw
+bytes. Conflicting or malformed retained authority is rejected with its reviewed causal facts.
 Transport duplication is allowed; authorizing a replacement or another semantic transaction is
 not. Provider errors and malformed transaction ingress retain their reviewed causes in `Unavailable`; a local binding,
 signer, route, or retained-authority mismatch is `Internal` before the affected provider phase.
