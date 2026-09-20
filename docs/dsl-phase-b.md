@@ -1,12 +1,17 @@
 # DSL Phase B production cutover
 
-The production cutover is implemented and focused and managed acceptance pass. Final composed CI
-is still pending at this candidate checkpoint; this is not yet a final passing verdict. The source
-baseline is `660285d0` (updated RFC); isolated proof `c4d97c9d` includes scalar-route enforcement
-`d7a42c78`. [dsl-phase-a.md](dsl-phase-a.md) remains the historical proof record. The chronological
-checkpoints below describe what was incomplete at each stage, not parallel supported designs.
+**Verdict: the amended Phase B design passes within the agreed scope.** Production migration,
+managed acceptance and final composed CI are complete. B2 is `472f950a3c42e3a9f503bf10e92b5cd454dd21aa`;
+combined-service isolation is `4defb1299a79cc12c5de7bf8f568072eeb03c74f`, the exact clean candidate
+that passed final CI. Subsequent changes only record evidence and correct two Markdown descriptions;
+no Rust, schemas, tests, manifests or task definitions changed after that passing run.
 
-Work proceeds in `refactor/dsl-phase-b`, in the sibling `mfm2-phase-b` worktree. The proof changes
+The source baseline is `660285d0`; isolated proof `c4d97c9d` includes scalar-route enforcement
+`d7a42c78`. [dsl-phase-a.md](dsl-phase-a.md) remains the historical proof record. The chronological
+checkpoints below describe what was incomplete at each stage, not outstanding migration work or
+parallel supported designs. Final commands, results and LOC follow the historical ledger.
+
+Work is committed in `refactor/dsl-phase-b`, in the sibling `mfm2-phase-b` worktree. The proof changes
 were applied relative to `b49c90b8`, excluding its older AGENTS and RFC files. The updated RFC and
 repository rules remain authoritative. B1 is omitted: native interfaces, products, resource binding,
 consumers, schemas, tests and deletions form one inseparable B2 cutover. No production compatibility
@@ -129,7 +134,7 @@ final cutover accounting.
 
 None remain for the agreed Phase B implementation boundary: configuration-deleted publication,
 State-derived native failure dispatch and resource binding without Application caches have executable
-cold acceptance. Final composed CI is a remaining verification gate, not an assumed pass. The
+cold acceptance. Final composed CI passed on the exact candidate identified above. The
 accepted downstream source-publication limitation remains explicit in [known-gaps.md](known-gaps.md).
 Managed Reth settlement and a surviving ephemeral signer do not establish production finality or
 host-process key recovery; those remain outside this cutover.
@@ -501,3 +506,80 @@ reserved endpoints. Evidence:
 `/home/willyrgf.linux/.local/state/nixfied/mfm/dev/0/runs/run-2590728-1789845533987397213/artifacts/run-summary.json`.
 This startup failure is retained as evidence; it is not a passing CI result. The corrected committed
 candidate receives the final composed CI below.
+
+## Final CI and assessment
+
+From `/home/willyrgf.linux/dev/mfm2-phase-b`, clean candidate
+`4defb1299a79cc12c5de7bf8f568072eeb03c74f` (tree
+`42e04b70bfed7fbd8f919b3a97f453ff4f8801d4`):
+
+```sh
+nix run .#ci
+```
+
+**Passed: nine tasks, zero failures, 2360.688 seconds.** Exact machine-readable result:
+`/home/willyrgf.linux/.local/state/nixfied/mfm/dev/0/runs/run-2591337-1789845588547974150/artifacts/run-summary.json`.
+All task exits are zero; none timed out or was canceled. This is the final composed run after the
+recorded startup-only failure, not an aggregation of earlier focused successes.
+
+| Task selected by CI | Result | Seconds |
+| --- | --- | ---: |
+| `fmt` | Passed | 0.424 |
+| `sqlx-check` | Passed; checked metadata unchanged | 18.699 |
+| `clippy` | Passed workspace with warnings denied | 31.495 |
+| `cargo-check` | Passed workspace | 7.649 |
+| `cargo-test` | 332 passed; seven managed cases ignored by ordinary selection | 1477.665 |
+| `doc-tests` | Five passed | 16.958 |
+| `postgres-test` | 13 passed across isolated/full selections | 40.912 |
+| `client-e2e` | One managed acceptance passed (456.99s test) | 472.077 |
+| `effect-e2e` | Two lifecycle, two recipe and one managed test passed | 293.125 |
+
+All seven ordinary ignored cases ran through their explicit managed owners. Live's 58 unit tests
+passed together (786.73s), including the full cold failure matrix; native Portfolio integration,
+collection restart, independent native implementation, all Runtime custody/cancellation and Store
+contracts also passed. Managed lifecycle composition took 154.71s, recipes 0.47s and the actual
+PostgreSQL/Reth/keystore scenario 115.00s. Native Pending pacing survives cancellation and cold load,
+checks receipt and transaction-known before exact rebroadcast, and preserves supplied errors.
+
+Newly verified production guarantees are: the complete immutable compiler/Runtime path; independent
+expected routes through cold native binding; both actual Portfolio continuations without EVM
+interpretation in Portfolio/Application; configuration-deleted execution/publication without live
+handles for publication; exact native/product failure projection; complete-document serialization
+bounds; native codec phases and construction causes; maintained defaults and one depth guard; and
+real 42/84 execution with delayed settlement. The Phase A proof is now promoted into exercised
+production consumers. No Phase B migration or managed acceptance remains deferred.
+
+Accepted limits remain explicit: downstream authors publish new source semantics once in the
+installed environment; arbitrary Rust code cannot be reconstructed from stored identities. Managed
+Reth settlement does not define production finality, and a surviving ephemeral signer does not prove
+host-process key recovery. No mutation entry point was added to Portfolio or its transports.
+Existing unrelated first-loss gaps remain scoped in the adapter audit. These are not newly weakened
+contracts or hidden blockers to the amended Phase B scope.
+
+The final evidence-only commit corrects stale routing prose (Journal, not custody, retains
+settlement) and removes historical integration-pending wording in design. It is verified with
+`git diff --check`, changed-document local-link checks and the LOC script; CI is not redundantly
+rerun for these Markdown-only edits. The exact tested code and executable task graph remain those
+of `4defb129`.
+
+## Final revision LOC
+
+Reproduce from this evidence revision:
+
+```sh
+python3 docs/dsl-phase-b-loc.py 660285d0 HEAD
+python3 docs/dsl-phase-b-loc.py c4d97c9d HEAD
+```
+
+| Category | Added vs RFC baseline | Removed | Net | Net vs amended proof |
+| --- | ---: | ---: | ---: | ---: |
+| Production Rust | 11,615 | 7,715 | +3,900 | +849 |
+| Test Rust | 17,815 | 8,134 | +9,681 | +574 |
+| Documentation | 1,935 | 653 | +1,282 | +743 |
+| Manifests/lock/UI/Nix/evidence scripts | 396 | 239 | +157 | -24 |
+
+Production and test counts are unchanged after final CI. The added native semantic boundary and
+its qualification/projection machinery account for the Phase B production increase; the promoted
+proof accounts for the rest relative to the RFC branch. Deletions and executable replacements are
+mapped above. Documentation counts include this complete evidence ledger and historical Phase A
+proof, rather than counting them as production code.
