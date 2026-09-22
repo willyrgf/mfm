@@ -13,10 +13,7 @@ use std::sync::{
 #[derive(Clone, Copy, Debug)]
 enum Fault {
     Rejected,
-    SafeFailure,
     IntegrityBlocked,
-    WrongChain,
-    ChangedAnchor,
     MaximumTokenBalance,
 }
 struct Provider(AtomicUsize, Option<(usize, Fault)>);
@@ -38,21 +35,9 @@ impl EvmReadProvider for Provider {
                             EvmReadValue::RawUnits(EvmU256::new("115792089237316195423570985008687907853269984665640564039457584007913129639935").unwrap()),
                         ),
                         Fault::Rejected => EvmReadEvidence::rejected(reference.clone()),
-                        Fault::SafeFailure => EvmReadEvidence::safe_failure(reference.clone()),
                         Fault::IntegrityBlocked => {
                             EvmReadEvidence::integrity_blocked(reference.clone())
                         }
-                        Fault::WrongChain => EvmReadEvidence::returned(
-                            reference.clone(),
-                            EvmReadValue::ChainId(std::num::NonZeroU64::new(2).unwrap()),
-                        ),
-                        Fault::ChangedAnchor => EvmReadEvidence::returned(
-                            reference.clone(),
-                            EvmReadValue::Anchor(EvmBlockAnchor {
-                                number: EvmU256::from_u64(10),
-                                hash: EvmHash::from_bytes([4; 32]),
-                            }),
-                        ),
                     });
                 }
             }
@@ -85,6 +70,49 @@ impl EvmReadProvider for Provider {
         panic!("Portfolio does not use scalar contract calls")
     }
 }
+enum ReadMode {
+    PauseConfirmation(Arc<tokio::sync::Notify>),
+    ConfirmationOnly,
+    Forbidden,
+}
+struct ControlledProvider {
+    provider: Arc<Provider>,
+    mode: ReadMode,
+}
+impl EvmReadProvider for ControlledProvider {
+    fn observe<'a>(
+        &'a self,
+        reference: &'a ContentRef,
+        intent: &'a EvmReadIntent,
+    ) -> ProviderFuture<'a, EvmReadEvidence> {
+        Box::pin(async move {
+            match &self.mode {
+                ReadMode::Forbidden => panic!("terminal inspection cannot call a provider"),
+                ReadMode::ConfirmationOnly => assert!(
+                    matches!(intent.subject(), EvmReadSubject::ConfirmAnchor { .. }),
+                    "cold resume must not reread balances"
+                ),
+                ReadMode::PauseConfirmation(entered)
+                    if intent.source_ordinal() == 1
+                        && matches!(intent.subject(), EvmReadSubject::ConfirmAnchor { .. }) =>
+                {
+                    entered.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                ReadMode::PauseConfirmation(_) => {}
+            }
+            self.provider.observe(reference, intent).await
+        })
+    }
+    fn observe_anchored_call<'a>(
+        &'a self,
+        _: &'a ContentRef,
+        _: &'a AnchoredContractCallIntent,
+    ) -> ProviderFuture<'a, AnchoredContractCallEvidence> {
+        panic!("Portfolio does not use scalar contract calls")
+    }
+}
+
 fn configuration(enrichment: bool) -> EvmPortfolioConfig {
     serde_json::from_value(serde_json::json!({
         "entry_point": if enrichment { PORTFOLIO_ENRICHMENT_ENTRY_POINT_ID } else { PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID },
@@ -100,7 +128,7 @@ fn configuration(enrichment: bool) -> EvmPortfolioConfig {
         }
     })).unwrap()
 }
-fn resources(endpoint: &str, provider: Arc<Provider>) -> PortfolioResources {
+fn resources(endpoint: &str, provider: Arc<dyn EvmReadProvider>) -> PortfolioResources {
     PortfolioResources::new(
         vec![(
             EvmBalanceRoute::new(
@@ -152,41 +180,97 @@ async fn both_continuations_execute_cold_and_publish_without_source_configuratio
         let wrong = resources("different", provider.clone());
         assert!(load(&bytes, &wrong).is_err());
         assert_eq!(provider.0.load(Ordering::SeqCst), 0);
-        let cold = resources("expected", provider.clone());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let cold = resources(
+            "expected",
+            Arc::new(ControlledProvider {
+                provider: provider.clone(),
+                mode: ReadMode::PauseConfirmation(entered.clone()),
+            }),
+        );
         let reconstructed = load(&bytes, &cold).unwrap();
-        let runtime = Runtime::new(Arc::new(MemoryStore::new()));
+        let store = Arc::new(MemoryStore::new());
+        let runtime = Runtime::new(store.clone());
         let id = RunId::from_digest(DigestBytes::from_array(
             [if enrichment { 1 } else { 2 }; 32],
         ));
-        let result = if enrichment {
-            runtime
-                .execute(
-                    id,
-                    &reconstructed,
-                    &input.decode::<PortfolioEnrichmentInput>().unwrap(),
-                )
-                .await
-                .unwrap()
-        } else {
-            runtime
-                .execute(
-                    id,
-                    &reconstructed,
-                    &input.decode::<PortfolioSnapshotInput>().unwrap(),
-                )
-                .await
-                .unwrap()
-        };
-        assert_eq!(provider.0.load(Ordering::SeqCst), 9);
-        drop(reconstructed);
+        let executing_id = id.clone();
+        let task = tokio::spawn(async move {
+            let runtime = Runtime::new(store);
+            if enrichment {
+                runtime
+                    .execute(
+                        executing_id,
+                        &reconstructed,
+                        &input.decode::<PortfolioEnrichmentInput>().unwrap(),
+                    )
+                    .await
+            } else {
+                runtime
+                    .execute(
+                        executing_id,
+                        &reconstructed,
+                        &input.decode::<PortfolioSnapshotInput>().unwrap(),
+                    )
+                    .await
+            }
+        });
+        entered.notified().await;
         drop(cold);
-        drop(runtime);
+        let document = runtime.program_document(&id).await.unwrap();
+        let cold = load(
+            document.canonical_bytes(),
+            &resources(
+                "expected",
+                Arc::new(ControlledProvider {
+                    provider: provider.clone(),
+                    mode: ReadMode::ConfirmationOnly,
+                }),
+            ),
+        )
+        .unwrap();
+        let pending = runtime.read(&id, &cold).await.unwrap();
+        assert!(matches!(
+            pending.state(),
+            mfm_runtime::RunViewState::Runnable { .. }
+        ));
+        assert!(pending.success().is_none());
+        assert!(pending.failure().is_none());
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        assert_eq!(
+            runtime.read(&id, &cold).await.unwrap().head_digest(),
+            pending.head_digest()
+        );
+        let result = runtime.resume(&id, &cold).await.unwrap();
+        assert!(result.head_sequence() > pending.head_sequence());
+        drop(cold);
+        let terminal = load(
+            document.canonical_bytes(),
+            &resources(
+                "expected",
+                Arc::new(ControlledProvider {
+                    provider: provider.clone(),
+                    mode: ReadMode::Forbidden,
+                }),
+            ),
+        )
+        .unwrap();
+        let inspected = runtime.read(&id, &terminal).await.unwrap();
+        let resumed = runtime.resume(&id, &terminal).await.unwrap();
+        assert_eq!(inspected.success(), result.success());
+        assert_eq!(resumed.head_digest(), result.head_digest());
         if enrichment {
             let output = result
                 .success()
                 .unwrap()
                 .decode::<PortfolioEnrichmentOutput>()
                 .unwrap();
+            assert!(result
+                .success()
+                .unwrap()
+                .decode::<PortfolioSnapshotOutput>()
+                .is_err());
             let published = snapshot_config(&output).unwrap();
             assert_eq!(serde_json::to_value(published).unwrap(), expected_wire);
         } else {
@@ -196,6 +280,10 @@ async fn both_continuations_execute_cold_and_publish_without_source_configuratio
                 .decode::<PortfolioSnapshotOutput>()
                 .unwrap();
             let rendered = render_snapshot(&output).unwrap();
+            assert_eq!(
+                rendered["report"]["totals_by_quote"][0]["total_value_dec"],
+                "126"
+            );
             assert_eq!(
                 rendered["snapshot"]["collections"][0]["holdings"][0]["amount_dec"],
                 "42"
@@ -210,7 +298,7 @@ async fn both_continuations_execute_cold_and_publish_without_source_configuratio
 
 #[tokio::test]
 async fn real_native_failures_project_both_continuations_hot_and_cold_without_config() {
-    for enrichment in [false, true] {
+    for (enrichment, shared) in [(false, false), (true, false), (false, true)] {
         let mut wire = serde_json::to_value(configuration(enrichment)).unwrap();
         let mut prior = wire["input"]["portfolio"]["collections"][0].clone();
         prior["correlation"] = serde_json::json!("prior-collection");
@@ -225,7 +313,14 @@ async fn real_native_failures_project_both_continuations_hot_and_cold_without_co
             .insert(0, prior);
         let config: EvmPortfolioConfig = serde_json::from_value(wire).unwrap();
         let entry = config.entry_point_id().unwrap();
-        let provider = Arc::new(Provider(AtomicUsize::new(0), Some((11, Fault::Rejected))));
+        let provider = Arc::new(Provider(
+            AtomicUsize::new(0),
+            Some(if shared {
+                (12, Fault::IntegrityBlocked)
+            } else {
+                (11, Fault::Rejected)
+            }),
+        ));
         let installed = resources("expected", provider.clone());
         let store = Arc::new(MemoryStore::new());
         let runtime = Runtime::new(store.clone());
@@ -259,14 +354,45 @@ async fn real_native_failures_project_both_continuations_hot_and_cold_without_co
         let hot = serde_json::to_value(mfm_app::SerializableRunView::new(&view).unwrap()).unwrap();
         assert_eq!(
             hot["state"]["product_failure"],
-            serde_json::json!({"kind":"collection_failed", "value":{"ordinal":1,"code":"observation_unavailable"}})
+            serde_json::json!({"kind":"collection_failed", "value":{"ordinal":1,"code":if shared { "integrity_blocked" } else { "observation_unavailable" }}})
         );
         let report = view.failure().unwrap();
-        assert!(report
-            .failure()
-            .original()
-            .decode::<EvmBalanceFailure>()
-            .is_ok());
+        if shared {
+            report
+                .failure()
+                .original()
+                .decode::<mfm_chain::balance::ObserveBalanceFailure>()
+                .unwrap();
+            let mfm_runtime::Failure::Domain {
+                call:
+                    mfm_runtime::StateCall::Read {
+                        call,
+                        intent,
+                        evidence,
+                    },
+                ..
+            } = report.failure()
+            else {
+                panic!("retain the complete failed observation")
+            };
+            let prepared = call.input().decode::<mfm_chain::balance::PreparedBalance<mfm_portfolio::PortfolioContinuation>>().unwrap();
+            let context = prepared.context();
+            let intent = intent
+                .decode::<mfm_chain::balance::ReadBalanceAt>()
+                .unwrap();
+            assert_eq!(intent.route_ref(), context.metadata().route_ref());
+            assert_eq!(intent.target(), context.active_source().unwrap().target());
+            assert!(matches!(
+                evidence.decode::<EvmReadEvidence>().unwrap(),
+                EvmReadEvidence::IntegrityBlocked { .. }
+            ));
+        } else {
+            report
+                .failure()
+                .original()
+                .decode::<EvmBalanceFailure>()
+                .unwrap();
+        }
         let wrong = if enrichment {
             snapshot_failure(
                 report.declaration(),
@@ -288,7 +414,11 @@ async fn real_native_failures_project_both_continuations_hot_and_cold_without_co
         };
         let input = report.failure().call().input();
         let retained: serde_json::Value = serde_json::from_slice(input.canonical_bytes()).unwrap();
-        let context = &retained["checked"]["context"];
+        let context = if shared {
+            &retained["context"]
+        } else {
+            &retained["checked"]["context"]
+        };
         assert_eq!(context["completed"].as_array().unwrap().len(), 1);
         let caller = if enrichment {
             &context["caller"]["progress"]
@@ -298,7 +428,11 @@ async fn real_native_failures_project_both_continuations_hot_and_cold_without_co
         assert_eq!(caller["completed_collections"].as_array().unwrap().len(), 1);
         for field in ["ordinal", "correlation", "route", "request", "source"] {
             let mut forged = retained.clone();
-            let context = &mut forged["checked"]["context"];
+            let context = if shared {
+                &mut forged["context"]
+            } else {
+                &mut forged["checked"]["context"]
+            };
             match field {
                 "ordinal" => context["metadata"]["collection_ordinal"] = serde_json::json!(0),
                 "correlation" => {
@@ -338,7 +472,17 @@ async fn real_native_failures_project_both_continuations_hot_and_cold_without_co
         assert!(project(report.declaration(), &foreign, report.failure().original()).is_err());
         assert!(project(report.declaration(), input, &foreign).is_err());
         let document = runtime.program_document(&id).await.unwrap();
-        let program = load(document.canonical_bytes(), &installed).unwrap();
+        let program = load(
+            document.canonical_bytes(),
+            &resources(
+                "expected",
+                Arc::new(ControlledProvider {
+                    provider: provider.clone(),
+                    mode: ReadMode::Forbidden,
+                }),
+            ),
+        )
+        .unwrap();
         // A valid declaration for another retained State cannot authorize this native input/original.
         assert!(project(
             &program.declarations()[0],
@@ -348,7 +492,15 @@ async fn real_native_failures_project_both_continuations_hot_and_cold_without_co
         .is_err());
         let cold_runtime = Runtime::new(store);
         let cold_view = cold_runtime.read(&id, &program).await.unwrap();
-        assert_eq!(provider.0.load(Ordering::SeqCst), 11);
+        let resumed = cold_runtime.resume(&id, &program).await.unwrap();
+        assert_eq!(
+            resumed.failure().unwrap().canonical_bytes(),
+            report.canonical_bytes()
+        );
+        assert_eq!(
+            provider.0.load(Ordering::SeqCst),
+            if shared { 12 } else { 11 }
+        );
         assert_eq!(cold_view.head_digest(), view.head_digest());
         assert_eq!(
             serde_json::to_value(mfm_app::SerializableRunView::new(&cold_view).unwrap()).unwrap(),
@@ -361,155 +513,13 @@ async fn real_native_failures_project_both_continuations_hot_and_cold_without_co
     }
 }
 
-// Each failure occurs after a complete earlier collection and at least one confirmed source.
-// Reconstruct before execution and again before inspection; neither path can consult configuration.
-#[tokio::test]
-async fn every_observation_stage_projects_its_exact_failure_without_source_configuration() {
-    for enrichment in [false, true] {
-        let mut wire = serde_json::to_value(configuration(enrichment)).unwrap();
-        let collections = wire["input"]["portfolio"]["collections"]
-            .as_array_mut()
-            .unwrap();
-        let mut prior = collections[0].clone();
-        prior["correlation"] = serde_json::json!("prior-collection");
-        prior["request"]["sources"]
-            .as_array_mut()
-            .unwrap()
-            .truncate(1);
-        prior["request"]["sources"][0]["source_id"] = serde_json::json!("prior-native");
-        let mut last = collections[0]["request"]["sources"][0].clone();
-        last["source_id"] = serde_json::json!("last-native");
-        collections[0]["request"]["sources"]
-            .as_array_mut()
-            .unwrap()
-            .push(last);
-        collections.insert(0, prior);
-        let config: EvmPortfolioConfig = serde_json::from_value(wire).unwrap();
-        let unused = Arc::new(Provider(AtomicUsize::new(0), None));
-        let installed = resources("expected", unused.clone());
-        let (program, input) = if enrichment {
-            let input = admit_enrichment(&config, None).unwrap();
-            let program = compile(
-                config.entry_point_id().unwrap(),
-                &mfm_portfolio::PortfolioEnrichmentOperation::default(),
-                &input,
-                &installed,
-                ProgramLimits::new(0),
-            )
-            .unwrap();
-            (program, Object::from_value(&input).unwrap())
-        } else {
-            let input = admit_snapshot(&config, None).unwrap();
-            let program = compile(
-                config.entry_point_id().unwrap(),
-                &mfm_portfolio::PortfolioSnapshotOperation::default(),
-                &input,
-                &installed,
-                ProgramLimits::new(0),
-            )
-            .unwrap();
-            (program, Object::from_value(&input).unwrap())
-        };
-        let bytes = program.canonical_bytes().to_vec();
-        drop(program);
-        drop(config);
-        drop(installed);
-        assert_eq!(unused.0.load(Ordering::SeqCst), 0);
-        for (at, fault, expected, shared) in [
-            (9, Fault::Rejected, "chain_identity_unavailable", false),
-            (10, Fault::Rejected, "observation_unavailable", false),
-            (11, Fault::Rejected, "observation_unavailable", false),
-            (12, Fault::Rejected, "observation_unavailable", true),
-            (13, Fault::Rejected, "observation_unavailable", false),
-            (15, Fault::Rejected, "observation_unavailable", false),
-            (16, Fault::Rejected, "observation_unavailable", true),
-            (12, Fault::SafeFailure, "observation_unavailable", true),
-            (12, Fault::IntegrityBlocked, "integrity_blocked", true),
-            (9, Fault::WrongChain, "chain_identity_unavailable", false),
-            (13, Fault::ChangedAnchor, "anchor_changed", false),
-        ] {
-            let provider = Arc::new(Provider(AtomicUsize::new(0), Some((at, fault))));
-            let installed = resources("expected", provider.clone());
-            let program = load(&bytes, &installed).unwrap();
-            let store = Arc::new(MemoryStore::new());
-            let runtime = Runtime::new(store.clone());
-            let run = RunId::from_digest(DigestBytes::from_array([40; 32]));
-            let view = if enrichment {
-                runtime
-                    .start(
-                        run.clone(),
-                        &program,
-                        &input.decode::<PortfolioEnrichmentInput>().unwrap(),
-                    )
-                    .await
-                    .unwrap()
-            } else {
-                runtime
-                    .start(
-                        run.clone(),
-                        &program,
-                        &input.decode::<PortfolioSnapshotInput>().unwrap(),
-                    )
-                    .await
-                    .unwrap()
-            };
-            let report = view
-                .failure()
-                .unwrap_or_else(|| panic!("expected failure at {at}: {fault:?}"));
-            if shared {
-                report
-                    .failure()
-                    .original()
-                    .decode::<mfm_chain::balance::ObserveBalanceFailure>()
-                    .unwrap();
-            } else {
-                report
-                    .failure()
-                    .original()
-                    .decode::<EvmBalanceFailure>()
-                    .unwrap();
-            }
-            let hot =
-                serde_json::to_value(mfm_app::SerializableRunView::new(&view).unwrap()).unwrap();
-            assert_eq!(
-                hot["state"]["product_failure"],
-                serde_json::json!({
-                    "kind":"collection_failed", "value":{"ordinal":1,"code":expected}
-                }),
-                "{enrichment} {at} {fault:?}"
-            );
-            let document = runtime.program_document(&run).await.unwrap();
-            drop(program);
-            drop(runtime);
-            drop(installed);
-            let cold = load(
-                document.canonical_bytes(),
-                &resources("expected", provider.clone()),
-            )
-            .unwrap();
-            let inspected = Runtime::new(store).read(&run, &cold).await.unwrap();
-            assert_eq!(inspected.head_digest(), view.head_digest());
-            assert_eq!(
-                inspected.failure().unwrap().canonical_bytes(),
-                report.canonical_bytes()
-            );
-            assert_eq!(
-                serde_json::to_value(mfm_app::SerializableRunView::new(&inspected).unwrap())
-                    .unwrap(),
-                hot
-            );
-            assert_eq!(provider.0.load(Ordering::SeqCst), at);
-        }
-    }
-}
-
 // Arithmetic remains an exact native/shared original; only the checked client projects a product
 // code. Portfolio's cross-collection decimal alignment can separately fail at its own Pure State.
 #[tokio::test]
 async fn arithmetic_and_product_failures_project_exact_originals_after_cold_loading() {
     use mfm_chain::balance::{BalanceArithmetic, BalanceCollectionFailure};
-    for (enrichment, stage) in [(false, 0), (true, 0), (false, 1), (true, 1), (false, 2)] {
-        let mut wire = serde_json::to_value(configuration(enrichment)).unwrap();
+    for scale_overflow in [true, false] {
+        let mut wire = serde_json::to_value(configuration(false)).unwrap();
         let collections = wire["input"]["portfolio"]["collections"]
             .as_array_mut()
             .unwrap();
@@ -521,26 +531,8 @@ async fn arithmetic_and_product_failures_project_exact_originals_after_cold_load
             .truncate(1);
         prior["request"]["sources"][0]["source_id"] = serde_json::json!("prior-native");
         prior["request"]["decimals"] = serde_json::json!(18);
-        let native = collections[0]["request"]["sources"][0].clone();
-        let token = collections[0]["request"]["sources"][1].clone();
-        collections[0]["request"]["sources"] = serde_json::Value::Array(
-            (0..if stage == 1 { 9 } else { 1 })
-                .map(|ordinal| {
-                    let mut source = token.clone();
-                    source["source_id"] = serde_json::json!(format!("token-{ordinal}"));
-                    source
-                })
-                .collect(),
-        );
-        collections[0]["request"]["sources"]
-            .as_array_mut()
-            .unwrap()
-            .insert(0, native);
-        collections[0]["request"]["decimals"] = serde_json::json!(match stage {
-            0 => 3,
-            1 => 2,
-            _ => 0,
-        });
+        collections[0]["request"]["decimals"] =
+            serde_json::json!(if scale_overflow { 3 } else { 0 });
         collections.insert(0, prior);
         let config: EvmPortfolioConfig = serde_json::from_value(wire).unwrap();
         let provider = Arc::new(Provider(
@@ -548,29 +540,15 @@ async fn arithmetic_and_product_failures_project_exact_originals_after_cold_load
             Some((0, Fault::MaximumTokenBalance)),
         ));
         let installed = resources("expected", provider.clone());
-        let (program, input) = if enrichment {
-            let input = admit_enrichment(&config, None).unwrap();
-            let program = compile(
-                config.entry_point_id().unwrap(),
-                &mfm_portfolio::PortfolioEnrichmentOperation::default(),
-                &input,
-                &installed,
-                ProgramLimits::new(0),
-            )
-            .unwrap();
-            (program, Object::from_value(&input).unwrap())
-        } else {
-            let input = admit_snapshot(&config, None).unwrap();
-            let program = compile(
-                config.entry_point_id().unwrap(),
-                &mfm_portfolio::PortfolioSnapshotOperation::default(),
-                &input,
-                &installed,
-                ProgramLimits::new(0),
-            )
-            .unwrap();
-            (program, Object::from_value(&input).unwrap())
-        };
+        let input = admit_snapshot(&config, None).unwrap();
+        let program = compile(
+            config.entry_point_id().unwrap(),
+            &mfm_portfolio::PortfolioSnapshotOperation::default(),
+            &input,
+            &installed,
+            ProgramLimits::new(0),
+        )
+        .unwrap();
         let bytes = program.canonical_bytes().to_vec();
         drop(program);
         drop(config);
@@ -579,65 +557,34 @@ async fn arithmetic_and_product_failures_project_exact_originals_after_cold_load
         let program = load(&bytes, &resources("expected", provider.clone())).unwrap();
         let store = Arc::new(MemoryStore::new());
         let runtime = Runtime::new(store.clone());
-        let run = RunId::from_digest(DigestBytes::from_array([70 + stage; 32]));
-        let view = if enrichment {
-            runtime
-                .start(
-                    run.clone(),
-                    &program,
-                    &input.decode::<PortfolioEnrichmentInput>().unwrap(),
-                )
-                .await
-                .unwrap()
-        } else {
-            runtime
-                .start(
-                    run.clone(),
-                    &program,
-                    &input.decode::<PortfolioSnapshotInput>().unwrap(),
-                )
-                .await
-                .unwrap()
-        };
+        let run = RunId::from_digest(DigestBytes::from_array([70 + u8::from(scale_overflow); 32]));
+        let view = runtime.start(run.clone(), &program, &input).await.unwrap();
         let report = view.failure().expect("actual arithmetic domain failure");
         let original = report.failure().original();
-        let arithmetic = match stage {
-            0 => match original.decode::<EvmBalanceFailure>().unwrap() {
-                EvmBalanceFailure::Collection { source } => Some(source),
-                _ => panic!("native confirmation arithmetic failure"),
-            },
-            1 => Some(original.decode::<BalanceCollectionFailure>().unwrap()),
-            _ => {
-                assert!(matches!(
-                    original
-                        .decode::<mfm_portfolio::PortfolioSnapshotFailure>()
-                        .unwrap(),
-                    mfm_portfolio::PortfolioSnapshotFailure::ConsolidationFailed
-                ));
-                None
-            }
-        };
-        if let Some(BalanceCollectionFailure::DecimalCapacityExceeded {
-            operation, size, ..
-        }) = arithmetic
-        {
-            assert_eq!(
-                operation,
-                if stage == 0 {
-                    BalanceArithmetic::Scale
-                } else {
-                    BalanceArithmetic::Sum
-                }
-            );
-            assert_eq!(size.actual(), 81);
-            assert_eq!(size.limit(), 80);
+        if scale_overflow {
+            let EvmBalanceFailure::Collection {
+                source:
+                    BalanceCollectionFailure::DecimalCapacityExceeded {
+                        operation, size, ..
+                    },
+            } = original.decode().unwrap()
+            else {
+                panic!("native confirmation retains its arithmetic original")
+            };
+            assert_eq!(operation, BalanceArithmetic::Scale);
+            assert_eq!((size.actual(), size.limit()), (81, 80));
         } else {
-            assert_eq!(stage, 2);
+            assert!(matches!(
+                original
+                    .decode::<mfm_portfolio::PortfolioSnapshotFailure>()
+                    .unwrap(),
+                mfm_portfolio::PortfolioSnapshotFailure::ConsolidationFailed
+            ));
         }
         let hot = serde_json::to_value(mfm_app::SerializableRunView::new(&view).unwrap()).unwrap();
         assert_eq!(
             hot["state"]["product_failure"],
-            if stage == 2 {
+            if !scale_overflow {
                 serde_json::json!({"kind":"consolidation_failed"})
             } else {
                 serde_json::json!({"kind":"collection_failed","value":{"ordinal":1,"code":"observation_unavailable"}})
@@ -656,9 +603,8 @@ async fn arithmetic_and_product_failures_project_exact_originals_after_cold_load
             serde_json::to_value(mfm_app::SerializableRunView::new(&inspected).unwrap()).unwrap(),
             hot
         );
-        assert_eq!(
-            provider.0.load(Ordering::SeqCst),
-            if stage == 1 { 53 } else { 13 }
-        );
+        assert_eq!(provider.0.load(Ordering::SeqCst), 13);
     }
 }
+
+mod projection;
