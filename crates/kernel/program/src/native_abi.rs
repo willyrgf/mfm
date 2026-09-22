@@ -1,8 +1,6 @@
 //! Exact selected semantic/native code association retained in each capability occurrence.
 
-use crate::{
-    capability_contract_ref, effect_capability_contract_ref, nominal_contract_ref, Result,
-};
+use crate::{capability_ref, nominal_contract_ref, Result};
 use mfm_capabilities::{
     EffectCapabilityContract, EffectImplementation, ReadCapabilityContract, ReadImplementation,
 };
@@ -28,18 +26,27 @@ impl NativeAbi {
         C: ReadCapabilityContract,
         I: ReadImplementation<C>,
     {
-        Self::from_contracts(
-            I::implementation_id()?,
-            capability_contract_ref::<C>()?,
-            [
-                nominal_contract_ref::<C::Intent>()?,
-                nominal_contract_ref::<C::Evidence>()?,
-                nominal_contract_ref::<I::NativeIntent>()?,
-                nominal_contract_ref::<I::NativeEvidence>()?,
-                nominal_contract_ref::<I::OperationalError>()?,
-                nominal_contract_ref::<I::Binding>()?,
-            ],
-        )
+        Self::read_from_contracts::<C, I>([
+            nominal_contract_ref::<C::Intent>()?,
+            nominal_contract_ref::<C::Evidence>()?,
+            nominal_contract_ref::<I::NativeIntent>()?,
+            nominal_contract_ref::<I::NativeEvidence>()?,
+            nominal_contract_ref::<I::OperationalError>()?,
+            nominal_contract_ref::<I::Binding>()?,
+        ])
+    }
+    pub(crate) fn read_from_contracts<C, I>(contracts: [ContentRef; 6]) -> Result<Self>
+    where
+        C: ReadCapabilityContract,
+        I: ReadImplementation<C>,
+    {
+        let capability = capability_ref(
+            "read",
+            C::contract_id()?,
+            contracts[0].clone(),
+            contracts[1].clone(),
+        )?;
+        Self::from_contracts(I::implementation_id()?, capability, contracts)
     }
     /// Derives the complete exact ABI from its owning Effect capability and implementation.
     pub fn effect<C, I>() -> Result<Self>
@@ -47,18 +54,27 @@ impl NativeAbi {
         C: EffectCapabilityContract,
         I: EffectImplementation<C>,
     {
-        Self::from_contracts(
-            I::implementation_id()?,
-            effect_capability_contract_ref::<C>()?,
-            [
-                nominal_contract_ref::<C::Command>()?,
-                nominal_contract_ref::<C::Evidence>()?,
-                nominal_contract_ref::<I::NativeCommand>()?,
-                nominal_contract_ref::<I::NativeEvidence>()?,
-                nominal_contract_ref::<I::OperationalError>()?,
-                nominal_contract_ref::<I::Binding>()?,
-            ],
-        )
+        Self::effect_from_contracts::<C, I>([
+            nominal_contract_ref::<C::Command>()?,
+            nominal_contract_ref::<C::Evidence>()?,
+            nominal_contract_ref::<I::NativeCommand>()?,
+            nominal_contract_ref::<I::NativeEvidence>()?,
+            nominal_contract_ref::<I::OperationalError>()?,
+            nominal_contract_ref::<I::Binding>()?,
+        ])
+    }
+    pub(crate) fn effect_from_contracts<C, I>(contracts: [ContentRef; 6]) -> Result<Self>
+    where
+        C: EffectCapabilityContract,
+        I: EffectImplementation<C>,
+    {
+        let capability = capability_ref(
+            "effect",
+            C::contract_id()?,
+            contracts[0].clone(),
+            contracts[1].clone(),
+        )?;
+        Self::from_contracts(I::implementation_id()?, capability, contracts)
     }
     fn from_contracts(
         id: mfm_ids::StableId,

@@ -81,9 +81,12 @@ pub struct HandlerAbi {
 impl HandlerAbi {
     /// Derives an exact implementation/parameter association.
     pub fn of<H: Handler>() -> Result<Self> {
+        Self::from_contract::<H>(nominal_contract_ref::<H::Params>()?)
+    }
+    pub(crate) fn from_contract<H: Handler>(params: ContentRef) -> Result<Self> {
         Ok(Self {
             implementation: implementation_ref("mfm.handler", H::implementation_id()?)?,
-            params: nominal_contract_ref::<H::Params>()?,
+            params,
         })
     }
     /// Handler implementation identity.
@@ -107,9 +110,12 @@ pub struct HandlerBinding {
 impl HandlerBinding {
     /// Binds a static handler to its immutable checked parameters.
     pub fn new<H: Handler>(params: H::Params) -> Result<Self> {
+        Self::from_abi(HandlerAbi::of::<H>()?, &params)
+    }
+    pub(crate) fn from_abi<T: MfmValue>(abi: HandlerAbi, params: &T) -> Result<Self> {
         Ok(Self {
-            abi: HandlerAbi::of::<H>()?,
-            params: PolicyParams::new(&params)?,
+            abi,
+            params: PolicyParams::new(params)?,
         })
     }
 

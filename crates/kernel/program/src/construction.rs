@@ -39,15 +39,6 @@ enum Code {
     Effect(NativeAbi),
 }
 impl StateAbi {
-    fn of<S: State>() -> Result<Self> {
-        Ok(Self {
-            implementation: state_implementation_ref::<S>()?,
-            input: nominal_contract_ref::<S::Input>()?,
-            output: nominal_contract_ref::<S::Output>()?,
-            failure: nominal_contract_ref::<S::Failure>()?,
-            execution: Code::Pure,
-        })
-    }
     fn recorded(state: &StateDeclaration) -> Self {
         Self {
             implementation: state.state_implementation_ref().clone(),
@@ -78,7 +69,7 @@ impl Contracts {
             handlers: BTreeMap::new(),
         }
     }
-    pub(crate) fn insert<T: MfmValue>(&mut self) -> Result<()> {
+    pub(crate) fn insert<T: MfmValue>(&mut self) -> Result<ContentRef> {
         let (reference, descriptor) = derive_nominal_contract::<T>()?;
         let claim = (TypeId::of::<T>(), descriptor);
         if let Some(old) = self.values.get(&reference) {
@@ -91,15 +82,18 @@ impl Contracts {
                 ));
             }
         } else {
-            self.values.insert(reference, claim);
+            self.values.insert(reference.clone(), claim);
         }
-        Ok(())
+        Ok(reference)
     }
     fn state<S: State>(&mut self) -> Result<StateAbi> {
-        self.insert::<S::Input>()?;
-        self.insert::<S::Output>()?;
-        self.insert::<S::Failure>()?;
-        let abi = StateAbi::of::<S>()?;
+        let abi = StateAbi {
+            implementation: state_implementation_ref::<S>()?,
+            input: self.insert::<S::Input>()?,
+            output: self.insert::<S::Output>()?,
+            failure: self.insert::<S::Failure>()?,
+            execution: Code::Pure,
+        };
         let owner = TypeId::of::<S>();
         if self.states.get(&abi).is_some_and(|old| *old != owner) {
             return Err(rejection(
@@ -114,8 +108,8 @@ impl Contracts {
         Ok(abi)
     }
     fn handler<H: Handler>(&mut self) -> Result<HandlerAbi> {
-        self.insert::<H::Params>()?;
-        let abi = HandlerAbi::of::<H>()?;
+        let params = self.insert::<H::Params>()?;
+        let abi = HandlerAbi::from_contract::<H>(params)?;
         let owner = TypeId::of::<H>();
         if self.handlers.get(&abi).is_some_and(|old| *old != owner) {
             return Err(rejection(
@@ -144,9 +138,9 @@ pub(crate) struct Policy {
     targets: Vec<(u64, TypeId, ContentRef)>,
 }
 impl Policy {
-    fn fallback() -> Result<Self> {
+    fn fallback(abi: HandlerAbi) -> Result<Self> {
         Ok(Self {
-            binding: HandlerBinding::new::<Stop>(NoParams)?,
+            binding: HandlerBinding::from_abi(abi, &NoParams)?,
             handle: executable::handle::<Stop>,
             allowances: RecoveryAllowances::default(),
             targets: Vec::new(),
@@ -169,12 +163,12 @@ pub(crate) struct Draft {
 impl Draft {
     fn new() -> Result<Self> {
         let mut contracts = Contracts::new();
-        contracts.handler::<Stop>()?;
+        let fallback = contracts.handler::<Stop>()?;
         Ok(Self {
             contracts,
             declarations: Vec::new(),
             executables: Vec::new(),
-            policy: Policy::fallback()?,
+            policy: Policy::fallback(fallback)?,
             depth: 0,
             scope: 0,
             next_scope: 1,
@@ -184,14 +178,20 @@ impl Draft {
         })
     }
     pub(crate) fn pure<S: PureState>(&mut self) -> Result<()> {
-        let executable = pure_executable::<S>(&self.policy.binding, self.policy.handle)?;
-        self.emit::<S>(Execution::Pure {}, executable)
+        let abi = self.contracts.state::<S>()?;
+        let executable =
+            pure_executable::<S>(&abi.failure, &self.policy.binding, self.policy.handle)?;
+        self.emit(abi, Execution::Pure {}, executable)
     }
-    fn emit<S: State>(&mut self, execution: Execution, executable: ExecutableState) -> Result<()> {
+    fn emit(
+        &mut self,
+        abi: StateAbi,
+        execution: Execution,
+        executable: ExecutableState,
+    ) -> Result<()> {
         if self.declarations.len() >= MAX_STATES {
             return Err(ProgramError::Capacity);
         }
-        let abi = self.contracts.state::<S>()?;
         self.targets.push(self.policy.targets.clone());
         self.declarations.push(StateData {
             state_implementation_ref: abi.implementation,
@@ -219,8 +219,7 @@ impl Draft {
         self.declarations.len()
     }
     pub(crate) fn checkpoint<M: CheckpointMarker>(&mut self) -> Result<()> {
-        self.contracts.insert::<M::Context>()?;
-        let input = nominal_contract_ref::<M::Context>()?;
+        let input = self.contracts.insert::<M::Context>()?;
         let position = self.position();
         if let Some((previous, _)) = self
             .markers
@@ -300,7 +299,7 @@ impl Draft {
     where
         P: ResolveDefaults<C>,
     {
-        self.contracts.handler::<P::Handler>()?;
+        let handler_abi = self.contracts.handler::<P::Handler>()?;
         let selected = P::resolve(config)?;
         let parent = self.policy.clone();
         let parent_scope = self.scope;
@@ -310,7 +309,7 @@ impl Draft {
             .checked_add(1)
             .ok_or(ProgramError::Capacity)?;
         if let Some(params) = selected.handler {
-            self.policy.binding = HandlerBinding::new::<P::Handler>(params)?;
+            self.policy.binding = HandlerBinding::from_abi(handler_abi, &params)?;
             self.policy.handle = executable::handle::<P::Handler>;
             self.policy.targets = crate::typed_source::targets::<P::Targets>()?
                 .into_iter()
@@ -433,7 +432,7 @@ impl<R> Inventory<R> {
         Ok(())
     }
     pub(crate) fn value<T: MfmValue>(&mut self) -> Result<()> {
-        self.contracts.insert::<T>()
+        self.contracts.insert::<T>().map(|_| ())
     }
     pub(crate) fn handler<H: Handler>(&mut self) -> Result<()> {
         let abi = self.contracts.handler::<H>()?;
@@ -444,19 +443,20 @@ impl<R> Inventory<R> {
         let abi = self.contracts.state::<S>()?;
         self.component(ComponentKind::PureState, S::state_id()?, S::description())?;
         self.states.insert(abi, |state, _, _, handle| {
-            pure_executable::<S>(state.handler(), handle)
+            pure_executable::<S>(state.failure_contract_ref(), state.handler(), handle)
         });
         Ok(())
     }
 }
 
 fn pure_executable<S: PureState>(
+    failure: &ContentRef,
     binding: &HandlerBinding,
     handle: executable::Handle,
 ) -> Result<ExecutableState> {
     Ok(ExecutableState {
         mode: ExecutableMode::Pure {
-            callbacks: callback::PureCallbacks::new::<S>(nominal_contract_ref::<S::Failure>()?),
+            callbacks: callback::PureCallbacks::new::<S>(failure.clone()),
         },
         handle,
         params: executable::parameters(binding)?,
@@ -478,17 +478,17 @@ where
     R: ProgramEnvironment,
 {
     let mut draft = Draft::new()?;
-    draft.contracts.insert::<S::Input>()?;
-    draft.contracts.insert::<S::Output>()?;
+    let input_contract = draft.contracts.insert::<S::Input>()?;
+    let output_contract = draft.contracts.insert::<S::Output>()?;
     let initial = Object::from_value(input)
         .map_err(|cause| ProgramError::Diagnostic(cause.into_diagnostic("compile_input")))?;
     source.walk(input, resources, &mut draft)?;
     draft.lower()?;
     let document = ProgramDocument::new(
         entry,
-        nominal_contract_ref::<S::Input>()?,
+        input_contract,
         initial.value_ref().clone(),
-        nominal_contract_ref::<S::Output>()?,
+        output_contract,
         draft.declarations,
         limits,
         draft.bindings.into_values().collect(),
@@ -581,20 +581,22 @@ where
 // associated types and typed adapter calls remain monomorphized at each concrete leaf.
 macro_rules! native_leaf {
     ($method:ident, $mode:ident, $state:ident, $capability:ident, $implementation:ident, $binder:ident,
-     $bind:ident, $leaf:ident, $callbacks:ident, $adapter:ident, $request:ident, $native:ident) => {
+     $bind:ident, $leaf:ident, $callbacks:ident, $adapter:ident, $request:ident, $native:ident, $from_contracts:ident) => {
         impl Contracts {
             fn $method<C, I>(&mut self) -> Result<NativeAbi>
             where
                 C: mfm_capabilities::$capability,
                 I: mfm_capabilities::$implementation<C>,
             {
-                self.insert::<C::$request>()?;
-                self.insert::<C::Evidence>()?;
-                self.insert::<I::$native>()?;
-                self.insert::<I::NativeEvidence>()?;
-                self.insert::<I::OperationalError>()?;
-                self.insert::<I::Binding>()?;
-                let abi = NativeAbi::$method::<C, I>()?;
+                let contracts = [
+                    self.insert::<C::$request>()?,
+                    self.insert::<C::Evidence>()?,
+                    self.insert::<I::$native>()?,
+                    self.insert::<I::NativeEvidence>()?,
+                    self.insert::<I::OperationalError>()?,
+                    self.insert::<I::Binding>()?,
+                ];
+                let abi = NativeAbi::$from_contracts::<C, I>(contracts)?;
                 let key = (abi.capability.clone(), I::implementation_id()?);
                 let claim = (TypeId::of::<(C, I)>(), abi.clone());
                 if self.native.get(&key).is_some_and(|old| old != &claim) {
@@ -621,17 +623,20 @@ macro_rules! native_leaf {
                 R: $binder<C, I>,
             {
                 let abi = self.contracts.$method::<C, I>()?;
+                let state_abi = self.contracts.state::<S>()?;
                 let object = Object::from_value(binding).map_err(|cause| {
                     ProgramError::Diagnostic(cause.into_diagnostic("compile_binding"))
                 })?;
                 let executable = $leaf::<S, C, I, R>(
                     &object,
                     &abi,
+                    &state_abi.failure,
                     resources,
                     &self.policy.binding,
                     self.policy.handle,
                 )?;
-                self.emit::<S>(
+                self.emit(
+                    state_abi,
                     Execution::$mode {
                         abi,
                         binding_ref: object.value_ref().clone(),
@@ -673,7 +678,7 @@ macro_rules! native_leaf {
                                 "reason": "binding_not_retained", "binding": binding_ref, "abi": abi,
                             })))?;
                         let object = &bindings[index];
-                        $leaf::<S, C, I, R>(object, abi, resources, state.handler(), handle)
+                        $leaf::<S, C, I, R>(object, abi, state.failure_contract_ref(), resources, state.handler(), handle)
                     });
                 Ok(())
             }
@@ -681,6 +686,7 @@ macro_rules! native_leaf {
         fn $leaf<S, C, I, R>(
             object: &Object,
             abi: &NativeAbi,
+            failure: &ContentRef,
             resources: &R,
             handler: &HandlerBinding,
             handle: executable::Handle,
@@ -702,7 +708,7 @@ macro_rules! native_leaf {
             Ok(ExecutableState {
                 mode: ExecutableMode::$mode {
                     callbacks: callback::$callbacks::new::<S, C, I>(
-                        nominal_contract_ref::<S::Failure>()?,
+                        failure.clone(),
                         abi.implementation.clone(),
                         object.value_ref().clone(),
                         std::sync::Arc::clone(&binding),
@@ -735,7 +741,8 @@ native_leaf!(
     ReadCallbacks,
     read_adapter,
     Intent,
-    NativeIntent
+    NativeIntent,
+    read_from_contracts
 );
 native_leaf!(
     effect,
@@ -749,5 +756,6 @@ native_leaf!(
     EffectCallbacks,
     effect_adapter,
     Command,
-    NativeCommand
+    NativeCommand,
+    effect_from_contracts
 );

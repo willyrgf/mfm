@@ -247,7 +247,7 @@ impl<R, S: PureState> Discover<R> for Pure<S> {
 }
 impl<C: ?Sized, R, T: MfmValue> Walk<C, R> for Identity<T> {
     fn walk(&self, _: &C, _: &R, draft: &mut Draft) -> Result<()> {
-        draft.contracts.insert::<T>()
+        draft.contracts.insert::<T>().map(|_| ())
     }
 }
 impl<R, T: MfmValue> Discover<R> for Identity<T> {
