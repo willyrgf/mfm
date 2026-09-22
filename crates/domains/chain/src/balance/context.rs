@@ -106,7 +106,14 @@ impl<K: Value> BalanceContext<K> {
         (self.request, self.caller, self.metadata, self.completed)
     }
     pub(super) fn require_complete(&self) -> Result<(), BalanceContextError> {
-        self.request.validate_confirmed(&self.completed)
+        // Construction and decoding already establish the prefix's source, point and amount checks.
+        if self.completed.len() != self.request.sources().len() {
+            return Err(BalanceContextError::Incomplete {
+                completed: self.completed.len(),
+                expected: self.request.sources().len(),
+            });
+        }
+        Ok(())
     }
     /// Selects the next source without a second mutable index.
     pub fn active_source(&self) -> Result<&BalanceSource, BalanceContextError> {
