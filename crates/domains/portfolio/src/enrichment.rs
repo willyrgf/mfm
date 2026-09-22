@@ -51,25 +51,9 @@ impl EnrichmentContinuation {
         context: &BalanceContext<Self>,
         code: BalanceFailureCode,
     ) -> Result<PortfolioSnapshotFailure, InvocationDiagnostic> {
-        context
-            .caller()
-            .validate()
-            .map_err(|cause| cause.into_diagnostic("project_enrichment_failure"))?;
         collection::project_failure(context, &context.caller().progress, code)
     }
-    fn new(
-        progress: PortfolioContinuation,
-        required_sources: Vec<String>,
-    ) -> Result<Self, PortfolioError> {
-        let value = Self {
-            progress,
-            required_sources,
-        };
-        value.validate()?;
-        Ok(value)
-    }
     fn validate(&self) -> Result<(), PortfolioError> {
-        self.progress.validate()?;
         validate_candidates(&self.progress.input, &self.required_sources)
     }
 }
@@ -101,8 +85,7 @@ impl PortfolioEnrichmentInput {
         value.validate()?;
         Ok(value)
     }
-    pub(super) fn validate(&self) -> Result<(), PortfolioError> {
-        self.input.validate()?;
+    fn validate(&self) -> Result<(), PortfolioError> {
         validate_candidates(&self.input, &self.required_sources)
     }
     /// Exact admitted source revision and enrichment linkage, when supplied.
@@ -147,10 +130,10 @@ impl PureState for InitializeEnrichment {
         input: Self::Input,
     ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::InvocationDiagnostic>
     {
-        PortfolioContinuation::new(input.input, vec![])
-            .and_then(|progress| EnrichmentContinuation::new(progress, input.required_sources))
-            .map(portfolio_success)
-            .map_err(|source| source.into_diagnostic("initialize_enrichment"))
+        Ok(portfolio_success(EnrichmentContinuation {
+            progress: PortfolioContinuation::new(input.input),
+            required_sources: input.required_sources,
+        }))
     }
 }
 impl PureState for EnterEnrichmentCollection {
@@ -178,9 +161,10 @@ impl PureState for ResumeEnrichmentCollection {
             confirmed,
             total_scaled,
         )?;
-        EnrichmentContinuation::new(progress, continuation.required_sources)
-            .map(portfolio_success)
-            .map_err(|source| source.into_diagnostic("resume_enrichment_collection"))
+        Ok(portfolio_success(EnrichmentContinuation {
+            progress,
+            required_sources: continuation.required_sources,
+        }))
     }
 }
 
@@ -365,7 +349,6 @@ impl PureState for ResolvePortfolioAssets {
     ) -> Result<ProposedStateOutcome<Self::Output, Self::Failure>, mfm_values::InvocationDiagnostic>
     {
         let resolve = || -> Result<PortfolioEnrichmentOutput, PortfolioError> {
-            input.validate()?;
             if input.progress.next_collection_ordinal().is_some() {
                 return Err(PortfolioError::InvalidContinuation);
             }

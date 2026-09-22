@@ -163,9 +163,6 @@ fn validate_demand_parts<'a>(
     quotes: &[QuoteCode],
     collections: impl ExactSizeIterator<Item = &'a PortfolioCollectionDemand> + Clone,
 ) -> Result<(), PortfolioError> {
-    for collection in collections.clone() {
-        collection.validate()?;
-    }
     if !quotes.contains(quote)
         || quotes.len() > 2
         || quotes
@@ -261,7 +258,7 @@ impl PortfolioSnapshotInput {
         &self.quotes
     }
 
-    /// Validates a decoded snapshot input and every declaration-ordered child request.
+    /// Checks Portfolio-wide relationships among the already checked child requests.
     fn validate(&self) -> Result<(), PortfolioError> {
         validate_demand_parts(
             &self.portfolio_id,
@@ -301,20 +298,14 @@ impl_checked_deserialize!(PortfolioContinuation {
 });
 
 impl PortfolioContinuation {
-    fn new(
-        input: PortfolioSnapshotInput,
-        completed_collections: Vec<PortfolioSnapshotCollection>,
-    ) -> Result<Self, PortfolioError> {
-        let continuation = Self {
+    fn new(input: PortfolioSnapshotInput) -> Self {
+        Self {
             input,
-            completed_collections,
-        };
-        continuation.validate()?;
-        Ok(continuation)
+            completed_collections: Vec::new(),
+        }
     }
 
     fn validate(&self) -> Result<(), PortfolioError> {
-        self.input.validate()?;
         let next = self.completed_collections.len();
         if next > self.input.collections.len() {
             return Err(PortfolioError::InvalidContinuation);
@@ -324,7 +315,7 @@ impl PortfolioContinuation {
                 .input
                 .collection(ordinal)
                 .ok_or(PortfolioError::InvalidContinuation)?;
-            completed_collection_scaled_total(result, demand, ordinal as u32)?;
+            validate_completed_collection(result, demand, ordinal as u32)?;
         }
         Ok(())
     }
@@ -336,12 +327,11 @@ impl PortfolioContinuation {
     }
 }
 
-fn completed_collection_scaled_total(
+fn validate_completed_collection(
     result: &PortfolioSnapshotCollection,
     demand: &PortfolioCollectionDemand,
     ordinal: u32,
-) -> Result<String, PortfolioError> {
-    result.validate()?;
+) -> Result<(), PortfolioError> {
     if result.metadata.collection_ordinal() != ordinal
         || result.metadata.correlation() != demand.correlation
         || result.metadata.route_ref() != demand.route_ref()?
@@ -355,7 +345,7 @@ fn completed_collection_scaled_total(
     {
         return Err(PortfolioError::InvalidContinuation);
     }
-    Ok(result.total_scaled.clone())
+    Ok(())
 }
 
 /// Confirmed shared balances and checked aggregate, without native presentation fields.
@@ -525,7 +515,6 @@ fn collection_total_value_dec(
     collection: &PortfolioSnapshotCollection,
     source_ids: &mut BTreeSet<String>,
 ) -> Option<String> {
-    collection.validate().ok()?;
     for balance in &collection.balances {
         if !source_ids.insert(balance.source().source_id().to_owned()) {
             return None;
@@ -681,9 +670,7 @@ fn initialize_portfolio(
     ProposedStateOutcome<PortfolioContinuation, PortfolioSnapshotFailure>,
     mfm_values::InvocationDiagnostic,
 > {
-    PortfolioContinuation::new(input, Vec::new())
-        .map(portfolio_success)
-        .map_err(|source| source.into_diagnostic("initialize_portfolio"))
+    Ok(portfolio_success(PortfolioContinuation::new(input)))
 }
 
 mod collection;
@@ -694,9 +681,6 @@ fn consolidate_portfolio(
     ProposedStateOutcome<PortfolioSnapshotOutput, PortfolioSnapshotFailure>,
     mfm_values::InvocationDiagnostic,
 > {
-    input
-        .validate()
-        .map_err(|source| source.into_diagnostic("consolidate_portfolio"))?;
     if input.next_collection_ordinal().is_some() {
         return Err(PortfolioError::InvalidContinuation.into_diagnostic("consolidate_portfolio"));
     }
@@ -707,12 +691,7 @@ fn consolidate_portfolio(
         completed_collections,
     } = input;
     for (ordinal, collection) in completed_collections.iter().enumerate() {
-        let demand = input.collection(ordinal).ok_or_else(|| {
-            PortfolioError::InvalidContinuation.into_diagnostic("consolidate_portfolio")
-        })?;
-        let total_scaled = completed_collection_scaled_total(collection, demand, ordinal as u32)
-            .map_err(|source| source.into_diagnostic("consolidate_portfolio"))?;
-        let total_value_dec = decimal_amount(&total_scaled, demand.request.decimals().get());
+        let total_value_dec = decimal_amount(&collection.total_scaled, collection.decimals.get());
         let total_value_dec = canonical_decimal(total_value_dec);
         totals.push(total_value_dec.clone());
         summaries.push(PortfolioCollectionSummary {

@@ -6,10 +6,7 @@ use mfm_values::MfmValue as Value;
 
 fn sources<K: Value>(
     demand: &PortfolioCollectionDemand,
-) -> mfm_program::Result<Vec<Operation<BalanceSourceDefinition<K>>>> {
-    demand.validate().map_err(|source| {
-        mfm_program::ProgramError::Diagnostic(source.into_diagnostic("plan_portfolio_collection"))
-    })?;
+) -> Vec<Operation<BalanceSourceDefinition<K>>> {
     demand
         .request
         .sources()
@@ -17,12 +14,12 @@ fn sources<K: Value>(
         .zip(&demand.executions)
         .enumerate()
         .map(|(ordinal, (source, execution))| {
-            Ok(Operation::new(BalanceSourceDefinition::new(
+            Operation::new(BalanceSourceDefinition::new(
                 source.clone(),
                 ordinal as u32,
                 demand.request.decimals(),
                 execution.clone(),
-            )))
+            ))
         })
         .collect()
 }
@@ -48,7 +45,7 @@ macro_rules! collection {
                     self,
                     (
                         Pure::default(),
-                        sources(&self.demand)?,
+                        sources(&self.demand),
                         Pure::default(),
                         Pure::default(),
                     ),
@@ -96,9 +93,6 @@ impl Plan<PortfolioSnapshotInput> for SnapshotDefinition {
         &'a self,
         input: &'a Self::Config,
     ) -> mfm_program::Result<(&'a Self::Config, Self::Body)> {
-        input.validate().map_err(|source| {
-            mfm_program::ProgramError::Diagnostic(source.into_diagnostic("plan_portfolio_snapshot"))
-        })?;
         Ok((
             input,
             (
@@ -136,11 +130,6 @@ impl Plan<PortfolioEnrichmentInput> for EnrichmentDefinition {
         &'a self,
         input: &'a Self::Config,
     ) -> mfm_program::Result<(&'a Self::Config, Self::Body)> {
-        input.validate().map_err(|source| {
-            mfm_program::ProgramError::Diagnostic(
-                source.into_diagnostic("plan_portfolio_enrichment"),
-            )
-        })?;
         Ok((
             input,
             (

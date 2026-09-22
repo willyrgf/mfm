@@ -81,6 +81,8 @@ impl PureState for ResumePortfolioCollection {
     }
 }
 
+// Both callers decompose a checked BalanceCollectionCompletion; its source prefix and aggregate
+// are already qualified. This handoff additionally checks correspondence to the Portfolio demand.
 pub(super) fn resume(
     mut continuation: PortfolioContinuation,
     request: BalanceRequest,
@@ -123,10 +125,11 @@ pub(super) fn resume(
         executions: demand.executions.clone(),
         total_scaled,
     };
-    continuation.completed_collections.push(collection);
-    continuation
+    // The checked continuation retains its prefix; only this newly assembled result needs admission.
+    collection
         .validate()
         .map_err(|source| source.into_diagnostic("resume_portfolio_collection"))?;
+    continuation.completed_collections.push(collection);
     Ok(continuation)
 }
 
@@ -135,9 +138,6 @@ pub(super) fn project_failure<K: mfm_values::MfmValue>(
     continuation: &PortfolioContinuation,
     code: BalanceFailureCode,
 ) -> Result<PortfolioSnapshotFailure, InvocationDiagnostic> {
-    continuation
-        .validate()
-        .map_err(|cause| cause.into_diagnostic("project_collection_failure"))?;
     let (request, metadata) = enter(continuation)?;
     if context.request() != &request {
         return Err(rejected(HandoffError::Request));

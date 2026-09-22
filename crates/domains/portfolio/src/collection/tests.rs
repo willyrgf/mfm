@@ -148,6 +148,17 @@ fn resumption_preserves_product_fields_and_rejects_substituted_handoff_facts() {
     else {
         panic!("expected resumed Portfolio")
     };
+    // Cold admission still checks both a child's total and its relation to retained demand.
+    let wire = serde_json::to_value(&output).unwrap();
+    for (path, value) in [
+        ("/completed_collections/0/total_scaled", "999"),
+        ("/completed_collections/0/metadata/correlation", "another"),
+        ("/input/collections/0/correlation", "another"),
+    ] {
+        let mut changed = wire.clone();
+        *changed.pointer_mut(path).unwrap() = serde_json::json!(value);
+        assert!(serde_json::from_str::<PortfolioContinuation>(&changed.to_string()).is_err());
+    }
     let cold = Object::from_value(&output)
         .unwrap()
         .decode::<PortfolioContinuation>()
