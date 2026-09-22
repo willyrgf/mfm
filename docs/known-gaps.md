@@ -92,8 +92,9 @@ The following are missing capabilities, not current API guarantees:
 
 ## Deferred product execution and extension scenarios
 
-Runtime owns intrinsic error classification, handler selection, bounded retry/checkpoint restart,
-Effect barriers, canonical failure reports and stopped-invocation observations. `execute` drives
+Runtime classifies acknowledged originals through their typed callbacks, invokes the selected handler,
+and authorizes bounded retry/checkpoint restart. It owns Effect barriers, canonical failure reports
+and stopped-invocation observations. `execute` drives
 ordinary progression; native Pending adapters await readiness or pace reconciliation. There is no
 separate RuntimeDriver, Runtime deadline or configurable polling layer to add as part of this DSL.
 
@@ -111,5 +112,5 @@ separate RuntimeDriver, Runtime deadline or configurable polling layer to add as
 
 Current consuming acceptance and independent oracles are owned by
 [build and verification](build-and-verification.md#acceptance-scenarios-and-independent-oracles).
-Future scenarios never justify removing currently exercised assertions. Framework extension tests
+Future scenarios do not replace coverage of retained observable guarantees. Framework extension tests
 may define new semantics; ordinary selection/composition consumers must use maintained contracts.

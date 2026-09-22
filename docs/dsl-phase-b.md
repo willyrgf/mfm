@@ -1,6 +1,6 @@
 # DSL production verification record
 
-This record separates the verified production cutover from subsequent cleanup. Current API and
+This record separates the original production cutover from the verified follow-up cleanup. Current API and
 invariants are owned by [design](design.md), [architecture](architecture.md) and the
 [authoring guide](capability-authoring.md). Current commands and independent acceptance oracles are
 owned by [build and verification](build-and-verification.md).
@@ -117,7 +117,7 @@ and removals can differ from default diff statistics, while net counts agree. Pr
 moved from Runtime/EVM to Program/shared Chain; narrower proof-relative growth does not describe
 full test/documentation cost. Source comments and test fixtures are not excluded to improve totals.
 
-## Cleanup candidate
+## Verified cleanup
 
 The follow-up implements the reviewed consumer, diagnostic, construction, validation and testing
 corrections. Flat Report semantics and native Read canonicalization/materialization remain intact.
@@ -191,12 +191,67 @@ latency. No timing assertion or benchmark framework was added to the ordinary te
 The first cleanup CI attempt exposed an Application test that still required whole-State diagnostic
 serialization. Its assertion now checks the reviewed identities and preserves exact transport
 forwarding; the focused Application regression passed. The correction is included in the diagnostic
-commit above. The final CI result and full-branch accounting are pending below. Historical passing CI must not
-be attributed to this candidate until its exact combined tree passes.
+commit above. The corrected combined source passed final CI.
+
+### Final integrated verification
+
+`nix run .#ci` passed on source commit `8b681167d40899ed393c0a0f2ba500c03b70f4f4`,
+tree `35658ae41f5aac9832fde447b993cb917a4b12bb`: nine tasks, zero failures, 631.599 seconds.
+The evidence update and final classification-ownership wording changes after that commit are
+Markdown only; executable code, tests and the task graph match the tested source.
+
+Machine-readable result:
+`/home/willyrgf.linux/.local/state/nixfied/mfm/dev/0/runs/run-4143497-1790103505078094245/artifacts/run-summary.json`.
+All tasks have exit code 0, success true, and no cancellation or timeout.
+
+| Task | Result | Seconds |
+| --- | --- | ---: |
+| fmt | Passed | 0.459 |
+| sqlx-check | Passed | 3.080 |
+| clippy | Passed | 10.296 |
+| cargo-check | Passed | 8.097 |
+| cargo-test | 329 passed; seven managed cases ignored here | 297.057 |
+| doc-tests | Five passed | 8.896 |
+| postgres-test | 13 passed across isolated/full selections | 14.813 |
+| client-e2e | Managed CLI/REST cold publication passed | 118.246 |
+| effect-e2e | Two lifecycle, two recipe and one managed 42/84 test passed | 168.285 |
+
+The first failed CI attempt is retained as
+`run-4135499-1790103258049051600`; it identified the obsolete Application diagnostic assertion,
+not a production execution failure. The focused correction and final combined pass above supersede
+that result. No failed or pending managed gate remains for this cleanup.
+
+### Final accounting
+
+Physical-line accounting includes every committed addition, including replacement tests and this
+final evidence update. Compare the reviewed Phase B revision and the pinned original branch base:
+
+```sh
+python3 docs/dsl-phase-b-loc.py f89faca9 HEAD
+python3 docs/dsl-phase-b-loc.py 6d47027c9a6d2f0a07cae4cd78a0fbd3e0346c10 HEAD
+```
+
+| Category | Cleanup delta from f89faca9 | Full branch delta from origin/dev |
+| --- | ---: | ---: |
+| Production Rust | +91 | +3,991 |
+| Test Rust | -368 | +9,634 |
+| Documentation | -4,477 | +686 |
+| Other | -58 | +99 |
+| Total | -4,812 | +14,410 |
+
+The production increase supplies missing maintained client admission/publication and explicit
+reviewed-field/checked-reference construction. It is not an additional compiler or Runtime layer.
+Test reduction is smaller than the initial 600–1,000-line estimate: actual consuming examples and
+stronger replacement assertions offset fixture deletion. The two redesigned suites still remove 67
+full Runtime histories while retaining direct coverage of the distinct fault boundaries. The
+full branch's remaining growth is reported explicitly rather than hidden by the cleanup baseline.
+
+Recorded CI duration decreased from 2,360.688 to 631.599 seconds. These are local runs, not controlled
+benchmarks; construction changes, test redesign, build reuse and machine conditions contribute.
 
 ## Material uncertainties
 
-Focused tests and static ownership review support the cleanup, but the final combined CI has not
-yet run. Managed native admission and 42/84 execution remain the final integration check. Performance
-samples do not establish isolated causes or release latency. Finality, key-custody, source-publication
-and the deferred extension oracle retain their documented limits.
+No implementation or verification blocker remains for the agreed cleanup. The timing samples do
+not establish isolated causes or release latency; profile those before a production performance
+claim. Finality, host-process key custody, explicit publication of new semantics and the deferred
+extension business oracle retain the limits documented in [known gaps](known-gaps.md).
