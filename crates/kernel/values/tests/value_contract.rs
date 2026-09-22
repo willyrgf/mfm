@@ -115,3 +115,45 @@ fn object_deserialize_checks_admission_and_reports_parser_errors() {
     assert_eq!(error.line(), 1);
     assert!(error.column() > 0);
 }
+
+#[derive(Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct GenericValue<T> {
+    inner: T,
+}
+
+#[test]
+fn generic_descriptors_preserve_the_declared_semantic_owner_check() {
+    use mfm_values::{GenericArgumentDescriptor, MfmValue as _, SchemaShape};
+
+    let descriptor = ExactValue::schema_descriptor().unwrap();
+    assert_eq!(
+        GenericArgumentDescriptor::from_descriptor::<ExactValue>(&descriptor).unwrap(),
+        GenericArgumentDescriptor::for_value::<ExactValue>().unwrap()
+    );
+    assert!(matches!(
+        GenericArgumentDescriptor::from_descriptor::<DishonestValue>(&descriptor),
+        Err(ValueError::Descriptor(_))
+    ));
+    assert!(matches!(
+        GenericValue::<DishonestValue>::schema_descriptor(),
+        Err(ValueError::Descriptor(_))
+    ));
+    let generic = GenericValue::<ExactValue>::schema_descriptor().unwrap();
+    let SchemaShape::Struct { fields } = generic.identity().canonical_json_shape().unwrap() else {
+        panic!("generic owner must retain its struct shape");
+    };
+    let SchemaShape::Generic {
+        arguments,
+        serialized_shape,
+        ..
+    } = &fields[0].shape
+    else {
+        panic!("generic field must retain its argument identity");
+    };
+    assert_eq!(arguments[0].schema_id, descriptor.schema_id().unwrap());
+    assert_eq!(
+        serialized_shape.as_ref(),
+        descriptor.identity().canonical_json_shape().unwrap()
+    );
+}

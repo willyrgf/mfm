@@ -447,7 +447,7 @@ fn shape_tokens_for_path(
             ::mfm_values::SchemaShape::Generic {
                 constructor: "mfm/generic-value".to_owned(),
                 arguments: vec![
-                    ::mfm_values::GenericArgumentDescriptor::for_value::<#type_path>()?
+                    ::mfm_values::GenericArgumentDescriptor::from_descriptor::<#type_path>(&descriptor)?
                 ],
                 serialized_shape: Box::new(
                     descriptor.identity().canonical_json_shape()?.clone()

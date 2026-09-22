@@ -1814,7 +1814,10 @@ pub struct GenericArgumentDescriptor {
 impl GenericArgumentDescriptor {
     /// Creates a generic argument descriptor for an `MfmValue`.
     pub fn for_value<T: MfmValue>() -> Result<Self> {
-        let descriptor = T::schema_descriptor()?;
+        Self::from_descriptor::<T>(&T::schema_descriptor()?)
+    }
+    /// Uses an already derived descriptor after checking its declared semantic owner.
+    pub fn from_descriptor<T: MfmValue>(descriptor: &SchemaDescriptor) -> Result<Self> {
         let semantic_type_id = T::semantic_id()?;
         if descriptor.identity().semantic_type_id.as_ref() != Some(&semantic_type_id) {
             return Err(ValueError::Descriptor(
