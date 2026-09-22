@@ -515,7 +515,12 @@ where
                 rejection(
                     "associate",
                     &serde_json::json!({
-                        "reason": reason, "position": position, "state": state,
+                        "reason": reason, "position": position,
+                        "implementation": state.state_implementation_ref(),
+                        "input": state.input_contract_ref(), "output": state.output_contract_ref(),
+                        "failure": state.failure_contract_ref(), "execution": state.execution(),
+                        "handler": state.handler().abi(),
+                        "handler_params": state.handler().params().value_ref(),
                     }),
                 )
             };
@@ -655,7 +660,11 @@ macro_rules! native_leaf {
                         let Execution::$mode { abi, binding_ref } = state.execution() else {
                             return Err(rejection("bind_native", &serde_json::json!({
                                 "reason": "execution_mode_mismatch", "expected": stringify!($mode),
-                                "state": state,
+                                "implementation": state.state_implementation_ref(),
+                                "input": state.input_contract_ref(), "output": state.output_contract_ref(),
+                                "failure": state.failure_contract_ref(), "execution": state.execution(),
+                                "handler": state.handler().abi(),
+                                "handler_params": state.handler().params().value_ref(),
                             })));
                         };
                         let index = bindings

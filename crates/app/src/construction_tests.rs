@@ -232,10 +232,23 @@ fn construction_causes_retain_selection_association_and_checkpoint_facts_in_tran
                 cause.details().as_value()["implementation"],
                 "mfm.test.app/native@1"
             ),
-            2 => assert_eq!(
-                cause.details().as_value()["state"],
-                serde_json::to_value(&program.declarations()[0]).unwrap()
-            ),
+            2 => {
+                let declaration = &program.declarations()[0];
+                let details = cause.details().as_value();
+                assert_eq!(
+                    details["implementation"],
+                    serde_json::to_value(declaration.state_implementation_ref()).unwrap()
+                );
+                assert_eq!(
+                    details["execution"],
+                    serde_json::to_value(declaration.execution()).unwrap()
+                );
+                assert_eq!(
+                    details["handler_params"],
+                    serde_json::to_value(declaration.handler().params().value_ref()).unwrap()
+                );
+                assert!(details.get("state").is_none());
+            }
             _ => assert_eq!(cause.details().as_value()["target_position"], 1),
         }
         let expected = serde_json::to_value(&error).unwrap();

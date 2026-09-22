@@ -66,6 +66,14 @@ fn configured_native_abis_and_resolved_support_cold_load_without_resolution() {
             serde_json::from_slice(program.canonical_bytes()).unwrap();
         forged["declarations"][1]["execution"]["abi"]["native_evidence"] =
             serde_json::to_value(nominal_contract_ref::<Prepared>().unwrap()).unwrap();
+        let marker = "unreviewed-handler-parameter-marker";
+        let params = PolicyParams::new(&AlternateFailure {
+            code: marker.to_owned(),
+        })
+        .unwrap();
+        forged["declarations"][1]["handler"]["params"] = serde_json::to_value(&params).unwrap();
+        forged["declarations"][1]["handler"]["abi"]["params"] =
+            serde_json::to_value(nominal_contract_ref::<AlternateFailure>().unwrap()).unwrap();
         let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
             &serde_json::to_string(&forged).unwrap(),
         )
@@ -77,10 +85,25 @@ fn configured_native_abis_and_resolved_support_cold_load_without_resolution() {
         assert_eq!(cause.operation(), "associate");
         assert_eq!(cause.details().as_value()["reason"], "state_not_installed");
         assert_eq!(cause.details().as_value()["position"], 1);
+        let details = cause.details().as_value();
         assert_eq!(
-            cause.details().as_value()["state"],
-            forged["declarations"][1]
+            details["implementation"],
+            forged["declarations"][1]["state_implementation_ref"]
         );
+        assert_eq!(details["execution"], forged["declarations"][1]["execution"]);
+        assert_eq!(
+            details["handler"],
+            forged["declarations"][1]["handler"]["abi"]
+        );
+        assert_eq!(
+            details["handler_params"],
+            forged["declarations"][1]["handler"]["params"]["value"]
+        );
+        assert!(details.get("state").is_none());
+        assert!(!serde_json::to_string(&cause).unwrap().contains(marker));
+        assert!(std::str::from_utf8(canonical.as_bytes())
+            .unwrap()
+            .contains(marker));
         assert!(recorded.lock().unwrap().is_empty());
         let mut wrong_mode: serde_json::Value =
             serde_json::from_slice(program.canonical_bytes()).unwrap();
