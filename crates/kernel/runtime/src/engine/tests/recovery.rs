@@ -553,18 +553,13 @@ async fn cancelled_read_preserves_visit_and_spends_no_recovery_allowance() {
     )
     .unwrap();
     let run = RunId::from_digest(DigestBytes::from_array([63; 32]));
-    let first_store = store.clone();
+    let first_runtime = Arc::clone(&runtime);
     let first_program = program.clone();
     let first_run = run.clone();
     let first = tokio::spawn(async move {
-        admit(
-            first_store,
-            first_run,
-            first_program,
-            Object::from_value(&Offset { value: 7 }).unwrap(),
-            Advancement::Manual,
-        )
-        .await
+        first_runtime
+            .start(first_run, &first_program, &Offset { value: 7 })
+            .await
     });
     entered.notified().await;
     first.abort();

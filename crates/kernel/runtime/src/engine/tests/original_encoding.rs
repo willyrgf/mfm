@@ -9,18 +9,49 @@ static ENCODINGS: AtomicUsize = AtomicUsize::new(0);
 #[derive(Debug, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 struct Input {
-    panics: bool,
+    fault: EncodingFault,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+enum EncodingFault {
+    Serializer,
+    Panic,
+    Admission,
 }
 #[derive(Debug, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 struct Original {
-    panics: bool,
+    detail: String,
+}
+impl EncodingFault {
+    fn original(self) -> Original {
+        // Script the real serializer/admission boundary without admitting the rejected detail.
+        Original {
+            detail: match self {
+                Self::Serializer => "encoder failure",
+                Self::Panic => "original panic payload marker",
+                Self::Admission => "api_key=must-not-escape",
+            }
+            .into(),
+        }
+    }
 }
 impl Serialize for Original {
-    fn serialize<S: serde::Serializer>(&self, _: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
         ENCODINGS.fetch_add(1, Ordering::SeqCst);
-        assert!(!self.panics, "original panic payload marker");
-        Err(serde::ser::Error::custom("original encoder rejected field"))
+        match self.detail.as_str() {
+            "encoder failure" => Err(serde::ser::Error::custom("original encoder rejected field")),
+            "original panic payload marker" => panic!("original panic payload marker"),
+            _ => {
+                let mut value = serializer.serialize_struct("Original", 1)?;
+                value.serialize_field("detail", &self.detail)?;
+                value.end()
+            }
+        }
     }
 }
 impl ClassifyError for Original {
@@ -42,9 +73,7 @@ impl PureState for Reject {
         input: Input,
     ) -> std::result::Result<ProposedStateOutcome<Input, Original>, InvocationDiagnostic> {
         Ok(ProposedStateOutcome::Failure {
-            failure: Original {
-                panics: input.panics,
-            },
+            failure: input.fault.original(),
         })
     }
 }
@@ -66,9 +95,7 @@ impl ReadCapabilityContract for Observation {
 }
 impl ReadState<Observation> for Reject {
     fn prepare(input: &Input) -> std::result::Result<Input, InvocationDiagnostic> {
-        Ok(Input {
-            panics: input.panics,
-        })
+        Ok(Input { fault: input.fault })
     }
     fn interpret(
         _: Input,
@@ -97,7 +124,7 @@ impl ReadImplementation<Observation> for NativeRead {
         intent: &Input,
     ) -> std::result::Result<Input, mfm_capabilities::CallbackFailure> {
         Ok(Input {
-            panics: intent.panics,
+            fault: intent.fault,
         })
     }
     fn project_evidence(
@@ -156,11 +183,7 @@ impl ReadAdapter<Input, Input, Original> for Environment {
         intent: &'a Input,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<Input, AdapterError<Original>>> + Send + 'a>>
     {
-        Box::pin(async move {
-            Err(AdapterError::Operational(Original {
-                panics: intent.panics,
-            }))
-        })
+        Box::pin(async move { Err(AdapterError::Operational(intent.fault.original())) })
     }
 }
 
@@ -184,9 +207,7 @@ impl EffectCapabilityContract for Command {
 }
 impl EffectState<Command> for Reject {
     fn prepare(input: &Input) -> std::result::Result<Original, InvocationDiagnostic> {
-        Ok(Original {
-            panics: input.panics,
-        })
+        Ok(input.fault.original())
     }
     fn interpret(
         _: Input,
@@ -282,8 +303,12 @@ impl EffectAdapter<Input, Input, Original> for Environment {
 #[tokio::test]
 async fn original_or_command_encoding_fault_preserves_admission_without_retry_or_classification() {
     for read in [false, true] {
-        for panics in [false, true] {
-            let input = Input { panics };
+        for fault in [
+            EncodingFault::Serializer,
+            EncodingFault::Panic,
+            EncodingFault::Admission,
+        ] {
+            let input = Input { fault };
             let entry = EntryPointId::new("mfm.test/original-encoding@1").unwrap();
             let program = if read {
                 mfm_program::compile(
@@ -306,7 +331,7 @@ async fn original_or_command_encoding_fault_preserves_admission_without_retry_or
             let store = Arc::new(MemoryStore::new());
             let runtime = Runtime::new(store.clone());
             let run = RunId::from_digest(DigestBytes::from_array(
-                [150 + u8::from(read) * 2 + u8::from(panics); 32],
+                [150 + u8::from(read) * 3 + fault as u8; 32],
             ));
             let before = ENCODINGS.load(Ordering::SeqCst);
             let Err(InvocationFailure::Execution {
@@ -343,14 +368,27 @@ async fn original_or_command_encoding_fault_preserves_admission_without_retry_or
             );
             assert_eq!(fields["position"]["state"], 0);
             let rendered = serde_json::to_string(&cause).unwrap();
-            if panics {
-                assert_eq!(fields["encoding"], "panicked");
-                assert!(!rendered.contains("original panic payload marker"));
-            } else {
-                assert!(rendered.contains("original encoder rejected field"));
+            match fault {
+                EncodingFault::Panic => {
+                    assert_eq!(fields["encoding"], "panicked");
+                    assert!(!rendered.contains("original panic payload marker"));
+                }
+                EncodingFault::Serializer => {
+                    assert!(rendered.contains("original encoder rejected field"));
+                }
+                EncodingFault::Admission => {
+                    assert_eq!(cause.code(), "value_error");
+                    assert_eq!(fields["encoding"], "schema_shape_mismatch");
+                    assert!(!rendered.contains("must-not-escape"));
+                }
             }
             assert_eq!(ENCODINGS.load(Ordering::SeqCst) - before, 1);
             assert_eq!(observed.head_sequence(), 1);
+            let retained = store.load_run(&run, None).await.unwrap().unwrap();
+            assert_eq!(retained.head().head_digest(), observed.head_digest());
+            assert!(!std::str::from_utf8(retained.latest())
+                .unwrap()
+                .contains("must-not-escape"));
             let document = runtime.program_document(&run).await.unwrap();
             drop(program);
             let cold = mfm_program::load(document.canonical_bytes(), &Environment).unwrap();
@@ -362,8 +400,8 @@ async fn original_or_command_encoding_fault_preserves_admission_without_retry_or
             assert_eq!(ENCODINGS.load(Ordering::SeqCst) - before, 1);
         }
     }
-    for panics in [false, true] {
-        let input = Input { panics };
+    for fault in [EncodingFault::Serializer, EncodingFault::Panic] {
+        let input = Input { fault };
         let program = mfm_program::compile(
             EntryPointId::new("mfm.test/command-encoding@1").unwrap(),
             &Effect::<Reject, Command>::default(),
@@ -373,7 +411,7 @@ async fn original_or_command_encoding_fault_preserves_admission_without_retry_or
         )
         .unwrap();
         let runtime = Runtime::new(Arc::new(MemoryStore::new()));
-        let run = RunId::from_digest(DigestBytes::from_array([154 + u8::from(panics); 32]));
+        let run = RunId::from_digest(DigestBytes::from_array([156 + fault as u8; 32]));
         let before = ENCODINGS.load(Ordering::SeqCst);
         let Err(InvocationFailure::Execution {
             run_id,
@@ -395,7 +433,7 @@ async fn original_or_command_encoding_fault_preserves_admission_without_retry_or
         };
         assert_eq!(cause.operation(), "encode");
         let rendered = serde_json::to_string(&cause).unwrap();
-        if panics {
+        if matches!(fault, EncodingFault::Panic) {
             assert!(rendered.contains("panicked"));
             assert!(!rendered.contains("original panic payload marker"));
         } else {

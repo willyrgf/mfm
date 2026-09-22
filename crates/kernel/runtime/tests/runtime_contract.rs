@@ -171,63 +171,6 @@ async fn read_success_and_separate_failure_recovery_are_restorable_without_repea
     assert_eq!(original.decode::<Number>().unwrap().value, 21);
 }
 
-// Cancelling an in-flight Read must leave the admitted run runnable without inventing a
-// completed observation.
-#[tokio::test]
-async fn cancellation_during_observation_preserves_a_runnable_prefix() {
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let store = Arc::new(MemoryStore::new());
-    let builder = Resources::<Installed>::read({
-        let entered = Arc::clone(&entered);
-        let release = Arc::clone(&release);
-        move |intent_value_ref, intent| {
-            let entered = Arc::clone(&entered);
-            let release = Arc::clone(&release);
-            let intent_value_ref = intent_value_ref.clone();
-            Box::pin(async move {
-                entered.notify_one();
-                release.notified().await;
-                Ok(Evidence {
-                    intent_value_ref,
-                    value: intent.value,
-                    accepted: true,
-                })
-            })
-        }
-    });
-    let runtime = Arc::new(Runtime::new(store));
-    let run_id = RunId::from_digest(DigestBytes::from_array([5; 32]));
-    let program = compile(
-        EntryPointId::new("mfm.test.runtime/cancel@1").expect("entry point"),
-        &ReadSource::new(Binding { route: 7 }),
-        &Number { value: 8 },
-        &builder,
-        ProgramLimits::new(0),
-    )
-    .expect("Program");
-    let task = {
-        let runtime = Arc::clone(&runtime);
-        let program = program.clone();
-        let run_id = run_id.clone();
-        tokio::spawn(async move { runtime.start(run_id, &program, &Number { value: 8 }).await })
-    };
-    entered.notified().await;
-    task.abort();
-    match task.await {
-        Err(error) => assert!(error.is_cancelled()),
-        Ok(_) => panic!("observation task was not cancelled"),
-    }
-    release.notify_waiters();
-
-    let prefix = runtime
-        .read(&run_id, &program)
-        .await
-        .expect("durable prefix");
-    assert_eq!(prefix.head_sequence(), 1);
-    assert!(matches!(prefix.state(), RunViewState::Runnable { .. }));
-}
-
 // Cancellation after adapter entry must leave a durable command that a rebuilt Runtime resumes
 // with the same Effect identity.
 #[tokio::test]
