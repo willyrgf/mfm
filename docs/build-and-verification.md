@@ -55,11 +55,60 @@ and exact `solc 0.8.33`. The task compiles the first-party fixture to a temporar
 drives the ignored `mfm-evm-live` test serially; compiler output is never committed.
 
 The Effect e2e reconstructs Runtime and database handles while retaining the same keystore owner;
-its cold-recovery claim is not a process-restart test. It uses a 300-second progress deadline,
-retries Runnable, EffectPending, and reviewed dependency failures with a 100 ms interval, and reports typed domain failures immediately.
-Its terminal checks prove unchanged history, output, and nonce, not absence of provider calls.
-`crates/live/evm/src/transaction_tests.rs` separately verifies prepared-wire recovery with a rejecting
-signer, cancellation, and ambiguous appends at every transaction Journal boundary.
+its cold-recovery claim is not a process-restart test. Test supervision and funding/recovery helper
+timeouts are fixture policy, not Runtime deadlines. Ordinary terminal progression uses Runtime and
+native Pending pacing. Terminal checks prove unchanged history, output and nonce; a no-provider-IO
+claim additionally needs explicit instrumentation. Focused native transaction tests retain exact
+prepared-wire, rejecting-signer, cancellation and ambiguous-append coverage.
+
+## Scalar-contract artifact
+
+The `effect-e2e` task in `nixfied.nix` supplies pinned solc 0.8.33, compiles the first-party source with
+no optimizer and `--evm-version cancun`, and sets `MFM_EFFECT_E2E_INITCODE_PATH` for the consuming
+recipe/lifecycle tests. Run the managed task for complete reproduction:
+
+```sh
+nix run .#run -- --task effect-e2e
+```
+
+Its compiler recipe, with `solc` supplied by that pinned task environment, is:
+
+```sh
+fixture_dir="$(mktemp -d)"
+solc --bin --overwrite --evm-version cancun --output-dir "$fixture_dir" \
+  crates/live/evm/tests/fixtures/MfmEffectFixture.sol
+export MFM_EFFECT_E2E_INITCODE_PATH="$fixture_dir/MfmEffectFixture.bin"
+```
+
+The decoded initcode is 497 bytes with SHA-256
+`c7aed441e0afa86de84779ac168d27e4d8a29148b6834565d5930ef7c8ae855d`. The native artifact contract
+checks this exact supported ABI/compiler output. Compiler output is temporary and is not committed;
+the task removes its temporary directory. A different artifact requires a reviewed contract change.
+
+## Acceptance scenarios and independent oracles
+
+Each row names a consuming boundary, not a separate scenario DSL. Expected values come from fixture
+premises or independent native observations, not only the production result projection being tested.
+Focused owners retain guarantees that do not require repeating managed IO.
+
+| Scenario | Independent oracle and retained boundaries | Executable owner |
+| --- | --- | --- |
+| Select Portfolio through CLI/REST | Independent runs preserve explicit/generated RunIds, exact selected revision and typed output; fixture balances and decimal amounts are checked against literal expectations and an independent RPC anchor/balance observation. Terminal cold inspection preserves head/output. | `bin/rest-api/tests/client_execution_e2e.rs`, managed `client-e2e` |
+| Recover selection and publish enrichment | Delete admitted source configuration, cold-resume the same run, preserve provider error causes, publish retained enrichment without live discovery, repeat publication idempotently, and recover dependent selection after revision deletion. | Same managed client test and Application use-case tests |
+| Compose lifecycle 42/84 | Maintained lifecycle yields 42; production Pure addition constructs later calldata 84 from 42+42. Assert deployment/configuration target, receipt point, exact native outcomes and independent node code/value observations. Pure addition consumes no nonce. | `crates/live/evm/tests/evm_contract_effect_e2e.rs`, managed `effect-e2e`; domain `lifecycle_runtime` |
+| Preserve transaction authority | Reservation acknowledgement loss causes no early signing/submission; cancellation after broadcast retains exact command; cold recovery does not re-sign. External nonce advance affects only fresh transactions. SQL/closed-signer originals and local epoch rejection preserve their distinct contracts. Terminal replay preserves head/output/nonce. | Same managed lifecycle test and Live `transaction_tests.rs` |
+| Extend with a new State | A consuming crate owns new semantic contracts and composes them with existing components; checked success and exact typed rejection survive cold inspection. Incompatible adjacency is rejected at compile time. | Domain `lifecycle_runtime` and Program compile-fail/authoring tests; current public examples in the authoring guide |
+| Native qualification and unsuccessful outcomes | Same-ledger wrong route causes no provider call/outcome append; rejected/safe/integrity evidence cannot become a successful report. Native decoder/encoder phases and originals survive exact cold inspection. | EVM/Chain contracts, Live Portfolio client tests and Runtime callback tests |
+| Runtime/Store safety | Original acknowledgement precedes classification; cancellation preserves authority; competing/ambiguous appends do not invent acknowledgement; checkpoint barriers, report/frame capacity and cold ABI mismatches retain their exact failures. | Runtime/Program boundary suites, Journal/Store and managed `postgres-test` |
+
+The managed extension policy proposed in earlier design discussions (42+8, ceiling 49 rejection) is
+[deferred](known-gaps.md#deferred-product-execution-and-extension-scenarios); the generic extension
+row does not claim that business oracle has been implemented. No Runtime wait-budget scenario is
+required: deadlines were excluded from the current API. External test supervision remains separate.
+
+The [verification record](dsl-phase-b.md) identifies historical source revisions and executed gates.
+A test/helper rewrite must map every removed observable assertion to its retained owner; historical
+passes or proposed future scenarios do not prove a changed candidate.
 
 ## Checked PostgreSQL SQL
 

@@ -2,8 +2,8 @@
 
 The [design](design.md) owns execution and persistence contracts; the
 [architecture](architecture.md) owns placement. This guide describes the implemented authoring
-path. The [Phase B ledger](dsl-phase-b.md) records which production acceptance checks have passed
-and which remain outstanding.
+path. The [verification record](dsl-phase-b.md) identifies the tested production revision and
+separately records the validation status of subsequent changes.
 
 ## Reuse semantics before introducing a contract
 
@@ -65,12 +65,48 @@ signer and Store handles do not enter canonical data. Publication retains the en
 name as well as its derived identity, so a native client can reconstruct configuration from a
 semantic enrichment output without live handles.
 
-The executable examples are [maintained lifecycle composition](../crates/domains/chain/src/transaction/authoring.rs),
-[Portfolio planning](../crates/domains/portfolio/src/planning.rs),
-[explicit defaults](../crates/kernel/program/tests/recovery_scopes.rs), and
-[native Portfolio cold execution](../crates/live/evm/tests/portfolio_runtime.rs).
-The accepted [source-publication limitation](known-gaps.md#downstream-component-discovery-in-the-dsl-refactor)
-is distinct from recomposing already installed code.
+## Five consumer paths
+
+The examples below are actual consuming source, with imports, checked input construction, explicit
+resources, compilation/execution and checked results. Keep code executable at these owners instead
+of copying a second implementation into this guide. Managed setup supplies services, a funded
+signer and the pinned artifact; it is not part of deterministic Operation planning.
+
+The native client exposes
+[`EvmContractConfig` and `ContractResources`](../crates/live/evm/src/client/contract.rs).
+Parse supported configuration into `EvmContractConfig`, then call `into_request()` to derive the
+semantic `DeploymentRequest`. This admission path owns native implementation/ledger/route identities
+and artifact encoding. Consumers supply checked values and supported options, not prepared facts or
+pre-encoded configuration calldata. The artifact is the maintained scalar fixture and ABI, not an
+arbitrary Solidity catalogue. `ContractResources` publishes maintained lifecycle/child States and
+addition; ordinary recomposition does not change that installed set.
+
+| Caller activity | Selected source and input | Complete executable consumer |
+| --- | --- | --- |
+| One existing Pure State | `Pure<CheckedAdd>` with `CheckedAddition::new("42", "42")`; `ContractResources` has no live handles. Result decodes as `Unsigned256` 84. | [Pure selection](../crates/live/evm/tests/contract_authoring.rs) |
+| One injected Effect State | `Effect<Deploy, TransactionEffect<DeploymentRequest>>` with admitted native configuration; injection binds reservation/preparation automatically. Its declared success is `DeployedContract`; the standalone consumer currently exercises typed deployment rejection. Managed successful deployment is exercised inside the lifecycle. | [Standalone deployment](../crates/live/evm/tests/evm_contract_effect_e2e.rs) |
+| One existing Operation | `ContractDeploymentLifecycle` with the same configuration and explicit native resources; checked report value 42. | [Maintained lifecycle](../crates/live/evm/tests/evm_contract_effect_e2e.rs) |
+| Mix existing Operations and States | Deploy, `CheckedAddConfigurationValue`, then maintained `ConfigureAndObserve`, Validate and Report; effective 84 flows into a newly prepared configuration command and checked report. | [Mixed composition](../crates/live/evm/tests/evm_contract_effect_e2e.rs) |
+| Implement a new State | Example `RequireNonZero` declares its semantic contracts and exact `ZeroSum` failure, and composes with maintained `CheckedAdd`. Publish only the new source through `ContractResources<Pure<RequireNonZero>>`. | [New semantics, success and rejection](../crates/live/evm/tests/contract_authoring.rs) |
+
+Each example uses the same `compile`/`load` path and a non-generic `Program`. Typed source composition
+checks every adjacent expanded State connection, not only the first input and final output.
+Runtime executes the completed Program with explicit RunId and borrowed input. Check `success()` or
+`failure()` and use `Object::decode<T>()` for the recorded exact result/original contract; wrong
+nominal types fail without provider IO, recovery or append. Cold loading uses retained document bytes
+and explicit resources, not source configuration or the original Operation type.
+
+Ordinary failures require no enclosing failure enum or mechanical mapper. New-State authors define
+only their new semantics and intrinsic classification; Runtime acknowledges originals before asking
+for recovery decisions. A new source's one-time publication is the accepted
+[code-discovery limit](known-gaps.md#downstream-component-discovery-in-the-dsl-refactor), not a
+requirement for consumers to list dependent codecs, handlers or supporting States.
+
+[Portfolio planning](../crates/domains/portfolio/src/planning.rs) demonstrates checked local
+configuration and homogeneous collections. [Explicit defaults](../crates/kernel/program/tests/recovery_scopes.rs)
+shows inherited/replaced policy, and [native Portfolio execution](../crates/live/evm/src/client/portfolio/tests.rs)
+checks production cold execution. Use [verification](build-and-verification.md) for commands and
+managed oracles; implementation source alone is not evidence of a passing changed candidate.
 
 ## Trace deployment through native execution
 
@@ -120,3 +156,16 @@ Use the [native State declarations](../crates/domains/evm/src/balance/stages.rs)
 consuming examples. Extend boundary tests for new semantics, including exact cold decoding,
 local rejection without IO/append, cancellation and original-cause preservation. The independent
 native test is a fixture, not support for another shipping network.
+
+## Preserve checked materialization and reports
+
+Native Read intent encoding establishes an exact native identity, and checked materialization can
+invoke a custom decoder. Do not remove an Object roundtrip solely because Rust types match: retain
+schema admission, custom-decoder rejection, phase/cause provenance and the exact native identity.
+Effect evidence projection before settlement and after acknowledgement protects distinct boundaries.
+
+`ContractDeploymentReport` currently remains a distinct flat checked contract. Its constructors and
+cold decoder must preserve request/effective value, applied deployment/configuration, target/anchor
+and observation consistency. A nested wrapper representation is a separate schema decision, not
+an implicit documentation cleanup. `ValidatedConfiguration` continues to require Validate before
+Report in typed composition.

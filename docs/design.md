@@ -410,8 +410,8 @@ necessary: its public evidence alone carries only EffectId and hash.
 Slot recipes, cumulative phase-fact wrappers, ExecuteEvmTransaction, the mandatory Pure outcome
 projection and their wrapper Operation are removed. Shared lifecycle callers use the existing
 compiler/capability/Runtime path. Intent, anchor, ABI and exact original-evidence checks remain native
-responsibilities. [The Phase B ledger](dsl-phase-b.md) distinguishes verified paths from remaining
-consumer migration and managed acceptance; supporting-State tests alone do not prove custody recovery.
+responsibilities. [The verification record](dsl-phase-b.md) identifies the tested production revision
+and managed evidence; supporting-State tests alone do not prove custody recovery.
 
 The broad EVM Read intent fixes only a nonzero chain ID, physical-route content ref, and one of six
 balance subjects; that subject is the operation discriminator. Its returned sum contains checked
@@ -436,8 +436,8 @@ it is never authenticated IntegrityBlocked evidence. No provider or outcome appe
 rejection. Runtime's initial admission frame remains distinct from Read execution; cold retry leaves
 that head unchanged and makes no append call. Missing route fields in old wires are rejected;
 changed nested descriptors update dependent schema identities without a compatibility decoder.
-The previous ObserveAt/AnchoredObservationFacts machinery remains superseded; complete production
-consumer migration is separate from the isolated proof.
+The old ObserveAt/AnchoredObservationFacts machinery is removed; shared Observe uses these contracts
+in both direct framework composition and the managed lifecycle.
 
 `EvmResources<Sources>` implements the existing environment and native binding contracts. Checked
 transaction resources qualify authority epoch, signing purpose and sender at construction. Native
@@ -592,10 +592,6 @@ Secrets do not enter Program, C0, frames, Store metadata, RunView, outputs, logs
 Writable restoration behind acknowledged state is unsupported; a new writable timeline requires
 fresh external authority and fresh RunIds.
 
-## Material uncertainties
-
-none
-
 Enrichment output pairs every resolved collection configuration with its route and observed anchor.
 Portfolio identity and selected quote are stored once; consuming projection produces the existing
 snapshot configuration and selector. Publication retains the exact output ref in provenance: a
@@ -606,3 +602,8 @@ and existing revisions are never rewritten.
 ContractValueEvidence v2 retains its exact native original and a ContractValueOutcome. Only Observed
 carries a point and scalar. Rejected, SafeFailure and IntegrityBlocked become corresponding declared
 Permanent Observe failures; they cannot construct ObservedConfiguration or a successful report.
+
+## Material uncertainties
+
+none within the current implemented contracts; deferred product capabilities are listed in
+[known gaps](known-gaps.md).

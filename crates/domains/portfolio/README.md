@@ -24,5 +24,5 @@ and input contracts and passes a typed BalanceFailureCode to Portfolio's continu
 One private semantic check validates collection/context agreement. A mismatch is a projection error;
 it does not become a fabricated ConsolidationFailed. Genuine Portfolio originals remain unchanged.
 
-The evolving cutover and verification ledger is in [dsl-phase-b.md](../../../docs/dsl-phase-b.md).
-Historical isolated proof evidence remains in [dsl-phase-a.md](../../../docs/dsl-phase-a.md).
+The [verification record](../../../docs/dsl-phase-b.md) records production evidence and its limits;
+[build and verification](../../../docs/build-and-verification.md) owns current acceptance commands.

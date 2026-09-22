@@ -25,7 +25,7 @@ declared Permanent observation failure. Candidate decoding does not advance comp
 amount. Native confirmation must compare anchors before calling `append_confirmed`; its outer result
 keeps local invocation errors separate from inner arithmetic rejection. Successful append adds one
 source. Completed-prefix decoding checks individual amounts but leaves aggregate overflow for
-consolidation. Native confirmation and caller integration remain unfinished.
+consolidation. EVM confirmation and both maintained Portfolio continuations consume this boundary.
 
 `CheckedAddition` supplies two checked `Unsigned256` operands. `CheckedAdd` returns their full-width
 sum or its exact `AdditionOverflow` domain failure. The enclosing Runtime call retains the operands;
@@ -75,5 +75,6 @@ fabricating future inputs. `LifecycleDefaults` installs Stop with empty targets 
 optional allowance with zero fallback. The configuration/observation child inherits its parent
 policy; actual effective configuration continues to come from execution input.
 
-This is an isolated Phase A checkpoint. Lifecycle/balance contracts and complete Program construction
-are still in progress; the new crate does not enable shipping transaction execution.
+The [authoring guide](../../../docs/capability-authoring.md) describes the maintained consumers.
+Managed lifecycle acceptance does not enable a shipping transaction product or establish production
+finality; those limits remain explicit in [known gaps](../../../docs/known-gaps.md).

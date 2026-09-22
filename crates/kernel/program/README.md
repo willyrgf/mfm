@@ -9,9 +9,9 @@ second hashing recipe. Duplicate family claims remain checked independently of t
 
 Program owns an immutable linear document, exact value contracts and one executable occurrence per
 State. Typed sources construct the complete in-process Program; Runtime owns continuation,
-acknowledgement and recovery. The isolated Phase A work is tracked in
-[the proof ledger](../../../docs/dsl-phase-a.md); native construction and dependent Runtime migration
-remain unfinished. The provisional current document is `mfm.program.v9`.
+acknowledgement and recovery. The current document is `mfm.program.v9`; the
+[authoring guide](../../../docs/capability-authoring.md) describes selection, composition, extension
+and cold loading. [Verification evidence](../../../docs/dsl-phase-b.md) records the tested revision.
 
 ```rust
 use mfm_ids::{EntryPointId, StableId};

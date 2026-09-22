@@ -138,8 +138,9 @@ domain types. They do not rebuild a parallel Operation, State, or adapter model.
 Framework composition and extension tests may author Operations or minimal new States when those
 public contracts are the behavior under test. Use existing components for the surrounding scenario;
 assert useful outcomes and boundary failures rather than duplicating engine coverage. Distinguish
-these tests from product selection tests and deliberate fault/recovery tests, as described in the
-[public interfaces and tests RFC](../RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md).
+these tests from product selection tests and deliberate fault/recovery tests. The
+[acceptance ownership table](build-and-verification.md#acceptance-scenarios-and-independent-oracles)
+identifies the consuming boundary and independent oracle for each current scenario.
 
 Do not add runtime assertions for facts already proved by Rust's type checker, trait bounds, private
 fields, or an infallible constructor. Do not freeze helper call counts, internal declaration

@@ -7,15 +7,16 @@
 - PostgreSQL claims primary crash/restart durability only. It does not claim safe writable rollback,
   host-loss failover, quorum, replica, or multi-primary authority.
 - Trusted Rust State implementations, compiler environments, and adapters are in the process trust base.
-- Runtime has caller-driven progression only; it owns no background scheduler or timeout policy.
+- Runtime offers automatic terminal execution and explicit start/read/resume; it owns no background
+  scheduler or timeout policy.
 - Current product entry points are `mfm.portfolio/snapshot@1` and bounded candidate enrichment
   `mfm.portfolio/enrich@1`. Enrichment does not discover assets outside the supplied candidate list.
 - EVM transaction settlement version 1 is limited to the pinned non-reorging development fixture.
   Production submission remains unsupported until a product defines its finality, confirmation,
   reorg, authorization, and operational policy under a separately reviewed capability identity.
 - The in-process keystore has no encrypted persistent custody or key recovery across host-process
-  termination. The bounded managed cold-recovery loop rebuilds Runtime and every IO handle between
-  caller invocations while retaining the same ephemeral signer owner.
+  termination. Managed cold recovery rebuilds Runtime and database/resource handles while retaining the same
+  ephemeral signer owner.
 - The append-only EVM transaction authority has no writable rollback, snapshot restoration, nonce
   release/reuse, replacement, or fee-bump contract. Loss of acknowledged authority requires a new
   authority epoch and fresh runs rather than reconstruction of its old writable timeline.
@@ -28,8 +29,8 @@
 ## Public framework interfaces
 
 MFM supports three public activities: selecting an existing operation, composing Operations/States,
-and implementing a new State. Their caller responsibilities and proposed improvements are recorded
-in the [public interfaces and tests RFC](../RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md).
+and implementing a new State. Their current caller responsibilities are described
+in the [authoring guide](capability-authoring.md).
 Typed DSL construction now derives executable requirements and compiles a complete immutable
 Program before Runtime admission. Native implementations own EVM planning and exact codecs;
 maintained lifecycle Operations and reports replace fixture-owned execution/result glue. Custom
@@ -37,7 +38,7 @@ Operations and States remain legitimate tests of framework authoring and extensi
 
 ### Downstream component discovery in the DSL refactor
 
-The [DSL refactor RFC](../RFC_REFACTOR_DSL.md) accepts one temporary limitation: authors introducing
+One accepted limitation remains: authors introducing
 new executable semantics must publish the new source once in their integration's installed public
 component set through ProgramEnvironment::Sources on the maintained resource environment. Its
 native families supply their dependent injected implementations and codecs through the same discovery
@@ -58,8 +59,8 @@ inward dependencies or explicit failure when required code is unavailable.
 ## Configuration-driven workflows
 
 A configured EVM product is one use of the framework, alongside direct Rust authoring. Its consumers
-should supply supported workflow/input and execution options and inspect checked results. The RFC
-separates this product capability from improvements to the three public usage paths.
+should supply supported workflow/input and execution options and inspect checked results. The [authoring guide](capability-authoring.md) separates this product capability from the three
+public usage paths.
 The following are missing capabilities, not current API guarantees:
 
 - A general configuration-driven mutation product with deployment authorization, finality and
@@ -89,29 +90,26 @@ The following are missing capabilities, not current API guarantees:
   repeating `eth_sendTransaction` after lost acknowledgement can fund twice. Select and test the
   smallest convergent dev-node protocol before treating funding as a recoverable Effect.
 
-## General execution and recovery policy
+## Deferred product execution and extension scenarios
 
-Runtime now supplies intrinsic error classification and common handler selection, bounded retry/checkpoint restart, Effect
-barriers, canonical failure reports, and stopped-invocation observations. The remaining gaps below
-concern configurable product orchestration around that caller-driven contract.
+Runtime owns intrinsic error classification, handler selection, bounded retry/checkpoint restart,
+Effect barriers, canonical failure reports and stopped-invocation observations. `execute` drives
+ordinary progression; native Pending adapters await readiness or pace reconciliation. There is no
+separate RuntimeDriver, Runtime deadline or configurable polling layer to add as part of this DSL.
 
-- There is no complete reusable production driver for configured deadlines, polling, retries,
-  exact-admission recovery, dependency reconnection, and structured result delivery. Consumers
-  should configure this policy rather than implement `drive_to_success` or resume-before-start
-  loops. Operational policy must not rewrite admitted Program/input or retained pending commands.
-- Product configuration for Absent, admission conflict, dependency reconnection, ambiguous
-  acknowledgement, cancellation, and caller deadlines remains undefined. Any orchestration must
-  preserve the existing distinction between invocation failure and durable terminal failure,
-  including retained pending Effect authority.
-- Recovery after client/process loss, pending transaction reconciliation, key/authority availability,
-  and interactions with the existing nonce/replacement/finality limitations are not a complete
-  configurable product. Existing cancellation, acknowledgement-loss, prepared-wire, and cold-fold
-  tests establish specific boundaries; they do not establish a complete configurable orchestration product. Ephemeral
-  keystore survival during Runtime reconstruction is not host-process restart recovery.
-- The [three public-usage E2Es](../RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md#three-public-usage-e2es)
-  are the agreed replacement target: selection through both CLI/REST, composition of existing
-  Operations/States, and new-State implementation plus composition. Each can grow named recovery,
-  durability, and error cases. Framework cases may author Operations/States and drive Runtime
-  directly; fault cases may assert intermediate authority/history. Focused boundary tests remain
-  valid. Map existing guarantees and managed selection before deleting old coverage; planned future
-  cases are not replacements for exercised guarantees. No new scenario DSL is required.
+- A complete mutation product still needs decisions about production finality, external authority
+  recovery, dependency reconnection and host-process key custody. These decisions must preserve
+  exact RunId, admitted Program/input, pending command authority and the distinction between an
+  invocation failure and a durable terminal failure. The existing managed fixture does not settle
+  them.
+- An older proposed managed extension scenario would read 42, assess an increase of 8 against a
+  ceiling 100, return proposed 50/headroom 50, and reject ceiling 49 with an exact typed failure. This
+  particular business oracle has not been implemented or verified. It remains deferred, not a
+  requirement to invent another DSL or a claim covered by the current custom-State fixture. The
+  current extension guarantee is composing a new typed State with maintained components and
+  preserving typed success/failure through cold inspection.
+
+Current consuming acceptance and independent oracles are owned by
+[build and verification](build-and-verification.md#acceptance-scenarios-and-independent-oracles).
+Future scenarios never justify removing currently exercised assertions. Framework extension tests
+may define new semantics; ordinary selection/composition consumers must use maintained contracts.

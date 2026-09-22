@@ -76,8 +76,8 @@ the architect rule above.
   the same change.
 - `docs/architecture.md` owns taxonomy and placement:
   - Program is an immutable, content-addressed linear State sequence;
-  - Runtime associates the Program with typed implementations and owns the current continuation,
-    transitions, and local safety checks;
+  - Program construction associates exact typed implementations and explicit resources; Runtime
+    consumes the complete Program and owns continuation, transitions, and local safety checks;
   - State implementations are deterministic and perform no ambient IO;
   - Read adapters bind typed intent to explicit observational capabilities;
   - Journal owns the exact opaque append-only frame wire;

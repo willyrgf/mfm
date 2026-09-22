@@ -21,10 +21,10 @@ Effects perform external IO through explicit adapters. All three paths use the s
 Program and Runtime. Caller-owned choices and new semantics belong in authoring code; reusable
 assembly, execution, and result handling should not be reimplemented by each caller.
 
-These paths guide the public API, not a claim that every convenience interface already exists.
-The [public interfaces and tests RFC](RFC_RESHAPING_PUBLIC_FACING_N_TESTS.md) records current
-friction, proposed requirements, test responsibilities, and unresolved API decisions. Rust framework
-composition and extension remain first-class uses alongside configured product entry points.
+The [authoring guide](docs/capability-authoring.md) describes the current public construction path
+and caller responsibilities. Rust composition and extension remain first-class uses alongside
+configured product entry points. [Known gaps](docs/known-gaps.md) separates supported framework
+behavior from deferred product capabilities.
 
 ## Current products and documentation
 
@@ -41,23 +41,24 @@ Start with [design](docs/design.md), [architecture](docs/architecture.md),
 [capability authoring](docs/capability-authoring.md), and
 [build and verification](docs/build-and-verification.md).
 
-## Target workflow for the DSL refactor
+## Construction and execution workflow
 
-This diagram describes the target in [RFC_REFACTOR_DSL.md](RFC_REFACTOR_DSL.md), not the
-current implementation. Orange nodes identify capability-owned network-specific behavior.
+This diagram shows the implemented ownership boundaries described in [design](docs/design.md).
+Supported native clients admit configuration; this is not a general configuration language for
+arbitrary workflows. Orange nodes identify capability-owned network-specific behavior.
 Runtime executes every expanded State through the same Pure/Read/Effect machinery; the domain
 and supporting-State branches below show ownership, not different execution engines.
 
 ```mermaid
 flowchart TB
       subgraph INPUTS["0 - Config"]
-          CONTRACT["Smart contract definition"]
-          CONFIG["Toml config file:<br/>network, chainid, wallets, contracts refs"]
+          CONTRACT["Supply the supported contract artifact"]
+          CONFIG["Parse supported client configuration<br/>Public bindings, artifact and values"]
       end
       CONTRACT-->CONFIG
 
       subgraph DSL["1 · DSL / definition"]
-          TCONFIG["Checked input and configs"]
+          TCONFIG["Admit typed input and supported configuration"]
           SOURCE["Select or compose concrete States and Operations:<br/> Deploy → Configure → Observe → Validate → Report"]
       end
       CONFIG-->TCONFIG

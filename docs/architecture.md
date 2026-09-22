@@ -4,7 +4,7 @@ Dependencies point inward from composition and adapters to typed domain/kernel c
 
 | Owner | Responsibility | Must not own |
 | --- | --- | --- |
-| IDs / Values | checked identities including `EffectId`, `ConfigName` and `DigestBytes`, schema descriptors, canonical typed values, shared checked unsigned-256 arithmetic, mechanical typed context slots, 32 MiB object bound | execution or IO |
+| IDs / Values | checked identities including `EffectId`, `ConfigName` and `DigestBytes`, schema descriptors, canonical typed values, shared checked unsigned-256 arithmetic, 32 MiB object bound | execution or IO |
 | Capabilities | Read intent/evidence and Effect command/evidence contracts, typed adapter outcomes | State outcomes or retries |
 | Program | typed Operation authoring and root input validation, sole private lowering draft, complete immutable v9 ordered State sequence and exact initial-value commitment, Pure/Read/Effect State contracts, typed State/adapter invocation and original classification callbacks, redaction-safe internal callback errors, `Never` | registries, ambient IO, scheduling |
 | Runtime | complete current continuation and operation facts, local safety checks and typed progression | physical storage or Journal envelope wire |
@@ -200,8 +200,8 @@ conversion. Shared constructors own source/request validation and Portfolio owns
 agreement. Public route descriptors retain the endpoint name needed by configuration-deleted
 publication. Maintained snapshot/enrichment Operations derive vectors from checked input; Application
 calls compilation with explicit native resources. Their distinct checked continuations share private
-collection validation. The evidence ledger distinguishes passing focused product tests from remaining
-managed production acceptance.
+collection validation. The evidence ledger records the exact revisions and scope of focused and
+managed acceptance.
 Native balance support uses EvmBalanceLedger's chain ID, EvmBalanceTarget's account/asset and a
 per-source binding. The qualified native intent carries ordinal, scale, chain, target and public route
 once, with a stage-only subject. Supporting identity translation checks those retained execution
@@ -240,9 +240,11 @@ Report consumes validated context and moves each retained fact once. Intent iden
 connects observations to their retained target and configuration anchor; it does not reinterpret
 native evidence or reconstruct prepared transaction commands.
 
-The domain graph is one-way: Portfolio depends on EVM domain contracts; EVM depends on shared Chain,
-foundations and Program; live EVM depends on EVM plus Runtime and captures concrete
-signer handles. Neither domain depends on Runtime, Store, live IO, keystore custody, or Application.
+The production domain graph points inward: Portfolio depends on Chain; EVM depends on Chain,
+foundations and Program. Live EVM depends on Portfolio, Chain, EVM and Program/Capabilities for
+native admission, binding and presentation, and captures concrete signer handles. Runtime is a
+Live EVM test dependency, not a production dependency. Application coordinates Runtime and the
+native client. No domain depends on Runtime, Store, live IO, keystore custody, or Application.
 
 ## Material uncertainties
 

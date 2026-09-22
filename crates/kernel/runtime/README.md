@@ -94,10 +94,7 @@ canonical artifact supplies hashing/output without a second cause tree or root m
 views own their EffectCall and optional original/outcome pair. `RecoveryStopped` retains only the
 observed view.
 
-The isolated Phase A proof exercises borrowed admission, terminal execution, two selected native
-ABIs, recovery scopes, cancellation, acknowledgement ambiguity, encoding faults and cold original
-reports. Domain proof callers also execute through this Runtime with scripted external adapters.
-See [the proof assessment](../../../docs/dsl-phase-a.md) for its isolated guarantees and
-[the production cutover ledger](../../../docs/dsl-phase-b.md) for migrated integration targets,
-remaining consumers, commands and managed acceptance. Focused passes do not imply a full production
-acceptance or final CI pass.
+The [verification record](../../../docs/dsl-phase-b.md) identifies the exact tested production
+revision and retained custody, cancellation, recovery, cold-load and managed acceptance evidence.
+Use [build and verification](../../../docs/build-and-verification.md) for current commands; a
+historical passing revision does not establish that a changed candidate passes.

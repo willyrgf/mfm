@@ -1,7 +1,7 @@
 use super::*;
 
 // solc 0.8.33, --evm-version cancun, no optimizer, original managed fixture source path.
-// See docs/dsl-phase-a.md for the reproducible compilation command; bytecode is not committed.
+// See docs/build-and-verification.md#scalar-contract-artifact for reproduction; bytecode is not committed.
 const INITCODE_SHA256: &str = "c7aed441e0afa86de84779ac168d27e4d8a29148b6834565d5930ef7c8ae855d";
 pub(super) const CONFIGURE_SELECTOR: [u8; 4] = [0x1e, 0xb2, 0x5e, 0x0a];
 
