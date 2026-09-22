@@ -10,18 +10,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mfm_chain::transaction::*;
-use mfm_chain::{ContractArtifact, LedgerIdentity};
 use mfm_evm::custody::{
     AuthorityError, AuthorityFuture, EvmTransactionAuthority, LoadedTransaction, PreparedRecord,
     Reservation,
 };
 use mfm_evm::{
     Eip1559Options, EvmAddress, EvmAuthorityEpoch, EvmBalanceRoute, EvmContractExecutionConfig,
-    EvmContractReadImplementation, EvmEndpoint, EvmHash, EvmScalarContractArtifact,
-    EvmTransactionBinding, EvmTransactionImplementation, EvmTransactionRoute, EvmU256,
+    EvmEndpoint, EvmHash, EvmScalarContractArtifact, EvmTransactionBinding, EvmTransactionRoute,
+    EvmU256,
 };
+use mfm_evm_live::client::contract::{ContractResources, EvmContractConfig};
 use mfm_evm_live::{
-    ethereum_address, EvmAdapterLocator, EvmReadProvider, EvmResources, EvmTransactionProvider,
+    ethereum_address, EvmAdapterLocator, EvmReadProvider, EvmTransactionProvider,
     EvmTransactionResource, JsonRpcEvmProvider, EVM_EIP1559_SIGNING_PURPOSE_ID,
 };
 use mfm_ids::{ContentRef, DigestBytes, EffectId, EntryPointId, RunId, StableId};
@@ -34,7 +34,6 @@ use mfm_storage_postgres::{
     PostgresEvmTransactionAuthority, RuntimePostgresLocator,
 };
 use mfm_store::Store;
-use mfm_values::Object;
 use zeroize::Zeroizing;
 
 const MAX_INITCODE_BYTES: usize = 49_152;
@@ -47,23 +46,6 @@ const CONFIGURATION_GAS: u64 = 200_000;
 const PRIORITY_FEE: u64 = 1_000_000_000;
 const MAX_FEE: u64 = 10_000_000_000;
 const FUNDING_WEI: u64 = 1_000_000_000_000_000_000;
-type Deployer = Effect<Deploy, TransactionEffect<DeploymentRequest>>;
-type Composed = Operation<
-    (
-        Deployer,
-        Pure<CheckedAddConfigurationValue>,
-        ConfigureAndObserve,
-        Pure<Validate>,
-        Pure<Report>,
-    ),
-    LifecycleDefaults,
->;
-type Resources = EvmResources<(
-    ContractDeploymentLifecycle,
-    Composed,
-    ConfigureAndObserve,
-    Deployer,
-)>;
 
 #[path = "support/managed_provider.rs"]
 mod managed_provider;
@@ -129,7 +111,7 @@ async fn runtime(
     signer: Arc<dyn Secp256k1Signer>,
     consumed: Arc<AtomicBool>,
     calls: Arc<ProviderCalls>,
-) -> (Runtime, Resources) {
+) -> (Runtime, ContractResources) {
     let backend = Arc::new(
         PostgresBackend::connect(runtime_locator)
             .await
@@ -161,7 +143,7 @@ async fn runtime(
         binding.route.chain_instance.chain_id,
         EvmEndpoint::new("reth-effect-e2e").unwrap(),
     );
-    let resources = Resources::new(vec![(route, read_provider)], vec![resource]).unwrap();
+    let resources = ContractResources::new(vec![(route, read_provider)], vec![resource]).unwrap();
     let store: Arc<dyn Store> = backend;
     (Runtime::new(store), resources)
 }
@@ -192,45 +174,7 @@ fn fixture_initcode() -> Vec<u8> {
     alloy_primitives::hex::decode(digits).expect("hexadecimal fixture initcode")
 }
 
-fn deployment_request(binding: &EvmTransactionBinding, initcode: Vec<u8>) -> DeploymentRequest {
-    use mfm_capabilities::{EffectImplementation, ReadImplementation};
-    let native = EvmContractExecutionConfig::new(
-        binding.clone(),
-        Eip1559Options::new(nonzero(DEPLOYMENT_GAS), PRIORITY_FEE.into(), MAX_FEE.into()).unwrap(),
-        Eip1559Options::new(
-            nonzero(CONFIGURATION_GAS),
-            PRIORITY_FEE.into(),
-            MAX_FEE.into(),
-        )
-        .unwrap(),
-    );
-    DeploymentRequest::new(
-        ContractArtifact::new(
-            LedgerIdentity::new(Object::from_value(&binding.route.chain_instance).unwrap()),
-            Object::from_value(&EvmScalarContractArtifact::new(initcode).unwrap()).unwrap(),
-        ),
-        ContractExecutionConfig::new(
-            <EvmTransactionImplementation as EffectImplementation<
-                TransactionEffect<DeploymentRequest>,
-            >>::implementation_id()
-            .unwrap(),
-            <EvmContractReadImplementation as ReadImplementation<ContractRead>>::implementation_id(
-            )
-            .unwrap(),
-            Object::from_value(&binding.route)
-                .unwrap()
-                .value_ref()
-                .clone(),
-            Object::from_value(&native).unwrap(),
-        ),
-        ConfigurationValue::new("42").unwrap(),
-        ConfigurationValue::new("42").unwrap(),
-        None,
-        None,
-    )
-}
-
-async fn cold_program(runtime: &Runtime, resources: &Resources, run: &RunId) -> Program {
+async fn cold_program(runtime: &Runtime, resources: &ContractResources, run: &RunId) -> Program {
     let document = runtime.program_document(run).await.unwrap();
     load(document.canonical_bytes(), resources).unwrap()
 }
@@ -444,7 +388,25 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         .await
         .unwrap_or_else(|_| panic!("managed admin connection"));
     let diagnostic_run = RunId::from_digest(DigestBytes::from_array([0x59; 32]));
-    let diagnostic_input = deployment_request(&binding, initcode.clone());
+    let config = EvmContractConfig {
+        artifact: EvmScalarContractArtifact::new(initcode).unwrap(),
+        execution: EvmContractExecutionConfig::new(
+            binding.clone(),
+            Eip1559Options::new(nonzero(DEPLOYMENT_GAS), PRIORITY_FEE.into(), MAX_FEE.into())
+                .unwrap(),
+            Eip1559Options::new(
+                nonzero(CONFIGURATION_GAS),
+                PRIORITY_FEE.into(),
+                MAX_FEE.into(),
+            )
+            .unwrap(),
+        ),
+        requested: ConfigurationValue::new("42").unwrap(),
+        increment: ConfigurationValue::new("42").unwrap(),
+        retry_allowance: Some(0),
+        restart_allowance: Some(0),
+    };
+    let diagnostic_input = config.clone().into_request().unwrap();
     let (hot, resources) = runtime(
         &runtime_locator,
         &rpc_locator,
@@ -456,7 +418,7 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     .await;
     let diagnostic_program = compile(
         EntryPointId::new("mfm.test.evm-effect/authority-diagnostic@1").unwrap(),
-        &Deployer::default(),
+        &Effect::<Deploy, TransactionEffect<DeploymentRequest>>::default(),
         &diagnostic_input,
         &resources,
         ProgramLimits::new(0),
@@ -609,7 +571,31 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     drop(cold);
     drop(admin);
 
-    let input = deployment_request(&binding, initcode);
+    let encoded_config = serde_json::to_value(&config).unwrap();
+    let mut malformed_config = encoded_config.clone();
+    malformed_config["requested"] = serde_json::json!("042");
+    assert!(serde_json::from_value::<EvmContractConfig>(malformed_config).is_err());
+    let config: EvmContractConfig = serde_json::from_value(encoded_config).unwrap();
+    let expected_execution = config.execution.clone();
+    let input = config.into_request().unwrap();
+    assert_eq!(input.retry_allowance(), Some(0));
+    assert_eq!(input.restart_allowance(), Some(0));
+    assert_eq!(
+        input
+            .execution()
+            .native()
+            .decode::<EvmContractExecutionConfig>()
+            .unwrap(),
+        expected_execution
+    );
+    assert_eq!(
+        input.execution().transaction_implementation().as_str(),
+        "mfm.evm.transaction@1"
+    );
+    assert_eq!(
+        input.execution().read_implementation().as_str(),
+        "mfm.evm.contract-read@1"
+    );
     let run_id = RunId::from_digest(DigestBytes::from_array([0x5a; 32]));
     let consumed = Arc::new(AtomicBool::new(false));
     let (initial_runtime, resources) = runtime(
@@ -833,7 +819,13 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
     let composed_input = report.request().clone();
     let composed = compile(
         EntryPointId::new("mfm.test.evm-effect/composed@1").unwrap(),
-        &Composed::default(),
+        &Operation::<_, LifecycleDefaults>::from((
+            Effect::<Deploy, TransactionEffect<DeploymentRequest>>::default(),
+            Pure::<CheckedAddConfigurationValue>::default(),
+            ConfigureAndObserve::default(),
+            Pure::<Validate>::default(),
+            Pure::<Report>::default(),
+        )),
         &composed_input,
         &resources,
         ProgramLimits::new(1),
