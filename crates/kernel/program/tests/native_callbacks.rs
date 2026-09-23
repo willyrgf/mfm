@@ -22,6 +22,8 @@ use std::{
     },
 };
 
+static READ_PROJECTIONS: AtomicUsize = AtomicUsize::new(0);
+
 struct NativeRead<const PHASE: u8 = 0>;
 impl<const PHASE: u8> ReadImplementation<Observation> for NativeRead<PHASE> {
     type Binding = NoParams;
@@ -55,6 +57,9 @@ impl<const PHASE: u8> ReadImplementation<Observation> for NativeRead<PHASE> {
         evidence: &Deployed,
         original: &Object,
     ) -> Result<Observed, mfm_capabilities::CallbackFailure> {
+        if PHASE == 0 {
+            READ_PROJECTIONS.fetch_add(1, Ordering::SeqCst);
+        }
         if PHASE >= 10 {
             hook_failure(PHASE - 10)?;
         }
@@ -111,16 +116,14 @@ async fn read_callbacks_keep_native_evidence_and_interpret_its_semantic_projecti
     let evidence = adapter(position, &intent).await.unwrap().unwrap();
     assert_eq!(evidence.decode::<Deployed>().unwrap().value, 8);
     assert!(evidence.decode::<Observed>().is_err());
-    (callbacks.bind)(intent.clone(), evidence.clone())
-        .await
-        .unwrap();
-    let outcome = (callbacks.interpret)(input, intent, evidence, position)
+    let outcome = (callbacks.complete)(input, intent, evidence, position)
         .await
         .unwrap();
     let ProposedStateOutcome::Success { output } = outcome else {
         panic!("unexpected State failure")
     };
     assert_eq!(output.decode::<Observed>().unwrap().value, 7);
+    assert_eq!(READ_PROJECTIONS.load(Ordering::SeqCst), 1);
 }
 
 struct NativeEffect<const WRONG_SCHEMA: bool>;
@@ -402,9 +405,20 @@ async fn nested_native_hooks_preserve_codec_phases_and_uncaught_hook_panics() {
                 binding.value_ref().clone(),
                 Arc::new(NoParams),
             );
-            (callbacks.bind)(intent, Object::from_value(&Deployed { value: 8 }).unwrap())
-                .await
-                .unwrap_err()
+            let callback::ReadCompletionFailure::Bind(error) = (callbacks.complete)(
+                intent.clone(),
+                intent,
+                Object::from_value(&Deployed { value: 8 }).unwrap(),
+                ExecutionPosition {
+                    state: StatePosition::new(0).unwrap(),
+                    visit: VisitId::new(0),
+                },
+            )
+            .await
+            .unwrap_err() else {
+                panic!("projection retains binding provenance");
+            };
+            error
         };
         let phase = PHASE % 10;
         let cause = match (phase, error) {

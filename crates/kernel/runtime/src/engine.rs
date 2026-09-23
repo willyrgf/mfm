@@ -859,17 +859,21 @@ async fn start_read(
             .await
         }
         Ok(evidence) => {
-            (callbacks.bind)(intent.clone(), evidence.clone())
-                .await
-                .map_err(|error| RuntimeError::callback(Operation::ReadBind, error))?;
-            let outcome = (callbacks.interpret)(
+            let outcome = (callbacks.complete)(
                 call.input.clone(),
                 intent.clone(),
                 evidence.clone(),
                 call.position,
             )
             .await
-            .map_err(|error| RuntimeError::callback(Operation::ReadInterpret, error))?;
+            .map_err(|error| match error {
+                callback::ReadCompletionFailure::Bind(cause) => {
+                    RuntimeError::callback(Operation::ReadBind, cause)
+                }
+                callback::ReadCompletionFailure::Interpret(cause) => {
+                    RuntimeError::callback(Operation::ReadInterpret, cause)
+                }
+            })?;
             conclude(
                 context,
                 StateCall::Read {

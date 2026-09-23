@@ -46,6 +46,11 @@ value/original encoding and panic containment. Runtime's nongeneric State runner
 functions without passing DriverContext or transition authority across that boundary. Each outcome
 wrapper captures its exact original contract; Runtime supplies the current execution position. Its invocation-only Decode/Execute/Encode failure carries
 immutable diagnostic data; Runtime attaches the actual operation without recapturing it.
+Read has one completion callback: project/bind native evidence once, pass the typed evidence directly
+to State interpretation, then encode the outcome. Its internal Bind/Interpret result preserves the
+operation alongside the existing codec phase and cause. The native Object remains the exact retained
+evidence. Effect keeps separate binding and interpretation callbacks across settlement acknowledgement
+and cold recovery; Read has no such intervening durable boundary.
 Callback encoding and decoding use immediately awaited pure blocking jobs. Runtime admission
 encoding is the explicitly approved synchronous exception for borrowed caller input. Explicit adapter IO stays
 async, and Runtime alone retains append, acknowledgement, classification timing and recovery

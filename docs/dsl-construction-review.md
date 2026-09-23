@@ -126,3 +126,28 @@ nix develop -c cargo clippy -p mfm-portfolio -p mfm-evm-live -p mfm-app --all-ta
 All passed: Portfolio four unit/one integration, native client six, Application fourteen. Initial
 workspace checking identified the now-irrefutable test branches; these were removed and Clippy
 passed without warnings. Production +48/-67 (net -19), tests +15/-54 (net -39), before documentation.
+
+## Step 4: one Read completion
+
+Step 3 revision: `1ebae644`. Read now has one completion callback which binds/projects native
+evidence once, directly interprets its typed result and encodes the outcome. Removed the separate
+binding callback and duplicate captures/projection. The internal kernel-only `ReadCompletionFailure`
+distinguishes Bind and Interpret while carrying existing `CallbackFailure` unchanged; Runtime keeps
+its existing operation diagnostics. Effect callbacks and acknowledgement boundaries are unchanged.
+
+The existing native callback scenario now counts exactly one projection while asserting retained
+native evidence and semantic output. Existing fault cases retain binding/interpretation provenance,
+codec phases, original acknowledgement timing and cold inspection. No callback authority moved.
+
+```sh
+nix develop -c cargo fmt --all
+nix develop -c cargo test -p mfm-program --test native_callbacks --message-format short
+nix develop -c cargo test -p mfm-runtime --test callback_phases --message-format short
+nix develop -c cargo test -p mfm-program -p mfm-runtime --all-targets --message-format short
+nix develop -c cargo clippy -p mfm-program -p mfm-runtime --all-targets --message-format short -- -D warnings
+```
+
+All passed, including the normal compile-fail checks and Runtime cancellation, append/reconciliation,
+recovery, classification and original-custody suites. Production +38/-39 (net -1), tests +27/-9
+(net +18), before documentation. The narrow result distinction adds provenance without a second
+error framework or evidence cache.

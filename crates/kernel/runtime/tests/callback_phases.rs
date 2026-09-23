@@ -652,8 +652,12 @@ async fn invoke_fault(
         );
         let intent = (callbacks.prepare)(input.clone()).await?;
         let evidence = adapter(position, &intent).await?.unwrap();
-        (callbacks.bind)(intent.clone(), evidence.clone()).await?;
-        (callbacks.interpret)(input, intent, evidence, position).await?;
+        (callbacks.complete)(input, intent, evidence, position)
+            .await
+            .map_err(|failure| match failure {
+                callback::ReadCompletionFailure::Bind(cause)
+                | callback::ReadCompletionFailure::Interpret(cause) => cause,
+            })?;
     }
     Ok(())
 }

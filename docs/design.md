@@ -94,6 +94,10 @@ exact implementation/input/output/failure ABI, so one implementation identity ma
 generic ABIs without ambiguity. Read callbacks and evidence binding receive the exact intent value
 ref; Effect callbacks receive the exact command value ref used for `EffectId` derivation. These are
 instance refs, never shared codec contract refs. State code has no ambient IO.
+A Read completion binds/projects native evidence once before interpreting that typed result. Binding
+and interpretation retain separate operation provenance, with the existing Decode/Execute/Encode
+causes unchanged. No append or acknowledgement occurs between them. Effect retains separate callbacks
+because settlement acknowledgement and cold recovery may intervene.
 
 Values owns `Unsigned256`, the checked canonical decimal integer in `0..=2^256-1`, including
 checked addition. EVM's `EvmU256` delegates grammar/range checking to that owner while preserving

@@ -12,7 +12,7 @@ use mfm_values::{InvocationDiagnostic, MfmValue, Object};
 use std::{future::Future, pin::Pin, sync::Arc};
 
 /// One immediately awaited invocation, with no retained mutation authority.
-pub type Job<T> = Pin<Box<dyn Future<Output = Result<T, CallbackFailure>> + Send>>;
+pub type Job<T, E = CallbackFailure> = Pin<Box<dyn Future<Output = Result<T, E>> + Send>>;
 /// An encoded State outcome. Failure is still unclassified.
 pub type Outcome = ProposedStateOutcome<Object, Object>;
 /// Exact original decoding and classification, invoked after acknowledgement by Runtime.
@@ -21,14 +21,23 @@ pub type Classifier = fn(Object) -> Job<Classification>;
 pub type Prepare = fn(Object) -> Job<Object>;
 /// Evaluation with the exact original contract captured at construction.
 pub type Evaluate = Arc<dyn Fn(Object, ExecutionPosition) -> Job<Outcome> + Send + Sync>;
-/// Interpretation with the exact original contract captured at construction.
-pub type ReadInterpret =
-    Arc<dyn Fn(Object, Object, Object, ExecutionPosition) -> Job<Outcome> + Send + Sync>;
+/// Read completion preserves binding versus State interpretation provenance.
+pub type ReadComplete = Arc<
+    dyn Fn(Object, Object, Object, ExecutionPosition) -> Job<Outcome, ReadCompletionFailure>
+        + Send
+        + Sync,
+>;
+/// Internal completion boundary; Runtime projects its operation without replacing the cause.
+#[derive(Debug)]
+pub enum ReadCompletionFailure {
+    /// Native evidence decoding, projection or semantic binding failed.
+    Bind(CallbackFailure),
+    /// State input decoding, interpretation or outcome encoding failed.
+    Interpret(CallbackFailure),
+}
 /// Effect interpretation retains the acknowledged command and Effect identity for projection.
 pub type EffectInterpret =
     Arc<dyn Fn(Object, EffectId, Object, Object, ExecutionPosition) -> Job<Outcome> + Send + Sync>;
-/// Read evidence binding remains a separate operation from interpretation.
-pub type ReadBind = Arc<dyn Fn(Object, Object) -> Job<()> + Send + Sync>;
 /// Effect evidence binding uses Runtime's retained Effect identity.
 pub type EffectBind = Arc<dyn Fn(EffectId, Object, Object) -> Job<()> + Send + Sync>;
 /// Validates selected native extraction before Runtime can acknowledge a command.
@@ -47,10 +56,8 @@ pub struct PureCallbacks {
 pub struct ReadCallbacks {
     /// Prepare an exact intent.
     pub prepare: Prepare,
-    /// Check evidence against that intent.
-    pub bind: ReadBind,
-    /// Interpret accepted evidence and encode its outcome.
-    pub interpret: ReadInterpret,
+    /// Bind native evidence once, interpret the typed result and encode its outcome.
+    pub complete: ReadComplete,
     /// Classify an acknowledged State original.
     pub classify: Classifier,
     /// Classify an acknowledged adapter original.
@@ -135,9 +142,6 @@ impl ReadCallbacks {
         I: ReadImplementation<C>,
         I::OperationalError: ClassifyError,
     {
-        let bind_implementation = implementation.clone();
-        let bind_ref = binding_ref.clone();
-        let bind_value = Arc::clone(&binding);
         Self {
             prepare: |input| {
                 Box::pin(async move {
@@ -145,29 +149,12 @@ impl ReadCallbacks {
                     encode(execute(move || S::prepare(&input)).await?).await
                 })
             },
-            bind: Arc::new(move |intent, evidence| {
-                let implementation = bind_implementation.clone();
-                let binding_ref = bind_ref.clone();
-                let binding = Arc::clone(&bind_value);
-                Box::pin(async move {
-                    super::native::read_evidence::<C, I>(
-                        implementation,
-                        binding_ref,
-                        binding,
-                        intent,
-                        evidence,
-                    )
-                    .await?;
-                    Ok(())
-                })
-            }),
-            interpret: Arc::new(move |input, intent, evidence, position| {
+            complete: Arc::new(move |input, intent, evidence, position| {
                 let contract = failure_contract.clone();
                 let implementation = implementation.clone();
                 let binding_ref = binding_ref.clone();
                 let binding = Arc::clone(&binding);
                 Box::pin(async move {
-                    let input = decode::<S::Input>(input).await?;
                     let evidence = super::native::read_evidence::<C, I>(
                         implementation,
                         binding_ref,
@@ -175,9 +162,17 @@ impl ReadCallbacks {
                         intent,
                         evidence,
                     )
-                    .await?;
-                    let proposed = execute(move || S::interpret(input, &evidence)).await?;
-                    outcome(proposed, position, &contract).await
+                    .await
+                    .map_err(ReadCompletionFailure::Bind)?;
+                    let input = decode::<S::Input>(input)
+                        .await
+                        .map_err(ReadCompletionFailure::Interpret)?;
+                    let proposed = execute(move || S::interpret(input, &evidence))
+                        .await
+                        .map_err(ReadCompletionFailure::Interpret)?;
+                    outcome(proposed, position, &contract)
+                        .await
+                        .map_err(ReadCompletionFailure::Interpret)
                 })
             }),
             classify: classify::<S::Failure>,
