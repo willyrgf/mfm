@@ -49,8 +49,7 @@
           rustToolchain = import ./nix/rust-toolchain.nix { inherit pkgs; };
         in
         [
-          rustToolchain
-          pkgs.cargo-nextest
+          rustToolchain.package
           pkgs.git
           pkgs.jq
           pkgs.pkg-config
@@ -71,15 +70,15 @@
           pkgs = mkPkgs system;
           rustToolchain = import ./nix/rust-toolchain.nix { inherit pkgs; };
           rustPlatform = pkgs.makeRustPlatform {
-            cargo = rustToolchain;
-            rustc = rustToolchain;
+            cargo = rustToolchain.package;
+            rustc = rustToolchain.package;
           };
         in
         {
           default = self.packages.${system}.model;
           model = nixfied.lib.${system}.compileModel ./nixfied.nix;
           sqlx-cli = mkSqlxCli system;
-          mfm = rustPlatform.buildRustPackage {
+          mfm = rustPlatform.buildRustPackage (rustToolchain.env // {
             pname = "mfm";
             version = "0.1.0";
             src = ./.;
@@ -99,7 +98,7 @@
             postInstall = ''
               ln -s "$out/bin/mfm_cli" "$out/bin/mfm"
             '';
-          };
+          });
         }
       );
 
@@ -107,14 +106,15 @@
         system:
         let
           pkgs = mkPkgs system;
+          rustToolchain = import ./nix/rust-toolchain.nix { inherit pkgs; };
         in
         {
-          default = pkgs.mkShell {
+          default = pkgs.mkShell (rustToolchain.env // {
             packages = mkDevTools system;
             shellHook = ''
               unset CARGO_TARGET_DIR
             '';
-          };
+          });
         }
       );
 

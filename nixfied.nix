@@ -22,7 +22,7 @@ let
   ]
   ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
   ccEnvSuffix = lib.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.config;
-  cargoEnv = {
+  cargoEnv = rustToolchain.env // {
     SQLX_OFFLINE = "true";
     CARGO_TARGET_DIR = "target/verification";
     CARGO_INCREMENTAL = "0";
@@ -166,7 +166,7 @@ let
         for baseline in run_history_postgres_v2 config_postgres_v2 evm_transaction_postgres_v2; do
           psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "crates/storages/postgres/migrations/$baseline.sql" >/dev/null
         done
-        SQLX_OFFLINE=false cargo sqlx prepare --no-dotenv ${lib.optionalString check "--check"} --workspace -- --locked -p mfm-storage-postgres --lib
+        SQLX_OFFLINE=false cargo-sqlx sqlx prepare --no-dotenv ${lib.optionalString check "--check"} --workspace -- --locked -p mfm-storage-postgres --lib
         ${lib.optionalString check ''
           # SQLx warns about extra cache files; CI requires the exact live query set.
           cache_names() { find "$1" -maxdepth 1 -name 'query-*.json' -printf '%f\n' | sort; }
@@ -247,7 +247,7 @@ in
   };
 
   nixfied.closures.rust-toolchain = {
-    package = rustToolchain;
+    package = rustToolchain.package;
     executable = "bin/cargo";
     effects = [
       "process"
@@ -288,9 +288,13 @@ in
   };
 
   nixfied.tasks = {
+    toolchain-check = cargoLeaf {
+      tools = [ pkgs.coreutils (assert pkgs.sqlx-cli.version == "0.9.0"; pkgs.sqlx-cli) ];
+      run = [ "bash" "nix/toolchain-check.sh" ];
+    };
     fmt = cargoLeaf {
       run = [
-        "cargo"
+        "cargo-fmt"
         "fmt"
         "--all"
         "--"
@@ -299,7 +303,7 @@ in
     };
     clippy = cargoLeaf {
       run = [
-        "cargo"
+        "cargo-clippy"
         "clippy"
         "--workspace"
         "--all-targets"
@@ -470,6 +474,7 @@ in
     ci = {
       kind = "composite";
       steps = nixfiedLib.seq [
+        "toolchain-check"
         "fmt"
         "sqlx-check"
         "clippy"
