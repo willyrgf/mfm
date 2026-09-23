@@ -151,3 +151,85 @@ All passed, including the normal compile-fail checks and Runtime cancellation, a
 recovery, classification and original-custody suites. Production +38/-39 (net -1), tests +27/-9
 (net +18), before documentation. The narrow result distinction adds provenance without a second
 error framework or evidence cache.
+
+## Step 5: consumer evidence and overlap removal
+
+Step 4 revision: `2cf07e8a`. The existing managed standalone deployment now resumes after restoring
+its authority on the original RunId. It compares every prior frame byte-for-byte, finds settlement of
+the exact retained Effect call/command, independently observes the creation receipt, checks one extra
+signature/submission and nonce, then verifies unchanged terminal replay. It reuses the existing
+fixture and resource reconstruction; no additional scenario framework or Runtime policy is added.
+
+The existing NotInserted fixture now covers both manual progression and automatic `execute` at all
+three Effect append boundaries. Manual calls yield the checked winner; automatic execution may
+continue. Both paths make one adapter call using the retained command ref/value and EffectId, and
+cold resume completes without repeating it. Runtime execution code is unchanged by this step.
+Current design/Runtime documentation now states that distinction.
+
+Callback fault controls are named private variants, including original codec/classifier faults.
+All previous fault phases, reviewed nested causes, panic-payload exclusion, acknowledgement timing,
+one original encoding and cold original custody remain exercised. Test-only wire labels now describe
+the simulated fault rather than encoding its behavior as numeric ranges.
+
+### Replaced coverage
+
+| Removed/replaced coverage | Retained observable owner |
+| --- | --- |
+| Source selecting both conflicting States/handlers | `claim_conflicts`: selected shadow versus installed owner, exact operation/reason; installed conflicts and generic ABI distinctions remain separately covered. |
+| Invocation-time handler parameter decoding | `handler_construction`: checked non-Clone parameters, one decode hot/cold, repeat recovery requests without decoding, invalid later values prevent every native binder. |
+| Constructor-only maximum Portfolio output | `snapshot_extremes`: valid boundary values plus independently malformed wire; every child decodes before aggregate rejection. |
+| Seven impossible Portfolio domain failures and generic projection | Owning States declare Never; actual native-client arithmetic scenario retains exact consolidation original, unchanged product summary and cold report bytes. |
+| Separate Read bind/interpret projection | `native_callbacks` counts one native projection; `callback_phases` retains all codec causes and representative Runtime operation/head checks. |
+| `existing_pure_caller_executes_without_binding_any_native_adapter` | Existing Live `contract_authoring::pure_selection_and_new_semantics_use_the_same_cold_execution_path`: 42+42=84, cold Program, empty bindings and actual resources with no native handles; also new State success/rejection. |
+| Manual-only append-race assertion | Existing `runtime_contract` fixture now checks manual yield and automatic completion against the same exact retained command/EffectId. |
+| Managed standalone rejection/inspection only | Same deployment completes after resource restoration, preserving all failure-prefix bytes and command authority; independent receipt and terminal replay checks added. |
+
+Focused verification passed:
+
+```sh
+nix develop -c cargo fmt --all
+nix develop -c cargo test -p mfm-program --test native_callbacks --message-format short
+nix develop -c cargo test -p mfm-runtime --test callback_phases --test runtime_contract --message-format short
+nix develop -c cargo test -p mfm-runtime --test callback_phases --message-format short
+nix develop -c cargo check -p mfm-evm-live --test evm_contract_effect_e2e --message-format short
+nix develop -c cargo test -p mfm-evm-live --test contract_authoring --message-format short
+nix develop -c cargo clippy -p mfm-program -p mfm-runtime -p mfm-evm -p mfm-evm-live --all-targets --message-format short -- -D warnings
+```
+
+Program native callbacks: four passed; Runtime phases: five passed; Runtime contracts: fourteen
+passed; public authoring: one passed. The direct `cargo test -p mfm-evm --test lifecycle_runtime
+--message-format short` compiled successfully but ignored its one fixture-dependent test; it is not
+execution evidence. The managed Effect task supplies its pinned Solidity artifact.
+
+Final architect source review accepted all five steps, finding no implementation blocker, new
+registry, compatibility path or duplicate executable authority. That review did not independently
+run managed tests or CI. Native binding decoder panic containment is an existing limitation and is
+not claimed by this cutover; the new handler decoder panic boundary is covered separately.
+
+Additional focused scalar check passed:
+`nix develop -c cargo test -p mfm-evm --test scalar_read_evidence --message-format short`
+(one test retaining all observation outcomes and mismatch/malformed rejection).
+
+The first managed `nix run .#run -- --task effect-e2e` attempt passed the one domain lifecycle and two
+scalar-recipe tests, then the enlarged live test future overflowed its test-thread stack before the
+scenario ran (task exit 101). Evidence:
+`/home/willyrgf.linux/.local/state/nixfied/mfm/dev/0/runs/run-245229-1790156017398676327/artifacts/run-summary.json`.
+The added recovery block now uses one immediately awaited boxed future; no Runtime change, stack-limit
+increase or assertion removal was made. Focused fixture Clippy passed with
+`nix develop -c cargo clippy -p mfm-evm-live --test evm_contract_effect_e2e --message-format short -- -D warnings`.
+The complete managed task was rerun after that correction; results are recorded below.
+
+Managed Effect rerun passed: one lifecycle test, two scalar-recipe tests and one live recovery test
+(65.60s live test; 184.512s task, 186.245s total). Exact command:
+
+```sh
+nix run .#run -- --task effect-e2e
+```
+
+Evidence:
+`/home/willyrgf.linux/.local/state/nixfied/mfm/dev/0/runs/run-262855-1790156328347726397/artifacts/run-summary.json`.
+Architect follow-up accepted the allocation correction and retained empty-binding assertion.
+Step 5 adds no production Rust: test Rust +597/-321 (net +276). The increase replaces numeric fault
+ranges with explicit variants, extends the existing reconciliation/managed fixtures, and deletes
+43 net lines of duplicate Pure consumer coverage. Managed client acceptance and final CI remain
+pending at this implementation commit; the final assessment below records their results.

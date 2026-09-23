@@ -62,6 +62,7 @@ async fn pure_selection_and_new_semantics_use_the_same_cold_execution_path() {
     )
     .unwrap();
     let program = load(program.canonical_bytes(), &resources).unwrap();
+    assert!(program.bindings().is_empty());
     let runtime = Runtime::new(Arc::new(MemoryStore::new()));
     let result = runtime
         .execute(

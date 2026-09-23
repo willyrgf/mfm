@@ -1,7 +1,7 @@
 //! Managed PostgreSQL/Reth coverage of lost reservation acknowledgement, reconstructed Runtime
 //! recovery, external nonce advancement, and unchanged terminal history. Keystore custody stays
 //! alive across Runtime reconstruction. Preparation recovery without signing and Journal append
-//! faults are exercised in `src/transaction_tests.rs`; this test does not count provider calls.
+//! faults are exercised in `src/transaction_tests.rs`; this fixture counts submission and Pending calls.
 
 use std::io::Read;
 use std::num::NonZeroU64;
@@ -909,6 +909,100 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         }
     }
     assert_eq!(setup_provider.pending_nonce(&sender).await.unwrap(), 6);
+    drop(diagnostic_program);
+    // Keep this additional recovery future off the already large managed fixture's stack.
+    Box::pin(async {
+        // Finish the existing standalone deployment after resource restoration, without readmission.
+        // The saved failure prefix and command authority must survive the successful continuation.
+        let backend = PostgresBackend::connect(&runtime_locator).await.unwrap();
+        let RunViewState::EffectPending { effect, .. } = cold_view.state() else {
+            panic!("standalone deployment retains the failed command");
+        };
+        let retained_effect = serde_json::to_value(effect).unwrap();
+        let mut failure_prefix = Vec::new();
+        for sequence in 1..=cold_view.head_sequence() {
+            let snapshot = backend
+                .load_run(&diagnostic_run, Some(sequence))
+                .await
+                .unwrap()
+                .unwrap();
+            failure_prefix.push(snapshot.probe().unwrap().clone());
+        }
+        let (restored, resources) = runtime(
+            &runtime_locator,
+            &rpc_locator,
+            &binding,
+            signer.clone(),
+            Arc::new(AtomicBool::new(true)),
+            provider_calls.clone(),
+        )
+        .await;
+        let program = cold_program(&restored, &resources, &diagnostic_run).await;
+        let standalone =
+            drive_to_success(async || restored.resume(&diagnostic_run, &program).await).await;
+        assert_eq!(standalone.run_id(), &diagnostic_run);
+        let deployed = standalone
+            .success()
+            .unwrap()
+            .decode::<DeployedContract>()
+            .unwrap();
+        assert_eq!(deployed.effective().to_string(), "42");
+        let settlement = deployed
+            .deployment()
+            .original()
+            .decode::<mfm_evm::EvmTransactionSettlement>()
+            .unwrap();
+        assert_eq!(settlement.nonce(), 6);
+        let receipt = setup_provider
+            .receipt(settlement.transaction_hash())
+            .await
+            .unwrap()
+            .unwrap();
+        let mfm_evm_live::ProviderReceiptResult::SuccessCreate { contract_address } =
+            receipt.result()
+        else {
+            panic!("independent receipt confirms standalone deployment");
+        };
+        assert_eq!(
+            settlement.outcome(),
+            &mfm_evm::EvmTransactionOutcome::Created {
+                created_address: contract_address.clone(),
+            }
+        );
+        assert_eq!(receipt.block_anchor(), settlement.block_anchor());
+        let mut settled_retained_command = false;
+        for sequence in 1..=standalone.head_sequence() {
+            let snapshot = backend
+                .load_run(&diagnostic_run, Some(sequence))
+                .await
+                .unwrap()
+                .unwrap();
+            let bytes = snapshot.probe().unwrap();
+            if sequence <= cold_view.head_sequence() {
+                assert_eq!(bytes, &failure_prefix[(sequence - 1) as usize]);
+            } else {
+                let frame = mfm_journal::decode_frame(bytes).unwrap();
+                let payload: serde_json::Value =
+                    serde_json::from_slice(frame.payload().as_bytes()).unwrap();
+                if payload["operation"]["effect_settled"]["effect"] == retained_effect {
+                    settled_retained_command = true;
+                }
+            }
+        }
+        assert!(
+            settled_retained_command,
+            "settlement reuses the exact failed command and EffectId"
+        );
+        assert_eq!(provider_calls.submitted.lock().unwrap().len(), 6);
+        assert_eq!(signing_calls.load(Ordering::SeqCst), 7);
+        let replayed = restored.resume(&diagnostic_run, &program).await.unwrap();
+        assert_eq!(replayed.head_digest(), standalone.head_digest());
+        assert_eq!(replayed.success(), standalone.success());
+        assert_eq!(provider_calls.submitted.lock().unwrap().len(), 6);
+        assert_eq!(signing_calls.load(Ordering::SeqCst), 7);
+        assert_eq!(setup_provider.pending_nonce(&sender).await.unwrap(), 7);
+    })
+    .await;
     owner.shutdown().await.expect("keystore shutdown");
     let signing_run = RunId::from_digest(DigestBytes::from_array([0x5c; 32]));
     let (hot, resources) = runtime(
@@ -967,5 +1061,5 @@ async fn evm_contract_effect_recovers_cold_and_accepts_external_nonce_advance() 
         serde_json::to_value(mfm_app::SerializableRunView::new(&cold_view).unwrap()).unwrap(),
         hot_wire
     );
-    assert_eq!(setup_provider.pending_nonce(&sender).await.unwrap(), 6);
+    assert_eq!(setup_provider.pending_nonce(&sender).await.unwrap(), 7);
 }

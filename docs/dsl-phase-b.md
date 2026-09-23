@@ -3,7 +3,9 @@
 This record separates the original production cutover from the verified follow-up cleanup. Current API and
 invariants are owned by [design](design.md), [architecture](architecture.md) and the
 [authoring guide](capability-authoring.md). Current commands and independent acceptance oracles are
-owned by [build and verification](build-and-verification.md).
+owned by [build and verification](build-and-verification.md). The subsequent
+[construction and boundary review](dsl-construction-review.md) records its separate revisions,
+regressions, verification and accounting; historical passes below do not certify that later work.
 
 ## Verified production revision
 

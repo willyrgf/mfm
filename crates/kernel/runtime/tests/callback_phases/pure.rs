@@ -15,8 +15,8 @@ impl PureState for PureFault {
     ) -> Result<ProposedStateOutcome<FaultValue, custody::FaultOriginal>, InvocationDiagnostic>
     {
         let mode = match input.mode {
-            20 => panic!("callback-payload-marker"),
-            21 => {
+            Fault::ExecutePanic => panic!("callback-payload-marker"),
+            Fault::ExecuteFailure => {
                 return Err(InvocationDiagnostic::from_fields(
                     "fixture_evaluate",
                     "evaluate",
@@ -24,15 +24,19 @@ impl PureState for PureFault {
                     None,
                 ))
             }
-            30 | 31 => {
+            Fault::OriginalEncodeFailure | Fault::OriginalEncodePanic => {
                 return Ok(ProposedStateOutcome::Failure {
                     failure: custody::FaultOriginal {
-                        code: if input.mode == 30 { 87 } else { 88 },
+                        code: if input.mode == Fault::OriginalEncodeFailure {
+                            custody::OriginalFault::EncodeFailure
+                        } else {
+                            custody::OriginalFault::EncodePanic
+                        },
                     },
                 })
             }
-            22 => 13,
-            23 => 14,
+            Fault::ResultEncodePanic => Fault::ValueEncodePanic,
+            Fault::ResultEncodeFailure => Fault::ValueEncodeFailure,
             mode => mode,
         };
         Ok(ProposedStateOutcome::Success {
@@ -43,14 +47,14 @@ impl PureState for PureFault {
 #[tokio::test]
 async fn pure_decode_execution_and_output_encoding_failures_preserve_admission() {
     for (mode, expected_stage, diagnostic_operation) in [
-        (1, "decode", "decode_checked"),
-        (2, "decode", "decode"),
-        (20, "execute", "execute"),
-        (21, "execute", "evaluate"),
-        (22, "encode", "encode"),
-        (23, "encode", "encode"),
-        (30, "encode", "encode_failure"),
-        (31, "encode", "encode_failure"),
+        (Fault::DecodeFailure, "decode", "decode_checked"),
+        (Fault::DecodePanic, "decode", "decode"),
+        (Fault::ExecutePanic, "execute", "execute"),
+        (Fault::ExecuteFailure, "execute", "evaluate"),
+        (Fault::ResultEncodePanic, "encode", "encode"),
+        (Fault::ResultEncodeFailure, "encode", "encode"),
+        (Fault::OriginalEncodeFailure, "encode", "encode_failure"),
+        (Fault::OriginalEncodePanic, "encode", "encode_failure"),
     ] {
         let store = Arc::new(MemoryStore::new());
         let runtime = Runtime::new(store.clone());
@@ -82,13 +86,20 @@ async fn pure_decode_execution_and_output_encoding_failures_preserve_admission()
         let rendered = serde_json::to_string(&cause).unwrap();
         assert!(!rendered.contains("callback-payload-marker"));
         match mode {
-            1 => assert_eq!(cause.details().as_value()["cause"]["code"], 73),
-            21 => assert_eq!(cause.details().as_value()["cause"]["code"], 103),
-            23 => assert!(rendered.contains("reviewed evidence encoder failure")),
-            30 => assert!(rendered.contains("reviewed original encoder failure")),
+            Fault::DecodeFailure => assert_eq!(cause.details().as_value()["cause"]["code"], 73),
+            Fault::ExecuteFailure => assert_eq!(cause.details().as_value()["cause"]["code"], 103),
+            Fault::ResultEncodeFailure => {
+                assert!(rendered.contains("reviewed evidence encoder failure"))
+            }
+            Fault::OriginalEncodeFailure => {
+                assert!(rendered.contains("reviewed original encoder failure"))
+            }
             _ => assert_eq!(cause.code(), "task_failure"),
         }
-        if mode >= 30 {
+        if matches!(
+            mode,
+            Fault::OriginalEncodeFailure | Fault::OriginalEncodePanic
+        ) {
             let fields = cause.details().as_value();
             assert_eq!(fields["original_detail"], "unavailable");
             assert_eq!(fields["original_identity"], "unavailable");

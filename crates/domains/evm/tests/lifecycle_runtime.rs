@@ -111,12 +111,7 @@ impl mfm_store::Store for CountingStore {
 }
 struct Resources<const COLD: bool>(Arc<Mutex<Script>>);
 impl<const COLD: bool> ProgramEnvironment for Resources<COLD> {
-    type Sources = (
-        ContractDeploymentLifecycle,
-        Composed,
-        Extended,
-        Pure<mfm_chain::CheckedAdd>,
-    );
+    type Sources = (ContractDeploymentLifecycle, Composed, Extended);
 }
 impl<R: EvmTransactionRecipe, const COLD: bool> CapabilityFamily<TransactionEffect<R>>
     for Resources<COLD>
@@ -648,42 +643,4 @@ async fn lifecycle_callers_execute_predecessor_data_and_new_state_failure_surviv
         );
         assert_eq!(script.lock().unwrap().calls, calls);
     }
-}
-
-#[tokio::test]
-async fn existing_pure_caller_executes_without_binding_any_native_adapter() {
-    let script = Arc::new(Mutex::new(Script::default()));
-    let input = mfm_chain::CheckedAddition::new("42", "42").unwrap();
-    let program = compile(
-        EntryPointId::new("mfm.test/pure-caller@1").unwrap(),
-        &Pure::<mfm_chain::CheckedAdd>::default(),
-        &input,
-        &Resources::<false>(script.clone()),
-        ProgramLimits::new(0),
-    )
-    .unwrap();
-    assert!(program.bindings().is_empty());
-    let program = load(
-        program.canonical_bytes(),
-        &Resources::<true>(script.clone()),
-    )
-    .unwrap();
-    let result = Runtime::new(Arc::new(MemoryStore::new()))
-        .execute(
-            RunId::from_digest(DigestBytes::from_array([110; 32])),
-            &program,
-            &input,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        result
-            .success()
-            .unwrap()
-            .decode::<mfm_values::Unsigned256>()
-            .unwrap()
-            .to_string(),
-        "84"
-    );
-    assert_eq!(script.lock().unwrap().calls, 0);
 }

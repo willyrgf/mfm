@@ -54,8 +54,9 @@ pending-failure quota. Accepted evidence is bound and committed before interpret
 and Effect barriers prevent restart across their position.
 
 Known insertion adopts the candidate continuation locally. NotInserted performs one exact candidate
-probe, yielding a checked observation only when the candidate is present. Exclusion or absence
-remains this attempt's noninsertion. Presence is retained independently if subsequent projection
+probe, adopting a checked observation only when the candidate is present. Manual progression yields
+there; automatic `execute` may continue from the checked retained continuation using its exact
+command authority. Exclusion or absence remains this attempt's noninsertion. Presence is retained independently if subsequent projection
 fails. Store errors return immediately without probing; ambiguous acknowledgement remains
 Indeterminate. Recording errors retain the available original, separate recording cause and exact
 candidate only after submission. BeforeAppend requires an admitted Failure and retains its concrete

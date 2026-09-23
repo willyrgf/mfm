@@ -3,24 +3,39 @@ use super::*;
 static ENCODINGS: AtomicUsize = AtomicUsize::new(0);
 static CLASSIFICATIONS: AtomicUsize = AtomicUsize::new(0);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum OriginalFault {
+    Operational,
+    DecodeFailure,
+    DecodePanic,
+    ClassifyPanic,
+    EncodeFailure,
+    EncodePanic,
+}
+
 #[derive(Debug, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(decode_native = "Self::decode_checked")]
 pub(super) struct FaultOriginal {
-    pub(super) code: u64,
+    pub(super) code: OriginalFault,
 }
 impl Serialize for FaultOriginal {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        if self.code == 83 {
+        if self.code == OriginalFault::Operational {
             ENCODINGS.fetch_add(1, Ordering::SeqCst);
         }
-        if self.code == 87 {
+        if self.code == OriginalFault::EncodeFailure {
             return Err(serde::ser::Error::custom(
                 "reviewed original encoder failure",
             ));
         }
-        assert_ne!(self.code, 88, "callback-payload-marker");
+        assert_ne!(
+            self.code,
+            OriginalFault::EncodePanic,
+            "callback-payload-marker"
+        );
         let mut value = serializer.serialize_struct("FaultOriginal", 1)?;
         value.serialize_field("code", &self.code)?;
         value.end()
@@ -37,23 +52,27 @@ impl FaultOriginal {
             )
         })?;
         match original.code {
-            84 => Err(InvocationDiagnostic::from_fields(
+            OriginalFault::DecodeFailure => Err(InvocationDiagnostic::from_fields(
                 "fixture_original_decode",
                 "decode_checked",
                 &serde_json::json!({"cause": {"code": 107}}),
                 None,
             )),
-            85 => panic!("callback-payload-marker"),
+            OriginalFault::DecodePanic => panic!("callback-payload-marker"),
             _ => Ok(original),
         }
     }
 }
 impl ClassifyError for FaultOriginal {
     fn classify(&self) -> Classification {
-        if self.code == 83 {
+        if self.code == OriginalFault::Operational {
             CLASSIFICATIONS.fetch_add(1, Ordering::SeqCst);
         }
-        assert_ne!(self.code, 86, "callback-payload-marker");
+        assert_ne!(
+            self.code,
+            OriginalFault::ClassifyPanic,
+            "callback-payload-marker"
+        );
         Classification::OutcomeUnknown
     }
 }
@@ -75,7 +94,7 @@ async fn encoded_original_is_not_classified_until_its_append_is_acknowledged() {
         let resources = Resources::<EffectSource>::default();
         let runtime = Runtime::new(store.clone());
         let input = Input {
-            value: 8,
+            value: Fault::Operational,
             continuation: "original custody".into(),
         };
         let program = mfm_program::compile(
@@ -103,8 +122,11 @@ async fn encoded_original_is_not_classified_until_its_append_is_acknowledged() {
             else {
                 panic!("pending authority and original must remain available")
             };
-            assert_eq!(original.canonical_bytes(), br#"{"code":83}"#);
-            assert_eq!(original.decode::<FaultOriginal>().unwrap().code, 83);
+            assert_eq!(original.canonical_bytes(), br#"{"code":"operational"}"#);
+            assert_eq!(
+                original.decode::<FaultOriginal>().unwrap().code,
+                OriginalFault::Operational
+            );
             assert_eq!(observed.head_sequence(), 4);
         } else {
             let InvocationFailure::Execution {
@@ -123,7 +145,10 @@ async fn encoded_original_is_not_classified_until_its_append_is_acknowledged() {
             else {
                 panic!("original and failed physical append must remain distinct")
             };
-            assert_eq!(original.original().canonical_bytes(), br#"{"code":83}"#);
+            assert_eq!(
+                original.original().canonical_bytes(),
+                br#"{"code":"operational"}"#
+            );
             assert_eq!(observed.head_sequence(), 2);
         }
         let cold = runtime.read(&run, &program).await.unwrap();
@@ -148,7 +173,11 @@ async fn encoded_original_is_not_classified_until_its_append_is_acknowledged() {
 
 #[tokio::test]
 async fn classifier_failures_preserve_the_acknowledged_original_for_cold_inspection() {
-    for (code, expected_stage) in [(84, "decode"), (85, "decode"), (86, "execute")] {
+    for (code, expected_stage) in [
+        (OriginalFault::DecodeFailure, "decode"),
+        (OriginalFault::DecodePanic, "decode"),
+        (OriginalFault::ClassifyPanic, "execute"),
+    ] {
         let store = Arc::new(MemoryStore::new());
         let resources = Resources::<EffectSource> {
             original: Some(code),
@@ -156,7 +185,7 @@ async fn classifier_failures_preserve_the_acknowledged_original_for_cold_inspect
         };
         let runtime = Runtime::new(store.clone());
         let input = Input {
-            value: 0,
+            value: Fault::None,
             continuation: "classification fault".into(),
         };
         let program = mfm_program::compile(
@@ -184,7 +213,7 @@ async fn classifier_failures_preserve_the_acknowledged_original_for_cold_inspect
         assert_eq!(serde_json::to_value(stage).unwrap(), expected_stage);
         let rendered = serde_json::to_string(&cause).unwrap();
         assert!(!rendered.contains("callback-payload-marker"));
-        if code == 84 {
+        if code == OriginalFault::DecodeFailure {
             assert_eq!(cause.details().as_value()["cause"]["code"], 107);
         } else {
             assert_eq!(cause.code(), "task_failure");
@@ -200,7 +229,7 @@ async fn classifier_failures_preserve_the_acknowledged_original_for_cold_inspect
         };
         assert_eq!(
             original.canonical_bytes(),
-            format!("{{\"code\":{code}}}").as_bytes()
+            serde_json::to_vec(&serde_json::json!({"code":code})).unwrap()
         );
         assert_eq!(
             store

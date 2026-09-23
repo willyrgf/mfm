@@ -647,59 +647,103 @@ async fn ambiguous_effect_appends_recover_from_exact_retained_facts() {
     }
 }
 
-// Losing an append race must return the winning record and yield before executing the next step
-// on its behalf.
+// Manual progression yields at an exact-candidate reconciliation. Automatic execution can
+// continue from that checked continuation, preserving the retained command in both cases.
 #[tokio::test]
-async fn effect_not_inserted_returns_the_winner_without_entering_its_new_visit() {
-    for (offset, sequence) in [2_u64, 3, 4].into_iter().enumerate() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let store = Arc::new(ScriptedStore::new([(
-            sequence,
-            AppendAction::RetainThenNotInserted,
-        )]));
-        let (runtime, builder) = effect_runtime_with_counting_adapter(
-            store,
-            Arc::clone(&calls),
-            Arc::new(std::sync::Mutex::new(Vec::new())),
-        );
-        let run_id = RunId::from_digest(DigestBytes::from_array(
-            [u8::try_from(38 + offset).expect("RunId byte"); 32],
-        ));
-        let program = compile(
-            EntryPointId::new(format!("mfm.test.runtime/not-inserted-{sequence}@1"))
-                .expect("entry point"),
-            &EffectSource::new(Binding { route: 8 }),
-            &Number { value: 8 },
-            &builder,
-            ProgramLimits::new(0),
-        )
-        .expect("Program");
-        let completed = runtime
-            .start(run_id.clone(), &program, &Number { value: 8 })
-            .await
+async fn effect_not_inserted_preserves_manual_yield_and_automatic_command_reuse() {
+    for automatic in [false, true] {
+        for (offset, sequence) in [2_u64, 3, 4].into_iter().enumerate() {
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let store = Arc::new(ScriptedStore::new([(
+                sequence,
+                AppendAction::RetainThenNotInserted,
+            )]));
+            let builder = Resources::<Installed>::effect({
+                let seen = seen.clone();
+                move |effect_id, command_ref, command| {
+                    seen.lock().unwrap().push((
+                        effect_id.clone(),
+                        command_ref.clone(),
+                        command.value,
+                    ));
+                    let evidence = EffectEvidence {
+                        effect_id: effect_id.clone(),
+                        value: command.value,
+                        accepted: true,
+                    };
+                    Box::pin(async move { Ok(EffectAdapterOutcome::Settled(evidence)) })
+                }
+            });
+            let runtime = Runtime::new(store.clone());
+            let run_id = RunId::from_digest(DigestBytes::from_array(
+                [u8::try_from(38 + offset).expect("RunId byte"); 32],
+            ));
+            let program = compile(
+                EntryPointId::new(format!("mfm.test.runtime/not-inserted-{sequence}@1")).unwrap(),
+                &EffectSource::new(Binding { route: 8 }),
+                &Number { value: 8 },
+                &builder,
+                ProgramLimits::new(0),
+            )
+            .unwrap();
+            let completed = if automatic {
+                let result = runtime
+                    .execute(run_id.clone(), &program, &Number { value: 8 })
+                    .await
+                    .unwrap();
+                assert_eq!(result.run_id(), &run_id);
+                assert_eq!(
+                    result.success().unwrap().decode::<Number>().unwrap().value,
+                    8
+                );
+                runtime.read(&run_id, &program).await
+            } else {
+                runtime
+                    .start(run_id.clone(), &program, &Number { value: 8 })
+                    .await
+            }
             .expect("converged Effect");
-        assert_eq!(completed.head_sequence(), sequence);
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            if sequence == 2 { 0 } else { 1 }
-        );
-        if sequence == 2 {
-            assert!(matches!(
-                completed.state(),
-                RunViewState::EffectPending { .. }
-            ));
-        } else if sequence == 3 {
-            assert!(matches!(
-                completed.state(),
-                RunViewState::AwaitingInterpretation { .. }
-            ));
-        } else {
-            assert!(matches!(completed.state(), RunViewState::Succeeded(_)));
+            assert_eq!(
+                completed.head_sequence(),
+                if automatic { 4 } else { sequence }
+            );
+            assert_eq!(
+                seen.lock().unwrap().len(),
+                usize::from(automatic || sequence != 2)
+            );
+            match (automatic, sequence) {
+                (false, 2) => assert!(matches!(
+                    completed.state(),
+                    RunViewState::EffectPending { .. }
+                )),
+                (false, 3) => assert!(matches!(
+                    completed.state(),
+                    RunViewState::AwaitingInterpretation { .. }
+                )),
+                _ => assert!(matches!(completed.state(), RunViewState::Succeeded(_))),
+            }
+            let program = load(program.canonical_bytes(), &builder).unwrap();
+            let resumed = Runtime::new(store.clone())
+                .resume(&run_id, &program)
+                .await
+                .unwrap();
+            assert_eq!(resumed.head_sequence(), 4);
+            assert!(matches!(resumed.state(), RunViewState::Succeeded(_)));
+            let frames = store.snapshot();
+            let prepared = decode_frame(&frames[1]).unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_slice(prepared.payload().as_bytes()).unwrap();
+            let effect = &payload["operation"]["effect_prepared"];
+            let expected_id: EffectId =
+                serde_json::from_value(effect["effect_id"].clone()).unwrap();
+            let command: mfm_values::Object =
+                serde_json::from_value(effect["command"].clone()).unwrap();
+            assert_eq!(command.decode::<Command>().unwrap().value, 8);
+            assert_eq!(
+                *seen.lock().unwrap(),
+                vec![(expected_id, command.value_ref().clone(), 8)]
+            );
         }
-        let resumed = runtime.resume(&run_id, &program).await.unwrap();
-        assert_eq!(resumed.head_sequence(), 4);
-        assert!(matches!(resumed.state(), RunViewState::Succeeded(_)));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
 

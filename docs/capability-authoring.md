@@ -51,6 +51,9 @@ available native implementations; `Resolve` selects one from admitted configurat
 `ResolveReadBinding` or `ResolveEffectBinding` qualifies that configuration. `BindRead` and
 `BindEffect` bind the selected public facts to explicit handles. A consumer recomposing installed
 components does not write registration loops or another binding cache.
+Fresh construction checks selected Rust owners against this installed support. Fresh and cold paths
+then share the same association owner; every available typed handler parameter and public native
+binding is checked before any resource is attached. Bound handlers retain their decoded parameters.
 
 `compile` produces a complete immutable Program: a canonical document, exact public bindings and
 mandatory executable occurrences. The entire serialized document, including aggregate bindings,

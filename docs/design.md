@@ -329,8 +329,10 @@ history and Store's atomic exact-head append remain required trust contracts.
 Known insertion adopts the candidate continuation locally. This attempt's `NotInserted` result
 performs one exact candidate probe: presence can adopt a checked current observation; exclusion or
 absence remains a noninsertion failure. Candidate presence is independent of later payload/view
-projection, and any reload failure remains secondary. These paths yield without executing another
-visit. Store errors return immediately without a probe. Indeterminate never becomes a claim of
+projection, and any reload failure remains secondary. Manual progression yields after reconciliation
+without executing another visit. Automatic `execute` may continue from the checked retained
+continuation, reusing its exact command authority; it does not retry the rejected append blindly.
+Store errors return immediately without a probe. Indeterminate never becomes a claim of
 insertion or noninsertion. BeforeAppend requires an admitted Failure and retains its separate
 concrete Runtime cause without unsent candidate bytes. Store and NotInserted retain the admitted
 original when present, independent causes and exact submitted bytes. Failed first-original encoding

@@ -24,9 +24,28 @@ use std::{
 
 static READ_PROJECTIONS: AtomicUsize = AtomicUsize::new(0);
 
-struct NativeRead<const PHASE: u8 = 0>;
-impl<const PHASE: u8> ReadImplementation<Observation> for NativeRead<PHASE> {
-    type Binding = NoParams;
+#[derive(
+    Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, mfm_program_derive::MfmValue,
+)]
+#[serde(rename_all = "snake_case")]
+enum HookFault {
+    #[default]
+    None,
+    Decode,
+    Encode,
+    DecodePanic,
+    EncodePanic,
+    ExecutePanic,
+}
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize, mfm_program_derive::MfmValue)]
+#[serde(deny_unknown_fields)]
+struct ReadBinding {
+    encode: HookFault,
+    project: HookFault,
+}
+struct NativeRead;
+impl ReadImplementation<Observation> for NativeRead {
+    type Binding = ReadBinding;
     type NativeIntent = Prepared;
     type NativeEvidence = Deployed;
     type OperationalError = Never;
@@ -36,12 +55,10 @@ impl<const PHASE: u8> ReadImplementation<Observation> for NativeRead<PHASE> {
     fn encode_intent(
         _: &ContentRef,
         _: &ContentRef,
-        _: &NoParams,
+        binding: &ReadBinding,
         intent: &Configured,
     ) -> Result<Prepared, mfm_capabilities::CallbackFailure> {
-        if PHASE < 10 {
-            hook_failure(PHASE)?;
-        }
+        hook_failure(binding.encode)?;
         Ok(Prepared {
             value: intent.value + 1,
         })
@@ -49,7 +66,7 @@ impl<const PHASE: u8> ReadImplementation<Observation> for NativeRead<PHASE> {
     fn project_evidence(
         _: &ContentRef,
         _: &ContentRef,
-        _: &NoParams,
+        binding: &ReadBinding,
         _: &ContentRef,
         intent: &Configured,
         _: &ContentRef,
@@ -57,12 +74,8 @@ impl<const PHASE: u8> ReadImplementation<Observation> for NativeRead<PHASE> {
         evidence: &Deployed,
         original: &Object,
     ) -> Result<Observed, mfm_capabilities::CallbackFailure> {
-        if PHASE == 0 {
-            READ_PROJECTIONS.fetch_add(1, Ordering::SeqCst);
-        }
-        if PHASE >= 10 {
-            hook_failure(PHASE - 10)?;
-        }
+        hook_failure(binding.project)?;
+        READ_PROJECTIONS.fetch_add(1, Ordering::SeqCst);
         assert_eq!(native.value, intent.value + 1);
         assert_eq!(original.decode::<Deployed>().unwrap().value, evidence.value);
         Ok(Observed {
@@ -90,7 +103,7 @@ impl ReadAdapter<Prepared, Deployed, Never> for ObserveNative {
 
 #[tokio::test]
 async fn read_callbacks_keep_native_evidence_and_interpret_its_semantic_projection() {
-    let binding = Object::from_value(&NoParams).unwrap();
+    let binding = Object::from_value(&ReadBinding::default()).unwrap();
     // These low-level callback tests bypass Program association, so the implementation reference
     // is an explicit fixture identity. Exact installed ABI matching belongs to construction tests.
     let implementation = mfm_program::state_implementation_ref::<Observe>().unwrap();
@@ -98,13 +111,13 @@ async fn read_callbacks_keep_native_evidence_and_interpret_its_semantic_projecti
         mfm_program::nominal_contract_ref::<Never>().unwrap(),
         implementation.clone(),
         binding.value_ref().clone(),
-        Arc::new(NoParams),
+        Arc::new(ReadBinding::default()),
     );
     let adapter = callback::read_adapter::<Observation, NativeRead, _>(
         mfm_program::nominal_contract_ref::<Never>().unwrap(),
         implementation,
         binding.value_ref().clone(),
-        Arc::new(NoParams),
+        Arc::new(ReadBinding::default()),
         ObserveNative,
     );
     let input = Object::from_value(&Configured { value: 7 }).unwrap();
@@ -360,90 +373,86 @@ async fn cold_effect_program_contains_bound_native_callbacks_without_configurati
     assert_eq!(invoked.load(Ordering::SeqCst), 1);
 }
 
-fn hook_failure(phase: u8) -> Result<(), mfm_capabilities::CallbackFailure> {
-    use mfm_capabilities::{codec, CallbackFailure};
+fn hook_failure(fault: HookFault) -> Result<(), mfm_capabilities::CallbackFailure> {
+    use mfm_capabilities::codec;
     let cause = || InvocationDiagnostic::from_fields("native_codec", "nested_native", &42, None);
-    match phase {
-        0 => Ok(()),
-        1 => codec::decode(|| Err(cause())),
-        2 => codec::encode(|| Err(cause())),
-        3 => codec::decode(|| panic!("unretained codec payload")),
-        4 => codec::encode(|| panic!("unretained codec payload")),
-        5 => panic!("unretained hook payload"),
-        _ => Err(CallbackFailure::Execute(cause())),
+    match fault {
+        HookFault::None => Ok(()),
+        HookFault::Decode => codec::decode(|| Err(cause())),
+        HookFault::Encode => codec::encode(|| Err(cause())),
+        HookFault::DecodePanic => codec::decode(|| panic!("unretained codec payload")),
+        HookFault::EncodePanic => codec::encode(|| panic!("unretained codec payload")),
+        HookFault::ExecutePanic => panic!("unretained hook payload"),
     }
 }
 
 #[tokio::test]
 async fn nested_native_hooks_preserve_codec_phases_and_uncaught_hook_panics() {
-    async fn check<const PHASE: u8>() {
-        use mfm_capabilities::CallbackFailure;
-        let binding = Object::from_value(&NoParams).unwrap();
-        let implementation = source::state_implementation_ref::<Observe>().unwrap();
-        let intent = Object::from_value(&Configured { value: 7 }).unwrap();
-        let error = if PHASE < 10 {
-            let adapter = callback::read_adapter::<Observation, NativeRead<PHASE>, _>(
-                source::nominal_contract_ref::<Never>().unwrap(),
-                implementation,
-                binding.value_ref().clone(),
-                Arc::new(NoParams),
-                ObserveNative,
-            );
-            adapter(
-                ExecutionPosition {
-                    state: StatePosition::new(0).unwrap(),
-                    visit: VisitId::new(0),
-                },
-                &intent,
-            )
-            .await
-            .unwrap_err()
-        } else {
-            let callbacks = callback::ReadCallbacks::new::<Observe, Observation, NativeRead<PHASE>>(
-                source::nominal_contract_ref::<Never>().unwrap(),
-                implementation,
-                binding.value_ref().clone(),
-                Arc::new(NoParams),
-            );
-            let callback::ReadCompletionFailure::Bind(error) = (callbacks.complete)(
-                intent.clone(),
-                intent,
-                Object::from_value(&Deployed { value: 8 }).unwrap(),
-                ExecutionPosition {
-                    state: StatePosition::new(0).unwrap(),
-                    visit: VisitId::new(0),
-                },
-            )
-            .await
-            .unwrap_err() else {
-                panic!("projection retains binding provenance");
+    use mfm_capabilities::CallbackFailure;
+    for project in [false, true] {
+        for fault in [
+            HookFault::Decode,
+            HookFault::Encode,
+            HookFault::DecodePanic,
+            HookFault::EncodePanic,
+            HookFault::ExecutePanic,
+        ] {
+            let binding = Arc::new(ReadBinding {
+                encode: if project { HookFault::None } else { fault },
+                project: if project { fault } else { HookFault::None },
+            });
+            let binding_ref = Object::from_value(binding.as_ref())
+                .unwrap()
+                .value_ref()
+                .clone();
+            let implementation = source::state_implementation_ref::<Observe>().unwrap();
+            let intent = Object::from_value(&Configured { value: 7 }).unwrap();
+            let position = ExecutionPosition {
+                state: StatePosition::new(0).unwrap(),
+                visit: VisitId::new(0),
             };
-            error
-        };
-        let phase = PHASE % 10;
-        let cause = match (phase, error) {
-            (1 | 3, CallbackFailure::Decode(cause))
-            | (2 | 4, CallbackFailure::Encode(cause))
-            | (5, CallbackFailure::Execute(cause)) => cause,
-            _ => panic!("native phase changed across Program boundary"),
-        };
-        if phase <= 2 {
-            assert_eq!(cause.code(), "native_codec");
-            assert_eq!(cause.operation(), "nested_native");
-            assert_eq!(cause.details().as_value(), &serde_json::json!(42));
-        } else {
-            assert_eq!(cause.code(), "task_failure");
-            assert_eq!(cause.details().as_value(), &serde_json::json!("panicked"));
+            let error = if project {
+                let callbacks = callback::ReadCallbacks::new::<Observe, Observation, NativeRead>(
+                    source::nominal_contract_ref::<Never>().unwrap(),
+                    implementation,
+                    binding_ref,
+                    binding,
+                );
+                let callback::ReadCompletionFailure::Bind(error) = (callbacks.complete)(
+                    intent.clone(),
+                    intent,
+                    Object::from_value(&Deployed { value: 8 }).unwrap(),
+                    position,
+                )
+                .await
+                .unwrap_err() else {
+                    panic!("projection retains binding provenance");
+                };
+                error
+            } else {
+                let adapter = callback::read_adapter::<Observation, NativeRead, _>(
+                    source::nominal_contract_ref::<Never>().unwrap(),
+                    implementation,
+                    binding_ref,
+                    binding,
+                    ObserveNative,
+                );
+                adapter(position, &intent).await.unwrap_err()
+            };
+            let cause = match (fault, error) {
+                (HookFault::Decode | HookFault::DecodePanic, CallbackFailure::Decode(cause))
+                | (HookFault::Encode | HookFault::EncodePanic, CallbackFailure::Encode(cause))
+                | (HookFault::ExecutePanic, CallbackFailure::Execute(cause)) => cause,
+                _ => panic!("native phase changed across Program boundary"),
+            };
+            if matches!(fault, HookFault::Decode | HookFault::Encode) {
+                assert_eq!(cause.code(), "native_codec");
+                assert_eq!(cause.operation(), "nested_native");
+                assert_eq!(cause.details().as_value(), &serde_json::json!(42));
+            } else {
+                assert_eq!(cause.code(), "task_failure");
+                assert_eq!(cause.details().as_value(), &serde_json::json!("panicked"));
+            }
         }
     }
-    check::<1>().await;
-    check::<2>().await;
-    check::<3>().await;
-    check::<4>().await;
-    check::<5>().await;
-    check::<11>().await;
-    check::<12>().await;
-    check::<13>().await;
-    check::<14>().await;
-    check::<15>().await;
 }
