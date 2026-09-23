@@ -147,32 +147,41 @@ fn maximum_public_fields_preserve_completed_prefix_snapshot_and_enrichment() {
                     .clone();
             assert_output_wire_rejected(duplicate_source);
         } else {
-            // Each child remains valid at 64 sources; only the aggregate exceeds its bound.
+            // Valid children of 64 and one source cross only the aggregate source bound.
             let mut excessive_sources = wire;
             let mut second = excessive_sources["snapshot"]["collections"][0].clone();
             second["metadata"]["collection_ordinal"] = 1.into();
             second["metadata"]["correlation"] = "second".into();
-            for (ordinal, balance) in second["balances"]
-                .as_array_mut()
-                .unwrap()
-                .iter_mut()
-                .enumerate()
-            {
-                balance["source"]["source_id"] = format!("second-{ordinal}").into();
-            }
+            second["balances"].as_array_mut().unwrap().truncate(1);
+            second["executions"].as_array_mut().unwrap().truncate(1);
+            second["balances"][0]["source"]["source_id"] = "second-0".into();
+            second["total_scaled"] = maximum_units.into();
             excessive_sources["snapshot"]["collections"]
                 .as_array_mut()
                 .unwrap()
                 .push(second);
             let mut summary = excessive_sources["report"]["collection_summaries"][0].clone();
             summary["collection_ordinal"] = 1.into();
-            let total = summary["total_value_dec"].as_str().unwrap().to_owned();
+            let first_total = summary["total_value_dec"].as_str().unwrap().to_owned();
+            let second_total = canonical_decimal(decimal_amount(maximum_units, 30));
+            summary["total_value_dec"] = second_total.clone().into();
             excessive_sources["report"]["collection_summaries"]
                 .as_array_mut()
                 .unwrap()
                 .push(summary);
             excessive_sources["report"]["totals_by_quote"][0]["total_value_dec"] =
-                sum_decimal_values(&[total.clone(), total]).unwrap().into();
+                sum_decimal_values(&[first_total, second_total])
+                    .unwrap()
+                    .into();
+            assert_eq!(
+                excessive_sources["snapshot"]["collections"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|collection| collection["balances"].as_array().unwrap().len())
+                    .sum::<usize>(),
+                65
+            );
             assert_output_wire_rejected(excessive_sources);
         }
     }

@@ -395,3 +395,49 @@ persistence, concurrency or task graph; managed acceptance and full CI are not r
 
 Material uncertainties: none for the bounded correction. Existing operational limitations above
 remain unchanged.
+
+## Architect rereview: exact aggregate boundary and final assessment
+
+Handler correction revision: `14981a8a`. The following test-only refinement replaces the old
+128-source negative fixture with exactly 65 sources. The existing 64-source output remains accepted.
+A second collection retains one balance and its matching execution descriptor, unique public
+identities and ordinal, the correct same-scale total, and a matching summary. The aggregate report
+is recomputed. Both children decode independently before the complete output rejects. The existing
+duplicate-correlation and duplicate-source cases remain. Production validation is unchanged.
+
+```sh
+nix develop -c cargo fmt --all
+nix develop -c cargo test -p mfm-portfolio --lib maximum_public_fields --message-format short
+nix develop -c cargo test -p mfm-portfolio --all-targets --message-format short
+nix develop -c cargo clippy -p mfm-portfolio --all-targets --message-format short -- -D warnings
+nix develop -c cargo fmt --all -- --check
+git diff --check
+```
+
+Results: the focused boundary passed; the full Portfolio suite passed five tests, including native
+boundary coverage. Affected Clippy and formatting passed. The architect reviewed both corrections
+and accepted their ownership and boundary isolation. No tests or safety assertions were removed;
+the oversized aggregate fixture was replaced by the sharper adjacent-boundary case.
+
+Verdict: both architect rereview findings are corrected and pass the selected pinned verification.
+The authoring gap is closed: installed support is required for effective emitted handlers, with
+exact Rust-owner checks retained. The 64/65 aggregate regression now targets the specified boundary.
+The prior production cutover and managed evidence remain as recorded, with no newly claimed managed
+or CI execution. No further blocker was identified in this bounded rereview. Material uncertainties:
+none; the earlier documented operational limits remain.
+
+Correction accounting against `56462ece` (physical lines, including comments and whitespace):
+
+| Category | Added / removed / net |
+| --- | ---: |
+| Production Rust | +18 / -6 / +12 |
+| Test Rust | +119 / -11 / +108 |
+| Documentation | +101 / -7 / +94 |
+| Other | +0 / -0 / +0 |
+
+Reproduce with `python3 docs/dsl-phase-b-loc.py 56462ece HEAD` at this correction's final commit.
+The production addition is one private qualifier per construction policy and its emission-time ABI
+consistency check, replacing eager installation checks. No executable callback, public contract,
+registry, cache or second validation owner was added. The test increase covers the four omitted
+handler selection cases and tightens existing aggregate evidence. The historical tables above remain
+pinned to their original revision rather than attributing this correction to an earlier CI candidate.
