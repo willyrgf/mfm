@@ -64,16 +64,10 @@ fn every_retained_stage_projects_its_own_typed_input_and_original() {
     let input = admit_snapshot(&config, None).unwrap();
     let ProposedStateOutcome::Success {
         output: continuation,
-    } = InitializePortfolio::evaluate(input).unwrap()
-    else {
-        panic!("checked input initializes the collection")
-    };
+    } = InitializePortfolio::evaluate(input).unwrap();
     let ProposedStateOutcome::Success {
         output: mut context,
-    } = EnterPortfolioCollection::evaluate(continuation).unwrap()
-    else {
-        panic!("checked continuation enters the collection")
-    };
+    } = EnterPortfolioCollection::evaluate(continuation).unwrap();
     let anchor = EvmBlockAnchor {
         number: EvmU256::from_u64(9),
         hash: EvmHash::from_bytes([3; 32]),

@@ -127,6 +127,13 @@ metadata and requires request/descriptor count and route agreement. Enrichment p
 source with its descriptor, validates membership/coverage, and keeps required or nonzero observed
 sources. Native clients choose native-specific required sources and construct publication wire from
 retained public descriptors. Portfolio contains no EVM planner, decoder or renderer.
+Portfolio's seven initialization, collection handoff and enrichment States declare `Never` as their
+domain failure. `ConsolidatePortfolio` declares the exact `PortfolioConsolidationFailure` aggregate
+capacity original, classified Permanent. Product `PortfolioSnapshotFailure` is a presentation-only
+collection/consolidation summary; it has no executable identity or classifier. Exact State failure
+ABIs change with these contracts; former broad-original Programs are rejected by current association.
+Native clients derive the consolidation decoder from its owning State and preserve the retained
+original separately from the summary.
 Chain's private eighty-digit decimal arithmetic preserves full-width raw U256 inputs, canonical zero,
 dust-to-zero and exact-remainder scaling. Capacity failures retain the actual digit count when rejected
 and whether scaling or summation failed. Failure decoding checks the eighty-digit limit, possible

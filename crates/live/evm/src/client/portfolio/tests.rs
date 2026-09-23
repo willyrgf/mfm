@@ -576,9 +576,9 @@ async fn arithmetic_and_product_failures_project_exact_originals_after_cold_load
         } else {
             assert!(matches!(
                 original
-                    .decode::<mfm_portfolio::PortfolioSnapshotFailure>()
+                    .decode::<mfm_portfolio::PortfolioConsolidationFailure>()
                     .unwrap(),
-                mfm_portfolio::PortfolioSnapshotFailure::ConsolidationFailed
+                mfm_portfolio::PortfolioConsolidationFailure::AggregateCapacityExceeded
             ));
         }
         let hot = serde_json::to_value(mfm_app::SerializableRunView::new(&view).unwrap()).unwrap();

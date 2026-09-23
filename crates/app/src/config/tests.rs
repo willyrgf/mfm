@@ -39,16 +39,10 @@ async fn maximum_candidate_output_and_published_config_fit_the_existing_document
         use mfm_program::{ProposedStateOutcome, PureState};
         let ProposedStateOutcome::Success {
             output: mut progress,
-        } = InitializeEnrichment::evaluate(admitted).unwrap()
-        else {
-            panic!("initial progress")
-        };
+        } = InitializeEnrichment::evaluate(admitted).unwrap();
         for _ in 0..collection_count {
             let ProposedStateOutcome::Success { output: context } =
-                EnterEnrichmentCollection::evaluate(progress).unwrap()
-            else {
-                panic!("collection")
-            };
+                EnterEnrichmentCollection::evaluate(progress).unwrap();
             let anchor = mfm_evm::EvmBlockPoint::new(
                 mfm_evm::EvmU256::new("115792089237316195423570985008687907853269984665640564039457584007913129639935").unwrap(),
                 mfm_evm::EvmHash::from_bytes([255; 32]),
@@ -69,17 +63,11 @@ async fn maximum_candidate_output_and_published_config_fit_the_existing_document
                 panic!("completion")
             };
             let ProposedStateOutcome::Success { output } =
-                ResumeEnrichmentCollection::evaluate(completion).unwrap()
-            else {
-                panic!("resume")
-            };
+                ResumeEnrichmentCollection::evaluate(completion).unwrap();
             progress = output;
         }
         let ProposedStateOutcome::Success { output } =
-            ResolvePortfolioAssets::evaluate(progress).unwrap()
-        else {
-            panic!("resolved candidates")
-        };
+            ResolvePortfolioAssets::evaluate(progress).unwrap();
         let (canonical, reference) = mfm_values::canonicalize_mfm_value(&output).unwrap();
         assert!(canonical.as_bytes().len() < MAX_CONFIG_DOCUMENT_BYTES);
         let provenance = EnrichmentProvenance::new(

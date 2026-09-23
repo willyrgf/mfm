@@ -22,7 +22,11 @@ Semantic output identity remains distinct from the rendered representation.
 Exact domain failures retain their native/shared originals. The native client decodes exact State
 and input contracts and passes a typed BalanceFailureCode to Portfolio's continuation projection.
 One private semantic check validates collection/context agreement. A mismatch is a projection error;
-it does not become a fabricated ConsolidationFailed. Genuine Portfolio originals remain unchanged.
+it does not become a fabricated ConsolidationFailed. Seven Portfolio States declare `Never`.
+`ConsolidatePortfolio` alone declares `PortfolioConsolidationFailure`, whose aggregate-capacity
+rejection is Permanent. `PortfolioSnapshotFailure` is only a collection/consolidation presentation
+summary, with no executable contract or classifier. Native clients decode the consolidation original
+through its owning State definition before projecting its product summary.
 
 The [verification record](../../../docs/dsl-phase-b.md) records production evidence and its limits;
 [build and verification](../../../docs/build-and-verification.md) owns current acceptance commands.

@@ -19,7 +19,7 @@ use mfm_chain::balance::{
     BalanceRequest, ConfirmedBalance, DecimalScale,
 };
 use mfm_ids::{ContentRef, EntryPointId, StableId};
-use mfm_program::{ProposedStateOutcome, PureState, State};
+use mfm_program::{Never, ProposedStateOutcome, PureState, State};
 use mfm_program_derive::MfmValue;
 use mfm_values::string_contains_secret_marker;
 use serde::de;
@@ -529,23 +529,15 @@ impl PortfolioSnapshotOutput {
     }
 }
 
-/// Explicit fail-fast Portfolio failure route.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+/// Product failure summary projected from an exact retained original.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "kind",
     content = "value",
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "snapshot-failure",
-    version = "2",
-    schema = "mfm.portfolio-snapshot-failure"
-)]
 pub enum PortfolioSnapshotFailure {
-    /// The admitted configuration is invalid.
-    InvalidInput,
     /// One child collection failed and later children are suppressed.
     CollectionFailed {
         /// Declaration-ordered collection ordinal.
@@ -570,7 +562,6 @@ impl<'de> Deserialize<'de> for PortfolioSnapshotFailure {
             deny_unknown_fields
         )]
         enum Wire {
-            InvalidInput,
             CollectionFailed {
                 ordinal: u16,
                 code: BalanceFailureCode,
@@ -579,7 +570,6 @@ impl<'de> Deserialize<'de> for PortfolioSnapshotFailure {
         }
 
         let value = match Wire::deserialize(deserializer)? {
-            Wire::InvalidInput => Self::InvalidInput,
             Wire::CollectionFailed { ordinal, code } => Self::CollectionFailed { ordinal, code },
             Wire::ConsolidationFailed => Self::ConsolidationFailed,
         };
@@ -590,7 +580,7 @@ impl<'de> Deserialize<'de> for PortfolioSnapshotFailure {
 impl PortfolioSnapshotFailure {
     fn validate(&self) -> Result<(), PortfolioError> {
         match self {
-            Self::InvalidInput | Self::ConsolidationFailed => Ok(()),
+            Self::ConsolidationFailed => Ok(()),
             Self::CollectionFailed { ordinal, .. }
                 if usize::from(*ordinal) < PORTFOLIO_COLLECTION_LIMIT =>
             {
@@ -598,6 +588,26 @@ impl PortfolioSnapshotFailure {
             }
             Self::CollectionFailed { .. } => Err(PortfolioError::InvalidValue),
         }
+    }
+}
+
+/// Exact original when Portfolio cannot represent the consolidated decimal aggregate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "consolidation-failure",
+    version = "1",
+    schema = "mfm.portfolio-consolidation-failure"
+)]
+pub enum PortfolioConsolidationFailure {
+    /// Cross-collection decimal alignment or addition exceeds aggregate capacity.
+    AggregateCapacityExceeded,
+}
+
+impl mfm_program::ClassifyError for PortfolioConsolidationFailure {
+    fn classify(&self) -> mfm_program::Classification {
+        mfm_program::Classification::Permanent
     }
 }
 
@@ -614,7 +624,7 @@ pub struct ResumePortfolioCollection;
 pub struct ConsolidatePortfolio;
 
 macro_rules! impl_portfolio_state {
-    ($state:ident, $input:ty, $output:ty, $id:literal, $description:literal) => {
+    ($state:ident, $input:ty, $output:ty, $failure:ty, $id:literal, $description:literal) => {
         impl $state {
             /// Stable State identity used by Program authoring and product inspection.
             pub const STATE_ID: &'static str = $id;
@@ -628,7 +638,7 @@ macro_rules! impl_portfolio_state {
             }
             type Input = $input;
             type Output = $output;
-            type Failure = PortfolioSnapshotFailure;
+            type Failure = $failure;
 
             fn state_id() -> mfm_program::Result<StableId> {
                 Ok(StableId::new(Self::STATE_ID)?)
@@ -643,6 +653,7 @@ impl_portfolio_state!(
     InitializePortfolio,
     PortfolioSnapshotInput,
     PortfolioContinuation,
+    Never,
     "mfm.portfolio.state.initialize@1",
     "Initializes one Portfolio snapshot continuation."
 );
@@ -650,6 +661,7 @@ impl_portfolio_state!(
     EnterPortfolioCollection,
     PortfolioContinuation,
     BalanceContext<PortfolioContinuation>,
+    Never,
     "mfm.portfolio.state.enter-collection@1",
     "Enters the next balance collection."
 );
@@ -657,6 +669,7 @@ impl_portfolio_state!(
     ResumePortfolioCollection,
     BalanceCollectionCompletion<PortfolioContinuation>,
     PortfolioContinuation,
+    Never,
     "mfm.portfolio.state.resume-collection@1",
     "Resumes Portfolio aggregation after one confirmed balance collection."
 );
@@ -664,15 +677,13 @@ impl_portfolio_state!(
     ConsolidatePortfolio,
     PortfolioContinuation,
     PortfolioSnapshotOutput,
+    PortfolioConsolidationFailure,
     "mfm.portfolio.state.consolidate@1",
     "Consolidates all completed collections into the Portfolio snapshot output."
 );
 fn initialize_portfolio(
     input: PortfolioSnapshotInput,
-) -> Result<
-    ProposedStateOutcome<PortfolioContinuation, PortfolioSnapshotFailure>,
-    mfm_values::InvocationDiagnostic,
-> {
+) -> Result<ProposedStateOutcome<PortfolioContinuation, Never>, mfm_values::InvocationDiagnostic> {
     Ok(portfolio_success(PortfolioContinuation::new(input)))
 }
 
@@ -681,7 +692,7 @@ mod collection;
 fn consolidate_portfolio(
     input: PortfolioContinuation,
 ) -> Result<
-    ProposedStateOutcome<PortfolioSnapshotOutput, PortfolioSnapshotFailure>,
+    ProposedStateOutcome<PortfolioSnapshotOutput, PortfolioConsolidationFailure>,
     mfm_values::InvocationDiagnostic,
 > {
     if input.next_collection_ordinal().is_some() {
@@ -706,7 +717,7 @@ fn consolidate_portfolio(
         Some(value) => value,
         None => {
             return Ok(portfolio_failure(
-                PortfolioSnapshotFailure::ConsolidationFailed,
+                PortfolioConsolidationFailure::AggregateCapacityExceeded,
             ))
         }
     };
@@ -968,16 +979,6 @@ fn valid_public_text(value: &str, maximum: usize) -> bool {
 fn duplicate_text<'a>(mut values: impl Iterator<Item = &'a str>) -> bool {
     let mut values_seen = BTreeSet::new();
     values.any(|value| !values_seen.insert(value))
-}
-
-impl mfm_program::ClassifyError for PortfolioSnapshotFailure {
-    fn classify(&self) -> mfm_program::Classification {
-        match self {
-            Self::InvalidInput | Self::CollectionFailed { .. } | Self::ConsolidationFailed => {
-                mfm_program::Classification::Permanent
-            }
-        }
-    }
 }
 
 #[cfg(test)]

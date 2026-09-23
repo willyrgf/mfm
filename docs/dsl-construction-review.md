@@ -100,3 +100,29 @@ nix develop -c cargo test -p mfm-portfolio --all-targets --message-format short
 
 Passed all four unit tests and the independent native ABI consumer integration test (both maintained
 Portfolio continuations). Production change is +41/-44 (net -3); regression change +51/-0.
+
+## Step 3: exact originals and product summaries
+
+Step 2 revision: `07f1d6a2`. Seven Portfolio States now declare `Never` and consolidation alone
+owns `PortfolioConsolidationFailure::AggregateCapacityExceeded` (Permanent). The product summary
+loses unused InvalidInput, executable schema identity and classification. Deleted both native-client
+dispatch macros, seven impossible branches and the generic product-original decoder. The one
+consolidation decoder derives input/failure contracts from its owning State. No compatibility reader
+is retained: changed failure ABIs select the current exact contracts.
+
+The existing actual arithmetic failure scenario now decodes the precise consolidation original,
+checks unchanged product rendering, and compares exact retained originals and publication hot/cold.
+Infallible State consumers use irrefutable success patterns, deleting impossible test panic branches.
+
+```sh
+nix develop -c cargo fmt --all
+nix develop -c cargo check --workspace --all-targets --message-format short
+nix develop -c cargo test -p mfm-portfolio --all-targets --message-format short
+nix develop -c cargo test -p mfm-evm-live --lib client::portfolio --message-format short
+nix develop -c cargo test -p mfm-app --lib --message-format short
+nix develop -c cargo clippy -p mfm-portfolio -p mfm-evm-live -p mfm-app --all-targets --message-format short -- -D warnings
+```
+
+All passed: Portfolio four unit/one integration, native client six, Application fourteen. Initial
+workspace checking identified the now-irrefutable test branches; these were removed and Clippy
+passed without warnings. Production +48/-67 (net -19), tests +15/-54 (net -39), before documentation.

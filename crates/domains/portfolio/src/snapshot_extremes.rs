@@ -84,17 +84,11 @@ fn maximum_public_fields_preserve_completed_prefix_snapshot_and_enrichment() {
             .collect();
         let ProposedStateOutcome::Success {
             output: mut continuation,
-        } = InitializePortfolio::evaluate(input).unwrap()
-        else {
-            panic!("expected success");
-        };
+        } = InitializePortfolio::evaluate(input).unwrap();
         for _ in 0..collection_count {
             let ProposedStateOutcome::Success {
                 output: mut context,
-            } = EnterPortfolioCollection::evaluate(continuation).unwrap()
-            else {
-                panic!("expected success");
-            };
+            } = EnterPortfolioCollection::evaluate(continuation).unwrap();
             for _ in 0..context.request().sources().len() {
                 let point = ObservationPoint::new(
                     context.request().sources()[0].target().ledger().clone(),
@@ -117,10 +111,7 @@ fn maximum_public_fields_preserve_completed_prefix_snapshot_and_enrichment() {
                 panic!("expected success");
             };
             let ProposedStateOutcome::Success { output } =
-                ResumePortfolioCollection::evaluate(complete).unwrap()
-            else {
-                panic!("expected resumed collection");
-            };
+                ResumePortfolioCollection::evaluate(complete).unwrap();
             continuation = output;
         }
         mfm_values::canonicalize_mfm_value(&continuation).unwrap();
@@ -130,10 +121,7 @@ fn maximum_public_fields_preserve_completed_prefix_snapshot_and_enrichment() {
         )
         .unwrap();
         let ProposedStateOutcome::Success { output: resolved } =
-            ResolvePortfolioAssets::evaluate(enriched).unwrap()
-        else {
-            panic!("expected success");
-        };
+            ResolvePortfolioAssets::evaluate(enriched).unwrap();
         mfm_values::canonicalize_mfm_value(&resolved).unwrap();
         assert_eq!(resolved.collections().len(), collection_count);
         let ProposedStateOutcome::Success { output } =

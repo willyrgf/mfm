@@ -72,17 +72,19 @@ pub fn snapshot_failure(
     )? {
         return Ok(projected);
     }
-    macro_rules! original {
-        ($state:ty) => {
-            if let Some(projected) = pure_original::<$state>(state, input, original)? {
-                return Ok(projected);
+    if state_matches::<mfm_portfolio::ConsolidatePortfolio>(state)? {
+        if !matches!(state.execution(), Execution::Pure {}) {
+            return Err(invalid_projection("product_state_mode"));
+        }
+        input.decode::<<mfm_portfolio::ConsolidatePortfolio as State>::Input>()?;
+        let original =
+            original.decode::<<mfm_portfolio::ConsolidatePortfolio as State>::Failure>()?;
+        return Ok(match original {
+            mfm_portfolio::PortfolioConsolidationFailure::AggregateCapacityExceeded => {
+                PortfolioSnapshotFailure::ConsolidationFailed
             }
-        };
+        });
     }
-    original!(mfm_portfolio::InitializePortfolio);
-    original!(mfm_portfolio::EnterPortfolioCollection);
-    original!(mfm_portfolio::ResumePortfolioCollection);
-    original!(mfm_portfolio::ConsolidatePortfolio);
     Err(invalid_projection("unknown_snapshot_state"))
 }
 /// Projects an enrichment domain original through its exact retained contracts, without Runtime or IO.
@@ -99,34 +101,8 @@ pub fn enrichment_failure(
     )? {
         return Ok(projected);
     }
-    macro_rules! original {
-        ($state:ty) => {
-            if let Some(projected) = pure_original::<$state>(state, input, original)? {
-                return Ok(projected);
-            }
-        };
-    }
-    original!(mfm_portfolio::InitializeEnrichment);
-    original!(mfm_portfolio::EnterEnrichmentCollection);
-    original!(mfm_portfolio::ResumeEnrichmentCollection);
-    original!(mfm_portfolio::ResolvePortfolioAssets);
     Err(invalid_projection("unknown_enrichment_state"))
 }
-fn pure_original<S: State<Failure = PortfolioSnapshotFailure>>(
-    declaration: &StateDeclaration,
-    input: &Object,
-    original: &Object,
-) -> Result<Option<PortfolioSnapshotFailure>, InvocationDiagnostic> {
-    if !state_matches::<S>(declaration)? {
-        return Ok(None);
-    }
-    if !matches!(declaration.execution(), Execution::Pure {}) {
-        return Err(invalid_projection("product_state_mode"));
-    }
-    input.decode::<S::Input>()?;
-    original.decode::<PortfolioSnapshotFailure>().map(Some)
-}
-
 fn collection<K: MfmValue>(
     declaration: &StateDeclaration,
     input: &Object,

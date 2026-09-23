@@ -108,6 +108,7 @@ impl_portfolio_state!(
     InitializeEnrichment,
     PortfolioEnrichmentInput,
     EnrichmentContinuation,
+    Never,
     "mfm.portfolio.state.initialize-enrichment@1",
     "Initializes checked enrichment progress."
 );
@@ -115,6 +116,7 @@ impl_portfolio_state!(
     EnterEnrichmentCollection,
     EnrichmentContinuation,
     BalanceContext<EnrichmentContinuation>,
+    Never,
     "mfm.portfolio.state.enter-enrichment-collection@1",
     "Enters the next enrichment collection."
 );
@@ -122,6 +124,7 @@ impl_portfolio_state!(
     ResumeEnrichmentCollection,
     BalanceCollectionCompletion<EnrichmentContinuation>,
     EnrichmentContinuation,
+    Never,
     "mfm.portfolio.state.resume-enrichment-collection@1",
     "Resumes enrichment after confirmed collection."
 );
@@ -340,6 +343,7 @@ impl_portfolio_state!(
     ResolvePortfolioAssets,
     EnrichmentContinuation,
     PortfolioEnrichmentOutput,
+    Never,
     "mfm.portfolio.state.resolve-assets@1",
     "Retains required and nonzero confirmed candidate sources."
 );

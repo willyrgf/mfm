@@ -79,16 +79,10 @@ fn resumption_preserves_product_fields_and_rejects_substituted_handoff_facts() {
     );
     let ProposedStateOutcome::Success {
         output: continuation,
-    } = InitializePortfolio::evaluate(input).unwrap()
-    else {
-        panic!("expected initial continuation")
-    };
+    } = InitializePortfolio::evaluate(input).unwrap();
     let ProposedStateOutcome::Success {
         output: mut context,
-    } = EnterPortfolioCollection::evaluate(continuation).unwrap()
-    else {
-        panic!("expected shared collection")
-    };
+    } = EnterPortfolioCollection::evaluate(continuation).unwrap();
     // Shared confirmation admission is scripted here; native IO and Runtime execution are covered
     // by separate integration work, not by this product handoff test.
     for raw in [100, 250] {
@@ -144,10 +138,7 @@ fn resumption_preserves_product_fields_and_rejects_substituted_handoff_facts() {
 
     let completion = Object::from_value(&completion).unwrap().decode().unwrap();
     let ProposedStateOutcome::Success { output } =
-        ResumePortfolioCollection::evaluate(completion).unwrap()
-    else {
-        panic!("expected resumed Portfolio")
-    };
+        ResumePortfolioCollection::evaluate(completion).unwrap();
     // Cold admission still checks both a child's total and its relation to retained demand.
     let wire = serde_json::to_value(&output).unwrap();
     for (path, value) in [
