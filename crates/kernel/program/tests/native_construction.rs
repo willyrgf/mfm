@@ -153,7 +153,8 @@ fn unsupported_and_duplicate_family_selections_fail_before_resource_binding() {
         cause.details().as_value()["implementation"],
         "proof.primary@1"
     );
-    assert_eq!(cause.details().as_value()["position"], 0);
+    // Installed-family discovery rejects ambiguity before an occurrence is selected.
+    assert!(cause.details().as_value()["position"].is_null());
 
     let unsupported = Resources::<false> {
         family: std::marker::PhantomData,

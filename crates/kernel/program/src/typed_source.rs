@@ -247,7 +247,7 @@ impl<R, S: PureState> Discover<R> for Pure<S> {
 }
 impl<C: ?Sized, R, T: MfmValue> Walk<C, R> for Identity<T> {
     fn walk(&self, _: &C, _: &R, draft: &mut Draft) -> Result<()> {
-        draft.contracts.insert::<T>().map(|_| ())
+        draft.contracts.require_value::<T>().map(|_| ())
     }
 }
 impl<R, T: MfmValue> Discover<R> for Identity<T> {
@@ -512,7 +512,7 @@ macro_rules! resolved {
                 draft.nested(|draft| {
                     let (prefix, suffix) = I::surround(&self.binding)?;
                     prefix.walk(config, resources, draft)?;
-                    draft.$emit::<S, C, I, R>(&self.binding, resources)?;
+                    draft.$emit::<S, C, I>(&self.binding)?;
                     suffix.walk(config, resources, draft)
                 })
             }

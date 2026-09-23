@@ -23,6 +23,30 @@ note: required by a bound in `mfm_program::compile`
     |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `compile`
 
 error[E0277]: the trait bound `mfm_program::NoParams: ClassifyError` is not satisfied
+   --> tests/ui/classification_required.rs:122:9
+    |
+118 |     compile(
+    |     ------- required by a bound introduced by this call
+...
+122 |         &Resources,
+    |         ^^^^^^^^^^ the trait `ClassifyError` is not implemented for `mfm_program::NoParams`
+    |
+help: the trait `ClassifyError` is implemented for `mfm_program::Never`
+   --> $WORKSPACE/crates/kernel/program/src/recovery.rs
+    |
+    | impl ClassifyError for Never {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: required for `mfm_program::ResolvedRead<Observe, Observation, Native>` to implement `mfm_program::construction::Discover<Resources>`
+note: required by a bound in `mfm_program::compile`
+   --> $WORKSPACE/crates/kernel/program/src/construction.rs
+    |
+    | pub fn compile<S, R>(
+    |        ------- required by a bound in this function
+...
+    |     R::Sources: Discover<R>,
+    |                 ^^^^^^^^^^^ required by this bound in `compile`
+
+error[E0277]: the trait bound `mfm_program::NoParams: ClassifyError` is not satisfied
    --> tests/ui/classification_required.rs:126:17
     |
 126 |     load(b"{}", &Resources).unwrap();

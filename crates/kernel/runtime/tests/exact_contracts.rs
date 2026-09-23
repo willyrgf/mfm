@@ -244,7 +244,7 @@ fn exact_value_and_state_abi_collisions_are_rejected_during_construction() {
     .unwrap();
     ALTERNATE_DESCRIPTOR_AUDIT.store(false, Ordering::SeqCst);
     let diagnostic = serde_json::to_string(&error).unwrap();
-    assert!(diagnostic.contains("claim_value"), "{diagnostic}");
+    assert!(diagnostic.contains("select_value"), "{diagnostic}");
 
     let incompatible = Resources::<(
         Pure<GenericState<FirstGenericValue>>,

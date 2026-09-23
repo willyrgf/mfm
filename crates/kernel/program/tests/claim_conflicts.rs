@@ -70,28 +70,34 @@ fn fresh_and_cold_construction_reject_conflicting_state_and_handler_owners() {
         ProgramLimits::new(0),
     )
     .unwrap();
-    assert!(compile(
+    let Err(ProgramError::Diagnostic(cause)) = compile(
         EntryPointId::new("mfm.proof/claims@1").unwrap(),
-        &(Pure::<Add>::default(), Pure::<ShadowAdd>::default()),
+        &Pure::<ShadowAdd>::default(),
         &input,
         &installed,
-        ProgramLimits::new(0)
-    )
-    .is_err());
+        ProgramLimits::new(0),
+    ) else {
+        panic!("shadow State accepted");
+    };
+    assert_eq!(cause.operation(), "select_state");
+    assert_eq!(cause.details().as_value()["reason"], "conflicting_owner");
     assert!(load(
         program.canonical_bytes(),
         &Resources::<(Pure<Add>, Pure<ShadowAdd>)>(PhantomData)
     )
     .is_err());
     type ShadowPolicy = Operation<(Pure<Add>,), ShadowDefaults>;
-    assert!(compile(
+    let Err(ProgramError::Diagnostic(cause)) = compile(
         EntryPointId::new("mfm.proof/claims@1").unwrap(),
         &ShadowPolicy::default(),
         &input,
         &installed,
-        ProgramLimits::new(0)
-    )
-    .is_err());
+        ProgramLimits::new(0),
+    ) else {
+        panic!("shadow handler accepted");
+    };
+    assert_eq!(cause.operation(), "select_handler");
+    assert_eq!(cause.details().as_value()["reason"], "conflicting_owner");
     assert!(load(
         program.canonical_bytes(),
         &Resources::<(Pure<Add>, ShadowPolicy)>(PhantomData)
@@ -113,4 +119,42 @@ fn repeated_exact_claims_construct_and_cold_load_without_ambiguity() {
     let cold = load(program.canonical_bytes(), &resources).unwrap();
     assert_eq!(cold.canonical_bytes(), program.canonical_bytes());
     assert_eq!(cold.content_ref(), program.content_ref());
+}
+
+#[test]
+fn compilation_requires_installed_semantics_but_recomposition_needs_no_root_publication() {
+    let entry = EntryPointId::new("mfm.proof/installed@1").unwrap();
+    let input = Deployed { value: 7 };
+    let Err(ProgramError::Diagnostic(cause)) = compile(
+        entry.clone(),
+        &Pure::<Add>::default(),
+        &input,
+        &Resources::<(Identity<Deployed>, Identity<Never>)>(PhantomData),
+        ProgramLimits::new(0),
+    ) else {
+        panic!("uninstalled State accepted");
+    };
+    assert_eq!(cause.operation(), "select_state");
+    assert_eq!(cause.details().as_value()["reason"], "state_not_installed");
+
+    let Err(ProgramError::Diagnostic(cause)) = compile(
+        entry.clone(),
+        &Identity::<Deployed>::default(),
+        &input,
+        &Resources::<()>(PhantomData),
+        ProgramLimits::new(0),
+    ) else {
+        panic!("uninstalled value accepted");
+    };
+    assert_eq!(cause.details().as_value()["reason"], "value_not_installed");
+
+    let installed = Resources::<Pure<Add>>(PhantomData);
+    let grouped = Operation::new((Pure::<Add>::default(), Pure::<Add>::default()));
+    let program = compile(entry, &grouped, &input, &installed, ProgramLimits::new(0)).unwrap();
+    assert_eq!(
+        load(program.canonical_bytes(), &installed)
+            .unwrap()
+            .content_ref(),
+        program.content_ref()
+    );
 }

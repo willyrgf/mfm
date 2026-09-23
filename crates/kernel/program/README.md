@@ -76,8 +76,12 @@ explicit IO ownership. Effect native extraction is available before command ackn
 settlement binding always projects and checks the exact native original before admission.
 
 There is no public mutable declaration builder, root failure mapper or incomplete Program decoder.
-Fresh construction and cold discovery converge on the same executable constructors. Journal and
-Store remain outside Program; callers obtain admitted bytes from Runtime before calling `load`.
+Fresh compilation and cold loading use one installed Inventory association path. Compilation checks
+selected Rust owners against installed exact ABIs; new semantics require source publication, while
+regrouping installed components does not require publishing the new Operation. Draft emits only
+declarations, bindings and policy. Association checks all typed handler parameters and public
+bindings before binding resources. Parameters are captured once, not decoded during recovery.
+Journal and Store remain outside Program; callers obtain admitted bytes from Runtime before `load`.
 
 The complete Program document, including aggregate binding Objects, uses the existing bounded JSON
 serializer before canonicalization. Cold loading checks borrowed byte length before parsing or

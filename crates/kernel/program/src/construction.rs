@@ -20,7 +20,7 @@ pub(crate) fn rejection(operation: &'static str, fields: &impl Serialize) -> Pro
 
 /// Installed source roots, independent of the source value selected for this compilation.
 pub trait ProgramEnvironment {
-    /// Independent source types available to config-free cold discovery.
+    /// Installed source types discovered for both fresh compilation and config-free loading.
     type Sources;
 }
 
@@ -86,13 +86,13 @@ impl Contracts {
         }
         Ok(reference)
     }
-    fn state<S: State>(&mut self) -> Result<StateAbi> {
+    fn state<S: State>(&mut self, execution: Code) -> Result<StateAbi> {
         let abi = StateAbi {
             implementation: state_implementation_ref::<S>()?,
             input: self.insert::<S::Input>()?,
             output: self.insert::<S::Output>()?,
             failure: self.insert::<S::Failure>()?,
-            execution: Code::Pure,
+            execution,
         };
         let owner = TypeId::of::<S>();
         if self.states.get(&abi).is_some_and(|old| *old != owner) {
@@ -122,6 +122,53 @@ impl Contracts {
         self.handlers.insert(abi.clone(), owner);
         Ok(abi)
     }
+    pub(crate) fn require_value<T: MfmValue>(&self) -> Result<ContentRef> {
+        let (reference, descriptor) = derive_nominal_contract::<T>()?;
+        let reason = match self.values.get(&reference) {
+            Some((owner, installed)) if *owner == TypeId::of::<T>() && installed == &descriptor => {
+                return Ok(reference)
+            }
+            Some(_) => "conflicting_owner",
+            None => "value_not_installed",
+        };
+        Err(rejection(
+            "select_value",
+            &serde_json::json!({"reason": reason, "contract": reference}),
+        ))
+    }
+    fn require_state<S: State>(&self, execution: Code) -> Result<StateAbi> {
+        let abi = StateAbi {
+            implementation: state_implementation_ref::<S>()?,
+            input: self.require_value::<S::Input>()?,
+            output: self.require_value::<S::Output>()?,
+            failure: self.require_value::<S::Failure>()?,
+            execution,
+        };
+        let reason = match self.states.get(&abi) {
+            Some(owner) if *owner == TypeId::of::<S>() => return Ok(abi),
+            Some(_) => "conflicting_owner",
+            None => "state_not_installed",
+        };
+        Err(rejection(
+            "select_state",
+            &serde_json::json!({
+                "reason": reason, "implementation": abi.implementation,
+                "input": abi.input, "output": abi.output, "failure": abi.failure,
+            }),
+        ))
+    }
+    fn require_handler<H: Handler>(&self) -> Result<HandlerAbi> {
+        let abi = HandlerAbi::from_contract::<H>(self.require_value::<H::Params>()?)?;
+        let reason = match self.handlers.get(&abi) {
+            Some(owner) if *owner == TypeId::of::<H>() => return Ok(abi),
+            Some(_) => "conflicting_owner",
+            None => "handler_not_installed",
+        };
+        Err(rejection(
+            "select_handler",
+            &serde_json::json!({"reason": reason, "handler": abi}),
+        ))
+    }
     fn finish(self) -> BTreeMap<ContentRef, SchemaDescriptor> {
         self.values
             .into_iter()
@@ -133,7 +180,6 @@ impl Contracts {
 #[derive(Clone)]
 pub(crate) struct Policy {
     binding: HandlerBinding,
-    handle: executable::Handle,
     allowances: RecoveryAllowances,
     targets: Vec<(u64, TypeId, ContentRef)>,
 }
@@ -141,17 +187,15 @@ impl Policy {
     fn fallback(abi: HandlerAbi) -> Result<Self> {
         Ok(Self {
             binding: HandlerBinding::from_abi(abi, &NoParams)?,
-            handle: executable::handle::<Stop>,
             allowances: RecoveryAllowances::default(),
             targets: Vec::new(),
         })
     }
 }
 
-pub(crate) struct Draft {
-    pub(crate) contracts: Contracts,
+pub(crate) struct Draft<'a> {
+    pub(crate) contracts: &'a Contracts,
     declarations: Vec<StateData>,
-    executables: Vec<ExecutableState>,
     pub(crate) policy: Policy,
     depth: u8,
     scope: u64,
@@ -160,14 +204,12 @@ pub(crate) struct Draft {
     targets: Vec<Vec<(u64, TypeId, ContentRef)>>,
     bindings: BTreeMap<ContentRef, Object>,
 }
-impl Draft {
-    fn new() -> Result<Self> {
-        let mut contracts = Contracts::new();
-        let fallback = contracts.handler::<Stop>()?;
+impl<'a> Draft<'a> {
+    fn new(contracts: &'a Contracts) -> Result<Self> {
+        let fallback = contracts.require_handler::<Stop>()?;
         Ok(Self {
             contracts,
             declarations: Vec::new(),
-            executables: Vec::new(),
             policy: Policy::fallback(fallback)?,
             depth: 0,
             scope: 0,
@@ -178,17 +220,10 @@ impl Draft {
         })
     }
     pub(crate) fn pure<S: PureState>(&mut self) -> Result<()> {
-        let abi = self.contracts.state::<S>()?;
-        let executable =
-            pure_executable::<S>(&abi.failure, &self.policy.binding, self.policy.handle)?;
-        self.emit(abi, Execution::Pure {}, executable)
+        let abi = self.contracts.require_state::<S>(Code::Pure)?;
+        self.emit(abi, Execution::Pure {})
     }
-    fn emit(
-        &mut self,
-        abi: StateAbi,
-        execution: Execution,
-        executable: ExecutableState,
-    ) -> Result<()> {
+    fn emit(&mut self, abi: StateAbi, execution: Execution) -> Result<()> {
         if self.declarations.len() >= MAX_STATES {
             return Err(ProgramError::Capacity);
         }
@@ -203,7 +238,6 @@ impl Draft {
             recovery_targets: Vec::new(),
             allowances: self.policy.allowances,
         });
-        self.executables.push(executable);
         Ok(())
     }
     pub(crate) fn nested<T>(&mut self, walk: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
@@ -219,7 +253,7 @@ impl Draft {
         self.declarations.len()
     }
     pub(crate) fn checkpoint<M: CheckpointMarker>(&mut self) -> Result<()> {
-        let input = self.contracts.insert::<M::Context>()?;
+        let input = self.contracts.require_value::<M::Context>()?;
         let position = self.position();
         if let Some((previous, _)) = self
             .markers
@@ -286,7 +320,6 @@ impl Draft {
                     .push(RecoveryTarget {
                         position: StatePosition::new(*offset)?,
                     });
-                self.executables[*offset].checkpoint = true;
             }
         }
         Ok(())
@@ -299,7 +332,7 @@ impl Draft {
     where
         P: ResolveDefaults<C>,
     {
-        let handler_abi = self.contracts.handler::<P::Handler>()?;
+        let handler_abi = self.contracts.require_handler::<P::Handler>()?;
         let selected = P::resolve(config)?;
         let parent = self.policy.clone();
         let parent_scope = self.scope;
@@ -310,7 +343,6 @@ impl Draft {
             .ok_or(ProgramError::Capacity)?;
         if let Some(params) = selected.handler {
             self.policy.binding = HandlerBinding::from_abi(handler_abi, &params)?;
-            self.policy.handle = executable::handle::<P::Handler>;
             self.policy.targets = crate::typed_source::targets::<P::Targets>()?
                 .into_iter()
                 .map(|(marker, contract)| (self.scope, marker, contract))
@@ -333,8 +365,10 @@ pub(crate) trait Walk<C: ?Sized, R>: AuthoringSource {
 pub(crate) trait Discover<R> {
     fn discover(inventory: &mut Inventory<R>) -> Result<()>;
 }
+type BindExecutable<R> = Box<dyn FnOnce(&R) -> Result<ExecutableState>>;
 type Construct<R> =
-    fn(&StateDeclaration, &[Object], &R, executable::Handle) -> Result<ExecutableState>;
+    fn(&StateDeclaration, &[Object], executable::BoundHandler) -> Result<BindExecutable<R>>;
+type ConstructHandler = fn(&HandlerBinding) -> Result<executable::BoundHandler>;
 /// Kind of an installed executable or named authoring component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -386,7 +420,7 @@ pub(crate) struct Inventory<R> {
     contracts: Contracts,
     components: BTreeMap<(ComponentKind, StableId), Component>,
     states: BTreeMap<StateAbi, Construct<R>>,
-    handlers: BTreeMap<HandlerAbi, executable::Handle>,
+    handlers: BTreeMap<HandlerAbi, ConstructHandler>,
 }
 impl<R> Inventory<R> {
     fn new() -> Result<Self> {
@@ -436,35 +470,29 @@ impl<R> Inventory<R> {
     }
     pub(crate) fn handler<H: Handler>(&mut self) -> Result<()> {
         let abi = self.contracts.handler::<H>()?;
-        self.handlers.insert(abi, executable::handle::<H>);
+        self.handlers.insert(abi, executable::bind_handler::<H>);
         Ok(())
     }
     pub(crate) fn pure<S: PureState>(&mut self) -> Result<()> {
-        let abi = self.contracts.state::<S>()?;
+        let abi = self.contracts.state::<S>(Code::Pure)?;
         self.component(ComponentKind::PureState, S::state_id()?, S::description())?;
-        self.states.insert(abi, |state, _, _, handle| {
-            pure_executable::<S>(state.failure_contract_ref(), state.handler(), handle)
+        self.states.insert(abi, |state, _, handle| {
+            let failure = state.failure_contract_ref().clone();
+            Ok(Box::new(move |_| {
+                Ok(ExecutableState {
+                    mode: ExecutableMode::Pure {
+                        callbacks: callback::PureCallbacks::new::<S>(failure),
+                    },
+                    handle,
+                    checkpoint: false,
+                })
+            }))
         });
         Ok(())
     }
 }
 
-fn pure_executable<S: PureState>(
-    failure: &ContentRef,
-    binding: &HandlerBinding,
-    handle: executable::Handle,
-) -> Result<ExecutableState> {
-    Ok(ExecutableState {
-        mode: ExecutableMode::Pure {
-            callbacks: callback::PureCallbacks::new::<S>(failure.clone()),
-        },
-        handle,
-        params: executable::parameters(binding)?,
-        checkpoint: false,
-    })
-}
-
-/// Compiles a source directly into one complete immutable Program.
+/// Compiles a source into one complete Program using the environment's installed support.
 #[allow(private_bounds)]
 pub fn compile<S, R>(
     entry: EntryPointId,
@@ -476,10 +504,13 @@ pub fn compile<S, R>(
 where
     S: AuthoringSource + Walk<<S as AuthoringSource>::Input, R>,
     R: ProgramEnvironment,
+    R::Sources: Discover<R>,
 {
-    let mut draft = Draft::new()?;
-    let input_contract = draft.contracts.insert::<S::Input>()?;
-    let output_contract = draft.contracts.insert::<S::Output>()?;
+    let mut inventory = Inventory::new()?;
+    R::Sources::discover(&mut inventory)?;
+    let mut draft = Draft::new(&inventory.contracts)?;
+    let input_contract = draft.contracts.require_value::<S::Input>()?;
+    let output_contract = draft.contracts.require_value::<S::Output>()?;
     let initial = Object::from_value(input)
         .map_err(|cause| ProgramError::Diagnostic(cause.into_diagnostic("compile_input")))?;
     source.walk(input, resources, &mut draft)?;
@@ -493,7 +524,7 @@ where
         limits,
         draft.bindings.into_values().collect(),
     )?;
-    Program::freeze(document, draft.executables, draft.contracts.finish())
+    inventory.associate(document, resources)
 }
 
 /// Reconstructs exact executable code from the retained document and installed source types.
@@ -506,81 +537,90 @@ where
     let document = ProgramDocument::decode(canonical_program)?;
     let mut inventory = Inventory::new()?;
     R::Sources::discover(&mut inventory)?;
-    let selected = document
-        .declarations()
-        .iter()
-        .enumerate()
-        .map(|(position, state)| {
-            let reject = |reason| {
-                rejection(
+    inventory.associate(document, resources)
+}
+
+impl<R> Inventory<R> {
+    fn associate(self, document: ProgramDocument, resources: &R) -> Result<Program> {
+        for contract in [
+            document.admitted_context_contract_ref(),
+            document.root_success_contract_ref(),
+        ] {
+            if !self.contracts.values.contains_key(contract) {
+                return Err(rejection(
                     "associate",
                     &serde_json::json!({
-                        "reason": reason, "position": position,
-                        "implementation": state.state_implementation_ref(),
-                        "input": state.input_contract_ref(), "output": state.output_contract_ref(),
-                        "failure": state.failure_contract_ref(), "execution": state.execution(),
-                        "handler": state.handler().abi(),
-                        "handler_params": state.handler().params().value_ref(),
+                        "reason": "endpoint_contract_not_installed", "contract": contract,
                     }),
-                )
-            };
-            let construct = inventory
-                .states
-                .get(&StateAbi::recorded(state))
-                .ok_or_else(|| reject("state_not_installed"))?;
-            let handle = inventory
-                .handlers
-                .get(state.handler().abi())
-                .ok_or_else(|| reject("handler_not_installed"))?;
-            let descriptor = &inventory
-                .contracts
-                .values
-                .get(state.handler().abi().params())
-                .ok_or_else(|| reject("handler_contract_not_installed"))?
-                .1;
-            executable::parameters(state.handler())?
-                .admit(descriptor)
-                .map_err(|cause| ProgramError::Diagnostic(cause.into_diagnostic("load_handler")))?;
-            if let Execution::Read { abi, binding_ref } | Execution::Effect { abi, binding_ref } =
-                state.execution()
-            {
-                let index = document
-                    .bindings
-                    .binary_search_by(|object| object.value_ref().cmp(binding_ref))
-                    .map_err(|_| reject("binding_not_retained"))?;
-                let descriptor = &inventory
-                    .contracts
-                    .values
-                    .get(abi.binding())
-                    .ok_or_else(|| reject("binding_contract_not_installed"))?
-                    .1;
-                document.bindings[index]
-                    .admit(descriptor)
-                    .map_err(|cause| {
-                        ProgramError::Diagnostic(cause.into_diagnostic("load_binding"))
-                    })?;
+                ));
             }
-            Ok((*construct, *handle))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut executables = document
-        .declarations()
-        .iter()
-        .zip(selected)
-        .map(|(state, (construct, handle))| construct(state, &document.bindings, resources, handle))
-        .collect::<Result<Vec<_>>>()?;
-    for state in document.declarations() {
-        for target in state.recovery_targets() {
-            executables[target.position().index()].checkpoint = true;
         }
+        let selected = document
+            .declarations()
+            .iter()
+            .enumerate()
+            .map(|(position, state)| {
+                let reject = |reason| {
+                    rejection(
+                        "associate",
+                        &serde_json::json!({
+                            "reason": reason, "position": position,
+                            "implementation": state.state_implementation_ref(),
+                            "input": state.input_contract_ref(), "output": state.output_contract_ref(),
+                            "failure": state.failure_contract_ref(), "execution": state.execution(),
+                            "handler": state.handler().abi(),
+                            "handler_params": state.handler().params().value_ref(),
+                        }),
+                    )
+                };
+                let construct = self
+                    .states
+                    .get(&StateAbi::recorded(state))
+                    .ok_or_else(|| reject("state_not_installed"))?;
+                let construct_handler = self
+                    .handlers
+                    .get(state.handler().abi())
+                    .ok_or_else(|| reject("handler_not_installed"))?;
+                if let Execution::Read { abi, binding_ref } | Execution::Effect { abi, binding_ref } =
+                    state.execution()
+                {
+                    let index = document
+                        .bindings
+                        .binary_search_by(|object| object.value_ref().cmp(binding_ref))
+                        .map_err(|_| reject("binding_not_retained"))?;
+                    let descriptor = &self
+                        .contracts
+                        .values
+                        .get(abi.binding())
+                        .ok_or_else(|| reject("binding_contract_not_installed"))?
+                        .1;
+                    document.bindings[index]
+                        .admit(descriptor)
+                        .map_err(|cause| {
+                            ProgramError::Diagnostic(cause.into_diagnostic("associate_binding"))
+                        })?;
+                }
+                let handle = construct_handler(state.handler())?;
+                construct(state, &document.bindings, handle)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut executables = selected
+            .into_iter()
+            .map(|bind| bind(resources))
+            .collect::<Result<Vec<_>>>()?;
+        for state in document.declarations() {
+            for target in state.recovery_targets() {
+                executables[target.position().index()].checkpoint = true;
+            }
+        }
+        Program::freeze(document, executables, self.contracts.finish())
     }
-    Program::freeze(document, executables, inventory.contracts.finish())
 }
 
 // Both modes share the same binding custody and exact-descriptor admission. The semantic/native
 // associated types and typed adapter calls remain monomorphized at each concrete leaf.
 macro_rules! native_leaf {
-    ($method:ident, $mode:ident, $state:ident, $capability:ident, $implementation:ident, $binder:ident,
+    ($method:ident, $require:ident, $mode:ident, $state:ident, $capability:ident, $implementation:ident, $binder:ident,
      $bind:ident, $leaf:ident, $callbacks:ident, $adapter:ident, $request:ident, $native:ident, $from_contracts:ident) => {
         impl Contracts {
             fn $method<C, I>(&mut self) -> Result<NativeAbi>
@@ -609,39 +649,49 @@ macro_rules! native_leaf {
                 Ok(abi)
             }
         }
-        impl Draft {
-            pub(crate) fn $method<S, C, I, R>(
+        impl Contracts {
+            fn $require<C, I>(&self) -> Result<NativeAbi>
+            where C: mfm_capabilities::$capability, I: mfm_capabilities::$implementation<C>,
+            {
+                let contracts = [
+                    self.require_value::<C::$request>()?, self.require_value::<C::Evidence>()?,
+                    self.require_value::<I::$native>()?, self.require_value::<I::NativeEvidence>()?,
+                    self.require_value::<I::OperationalError>()?, self.require_value::<I::Binding>()?,
+                ];
+                let abi = NativeAbi::$from_contracts::<C, I>(contracts)?;
+                let key = (abi.capability.clone(), I::implementation_id()?);
+                let reason = match self.native.get(&key) {
+                    Some((owner, installed)) if *owner == TypeId::of::<(C, I)>() && installed == &abi => return Ok(abi),
+                    Some(_) => "conflicting_owner",
+                    None => "native_not_installed",
+                };
+                Err(rejection("select_native", &serde_json::json!({
+                    "reason": reason, "capability": key.0, "implementation": key.1, "abi": abi,
+                })))
+            }
+        }
+        impl Draft<'_> {
+            pub(crate) fn $method<S, C, I>(
                 &mut self,
                 binding: &I::Binding,
-                resources: &R,
             ) -> Result<()>
             where
                 S: $state<C>,
                 C: mfm_capabilities::$capability,
                 I: mfm_capabilities::$implementation<C>,
                 I::OperationalError: ClassifyError,
-                R: $binder<C, I>,
             {
-                let abi = self.contracts.$method::<C, I>()?;
-                let state_abi = self.contracts.state::<S>()?;
+                let abi = self.contracts.$require::<C, I>()?;
+                let state_abi = self.contracts.require_state::<S>(Code::$mode(abi.clone()))?;
                 let object = Object::from_value(binding).map_err(|cause| {
                     ProgramError::Diagnostic(cause.into_diagnostic("compile_binding"))
                 })?;
-                let executable = $leaf::<S, C, I, R>(
-                    &object,
-                    &abi,
-                    &state_abi.failure,
-                    resources,
-                    &self.policy.binding,
-                    self.policy.handle,
-                )?;
                 self.emit(
                     state_abi,
                     Execution::$mode {
                         abi,
                         binding_ref: object.value_ref().clone(),
                     },
-                    executable,
                 )?;
                 self.bindings.insert(object.value_ref().clone(), object);
                 Ok(())
@@ -658,10 +708,9 @@ macro_rules! native_leaf {
             {
                 let native = self.contracts.$method::<C, I>()?;
                 self.component(ComponentKind::$state, S::state_id()?, S::description())?;
-                let mut abi = self.contracts.state::<S>()?;
-                abi.execution = Code::$mode(native);
+                let abi = self.contracts.state::<S>(Code::$mode(native))?;
                 self.states
-                    .insert(abi, |state, bindings, resources, handle| {
+                    .insert(abi, |state, bindings, handle| {
                         let Execution::$mode { abi, binding_ref } = state.execution() else {
                             return Err(rejection("bind_native", &serde_json::json!({
                                 "reason": "execution_mode_mismatch", "expected": stringify!($mode),
@@ -678,7 +727,7 @@ macro_rules! native_leaf {
                                 "reason": "binding_not_retained", "binding": binding_ref, "abi": abi,
                             })))?;
                         let object = &bindings[index];
-                        $leaf::<S, C, I, R>(object, abi, state.failure_contract_ref(), resources, state.handler(), handle)
+                        $leaf::<S, C, I, R>(object, abi, state.failure_contract_ref(), handle)
                     });
                 Ok(())
             }
@@ -687,10 +736,8 @@ macro_rules! native_leaf {
             object: &Object,
             abi: &NativeAbi,
             failure: &ContentRef,
-            resources: &R,
-            handler: &HandlerBinding,
-            handle: executable::Handle,
-        ) -> Result<ExecutableState>
+            handle: executable::BoundHandler,
+        ) -> Result<BindExecutable<R>>
         where
             S: $state<C>,
             C: mfm_capabilities::$capability,
@@ -698,39 +745,41 @@ macro_rules! native_leaf {
             I::OperationalError: ClassifyError,
             R: $binder<C, I>,
         {
-            let binding = object
-                .decode::<I::Binding>()
-                .map_err(ProgramError::Diagnostic)?;
-            let adapter = resources
-                .$bind(&binding)
-                .map_err(ProgramError::Diagnostic)?;
-            let binding = std::sync::Arc::new(binding);
-            Ok(ExecutableState {
-                mode: ExecutableMode::$mode {
-                    callbacks: callback::$callbacks::new::<S, C, I>(
-                        failure.clone(),
-                        abi.implementation.clone(),
-                        object.value_ref().clone(),
-                        std::sync::Arc::clone(&binding),
-                    ),
-                    adapter: callback::$adapter::<C, I, _>(
-                        abi.operational_error.clone(),
-                        abi.implementation.clone(),
-                        object.value_ref().clone(),
-                        binding,
-                        adapter,
-                    ),
-                },
-                handle,
-                params: executable::parameters(handler)?,
-                checkpoint: false,
-            })
+            let binding = object.decode::<I::Binding>().map_err(ProgramError::Diagnostic)?;
+            let abi = abi.clone();
+            let failure = failure.clone();
+            let reference = object.value_ref().clone();
+            Ok(Box::new(move |resources| {
+                let adapter = resources.$bind(&binding).map_err(ProgramError::Diagnostic)?;
+                let binding = std::sync::Arc::new(binding);
+                Ok(ExecutableState {
+                    mode: ExecutableMode::$mode {
+                        callbacks: callback::$callbacks::new::<S, C, I>(
+                            failure,
+                            abi.implementation.clone(),
+                            reference.clone(),
+                            std::sync::Arc::clone(&binding),
+                        ),
+                        adapter: callback::$adapter::<C, I, _>(
+                            abi.operational_error,
+                            abi.implementation,
+                            reference,
+                            binding,
+                            adapter,
+                        ),
+                    },
+                    handle,
+                    checkpoint: false,
+                })
+            }))
         }
+
     };
 }
 
 native_leaf!(
     read,
+    require_read,
     Read,
     ReadState,
     ReadCapabilityContract,
@@ -746,6 +795,7 @@ native_leaf!(
 );
 native_leaf!(
     effect,
+    require_effect,
     Effect,
     EffectState,
     EffectCapabilityContract,

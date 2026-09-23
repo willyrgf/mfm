@@ -136,9 +136,9 @@ impl<F, const MISSING: bool> BindRead<ReadCapability, Native> for Resources<F, M
         Ok(Adapter)
     }
 }
-struct Empty;
-impl ProgramEnvironment for Empty {
-    type Sources = Identity<NoParams>;
+struct PureOnly;
+impl ProgramEnvironment for PureOnly {
+    type Sources = Pure<Pass>;
 }
 struct Marker;
 impl CheckpointMarker for Marker {
@@ -202,7 +202,7 @@ fn construction_causes_retain_selection_association_and_checkpoint_facts_in_tran
         ),
         (
             "associate",
-            load(program.canonical_bytes(), &Empty).err().unwrap(),
+            load(program.canonical_bytes(), &PureOnly).err().unwrap(),
         ),
         (
             "lower_checkpoint",
@@ -210,7 +210,7 @@ fn construction_causes_retain_selection_association_and_checkpoint_facts_in_tran
                 entry,
                 &Forward::default(),
                 &NoParams,
-                &Empty,
+                &PureOnly,
                 ProgramLimits::new(1),
             )
             .err()
@@ -222,7 +222,12 @@ fn construction_causes_retain_selection_association_and_checkpoint_facts_in_tran
             panic!("structured compiler rejection")
         };
         assert_eq!(cause.operation(), operation);
-        assert_eq!(cause.details().as_value()["position"], 0);
+        if index == 1 {
+            // Duplicate installed families fail discovery before occurrence selection.
+            assert!(cause.details().as_value()["position"].is_null());
+        } else {
+            assert_eq!(cause.details().as_value()["position"], 0);
+        }
         match index {
             0 => assert_eq!(
                 cause.details().as_value()["selected"],

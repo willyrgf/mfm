@@ -10,10 +10,15 @@ Sealed typed sources compose `Pure`, `Read`, `Effect`, tuples, endomorphic vecto
 maintained `Operation<Definition, Defaults>` scopes. `Plan` borrows a checked local configuration;
 it never simulates future State input. `From<Definition>` supports explicit definitions with the
 same maintained defaults as default construction. `compile(entry, source, input, resources, limits)`
-lowers one private draft, checks exact associations, and commits the input value reference into
-Program v9. `load(bytes, resources)` discovers the environment's source types and attaches exact
-native resources without Plan, source configuration or fabricated setup. Both return the same
-complete non-generic Program. Runtime rejects input substitution before admission or provider entry.
+discovers installed support once, then lowers a declaration-only draft while checking selected Rust
+owners against that immutable inventory. A conflicting or uninstalled selected owner is rejected;
+compilation never substitutes installed code or installs the selected source implicitly. The draft
+commits the input value reference into Program v9 and calls Inventory association.
+`load(bytes, resources)` decodes the document and calls that same association without Plan, source
+configuration, resolution or injection. Association qualifies available public bindings and typed
+handler parameters for every occurrence before binding any native resource. Each bound handler
+captures its decoded parameters once; invocation retains only execution/error/panic responsibility.
+Both paths return the same complete non-generic Program. Runtime rejects input substitution before admission or provider entry.
 Multiple RunIds may reuse the same exact Program/input pair.
 
 One nesting guard rejects excessive depth before Plan or native injection. Checkpoint marker types

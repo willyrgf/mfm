@@ -27,6 +27,14 @@ contracts; native evidence and operational originals use the selected native ABI
 Program shares immutable storage across invocations. Typed values materialize at selected callbacks
 and are not cached in Runtime's continuation. RunView shares the admitted Object.
 
+Program's private Inventory owns installed value, State, native and handler claims and the single
+executable association path shared by compilation and loading. Fresh Draft borrows those claims
+for selected-owner checks and retains only declaration ordering, public bindings, defaults,
+checkpoints and depth. It cannot create callbacks or bind resources. Association checks all
+available typed handler parameters and native bindings before resource attachment; bound handlers
+capture decoded parameters. Full ABI and in-process TypeId checks preserve ownership without
+persisting Rust identities. New groupings of installed components need no extra source publication.
+
 Program derives component inspection from the same structural source/type discovery used by cold
 association. State and Operation definitions own metadata. Application adds its entry points and
 forwards that inventory without a handwritten component table, Plan invocation or live handles.
