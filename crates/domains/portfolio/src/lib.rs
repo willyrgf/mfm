@@ -545,7 +545,7 @@ pub enum PortfolioSnapshotFailure {
         /// Stable redacted collection failure code.
         code: BalanceFailureCode,
     },
-    /// Final arithmetic or binding validation failed.
+    /// Final decimal aggregation exceeded capacity.
     ConsolidationFailed,
 }
 

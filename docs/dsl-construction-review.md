@@ -28,9 +28,8 @@ production/test/docs LOC accounting follow all five steps.
 
 ## Material uncertainties
 
-Current fixtures may compile semantics absent from their installed environment; these must publish
-actual support rather than preserve fresh-only ownership. Validate with complete affected Program,
-Runtime and consumer tests, including identity/empty sources and non-Clone parameter contracts.
+None for the approved five-step implementation after the verification recorded below. Existing
+operational limits are stated in the final assessment.
 
 ## Initial evidence
 
@@ -271,3 +270,84 @@ nix develop -c cargo clippy -p mfm-app --test use_cases --message-format short -
 
 All eleven Application use cases passed under the default parallel test runner (110.85s), including
 both readiness/cancellation cases. The complete final CI is rerun on the committed correction.
+
+## Final verification and verdict
+
+Implementation revisions, in dependency order:
+
+| Revision | Coherent cutover |
+| --- | --- |
+| `8c83ce25` | Sole installed association authority and checked bound handlers |
+| `07f1d6a2` | One Portfolio aggregate validator |
+| `1ebae644` | Exact consolidation original and presentation-only product summaries |
+| `2cf07e8a` | Single Read completion with preserved phase/operation causes |
+| `18eb0b62` | Retained consumer recovery, named faults and coverage replacement |
+| `cf18ab5e` | Bounded Application readiness watchdog; cancellation assertions unchanged |
+
+Managed client acceptance passed with `nix run .#run -- --task client-e2e`: one test, 136.36s;
+task 151.545s, total 152.671s. Evidence:
+`/home/willyrgf.linux/.local/state/nixfied/mfm/dev/0/runs/run-266141-1790156545804391178/artifacts/run-summary.json`.
+
+Final CI candidate: `cf18ab5e6539fb3cda0e6df050c8a4e589b40a68`, clean tree
+`ec4d660016ee14df478f5cb4fed9ca31fb3f862e`. Command: `nix run .#ci`.
+Passed all nine tasks, zero failures, 676.274s total. Evidence:
+`/home/willyrgf.linux/.local/state/nixfied/mfm/dev/0/runs/run-278866-1790157402070025852/artifacts/run-summary.json`.
+
+| Task | Result | Seconds |
+| --- | --- | ---: |
+| `fmt` | Passed | 0.407 |
+| `sqlx-check` | Passed; checked SQL metadata unchanged | 1.025 |
+| `clippy` | Passed workspace with warnings denied | 3.358 |
+| `cargo-check` | Passed workspace | 2.538 |
+| `cargo-test` | 330 passed; seven ignored by ordinary selection | 299.515 |
+| `doc-tests` | Five passed | 7.862 |
+| `postgres-test` | 13 passed across managed selections | 13.878 |
+| `client-e2e` | One passed; configuration-deleted recovery/publication | 145.875 |
+| `effect-e2e` | Four passed; lifecycle, recipes and live retained recovery | 200.173 |
+
+The managed client test took 135.29s; live Effect recovery took 80.61s. Timings are local
+observations, not a controlled performance comparison.
+
+The documentation-only successor records evidence and corrects one Rustdoc description to say
+that ConsolidationFailed projects aggregate capacity rejection, not local binding failure. No
+executable tokens, test, manifest, schema, Nix task or lockfile changes after the tested candidate.
+
+Verdict: the complete five-step review is implemented and passes its focused, managed and final CI
+verification. Newly verified relationships are installed-versus-selected ownership, global
+construction preflight before resource binding, demand/output aggregate invariants, exact originals
+versus product summaries, one Read projection, same-run deployment recovery with immutable failure
+prefix, and manual/automatic continuation using exact retained command authority. The production
+Phase B cutover and managed acceptance are complete within these contracts.
+
+This is not a claim of universal constructor-panic containment: native binding decoder panic
+containment remains outside the new guarantee. Managed key custody remains alive across Runtime
+reconstruction; it is not a host-process restart test. Finality, publication of new semantics and the
+separately deferred extension business oracle retain their documented [known gaps](known-gaps.md).
+No unresolved blocker remains for this approved implementation sequence.
+
+## Final LOC accounting
+
+Physical lines include comments/blank lines and all replacement tests. The existing script separates
+inline/external test-only Rust, documentation and UI diagnostics. Reproduce from the final evidence
+commit:
+
+```sh
+python3 docs/dsl-phase-b-loc.py 05f74977 HEAD
+python3 docs/dsl-phase-b-loc.py 6d47027c9a6d2f0a07cae4cd78a0fbd3e0346c10 HEAD
+```
+
+| Category | This review: added / removed / net | Full branch: added / removed / net |
+| --- | ---: | ---: |
+| Production Rust | +382 / -348 / +34 | +11,798 / -7,773 / +4,025 |
+| Test Rust | +1,075 / -386 / +689 | +18,444 / -8,121 / +10,323 |
+| Documentation | +419 / -15 / +404 | +2,065 / -975 / +1,090 |
+| UI/other | +24 / -0 / +24 | +362 / -239 / +123 |
+
+The review's production increase is 34 lines: selected-owner checks and complete preflight require
+57 net lines in step 1, offset by 23 lines removed from aggregate validation, product failure
+projection and Read completion. Deleted independent hot executable construction, repeated recovery
+parameter decoding, owned source-ID copies, broad impossible originals, duplicate dispatch macros,
+and the second Read projection. No registry, binding cache, compatibility wrapper or parallel API
+was added. Test growth adds missing cross-path assertions and readable fault variants to existing
+fixtures, plus non-Clone checked-handler/native-binding preflight coverage. The full branch delta is
+reported separately so the review baseline does not hide the earlier production cutover's growth.
