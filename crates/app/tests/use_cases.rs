@@ -27,6 +27,10 @@ use mfm_runtime::{Failure, RunViewState};
 use mfm_store::{AppendResult, MemoryStore, Store, StoreError};
 use mfm_values::{MfmValue, Object};
 
+// Bounds a stalled fixture while allowing complete debug-build construction/admission,
+// including parallel test contention. This is not a Runtime latency contract.
+const READ_ENTRY_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(120);
+
 const ANCHOR: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NATIVE_SNAPSHOT: &str = r#"{
   "entry_point": "mfm.portfolio/snapshot@1",
@@ -506,7 +510,7 @@ async fn snapshot_progresses_after_an_interrupted_read() {
         tokio::select! {
             result = &mut start => panic!("blocked Read completed: {}", result.is_ok()),
             _ = provider.entered.notified() => {}
-            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => panic!("Read was not entered"),
+            _ = tokio::time::sleep(READ_ENTRY_WATCHDOG) => panic!("Read was not entered"),
         }
     }
     let retained = app.read_run(&run_id).await.expect("prefix");
@@ -1015,7 +1019,7 @@ async fn indeterminate_start_and_progress_carry_recovery_identity() {
         tokio::select! {
             result = &mut start => panic!("blocked Read completed: {}", result.is_ok()),
             _ = provider.entered.notified() => {}
-            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => panic!("Read was not entered"),
+            _ = tokio::time::sleep(READ_ENTRY_WATCHDOG) => panic!("Read was not entered"),
         }
     }
     let retained = app.read_run(&progress_id).await.unwrap();

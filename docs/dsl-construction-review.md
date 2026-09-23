@@ -233,3 +233,41 @@ Step 5 adds no production Rust: test Rust +597/-321 (net +276). The increase rep
 ranges with explicit variants, extends the existing reconciliation/managed fixtures, and deletes
 43 net lines of duplicate Pure consumer coverage. Managed client acceptance and final CI remain
 pending at this implementation commit; the final assessment below records their results.
+
+## Final CI fixture correction
+
+The first full CI on `18eb0b62` passed fmt, SQL metadata, workspace Clippy and compilation, then
+stopped at two Application readiness watchdogs. Nine other `use_cases` tests passed; the failures
+were exactly `Read was not entered` at the old ten-second fixture deadline, before the intended
+cancellation point. Evidence:
+`/home/willyrgf.linux/.local/state/nixfied/mfm/dev/0/runs/run-268981-1790156752138467609/artifacts/run-summary.json`.
+The smallest preserved reproduction is the committed `18eb0b62` fixture with:
+
+```sh
+nix develop -c cargo test -p mfm-app --test use_cases snapshot_progresses_after_an_interrupted_read -- --exact
+```
+
+It also failed in isolation at 10.01s, so parallel contention alone is not claimed as the explanation.
+Temporary instrumentation with the reviewed 120-second fixture bound measured provider entry at
+10.1967s and 10.1914s. Both isolated scenarios then passed (27.95s and 36.38s total), including their
+retained-history and ambiguous-recovery assertions. Measurement commands added `--nocapture`; the
+instrumentation was removed after diagnosis. These are local debug-build timings, not latency
+benchmarks or an API guarantee.
+
+Architect inspection found no notification race: `notify_one` retains a permit, providers are local
+to each test, and the ambiguous admission fails before provider IO. The correction uses one shared
+`READ_ENTRY_WATCHDOG` of 120 seconds to bound a stalled fixture while allowing complete construction
+and admission. Both tests still cancel only after actual provider entry, and all subsequent
+assertions remain. No production deadline, scheduling change, retry, discovery cache or test
+serialization was added. Test Rust +6/-2 (net +4); production Rust unchanged.
+
+With temporary timing removed, focused verification passed on the correction:
+
+```sh
+nix develop -c cargo fmt --all
+nix develop -c cargo test -p mfm-app --test use_cases --message-format short
+nix develop -c cargo clippy -p mfm-app --test use_cases --message-format short -- -D warnings
+```
+
+All eleven Application use cases passed under the default parallel test runner (110.85s), including
+both readiness/cancellation cases. The complete final CI is rerun on the committed correction.
