@@ -180,13 +180,15 @@ impl Contracts {
 #[derive(Clone)]
 pub(crate) struct Policy {
     binding: HandlerBinding,
+    qualify_handler: fn(&Contracts) -> Result<HandlerAbi>,
     allowances: RecoveryAllowances,
     targets: Vec<(u64, TypeId, ContentRef)>,
 }
 impl Policy {
-    fn fallback(abi: HandlerAbi) -> Result<Self> {
+    fn fallback() -> Result<Self> {
         Ok(Self {
-            binding: HandlerBinding::from_abi(abi, &NoParams)?,
+            binding: HandlerBinding::new::<Stop>(NoParams)?,
+            qualify_handler: Contracts::require_handler::<Stop>,
             allowances: RecoveryAllowances::default(),
             targets: Vec::new(),
         })
@@ -206,11 +208,10 @@ pub(crate) struct Draft<'a> {
 }
 impl<'a> Draft<'a> {
     fn new(contracts: &'a Contracts) -> Result<Self> {
-        let fallback = contracts.require_handler::<Stop>()?;
         Ok(Self {
             contracts,
             declarations: Vec::new(),
-            policy: Policy::fallback(fallback)?,
+            policy: Policy::fallback()?,
             depth: 0,
             scope: 0,
             next_scope: 1,
@@ -226,6 +227,17 @@ impl<'a> Draft<'a> {
     fn emit(&mut self, abi: StateAbi, execution: Execution) -> Result<()> {
         if self.declarations.len() >= MAX_STATES {
             return Err(ProgramError::Capacity);
+        }
+        // Only an emitted occurrence requires installed support for its effective Rust owner.
+        let handler = (self.policy.qualify_handler)(self.contracts)?;
+        if &handler != self.policy.binding.abi() {
+            return Err(rejection(
+                "select_handler",
+                &serde_json::json!({
+                    "reason": "abi_mismatch", "expected": self.policy.binding.abi(),
+                    "observed": handler,
+                }),
+            ));
         }
         self.targets.push(self.policy.targets.clone());
         self.declarations.push(StateData {
@@ -332,7 +344,6 @@ impl<'a> Draft<'a> {
     where
         P: ResolveDefaults<C>,
     {
-        let handler_abi = self.contracts.require_handler::<P::Handler>()?;
         let selected = P::resolve(config)?;
         let parent = self.policy.clone();
         let parent_scope = self.scope;
@@ -342,7 +353,8 @@ impl<'a> Draft<'a> {
             .checked_add(1)
             .ok_or(ProgramError::Capacity)?;
         if let Some(params) = selected.handler {
-            self.policy.binding = HandlerBinding::from_abi(handler_abi, &params)?;
+            self.policy.binding = HandlerBinding::new::<P::Handler>(params)?;
+            self.policy.qualify_handler = Contracts::require_handler::<P::Handler>;
             self.policy.targets = crate::typed_source::targets::<P::Targets>()?
                 .into_iter()
                 .map(|(marker, contract)| (self.scope, marker, contract))

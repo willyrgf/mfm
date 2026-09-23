@@ -213,3 +213,102 @@ fn explicit_nondefault_definition_keeps_maintained_defaults_and_cold_handler_ide
         ));
     }
 }
+
+struct StateOnly;
+impl ProgramEnvironment for StateOnly {
+    type Sources = Pure<Add>;
+}
+struct Unpublished<const SELECT: bool>;
+impl<const SELECT: bool> OperationDefaults for Unpublished<SELECT> {
+    type Handler = ConfiguredHandler;
+    type Targets = ();
+}
+impl<const SELECT: bool> ResolveDefaults<Deployed> for Unpublished<SELECT> {
+    fn resolve(_: &Deployed) -> Result<PolicyValues<ConfiguredHandler>> {
+        Ok(PolicyValues {
+            handler: SELECT.then_some(Deployed { value: 10 }),
+            retries: None,
+            restarts: None,
+        })
+    }
+}
+
+#[test]
+fn unused_handlers_need_no_installation_and_preserve_effective_stop_on_cold_load() {
+    let entry = mfm_ids::EntryPointId::new("mfm.proof.recovery/unused@1").unwrap();
+    let input = Deployed { value: 7 };
+    let expected = compile(
+        entry.clone(),
+        &Pure::<Add>::default(),
+        &input,
+        &StateOnly,
+        ProgramLimits::new(0),
+    )
+    .unwrap();
+    for (case, result) in [
+        (
+            "absent handler inherits Stop",
+            compile(
+                entry.clone(),
+                &Operation::<(Pure<Add>,), Unpublished<false>>::default(),
+                &input,
+                &StateOnly,
+                ProgramLimits::new(0),
+            ),
+        ),
+        (
+            "empty scope does not use its handler",
+            compile(
+                entry.clone(),
+                &(
+                    Operation::<(Identity<Deployed>,), Unpublished<true>>::default(),
+                    Pure::<Add>::default(),
+                ),
+                &input,
+                &StateOnly,
+                ProgramLimits::new(0),
+            ),
+        ),
+        (
+            "child Stop overrides unused parent handler",
+            compile(
+                entry,
+                &Operation::<(Operation<(Pure<Add>,), Clear>,), Unpublished<true>>::default(),
+                &input,
+                &StateOnly,
+                ProgramLimits::new(0),
+            ),
+        ),
+    ] {
+        let program = result.unwrap_or_else(|cause| panic!("{case}: {cause:?}"));
+        assert_eq!(
+            program.canonical_bytes(),
+            expected.canonical_bytes(),
+            "{case}"
+        );
+        let cold = load(program.canonical_bytes(), &StateOnly).unwrap();
+        assert_eq!(cold.content_ref(), expected.content_ref(), "{case}");
+    }
+}
+
+#[test]
+fn unpublished_handler_used_by_a_state_rejects_with_selection_cause() {
+    let Err(ProgramError::Diagnostic(cause)) = compile(
+        mfm_ids::EntryPointId::new("mfm.proof.recovery/unpublished@1").unwrap(),
+        &Operation::<(Pure<Add>,), Unpublished<true>>::default(),
+        &Deployed { value: 7 },
+        &StateOnly,
+        ProgramLimits::new(0),
+    ) else {
+        panic!("unpublished handler accepted")
+    };
+    assert_eq!(cause.operation(), "select_handler");
+    assert_eq!(
+        cause.details().as_value()["reason"],
+        "handler_not_installed"
+    );
+    assert_eq!(
+        cause.details().as_value()["handler"],
+        serde_json::to_value(HandlerAbi::of::<ConfiguredHandler>().unwrap()).unwrap()
+    );
+}

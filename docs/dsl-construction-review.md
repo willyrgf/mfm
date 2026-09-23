@@ -271,7 +271,7 @@ nix develop -c cargo clippy -p mfm-app --test use_cases --message-format short -
 All eleven Application use cases passed under the default parallel test runner (110.85s), including
 both readiness/cancellation cases. The complete final CI is rerun on the committed correction.
 
-## Final verification and verdict
+## Verification and verdict at the initial review candidate
 
 Implementation revisions, in dependency order:
 
@@ -312,7 +312,8 @@ The documentation-only successor records evidence and corrects one Rustdoc descr
 that ConsolidationFailed projects aggregate capacity rejection, not local binding failure. No
 executable tokens, test, manifest, schema, Nix task or lockfile changes after the tested candidate.
 
-Verdict: the complete five-step review is implemented and passes its focused, managed and final CI
+Initial verdict (qualified by the architect rereview correction below): the complete five-step review
+is implemented and passes its focused, managed and final CI
 verification. Newly verified relationships are installed-versus-selected ownership, global
 construction preflight before resource binding, demand/output aggregate invariants, exact originals
 versus product summaries, one Read projection, same-run deployment recovery with immutable failure
@@ -323,17 +324,17 @@ This is not a claim of universal constructor-panic containment: native binding d
 containment remains outside the new guarantee. Managed key custody remains alive across Runtime
 reconstruction; it is not a host-process restart test. Finality, publication of new semantics and the
 separately deferred extension business oracle retain their documented [known gaps](known-gaps.md).
-No unresolved blocker remains for this approved implementation sequence.
+The subsequent architect rereview found the unused-handler authoring blocker recorded below.
 
-## Final LOC accounting
+## LOC accounting at `56462ece`
 
 Physical lines include comments/blank lines and all replacement tests. The existing script separates
 inline/external test-only Rust, documentation and UI diagnostics. Reproduce from the final evidence
 commit:
 
 ```sh
-python3 docs/dsl-phase-b-loc.py 05f74977 HEAD
-python3 docs/dsl-phase-b-loc.py 6d47027c9a6d2f0a07cae4cd78a0fbd3e0346c10 HEAD
+python3 docs/dsl-phase-b-loc.py 05f74977 56462ece
+python3 docs/dsl-phase-b-loc.py 6d47027c9a6d2f0a07cae4cd78a0fbd3e0346c10 56462ece
 ```
 
 | Category | This review: added / removed / net | Full branch: added / removed / net |
@@ -351,3 +352,46 @@ and the second Read projection. No registry, binding cache, compatibility wrappe
 was added. Test growth adds missing cross-path assertions and readable fault variants to existing
 fixtures, plus non-Clone checked-handler/native-binding preflight coverage. The full branch delta is
 reported separately so the review baseline does not hide the earlier production cutover's growth.
+
+
+## Architect rereview: effective handler selection
+
+Baseline: `56462ece`. The independent architect rereview found that `Draft::scope` required an
+installed handler even when no emitted State selected it. The initial pass above therefore missed
+an authoring guarantee. The dedicated architect specified the correction and reviewed its patch:
+carry a private monomorphized owner qualifier with the policy and invoke it only in the common State
+emission path, before recording the occurrence. `None` inherits the binding and qualifier together;
+an explicit override replaces both. The returned ABI must agree with the retained binding.
+
+This removes eager scope/root installation checks without removing exact Rust-owner checks.
+Explicit parameter serialization still happens at policy selection; malformed unused serializers
+are not newly accepted. Inventory association, complete parameter/native-binding preflight, checked
+handler invocation and persisted contracts are unchanged. No registry or public API was added.
+
+`recovery_scopes` now covers three successful cases against an environment publishing only Add:
+absent handler, an empty scope with an unpublished handler, and an unpublished parent overridden by
+Stop before use. Each produces exactly the direct Stop Program bytes and cold-loads with that same
+environment. A fourth case actually uses the unpublished handler and asserts
+`select_handler / handler_not_installed` with its exact ABI. `claim_conflicts` retains effective
+shadow-owner rejection; `handler_construction` retains complete preflight and single decode.
+
+Before the correction, the new recovery test failed at the absent-handler case with that same
+`select_handler / handler_not_installed` diagnostic (four tests passed, one failed). Afterward:
+
+```sh
+nix develop -c cargo fmt --all
+nix develop -c cargo test -p mfm-program --test recovery_scopes --test claim_conflicts --test handler_construction --message-format short
+nix develop -c cargo test -p mfm-program --all-targets --message-format short
+nix develop -c cargo clippy -p mfm-program --all-targets --message-format short -- -D warnings
+git diff --check
+```
+
+All passed: nine selected tests, then 32 Program tests including the compile-fail harness; Clippy
+reported no warnings. The architect accepted exact-owner custody, scope restoration and unchanged
+preflight. The handler blocker is corrected. The separate aggregate fixture refinement follows.
+Per the scoped verification policy, this private construction correction changes no cross-crate API,
+persistence, concurrency or task graph; managed acceptance and full CI are not rerun. Their earlier
+9/9 artifact remains historical evidence for `cf18ab5e`, not a CI result for this correction.
+
+Material uncertainties: none for the bounded correction. Existing operational limitations above
+remain unchanged.

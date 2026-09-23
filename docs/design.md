@@ -12,7 +12,11 @@ it never simulates future State input. `From<Definition>` supports explicit defi
 same maintained defaults as default construction. `compile(entry, source, input, resources, limits)`
 discovers installed support once, then lowers a declaration-only draft while checking selected Rust
 owners against that immutable inventory. A conflicting or uninstalled selected owner is rejected;
-compilation never substitutes installed code or installs the selected source implicitly. The draft
+compilation never substitutes installed code or installs the selected source implicitly. Handler
+ownership is qualified when a State uses the effective policy: absent overrides inherit the parent,
+and empty or fully overridden scopes need no installed handler. A private construction-time qualifier
+retains the selected Rust owner until emission; explicit parameter encoding still occurs at selection.
+The draft
 commits the input value reference into Program v9 and calls Inventory association.
 `load(bytes, resources)` decodes the document and calls that same association without Plan, source
 configuration, resolution or injection. Association qualifies available public bindings and typed
