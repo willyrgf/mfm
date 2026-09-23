@@ -143,5 +143,56 @@ fn maximum_public_fields_preserve_completed_prefix_snapshot_and_enrichment() {
         };
         mfm_values::canonicalize_mfm_value(&output).unwrap();
         assert_eq!(output.snapshot.collections.len(), collection_count);
+        let wire = serde_json::to_value(&output).unwrap();
+        assert!(serde_json::from_value::<PortfolioSnapshotOutput>(wire.clone()).is_ok());
+        if collection_count == 64 {
+            let mut duplicate_correlation = wire.clone();
+            duplicate_correlation["snapshot"]["collections"][1]["metadata"]["correlation"] =
+                duplicate_correlation["snapshot"]["collections"][0]["metadata"]["correlation"]
+                    .clone();
+            assert_output_wire_rejected(duplicate_correlation);
+
+            let mut duplicate_source = wire;
+            duplicate_source["snapshot"]["collections"][1]["balances"][0]["source"]["source_id"] =
+                duplicate_source["snapshot"]["collections"][0]["balances"][0]["source"]
+                    ["source_id"]
+                    .clone();
+            assert_output_wire_rejected(duplicate_source);
+        } else {
+            // Each child remains valid at 64 sources; only the aggregate exceeds its bound.
+            let mut excessive_sources = wire;
+            let mut second = excessive_sources["snapshot"]["collections"][0].clone();
+            second["metadata"]["collection_ordinal"] = 1.into();
+            second["metadata"]["correlation"] = "second".into();
+            for (ordinal, balance) in second["balances"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .enumerate()
+            {
+                balance["source"]["source_id"] = format!("second-{ordinal}").into();
+            }
+            excessive_sources["snapshot"]["collections"]
+                .as_array_mut()
+                .unwrap()
+                .push(second);
+            let mut summary = excessive_sources["report"]["collection_summaries"][0].clone();
+            summary["collection_ordinal"] = 1.into();
+            let total = summary["total_value_dec"].as_str().unwrap().to_owned();
+            excessive_sources["report"]["collection_summaries"]
+                .as_array_mut()
+                .unwrap()
+                .push(summary);
+            excessive_sources["report"]["totals_by_quote"][0]["total_value_dec"] =
+                sum_decimal_values(&[total.clone(), total]).unwrap().into();
+            assert_output_wire_rejected(excessive_sources);
+        }
     }
+}
+
+fn assert_output_wire_rejected(wire: serde_json::Value) {
+    for collection in wire["snapshot"]["collections"].as_array().unwrap() {
+        serde_json::from_value::<PortfolioSnapshotCollection>(collection.clone()).unwrap();
+    }
+    assert!(serde_json::from_value::<PortfolioSnapshotOutput>(wire).is_err());
 }

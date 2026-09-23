@@ -170,25 +170,34 @@ fn validate_demand_parts<'a>(
             .enumerate()
             .any(|(index, quote)| quotes[..index].contains(quote))
         || !valid_public_text(&portfolio_id.value, 256)
-        || collections.len() == 0
-        || collections.len() > PORTFOLIO_COLLECTION_LIMIT
-        || total_sources(
-            collections
-                .clone()
-                .map(|collection| collection.request.sources().len()),
-        ) > PORTFOLIO_SOURCE_LIMIT
-        || duplicate_text(
-            collections
-                .clone()
-                .map(|collection| collection.correlation.as_str()),
-        )
-        || duplicate_text(
-            collections
-                .flat_map(|collection| collection.request.sources())
-                .map(mfm_chain::balance::BalanceSource::source_id),
-        )
     {
         return Err(PortfolioError::InvalidValue);
+    }
+    validate_collection_set(
+        collections
+            .clone()
+            .map(|collection| collection.correlation.as_str()),
+        collections
+            .flat_map(|collection| collection.request.sources())
+            .map(mfm_chain::balance::BalanceSource::source_id),
+    )
+}
+
+fn validate_collection_set<'a>(
+    correlations: impl ExactSizeIterator<Item = &'a str>,
+    source_ids: impl Iterator<Item = &'a str>,
+) -> Result<(), PortfolioError> {
+    if correlations.len() == 0
+        || correlations.len() > PORTFOLIO_COLLECTION_LIMIT
+        || duplicate_text(correlations)
+    {
+        return Err(PortfolioError::InvalidValue);
+    }
+    let mut seen = BTreeSet::new();
+    for source_id in source_ids {
+        if !seen.insert(source_id) || seen.len() > PORTFOLIO_SOURCE_LIMIT {
+            return Err(PortfolioError::InvalidValue);
+        }
     }
     Ok(())
 }
@@ -481,20 +490,29 @@ impl PortfolioSnapshotOutput {
             || self.report.schema_version != 1
             || !valid_public_text(&self.snapshot.portfolio_id.value, 256)
             || self.snapshot.portfolio_id != self.report.portfolio_id
-            || self.snapshot.collections.is_empty()
-            || self.snapshot.collections.len() > PORTFOLIO_COLLECTION_LIMIT
             || self.report.collection_summaries.len() != self.snapshot.collections.len()
             || self.report.totals_by_quote.len() != 1
             || self.report.totals_by_quote[0].quote != self.report.quote
         {
             return Err(PortfolioError::InvalidValue);
         }
-        let mut source_ids = BTreeSet::new();
+        validate_collection_set(
+            self.snapshot
+                .collections
+                .iter()
+                .map(|collection| collection.metadata.correlation()),
+            self.snapshot
+                .collections
+                .iter()
+                .flat_map(|collection| &collection.balances)
+                .map(|balance| balance.source().source_id()),
+        )?;
         let mut totals = Vec::with_capacity(self.snapshot.collections.len());
         for (ordinal, collection) in self.snapshot.collections.iter().enumerate() {
-            let Some(total) = collection_total_value_dec(collection, &mut source_ids) else {
-                return Err(PortfolioError::InvalidValue);
-            };
+            let total = canonical_decimal(decimal_amount(
+                &collection.total_scaled,
+                collection.decimals.get(),
+            ));
             let summary = &self.report.collection_summaries[ordinal];
             if collection.metadata.collection_ordinal() != ordinal as u32
                 || summary.collection_ordinal != ordinal as u32
@@ -509,21 +527,6 @@ impl PortfolioSnapshotOutput {
         .then_some(())
         .ok_or(PortfolioError::InvalidValue)
     }
-}
-
-fn collection_total_value_dec(
-    collection: &PortfolioSnapshotCollection,
-    source_ids: &mut BTreeSet<String>,
-) -> Option<String> {
-    for balance in &collection.balances {
-        if !source_ids.insert(balance.source().source_id().to_owned()) {
-            return None;
-        }
-    }
-    Some(canonical_decimal(decimal_amount(
-        &collection.total_scaled,
-        collection.decimals.get(),
-    )))
 }
 
 /// Explicit fail-fast Portfolio failure route.
@@ -960,12 +963,6 @@ fn valid_public_text(value: &str, maximum: usize) -> bool {
         && value.len() <= maximum
         && !value.chars().any(char::is_control)
         && !string_contains_secret_marker(value)
-}
-
-fn total_sources(mut counts: impl Iterator<Item = usize>) -> usize {
-    counts
-        .try_fold(0usize, usize::checked_add)
-        .unwrap_or(usize::MAX)
 }
 
 fn duplicate_text<'a>(mut values: impl Iterator<Item = &'a str>) -> bool {

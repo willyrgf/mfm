@@ -77,3 +77,26 @@ The Runtime classification compile-fail diagnostic was reviewed and updated for 
 blocker; its request for precise shadow-owner assertions was incorporated. Native binding decoder
 panic containment is not a newly claimed guarantee. Managed acceptance and final CI remain pending
 until the complete five-step candidate.
+
+## Step 2: aggregate validation
+
+Step 1 revision: `8c83ce25`. Its accounting against `05f74977` is production +254/-197 (net +57),
+test Rust +396/-17 (net +379), documentation +102/-6 (net +96), UI diagnostics +24/-0.
+The necessary production increase implements selected-owner checks and full preflight before binding;
+it deletes the independent hot association authority and repeated recovery parameter decoding.
+
+One private collection-set validator now owns count, correlation uniqueness, total-source bound and
+source uniqueness for admission and output. Deleted the separate summation and output source-ID
+validator, including owned source-ID copies. Local child checks and output/report agreement remain.
+The existing maximum-field scenario now mutates output wire independently: each child still decodes,
+but duplicate correlations, cross-child duplicate source IDs and two valid 64-source children fail
+aggregate decoding. Re-running the new test against the preceding production implementation failed
+at the expected output-rejection assertion; the corrected implementation passes.
+
+```sh
+nix develop -c cargo fmt --all
+nix develop -c cargo test -p mfm-portfolio --all-targets --message-format short
+```
+
+Passed all four unit tests and the independent native ABI consumer integration test (both maintained
+Portfolio continuations). Production change is +41/-44 (net -3); regression change +51/-0.
