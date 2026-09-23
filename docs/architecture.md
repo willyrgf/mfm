@@ -191,8 +191,9 @@ The designated native implementation validates binding, native command and reque
 then projects settlement while retaining the original Object. Shared States own semantic rejection
 and successful context construction. The old slot-based execute/project family is removed.
 Domain-owned `mfm_evm::custody` still defines reservation and exact-byte retention; PostgreSQL owns
-its mechanical storage. The [Phase B ledger](dsl-phase-b.md) records focused and managed evidence;
-unit or scripted execution does not imply acceptance against live custody and chain services.
+its mechanical storage. [Build and verification](build-and-verification.md) defines focused and
+managed acceptance; unit or scripted execution does not imply acceptance against live custody and
+chain services.
 Chain owns the shared balance source/request/scale and semantic evidence contracts. Request admission
 preserves order and checks unique public IDs, nonempty bounded source count and common ledger.
 Balance Read binding checks intent, native-original provenance and successful observation point;

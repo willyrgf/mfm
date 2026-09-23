@@ -95,7 +95,5 @@ canonical artifact supplies hashing/output without a second cause tree or root m
 views own their EffectCall and optional original/outcome pair. `RecoveryStopped` retains only the
 observed view.
 
-The [verification record](../../../docs/dsl-phase-b.md) identifies the exact tested production
-revision and retained custody, cancellation, recovery, cold-load and managed acceptance evidence.
-Use [build and verification](../../../docs/build-and-verification.md) for current commands; a
-historical passing revision does not establish that a changed candidate passes.
+Use [build and verification](../../../docs/build-and-verification.md) for current commands and
+custody, cancellation, recovery, cold-load and managed acceptance coverage.

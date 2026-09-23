@@ -11,7 +11,8 @@ Program owns an immutable linear document, exact value contracts and one executa
 State. Typed sources construct the complete in-process Program; Runtime owns continuation,
 acknowledgement and recovery. The current document is `mfm.program.v9`; the
 [authoring guide](../../../docs/capability-authoring.md) describes selection, composition, extension
-and cold loading. [Verification evidence](../../../docs/dsl-phase-b.md) records the tested revision.
+and cold loading. [Build and verification](../../../docs/build-and-verification.md) defines checks
+and acceptance coverage.
 
 ```rust
 use mfm_ids::{EntryPointId, StableId};

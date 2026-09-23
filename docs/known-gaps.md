@@ -44,8 +44,9 @@ component set through ProgramEnvironment::Sources on the maintained resource env
 native families supply their dependent injected implementations and codecs through the same discovery
 walk. Stored implementation identities cannot instantiate Rust code absent from that support set.
 Automatic discovery of arbitrary downstream State implementations is deferred. The current typed
-compiler derives requirements from the explicitly published source set; production acceptance is
-tracked in [dsl-phase-b.md](dsl-phase-b.md).
+compiler derives requirements from the explicitly published source set. The
+[acceptance ownership table](build-and-verification.md#acceptance-scenarios-and-independent-oracles)
+identifies current production coverage.
 
 Consumers selecting or recomposing installed components need no registration-list changes. The
 framework must derive each published source's State, codec, handler and injected-support requirements

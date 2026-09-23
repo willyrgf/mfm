@@ -28,8 +28,8 @@ rejection is Permanent. `PortfolioSnapshotFailure` is only a collection/consolid
 summary, with no executable contract or classifier. Native clients decode the consolidation original
 through its owning State definition before projecting its product summary.
 
-The [verification record](../../../docs/dsl-phase-b.md) records production evidence and its limits;
-[build and verification](../../../docs/build-and-verification.md) owns current acceptance commands.
+[Build and verification](../../../docs/build-and-verification.md) owns current acceptance commands
+and coverage.
 
 Admission and snapshot output decoding share one collection-set check: nonempty bounded collections,
 unique correlations, at most 64 total sources, and unique source IDs across collections. Children

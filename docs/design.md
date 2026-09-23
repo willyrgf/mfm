@@ -119,7 +119,7 @@ no scaling or completion. Native confirmation must compare anchors before shared
 result separates local invocation errors from arithmetic rejection. Completed-prefix decoding checks
 order, ledger, common point and individual scaling, allowing total overflow to remain a consolidation
 failure. Protocol observation and acknowledgement are exercised through explicit native adapters;
-verification scope and managed acceptance are recorded in [the Phase B ledger](dsl-phase-b.md).
+verification scope and managed acceptance are defined in [build and verification](build-and-verification.md).
 ConsolidateBalanceCollection rejects an incomplete context with a local diagnostic retaining expected
 and completed counts. Aggregate overflow is a declared BalanceCollectionFailure after all sources
 confirmed. BalanceCollectionCompletion retains that context and the canonical total; decoding
@@ -167,8 +167,9 @@ an authenticated changed anchor is InputInvalidated before arithmetic admission.
 rejection, safe failure, wrong chain and integrity block are Permanent, with distinguishable
 failure payloads. Local evidence identity/type mismatches remain invocation errors. Changed-anchor
 failure decoding rejects equal anchors; arithmetic failure retains its concrete shared source.
-Native boundary tests cover State qualification; production cold execution and failure projection
-through actual adapters and Runtime are recorded in docs/dsl-phase-b.md.
+Native boundary tests cover State qualification; the
+[acceptance ownership table](build-and-verification.md#acceptance-scenarios-and-independent-oracles)
+identifies coverage for cold execution and failure projection through actual adapters and Runtime.
 EvmNativeBalance and EvmTokenBalance translate the designated shared balance intent and project all
 four native outcome variants without re-encoding the original. They reject mismatched ledger,
 account/asset and native evidence identity/type. Their fixed prefixes contain two and three Reads
@@ -432,8 +433,8 @@ necessary: its public evidence alone carries only EffectId and hash.
 Slot recipes, cumulative phase-fact wrappers, ExecuteEvmTransaction, the mandatory Pure outcome
 projection and their wrapper Operation are removed. Shared lifecycle callers use the existing
 compiler/capability/Runtime path. Intent, anchor, ABI and exact original-evidence checks remain native
-responsibilities. [The verification record](dsl-phase-b.md) identifies the tested production revision
-and managed evidence; supporting-State tests alone do not prove custody recovery.
+responsibilities. [Managed Effect acceptance](build-and-verification.md#nixfied-tasks) exercises
+custody recovery; supporting-State tests alone do not prove it.
 
 The broad EVM Read intent fixes only a nonzero chain ID, physical-route content ref, and one of six
 balance subjects; that subject is the operation discriminator. Its returned sum contains checked

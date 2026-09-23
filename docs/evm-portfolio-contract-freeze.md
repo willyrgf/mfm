@@ -11,7 +11,8 @@ Portfolio; managed lifecycle acceptance uses the pinned non-reorging Reth contra
 public success projection and is checked by Application acceptance. It is not the semantic
 Portfolio output or the Program/Journal wire. The former native collection and root-mapped failure
 fixtures are removed with their superseded contracts; current shared handoff and exact native/product
-failure coverage is mapped in [dsl-phase-b.md](dsl-phase-b.md).
+failure coverage is mapped in the
+[acceptance ownership table](build-and-verification.md#acceptance-scenarios-and-independent-oracles).
 
 Native clients admit EVM configuration and convert semantic success and exact retained failures.
 Portfolio owns collection/context agreement, checked arithmetic and product projections. Chain

@@ -106,9 +106,6 @@ The managed extension policy proposed in earlier design discussions (42+8, ceili
 row does not claim that business oracle has been implemented. No Runtime wait-budget scenario is
 required: deadlines were excluded from the current API. External test supervision remains separate.
 
-The [verification record](dsl-phase-b.md) identifies historical source revisions and executed gates;
-the [construction review ledger](dsl-construction-review.md) tracks the subsequent ownership and
-boundary cutover.
 A test/helper rewrite must map every removed observable assertion to its retained owner; historical
 passes or proposed future scenarios do not prove a changed candidate.
 
@@ -152,8 +149,8 @@ after they are staged in Git.
 
 The standalone capacity tasks select tests already included in the workspace test stage. CI runs
 that coverage once through `cargo-test`; it does not invoke `capacity-envelope` again. Keep these
-commands for focused capacity verification. See the [slow test review](test-cost-review.md) for
-measured costs and the coverage questions to assess before changing tests.
+commands for focused capacity verification. Follow the [test value policy](code-quality.md#test-value)
+and acceptance ownership table above before changing coverage.
 
 Do not run broad component gates immediately before `.#ci` on the same tree. Once focused failures
 are resolved, run CI exactly once on the final candidate when the workflow requires the composed

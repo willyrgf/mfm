@@ -2,8 +2,7 @@
 
 The [design](design.md) owns execution and persistence contracts; the
 [architecture](architecture.md) owns placement. This guide describes the implemented authoring
-path. The [verification record](dsl-phase-b.md) identifies the tested production revision and
-separately records the validation status of subsequent changes.
+path. [Build and verification](build-and-verification.md) defines commands and acceptance coverage.
 
 ## Reuse semantics before introducing a contract
 
