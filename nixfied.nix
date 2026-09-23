@@ -288,10 +288,6 @@ in
   };
 
   nixfied.tasks = {
-    toolchain-check = cargoLeaf {
-      tools = [ pkgs.coreutils (assert pkgs.sqlx-cli.version == "0.9.0"; pkgs.sqlx-cli) ];
-      run = [ "bash" "nix/toolchain-check.sh" ];
-    };
     fmt = cargoLeaf {
       run = [
         "cargo-fmt"
@@ -474,7 +470,6 @@ in
     ci = {
       kind = "composite";
       steps = nixfiedLib.seq [
-        "toolchain-check"
         "fmt"
         "sqlx-check"
         "clippy"

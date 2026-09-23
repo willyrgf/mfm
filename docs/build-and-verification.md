@@ -149,7 +149,6 @@ after they are staged in Git.
 | `nix run .#run -- --task sqlx-prepare` | Regenerate checked-query metadata from a disposable baseline database. |
 | `nix run .#run -- --task sqlx-check` | Verify metadata content and the exact query filename set without updating tracked files. |
 | `nix run .#model-check` | Admit the compiled model without project tasks. |
-| `nix run .#run -- --task toolchain-check` | Prove supplied tools bypass hostile Cargo-home executables and exercise compilation, Clippy, formatting and rustdoc with the shared pin. |
 | `nix run .#run -- --task reth-smoke` | Co-start instant and delayed Reth with independently modeled loopback RPC and peer listeners; run the protocol smoke probe. |
 | `nix run .#run -- --task postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
 | `nix run .#run -- --task client-e2e` | Generate and interrupt an exact historical REST run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it against Reth, validate and reload its exact snapshot through the CLI, then reimport the same revision and require an independent CLI-generated run to produce the same semantic result. Also preserve one supplied operational provider error through cold REST and CLI observations, and run candidate enrichment through REST, delete its config, publish via REST, repeat publication through CLI, execute the dependent snapshot and recover its exact start after deleting the published revision. |
@@ -158,7 +157,7 @@ after they are staged in Git.
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |
 | `nix run .#run -- --task capacity-envelope` | Compose the three capacity owners above. |
-| `nix run .#ci` | Compose the toolchain regression, format, Clippy, workspace check/tests (including capacity coverage), managed DB, the managed client and Effect e2es, and docs. |
+| `nix run .#ci` | Compose format, Clippy, workspace check/tests (including capacity coverage), managed DB, the managed client and Effect e2es, and docs. |
 
 The standalone capacity tasks select tests already included in the workspace test stage. CI runs
 that coverage once through `cargo-test`; it does not invoke `capacity-envelope` again. Keep these
