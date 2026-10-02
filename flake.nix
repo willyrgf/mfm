@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     nixfied = {
-      url = "github:willyrgf/nixfied";
+      url = "github:willyrgf/nixfied/fd33e0b1aa90abe5afaf91f0a337a2bf0c531f01";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -75,30 +75,33 @@
           };
         in
         {
-          default = self.packages.${system}.model;
-          model = nixfied.lib.${system}.compileModel ./nixfied.nix;
+          default = self.packages.${system}.manifest;
+          manifest = nixfied.lib.${system}.compileManifest ./nixfied.nix;
           sqlx-cli = mkSqlxCli system;
-          mfm = rustPlatform.buildRustPackage (rustToolchain.env // {
-            pname = "mfm";
-            version = "0.1.0";
-            src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
-            SQLX_OFFLINE = "true";
-            cargoBuildFlags = [
-              "-p"
-              "mfm"
-              "--bin"
-              "mfm_cli"
-            ];
-            doCheck = false;
-            nativeBuildInputs = [ pkgs.pkg-config ];
-            buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-              pkgs.libiconv
-            ];
-            postInstall = ''
-              ln -s "$out/bin/mfm_cli" "$out/bin/mfm"
-            '';
-          });
+          mfm = rustPlatform.buildRustPackage (
+            rustToolchain.env
+            // {
+              pname = "mfm";
+              version = "0.1.0";
+              src = ./.;
+              cargoLock.lockFile = ./Cargo.lock;
+              SQLX_OFFLINE = "true";
+              cargoBuildFlags = [
+                "-p"
+                "mfm"
+                "--bin"
+                "mfm_cli"
+              ];
+              doCheck = false;
+              nativeBuildInputs = [ pkgs.pkg-config ];
+              buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+                pkgs.libiconv
+              ];
+              postInstall = ''
+                ln -s "$out/bin/mfm_cli" "$out/bin/mfm"
+              '';
+            }
+          );
         }
       );
 
@@ -109,37 +112,29 @@
           rustToolchain = import ./nix/rust-toolchain.nix { inherit pkgs; };
         in
         {
-          default = pkgs.mkShell (rustToolchain.env // {
-            packages = mkDevTools system;
-            shellHook = ''
-              unset CARGO_TARGET_DIR
-            '';
-          });
+          default = pkgs.mkShell (
+            rustToolchain.env
+            // {
+              packages = mkDevTools system;
+              shellHook = ''
+                unset CARGO_TARGET_DIR
+              '';
+            }
+          );
         }
       );
 
       apps = forAllSystems (
         system:
         let
-          pkgs = mkPkgs system;
           projectApps = nixfied.lib.${system}.projectApps ./nixfied.nix;
-          managedMfm = pkgs.writeShellApplication {
-            name = "mfm";
-            runtimeInputs = [ self.packages.${system}.mfm ];
-            text = ''
-              mfm "$@"
-            '';
-          };
         in
         # Keep the generated project apps and add the CLI.
         projectApps
         // {
-          ci = projectApps.ci // {
-            meta.description = "Run the complete MFM verification graph";
-          };
           mfm = {
             type = "app";
-            program = "${managedMfm}/bin/mfm";
+            program = "${self.packages.${system}.mfm}/bin/mfm_cli";
             meta.description = "Run the MFM CLI";
           };
         }

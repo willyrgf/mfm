@@ -1,6 +1,5 @@
 {
   lib,
-  config,
   nixfiedLib,
   pkgs,
   adapters,
@@ -62,19 +61,6 @@ let
         timeoutMs = 7200000;
       };
     };
-  rethInvocation = name: interval: {
-    tools = [ "reth-managed-node" ];
-    run = [
-      "reth" "node" "--dev"
-      "--datadir" "\${stateDir}/${name}/data"
-      "--ipcdisable" "--disable-discovery"
-      "--addr" "127.0.0.1" "--port" "\${port:${name}-p2p}"
-      "--max-inbound-peers" "0" "--max-outbound-peers" "0"
-      "--http" "--http.addr" "127.0.0.1" "--http.port" "\${port:${name}-http}"
-      "--ws" "--ws.addr" "127.0.0.1" "--ws.port" "\${port:${name}-ws}"
-      "--authrpc.addr" "127.0.0.1" "--authrpc.port" "\${port:${name}-authrpc}"
-    ] ++ lib.optionals interval [ "--dev.block-time" "10s" ];
-  };
   pgLocalPrepare = pkgs.writeShellApplication {
     name = "mfm-pg-local-prepare";
     runtimeInputs = [
@@ -200,41 +186,8 @@ in
 {
   imports = [
     adapters.postgres
-    adapters.reth
+    ./nix/reth-fixtures.nix
   ];
-
-  # Reuse the pinned adapter's probes and containment with a separate interval-mining fixture.
-  # Client acceptance retains its instant-seal chain and stable historical snapshot assumptions.
-  nixfied.closures.reth-managed-node = {
-    package = pkgs.reth;
-    executable = "bin/reth";
-    effects = [ "process" "network-listener" "file-write" ];
-  };
-  # Pinned Reth binds a peer socket even in dev mode; model it on loopback for both nodes.
-  nixfied.services.reth = {
-    endpoints.reth-p2p = { };
-    lifecycle.start.invocation = lib.mkForce (rethInvocation "reth" false);
-  };
-  nixfied.services.reth-delayed = {
-    endpoints = {
-      reth-delayed-http = { };
-      reth-delayed-ws = { };
-      reth-delayed-authrpc = { };
-      reth-delayed-p2p = { };
-    };
-    primaryEndpoint = "reth-delayed-http";
-    logRefs = [ "service.reth-delayed" ];
-    stateRefs = [ "slot" ];
-    containment = "process-tree";
-    lifecycle = {
-      ready = config.nixfied.services.reth.lifecycle.ready;
-      health = config.nixfied.services.reth.lifecycle.health;
-      stop = config.nixfied.services.reth.lifecycle.stop;
-      start.invocation = rethInvocation "reth-delayed" true;
-    };
-  };
-
-  nixfied.tasks.reth-smoke.requires = [ "reth-delayed" ];
 
   nixfied.project.projectId = "mfm";
   nixfied.project.name = "MFM";
@@ -483,5 +436,5 @@ in
     };
   };
 
-  nixfied.surface.verbs = [ "ci" ];
+  nixfied.surface.verbs.ci = "Run the complete MFM verification graph";
 }

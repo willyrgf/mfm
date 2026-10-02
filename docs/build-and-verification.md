@@ -38,7 +38,7 @@ nix develop -c cargo-clippy clippy --workspace --all-targets --all-features -- -
 Expand to affected dependents for a public contract change. A docs-only change needs link/command
 review and `git diff --check`; it does not automatically select Rust gates. Cross-crate APIs,
 persistence, concurrency, manifests, or task-graph changes require affected focused tests and one
-final CI run. Run `nix run .#model-check` early after a Nixfied edit and
+final CI run. Run `nix run .#manifest-check` early after a Nixfied edit and
 `nix flake check --no-build` after flake/output edits.
 
 ## Current focused matrix
@@ -148,8 +148,9 @@ after they are staged in Git.
 | --- | --- |
 | `nix run .#run -- --task sqlx-prepare` | Regenerate checked-query metadata from a disposable baseline database. |
 | `nix run .#run -- --task sqlx-check` | Verify metadata content and the exact query filename set without updating tracked files. |
-| `nix run .#model-check` | Admit the compiled model without project tasks. |
-| `nix run .#run -- --task reth-smoke` | Co-start instant and delayed Reth with independently modeled loopback RPC and peer listeners; run the protocol smoke probe. |
+| `nix run .#manifest-check` | Admit the compiled manifest without project tasks. |
+| `nix run .#run -- --task reth-probe-check` | Reject malformed RPC responses, invalid node identities, closed peer ports and non-RLPx TCP listeners; advertised addresses cannot redirect probes. |
+| `nix run .#run -- --task reth-smoke` | Co-start instant and delayed Reth, validate HTTP and authenticated RLPx/Hello on both loopback listeners, and observe delayed block advancement. |
 | `nix run .#run -- --task postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
 | `nix run .#run -- --task client-e2e` | Generate and interrupt an exact historical REST run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it against Reth, validate and reload its exact snapshot through the CLI, then reimport the same revision and require an independent CLI-generated run to produce the same semantic result. Also preserve one supplied operational provider error through cold REST and CLI observations, and run candidate enrichment through REST, delete its config, publish via REST, repeat publication through CLI, execute the dependent snapshot and recover its exact start after deleting the published revision. |
 | `nix run .#run -- --task effect-e2e` | Run maintained scalar recipes and lifecycle tests with pinned solc, then the PostgreSQL/keystore lifecycle on ten-second interval-mining Reth. Lose the first reservation acknowledgement, cancel after actual broadcast and cold-recover exact retained commands without re-signing. Check lifecycle 42, an existing-address call after external nonce advance, and composed lifecycle 84 (`0 -> 2 -> 3 -> 4 -> 6`). Assert real absent receipts, known transactions and five unique native submissions. Preserve SQL causes, local epoch rejection without append, closed-signer custody and exact terminal cold replay. |
@@ -157,7 +158,7 @@ after they are staged in Git.
 | `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |
 | `nix run .#run -- --task capacity-envelope` | Compose the three capacity owners above. |
-| `nix run .#ci` | Compose format, Clippy, workspace check/tests (including capacity coverage), managed DB, the managed client and Effect e2es, and docs. |
+| `nix run .#ci` | Compose format, SQL metadata, Clippy, workspace check/tests (including capacity coverage), managed DB, client/Effect e2es, and docs. |
 
 The standalone capacity tasks select tests already included in the workspace test stage. CI runs
 that coverage once through `cargo-test`; it does not invoke `capacity-envelope` again. Keep these
@@ -176,3 +177,66 @@ nix develop -c cargo clean --target-dir target/verification
 ```
 
 This removes only verification artifacts, not Nixfied state.
+
+## Managed fixtures and evidence
+
+The pinned Nixfied revision is `fd33e0b1aa90abe5afaf91f0a337a2bf0c531f01`. Use
+`nix run .#help` for exported tasks and `nix run .#docs -- source` or
+`nix run .#docs -- topic runtime` for its exact framework contracts. The separate
+`nix run .#mfm -- --help` app runs the packaged CLI and is outside generated help.
+`nix build .#manifest` produces `result/manifest.json` and `result/views/docs.md`.
+
+`nix/reth-fixtures.nix` owns the two pinned Reth fixtures. Each exposes only HTTP
+and peer TCP on loopback. WebSocket, Engine API, IPC, discovery, outbound peers
+and background file logging are disabled. HTTP exposes `eth,admin`; the peer
+probe reads the public key from `admin_nodeInfo.enode`, then authenticates RLPx and
+completes the devp2p Hello handshake at the planned endpoint using pinned Reth's own CLI.
+Exactly one inbound peer is permitted for that probe. No cryptography is
+implemented in the probe. Failures retain the RPC operation and supplied error
+details, or native CLI stderr and the original timeout cause. Successful peer
+output is suppressed. Instant sealing serves client acceptance; ten-second
+interval sealing retains the Effect tests' observable pending transaction window.
+
+Runs exclusively own their selected slot. CI executes its task sequence serially;
+its required services start before the sequence and remain available until the
+session ends. The two-hour Cargo invocation deadline remains explicit. Framework
+`--timeout-ms` controls lifecycle operations, not the total task deadline.
+Application data is run-scoped and removed after quiescent success, failure or
+cancellation. Run evidence survives under
+`$NIXFIED_STATE_DIR/registry/mfm/dev/<slot>/runs/<run-id>/`; use `.#logs` and
+`.#ps` for inspection. `ps` is read-only; `down` cancels the current owned session.
+
+Use `--output summary`, `json` or `both` with managed tasks. `both` streams labeled
+task output to stderr and prints the final JSON result to stdout. A directly
+selected leaf also supports `--output task-output`, which preserves its redacted
+stdout/stderr stream without the summary renderer. Composite tasks such as CI
+do not support that mode. Keep the default summary for ordinary execution.
+
+## Upgrading existing local state
+
+The registry format and ownership marker changed incompatibly from the previous
+pin. There is no registry migration. New application data lives under
+`<base>/data/mfm`, while the active registry namespace remains `<base>/registry/mfm`.
+Old `clean` does not remove the old registry and cannot prepare it for this version.
+
+Before updating an existing installation, retain its checkout and lock, inspect
+every used slot with the old `.#ps`, and stop any owned session with the old
+`.#down`. Once all are quiescent, archive only `<base>/registry/mfm` outside the
+active registry namespace. Preserve `<base>/mfm` and every other project's state;
+record the archive's original path. The new runtime can then create its registry
+at the original location. Rollback requires stopping the new runtime, archiving
+its registry, restoring the legacy registry to its original path, and using the
+old checkout. Never rewrite the old marker or database to impersonate a new format.
+
+Alternatively, preserve the entire old base and choose a fresh one explicitly:
+
+```sh
+export NIXFIED_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/mfm-nixfied-v3"
+nix run .#manifest-check
+nix run .#run -- --task reth-smoke
+```
+
+Use the same base for subsequent run, logs, ps and down commands. CI already
+selects a fresh runner-local base. Linux execution and Darwin evaluation can be
+checked locally; actual Darwin process/listener containment must be checked by the
+macOS workflow job.
