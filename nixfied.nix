@@ -7,7 +7,73 @@
 }:
 let
   rustToolchain = import ./nix/rust-toolchain.nix { inherit pkgs; };
-  pinnedSolc = assert pkgs.solc.version == "0.8.33"; pkgs.solc;
+  pinnedSolc =
+    assert pkgs.solc.version == "0.8.33";
+    pkgs.solc;
+  rethAdapter = (adapters.reth { inherit pkgs; }).nixfied;
+  rethFixture =
+    name: interval:
+    let
+      peerProbe = {
+        tools = [ "reth-rpc-probe" ];
+        run = [
+          "nixfied-reth-probe"
+          "peer"
+          "\${host}"
+          "\${port}"
+          "\${port:${name}-http}"
+        ];
+      };
+    in
+    {
+      primaryEndpoint = "${name}-http";
+      containment = "process-tree";
+      endpoints = {
+        "${name}-http" = rethAdapter.services.reth.endpoints.reth-http;
+        "${name}-p2p" = {
+          readyProbe = peerProbe;
+          healthProbe = peerProbe;
+        };
+      };
+      lifecycle = rethAdapter.services.reth.lifecycle // {
+        start.invocation = {
+          tools = [ "reth-managed-node" ];
+          run = [
+            "reth"
+            "node"
+            "--dev"
+            "--datadir"
+            "\${stateDir}/${name}/data"
+            "--ipcdisable"
+            "--disable-discovery"
+            "--disable-auth-server"
+            "--addr"
+            "127.0.0.1"
+            "--port"
+            "\${port:${name}-p2p}"
+            # The authenticated readiness handshake needs one inbound peer.
+            "--max-inbound-peers"
+            "1"
+            "--max-outbound-peers"
+            "0"
+            "--http"
+            "--http.addr"
+            "127.0.0.1"
+            "--http.port"
+            "\${port:${name}-http}"
+            "--http.api"
+            "eth,admin"
+            "--quiet"
+            "--log.file.max-files"
+            "0"
+          ]
+          ++ lib.optionals interval [
+            "--dev.block-time"
+            "10s"
+          ];
+        };
+      };
+    };
   cargoTools = [
     "rust-toolchain"
     pkgs.bash
@@ -21,22 +87,24 @@ let
   ]
   ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
   ccEnvSuffix = lib.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.config;
-  cargoEnv = rustToolchain.env // {
-    SQLX_OFFLINE = "true";
-    CARGO_TARGET_DIR = "target/verification";
-    CARGO_INCREMENTAL = "0";
-    CARGO_PROFILE_DEV_DEBUG = "1";
-    CARGO_PROFILE_TEST_DEBUG = "1";
-    CARGO_PROFILE_DEV_SPLIT_DEBUGINFO = "off";
-    CARGO_PROFILE_TEST_SPLIT_DEBUGINFO = "off";
-    CARGO_BUILD_JOBS = "2";
-    RUST_BACKTRACE = "1";
-    TMPDIR = "\${stateDir}";
-  }
-  // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
-    "NIX_LDFLAGS_${ccEnvSuffix}" = "-L${pkgs.libiconv}/lib";
-    CPATH = "${pkgs.libiconv}/include";
-  };
+  cargoEnv =
+    rustToolchain.env
+    // {
+      SQLX_OFFLINE = "true";
+      CARGO_TARGET_DIR = "target/verification";
+      CARGO_INCREMENTAL = "0";
+      CARGO_PROFILE_DEV_DEBUG = "1";
+      CARGO_PROFILE_TEST_DEBUG = "1";
+      CARGO_PROFILE_DEV_SPLIT_DEBUGINFO = "off";
+      CARGO_PROFILE_TEST_SPLIT_DEBUGINFO = "off";
+      CARGO_BUILD_JOBS = "2";
+      RUST_BACKTRACE = "1";
+      TMPDIR = "\${stateDir}";
+    }
+    // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+      "NIX_LDFLAGS_${ccEnvSuffix}" = "-L${pkgs.libiconv}/lib";
+      CPATH = "${pkgs.libiconv}/include";
+    };
   cargoLeaf =
     {
       run,
@@ -133,41 +201,57 @@ let
     export PGSERVICE=ambient PGSSLMODE=verify-full
     ${cargoArgs}
   '';
-  sqlxTask = check:
+  sqlxTask =
+    check:
     (cargoLeaf {
       tools = [
         "pg-psql"
         pkgs.coreutils
         pkgs.findutils
-        (pkgs.diffutils // {
-          meta = pkgs.diffutils.meta // { mainProgram = "diff"; };
-        })
-        (assert pkgs.sqlx-cli.version == "0.9.0"; pkgs.sqlx-cli)
+        (
+          pkgs.diffutils
+          // {
+            meta = pkgs.diffutils.meta // {
+              mainProgram = "diff";
+            };
+          }
+        )
+        (
+          assert pkgs.sqlx-cli.version == "0.9.0";
+          pkgs.sqlx-cli
+        )
       ];
-      run = [ "bash" "-c" ''
-        set -euo pipefail
-        unset PGOPTIONS PGSERVICE PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGPASSFILE DATABASE_URL
-        admin_dsn="host=''${host:postgres} port=''${port:postgres} user=postgres dbname=postgres sslmode=disable"
-        metadata_db="mfm_sqlx_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-        psql -X "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<SQL
-        SELECT 'CREATE ROLE mfm_runtime' WHERE NOT EXISTS (
-          SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'mfm_runtime'
-        ) \gexec
-        CREATE DATABASE $metadata_db TEMPLATE template0;
-        SQL
-        trap 'psql -X "$admin_dsn" -v ON_ERROR_STOP=1 -c "DROP DATABASE $metadata_db WITH (FORCE)" >/dev/null' EXIT
-        export DATABASE_URL="postgresql://postgres@''${host:postgres}:''${port:postgres}/$metadata_db?sslmode=disable"
-        for baseline in run_history_postgres_v2 config_postgres_v2 evm_transaction_postgres_v2; do
-          psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "crates/storages/postgres/migrations/$baseline.sql" >/dev/null
-        done
-        SQLX_OFFLINE=false cargo-sqlx sqlx prepare --no-dotenv ${lib.optionalString check "--check"} --workspace -- --locked -p mfm-storage-postgres --lib
-        ${lib.optionalString check ''
-          # SQLx warns about extra cache files; CI requires the exact live query set.
-          cache_names() { find "$1" -maxdepth 1 -name 'query-*.json' -printf '%f\n' | sort; }
-          diff -u <(cache_names .sqlx) <(cache_names "$CARGO_TARGET_DIR/sqlx-prepare-check")
-        ''}
-      '' ];
-    }) // { requires = [ "postgres" ]; };
+      run = [
+        "bash"
+        "-c"
+        ''
+          set -euo pipefail
+          unset PGOPTIONS PGSERVICE PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGPASSFILE DATABASE_URL
+          admin_dsn="host=''${host:postgres} port=''${port:postgres} user=postgres dbname=postgres sslmode=disable"
+          metadata_db="mfm_sqlx_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          psql -X "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<SQL
+          SELECT 'CREATE ROLE mfm_runtime' WHERE NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'mfm_runtime'
+          ) \gexec
+          CREATE DATABASE $metadata_db TEMPLATE template0;
+          SQL
+          trap 'psql -X "$admin_dsn" -v ON_ERROR_STOP=1 -c "DROP DATABASE $metadata_db WITH (FORCE)" >/dev/null' EXIT
+          export DATABASE_URL="postgresql://postgres@''${host:postgres}:''${port:postgres}/$metadata_db?sslmode=disable"
+          for baseline in run_history_postgres_v2 config_postgres_v2 evm_transaction_postgres_v2; do
+            psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "crates/storages/postgres/migrations/$baseline.sql" >/dev/null
+          done
+          SQLX_OFFLINE=false cargo-sqlx sqlx prepare --no-dotenv ${lib.optionalString check "--check"} --workspace -- --locked -p mfm-storage-postgres --lib
+          ${lib.optionalString check ''
+            # SQLx warns about extra cache files; CI requires the exact live query set.
+            cache_names() { find "$1" -maxdepth 1 -name 'query-*.json' -printf '%f\n' | sort; }
+            diff -u <(cache_names .sqlx) <(cache_names "$CARGO_TARGET_DIR/sqlx-prepare-check")
+          ''}
+        ''
+      ];
+    })
+    // {
+      requires = [ "postgres" ];
+    };
   localEvmRun = rethService: cargoArgs: ''
     set -euo pipefail
     rpc_url="http://''${host:${rethService}}:''${port:${rethService}}"
@@ -178,24 +262,24 @@ let
     export NO_PROXY="" no_proxy=""
     ${cargoArgs}
   '';
-  localPostgresEvmRun = rethService: cargoArgs:
-    localPostgresRun (localEvmRun rethService ''
-      env -u PGSERVICE -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE \
-        -u PGPASSWORD -u PGPASSFILE \
-        psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
-      DROP SCHEMA IF EXISTS mfm_evm_tx CASCADE;
-      DROP SCHEMA IF EXISTS mfm_config CASCADE;
-      DROP SCHEMA IF EXISTS public CASCADE;
-      CREATE SCHEMA public AUTHORIZATION CURRENT_USER;
-      SQL
-      ${cargoArgs}
-    '');
+  localPostgresEvmRun =
+    rethService: cargoArgs:
+    localPostgresRun (
+      localEvmRun rethService ''
+        env -u PGSERVICE -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE \
+          -u PGPASSWORD -u PGPASSFILE \
+          psql "$admin_dsn" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+        DROP SCHEMA IF EXISTS mfm_evm_tx CASCADE;
+        DROP SCHEMA IF EXISTS mfm_config CASCADE;
+        DROP SCHEMA IF EXISTS public CASCADE;
+        CREATE SCHEMA public AUTHORIZATION CURRENT_USER;
+        SQL
+        ${cargoArgs}
+      ''
+    );
 in
 {
-  imports = [
-    adapters.postgres
-    ./nix/reth-fixtures.nix
-  ];
+  imports = [ adapters.postgres ];
 
   nixfied.project.projectId = "mfm";
   nixfied.project.name = "MFM";
@@ -207,6 +291,20 @@ in
     max = 9;
   };
 
+  nixfied.services = {
+    reth = rethFixture "reth" false;
+    reth-delayed = rethFixture "reth-delayed" true;
+  };
+  nixfied.closures.reth-managed-node = {
+    package = pkgs.reth;
+    executable = "bin/reth";
+    effects = [
+      "process"
+      "network-listener"
+      "file-write"
+    ];
+  };
+  nixfied.closures.reth-rpc-probe = rethAdapter.closures.reth-rpc-probe;
   nixfied.closures.rust-toolchain = {
     package = rustToolchain.package;
     executable = "bin/cargo";
@@ -247,6 +345,20 @@ in
   };
 
   nixfied.tasks = {
+    reth-smoke = {
+      requires = [
+        "reth"
+        "reth-delayed"
+      ];
+      invocation = rethAdapter.tasks.reth-smoke.invocation // {
+        run = [
+          "nixfied-reth-probe"
+          "http"
+          "\${host:reth}"
+          "\${port:reth}"
+        ];
+      };
+    };
     fmt = cargoLeaf {
       run = [
         "cargo-fmt"
