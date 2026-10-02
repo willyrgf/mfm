@@ -102,7 +102,7 @@ Use `docs/build-and-verification.md` for commands and selection. `nixfied.nix` o
 composition. Follow the pinned Nixfied adopter guide for framework changes.
 
 - Do not run broad gates merely because a commit is about to be created.
-- Do not run `.#check`, `.#test`, and `.#test-db` immediately before `.#ci`; CI composes them.
+- Do not run `.#clippy`, `.#cargo-test`, and `.#postgres-test` immediately before `.#ci`; CI composes them.
 - Run one final `nix run .#ci` on the exact candidate when the selected workflow requires it.
 
 ## Rust and API rules

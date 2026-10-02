@@ -24,7 +24,7 @@ jobs:
         with:
           path: |
             ~/.cache/nix
-          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'nixfied.nix', 'Cargo.lock', '.github/workflows/checks.yml') }}
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'nixfied.nix', 'nix/**', 'Cargo.lock', '.github/workflows/checks.yml') }}
 
       - name: Nix flake check
         run: |
@@ -33,16 +33,6 @@ jobs:
   ci-full:
     name: Nixfied CI (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
-    env:
-      LOG_TEE: "1"
-      LOG_LEVEL: "debug"
-      OUTPUT_MODE: "both"
-      MFM_ENV: "test"
-      RUST_BACKTRACE: "full"
-      RUST_LOG: "debug"
-      MFM_LOG: "debug"
-      MFM_TEST_LOG: "1"
-      MFM_TEST_LOG_FILTER: "debug"
     strategy:
       fail-fast: true
       matrix:
@@ -63,13 +53,13 @@ jobs:
         with:
           path: |
             ~/.cache/nix
-          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ hashFiles('flake.lock', 'flake.nix', 'nixfied.nix', 'Cargo.lock', '.github/workflows/checks.yml') }}
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ hashFiles('flake.lock', 'flake.nix', 'nixfied.nix', 'nix/**', 'Cargo.lock', '.github/workflows/checks.yml') }}
 
       - name: Nixfied CI
         env:
           NIXFIED_STATE_DIR: ${{ runner.temp }}/nixfied-state
         run: |
-          nix -L -v --log-format bar-with-logs run .#ci
+          nix -L -v --log-format bar-with-logs run .#ci -- --output both
 
       - name: Upload Nixfied failure logs
         if: failure()
@@ -77,7 +67,8 @@ jobs:
         with:
           name: nixfied-failure-${{ matrix.runner }}
           path: |
-            ${{ runner.temp }}/nixfied-state/**/runs/**/logs/**
-            ${{ runner.temp }}/nixfied-state/**/runs/**/artifacts/**
+            ${{ runner.temp }}/nixfied-state/registry/mfm/**/runs/**/logs/**
+            ${{ runner.temp }}/nixfied-state/registry/mfm/**/runs/**/artifacts/**
+            ${{ runner.temp }}/nixfied-state/registry/mfm/**/runs/**/summary*.json
           if-no-files-found: warn
           retention-days: 7

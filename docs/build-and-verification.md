@@ -80,7 +80,7 @@ no optimizer and `--evm-version cancun`, and sets `MFM_EFFECT_E2E_INITCODE_PATH`
 recipe/lifecycle tests. Run the managed task for complete reproduction:
 
 ```sh
-nix run .#run -- --task effect-e2e
+nix run .#effect-e2e
 ```
 
 Its compiler recipe, with `solc` supplied by that pinned task environment, is:
@@ -128,8 +128,8 @@ metadata. `.cargo/config.toml`, verification tasks, and release packaging defaul
 `SQLX_OFFLINE=true`; ordinary compilation needs no database. After changing a query or a baseline:
 
 ```bash
-nix run .#run -- --task sqlx-prepare
-nix run .#run -- --task sqlx-check
+nix run .#sqlx-prepare
+nix run .#sqlx-check
 ```
 
 Both tasks use the pinned PostgreSQL 18 service and SQLx CLI. They create a uniquely named disposable
@@ -146,19 +146,19 @@ after they are staged in Git.
 
 | Command | Contract |
 | --- | --- |
-| `nix run .#run -- --task sqlx-prepare` | Regenerate checked-query metadata from a disposable baseline database. |
-| `nix run .#run -- --task sqlx-check` | Verify metadata content and the exact query filename set without updating tracked files. |
+| `nix run .#sqlx-prepare` | Regenerate checked-query metadata from a disposable baseline database. |
+| `nix run .#sqlx-check` | Verify metadata content and the exact query filename set without updating tracked files. |
 | `nix run .#manifest-check` | Admit the compiled manifest without project tasks. |
-| `nix run .#run -- --task reth-probe-check` | Reject malformed RPC responses, invalid node identities, closed peer ports and non-RLPx TCP listeners; advertised addresses cannot redirect probes. |
-| `nix run .#run -- --task reth-smoke` | Co-start instant and delayed Reth, validate HTTP and authenticated RLPx/Hello on both loopback listeners, and observe delayed block advancement. |
-| `nix run .#run -- --task postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
-| `nix run .#run -- --task client-e2e` | Generate and interrupt an exact historical REST run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it against Reth, validate and reload its exact snapshot through the CLI, then reimport the same revision and require an independent CLI-generated run to produce the same semantic result. Also preserve one supplied operational provider error through cold REST and CLI observations, and run candidate enrichment through REST, delete its config, publish via REST, repeat publication through CLI, execute the dependent snapshot and recover its exact start after deleting the published revision. |
-| `nix run .#run -- --task effect-e2e` | Run maintained scalar recipes and lifecycle tests with pinned solc, then the PostgreSQL/keystore lifecycle on ten-second interval-mining Reth. Lose the first reservation acknowledgement, cancel after actual broadcast and cold-recover exact retained commands without re-signing. Check lifecycle 42, an existing-address call after external nonce advance, and composed lifecycle 84 (`0 -> 2 -> 3 -> 4 -> 6`). Assert real absent receipts, known transactions and five unique native submissions. Preserve SQL causes, local epoch rejection without append, closed-signer custody and exact terminal cold replay. |
-| `nix run .#run -- --task capacity-app` | Run the EVM, Portfolio and App test suites. |
-| `nix run .#run -- --task capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
-| `nix run .#run -- --task capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |
-| `nix run .#run -- --task capacity-envelope` | Compose the three capacity owners above. |
-| `nix run .#ci` | Compose format, SQL metadata, Clippy, workspace check/tests (including capacity coverage), managed DB, client/Effect e2es, and docs. |
+| `nix run .#reth-probe-check` | Reject malformed RPC responses, invalid node identities, closed peer ports and non-RLPx TCP listeners; advertised addresses cannot redirect probes. |
+| `nix run .#reth-smoke` | Co-start instant and delayed Reth, validate HTTP and authenticated RLPx/Hello on both loopback listeners, and observe delayed block advancement. |
+| `nix run .#postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
+| `nix run .#client-e2e` | Generate and interrupt an exact historical REST run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it against Reth, validate and reload its exact snapshot through the CLI, then reimport the same revision and require an independent CLI-generated run to produce the same semantic result. Also preserve one supplied operational provider error through cold REST and CLI observations, and run candidate enrichment through REST, delete its config, publish via REST, repeat publication through CLI, execute the dependent snapshot and recover its exact start after deleting the published revision. |
+| `nix run .#effect-e2e` | Run maintained scalar recipes and lifecycle tests with pinned solc, then the PostgreSQL/keystore lifecycle on ten-second interval-mining Reth. Lose the first reservation acknowledgement, cancel after actual broadcast and cold-recover exact retained commands without re-signing. Check lifecycle 42, an existing-address call after external nonce advance, and composed lifecycle 84 (`0 -> 2 -> 3 -> 4 -> 6`). Assert real absent receipts, known transactions and five unique native submissions. Preserve SQL causes, local epoch rejection without append, closed-signer custody and exact terminal cold replay. |
+| `nix run .#capacity-app` | Run the EVM, Portfolio and App test suites. |
+| `nix run .#capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
+| `nix run .#capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |
+| `nix run .#capacity-envelope` | Compose the three capacity owners above. |
+| `nix run .#ci` | Compose probe regressions, format, SQL metadata, Clippy, workspace check/tests (including capacity coverage), managed DB, client/Effect e2es, and docs. |
 
 The standalone capacity tasks select tests already included in the workspace test stage. CI runs
 that coverage once through `cargo-test`; it does not invoke `capacity-envelope` again. Keep these
@@ -203,8 +203,9 @@ session ends. The two-hour Cargo invocation deadline remains explicit. Framework
 `--timeout-ms` controls lifecycle operations, not the total task deadline.
 Application data is run-scoped and removed after quiescent success, failure or
 cancellation. Run evidence survives under
-`$NIXFIED_STATE_DIR/registry/mfm/dev/<slot>/runs/<run-id>/`; use `.#logs` and
-`.#ps` for inspection. `ps` is read-only; `down` cancels the current owned session.
+`$NIXFIED_STATE_DIR/registry/mfm/dev/<slot>/runs/<run-id>/`; inspect the reported
+evidence paths and use `.#ps` for process status. `ps` is read-only; `down` cancels
+the current owned session.
 
 Use `--output summary`, `json` or `both` with managed tasks. `both` streams labeled
 task output to stderr and prints the final JSON result to stdout. A directly
@@ -233,10 +234,10 @@ Alternatively, preserve the entire old base and choose a fresh one explicitly:
 ```sh
 export NIXFIED_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/mfm-nixfied-v3"
 nix run .#manifest-check
-nix run .#run -- --task reth-smoke
+nix run .#reth-smoke
 ```
 
-Use the same base for subsequent run, logs, ps and down commands. CI already
+Use the same base for subsequent run, ps and down commands. CI already
 selects a fresh runner-local base. Linux execution and Darwin evaluation can be
 checked locally; actual Darwin process/listener containment must be checked by the
 macOS workflow job.

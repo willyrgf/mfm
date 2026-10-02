@@ -135,7 +135,15 @@ let
   '';
   sqlxTask = check:
     (cargoLeaf {
-      tools = [ "pg-psql" pkgs.coreutils "find" "diff" (assert pkgs.sqlx-cli.version == "0.9.0"; pkgs.sqlx-cli) ];
+      tools = [
+        "pg-psql"
+        pkgs.coreutils
+        pkgs.findutils
+        (pkgs.diffutils // {
+          meta = pkgs.diffutils.meta // { mainProgram = "diff"; };
+        })
+        (assert pkgs.sqlx-cli.version == "0.9.0"; pkgs.sqlx-cli)
+      ];
       run = [ "bash" "-c" ''
         set -euo pipefail
         unset PGOPTIONS PGSERVICE PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGPASSFILE DATABASE_URL
@@ -208,8 +216,6 @@ in
       "file-write"
     ];
   };
-  nixfied.closures.find = { package = pkgs.findutils; executable = "bin/find"; effects = [ "source-read" ]; };
-  nixfied.closures.diff = { package = pkgs.diffutils; executable = "bin/diff"; effects = [ "source-read" ]; };
   nixfied.closures.cc = {
     package = pkgs.stdenv.cc;
     executable = "bin/cc";
@@ -302,10 +308,6 @@ in
       // {
         requires = [ "postgres" ];
       };
-    test-db = {
-      kind = "composite";
-      steps = nixfiedLib.seq [ "postgres-test" ];
-    };
     client-e2e =
       (cargoLeaf {
         run = [
@@ -423,18 +425,37 @@ in
     ci = {
       kind = "composite";
       steps = nixfiedLib.seq [
+        "reth-probe-check"
         "fmt"
         "sqlx-check"
         "clippy"
         "cargo-check"
         "cargo-test"
         "doc-tests"
-        "test-db"
+        "postgres-test"
         "client-e2e"
         "effect-e2e"
       ];
     };
   };
 
-  nixfied.surface.verbs.ci = "Run the complete MFM verification graph";
+  nixfied.surface.verbs = {
+    ci = "Run the complete MFM verification graph";
+    fmt = "Check workspace Rust formatting";
+    clippy = "Lint all workspace targets and features";
+    cargo-check = "Check all workspace targets";
+    cargo-test = "Test all workspace targets";
+    doc-tests = "Test workspace documentation examples";
+    sqlx-prepare = "Regenerate checked PostgreSQL query metadata";
+    sqlx-check = "Check PostgreSQL query metadata and exact cache filenames";
+    postgres-test = "Run serial managed PostgreSQL tests";
+    reth-probe-check = "Test Reth readiness protocol rejection";
+    reth-smoke = "Check both Reth protocols and delayed mining";
+    client-e2e = "Run managed CLI and REST client acceptance";
+    effect-e2e = "Run managed EVM Effect recovery acceptance";
+    capacity-app = "Test application and domain capacity contracts";
+    capacity-runtime = "Test Runtime capacity and hot/cold progression";
+    capacity-store = "Test Journal and Store capacity contracts";
+    capacity-envelope = "Run the composed capacity verification tasks";
+  };
 }
