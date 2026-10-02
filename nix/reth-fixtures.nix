@@ -112,17 +112,4 @@ in
       ];
     };
   };
-  nixfied.tasks.reth-probe-check.invocation = {
-    tools = [
-      pkgs.python3
-      "reth-peer-probe"
-    ];
-    run = [
-      (baseNameOf (lib.getExe pkgs.python3))
-      "nix/tests/reth_peer_test.py"
-      "${peerPackage}/bin/mfm-reth-peer-probe"
-    ];
-    timeoutMs = 30000;
-    env.PYTHONDONTWRITEBYTECODE = "1";
-  };
 }

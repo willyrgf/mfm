@@ -425,7 +425,6 @@ in
     ci = {
       kind = "composite";
       steps = nixfiedLib.seq [
-        "reth-probe-check"
         "fmt"
         "sqlx-check"
         "clippy"

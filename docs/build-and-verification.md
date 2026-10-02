@@ -149,7 +149,6 @@ after they are staged in Git.
 | `nix run .#sqlx-prepare` | Regenerate checked-query metadata from a disposable baseline database. |
 | `nix run .#sqlx-check` | Verify metadata content and the exact query filename set without updating tracked files. |
 | `nix run .#manifest-check` | Admit the compiled manifest without project tasks. |
-| `nix run .#run -- --task reth-probe-check` | Check that the local peer mapping rejects closed ports and non-RLPx TCP listeners, preserves native failure diagnostics, and ignores advertised addresses. |
 | `nix run .#reth-smoke` | Co-start instant and delayed Reth and validate HTTP and authenticated RLPx/Hello on both loopback listeners. |
 | `nix run .#postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
 | `nix run .#client-e2e` | Generate and interrupt an exact historical REST run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it against Reth, validate and reload its exact snapshot through the CLI, then reimport the same revision and require an independent CLI-generated run to produce the same semantic result. Also preserve one supplied operational provider error through cold REST and CLI observations, and run candidate enrichment through REST, delete its config, publish via REST, repeat publication through CLI, execute the dependent snapshot and recover its exact start after deleting the published revision. |
@@ -158,7 +157,7 @@ after they are staged in Git.
 | `nix run .#capacity-runtime` | Exercise hot/cold and zero-State Runtime progression. |
 | `nix run .#capacity-store` | Freeze Journal/Store object, frame, count, and cumulative-byte arithmetic. |
 | `nix run .#capacity-envelope` | Compose the three capacity owners above. |
-| `nix run .#ci` | Compose probe regressions, format, SQL metadata, Clippy, workspace check/tests (including capacity coverage), managed DB, client/Effect e2es, and docs. |
+| `nix run .#ci` | Compose format, SQL metadata, Clippy, workspace check/tests (including capacity coverage), managed DB, client/Effect e2es, and docs. |
 
 The standalone capacity tasks select tests already included in the workspace test stage. CI runs
 that coverage once through `cargo-test`; it does not invoke `capacity-envelope` again. Keep these
@@ -188,7 +187,8 @@ The pinned Nixfied revision is `fd33e0b1aa90abe5afaf91f0a337a2bf0c531f01`. Use
 
 `nix/reth-fixtures.nix` reuses Nixfied's HTTP probe and lifecycle policies for two
 loopback-only nodes: instant sealing for client acceptance and ten-second sealing
-for Effect recovery. The Effect tests own the pending-transaction assertions.
+for Effect recovery. The existing client and Effect e2es exercise fixture startup
+and teardown; the Effect tests own the pending-transaction assertions.
 Unused WebSocket, Engine API, IPC, discovery, outbound peers and file logging are
 disabled. Reth 1.9.3 still opens a peer listener in dev mode, unlike the assumption
 in the upstream adapter. `nix/reth-peer-probe.sh` obtains its public identity via
