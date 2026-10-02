@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     nixfied = {
-      url = "github:willyrgf/nixfied/fd33e0b1aa90abe5afaf91f0a337a2bf0c531f01";
+      url = "github:willyrgf/nixfied";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };

@@ -6,25 +6,17 @@
 }:
 let
   upstream = (adapters.reth { inherit pkgs; }).nixfied;
-  peerPackage = pkgs.writeShellApplication {
-    name = "mfm-reth-peer-probe";
-    runtimeInputs = [
-      pkgs.curl
-      pkgs.jq
-      pkgs.reth
-    ];
-    text = builtins.readFile ./reth-peer-probe.sh;
-  };
   fixture =
     name: interval:
     let
       peerProbe = {
-        tools = [ "reth-peer-probe" ];
+        tools = [ "reth-rpc-probe" ];
         run = [
-          "mfm-reth-peer-probe"
+          "nixfied-reth-probe"
+          "peer"
           "\${host}"
-          "\${port:${name}-http}"
           "\${port}"
+          "\${port:${name}-http}"
         ];
       };
     in
@@ -89,11 +81,6 @@ in
     ];
   };
   nixfied.closures.reth-rpc-probe = upstream.closures.reth-rpc-probe;
-  nixfied.closures.reth-peer-probe = {
-    package = peerPackage;
-    executable = "bin/mfm-reth-peer-probe";
-    effects = [ "process" ];
-  };
   nixfied.services = {
     reth = fixture "reth" false;
     reth-delayed = fixture "reth-delayed" true;

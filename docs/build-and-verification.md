@@ -179,34 +179,33 @@ This removes only verification artifacts, not Nixfied state.
 
 ## Managed fixtures and evidence
 
-The pinned Nixfied revision is `fd33e0b1aa90abe5afaf91f0a337a2bf0c531f01`. Use
+The pinned Nixfied revision is `58611eee90fa2f314da36fd1adc90a96c99ff143`. Use
 `nix run .#help` for exported tasks and `nix run .#docs -- source` or
 `nix run .#docs -- topic runtime` for its exact framework contracts. The separate
 `nix run .#mfm -- --help` app runs the packaged CLI and is outside generated help.
 `nix build .#manifest` produces `result/manifest.json` and `result/views/docs.md`.
 
-`nix/reth-fixtures.nix` reuses Nixfied's HTTP probe and lifecycle policies for two
+`nix/reth-fixtures.nix` reuses Nixfied's HTTP/peer probes and lifecycle policies for two
 loopback-only nodes: instant sealing for client acceptance and ten-second sealing
 for Effect recovery. The existing client and Effect e2es exercise fixture startup
-and teardown; the Effect tests own the pending-transaction assertions.
+and teardown; the Effect tests own the pending-transaction assertions. Protocol
+probe coverage belongs to Nixfied.
 Unused WebSocket, Engine API, IPC, discovery, outbound peers and file logging are
-disabled. Reth 1.9.3 still opens a peer listener in dev mode, unlike the assumption
-in the upstream adapter. `nix/reth-peer-probe.sh` obtains its public identity via
-`admin_nodeInfo.enode` and delegates authenticated RLPx/Hello to Reth's CLI at the
-planned address. One inbound peer is allowed for that check. Nixfied owns attempt
-deadlines and process cleanup; the helper forwards native stderr and exit status.
+disabled. Reth 1.9.3 still opens a peer listener in dev mode, so both fixtures
+declare it. The upstream `nixfied-reth-probe peer HOST PEER_PORT HTTP_PORT`
+obtains the public identity via `admin_nodeInfo.enode` and delegates authenticated
+RLPx/Hello to Reth's CLI at the planned address. One inbound peer is allowed for
+that check. Nixfied owns attempt deadlines and process cleanup.
 
-The pinned upstream HTTP helper discards JSON-RPC error details in
-`checked_response` and catches exceptions in its CLI, emitting only
-`Reth endpoint probe failed`. That loss affects fixture readiness diagnostics;
-fixing it belongs in Nixfied. It does not change MFM's provider error audit contract.
-The local peer identity request retains supplied RPC error details and native
-parser/CLI failures.
+Upstream probes emit `Reth endpoint probe failed`. HTTP detail is discarded in
+`reth-probe.py` (`checked_response` and CLI catch); peer detail is suppressed in
+`reth-probe.nix` before the native CLI boundary. Those internal diagnostics are
+unavailable to MFM. MFM's provider error audit contract is unchanged.
 
 CI uses `--output both` and retains evidence under
 `$NIXFIED_STATE_DIR/registry/mfm/dev/<slot>/runs/<run-id>/`. Its artifact upload
 includes logs, artifacts and numbered summaries. See the pinned
-[Nixfied adopter guide](https://github.com/willyrgf/nixfied/blob/fd33e0b1aa90abe5afaf91f0a337a2bf0c531f01/docs/GUIDE.md)
+[Nixfied adopter guide](https://github.com/willyrgf/nixfied/blob/58611eee90fa2f314da36fd1adc90a96c99ff143/docs/GUIDE.md)
 for output modes, run ownership, cleanup and recovery.
 
 The previous pin's registry is incompatible. For an existing installation, stop
