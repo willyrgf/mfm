@@ -449,8 +449,7 @@ in
     sqlx-prepare = "Regenerate checked PostgreSQL query metadata";
     sqlx-check = "Check PostgreSQL query metadata and exact cache filenames";
     postgres-test = "Run serial managed PostgreSQL tests";
-    reth-probe-check = "Test Reth readiness protocol rejection";
-    reth-smoke = "Check both Reth protocols and delayed mining";
+    reth-smoke = "Check both managed Reth HTTP and peer listeners";
     client-e2e = "Run managed CLI and REST client acceptance";
     effect-e2e = "Run managed EVM Effect recovery acceptance";
     capacity-app = "Test application and domain capacity contracts";

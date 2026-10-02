@@ -1,50 +1,44 @@
-{ lib, pkgs, ... }:
+{
+  lib,
+  pkgs,
+  adapters,
+  ...
+}:
 let
-  probePackage = pkgs.writeScriptBin "mfm-reth-probe" ''
-    #!${pkgs.python3}/bin/python3
-    ${builtins.readFile ./reth-probe.py}
-  '';
-  probe = args: {
-    tools = [
-      "reth-probe"
-      "reth-managed-node"
+  upstream = (adapters.reth { inherit pkgs; }).nixfied;
+  peerPackage = pkgs.writeShellApplication {
+    name = "mfm-reth-peer-probe";
+    runtimeInputs = [
+      pkgs.curl
+      pkgs.jq
+      pkgs.reth
     ];
-    run = [ "mfm-reth-probe" ] ++ args;
+    text = builtins.readFile ./reth-peer-probe.sh;
   };
   fixture =
     name: interval:
     let
-      httpProbe = probe [
-        "http"
-        "\${host}"
-        "\${port}"
-      ];
-      peerProbe = probe [
-        "peer"
-        "\${host}"
-        "\${port:${name}-http}"
-        "\${port}"
-      ];
-      policy = {
-        timeoutMs = 5000;
-        retryIntervalMs = 500;
-        maxAttempts = 60;
+      peerProbe = {
+        tools = [ "reth-peer-probe" ];
+        run = [
+          "mfm-reth-peer-probe"
+          "\${host}"
+          "\${port:${name}-http}"
+          "\${port}"
+        ];
       };
     in
     {
       primaryEndpoint = "${name}-http";
       containment = "process-tree";
       endpoints = {
-        "${name}-http" = {
-          readyProbe = httpProbe;
-          healthProbe = httpProbe;
-        };
+        "${name}-http" = upstream.services.reth.endpoints.reth-http;
         "${name}-p2p" = {
           readyProbe = peerProbe;
           healthProbe = peerProbe;
         };
       };
-      lifecycle = {
+      lifecycle = upstream.services.reth.lifecycle // {
         start.invocation = {
           tools = [ "reth-managed-node" ];
           run = [
@@ -81,9 +75,6 @@ let
             "10s"
           ];
         };
-        ready = { inherit policy; };
-        health = { inherit policy; };
-        stop.timeoutMs = 10000;
       };
     };
 in
@@ -97,9 +88,10 @@ in
       "file-write"
     ];
   };
-  nixfied.closures.reth-probe = {
-    package = probePackage;
-    executable = "bin/mfm-reth-probe";
+  nixfied.closures.reth-rpc-probe = upstream.closures.reth-rpc-probe;
+  nixfied.closures.reth-peer-probe = {
+    package = peerPackage;
+    executable = "bin/mfm-reth-peer-probe";
     effects = [ "process" ];
   };
   nixfied.services = {
@@ -111,26 +103,24 @@ in
       "reth"
       "reth-delayed"
     ];
-    invocation =
-      (probe [
-        "smoke"
+    invocation = upstream.tasks.reth-smoke.invocation // {
+      run = [
+        "nixfied-reth-probe"
+        "http"
         "\${host:reth}"
         "\${port:reth}"
-        "\${host:reth-delayed}"
-        "\${port:reth-delayed}"
-      ])
-      // {
-        timeoutMs = 30000;
-      };
+      ];
+    };
   };
   nixfied.tasks.reth-probe-check.invocation = {
     tools = [
       pkgs.python3
-      "reth-managed-node"
+      "reth-peer-probe"
     ];
     run = [
       (baseNameOf (lib.getExe pkgs.python3))
-      "nix/tests/reth_probe_test.py"
+      "nix/tests/reth_peer_test.py"
+      "${peerPackage}/bin/mfm-reth-peer-probe"
     ];
     timeoutMs = 30000;
     env.PYTHONDONTWRITEBYTECODE = "1";

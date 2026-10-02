@@ -149,8 +149,8 @@ after they are staged in Git.
 | `nix run .#sqlx-prepare` | Regenerate checked-query metadata from a disposable baseline database. |
 | `nix run .#sqlx-check` | Verify metadata content and the exact query filename set without updating tracked files. |
 | `nix run .#manifest-check` | Admit the compiled manifest without project tasks. |
-| `nix run .#reth-probe-check` | Reject malformed RPC responses, invalid node identities, closed peer ports and non-RLPx TCP listeners; advertised addresses cannot redirect probes. |
-| `nix run .#reth-smoke` | Co-start instant and delayed Reth, validate HTTP and authenticated RLPx/Hello on both loopback listeners, and observe delayed block advancement. |
+| `nix run .#run -- --task reth-probe-check` | Check that the local peer mapping rejects closed ports and non-RLPx TCP listeners, preserves native failure diagnostics, and ignores advertised addresses. |
+| `nix run .#reth-smoke` | Co-start instant and delayed Reth and validate HTTP and authenticated RLPx/Hello on both loopback listeners. |
 | `nix run .#postgres-test` | Run private ignored PostgreSQL tests through a real loopback-only `hostnossl` server, hostile overwritten ambient settings, isolated `PGOPTIONS` rejection, and the split runtime role. |
 | `nix run .#client-e2e` | Generate and interrupt an exact historical REST run at its first live Read, prove the durable runnable prefix, delete its config, cold-resume it against Reth, validate and reload its exact snapshot through the CLI, then reimport the same revision and require an independent CLI-generated run to produce the same semantic result. Also preserve one supplied operational provider error through cold REST and CLI observations, and run candidate enrichment through REST, delete its config, publish via REST, repeat publication through CLI, execute the dependent snapshot and recover its exact start after deleting the published revision. |
 | `nix run .#effect-e2e` | Run maintained scalar recipes and lifecycle tests with pinned solc, then the PostgreSQL/keystore lifecycle on ten-second interval-mining Reth. Lose the first reservation acknowledgement, cancel after actual broadcast and cold-recover exact retained commands without re-signing. Check lifecycle 42, an existing-address call after external nonce advance, and composed lifecycle 84 (`0 -> 2 -> 3 -> 4 -> 6`). Assert real absent receipts, known transactions and five unique native submissions. Preserve SQL causes, local epoch rejection without append, closed-signer custody and exact terminal cold replay. |
@@ -186,58 +186,31 @@ The pinned Nixfied revision is `fd33e0b1aa90abe5afaf91f0a337a2bf0c531f01`. Use
 `nix run .#mfm -- --help` app runs the packaged CLI and is outside generated help.
 `nix build .#manifest` produces `result/manifest.json` and `result/views/docs.md`.
 
-`nix/reth-fixtures.nix` owns the two pinned Reth fixtures. Each exposes only HTTP
-and peer TCP on loopback. WebSocket, Engine API, IPC, discovery, outbound peers
-and background file logging are disabled. HTTP exposes `eth,admin`; the peer
-probe reads the public key from `admin_nodeInfo.enode`, then authenticates RLPx and
-completes the devp2p Hello handshake at the planned endpoint using pinned Reth's own CLI.
-Exactly one inbound peer is permitted for that probe. No cryptography is
-implemented in the probe. Failures retain the RPC operation and supplied error
-details, or native CLI stderr and the original timeout cause. Successful peer
-output is suppressed. Instant sealing serves client acceptance; ten-second
-interval sealing retains the Effect tests' observable pending transaction window.
+`nix/reth-fixtures.nix` reuses Nixfied's HTTP probe and lifecycle policies for two
+loopback-only nodes: instant sealing for client acceptance and ten-second sealing
+for Effect recovery. The Effect tests own the pending-transaction assertions.
+Unused WebSocket, Engine API, IPC, discovery, outbound peers and file logging are
+disabled. Reth 1.9.3 still opens a peer listener in dev mode, unlike the assumption
+in the upstream adapter. `nix/reth-peer-probe.sh` obtains its public identity via
+`admin_nodeInfo.enode` and delegates authenticated RLPx/Hello to Reth's CLI at the
+planned address. One inbound peer is allowed for that check. Nixfied owns attempt
+deadlines and process cleanup; the helper forwards native stderr and exit status.
 
-Runs exclusively own their selected slot. CI executes its task sequence serially;
-its required services start before the sequence and remain available until the
-session ends. The two-hour Cargo invocation deadline remains explicit. Framework
-`--timeout-ms` controls lifecycle operations, not the total task deadline.
-Application data is run-scoped and removed after quiescent success, failure or
-cancellation. Run evidence survives under
-`$NIXFIED_STATE_DIR/registry/mfm/dev/<slot>/runs/<run-id>/`; inspect the reported
-evidence paths and use `.#ps` for process status. `ps` is read-only; `down` cancels
-the current owned session.
+The pinned upstream HTTP helper discards JSON-RPC error details in
+`checked_response` and catches exceptions in its CLI, emitting only
+`Reth endpoint probe failed`. That loss affects fixture readiness diagnostics;
+fixing it belongs in Nixfied. It does not change MFM's provider error audit contract.
+The local peer identity request retains supplied RPC error details and native
+parser/CLI failures.
 
-Use `--output summary`, `json` or `both` with managed tasks. `both` streams labeled
-task output to stderr and prints the final JSON result to stdout. A directly
-selected leaf also supports `--output task-output`, which preserves its redacted
-stdout/stderr stream without the summary renderer. Composite tasks such as CI
-do not support that mode. Keep the default summary for ordinary execution.
+CI uses `--output both` and retains evidence under
+`$NIXFIED_STATE_DIR/registry/mfm/dev/<slot>/runs/<run-id>/`. Its artifact upload
+includes logs, artifacts and numbered summaries. See the pinned
+[Nixfied adopter guide](https://github.com/willyrgf/nixfied/blob/fd33e0b1aa90abe5afaf91f0a337a2bf0c531f01/docs/GUIDE.md)
+for output modes, run ownership, cleanup and recovery.
 
-## Upgrading existing local state
-
-The registry format and ownership marker changed incompatibly from the previous
-pin. There is no registry migration. New application data lives under
-`<base>/data/mfm`, while the active registry namespace remains `<base>/registry/mfm`.
-Old `clean` does not remove the old registry and cannot prepare it for this version.
-
-Before updating an existing installation, retain its checkout and lock, inspect
-every used slot with the old `.#ps`, and stop any owned session with the old
-`.#down`. Once all are quiescent, archive only `<base>/registry/mfm` outside the
-active registry namespace. Preserve `<base>/mfm` and every other project's state;
-record the archive's original path. The new runtime can then create its registry
-at the original location. Rollback requires stopping the new runtime, archiving
-its registry, restoring the legacy registry to its original path, and using the
-old checkout. Never rewrite the old marker or database to impersonate a new format.
-
-Alternatively, preserve the entire old base and choose a fresh one explicitly:
-
-```sh
-export NIXFIED_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/mfm-nixfied-v3"
-nix run .#manifest-check
-nix run .#reth-smoke
-```
-
-Use the same base for subsequent run, ps and down commands. CI already
-selects a fresh runner-local base. Linux execution and Darwin evaluation can be
-checked locally; actual Darwin process/listener containment must be checked by the
-macOS workflow job.
+The previous pin's registry is incompatible. For an existing installation, stop
+owned sessions with the old checkout's `.#down` and preserve the old base; select
+a fresh `NIXFIED_STATE_DIR` for the new runtime. Use that same base for run, ps and
+down. CI already selects a fresh runner-local base. Darwin execution remains the
+macOS workflow job's responsibility.
