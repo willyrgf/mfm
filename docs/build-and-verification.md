@@ -176,3 +176,54 @@ nix develop -c cargo clean --target-dir target/verification
 ```
 
 This removes only verification artifacts, not Nixfied state.
+
+## Upgrading Nixfied
+
+Use the upstream upgrade app from the MFM repository root. MFM tracks
+`github:willyrgf/nixfied` in `flake.nix`; `flake.lock` pins the exact revision.
+The [upstream adopter guide](https://github.com/willyrgf/nixfied/blob/HEAD/docs/GUIDE.md#upgrade-and-recover)
+owns framework upgrade and recovery semantics. Read the installed reference with
+`nix run .#docs` when reviewing the current pin.
+
+1. Start from a clean worktree so the upgrade changes are easy to review. Before changing the pin,
+   inspect any slots with active or interrupted sessions using `nix run .#ps -- --slot <slot>`.
+   Stop or recover affected sessions with the old pin's `down` command before switching runtimes.
+2. Generate the plan:
+
+   ```sh
+   nix run github:willyrgf/nixfied#upgrade -- --root . --plan > nixfied-upgrade.diff
+   ```
+
+   Read `nixfied-upgrade.diff` and the old/candidate revision report on stderr. The plan changes no
+   project files and does not evaluate the candidate manifest. Its diff covers upstream `README.md`
+   and `docs/`; inspect relevant upstream implementation changes when needed to assess MFM's
+   integration, especially adapters, runtime state, supported platforms, and task execution.
+   Identify required adjustments to `flake.nix`, `nixfied.nix`, scripts, and project documentation.
+3. Apply the checked upgrade:
+
+   ```sh
+   nix run github:willyrgf/nixfied#upgrade -- --root .
+   git diff -- flake.nix flake.lock nixfied.nix
+   ```
+
+   Apply resolves upstream again; compare its reported candidate revision with the plan and review
+   any newly selected changes. The command evaluates the candidate manifest derivation before
+   writing the input lock; it preserves project-owned `nixfied.nix`. Make the required project
+   adjustments yourself. If checked evaluation rejects the candidate, fix the reported wiring or
+   declarations and replan. `--force` skips that evaluation and is not the normal upgrade path.
+4. Admit the upgraded manifest early, then verify the final candidate:
+
+   ```sh
+   nix run .#manifest-check
+   nix flake check --no-build
+   rm nixfied-upgrade.diff
+   git diff --check
+   nix run .#ci
+   ```
+
+   `manifest-check` builds and admits the manifest but runs no project tasks. CI exercises the
+   complete MFM task graph, including managed PostgreSQL and both Reth fixtures. Resolve failures
+   with focused checks before the final CI run; do not run its broad component gates separately.
+   Local results establish coverage on the executing host; the hosted matrix covers Linux and
+   macOS. Commit the input lock and any inseparable integration repairs together, then commit the
+   documented workflow separately when it changes. Keep the generated review diff out of commits.
