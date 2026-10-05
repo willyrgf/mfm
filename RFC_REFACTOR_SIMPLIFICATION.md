@@ -205,7 +205,8 @@ Evidence: [HTTP locator and send boundary](crates/live/evm/src/json_rpc.rs),
 ```mermaid
 flowchart TD
     App[Application: admission, product composition, publication, rendering]
-    Catalog[One installed leaf Catalog plus explicit Resources]
+    Catalog[One installed leaf Catalog]
+    Resources[Explicit owner-local Resources]
     Builder[Typed ProgramBuilder]
     Program[Immutable Program: sequence, contracts, callbacks, resources]
     Runtime[Runtime: continuation, recovery, acknowledgement]
@@ -215,6 +216,7 @@ flowchart TD
     Store[Store: selected rows and atomic exact-head append]
     App --> Builder
     Catalog --> Builder
+    Resources --> Builder
     Builder --> Program
     Program --> Runtime
     Runtime --> State
@@ -246,6 +248,189 @@ must not need the Portfolio domain to implement an EVM collection adapter. Trans
 remain reusable platform primitives. Keystore remains thread-affine; this RFC does not make it Send
 or Sync.
 
+### 4.1 Integration growth and execution scale are separate requirements
+
+Supporting many chains and application protocols means growing installed semantic implementations,
+network bindings, and product composition. Running many requests means controlling concurrency,
+provider pressure, signing/custody capacity, and physical history growth. The proposed design must
+address the first without pretending it has already solved the second.
+
+The scaling objective is locality: adding a supported integration changes its owning implementation,
+composition entry, and consuming tests. It does not add branches to Runtime, Journal, Store,
+Program's generic association algorithm, or every existing product. Necessary implementation code
+grows with genuinely distinct supported semantics. It must not grow with every combination of
+network, endpoint, account, asset, policy, and operation instance.
+
+### 4.2 Distinguish protocol semantics from deployed instances
+
+| Addition | Representation / owner | Required framework change |
+| --- | --- | --- |
+| Another network satisfying an installed protocol contract | Checked ledger identity, network facts, public bindings, and explicit owner resources | None; validate the supported behavior and binding. |
+| Another endpoint, account, asset, or deployed protocol address | Checked request/configuration data | None; qualify it through the selected owner. |
+| A genuinely different ledger or transaction protocol | Native domain contracts, codecs, adapter orchestration, and authority where required | Install actual typed semantic leaves; keep the generic execution and persistence algorithms unchanged. |
+| Another application protocol with different business meaning | Its domain values/States and selected adapters; ordinary Rust Operations compose them | Add its semantics locally; reuse existing platform primitives where their contracts match. |
+| Another transport for an already-supported contract | Reusable transport primitives and its selected native owner | No new business State merely because HTTP, WebSocket, or another wire path changes. |
+| Another retry policy or configured allowance | Selected handler contract and parameter Object, or policy instance data | Publish new handler code only when behavior changes; do not register each parameter instance. |
+
+For example, deploying a compatible EVM integration on another admitted network should not create
+another State family or duplicate balance adapter implementation. A newly supported application
+protocol may need its own receipt decoder and meaningful business operation while reusing the EVM
+transport and transaction primitives. Neither the network name nor a deployed address justifies
+another generic execution layer.
+
+Compatibility is an admitted contract, not an inference from an EVM label or shared RPC spelling.
+Different units, selectors, transaction authority, or evidence semantics require explicit support
+or rejection. No default capability flags or silent fallbacks manufacture equivalent behavior.
+
+### 4.3 One Catalog, with contributions owned by integrations
+
+Make Catalog nongeneric. Integration modules contribute exact typed factories to the one immutable
+Catalog through ordinary Rust composition. Typed installation fixes the selected State, adapter,
+binding, native receipt, operational fault, and resource-owner contracts. Erasure occurs privately
+at that installation boundary so the Catalog need not carry a giant tuple of all protocol types.
+
+Each integration owns its factory definitions and native validators. Application selects the
+installed integration modules at one composition root. Installed-component inspection derives from
+those same entries. There is no second component manifest, global protocol enum, recursive source
+inventory, ambient plugin discovery, or mutable Runtime registration.
+
+Only actual supported State/adapter semantic pairings are installed. Do not enumerate a Cartesian
+product of all States and adapters. Networks, endpoint names, addresses, assets, and policy instances
+do not create factory entries. Multiple bindings use the same factory after exact qualification.
+
+The resulting growth is approximately the sum of actual installed semantic leaves plus explicit
+binding data. This is an ownership/representation objective, not a measured compile-time bound.
+Compilation and binary size still include the selected typed implementations; optional deployment
+composition can select a smaller installed subset without runtime code loading.
+
+### 4.4 Explicit resources remain local to their native owners
+
+Keep each integration's typed resource table separate from Catalog. For example, EvmResources loses
+its Sources phantom and stores checked EVM bindings and handles only. Another protocol owns another
+resource-table type; kernel code does not add a field or enum variant for it.
+
+Program association passes explicit tables through private in-process owner slots. A factory's
+typed binder retrieves only its own table using checked type/owner association. Missing or mismatched
+tables fail with their available cause. Rust type identity is never persisted or used as semantic
+identity, and this mechanism adds no universal Any/JSON execution interface.
+
+Pure Catalog installation, metadata inspection, and observation qualification require no live
+resource construction. Executable attachment requires only the tables selected by the complete
+Program, after all declarations qualify. Installed but unselected integrations do not require
+credentials, providers, or signer handles.
+
+Resources retain their existing explicit authority and secret custody. Public bindings identify
+supported routes and contracts; private locators and credentials remain with resource owners.
+Private resource erasure cannot make Keystore Send/Sync or distribute its key custody. Runtime
+receives the bound Program, not Catalog or an owner-resource lookup service.
+
+### 4.5 Share business contracts, preserve native differences
+
+A common CollectionRequest and ObservedHoldings contract is appropriate for integrations that
+actually observe the same holding semantics. One CollectHoldings State can use different selected
+typed adapter leaves while its Input/Output remain PortfolioProgress. A complete Program may
+therefore alternate installed protocols without changing the Runtime or adding a generic caller K.
+
+Native receipts remain exact owner-specific MfmValue types. They enter history as checked Objects
+and are decoded/projected only by the selected factory. Existing LedgerIdentity, BalanceTarget,
+and ObservationPoint envelopes carry native Objects; they do not certify a native schema or
+cross-field correspondence by themselves. Owner validation remains mandatory at admission, use,
+and cold qualification where the selected contract requires it.
+
+Do not create a central Ledger enum or switch over all chains to decode these Objects. Do not
+promote an EVM address layout, numeric chain ID, denomination, block hash, nonce, or fee model into
+a universal blockchain contract. Retained identity includes its exact native schema/namespace and
+ledger facts; a short numeric identifier alone is not cross-protocol identity.
+
+The current [EVM balance ledger](crates/domains/evm/src/balance.rs) qualifies chain ID only and
+explicitly does not observe genesis.
+Do not advertise it as stronger network-instance identity. In the collection cutover, reuse the
+existing [EvmChainInstance vocabulary](crates/domains/evm/src/transaction.rs) (chain ID and expected
+genesis hash) for EVM ledger/binding
+qualification instead of inventing another fingerprint type. The expected identity comes from
+admitted public input or explicit trusted operator configuration; learning it from the same queried
+endpoint would not provide an independent expectation. Authenticate the selected supported identity
+externally and update all binding/request/receipt/configuration contracts and rejection fixtures
+together. This distinguishes the supported identity facts; it does not authenticate every possible
+fork or network history beyond those facts.
+
+Shared quantity bounds such as Unsigned256 and DecimalScale remain explicit supported-product
+limits, not proof that every future protocol fits them. Reject unsupported values honestly; extend
+the representation only when an actual consuming requirement justifies it. Never truncate or
+reinterpret a native value merely to fit the shared contract.
+
+A protocol position, nonfungible object, cross-ledger transfer, or other different business result
+need not pretend to be a fungible holding. Give genuinely different semantics their own typed
+values and meaningful States. Unify a contract only when its units, identity, evidence, and recovery
+meaning match; using the same transport is insufficient.
+
+### 4.6 Coherence and authority do not become global
+
+One collection groups a ledger, route, selected protocol contract, and coherence policy. It is not
+every source on a named chain or every application protocol using that provider. Different evidence
+requirements may require different collections even when ledger and endpoint coincide.
+
+An EVM anchored receipt supplies that selected EVM guarantee. Another protocol supplies its own
+explicit supported observation guarantee. Portfolio retains the per-collection observation points
+and policies; it cannot claim one simultaneous global snapshot merely because all collections
+appear in one output.
+
+Likewise, the one-Effect rule means one semantic externally authorized action, not every operation
+of an arbitrary cross-chain workflow. Independently authorized, irreversible actions on different
+ledgers require meaningful durable continuation boundaries. A bridge-like workflow must not be
+hidden inside one generic transaction adapter with an invented atomic success/failure promise.
+Cross-ledger recovery or compensation requires its own reviewed domain contract.
+
+### 4.7 Honest operational limits
+
+Independent runs can execute concurrently through explicit authorized resources while Store
+preserves exact-head atomicity for each RunId. Worker placement, provider quotas/backpressure,
+fairness, and distributed custody are deployment/application requirements, not implicit Runtime
+features. Scaling Effect workers also requires their actual retained authority and signer contract;
+the existing ephemeral-keystore fixture does not establish distributed production signing.
+
+A Program remains linear. The current Portfolio admission ceiling of 64 sources and EVM resource
+ceiling of 256 bindings are bounds on one admitted product/environment, not counts of all networks
+the software can support. Keep support breadth separate from how many resources a worker or one
+run must hold. Do not raise those limits as a substitute for a workload model.
+
+Full inline continuation snapshots have a real cost. If a run retains a progress value proportional
+to n collections/sources across a number of acknowledged transitions proportional to n, its
+history can grow quadratically in those counts. Removing nested K and dense zero counters does not
+remove that snapshot tradeoff. This is a conditional representation analysis, not a benchmark.
+
+For a product needing thousands of independent observations, evaluate bounded independent runs
+and Application-owned result aggregation with explicit RunId/head/output provenance, completeness,
+freshness, and failure rules. Do not silently split a run that requires shared sequential authority.
+If the real requirement is parallel work or huge continuation within one durable run, the linear
+Program/inline-record design needs a separate reviewed change. This RFC supplies neither a DAG
+executor nor an object store, and makes no throughput or simultaneous-snapshot guarantee.
+
+### 4.8 Integration growth acceptance
+
+The construction cutover must include consuming evidence beyond another EVM binding:
+
+1. Reuse one installed adapter on two different network bindings without adding a second factory.
+2. Contribute a second, genuinely different protocol adapter through its owning module and compose
+   it with the first using the same actual holding contract; Runtime, Journal, Store, and generic
+   association need no protocol branch.
+3. Preserve distinct native receipts, identities, and causal errors through hot/cold observations;
+   reject a receipt, binding, or resource table from the wrong owner.
+4. Select different bindings and policy instances without duplicating installation. Reject duplicate
+   or conflicting intrinsic factory claims before any live resource attachment.
+5. Construct and inspect a Program with an unselected integration's resources absent, and inspect
+   retained facts with every live table absent. Missing selected resources still block execution.
+6. Demonstrate differing business semantics require an explicit typed State rather than accidental
+   coercion into holdings. Independent collection points remain visible in the final result.
+7. Measure provider calls, attachment work, frame/history bytes, and cold restoration for defined
+   workloads at current bounds. Exercise independent concurrent runs and retained custody; a
+   successful multi-network output proves neither simultaneous observation nor atomic mutation.
+
+Use a minimal structurally different consuming integration where a live second protocol is not yet
+supported. Such a test proves framework extensibility and owner isolation; it does not certify a
+production chain implementation. Add real protocol interoperability evidence only when supporting
+that protocol becomes an implementation requirement.
+
 ## 5. Ordinary typed Program construction
 
 ### 5.1 Builder contract
@@ -259,8 +444,8 @@ signatures already compile:
 
 ```text
 pure::<S>(recovery)                 where S::Input = Current
-read::<S, A>(binding, recovery)     where S::Input = Current
-effect::<S, A>(binding, recovery)   where S::Input = Current
+read::<S>(leaf, binding, recovery)  where S::Input = Current
+effect::<S>(leaf, binding, recovery) where S::Input = Current
 
 each returns ProgramBuilder<Root, S::Output>
 ```
@@ -276,12 +461,31 @@ The final immutable Program remains a complete linear State sequence, including 
 commitment, descriptors, selected policies, bindings, callbacks, and explicit resource associations.
 Runtime receives that complete Program and performs no assembly, discovery, or code registration.
 
+Read takes a checked ReadLeaf<S> selected from Catalog; Effect takes the analogous EffectLeaf<S>.
+Typed factory installation fixes the adapter contract, and selection verifies the exact State owner
+and semantic ABI. The builder accepts a checked canonical binding Object that the selected native
+Binding codec qualifies during whole-document association. There is one public append path per
+mode; do not retain a parallel static-adapter append API as a convenience.
+
+For config-driven collections, Application obtains a ReadLeaf<CollectHoldings> from the exact
+installed leaf reference and builds the endomorphic sequence with an ordinary loop. It does not
+need a global match naming every concrete adapter type. This is checked construction-time selection;
+Runtime still invokes only already-associated callbacks.
+
 ### 5.2 One installed Catalog
 
-One immutable integration-owned `Catalog<Resources>` publishes typed leaf factories and selected
-handler factories. Fresh construction and cold loading use the same association owner. A new
-semantic implementation is published once; selecting installed components or composing another
-Operation does not require publishing another structural source family.
+One immutable nongeneric Catalog publishes typed leaf factories and selected handler factories.
+Integration-owned contributions and explicit owner-local Resources follow section 4. Fresh
+construction and cold loading use the same association owner. A new semantic implementation is
+published once; selecting installed components or composing another Operation does not require
+publishing another structural source family.
+
+Schematic installation is `register_read::<S, A, R>(owner_binder)` and its Effect counterpart, where
+R is the native owner's typed resource table. It checks intrinsic ownership and contracts before
+privately erasing A/R. `select_read::<S>(exact_leaf_ref)` returns ReadLeaf<S> only for the installed
+matching State ABI. The exact leaf reference identifies the intrinsic executable contract, not
+each occurrence's binding or recovery-policy value. No opaque live original or executable callback
+is serialized as part of selection.
 
 Catalog lookup uses the intrinsic executable contract: mode, semantic revisions, and selected value
 and binding contract schemas. Per-occurrence binding Objects, recovery selections, and parameter
@@ -370,6 +574,11 @@ the generic framework `NativeAbi`. Use one complete selected leaf descriptor com
   Fault, Binding, and selected handler/parameter contracts.
 - Public binding facts and exact recovery selection needed for that occurrence.
 
+Catalog selection keys the intrinsic executable contract. The complete Program declaration commits
+the selected leaf plus occurrence bindings, recovery, handler selection, and parameter values.
+Handler factories qualify by their own intrinsic contracts in the same Catalog. Reusing a leaf
+with another policy or binding does not create another installed executable identity.
+
 Descriptors describe contracts; they do not authenticate executable machine bytes. Decoder, binder,
 handler, projection, or adapter changes that alter semantics require a reviewed revision change.
 This RFC does not add reproducible-build attestation or pretend a StableId proves byte identity.
@@ -402,9 +611,11 @@ The EVM collection adapter performs this private protocol:
 
 1. Qualify the expected binding, route, configured chain, and active request locally. Local mismatch
    returns Internal with no provider call and no operational-outcome append.
-2. Observe the endpoint's chain ID and authenticate it against the admitted ledger before collecting
-   balances. Remote chain disagreement has provider IO and retains its authenticated native original;
-   it cannot be represented as a zero-call local mismatch.
+2. Observe the endpoint's supported chain-instance identity, including chain ID and expected-genesis
+   correspondence, and authenticate it against the admitted ledger before collecting balances.
+   Remote identity disagreement has provider IO and retains its authenticated native original;
+   it cannot be represented as a zero-call local mismatch. Section 4.5 describes the complete
+   chain-ID-only contract cutover.
 3. Obtain an initial selected anchor from the supported provider.
 4. Read each requested balance and token denomination at that anchor in declared order.
 5. Qualify native account, asset, route, anchor, ordering, and complete source coverage.
@@ -793,6 +1004,7 @@ is introduced to hide those limits.
 | --- | --- | --- |
 | Authoring | Structural DSL, traversal, injection, default inheritance, expanded endpoints | Ordinary Rust Operations, consuming typed builder, one leaf Catalog |
 | Adapter association | Marker/binder identity types, implementation wrappers, generic NativeAbi | Direct adapter ports and one complete selected descriptor |
+| Integration assembly | Generic Catalog<Resources>, Sources phantoms/giant type tuples, static-adapter append alternatives, central protocol dispatch and per-network code registration | Nongeneric contributed Catalog, checked State-typed leaf selection, explicit owner resource tables |
 | Portfolio | Generic caller contexts, stage handoffs, paired continuation families, initialization/consolidation plumbing | Checked PortfolioProgress and one collection Read |
 | Monetary output | QuoteCode, USD/EUR claims, heterogeneous totals, target-scale failures | Exact per-asset holdings with real denomination |
 | EVM Read | Public chain/anchor/decimals/confirmation States and stage dispatcher | Private anchored collection protocol with exact receipt |
@@ -822,9 +1034,9 @@ a compatibility layer merely to satisfy this outline.
 | --- | --- | --- |
 | 1. `exclude private request urls from retained transport errors` | Fix reqwest owner custody; preserve kind/child causes and explicit withheld-field status. | Synthetic private path/query fields excluded; distinguishable nested causes retained; classification unchanged where required. |
 | 2. `use run views as the single execution result` | Delete FailureReport, report stop preflight, result hierarchies, Application mirrors/fallbacks, and JSON/text roundtrip; retain failed RunView facts and secondary rendering errors. | Terminal stop independent of rendering; causes/acknowledgement survive hot/cold; RecoveryStopped preserves pending authority and explicit resume. |
-| 3. `make collection observation the portfolio execution unit` | Introduce nongeneric collection request/result and PortfolioProgress, private anchored EVM collection protocol, corrected holdings output; delete old stages/contexts/valuation model and move product composition. | Independent unit/asset oracle, normal head advance versus selected reorg, earlier-collection cold preservation, no provider call on local mismatch. |
+| 3. `make collection observation the portfolio execution unit` | Introduce nongeneric collection request/result and PortfolioProgress, private anchored EVM protocol, admitted chain-instance identity and corrected holdings output; delete old stages/contexts/valuation model and move product composition. | Independent unit/asset/identity oracle, normal head advance versus selected reorg, earlier-collection cold preservation, no provider call on local mismatch. |
 | 4. `make transaction protocols private to one effect` | Move reservation/signing/wire retention into one adapter; delete public supporting States and wrappers while retaining authority tables/ports. | First winner, acknowledged wire only, cancellation/ambiguous custody, exact settlement and no-IO cold interpretation. |
-| 5. `replace source lowering with typed construction` | Cut all current authoring and cold association to builder/Catalog/direct ports/complete descriptors; use Object parameters; physically delete the DSL and NativeAbi. | Consuming-crate composition and extension, compile-fail adjacency, revision/decoder rejection, no IO and no early resource attachment during qualification. |
+| 5. `replace source lowering with typed construction` | Cut all current authoring/cold association to the single leaf-handle builder path, nongeneric contributed Catalog, owner-local resource tables, direct ports and complete descriptors; use Object parameters; delete DSL/NativeAbi. | Composition/extension, compile-fail adjacency, two owner-distinct adapters through one State, binding/policy reuse without factory growth, no IO or early attachment, exact owner/revision rejection. |
 | 6. `store only nonzero recovery usage` | Replace dense usage with checked sparse counters throughout current records, recovery, cold decoding, and the changed wire baseline. | Retry/restart and allowance equivalence; malformed duplicate/zero entries rejected; independent large zero-recovery scenario. |
 | 7. `reduce persistence to exact frames and head metadata` | Change run baseline/query metadata, qualified canonical seal and append/load ownership; shrink catalogue checks; correct COMMIT classification and history claims. | PostgreSQL exact-head atomicity, selected snapshot/probe semantics, hostile privileges/features, independent acknowledgement-loss observations. |
 | 8. `bound configuration listing and serialize exact revisions` | Change port/Application/transports to keyset pages and coherent revision import/delete transactions; delete aggregate list and stale-query metadata. | Page coverage and bounds, exact-load validation, concurrent import/delete linearization and full cause retention. |
@@ -857,7 +1069,7 @@ broad component gates immediately before CI when CI composes them.
 | Enrichment | Literal raw 1500, denomination 3, optional source is selected because nonzero; no target precision can cause an inexact-scaling failure. |
 | Collection coherence | Script normal later-head advance and genuine selected-block replacement separately; assert only the latter violates canonical selected-anchor policy. |
 | Local integrity | Wrong local binding/route/configured chain/active request makes zero provider calls and no operational append, with the exact internal cause. |
-| External chain qualification | A remotely observed wrong chain ID retains authenticated native failure evidence and its provider/stage causes; it is distinct from local zero-call disagreement. |
+| External chain qualification | Remotely observed wrong chain ID or genesis retains authenticated native failure evidence and provider/stage causes; same-ID wrong-genesis data cannot pass the new instance contract. It is distinct from local zero-call disagreement. |
 | Read recovery | Complete one collection, fail/cancel the next, cold-resume; instrument that the completed collection is not reread and the unfinished collection may repeat. |
 | Collection receipt | Wrong account/asset/order/coverage/anchor/route cannot become success; retained native original and causes survive cold inspection. |
 | Effect authority | Exercise cancellation/acknowledgement loss at command, reservation, wire custody, submission, settlement, and interpretation; no unretained candidate is broadcast. |
@@ -865,6 +1077,8 @@ broad component gates immediately before CI when CI composes them.
 | Effect cold projection | Settled replay uses retained command/receipt and performs no provider, signer, or authority IO; instrument the no-IO claim. |
 | Typed construction | Consumer composes existing Operations and adds a new semantic State; incompatible adjacent contracts fail compilation. |
 | Association | Unknown revision, wrong decoder/binder/handler/binding, and malformed retained objects reject before live attachment; no unavailable-code substitution. |
+| Integration growth | Contribute two owner-distinct adapters for one actual semantic State without central protocol dispatch; many compatible bindings/policies reuse the same factories; wrong owners and unsupported contracts reject with full causes. |
+| Defined scale | At stated workloads/bounds, measure native calls, resource attachment, frame/history bytes and cold qualification; independent concurrent runs preserve exact-head/custody facts without global snapshot or atomicity claims. |
 | Causal custody | Inject distinguishable nested causes through every changed adapter and public conversion; assert layers/fields, classification, hot/cold preservation, and honest unavailable detail. |
 | Secret custody | Use synthetic locator path/query tokens and deliberately supplied MFM secret inputs; assert owner-known private fields never enter Program, context, history, or public output. |
 | Reporting | Fail the renderer after acknowledged terminal progression; inspect the unchanged terminal head and original primary cause independently. |
@@ -940,6 +1154,13 @@ encoding, report encoding, and old-BLOB append work; it does not yet quantify wa
   preserve selected causes once.
 - **Authenticate executable code with semantic IDs:** IDs require revision discipline and cannot
   establish executable-byte identity. Attestation is a separate requirement.
+- **One universal Chain trait or global protocol enum:** makes unrelated native semantics everyone's
+  change site. Use exact owner contracts and contributed typed factories for actual shared business
+  semantics.
+- **A factory per network, asset, or policy instance:** confuses installed code with data. Qualify
+  instance Objects against one selected intrinsic contract.
+- **Increase run limits to claim massive scale:** leaves inline snapshot amplification and provider/
+  custody limits unaddressed. Measure workloads and define large-product aggregation explicitly.
 
 No new dependency, execution engine, config DSL, autoload plugin system, background scheduler,
 timeout policy, legacy migration reader, destructive rollback, chain-finality policy, authentication
@@ -951,6 +1172,11 @@ addressed under float-free canonical structured hashing.
 
 | Uncertainty | Assumption | Why uncertain | Consequence if wrong | Validation / resolution |
 | --- | --- | --- | --- | --- |
+| Workload shape | Growth mainly adds integrations and independent bounded runs. | Expected accounts/assets, per-run collections, run rate, and latency/freshness targets are unspecified. | Huge individual runs may make linear execution and inline snapshot history unsuitable. | Measure representative workloads before increasing limits or claiming throughput; review another continuation design only for a demonstrated requirement. |
+| Cross-protocol semantic overlap | Some adapters faithfully share a holding Request/Observation contract. | Native units, identities, evidence/coherence policies, and nonholding positions are not yet reviewed across supported protocols. | Forced normalization drops meaning or supplies false successful output. | Consume two owner-distinct adapters through the same genuine contract; review each native mapping and reject unsupported semantics; add distinct States where meanings differ. |
+| Large-product aggregation | Independent bounded runs can satisfy a large observation product with explicit provenance. | Completeness, freshness, partial failure, and simultaneity requirements are not specified. | Independently correct results may fail the product's consistency requirement. | Specify Application aggregation and independent acceptance before splitting a logical run or claiming a cross-chain snapshot. |
+| Deployment topology | Current Store, provider, signer, and transaction-authority assumptions remain valid for the chosen deployment. | Cross-host worker placement, custody restoration, provider quotas, and production scale targets are unresolved. | Adapter extensibility is mistaken for distributed durability or production signing support. | Validate topology/custody separately, instrument contention and exact-head outcomes, and retain all current ambiguity/secret boundaries. |
+| Supported network-instance identity | Reusing admitted EvmChainInstance and external chain/genesis checks supplies the chosen EVM identity guarantee. | Existing balance contracts check chain ID only; identity admission/configuration and fork-distinguishing requirements still need explicit consuming agreement. | Stronger identity may remain unimplemented or still fail an intended network distinction. | Complete the binding/request/receipt/config cutover, test same-ID wrong-genesis endpoints, and document exactly which native identity facts are guaranteed. |
 | Collection audit granularity | Completed collections, rather than each RPC stage, are the required durable Read units. | Existing tests encode finer stages; no independent product requirement establishes a need to resume within one collection. | A product requiring per-source acknowledgement needs an explicitly meaningful smaller Read boundary. | Review consuming requirements and interrupted-run acceptance; do not silently restore generic stage injection. |
 | Supported anchor selectors | Supported providers can supply a reviewed anchored balance/denomination and canonicality contract. | Actual block-hash selector and `requireCanonical` support varies by method/provider. | The collection cannot claim coherent success with unconstrained reads. | Test pinned Reth and supported production provider methods; reject unsupported capability or review one equivalent anchored protocol. |
 | Removal of monetary claims | Current product requires holdings and enrichment, not an actual valued Portfolio. | Current USD/EUR fields suggest intent but no price/FX contract supplies their meaning. | A true valuation requirement is unimplemented after removing false output. | Confirm product acceptance against exact holdings; specify independent price/FX semantics before adding valuation. |
