@@ -3,8 +3,8 @@
 **Status:** proposed implementation of the agreed architectural direction.
 **Reviewed baseline:** `f6d2afc568f59e6a733623e73022e66b476d5654`.
 **Scope:** Program construction, State/adapter contracts, Portfolio Reads, EVM Effects,
-execution observations, error custody, PostgreSQL persistence/configuration, and a concrete
-ZEC→WBTC→Aave composition blueprint.
+execution observations, error custody, and PostgreSQL persistence/configuration. The
+ZEC→Ethereum WBTC→Aave scenario is a design exercise for integration growth.
 
 This RFC records the problems and one target design. It does not claim that the proposed behavior
 is implemented. [docs/design.md](docs/design.md) remains the current contract until each coherent
@@ -19,7 +19,9 @@ define useful independent route, coherence, failure, and recovery boundaries.
 The [core composition example](#7-core-example-zcash-to-ethereum-bitcoin-collateral-in-aave-v4)
 reads a ZEC balance, exchanges ZEC through NEAR Intents for WBTC on Ethereum, and supplies it as
 Aave v4 collateral. It tests implementation ownership and reuse through a concrete proposed
-workflow. Its prospective live integrations are not claimed as current MFM functionality.
+workflow. It is not an integration implementation commitment: this RFC does not schedule Zcash,
+NEAR Intents, Aave, or a live route, and implementing the refactor does not require implementing
+that example. The sketches exercise the target boundaries; current consumers own refactor checks.
 
 ## 1. Decision
 
@@ -76,7 +78,7 @@ The following complexity is necessary and remains:
 | Exact-head atomic append | Competing writers cannot overwrite or splice acknowledged history. |
 | Indeterminate acknowledgement | A connection failure cannot prove that COMMIT or another write did not happen. |
 | Causal error custody | Public classification cannot replace the available original failure chain. |
-| Explicit secret custody | Program, context, history, and diagnostics cannot become a deliberate secret transport. |
+| Explicit secret custody | Canonical ProgramDocument, admitted context, history and diagnostics cannot become a deliberate secret transport; authorized process-local handles retain their own custody. |
 
 Reducing LOC is evidence of removing duplicated responsibilities. It is not permission to remove
 these boundaries, weaken validation, compress readable code, or hide losses in a generic error.
@@ -205,6 +207,26 @@ Evidence: [HTTP locator and send boundary](crates/live/evm/src/json_rpc.rs),
 [HTTP diagnostic capture](crates/live/evm/src/json_rpc/capture.rs),
 [Application reporting](crates/app/src/reporting.rs), and the pinned dependency in
 [Cargo.lock](Cargo.lock).
+
+### 3.8 Nominal typing, instance identity, evidence and authority are different guarantees
+
+A typed sequence establishes declared adjacency. It does not prove that a State told the truth,
+that an ordinary Operation preserved its incoming prefix, or that an observed balance remains
+spendable. A semantic content reference likewise does not authenticate executable bytes or prove
+that a fresh leaf selected the same concrete Rust owner. A valid binding schema cannot determine
+whether unknown future calldata agrees with caller intent.
+
+The deeper flaw is treating one representation as proof of facts owned by another boundary. Doing
+so either overstates the guarantee or creates layers that repeatedly try to reconstruct missing
+evidence. Keep each fact at its strongest owner: private fresh identity claims in construction,
+checked plans and business interpretation in the domain, native command/binding/resource checks
+in adapters, and command/settlement acknowledgement in Runtime. Cold execution relies on admitted
+originals and reviewed semantic revisions; it does not regain external truth from a type name.
+
+This separation also prevents a service response or provider-selected network from defining what
+the caller authorized. Expected instance/asset/owner facts are independent admitted inputs. External
+observations qualify against those expectations under explicit trust policies; caller authentication
+and durable native custody remain their own contracts.
 
 ## 4. Target ownership
 
@@ -355,10 +377,11 @@ existing [EvmChainInstance vocabulary](crates/domains/evm/src/transaction.rs) (c
 genesis hash) for EVM ledger/binding
 qualification instead of inventing another fingerprint type. The expected identity comes from
 admitted public input or explicit trusted operator configuration; learning it from the same queried
-endpoint would not provide an independent expectation. Authenticate the selected supported identity
-externally and update all binding/request/receipt/configuration contracts and rejection fixtures
-together. This distinguishes the supported identity facts; it does not authenticate every possible
-fork or network history beyond those facts.
+endpoint would not provide an independent expectation. Qualify the selected supported identity
+externally under the explicit provider trust contract and update all binding/request/receipt/
+configuration contracts and rejection fixtures together. Chain ID/genesis agreement distinguishes
+those supported identity facts; it neither independently authenticates ledger history nor
+distinguishes every possible fork.
 
 Shared quantity bounds such as Unsigned256 and DecimalScale remain explicit supported-product
 limits, not proof that every future protocol fits them. Reject unsupported values honestly; extend
@@ -432,20 +455,26 @@ The construction cutover must include consuming evidence beyond another EVM bind
    workloads at current bounds. Exercise independent concurrent runs and retained custody; a
    successful multi-network output proves neither simultaneous observation nor atomic mutation.
 
-Use a minimal structurally different consuming integration where a live second protocol is not yet
+Use a minimal structurally different consuming fixture where a live second protocol is not yet
 supported. Such a test proves framework extensibility and owner isolation; it does not certify a
-production chain implementation. Add real protocol interoperability evidence only when supporting
-that protocol becomes an implementation requirement.
+production chain implementation or require the illustrative route. Add real protocol interoperability
+evidence only when supporting that protocol becomes an implementation requirement.
 
 ## 5. Ordinary typed Program construction
 
 ### 5.1 Builder contract
 
-Use a consuming `ProgramBuilder<Current>`. Current is the output contract of the built prefix.
+Use a consuming `ProgramBuilder<Current>`. Current is the declared success-output contract of the
+built prefix, conditional on trusted execution establishing it.
 Each append consumes the builder, requires the new State input to equal Current, and returns a
 builder whose Current is that State's output. The builder retains the mandatory admitted initial
 contract and exact input commitment internally; finish includes them in the immutable Program.
 An additional public Root parameter supplies no adjacency proof and is removed.
+
+Construct with `ProgramBuilder::new(&input)` and retain caller-owned input for the existing Runtime
+start API. Initial owner qualification establishes its value invariants before committing its
+reference. The builder does not acquire new initial-value custody, and Runtime independently
+checks the supplied input against that exact commitment before admission/provider entry.
 
 The following is schematic API notation, not a second configurable language or a claim that these
 signatures already compile:
@@ -459,8 +488,11 @@ each returns ProgramBuilder<S::Output>
 ```
 
 Operations are ordinary Rust functions that accept and return an appropriately typed builder.
-Repeated endomorphic States use ordinary loops. Explicit recovery values replace nested default
-inheritance. Checkpoints use checked builder-created handles; finish validates their positions,
+Repeated endomorphic States use ordinary loops. Rust proves nominal adjacency and mode/type
+compatibility, not external truth, ambient-IO freedom, or that an ordinary function extended the
+same builder rather than discarding it. Authors and installed implementations remain trusted.
+Explicit recovery values replace nested default inheritance. Checkpoints use checked builder-created
+handles with private originating-builder membership; finish validates their origin, positions,
 contracts, and static declaration constraints. Runtime checks acknowledged Effect barriers when
 authorizing recovery: those barriers are dynamic execution facts, not builder authority. There is
 no authoring-depth concept once authoring is ordinary Rust composition.
@@ -468,12 +500,22 @@ no authoring-depth concept once authoring is ordinary Rust composition.
 The final immutable Program remains a complete linear State sequence, including exact initial
 commitment, descriptors, selected policies, bindings, callbacks, and explicit resource associations.
 Runtime receives that complete Program and performs no assembly, discovery, or code registration.
+Its canonical ProgramDocument excludes private locators, credentials, executable pointers, and
+resource handles. Process-local callbacks may capture authorized handles; immutability fixes the
+sequence and associations, not the state or availability of a provider, signer, or wallet.
 
 Read takes a checked ReadLeaf<S> selected from Catalog; Effect takes the analogous EffectLeaf<S>.
 Typed factory installation fixes the adapter contract, and selection verifies the exact State owner
 and semantic ABI. The builder accepts a checked canonical binding Object that the selected native
 Binding codec qualifies during whole-document association. There is one public append path per
 mode; do not retain a parallel static-adapter append API as a convenience.
+
+Fresh leaves retain private concrete factory/State/resource-owner claims, and Pure append retains
+its State owner claim. Finish compares these with its Catalog before attachment. A content ref plus
+PhantomData is insufficient: another Catalog can contain a different Rust owner claiming the same
+semantic descriptors. Preserve existing in-process TypeId checks without persisting Rust identity
+or adding a public Catalog-identity interface. Cold association still relies on reviewed semantic
+revisions and the installed trusted code.
 
 For config-driven collections, Application obtains a ReadLeaf<CollectHoldings> from the exact
 installed leaf reference and builds the endomorphic sequence with an ordinary loop. It does not
@@ -515,6 +557,13 @@ Association has two ordered phases:
 Construction and loading perform no provider IO. Missing code, revisions, or resources fail with
 their available cause and context; they never silently select a fallback implementation.
 
+Qualification rejects malformed declarations, unsupported contracts, and wrong owners. It cannot
+evaluate unknown future State outputs. A well-formed network-B binding can pass generic association
+while a future request expects network A. Reject known intent/selection disagreements at their
+Application/domain boundary; mandatory invocation checks reject the remaining request/command
+mismatches before provider IO, and before command acknowledgement for Effects. Association does
+not certify remote network truth, deployed protocol behavior, or future signer availability.
+
 Installed-component inspection derives leaf metadata from this same Catalog. Application owns its
 entry-point descriptions; inspection does not plan a Program or require live handles. Do not replace
 recursive discovery with another duplicate registration table for the same leaf facts.
@@ -539,6 +588,13 @@ A Read State declares Request and Observation; an Effect State declares Command 
 Preparation derives the request/command once within an invocation. Interpretation receives that
 already-prepared value and the qualified observation, rather than calling preparation again. This
 does not remove necessary pure cold validation against an acknowledged command.
+
+Preparation returns the prepared value or a source-preserving InvocationDiagnostic. This target
+does not introduce a command-free domain-failure transition. Caller-plan rejection belongs in
+admission; meaningful observed refusals belong in the interpretation that establishes the next
+phase. Checked phases must establish deterministic command-construction preconditions. If an actual
+consumer requires recoverable domain preparation failure, it needs a separately reviewed change to
+the existing origin/acknowledgement/recovery contract before implementation.
 
 State evaluation, preparation, receipt projection, and interpretation perform no ambient IO.
 Callback boundaries retain panic containment, selected decoding/encoding rejection, and the actual
@@ -568,24 +624,40 @@ selected boundary, and pass the typed observation within that invocation. Do not
 projected observation Object. Effect settlement still separates durable receipt acknowledgement
 from interpretation, so cold interpretation rematerializes the retained receipt as required.
 
+Preserve the existing exact-identity inputs when deleting the generic capability/native pipeline.
+The selected owner's pure qualification/projection boundary is schematically:
+
+```text
+Read:   binding, request_ref, request, receipt_ref, receipt -> Observation
+Effect: binding, effect_id, command_ref, command,
+        receipt_ref, receipt -> Observation
+```
+
+Program callbacks supply EffectId and refs from their already-admitted Objects; a provider cannot
+define them, and deriving them needs no second serialization or ambient Runtime context. Reads
+qualify before interpretation. Effects qualify the exact native settlement before its append,
+interpret only after acknowledgement, and repeat only pure projection for cold interpretation.
+Keep mandatory pure command/binding validation before Effect acknowledgement and native IO.
+
 Private HTTP requests need no framework-level ABI. Native command references that transaction
 authority actually consumes remain: removing generic NativeAbi is not permission to erase custody
 identity or necessary native command materialization.
 
-### 6.3 One complete leaf descriptor
+### 6.3 Intrinsic leaf identity and occurrence declarations
 
 Delete capability-marker/binder identity types, `ReadImplementation`, `EffectImplementation`, and
-the generic framework `NativeAbi`. Use one complete selected leaf descriptor committing to:
+the generic framework `NativeAbi`. Use one intrinsic LeafDescriptor committing to:
 
 - Execution mode and State/adapter semantic revisions.
 - Actual Input, Output, domain Failure, Request or Command, Observation, Receipt, operational
-  Fault, Binding, and selected handler/parameter contracts.
-- Public binding facts and exact recovery selection needed for that occurrence.
+  Fault, and Binding contracts.
 
 Catalog selection keys the intrinsic executable contract. The complete Program declaration commits
-the selected leaf plus occurrence bindings, recovery, handler selection, and parameter values.
+the selected leaf plus occurrence bindings, recovery, handler contracts, and parameter values in
+the existing StateDeclaration. Do not put policy or binding instances into the intrinsic leaf ref.
 Handler factories qualify by their own intrinsic contracts in the same Catalog. Reusing a leaf
 with another policy or binding does not create another installed executable identity.
+This clarifies existing declaration ownership; it adds no second descriptor hierarchy or manifest.
 
 Descriptors describe contracts; they do not authenticate executable machine bytes. Decoder, binder,
 handler, projection, or adapter changes that alter semantics require a reviewed revision change.
@@ -593,113 +665,128 @@ This RFC does not add reproducible-build attestation or pretend a StableId prove
 
 ## 7. Core example: Zcash to Ethereum Bitcoin collateral in Aave v4
 
-Use this example as the consuming architecture test for the RFC: read a transparent Zcash wallet's
-spendable balance, exchange a caller-selected amount of ZEC through NEAR Intents for WBTC delivered
-to Ethereum, and supply that WBTC as collateral in a selected Aave v4 Spoke. There is no borrowing
-step. The implementation must make protocol integration reusable without pretending the whole
-journey is atomic or that all protocols share one transaction model.
+This is an architecture exercise for supporting multiple native protocols and network instances.
+Imagine reading a transparent Zcash wallet's eligible balance, exchanging a selected amount of ZEC
+through NEAR Intents for WBTC on Ethereum, and supplying that WBTC as collateral in Aave v4.
+There is no borrowing step. Use the example to expose ownership, composition, evidence, and custody
+requirements; implementing it is not part of this refactor or its completion criteria.
 
-Everything below is a proposed implementation sketch. The Rust names and signatures illustrate the
-target contracts; they are not currently compiled APIs or evidence of a working production route.
-Existing crate boundaries remain. Directory names show responsibility placement, not a requirement
-to create a crate for every module. Live integrations need their own reviewed contracts and tests
-before enablement.
+All new protocol/module names, States, phase values, adapters, and signatures below are illustrative.
+They are neither compiled APIs nor a commitment to create these integrations now. Current supported
+consumers exercise the framework cutover. Future support for this route would require a separate
+product decision and review of its native capabilities. No live quote, transaction, deployment,
+production finality policy, or wallet-custody implementation is required to finish this RFC.
 
-### 7.1 Admit the actual assets and route
+### 7.1 Distinguish protocol semantics, asset identity, and instance data
 
-Native BTC belongs to Bitcoin. Ethereum collateral must be a specific supported representation of
-Bitcoin; this example chooses WBTC. Changing to cbBTC changes the admitted token and its associated
-qualification, rather than renaming an undifferentiated `BTC` value.
+Ethereum collateral must be a particular supported representation of Bitcoin. This exercise chooses
+WBTC; it does not introduce a Bitcoin-chain execution leg. Asset symbols cannot supply identity.
+The reviewed NEAR Intents inventory illustrates three different native identities:
 
-The public NEAR Intents token inventory reviewed for this RFC contains these distinct asset IDs:
-
-| Meaning | NEAR Intents asset ID | Native base units |
+| Meaning | NEAR Intents asset ID | Base units |
 | --- | --- | --- |
 | Source ZEC | `nep141:zec.omft.near` | Zatoshis; 8 decimal places |
-| Bitcoin-chain BTC, excluded from this route | `nep141:btc.omft.near` | Satoshis; 8 decimal places |
-| Destination Ethereum WBTC | `nep141:eth-0x2260fac5e5542a773aa44fbcfedf7c193bc2c599.omft.near` | WBTC token units; 8 decimal places |
+| Bitcoin-chain BTC, outside this route | `nep141:btc.omft.near` | Satoshis; 8 decimal places |
+| Ethereum WBTC | `nep141:eth-0x2260fac5e5542a773aa44fbcfedf7c193bc2c599.omft.near` | WBTC token units; 8 decimal places |
 
-Inventory presence does not prove that a ZEC/WBTC quote is available or that a chosen Aave reserve
-admits WBTC. Validate the actual route and deployment. NEAR's documented Zcash receiving surface
-uses transparent addresses; this example selects transparent wallet funding explicitly. Shielded
-funding would require a separately reviewed wallet authority contract. Sources:
+Inventory presence does not establish pair liquidity or Aave eligibility. The example restricts its
+source to a transparent wallet; shielded funding is a different wallet authority contract. Sources:
 [supported tokens](https://docs.near-intents.org/api-reference/oneclick/get-supported-tokens),
 [token inventory](https://1click.chaindefuser.com/v0/tokens), and
 [supported chains](https://docs.near-intents.org/resources/chain-support).
 
-Public intent fixes the source network/account reference, positive ZEC input amount, maximum source
-fee, minimum delivered WBTC, maximum collateral amount, absolute time bounds, refund address,
-Ethereum instance, recipient, WBTC contract, and selected Spoke/reserve. It also authorizes the
-specified Ethereum gas bounds and the possible partial result of owning delivered WBTC before
-collateral supply succeeds. Wallet keys, viewing keys, signer handles, RPC credentials, and private
-locators remain explicit resources outside the intent and Program.
+Three independent inputs supply the intended execution:
 
-Supply and enabling collateral are distinct Aave calls. For the direct owner path, the selected
-Spoke's multicall can combine `supply(reserveId, amount, owner)` and
-`setUsingAsCollateral(reserveId, true, owner)` into one Ethereum transaction. ERC-20 allowance is
-granted to that Spoke, which pulls the underlying asset. Use the on-chain reserve ID, not an opaque
-API identifier. These are upstream source facts, not proof of an admitted deployed revision:
+| Input / owner | Contents and obligation |
+| --- | --- |
+| Public intent / domain admission | Expected networks, exact assets, recipient/position owner, Spoke/reserve, amounts, fee/gas/time bounds, refund destination, and accepted partial exposure |
+| Selected implementations and public bindings / Application and Program | Exact State/adapter revisions, public execution routes, expected sender/authority facts, occurrence recovery and parameters |
+| Explicit resources / native owners | Actual provider, wallet, service, signer and custody handles; private locators and credentials |
+
+The State fixes business protocol semantics in code. `SupplyAsCollateral` encodes the admitted Aave
+v4 recipe; selecting another Ethereum binding does not turn it into another lending protocol.
+Data selects a compatible network/deployment instance. The selected adapter supplies the native
+execution contract, and resources supply its actual IO authority. Preserve the independent intent
+expectation rather than letting a chosen provider define what the caller supposedly authorized.
+
+For the direct-owner exercise, admitted facts must establish:
+
+```text
+delivery recipient = Aave position owner = expected EVM sender
+expected EVM sender = selected transaction binding sender = verified signer address
+```
+
+Known intent/selection disagreements reject before source funding. For EVM Effects, domain admission
+and preparation qualify token, Spoke/reserve, amount, zero ETH value and gas/fee bounds against the
+admitted plan. Pure native adapter validation separately checks the complete command against the
+selected binding's ledger/sender/authority epoch and supported native facts before acknowledgement
+and IO. Resource attachment verifies actual signer purpose/address/epoch; the domain owns the
+meaning of Aave calldata, rather than asking a generic EVM binding to authorize a lending plan.
+Intent bounds and Runtime acknowledgement do not authenticate a customer. This exercise assumes
+trusted library composition with already-authorized handles; exposing mutation through a transport
+would need its own Application admission/authorization contract.
+
+Aave's upstream direct-owner recipe uses supply plus collateral enabling in a selected Spoke
+multicall. Allowance goes to that Spoke, and the ABI uses the on-chain reserve ID. Source-code facts
+motivate the illustration, rather than certify a deployed contract:
 [reserves](https://www.aave.com/docs/aave-v4/liquidity/reserves),
 [Spoke](https://github.com/aave/aave-v4/blob/main/src/spoke/Spoke.sol), and
 [multicall](https://github.com/aave/aave-v4/blob/main/src/utils/Multicall.sol).
 
-### 7.2 Organize by semantic owner, not network/protocol combinations
+### 7.2 Put implementation changes at their semantic owner
+
+The hypothetical placement is:
 
 ```text
 crates/
-  kernel/                    unchanged generic execution and persistence algorithms
+  kernel/                    generic construction, execution, Journal and Store
   domains/
-    evm/                     EVM identity, anchored requests, transaction commands
-    zcash/                   transparent account, zatoshis, funding contracts
-    near_intents/            asset IDs, quote requests/tickets, delivery contracts
-    aave_v4/                 ABI recipes, reserve/position qualification
-    collateral/              concrete workflow phases and ten business States
+    evm/                     native identities, anchored calls, transaction commands
+    zcash/                   public account/units and native funding contracts
+    near_intents/            asset IDs, allocation tickets and delivery contracts
+    aave_v4/                 pure ABI recipes and reserve/position qualification
+    collateral/              concrete Aave-directed phases and eight business States
   live/
-    evm/                     existing reusable EVM reads and transaction custody
-    zcash/                   wallet observations and exact funding custody
-    near_intents/            quote/status IO and selected delivery qualification
+    evm/                     reusable EVM IO and private transaction custody
+    zcash/                   selected wallet observations and funding authority
+    near_intents/            selected allocation/status IO and delivery qualification
   app/
-    src/operations/zec_to_aave.rs   ordinary Rust composition
-    src/integrations/              selected typed leaf contributions
+    src/operations/zec_to_aave.rs   ordinary Rust recipe composition
+    src/integrations/              exact contributed State/adapter pairings
 ```
 
-Protocol domains own checked native request/command/observation values. The collateral domain uses
-those contracts and pure helpers, but does not import live adapters, Runtime, or Store. Live owners
-bind native intent to explicit resources; they do not accept `CollateralIntent` or a workflow phase.
-Application imports the selected domains and live owners at its composition boundary. Transports
-and signers retain their reusable platform ownership.
+These are responsibility examples, not new-crate tasks. Existing package boundaries remain.
+Protocol domains own native values and pure helpers. The collateral domain uses those contracts
+without importing live adapters, Runtime, or Store. Native adapters receive their own request or
+command, never the entire workflow phase. Application wires actual supported pairings and handles.
 
-There is no `ZcashToNearToEthereumToAaveAdapter`, `AaveLive` provider wrapper, chain-wide protocol enum,
-or protocol-specific Runtime branch. Aave's domain helpers encode calls and qualify EVM evidence;
-the existing EVM adapter executes them. The NEAR Intents Ethereum-delivery adapter privately combines
-its selected service contract with explicit reusable EVM observation capabilities. Supporting a new
-destination family can require another delivery adapter; another WBTC address or compatible EVM
-network does not require one by itself.
+No combined cross-chain adapter, Aave provider/signer wrapper, central chain enum, or protocol branch
+in Runtime/Journal/Store is needed. Different business protocols legitimately have different
+States and interpretation; matching native execution primitives can share their implementation.
+Native protocol modules do not import the collateral workflow merely to register its leaves.
 
-Application wiring knows which concrete State/adapter pairs it installs. Native protocol modules do
-not import the collateral workflow just to register it. Their contracts and binders remain reusable
-by other Operations; integration wiring contributes the actual pairs to the same Catalog.
+Reuse does not imply an existing capability. Current bounded EVM command/custody primitives exist,
+but the maintained [contract-read recipe](crates/domains/evm/src/transaction/read.rs) targets a
+scalar fixture, and current [transaction receipts](crates/live/evm/src/transaction.rs) contain no
+logs or minted-share evidence. A future implementation would need reviewed bounded anchored calls,
+code/deployment observations and native receipt logs, with pure Aave decoding. Current production
+settlement and restart-safe signer custody remain outside supported guarantees; see
+[known limitations](docs/known-gaps.md). The exercise identifies those obligations without adding
+them to this refactor.
 
-### 7.3 Use concrete phase values with bounded downstream facts
+### 7.3 Carry only the concrete facts the next phase needs
 
-The phase types describe the business facts established so far. They are not generic caller-context
-wrappers, parent-phase nesting, or separate stored copies of projected observations. Each transition
-keeps only facts required by later preparation, interpretation, reporting, or cold qualification.
-Native receipts retain their separate exact-original contract from section 6.
-
-The following abbreviated declarations omit value metadata and checked constructors. Fields are
-private; direct construction and decoding must establish the actual cross-field invariants.
-`EthereumDestination` includes the reviewed token, Spoke/reserve, deployment expectations, owner,
-collateral bounds, and transaction authorizations. It is a downstream plan, not the entire root input.
+Phase types describe admitted business facts under selected evidence policies. They do not prove
+external truth merely by their names. Fields are private; checked construction and decoding enforce
+cross-field invariants. These abbreviated sketches omit metadata and constructors:
 
 ```rust
-// domains/collateral: concrete business values, no live handles
 struct CollateralIntent {
     source: TransparentZcashAccount,
     input: Zatoshis,
     max_source_fee: Zatoshis,
     swap_limits: SwapLimits,
-    destination: EthereumDestination,
+    destination: AaveDestination,
 }
 
 struct SourceChecked {
@@ -708,11 +795,11 @@ struct SourceChecked {
     max_source_fee: Zatoshis,
     source_point: ZcashObservationPoint,
     swap_limits: SwapLimits,
-    destination: EthereumDestination,
+    destination: AaveDestination,
 }
 
-// DestinationChecked and PreviewChecked carry the checked downstream request
-// and bounds. Neither contains SourceChecked or the complete root input.
+// DestinationChecked carries the qualified allocation request and remaining
+// Aave-directed authorization. It contains no parent SourceChecked/root wrapper.
 
 struct FundableSwap {
     ticket: CheckedQuoteTicket,
@@ -721,17 +808,16 @@ struct FundableSwap {
     funding_window: ZcashFundingWindow,
     input: Zatoshis,
     max_source_fee: Zatoshis,
-    destination: EthereumDestination,
+    destination: AaveDestination,
 }
 
 struct FundedSwap {
     ticket: CheckedQuoteTicket,
     funding: ZcashFundingProvenance,
     funding_audit: EffectAuditRefs,
-    destination: EthereumDestination,
+    destination: AaveDestination,
 }
 
-// Local audit links; no native source schema or decoder.
 struct EffectAuditRefs {
     effect_id: EffectId,
     command_ref: ContentRef,
@@ -739,15 +825,14 @@ struct EffectAuditRefs {
 }
 
 struct DeliveredCollateral {
-    destination: EthereumDestination,
+    destination: AaveDestination,
     amount: WbtcUnits,
     funding: EffectAuditRefs,
     delivery: EthereumDeliveryProvenance,
 }
 
-// ApprovedCollateral additionally establishes the acknowledged exact approval.
-// SuppliedCollateral additionally establishes the acknowledged supply multicall.
-// VerifiedCollateral retains qualified position facts and final observation point.
+// ApprovedCollateral retains qualified exact approval facts and the remaining
+// plan. SuppliedCollateral retains needed supply/event facts for verification.
 
 struct CollateralReport {
     ledger: EvmChainInstance,
@@ -766,187 +851,204 @@ struct CollateralReport {
 }
 ```
 
-Do not put preview amounts, whole wallet balances, or completed source preflight details into every
-later phase. Funding must requalify current spendability within its own retained authority. Quote
-and delivery facts needed to qualify the current continuation stay inline in that continuation;
-historical IDs provide provenance, not an implicit resolver for missing data. No runtime phase flag,
-optional-field bag, generic `K`, or replay of the complete history is introduced.
+`AaveDestination` is a concrete downstream plan: native Aave target/deployment expectations,
+recipient, expected public EVM transaction binding, transaction bounds and collateral/evidence
+constraints. Keeping those still-needed facts is legitimate; this is an Aave-directed recipe.
+Do not advertise `DeliveredCollateral` as an arbitrary lending-protocol input. Equivalent alternate
+source prefixes could construct it for the same Aave destination. A different lending consumer
+would establish its own contract and share only genuinely common delivered-asset facts.
 
-Allocation interpretation establishes the Zcash-owned destination/window facts and their exact
-correspondence to the accepted ticket. Cold qualification checks that correspondence too. A NEAR
-ticket does not become an argument to a Zcash domain helper. Likewise, the downstream destination
-contains an Aave-owned target and EVM-owned transaction bounds; workflow types do not become native
-protocol APIs.
+Drop completed balance/preflight details and obsolete quote estimates when later work does not use
+them. Retain necessary ticket/funding/native correspondence facts inline while delivery observation
+needs them. Allocation interpretation establishes the Zcash-owned destination/window facts and
+checks their correspondence to the accepted ticket; native Zcash helpers do not accept NEAR tickets.
+Aave helpers likewise receive Aave/EVM contracts rather than workflow-owned phases or failures.
 
-The delivery boundary deliberately ends the source dependency. `ObserveDelivery::interpret` still
-has `FundedSwap` when it qualifies the winning ticket, native funding, service attribution, and
-Ethereum payout. It then admits `DeliveredCollateral`, dropping Zcash-specific funding semantics.
-The Ethereum collateral suffix consumes actual delivered WBTC and never decodes Zcash. Another
-source prefix may construct this same contract when it establishes equivalent delivery guarantees.
+After delivery interpretation checks the exact ticket, source funding, attribution and Ethereum
+payout, the collateral suffix needs no Zcash decoder or resource. It keeps audit links plus the
+admitted destination and delivery facts. These describe delivery at an accepted observation point;
+they do not reserve a future WBTC balance or independently re-prove historical funding.
 
-`FundSwap` interpretation establishes the audit links after settlement acknowledgement. Its
-qualified observation receives the existing boundary's known EffectId and exact admitted command
-and native settlement Object references, preserving their correspondence without another encoding
-pass or an ambient Runtime argument. `settlement_ref` names the native Object, not a Journal frame
-or an acknowledgement certificate. The links provide provenance, not standalone proof of funding.
-Cold qualification checks their forms and available correspondence, along with the inline
-delivery/destination/amount/evidence facts. It neither dereferences them nor claims to re-prove
-historical source acknowledgement. Source-native details remain in their exact retained original;
-no generic native-source envelope or reference-loading service is introduced.
+Funding projection receives the existing callback's known EffectId and exact admitted command and
+native settlement Object refs. FundSwap interpretation copies them after settlement acknowledgement.
+`settlement_ref` is an Object reference, not a frame hash or acknowledgement certificate. Current
+qualification checks the available inline facts and reference correspondence; it never follows the
+links to recover missing evidence. Full source originals remain retained by their own boundary.
+No generic caller K, native-source envelope, object store, or history replay is introduced.
 
-### 7.4 Make business boundaries the States
+### 7.4 Use eight business States
 
 ```mermaid
 flowchart TD
     I[CollateralIntent] --> S[ReadZecBalance: Read]
     S --> D[ReadAaveDestination: Read]
-    D --> P[PreviewSwap: Read]
-    P --> Q[AllocateQuote: Effect]
+    D --> Q[AllocateQuote: Effect]
     Q --> F[FundSwap: Effect]
     F --> O[ObserveDelivery: Read]
     O --> A[ApproveExactDeliveredAmount: Effect]
     A --> C[SupplyAsCollateral: Effect]
     C --> V[VerifyPosition: Read]
-    V --> R[Report: Pure]
-    R --> X[CollateralReport]
+    V --> X[CollateralReport]
 ```
 
-| State | Input → Output | Native boundary and established business fact |
+| State | Input -> success Output | Boundary exercised |
 | --- | --- | --- |
-| `ReadZecBalance` | `CollateralIntent` → `SourceChecked` | A Zcash balance request establishes supported spendable units, source identity/point, and input/fee headroom. It does not reserve spend authority. |
-| `ReadAaveDestination` | `SourceChecked` → `DestinationChecked` | Anchored EVM requests qualify the exact destination, reserve eligibility/capacity, recipient authority, and gas readiness before source funding. |
-| `PreviewSwap` | `DestinationChecked` → `PreviewChecked` | A duplicate-safe dry quote qualifies route feasibility and caller bounds without allocating funding instructions. |
-| `AllocateQuote` | `PreviewChecked` → `FundableSwap` | A live quote allocation yields one acknowledged, qualified funding ticket matching the authorized route. |
-| `FundSwap` | `FundableSwap` → `FundedSwap` | A Zcash payment command establishes retained exact funding authority and its acknowledged native result. |
-| `ObserveDelivery` | `FundedSwap` → `DeliveredCollateral` | Service status plus qualified Ethereum evidence attributes actual WBTC delivery to this ticket/funding. |
-| `ApproveExactDeliveredAmount` | `DeliveredCollateral` → `ApprovedCollateral` | An EVM transaction authorizes the selected Spoke for the actual bounded delivery amount. |
-| `SupplyAsCollateral` | `ApprovedCollateral` → `SuppliedCollateral` | One EVM transaction supplies that amount and enables it as collateral through the selected Spoke. |
-| `VerifyPosition` | `SuppliedCollateral` → `VerifiedCollateral` | Anchored EVM evidence qualifies actual supply shares, collateral flag, and selected owner/reserve position. |
-| `Report` | `VerifiedCollateral` → `CollateralReport` | Pure domain projection reports supplied units, shares, evidence points, and action provenance. |
+| `ReadZecBalance` | `CollateralIntent` -> `SourceChecked` | Selected wallet-local eligible-output observation and source/fee headroom; no reservation |
+| `ReadAaveDestination` | `SourceChecked` -> `DestinationChecked` | Destination deployment/reserve/underlying, recipient authority, market/gas readiness at an admitted point |
+| `AllocateQuote` | `DestinationChecked` -> `FundableSwap` | One acknowledged qualified allocation ticket for the authorized route |
+| `FundSwap` | `FundableSwap` -> `FundedSwap` | Retained native payment authority and its selected acknowledged funding result |
+| `ObserveDelivery` | `FundedSwap` -> `DeliveredCollateral` | Attributable actual WBTC delivery under selected service/provider/finality assumptions |
+| `ApproveExactDeliveredAmount` | `DeliveredCollateral` -> `ApprovedCollateral` | Separate bounded approval to the selected Spoke |
+| `SupplyAsCollateral` | `ApprovedCollateral` -> `SuppliedCollateral` | Separate Ethereum Effect supplying and enabling collateral in one admitted multicall |
+| `VerifyPosition` | `SuppliedCollateral` -> `CollateralReport` | Qualified actual position plus deterministic report projection |
 
-Validation belongs in checked constructors, deterministic State preparation/interpretation, and
-native qualification. There are no extra `Initialize`, `Validate`, `Prepare`, `ReserveNonce`,
-`Sign`, `Submit`, or handoff States. A State exists when it establishes meaningful domain progress
-or a separately authorized action, rather than because one implementation has another RPC call.
+Delete mandatory dry `PreviewSwap` and its `PreviewChecked` phase: live allocation can qualify the
+same caller bounds before funding, and no independent preview requirement has been established.
+Dry preview remains a possible separate product Read if a consumer needs it. Fuse final verification
+and reporting; no `VerifiedCollateral` phase or projection-only final `Report` State is necessary.
+Meaningful Pure States remain part of the framework through existing consumers.
 
-Destination preflight is a qualified observation, not a lock on a future market. Later destination
-failure can leave WBTC in the recipient wallet. The caller must authorize that exposure before ZEC
-funding. Reporting must distinguish delivered assets from a verified collateral position.
+Validation belongs in checked admission, preparation, receipt qualification and interpretation.
+There are no initialization/handoff or per-RPC/signing States. Four independently authorized Effects
+remain. The sequence describes successful progression; any invocation can stop with partial exposure
+or unresolved authority. Destination preflight observes readiness, not future market reservation.
 
-### 7.5 Operations are ordinary Rust functions
+### 7.5 Explain exactly what ordinary Operations assemble
 
-The selected handles below are a local composition value obtained from the installed Catalog. They
-are not another inventory of component metadata. Bindings are checked canonical Objects; recovery
-values explicitly select installed handlers and their parameters. Names abbreviate those values.
+Operations are ordinary Rust functions that append State declarations. The builder's Current type
+tracks the declared successful endpoint; it holds no future delivered tokens. Construction errors
+are returned now; reads, wallet funding and transactions happen later through Runtime.
+
+Use narrow local selection records. For example, the suffix record contains only its own leaves,
+public EVM bindings and three recovery selections:
 
 ```rust
-// app/src/operations/zec_to_aave.rs -- proposed API sketch
-fn swap_zec_to_wbtc(
+struct CollateralSelections {
+    approve: EffectLeaf<ApproveExactDeliveredAmount>,
+    supply: EffectLeaf<SupplyAsCollateral>,
+    position: ReadLeaf<VerifyPosition>,
+    ethereum_transaction: Object,
+    ethereum_read: Object,
+    approval_recovery: RecoverySelection,
+    supply_recovery: RecoverySelection,
+    position_recovery: RecoverySelection,
+}
+```
+
+`SwapSelections` analogously contains only source balance, destination preflight, allocation,
+funding and delivery leaves, their public bindings and recovery values. These are private recipe
+arguments, not another component inventory, public configuration catalogue, or optional-field bag.
+The suffix can construct with Zcash/Intents factories and resources entirely absent.
+
+```rust
+// Hypothetical consuming API; no implementation task is created by this sketch.
+fn swap_zec_to_wbtc_for_aave(
     b: ProgramBuilder<CollateralIntent>,
-    s: &SelectedWorkflow,
+    s: &SwapSelections,
 ) -> Result<ProgramBuilder<DeliveredCollateral>, BuildError> {
     b.read::<ReadZecBalance>(
-        &s.zec_balance, &s.bindings.zcash, &s.recovery.source_read,
+        &s.balance, &s.zcash_read, &s.balance_recovery,
     )?
     .read::<ReadAaveDestination>(
-        &s.aave_destination, &s.bindings.ethereum, &s.recovery.destination_read,
-    )?
-    .read::<PreviewSwap>(
-        &s.preview, &s.bindings.intents, &s.recovery.preview_read,
+        &s.destination, &s.ethereum_read, &s.destination_recovery,
     )?
     .effect::<AllocateQuote>(
-        &s.allocate, &s.bindings.intents, &s.recovery.quote_allocation,
+        &s.allocate, &s.intents, &s.allocation_recovery,
     )?
     .effect::<FundSwap>(
-        &s.fund, &s.bindings.zcash, &s.recovery.source_funding,
+        &s.fund, &s.zcash_funding, &s.funding_recovery,
     )?
     .read::<ObserveDelivery>(
-        &s.delivery, &s.bindings.intents_ethereum, &s.recovery.delivery_read,
+        &s.delivery, &s.intents_ethereum, &s.delivery_recovery,
     )
 }
 
 fn add_wbtc_as_collateral(
     b: ProgramBuilder<DeliveredCollateral>,
-    s: &SelectedWorkflow,
-) -> Result<ProgramBuilder<VerifiedCollateral>, BuildError> {
+    s: &CollateralSelections,
+) -> Result<ProgramBuilder<CollateralReport>, BuildError> {
     b.effect::<ApproveExactDeliveredAmount>(
-        &s.approve, &s.bindings.ethereum, &s.recovery.approval,
+        &s.approve, &s.ethereum_transaction, &s.approval_recovery,
     )?
     .effect::<SupplyAsCollateral>(
-        &s.supply, &s.bindings.ethereum, &s.recovery.supply,
+        &s.supply, &s.ethereum_transaction, &s.supply_recovery,
     )?
     .read::<VerifyPosition>(
-        &s.position, &s.bindings.ethereum, &s.recovery.position_read,
+        &s.position, &s.ethereum_read, &s.position_recovery,
     )
 }
 
 fn zec_to_aave(
-    intent: CollateralIntent,
-    s: &SelectedWorkflow,
+    intent: &CollateralIntent,
+    swap: &SwapSelections,
+    collateral: &CollateralSelections,
     catalog: &Catalog,
     resources: &ExplicitOwnerResources,
 ) -> Result<Program, BuildError> {
+    check_known_intent_selection_agreement(intent, swap, collateral)?;
     let b = ProgramBuilder::new(intent)?;
-    let b = swap_zec_to_wbtc(b, s)?;
-    let b = add_wbtc_as_collateral(b, s)?;
-    b.pure::<Report>(&s.recovery.report)?.finish(catalog, resources)
+    let b = swap_zec_to_wbtc_for_aave(b, swap)?;
+    let b = add_wbtc_as_collateral(b, collateral)?;
+    b.finish(catalog, resources)
 }
+
+// Caller retains the same input for Runtime's independent commitment check.
+let program = zec_to_aave(&intent, &swap, &collateral, &catalog, &resources)?;
+let view = runtime.start(run_id, &program, &intent).await?;
 ```
 
-For example, `s.fund` is `EffectLeaf<FundSwap>` and `s.delivery` is
-`ReadLeaf<ObserveDelivery>`. Passing `ProgramBuilder<FundedSwap>` to `add_wbtc_as_collateral` fails
-the adjacency contract: deposited ZEC is not proven WBTC delivery. Selecting the wrong State leaf
-or binding fails Catalog selection/document qualification before resource attachment or provider IO.
+The pure Application admission helper compares available expected network/token/recipient/owner,
+public route/sender and authorization facts. It does not inspect live providers or introduce a
+workflow interpreter. Future command-dependent checks remain mandatory at invocation.
 
-`ExplicitOwnerResources` abbreviates the existing proposed owner-slot assembly from section 4.4;
-it is not a universal blockchain execution port. `finish` qualifies the complete declarations first,
-then attaches only selected resource tables. Runtime receives the complete resulting Program.
-The two Operations need no `OperationDefinition`, structural registration, lowering, or wrapper.
+The first two functions are Operations. The `.read`/`.effect` methods append individual States;
+`finish` qualifies and associates the complete Program. No operation registry or separate lowering
+language is involved. Passing `ProgramBuilder<FundedSwap>` to the suffix fails nominal adjacency.
+A State could still lie about producing `DeliveredCollateral`; trusted implementations, checked
+values, native qualification and acknowledged custody establish its actual semantics.
 
-Application starts that Program under one explicit caller RunId with the admitted initial input
-matching its commitment. Runtime alone advances the continuation through acknowledged frames.
-Application observes its qualified RunView for completion, waiting/recovery stops, failures, and
-retained partial financial facts. Neither an Operation nor an adapter schedules the next State.
+Malformed/wrong-owner bindings fail association before attachment. Well-formed bindings that
+conflict with a future request can instead fail local invocation without provider IO; Effects reject
+before command append. An ordinary Operation can replace its incoming builder, so type signatures
+alone do not prove prefix preservation. Runtime retains the independent exact-input check.
 
-### 7.6 Install exact leaves once; reuse native adapters
+### 7.6 Select exact leaves and keep native protocol code reusable
 
-During Application composition, selected integration wiring contributes these actual pairings.
-Catalog is immutable once assembled. Installation knows concrete adapter and resource types;
-Runtime does not. The abbreviated pseudocode uses the same registration contract as section 5.2:
+These hypothetical pairings illustrate the same Catalog used by existing refactor consumers:
 
 ```rust
 catalog.register_read::<ReadZecBalance, ZcashBalanceAdapter, ZcashResources>(bind_zcash)?;
 catalog.register_effect::<FundSwap, ZcashFundingAdapter, ZcashResources>(bind_zcash)?;
-
-catalog.register_read::<PreviewSwap, OneClickPreviewAdapter, IntentsResources>(bind_intents)?;
 catalog.register_effect::<AllocateQuote, OneClickAllocationAdapter, IntentsResources>(bind_intents)?;
 catalog.register_read::<ObserveDelivery, OneClickEthereumDeliveryAdapter, IntentsResources>(
     bind_intents_with_explicit_evm_reads,
 )?;
-
 catalog.register_read::<ReadAaveDestination, EvmReadAdapter, EvmResources>(bind_evm_reads)?;
-catalog.register_effect::<ApproveExactDeliveredAmount, EvmCallAdapter, EvmResources>(bind_evm_calls)?;
-catalog.register_effect::<SupplyAsCollateral, EvmCallAdapter, EvmResources>(bind_evm_calls)?;
+catalog.register_effect::<ApproveExactDeliveredAmount, EvmTransactionAdapter, EvmResources>(
+    bind_evm_transactions,
+)?;
+catalog.register_effect::<SupplyAsCollateral, EvmTransactionAdapter, EvmResources>(
+    bind_evm_transactions,
+)?;
 catalog.register_read::<VerifyPosition, EvmReadAdapter, EvmResources>(bind_evm_reads)?;
-catalog.register_pure::<Report>()?;
 ```
 
-These entries represent distinct State contracts; they do not duplicate the EVM adapter code.
-Another Operation reusing these States selects the installed leaves. Another asset, supported
-network, account, endpoint, Spoke, reserve, or recovery parameter uses different admitted data.
-It does not publish another copy of these factories.
+Actual code semantics are installed once; bindings, assets, addresses and recovery instances are
+declaration data. State/adapter pairings may share native adapter implementation without being the
+same business State. Component metadata derives from these same entries, not from selection records.
 
-Application constructs `IntentsResources` with the explicitly selected read-only EVM capabilities
-needed for delivery qualification, sharing reusable provider handles where appropriate. That binder
-retrieves only its own typed table; it does not search arbitrary resource tables or receive EVM
-signing/custody authority. The composite public delivery Binding commits the selected service and
-EVM routes, native instance identity, and evidence policy. Pure document qualification checks those
-facts before attachment; the adapter still checks its actual supported native evidence at use.
+Bindings use each selected native codec. A read route and a transaction authority binding are
+different contracts even on the same network; use distinct Objects and check their expected native
+identity correspondence, rather than assuming one Ethereum or Zcash Object fits every mode.
 
-The State's adapter-facing data is smaller than its workflow phase. For example:
+For delivery, Application explicitly supplies read-only EVM capabilities to `IntentsResources`.
+Its binder retrieves only that native owner's table, never arbitrary tables or signer/custody
+handles. The composite public binding commits service/EVM routes, native identity and evidence
+policy. Resource attachment and invocation check the appropriate correspondence at their boundary.
+
+Native helpers receive their own values, not workflow types:
 
 ```rust
-// domains/collateral -- deterministic preparation only
 impl EffectState for FundSwap {
     type Input = FundableSwap;
     type Output = FundedSwap;
@@ -954,208 +1056,184 @@ impl EffectState for FundSwap {
     type Command = ZcashPayment;
     type Observation = ZcashFundingObservation;
 
-    fn prepare(input: &FundableSwap) -> Result<ZcashPayment, FundingFailure> {
+    fn prepare(input: &FundableSwap) -> Result<ZcashPayment, InvocationDiagnostic> {
         ZcashPayment::checked(
             input.source(), input.funding_destination(), input.input(),
             input.max_source_fee(), input.funding_window(),
         )
-        .map_err(FundingFailure::Zcash)
+        .map_err(|cause| cause.into_diagnostic("prepare_zcash_payment"))
     }
-
-    // Interpretation checks the already-prepared command and qualified native
-    // result, then constructs FundedSwap without calling prepare again.
+    // Interpretation checks the prepared command and acknowledged native result.
 }
 
 impl EffectState for SupplyAsCollateral {
     type Input = ApprovedCollateral;
     type Output = SuppliedCollateral;
     type Failure = CollateralFailure;
-    type Command = EvmCall;
+    type Command = Eip1559TransactionCommand;
     type Observation = EvmExecution;
 
-    fn prepare(input: &ApprovedCollateral) -> Result<EvmCall, CollateralFailure> {
+    fn prepare(
+        input: &ApprovedCollateral,
+    ) -> Result<Eip1559TransactionCommand, InvocationDiagnostic> {
         aave_v4::supply_and_enable_collateral(
             input.destination().aave_target(), input.delivered_erc20_amount(),
+            input.destination().expected_transaction_binding(),
             input.destination().tx_bounds(),
         )
-        .map_err(CollateralFailure::Aave)
+        .map_err(|cause| cause.into_diagnostic("prepare_aave_supply"))
     }
-
-    // Interpretation qualifies the prepared call and acknowledged execution,
-    // including the expected reserve/owner/supply events, before phase admission.
+    // Interpretation qualifies exact reserve/owner/amount/share evidence.
 }
 
-// domains/aave_v4 -- ABI construction, no provider or signer ownership
+// Pure aave_v4 owner helper; ordinary native values and source-bearing errors.
 fn supply_and_enable_collateral(
     target: &AaveCollateralTarget,
     amount: Erc20Amount,
-    tx_bounds: &EvmTransactionBounds,
-) -> Result<EvmCall, AaveError> {
-    target.check_supported_supply(&amount)?;
+    binding: &EvmTransactionBinding,
+    bounds: &EvmTransactionBounds,
+) -> Result<Eip1559TransactionCommand, AaveError> {
+    target.check_supply_and_direct_owner(&amount, binding)?;
     let calls = vec![
         encode_supply(target.reserve_id(), amount.units(), target.owner()),
         encode_set_using_as_collateral(target.reserve_id(), true, target.owner()),
     ];
-    EvmCall::checked(target.ledger(), target.spoke(), encode_multicall(calls), tx_bounds)
-        .map_err(AaveError::EvmCommand)
+    Eip1559TransactionCommand::call(
+        binding.clone(), target.spoke().clone(), encode_multicall(calls),
+        EvmU256::from_u64(0), bounds.gas_limit(),
+        bounds.max_priority_fee_per_gas(), bounds.max_fee_per_gas(),
+    )
+    .map_err(AaveError::Command)
 }
 ```
 
-The actual owner implementations retain their full typed failure causes. Abbreviated helper return
-types are not permission to stringify or replace a child error. State preparation does not inspect
-a clock, wallet, provider, or secret. Native adapters enforce changing operational facts through
-their explicit capabilities and retain qualified native results before domain interpretation.
-The illustrated error variants retain their child as a source; these conversions do not discard it.
+Use the existing nonce-free EVM command representation, not a parallel `EvmCall`. Owner error
+conversion retains the full available concrete causal chain and known operation. Checked phase
+invariants establish constructor preconditions; no command-free domain failure or new Runtime
+recovery path is implied. Preparation observes no clock, provider, wallet, or secret. The selected
+adapter still checks the complete command against the actually associated binding before append.
 
-### 7.7 Preserve authority and acknowledge partial outcomes
+### 7.7 Exercise evidence, authority, and partial outcomes honestly
 
-**Quote allocation.** Dry quote and allocation have different effects. The reviewed API documents
-live allocation of deposit instructions but does not establish caller-supplied idempotency. This
-sketch permits repeated allocation only under an explicit caller/provider contract accepting
-discarded unfunded tickets and their bounded nonmonetary effects. Runtime acknowledgement selects
-one winning ticket; only its exact instructions can be funded. Cancellation before acknowledgement
-may orphan an unfunded ticket. If allocations have unacceptable cost or side effects, that adapter
-is unsupported until a stronger recovery contract exists. An acknowledged ticket is reused cold;
-neither a session ID nor a tracing ID is treated as payment idempotency. Sources:
-[quote API](https://docs.near-intents.org/api-reference/oneclick/request-a-swap-quote) and
-[request flow](https://docs.near-intents.org/integration/distribution-channels/1click-api/quickstart/making-a-request).
+**Source observation.** Public address balance is not wallet spendability. The cited address-index
+RPC accepts addresses without establishing ownership or eligible spend authority. A hypothetical
+wallet adapter must define wallet-local UTXO/account, ownership, confirmations, maturity, safety,
+units and observation-point rules. Funding freshly qualifies and reserves eligible inputs; preflight
+never reserves them. Sources: [address balance](https://zcash.github.io/rpc/getaddressbalance.html)
+and [wallet outputs](https://zcash.github.io/rpc/listunspent.html).
 
-This selects 1Click's external-deposit flow: the service coordinates its NEAR execution. MFM needs
-the source wallet, service, and destination capabilities for that contract, without a separate NEAR
-signer or an invented NEAR handoff State. Direct signed-intent integration would require its actual
-NEAR command/authority contract and separately meaningful Effects.
+**Allocation.** The reviewed live quote API allocates deposit instructions without establishing
+caller-supplied idempotency. A possible contract accepts discarded unfunded tickets and funds only
+the Runtime-acknowledged winner. Cancellation or concurrent entry can allocate additional tickets
+without an acknowledged failure/recovery decision, so Runtime counters do not bound physical POST
+attempts. Accept those locally uncounted orphan allocations only under an explicit upstream/caller
+side-effect contract, or leave that hypothetical adapter unsupported. A hard attempt cap needs real
+durable authority; it is not supplied by the typed builder. Source:
+[quote API](https://docs.near-intents.org/api-reference/oneclick/request-a-swap-quote).
 
-**Zcash funding.** `FundSwap` receives the winning supported deposit instructions, exact authorized ZEC input,
-fee bound, and funding time constraints. Its private authority must durably reserve selected inputs,
-retain one exact signed transaction before broadcast, converge competing preparations on that
-winner, and recover ambiguous submission without another payment. Zcash has its own input/spend
-model; EVM nonce reservation is not its implementation. A balance read and an asynchronous wallet
-operation ID do not supply this custody contract. The live funding port remains future high-risk
-work; bare retries of a wallet send are insufficient. Reject deposit memo/address requirements
-outside the selected transparent funding format. Sources:
-[balance](https://zcash.github.io/rpc/getaddressbalance.html),
-[asynchronous send](https://zcash.github.io/rpc/z_sendmany.html), and
+1Click's external-deposit flow lets the service coordinate its NEAR execution. The illustration
+needs source wallet, service and destination capabilities, not an invented NEAR handoff State or
+signer. Direct signed-intent support would have its own native authority contract. An acknowledged
+ticket stays fixed across cold recovery; tracing/session IDs are not payment idempotency.
+
+**Funding.** A hypothetical Zcash authority must reserve eligible inputs, retain one exact signed
+winner before broadcast, converge competing attempts and recover ambiguous submission without a
+second payment. Its selected result must say whether it acknowledges submission, inclusion or final
+settlement; an asynchronous operation ID does not decide that meaning. Existing EVM nonce custody
+cannot implement the Zcash spend model. These are unimplemented native prerequisites, not work
+scheduled here. Sources: [send RPC](https://zcash.github.io/rpc/z_sendmany.html) and
 [operation status](https://zcash.github.io/rpc/z_getoperationstatus.html).
 
-Absolute bounds enter the Program as admitted data. The owning adapter checks safe new submission
-against its explicit time capability. Expiry prevents unsafe new funding; it does not erase an
-already-broadcast or ambiguously submitted payment. Different upstream inactivity/refund conditions
-must remain distinct. An expired quote never authorizes automatic re-quotation and a second payment.
-Recovery must preserve the original financial exposure; refund needs its own qualified evidence.
+An explicit time capability checks safe new submission against admitted bounds. Expiry cannot erase
+an already-broadcast/ambiguous payment or authorize re-quotation and re-funding. Keep upstream
+inactivity and refund conditions distinct; observation exhaustion cannot establish a refund.
 
-**Delivery observation.** The selected adapter obtains ticket-specific service status and candidate
-payout transactions, then qualifies Ethereum ledger/point, WBTC contract, recipient, and raw units.
-Service attribution is an explicit selected trust contract; a signed quote does not itself prove
-payout or finality. Successful admission requires unambiguous payout attribution using native
-transaction hash/log index and ledger identity. Batched transfers can be aggregated only under a
-reviewed attribution rule. Whole-wallet balances, balance deltas, preview amounts, or an unsigned
-service success flag alone cannot establish this workflow's delivered collateral. Sources:
-[execution status](https://docs.near-intents.org/api-reference/oneclick/check-swap-execution-status) and
-[quote signatures](https://docs.near-intents.org/integration/distribution-channels/1click-api/verify-quote-signature).
+**Delivery and identity.** Ticket-specific service status plus EVM receipts must establish an
+unambiguous payout under named service/provider/attribution/canonicality policies. Qualify exact
+ledger, token, recipient, units and observation point, including unique native transaction/log
+identity. Reject ambiguous batch attribution, wallet totals, unexplained balance deltas and
+service-only success. A signed quote authenticates its selected issuer/fields under upstream signing
+rules; MFM canonical hashing supplies content identity, not substitute signature verification.
+Sources: [status](https://docs.near-intents.org/api-reference/oneclick/check-swap-execution-status)
+and [quote signatures](https://docs.near-intents.org/integration/distribution-channels/1click-api/verify-quote-signature).
 
-The native owner verifies quote signatures using the upstream signing representation. MFM's
-canonical structured hashing serves content identity; it does not replace upstream signature
-verification or establish authenticity for unsigned status fields.
+Expected chain ID/genesis and observed agreement distinguish supported native identity facts; they
+neither distinguish every fork nor make a dishonest provider truthful. An authenticated service
+channel is not a cryptographic ticket-to-log proof. Declare the actual trusted assumptions and
+reject evidence beyond the supported contract. Keep local zero-IO mismatch separate from remote
+observation, which has already performed IO and needs its own qualifying native facts.
 
-While pending, the adapter returns the native status observation. The State interprets that exact
-original as a declared `NotReady` domain failure whose `ClassifyError` implementation projects
-`Retryable`; the selected recovery handler then chooses bounded retry or stop. Operational fetch
-failures retain their separate native cause chains. Bounded Read
-recovery can repeat observation, never source funding. Exhausted observation does not prove swap
-failure, nonpayment, or refund; a stopped/failed workflow may still have an unresolved external
-payment. Keep RunView's existing execution meanings and expose the financial facts honestly.
-If a terminal run needs later observation, use a separately authorized read-only Program with
-explicit retained funding/ticket provenance; do not restart the payment workflow.
+Pending status remains an exact native observation, interpreted as a declared `NotReady` failure
+whose ClassifyError projects Retryable. The selected handler chooses bounded retry/stop. Read
+recovery repeats observation, never funding. A stopped/failed workflow can still have unresolved
+financial exposure; later authorized read-only observation must not restart payment.
 
-**Approval.** This example always includes `ApproveExactDeliveredAmount` for the reviewed WBTC
-path. It approves the actual delivered amount within caller bounds to the selected Spoke, rather
-than granting an unlimited allowance. Existing allowance does not dynamically remove a State from
-the immutable Program. Unsupported token approval semantics reject; no hidden reset/regrant,
-permit-manager deployment, or runtime branch is introduced. If delivery exceeds the admitted
-collateral bound, stop before approval and retain the delivered-assets facts.
+**Destination and supply.** The destination Read must qualify actual supported code/deployment,
+proxy implementation where applicable, reserve underlying and market/account eligibility. Nonempty
+code, matching selectors or published addresses alone are insufficient. Preflight cannot lock
+future capacity or prevent an upgrade before transaction inclusion. Define accepted deployment/
+upgrade trust or a real execution guard if stronger inclusion-time identity is required; do not
+attribute that guarantee to binding schemas.
 
-**Supply and verification.** The direct recipient owner signs the Spoke multicall. Both Aave calls
-share one Ethereum transaction and revert together under the reviewed implementation. Allocation,
-Zcash funding, and token approval remain separate acknowledged Effects with their own EffectIds.
-No global transaction or automatic cross-ledger compensation is claimed. Aave availability or
-deployment changes may prevent supply after delivery or approval; keep the resulting assets and
-allowance visible. Before enablement, qualify the exact supported ABI/code/deployment and define
-what changing-code checks can actually guarantee.
+Exact approval to the selected Spoke remains a separate Effect for this reviewed token path. The
+immutable Program does not silently drop it based on allowance or add reset/regrant/manager steps.
+Supply and collateral enabling share one admitted Ethereum multicall; cross-chain allocation,
+funding and approval remain separate financial boundaries. Actual receipt logs must support amount
+and minted-share attribution; final total-position deltas cannot establish this contribution.
 
-The final Read verifies actual owner/reserve position and collateral flag at an admitted EVM point.
-Supply shares are not raw WBTC units. Report the qualified minted shares/supply evidence and
-observed position separately; existing holdings and concurrent transactions forbid deriving this
-workflow's supply from an unexplained total-position delta. Successful verification describes that
-observation point, not a perpetual collateral guarantee.
+Position verification produces CollateralReport directly, with supplied token units, qualified
+minted shares and independently observed position/flag at the admitted point. Shares are not WBTC
+units. Delivery does not reserve later spendability, and verification does not guarantee a perpetual
+position. Supply failure leaves delivery/approval exposure; verification failure can follow successful
+supply. Preserve those facts and command authority in existing RunView/InvocationFailure semantics.
+Failed Store acknowledgement does not establish that an outcome or diagnostic was durably recorded.
 
-Every Effect has a Runtime-assigned identity before mutation, acknowledges its qualified exact
-native result before interpretation, and preserves the same command across retry/cold recovery.
-Checkpoint/restart handlers cannot cross acknowledged Effect barriers to execute payment again.
-Local binding/command mismatches remain Internal with no provider call or operational append;
-authenticated external evidence retains its selected durable meaning. Failed Store acknowledgement
-does not authorize claiming that financial exposure or its diagnostic was durably recorded.
+### 7.8 Check that integration growth stays local
 
-### 7.8 Keep the change cone local as support grows
-
-| Requested extension | Necessary changes | Reused implementation |
+| Hypothetical extension | Necessary changes | Reusable boundary |
 | --- | --- | --- |
-| Another admitted compatible Ethereum destination network | Native instance/configuration, token mapping, supported Spoke/reserve and provider/signer bindings; prove route/evidence support | Workflow States, Operations, EVM adapter code, Runtime, Journal, Store |
-| cbBTC instead of WBTC | Reviewed token/route/approval/reserve facts; generalize a token-specific quantity only when its consuming semantics actually match | EVM custody, Aave ABI helpers, generic builder/association; no Bitcoin-chain adapter just for an Ethereum token |
-| Another source ledger | Its balance/payment contracts, native custody and integration wiring; a source-specific swap prefix where semantics differ | Ethereum collateral suffix and its checked `DeliveredCollateral` contract where genuinely equivalent |
-| Another exchange service | Its quote allocation, attribution, receipt/trust and recovery contracts; actual matching leaf registrations | Business States only where those contracts match, destination EVM primitives, generic execution |
-| Another lending protocol | Its pure domain recipes, position semantics and meaningful collateral States | Delivered-asset input, EVM transport/signing/custody, ordinary Operation composition |
-| Another transport for an existing native contract | Native owner/transport implementation and selected binder | Business workflow and State sequence |
+| Another compatible EVM destination instance | Admitted network/token/deployment/evidence facts and explicit bindings/resources | Same business recipe where semantics match; native custody; generic kernel |
+| Another source ledger for this Aave destination | Native observation/payment/custody and a source-specific prefix | Collateral suffix when the same Aave-directed delivery guarantees are established |
+| Another exchange service | Native allocation, attribution, trust and recovery contracts | Business States only where meaning matches; EVM observation/custody primitives |
+| Another lending protocol | Its own domain recipes, position semantics and consuming phases/States | Genuinely common delivered-asset facts, EVM primitives, ordinary composition |
+| Another compatible asset or deployed address | Exact asset/reserve/approval admission and instance data | Installed leaf implementations where the actual contracts remain equivalent |
+| Another transport | Native owner/transport implementation and selected binder | Existing business sequence where the native contract remains equivalent |
 
-Do not generalize ten concrete phase types into a workflow language to anticipate every possible
-route. Reuse the existing delivered-asset boundary first. Extract common source or collateral
-contracts only after a second consuming implementation establishes equivalent guarantees. New
-semantics legitimately add code locally; new instance combinations do not justify another layer.
+Necessary code grows with distinct semantics and actual supported pairings. Instance combinations
+are admitted data. Do not invent a workflow language, generic K, global chain enum, or universal
+blockchain proof interface to anticipate every route. This concrete recipe deliberately retains its
+still-needed Aave authorization. Further generalization requires a real second consumer.
 
-### 7.9 Acceptance scenarios for this example
+### 7.9 Design questions for the exercise
 
-Implementation must exercise the actual Application Operation and native owner boundaries with
-scripted or managed external services. These are prospective acceptance requirements, not tests of
-this Markdown or a parallel synthetic workflow:
+These are conceptual review scenarios, not current integration tests, refactor CI gates, or tasks
+to implement the example. Section 16 owns actual verification against existing consumers. If a
+future product selects this route, its owner must separately specify and verify these guarantees:
 
-1. Use literal 100,000,000 zatoshis as one ZEC input and an independently scripted payout of 250,000
-   WBTC units as 0.0025 WBTC. This is a unit fixture, not a market quote. Approval and supply must
-   use the qualified 250,000-unit delivery; minted Aave shares have their own independent oracle.
-2. Reject native-BTC destination IDs, the wrong Ethereum instance/token/recipient/Spoke/reserve,
-   unsupported deployment revisions, and insufficient admitted bounds before unsafe payment.
-   Separate local zero-call mismatch from authenticated external rejection.
-3. Permit acceptable competing unfunded allocations under the selected contract, acknowledge one
-   winner, and instrument that only its deposit instructions reach funding. Cold restoration uses
-   that ticket and does not allocate another after acknowledgement.
-4. Cancel/crash or lose acknowledgement at Zcash input reservation, signing, exact-wire retention,
-   broadcast, and result admission. Observe the wallet/network independently: no unretained wire
-   is broadcast, and recovery cannot create a second payment or erase ambiguous exposure.
-5. Expire instructions before a first safe submission and separately after ambiguous submission.
-   Only the former forbids initial funding; neither authorizes re-quotation/re-funding or invents a
-   refund. Follow selected upstream funding bounds without collapsing them into one timestamp.
-6. Return pending and transient status failures, then a qualified delivery. Only delivery Reads may
-   repeat. Exhaust observation separately and inspect retained funding authority and honest partial
-   output; a financial failure cannot be inferred from the workflow's execution stop.
-7. Reject service-only success, unrelated existing WBTC balance, wrong transfer events, duplicate
-   log attribution, and ambiguous batched payout mappings. Accept only the reviewed attributable
-   amount under the selected evidence/finality policy.
-8. Assert exact allowance to the selected Spoke, actual-delivery bounds, and distinct approval
-   custody. A reverted supply multicall must not establish supplied collateral; delivery and any
-   acknowledged allowance remain visible.
-9. Observe the actual owner/reserve shares and collateral flag independently after supply. Prior
-   positions or concurrent changes cannot be misreported as this workflow's newly minted shares.
-10. Cold-inspect every acknowledged phase with provider/signer resources absent. Resume still
-    requires complete association; settled interpretation performs no new quote, wallet send,
-    approval, or supply IO, and all available native causal layers survive.
-11. Compose another Operation from the same leaves and use another admitted binding without adding
-    Runtime/Journal/Store protocol branches or per-instance factories. Compile-fail a collateral
-    suffix applied before the delivery contract is established.
-12. Inject synthetic wallet keys, viewing keys, private locators, and nested native failures at the
-    owning boundaries. Secrets never enter retained public data; available reviewed causes remain
-    distinguishable, with explicit acknowledgement/custody limits when recording fails.
-13. At the next source integration, construct the same qualified delivery contract from that actual
-    source owner and compose the existing collateral suffix without a Zcash decoder or resource
-    dependency. Audit links remain exact hot/cold; no extra encoding, provider IO, or history
-    resolver is needed. Different delivered-asset guarantees require a distinct contract.
+1. Do independent literals preserve units: 100,000,000 zatoshis is one ZEC, and a scripted 250,000
+   WBTC-unit payout is 0.0025 WBTC? This fixture is not a market rate; shares have another oracle.
+2. Do recipient/owner/binding/signer equality and exact token/Spoke/reserve/amount/zero-value bounds
+   reject locally before financial authority or provider IO, while remote rejection stays distinct?
+3. Does wallet observation reject watch-only/ineligible outputs and acknowledge that concurrent
+   spending can invalidate preflight, with funding freshly reserving the permitted inputs?
+4. Can canceled/unacknowledged/concurrent allocations create orphans without consuming recovery
+   counters, and does the selected contract honestly accept or reject that behavior?
+5. Does funding recover one retained signed winner across crash/cancellation/acknowledgement loss,
+   with no second payment and no false conclusion from ambiguous submission or expired instructions?
+6. Does pending delivery repeat only observation, retain native causes and keep financial exposure
+   visible even when execution stops? Is later observation separately authorized without repayment?
+7. Are wrong-ticket transfers, duplicate logs, ambiguous batches and internally consistent dishonest
+   provider replies handled within the explicit supported trust/finality contract?
+8. Does code/deployment/reserve qualification reject unsupported behavior, state its upgrade window,
+   and preserve delivered assets/allowance when market changes prevent supply?
+9. Do actual native logs qualify minted shares separately from units and total positions, including
+   prior holdings/concurrent activity and successful supply followed by failed final verification?
+10. Can the suffix construct without source integrations/resources; do necessary current facts remain
+    inline; and do hot/cold projections preserve exact audit refs without IO or history resolution?
+11. Do a real alternate source and lending consumer share only equivalent contracts, with no new
+    Runtime/Journal/Store protocol branch or per-instance factory registration?
+12. Are private handles excluded from canonical documents/history, owner-known private diagnostic
+    fields excluded, and available native cause chains retained with honest acknowledgement limits?
 
 ## 8. Portfolio becomes asset observation
 
@@ -1267,6 +1345,15 @@ the nonce-free Eip1559TransactionCommand deterministically. Do not add another w
 the request, duplicated native command, and binding. Runtime derives EffectId from RunId, Program
 reference, State/visit, and semantic command reference. The Program separately commits to the
 selected adapter revision and binding.
+
+Keep these semantic lifecycle Commands in their existing Chain owner. Their EVM-owned adapters
+privately derive the same native command and share one private custody routine. An EVM-specific
+domain State, such as the hypothetical Aave supply State in section 7, can instead prepare
+Eip1559TransactionCommand directly. Different actual typed Commands require their own adapter
+pairings; sharing custody code does not make one typed port accept every Command. Native derivation
+is ordinary private owner code, not another public translator trait or registry. This removes
+generic NativeAbi/implementation machinery without inverting the Chain-to-EVM dependency or adding
+a duplicate transaction representation.
 
 The adapter performs pure semantic/native command qualification before append. Runtime acknowledges
 the complete semantic command before any provider, authority, signer, or filesystem IO and before
@@ -1580,6 +1667,7 @@ is introduced to hide those limits.
 | Builder proposal | Unnecessary public Root generic and persistent whole-root carry through workflow phases | Current-only adjacency proof; admitted initial contract/commitment retained internally |
 | Adapter association | Marker/binder identity types, implementation wrappers, generic NativeAbi | Direct adapter ports and one complete selected descriptor |
 | Integration assembly | Generic Catalog<Resources>, Sources phantoms/giant type tuples, static-adapter append alternatives, central protocol dispatch and per-network code registration | Nongeneric contributed Catalog, checked State-typed leaf selection, explicit owner resource tables |
+| Superseded example sketches | Mandatory PreviewSwap/PreviewChecked, VerifiedCollateral and projection-only Report, whole-workflow selection arguments, duplicate EvmCall | Eight illustrative States, concrete phase facts, narrow recipe selections and the existing native EVM command; these are documentation revisions, not production deletions |
 | Portfolio | Generic caller contexts, stage handoffs, paired continuation families, initialization/consolidation plumbing | Checked PortfolioProgress and one collection Read |
 | Monetary output | QuoteCode, USD/EUR claims, heterogeneous totals, target-scale failures | Exact per-asset holdings with real denomination |
 | EVM Read | Public chain/anchor/decimals/confirmation States and stage dispatcher | Private anchored collection protocol with exact receipt |
@@ -1610,8 +1698,8 @@ a compatibility layer merely to satisfy this outline.
 | 1. `exclude private request urls from retained transport errors` | Fix reqwest owner custody; preserve kind/child causes and explicit withheld-field status. | Synthetic private path/query fields excluded; distinguishable nested causes retained; classification unchanged where required. |
 | 2. `use run views as the single execution result` | Delete FailureReport, report stop preflight, result hierarchies, Application mirrors/fallbacks, and JSON/text roundtrip; retain failed RunView facts and secondary rendering errors. | Terminal stop independent of rendering; causes/acknowledgement survive hot/cold; RecoveryStopped preserves pending authority and explicit resume. |
 | 3. `make collection observation the portfolio execution unit` | Introduce nongeneric collection request/result and PortfolioProgress, private anchored EVM protocol, admitted chain-instance identity and corrected holdings output; delete old stages/contexts/valuation model and move product composition. | Independent unit/asset/identity oracle, normal head advance versus selected reorg, earlier-collection cold preservation, no provider call on local mismatch. |
-| 4. `make transaction protocols private to one effect` | Move reservation/signing/wire retention into one adapter; delete public supporting States and wrappers while retaining authority tables/ports. | First winner, acknowledged wire only, cancellation/ambiguous custody, exact settlement and no-IO cold interpretation. |
-| 5. `replace source lowering with typed construction` | Cut all current authoring/cold association to the single leaf-handle builder path, nongeneric contributed Catalog, owner-local resource tables, direct ports and complete descriptors; use Object parameters; delete DSL/NativeAbi. | Composition/extension, compile-fail adjacency, two owner-distinct adapters through one State, binding/policy reuse without factory growth, no IO or early attachment, exact owner/revision rejection. |
+| 4. `make transaction protocols private to one effect` | Move reservation/signing/wire retention into a private EVM custody routine shared by direct semantic adapters; delete public supporting States and wrappers while retaining authority tables/ports. | First winner, acknowledged wire only, cancellation/ambiguous custody, exact settlement and no-IO cold interpretation. |
+| 5. `replace source lowering with typed construction` | Cut all current authoring/cold association to the single borrowed-input, leaf-handle builder path, nongeneric contributed Catalog, owner-local resource tables and direct ports. Separate intrinsic leaf contracts from existing occurrence declarations; preserve private fresh owner claims and explicit projection identity inputs; use Object parameters; delete DSL/NativeAbi. | Existing consuming composition/extension, compile-fail adjacency, two owner-distinct adapters through one genuine State contract, binding/policy reuse without factory growth, foreign checkpoint/cross-Catalog shadow-owner rejection, exact initial-input check, no IO or early attachment, source-preserving preparation failure without command append, and hot/cold identity projection without extra encoding. |
 | 6. `store only nonzero recovery usage` | Replace dense usage with checked sparse counters throughout current records, recovery, cold decoding, and the changed wire baseline. | Retry/restart and allowance equivalence; malformed duplicate/zero entries rejected; independent large zero-recovery scenario. |
 | 7. `reduce persistence to exact frames and head metadata` | Change run baseline/query metadata, qualified canonical seal and append/load ownership; shrink catalogue checks; correct COMMIT classification and history claims. | PostgreSQL exact-head atomicity, selected snapshot/probe semantics, hostile privileges/features, independent acknowledgement-loss observations. |
 | 8. `bound configuration listing and serialize exact revisions` | Change port/Application/transports to keyset pages and coherent revision import/delete transactions; delete aggregate list and stale-query metadata. | Page coverage and bounds, exact-load validation, concurrent import/delete linearization and full cause retention. |
@@ -1626,22 +1714,16 @@ The URL custody and report-liveness corrections come first because they fix conc
 gaps independently of the larger compiler deletion. Do not defer an independently complete fix
 solely to make the architectural diff larger.
 
-Section 7 is the consuming API and ownership blueprint for that construction cutover. It does not
-silently add production Zcash/NEAR Intents/Aave support to the nine refactor commits. After the
-required core cutovers, implement the chosen integrations through coherent owner changes:
+Section 7 exercises the construction API and ownership boundaries; it is not an integration roadmap
+or an additional set of implementation commits. Validate the core cutovers with existing Portfolio
+and lifecycle consumers and a minimal consuming extension fixture where the public composition
+contract needs it. No live route, Zcash wallet custody, NEAR Intents adapter, Aave deployment or
+example-specific CI gate is a prerequisite for completing this refactor.
 
-| Order / subject | Integration cutover | Required evidence |
-| --- | --- | --- |
-| 1. `add aave v4 domain recipes and position qualification` | Pure selected ABI/reserve/position contracts and recipes consuming the existing EVM read/call ports; no new provider or signer wrapper. | Exact deployment/interface admission, spender/owner semantics, atomic multicall failure, units versus shares. |
-| 2. `add transparent zcash balance observations` | Explicit wallet resources, native identity/account/amount contracts, duplicate-safe balance adapter and exact native receipts. | Literal zatoshi oracle, supported observation/spendability meaning, owner causal chains and secret exclusions. |
-| 3. `add exact zcash funding custody` | Native payment adapter and durable input/exact-transaction authority, including concurrent preparation and ambiguous broadcast recovery. | Independent network/wallet evidence across cancellation/crash/acknowledgement loss; deliberate cryptographic and key-custody review. |
-| 4. `add near intents quote allocation contracts` | Checked route/token/quote values, dry preview and allocated-ticket adapters with one explicit acceptable-orphan recovery contract. | Signature/field qualification, allocation competition/cancellation, admitted amount/time/refund bounds; reject unsupported allocation effects. |
-| 5. `qualify attributable ethereum swap delivery` | Selected status service plus explicit reusable EVM observation resources and exact native composite receipt. | Pending versus fetch failure, payout attribution/reorg/finality policy, duplicate/ambiguous logs, native originals and no financial-success inference. |
-| 6. `compose zec to aave collateral` | Concrete phase values, ten domain States, ordinary Operations and exact contributed leaves, Application/public result contracts. | Actual consuming scenarios in section 7.9, compile-fail adjacency, cold recovery without repeat payment, partial outcomes, no kernel protocol dispatch. |
-
-Do not enable the funding path while its custody contract is unresolved. These commits add actual
-new semantics; their production LOC is reported separately from the refactor's deletions. Each
-updates its owning public contracts/docs and selected verification in the same change.
+Adding an actual protocol later requires a separate product decision and a coherent change at its
+owning boundary, with its own capability, custody and evidence contracts. The hypothetical types,
+native gaps and questions in section 7 explain where such work would belong; they neither authorize
+nor schedule that work now.
 
 Changed persistence baselines reject prior incompatible data. The implementation does not mutate an
 existing run history, install a legacy reader, or silently reprovision a live schema. Current
@@ -1655,6 +1737,11 @@ development shell. Start with affected focused tests; expand for the actual cros
 boundary and run one final `nix run .#ci` on the complete implementation candidate. Do not repeat
 broad component gates immediately before CI when CI composes them.
 
+The implementation checks below belong to the existing refactor consumers and framework extension
+contracts. Section 7.9 contains conceptual review questions, not another executable acceptance gate.
+Proving integration growth may use a minimal owner-distinct consuming fixture; it does not require
+building the illustrative ZEC→WBTC→Aave route or implementing another live protocol.
+
 | Boundary | Scenario / independent oracle |
 | --- | --- |
 | Product units | Assert raw native `1000000000000000000` at the reviewed denomination is one ETH; unrelated assets remain separate and are never called USD without valuation evidence. |
@@ -1667,13 +1754,14 @@ broad component gates immediately before CI when CI composes them.
 | Effect authority | Exercise cancellation/acknowledgement loss at command, reservation, wire custody, submission, settlement, and interpretation; no unretained candidate is broadcast. |
 | Concurrent preparation | Competing candidate signings converge on one retained exact wire and only that winner may be submitted. |
 | Effect cold projection | Settled replay uses retained command/receipt and performs no provider, signer, or authority IO; instrument the no-IO claim. |
-| Typed construction | Consumer composes existing Operations and adds a new semantic State; incompatible adjacent contracts fail compilation. |
-| Association | Unknown revision, wrong decoder/binder/handler/binding, and malformed retained objects reject before live attachment; no unavailable-code substitution. |
+| Preparation | Distinguishable checked-constructor failures preserve the causal InvocationDiagnostic and acknowledge no command; no command-free domain-failure transition is added. |
+| Typed construction | Consumer composes existing Operations and adds a new semantic State; incompatible adjacent contracts fail compilation. Caller retains borrowed initial input; Runtime rejects a changed input. Foreign-builder checkpoints reject without claiming that ordinary function signatures preserve the prefix. |
+| Association | Unknown revision, wrong decoder/binder/handler/binding, malformed retained objects and same-reference/different-owner fresh handles reject before live attachment; no unavailable-code substitution. A valid binding conflicting with a later prepared command rejects before its append or IO. |
+| Projection identity | Read and Effect projections receive admitted request/command and native-receipt references, plus EffectId for Effects; hot/cold facts agree without reencoding originals, ambient Runtime context or live authority lookup. |
 | Integration growth | Contribute two owner-distinct adapters for one actual semantic State without central protocol dispatch; many compatible bindings/policies reuse the same factories; wrong owners and unsupported contracts reject with full causes. |
-| Core cross-protocol example | The actual ZEC→WBTC→Aave Operation satisfies section 7.9: acknowledged winning ticket, exact single-payment custody, attributable delivery, separate approval, atomic supply/enable, actual position evidence and honest partial outcomes. |
 | Defined scale | At stated workloads/bounds, measure native calls, resource attachment, frame/history bytes and cold qualification; independent concurrent runs preserve exact-head/custody facts without global snapshot or atomicity claims. |
 | Causal custody | Inject distinguishable nested causes through every changed adapter and public conversion; assert layers/fields, classification, hot/cold preservation, and honest unavailable detail. |
-| Secret custody | Use synthetic locator path/query tokens and deliberately supplied MFM secret inputs; assert owner-known private fields never enter Program, context, history, or public output. |
+| Secret custody | Use synthetic locator path/query tokens and deliberately supplied MFM secret inputs; assert owner-known private fields never enter canonical ProgramDocument, admitted context, history or public output. Authorized process-local handles retain their existing owner custody. |
 | Reporting | Fail the renderer after acknowledged terminal progression; inspect the unchanged terminal head and original primary cause independently. |
 | Stopped unresolved Effect | Render RecoveryStopped, cold-inspect the unchanged pending command authority and retained decision/original, then explicitly resume the same command; no terminal Failed or paused status is invented. |
 | Sparse counters | Exercise a large zero-recovery sequence and retained nonzero retry/restart allowances; do not assert implementation-derived byte counts. |
@@ -1763,16 +1851,17 @@ addressed under float-free canonical structured hashing.
 
 ## 19. Material uncertainties
 
+### 19.1 Framework refactor
+
+These uncertainties affect the proposed core cutovers. Resolve each at its owning boundary using
+existing consumers or focused extension fixtures; the illustrative route is not required evidence.
+
 | Uncertainty | Assumption | Why uncertain | Consequence if wrong | Validation / resolution |
 | --- | --- | --- | --- | --- |
-| Executable ZEC/WBTC/Aave route | A quote can deliver the exact selected Ethereum token to an admitted Aave v4 reserve. | Published token/source-code inventories do not establish current pair liquidity, deployed interface identity, reserve eligibility, or account capacity. | The example remains a composition blueprint and cannot safely execute that live route. | Before enablement, qualify a real bounded quote, exact deployment/code/interface and reserve/account facts; reject unavailable or changed contracts. |
-| Unfunded quote allocation effects | Caller/provider accept discarded unfunded tickets under a bounded explicit allocation contract. | The reviewed API does not establish caller idempotency or all allocation-side costs/limits. | Retrying allocation may have unacceptable side effects even though only one ticket is funded. | Review provider terms/behavior, exercise cancellation and competing allocations; use a stronger contract or leave this adapter unsupported if orphan effects cannot be accepted. |
-| Zcash funding custody | A selected wallet implementation can durably retain spend authority and one exact signed winner before broadcast. | No implementation of that port has been reviewed here; a balance response/asynchronous operation ID is insufficient. | Cancellation or acknowledgement loss may cause duplicate payments or lose unresolved spend authority. | Dedicated wallet/cryptographic design and crash/concurrency/ambiguous-broadcast tests against independent wallet/network observations before live funding. |
-| Payout attribution and evidence | Service status and qualified Ethereum receipts unambiguously identify this funding's WBTC delivery under an explicit trust/finality contract. | Real payout batching/log shapes and finality/attribution guarantees are not yet admitted. | Unrelated or reversible funds can be approved/supplied as if they completed the swap. | Review real native receipts and provider guarantees, test reorgs/duplicate/batched mappings, and reject ambiguous attribution or unsupported evidence policies. |
-| Audit identity projection | Funding observations carry exact known EffectId/command/native settlement Object identities from the existing canonical boundary. | Proposed observation signatures remain schematic. | Implementers may reconstruct identities or add unnecessary context/serialization machinery. | Specify identity origin/correspondence in the selected factory/observation contract; assert hot/cold equality with no extra encoding or IO. |
-| Delivered-asset reuse | No source-native funding semantic is needed after qualified Ethereum delivery. | A second actual source prefix has not been implemented. | A different delivery/recovery meaning may invalidate reuse of the collateral input contract. | Consume the suffix from the next real source owner; share the contract only where amount, attribution, evidence and recovery guarantees match. |
-| Destination availability after funding | Caller accepts delivery/allowance exposure if Aave supply later becomes unavailable. | Preflight cannot reserve future liquidity, eligibility, gas, or implementation behavior across a cross-ledger journey. | ZEC is exchanged successfully but the intended collateral position is not established. | Admit partial-outcome authorization, enforce supported deployment/transaction bounds, fail supply honestly, and report retained delivery/approval facts. |
-| Observation recovery budget | Bounded Reads plus explicit follow-up observation satisfy the consuming product's waiting requirements. | Expected swap latency, polling budget and terminal follow-up UX are unspecified. | Execution may stop while financial delivery remains unresolved. | Choose bounds from measured behavior; test stopped/failed observation and a separately authorized read-only follow-up without repeating funding. |
+| Borrowed initial input | The consuming builder can qualify an input by reference while the caller retains it for unchanged Runtime start. | The replacement API is schematic and has not yet consumed every current authoring path. | Implementation may accidentally move input custody into Program or require another start API. | Cut over existing Portfolio/lifecycle recipes with borrowed input, independently reject changed input at Runtime and remove superseded authoring paths. |
+| Fresh exact implementation ownership | Private factory/State/resource claims and builder membership can reject shadow-owner substitution while persisted identity remains semantic. | The proposed leaf-handle and checkpoint representation is not implemented. | Matching references could select different Rust owners, or a foreign checkpoint could pass nominal typing. | Consuming cross-Catalog shadow-owner and foreign-checkpoint tests; compare fresh private claims before attachment and retain cold revision trust explicitly. |
+| Preparation totality | Checked phase inputs make valid request/command preparation possible; remaining failures use the existing causal InvocationDiagnostic. | Current consuming constructors and new direct State ports must be audited together. | Expected business refusal may be forced into an Internal failure or motivate an unnecessary command-free Runtime transition. | Review each retained constructor/admission invariant, place expected refusal at its owning admission or interpretation boundary, and test preparation failure with no command append. |
+| Audit identity projection | Direct projections receive exact admitted request/command/native settlement Object identities and EffectId from the existing canonical boundary. | Proposed port signatures remain schematic. | Implementers may reconstruct identities or add unnecessary context/serialization machinery. | Specify origin/correspondence in each selected factory contract; assert hot/cold equality with no extra encoding or IO. |
 | Workload shape | Growth mainly adds integrations and independent bounded runs. | Expected accounts/assets, per-run collections, run rate, and latency/freshness targets are unspecified. | Huge individual runs may make linear execution and inline snapshot history unsuitable. | Measure representative workloads before increasing limits or claiming throughput; review another continuation design only for a demonstrated requirement. |
 | Cross-protocol semantic overlap | Some adapters faithfully share a holding Request/Observation contract. | Native units, identities, evidence/coherence policies, and nonholding positions are not yet reviewed across supported protocols. | Forced normalization drops meaning or supplies false successful output. | Consume two owner-distinct adapters through the same genuine contract; review each native mapping and reject unsupported semantics; add distinct States where meanings differ. |
 | Large-product aggregation | Independent bounded runs can satisfy a large observation product with explicit provenance. | Completeness, freshness, partial failure, and simultaneity requirements are not specified. | Independently correct results may fail the product's consistency requirement. | Specify Application aggregation and independent acceptance before splitting a logical run or claiming a cross-chain snapshot. |
@@ -1790,7 +1879,26 @@ addressed under float-free canonical structured hashing.
 | Terminal capacity | Removing report preflight improves stop liveness within real Object/frame/run bounds. | Full inline records and bounded history still have finite space. | A necessary terminal append may remain impossible near a real physical limit. | Small-limit independent tests; state the retained capacity contract rather than promising all admitted runs terminate. |
 | Net code/performance savings | Deleting the identified layers reduces concepts and likely source/work footprint. | Replacement implementations and measurements do not yet exist. | Net LOC or latency savings may be smaller than expected. | Report actual per-commit production deltas and defined-scenario measurements; revise representations if equivalent behavior still needs excessive duplication. |
 
-These uncertainties do not authorize weakening current guarantees. Each is owned by an explicit
-implementation boundary and acceptance check. If implementation reveals an unresolved ownership or
+### 19.2 Illustrative route, outside implementation scope
+
+These assumptions make the example useful as a design exercise; they are not validated capabilities,
+refactor blockers, integration tasks or requests to obtain live quotes. If a future product decision
+selects this route, its owners must establish the relevant contracts before claiming support.
+
+| Uncertainty | Assumption | Why uncertain | Consequence if wrong | Validation / resolution if the route is later selected |
+| --- | --- | --- | --- | --- |
+| Executable ZEC/WBTC/Aave route | A quote could deliver the exact selected Ethereum token to an eligible Aave v4 reserve. | Published token/source-code inventories do not establish pair liquidity, deployed interface identity, reserve eligibility or account capacity. | This particular route cannot execute even though the composition design may remain useful. | Qualify the chosen deployment, bounded quote and reserve/account facts in a separate integration change; reject unavailable or changed contracts. |
+| Unfunded quote allocation | Caller/provider accept unfunded orphan allocations without a promised local bound on physical attempts. | The reviewed API does not establish caller idempotency or all allocation-side costs; cancellation/concurrent POSTs can occur outside acknowledged Runtime retry counters. | One acknowledged winning ticket does not prevent unacceptable allocation costs or unlimited local orphan attempts. | Review upstream/caller terms and attempt authority; accept explicitly uncounted orphans, require stronger recovery/idempotency, or design durable attempt authority for a hard bound. |
+| Zcash spendability and funding custody | Wallet-local qualification and durable exact signed-wire custody can establish supported spend authority and one retained winner. | No Zcash custody port is implemented here; address-index balance and asynchronous operation IDs are insufficient. | Funding may fail after observation or duplicate under cancellation/acknowledgement loss. | Separate native wallet/key-custody design, owned safe/mature UTXO qualification and independent crash/concurrency/ambiguous-broadcast evidence. |
+| Native EVM evidence and deployment identity | An explicitly extended native observation contract can retain the needed logs, reserve/owner/share facts and supported code/proxy identity under a stated provider/finality trust contract. | Current reads target a scalar fixture and ProviderReceipt omits logs; existing production finality and signer process-restart custody remain unsupported. Preflight cannot lock inclusion-time upgrades or market readiness. | Reusing current primitives alone cannot establish delivery or the intended Aave position; stronger execution-time guarantees may need a real guard. | Define native evidence and deployment/proxy trust only in a separate integration change; qualify real observations and review any stronger guard/custody requirement. |
+| Payout attribution | Service status plus qualified Ethereum evidence can attribute this funding to the delivered WBTC under an explicit trust policy. | Real batching/log shapes are not admitted, and unsigned service status is not a cryptographic ticket-to-log proof. | Unrelated or reversible funds could be treated as swap delivery. | Review native receipts and service/provider guarantees; reject ambiguous mappings, duplicates and unsupported finality/attribution claims. |
+| Delivered-phase reuse | The Aave-directed suffix needs no source-native semantics after qualified delivery, while retaining its exact Aave plan. | No second actual source prefix consumes this phase. | Different attribution/recovery semantics could invalidate reuse, or callers may mistake it for a generic lending input. | Share only with an actual equivalent consumer; keep AaveDestination explicit and introduce no generic continuation parameters merely to erase it. |
+| Destination authority and partial exposure | The caller authorizes delivery/allowance exposure if supply later becomes unavailable; direct owner, recipient, expected sender, actual signer and selected reserve/spender agree. | Caller authentication is outside Runtime, and preflight cannot reserve future eligibility, gas or implementation behavior. | A successful exchange or approval would not establish collateral, or wrong account authority could act. | Review product authorization separately; enforce complete command/binding/signer correspondence and report acknowledged partial exposure without cross-chain rollback claims. |
+| Observation recovery budget | Bounded Reads and an explicitly authorized read-only follow-up could meet product waiting requirements. | Swap latency, polling budget and follow-up UX are unspecified. | Execution may stop while financial delivery remains unresolved. | Select bounds from future measured requirements; preserve unresolved authority and avoid repeating funding during follow-up. |
+| Optional preview or separate report | This exercise requires neither a separately admitted preview nor another durable reporting transformation. | A future consumer could demand a meaningful boundary absent from this example. | Eight States might not satisfy that additional product behavior. | Add a boundary only for the concrete requirement; retain existing meaningful Pure consumers for framework coverage. |
+
+These uncertainties do not authorize weakening current guarantees. Core implementation uncertainties
+have an explicit owning boundary and acceptance check; example uncertainties remain conditional on
+future product scope. If implementation reveals an unresolved ownership or
 architecture question, obtain one dedicated architect's target design and complete deletion scope
 before continuing that cutover, as required by [AGENTS.md](AGENTS.md).
