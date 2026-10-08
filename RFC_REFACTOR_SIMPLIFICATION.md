@@ -31,9 +31,9 @@ generic State merely because those steps happen in order.
 
 The target has five central decisions:
 
-1. Construct Programs with ordinary Rust composition and a consuming typed builder. Publish
-   installed leaf implementations once in one integration-owned Catalog. Delete source lowering,
-   injection, default inheritance, and recursive discovery machinery.
+1. Construct Programs directly with ordinary Rust and a consuming typed builder; recipe functions
+   are optional local factoring. Publish installed leaf implementations once in one integration-owned
+   Catalog. Delete source lowering, injection, default inheritance and recursive discovery machinery.
 2. Give Read and Effect States direct typed request/command and observation contracts. Keep native
    protocol orchestration inside adapters, with exact native receipt and operational-failure custody.
 3. Observe one Portfolio collection per Read. Preserve asset identity and real denomination; remove
@@ -228,6 +228,13 @@ the caller authorized. Expected instance/asset/owner facts are independent admit
 observations qualify against those expectations under explicit trust policies; caller authentication
 and durable native custody remain their own contracts.
 
+Installed code, configured instance suitability and current remote availability are another three
+different guarantees. A descriptor cannot prove liquidity; a suitable bridge binding cannot choose
+the product's business sequence; a receipt cannot change admitted authority. The framework should
+abstract execution mechanics while each domain keeps the semantics it can actually establish.
+Making every protocol fit a universal route or blockchain value would move that responsibility into
+generic machinery and recreate the original problem.
+
 ## 4. Target ownership
 
 ```mermaid
@@ -347,6 +354,12 @@ resource construction. Executable attachment requires only the tables selected b
 Program, after all declarations qualify. Installed but unselected integrations do not require
 credentials, providers, or signer handles.
 
+The original Program still requires attachment for all its selected occurrences on resume,
+including a completed prefix. Missing those resources can prevent full resume even though completed
+States make no IO calls. Pure inspection and a separately authored suffix can require fewer
+resources; neither is remaining-State attachment for the original run. This RFC adds no lazy
+attachment or durable run splitting.
+
 Resources retain their existing explicit authority and secret custody. Public bindings identify
 supported routes and contracts; private locators and credentials remain with resource owners.
 Private resource erasure cannot make Keystore Send/Sync or distribute its key custody. Runtime
@@ -460,6 +473,95 @@ supported. Such a test proves framework extensibility and owner isolation; it do
 production chain implementation or require the illustrative route. Add real protocol interoperability
 evidence only when supporting that protocol becomes an implementation requirement.
 
+### 4.9 Configuration resolution and protocol discovery
+
+ProgramBuilder is the complete authoring surface. A developer can append States directly; named
+recipes are optional ordinary Rust factoring. Neither recipes nor configured products require an
+Operation registry. Configuration chooses supported code and instance facts; it cannot manufacture
+protocol semantics from token/network strings.
+
+Application owns product input admission and construction. Native owners own their public
+configuration/request constructors and asset-ID mappings. Product glue extracts the native
+arguments, invokes those constructors, and checks cross-leaf network/asset/recipient/owner/authority
+agreement. Native protocol modules receive their own contracts, never an arbitrary workflow input.
+This preserves inward dependencies without a universal bridge request or native-to-product cycle.
+
+A developer who already has checked input and selections can build directly. No resolver object,
+planning run or configuration compiler is a required framework component.
+
+For the illustrative product, the private selection function could be:
+
+```rust
+// Concrete product code, not a new framework resolver interface.
+fn resolve_collateral(
+    request: &CollateralRequest,
+    deployment: &CollateralDeployment,
+    catalog: &Catalog,
+) -> Result<(CollateralIntent, CollateralSelection), AppError>;
+```
+
+The result contains checked input and exact selections/public bindings. It is data used by ordinary
+Rust construction, not a workflow AST, registered builder fragment, or runtime protocol dispatcher.
+Any execution-profile choice belongs to this product and is needed only when actual supported
+business action shapes differ. Branches finish their typed builders before returning nongeneric
+Program. Different root contracts start within the existing typed Application entry-point branch.
+
+Separate three questions:
+
+| Question | Owner / result | What it does not establish |
+| --- | --- | --- |
+| Is this code installed with these contracts? | Catalog selection of an exact leaf and reviewed semantic revision | Route support, permission to select it, or remote availability |
+| Can an allowed configured instance express this intent? | Pure product/native admission, retaining its checked native result | Current offer, liquidity, wallet spendability or market capacity |
+| Is execution currently possible under the admitted terms? | Explicit native observations and acknowledged Effects | Permanent readiness, cross-chain atomicity or a right to replace the Program |
+
+Automatic selection can work without making a customer name every protocol or binding. Admitted
+deployment policy may supply exact asset mappings, allowed service instances, accounts, trust/custody
+contracts and bounds. Application may select an explicitly requested suitable instance, the unique
+statically suitable allowed instance, or an explicitly admitted preference. Zero candidates and
+unresolved multiple candidates reject distinctly; installation order is not a preference policy.
+
+Candidates are configured execution instances, not Catalog leaves. Two instances using one leaf
+but different bindings/authority facts can still be ambiguous. Installing another adapter does not
+enlarge the permitted set. First qualify configured public data; product code then passes extracted
+native arguments to each relevant owner's actual admission. Reuse the successful checked result;
+do not maintain separate supports/admit logic or copy a capability matrix.
+
+Only deliberate typed incompatibility declines a candidate. Malformed input/configuration, bad
+asset mappings, unsupported local schemas and internal owner rejection retain their causal chain
+and cannot disappear into 'no match'. Failed qualification that affects uniqueness prevents
+selection. Do not infer applicability from error strings or diagnostic codes. Public selector
+grammar follows the actual product schema: an unknown spelling in a closed enum is a parser
+rejection; an admitted checked selector absent from installed support is unsupported selection.
+
+This is ordinary bounded product code. The composition root installs relevant Catalog contributions
+and calls native admission; it needs no common erased candidate interface, contribution engine,
+bridge registry, route graph or optimizer. Only introduce shared product selection machinery for an
+actual consumer with multiple equivalent alternatives. The current refactor need not implement a
+new bridge product to prove this boundary.
+
+Live duplicate-safe discovery may use explicit Application adapters before construction. Admit the
+qualified facts needed for execution inline; discarded/interrupted discovery has no durable audit
+promise. A valid no-offer response, failed remote observation and unsupported configured instance
+are different facts. Live ranking needs explicit product objectives, tie/freshness/cost/trust rules
+and any decision-audit requirement; Catalog metadata supplies none of those semantics.
+
+Wet allocation stays inside the fixed execution Program as an acknowledged Effect by default.
+A live result may supply a deposit address, delivered amount or other future data within that
+sequence; it cannot install code, change bindings or append States. If a mutation must precede
+choosing sequence shape, a separate run additionally needs checked source acknowledgement and
+caller authorization plus an explicit native/Application handoff contract if exclusivity matters.
+The same ticket admitted under two fresh RunIds can otherwise produce two funding EffectIds and
+two payments. Provenance references are neither acknowledgement certificates nor one-shot permits.
+This RFC adds no cross-run ticket ledger or universal custody port.
+
+For an existing RunId, inspect retained admission before fresh configuration/discovery. After lost
+genesis acknowledgement or competing differently selected genesis proposals, qualify the retained
+winner and resume it or report conflict/ambiguity; the losing candidate cannot execute. Cold loading
+uses retained Program and resolved input, never today's selection. Retain necessary facts inline:
+config/discovery hashes alone cannot recover deleted data through Store. Reproducibility means the
+admitted choice remains recoverable; explaining every rejected candidate is additional product audit.
+
+
 ## 5. Ordinary typed Program construction
 
 ### 5.1 Builder contract
@@ -487,7 +589,10 @@ effect::<S>(leaf, binding, recovery) where S::Input = Current
 each returns ProgramBuilder<S::Output>
 ```
 
-Operations are ordinary Rust functions that accept and return an appropriately typed builder.
+Direct builder use is the complete construction API. Operations are optional ordinary Rust
+functions that accept and return an appropriately typed builder; no recipe must be named,
+published or registered. Inline single-use helpers and their argument wrappers when they add
+no useful reuse.
 Repeated endomorphic States use ordinary loops. Rust proves nominal adjacency and mode/type
 compatibility, not external truth, ambient-IO freedom, or that an ordinary function extended the
 same builder rather than discarding it. Authors and installed implementations remain trusted.
@@ -509,6 +614,13 @@ Typed factory installation fixes the adapter contract, and selection verifies th
 and semantic ABI. The builder accepts a checked canonical binding Object that the selected native
 Binding codec qualifies during whole-document association. There is one public append path per
 mode; do not retain a parallel static-adapter append API as a convenience.
+
+The private initial claim retains its exact codec/qualifier owner through every Current change;
+finish compares both initial and terminal value owners with the same Catalog. This also applies
+to zero-State Programs. State factories contribute their actual persisted-value codecs; independent
+supported root/output values can contribute codecs to that same Catalog without publishing a
+synthetic Identity State. Initial encoding/qualification is transient: keep the descriptor/ref and
+owner claim, not another root payload or new start API.
 
 Fresh leaves retain private concrete factory/State/resource-owner claims, and Pure append retains
 its State owner claim. Finish compares these with its Catalog before attachment. A content ref plus
@@ -579,89 +691,192 @@ Delete obsolete authoring examples and tests in the same cutover. Retain consume
 extension, cold association, wrong-owner rejection, and compile-fail adjacency guarantees through
 the new public API.
 
-## 6. Direct State and adapter contracts
+## 6. Contracts between the generic framework and concrete implementations
+
+The framework is generic over execution and value contracts. It does not interpret chain names,
+asset symbols, bridge paths, lending calldata, nonces or UTXOs. Concrete types may appear in State
+ports; generic scheduling does not require every domain contract to be network independent.
+Share a Request/Observation only when actual business meaning, evidence and recovery agree.
+
+| Boundary | Contract crossing it | Generic guarantee | Concrete owner's obligation |
+| --- | --- | --- | --- |
+| Product request/configuration to construction | Checked initial input, exact leaf selections, public bindings and recovery values | Builder consumes declared types; Catalog selects installed contracts | Product admission and native constructors establish authorized instance facts and known cross-leaf agreement |
+| State to native adapter | Typed Request or Command | Installation proves selected port type equality; invocation uses admitted canonical values | State prepares business-authorized terms; adapter checks binding agreement and performs explicit IO |
+| Native adapter to State | Exact native Receipt/Fault and ephemeral projected Observation | Original admission, selected decoding, exact identity inputs and distinct failure alternatives | Native ingress qualifies external evidence; pure owner projection establishes supported correspondence; State interprets business meaning |
+| Typed owners to Program callbacks | Checked codecs, bound adapter, pure callbacks and private owner claims | One exact association path and private erasure after qualification | Semantic revisions identify full behavior, including hidden generic specializations |
+| Program to Runtime | Complete immutable sequence, Objects, refs and associated callbacks | Acknowledgement order, local continuation checks, Pending and recovery/barriers | Installed code honors declared deterministic/native contracts; Runtime does not discover routes |
+| Runtime to Journal/Store | Exact current payload and sealed opaque frame | Canonical frame qualification and physical exact-head atomicity | No domain, bridge, provider or code-selection semantics enter Store |
 
 ### 6.1 State semantics
 
-`State` continues to own Input, Output, and its domain Failure. Pure evaluation remains deterministic.
-A Read State declares Request and Observation; an Effect State declares Command and Observation.
-Preparation derives the request/command once within an invocation. Interpretation receives that
-already-prepared value and the qualified observation, rather than calling preparation again. This
-does not remove necessary pure cold validation against an acknowledged command.
-
-Preparation returns the prepared value or a source-preserving InvocationDiagnostic. This target
-does not introduce a command-free domain-failure transition. Caller-plan rejection belongs in
-admission; meaningful observed refusals belong in the interpretation that establishes the next
-phase. Checked phases must establish deterministic command-construction preconditions. If an actual
-consumer requires recoverable domain preparation failure, it needs a separately reviewed change to
-the existing origin/acknowledgement/recovery contract before implementation.
-
-State evaluation, preparation, receipt projection, and interpretation perform no ambient IO.
-Callback boundaries retain panic containment, selected decoding/encoding rejection, and the actual
-Decode/Execute/Encode and Bind/Interpret provenance. Classifiable domain failures remain distinct
-from internal invocation failures.
-
-### 6.2 Adapter semantics
-
-Capabilities owns direct `ReadAdapter<Request, Observation>` and
-`EffectAdapter<Command, Observation>` contracts. Their selected implementations provide:
-
-- A checked public Binding and an author-maintained semantic revision.
-- The exact native Receipt and declared operational Fault, each an admitted MfmValue.
-- Async invocation through explicitly supplied resources.
-- Pure native receipt qualification and typed observation projection.
-- For Effects, a pure complete command/binding check before command acknowledgement and IO.
-
-Program requires selected operational Faults to implement ClassifyError. Capabilities does not
-acquire a dependency on Program to express classification.
-
-Operational Fault and internal InvocationDiagnostic are separate alternatives. Missing execution
-invariants, codec errors, or local mismatch must not be manufactured into a recoverable external
-incident just to obtain an append.
-
-The exact native receipt remains the admitted canonical original. Decode and qualify it once at the
-selected boundary, and pass the typed observation within that invocation. Do not persist another
-projected observation Object. Effect settlement still separates durable receipt acknowledgement
-from interpretation, so cold interpretation rematerializes the retained receipt as required.
-
-Preserve the existing exact-identity inputs when deleting the generic capability/native pipeline.
-The selected owner's pure qualification/projection boundary is schematically:
+State owns Input, Output and domain Failure. Pure State evaluation remains deterministic and needs
+no unused Request/Command/Observation port. ReadState adds Request and Observation; EffectState
+adds Command and Observation. Their boundary is schematically:
 
 ```text
-Read:   binding, request_ref, request, receipt_ref, receipt -> Observation
-Effect: binding, effect_id, command_ref, command,
-        receipt_ref, receipt -> Observation
+ReadState:
+  prepare(&Input) -> Result<Request, InvocationDiagnostic>
+  interpret(Input, &Request, &Observation)
+    -> Result<ProposedStateOutcome<Output, Failure>, InvocationDiagnostic>
+
+EffectState:
+  prepare(&Input) -> Result<Command, InvocationDiagnostic>
+  interpret(Input, &Command, &Observation)
+    -> Result<ProposedStateOutcome<Output, Failure>, InvocationDiagnostic>
 ```
 
-Program callbacks supply EffectId and refs from their already-admitted Objects; a provider cannot
-define them, and deriving them needs no second serialization or ambient Runtime context. Reads
-qualify before interpretation. Effects qualify the exact native settlement before its append,
-interpret only after acknowledgement, and repeat only pure projection for cold interpretation.
-Keep mandatory pure command/binding validation before Effect acknowledgement and native IO.
+Preparation derives the proposal once within an invocation. Program admits/decodes its canonical
+representation and passes that prepared value to interpretation rather than preparing it again.
+Necessary pure cold validation against an acknowledged command remains.
 
-Private HTTP requests need no framework-level ABI. Native command references that transaction
-authority actually consumes remain: removing generic NativeAbi is not permission to erase custody
-identity or necessary native command materialization.
+Preparation keeps the existing source-preserving InvocationDiagnostic alternative. Checked entry
+admission or preceding interpretation must establish deterministic construction preconditions.
+Expected business refusal belongs at that domain boundary and retains observed originals; it must
+not become Internal. This bounded target adds no command-free domain-failure transition. An actual
+consumer needing recoverable preparation refusal requires an explicit original/recovery contract,
+not a silent trait change or an extra validation State merely to manufacture a failure boundary.
 
-### 6.3 Intrinsic leaf identity and occurrence declarations
+Observation is invocation-local Rust data, not another admitted Object. Delete its mandatory
+MfmValue, Serialize/Deserialize, schema, codec and content-reference requirements. Installation
+proves exact State/adapter Observation equality. Apply only bounds needed by the actual execution:
+an Observation created and consumed inside a pure job need not cross that job boundary or acquire
+Send/Sync reflexively. A value actually returned across a worker/future boundary needs its real
+execution bounds. A domain may independently persist a similar value when it is an actual product
+requirement; that does not make every Observation a durable contract.
 
-Delete capability-marker/binder identity types, `ReadImplementation`, `EffectImplementation`, and
-the generic framework `NativeAbi`. Use one intrinsic LeafDescriptor committing to:
+State evaluation, preparation, native projection and interpretation perform no ambient IO. Callback
+boundaries preserve panic containment, selected codec rejection and Decode/Execute/Encode plus
+Bind/Interpret operation provenance. Domain failures remain distinct from internal invocation failures.
 
-- Execution mode and State/adapter semantic revisions.
-- Actual Input, Output, domain Failure, Request or Command, Observation, Receipt, operational
-  Fault, and Binding contracts.
+### 6.2 Native adapter semantics
 
-Catalog selection keys the intrinsic executable contract. The complete Program declaration commits
-the selected leaf plus occurrence bindings, recovery, handler contracts, and parameter values in
-the existing StateDeclaration. Do not put policy or binding instances into the intrinsic leaf ref.
-Handler factories qualify by their own intrinsic contracts in the same Catalog. Reusing a leaf
-with another policy or binding does not create another installed executable identity.
-This clarifies existing declaration ownership; it adds no second descriptor hierarchy or manifest.
+Capabilities owns direct ReadAdapter<Request, Observation> and EffectAdapter<Command, Observation>.
+Each selected implementation declares public Binding, exact native Receipt and operational Fault
+as actual stored MfmValue contracts. Resource attachment produces a concrete bound adapter capturing
+its qualified Binding and explicit owner handles. Pure validation/projection uses the public Binding
+without constructing that live adapter, so historical qualification needs no handles.
 
-Descriptors describe contracts; they do not authenticate executable machine bytes. Decoder, binder,
-handler, projection, or adapter changes that alter semantics require a reviewed revision change.
-This RFC does not add reproducible-build attestation or pretend a StableId proves byte identity.
+The required ports are schematic contracts, not currently compiled replacement signatures:
+
+```text
+ReadAdapter<Request, Observation>:
+  check_request(&Binding, &Request) -> Result<(), InvocationDiagnostic>
+  observe(&self, request_ref, &Request)
+    -> async Result<Receipt, AdapterError<Fault>>
+  project(&Binding, request_ref, &Request, receipt_ref, &Receipt)
+    -> Result<Observation, InvocationDiagnostic>
+
+EffectAdapter<Command, Observation>:
+  check_command(&Binding, &Command) -> Result<(), InvocationDiagnostic>
+  reconcile(&self, effect_id, command_ref, &Command)
+    -> async Result<EffectAdapterOutcome<Receipt>, AdapterError<Fault>>
+  project(&Binding, effect_id, command_ref, &Command, receipt_ref, &Receipt)
+    -> Result<Observation, InvocationDiagnostic>
+
+AdapterError<Fault>: Operational(Fault) | Invariant(InvocationDiagnostic)
+EffectAdapterOutcome<Receipt>: Pending | Settled(Receipt)
+```
+
+Program requires selected Faults to implement ClassifyError. Capabilities does not depend on Program
+to express classification. Pure request validation precedes Read IO; pure complete command/binding
+validation precedes Effect command acknowledgement and all Effect IO. Providers do not choose the
+expected request/command identities: Program supplies refs from admitted Objects and Runtime
+supplies EffectId from its acknowledged command contract.
+
+Native observe/reconcile owns request-relative remote ingress qualification. Malformed remote
+JSON/protocol data, bad signatures and unacceptable external correspondence return the selected
+owner Fault or an explicitly supported native rejection Receipt, with available causes retained.
+Do not defer expected external rejection into projection's internal-only alternative. The same
+pure owner validators can recheck retained correspondence during cold projection. A serialized
+'qualified' flag is insufficient. Local decoding of admitted Objects, impossible binding agreement
+or broken implementation invariants remains InvocationDiagnostic. Operation and owner determine
+the category; the fact that both paths use a parser does not make them the same failure.
+
+Expected service/provider trust, attribution and finality stay in selected native contracts. Content
+hashes identify bytes; signature qualification and matching ledger facts do not supply every other
+authentication guarantee. A generic adapter cannot authorize arbitrary Aave calldata merely because
+its sender/target encoding is valid. Product/domain admission owns those business terms.
+
+All checks, IO and projection consume the selected owner's decoding of the authoritative admitted
+canonical Request/Command/Receipt Objects. Do not project hot from a pre-encoding Rust value while
+cold execution projects a decoded Object: custom serialization may normalize fields. Encode/admit
+each original once, decode/qualify that representation at its selected boundary, and preserve its
+exact ref. No second serializer pass or Observation Object supplies identity.
+
+Read completion projects once and passes Observation directly to interpretation within its fused
+pure callback. Effect qualification projects before settlement append and discards Observation;
+after acknowledgement, interpretation deterministically projects again, both hot and cold. This
+repetition follows the existing erased acknowledgement boundary. It repeats pure computation,
+never provider IO, signing or submission. Keep it instead of adding an Any cache, observation mirror
+or transient continuation merely to promise once-only Effect projection.
+
+Private native request/command derivation uses admitted terms, retained Binding and selected code
+revision, never refreshed configuration, quotes or fee terms. Physical nonce/input selection,
+signing and wire preparation use explicit mutable owner resources after acknowledgement; retained
+winning bytes remain immutable. Necessary native command identity/custody ports survive deletion of
+generic NativeAbi, without another framework translator or universal transaction authority.
+
+### 6.3 Intrinsic identity and occurrence declarations
+
+Delete capability-marker/binder identity types, ReadImplementation, EffectImplementation and generic
+NativeAbi. One intrinsic LeafDescriptor commits mode, concrete State and applicable adapter semantic
+identities, and that mode's actual stored contracts. State contributes Input, Output and domain
+Failure; Read/Effect add Request/Command, Binding, Receipt and Fault. Pure needs no unused adapter
+ports. The descriptor contains no ephemeral Observation schema.
+
+The existing StateDeclaration commits selected leaf, binding Object, recovery/handler contracts
+and parameter values. Binding/policy instances do not create installed leaf identities. Handler
+factories qualify through the same Catalog. No second descriptor hierarchy or manifest is needed.
+
+Removing Observation schema removes an automatic discriminator for observation-only generic
+specializations. For example, Normalize<Unit8> and Normalize<Unit18> could have identical remaining
+stored contracts and family IDs but different projection arithmetic. Existing State/adapter semantic
+IDs/revisions must distinguish that behavior, or an actual instance choice must be checked committed
+data. Reject different fresh factories claiming one intrinsic leaf key, including hidden observation
+specializations. A later sole replacement under unchanged semantic refs violates revision trust;
+private TypeIds cannot authenticate it after restart. Add no ObservationId trait to disguise that limit.
+
+Decoder, binder, handler, projection, interpretation or adapter changes affecting meaning require
+reviewed revision changes, including behavior-changing generic/const parameters. Descriptors do
+not authenticate executable bytes. This RFC adds no build attestation.
+
+### 6.4 Typed installation and private execution erasure
+
+Installation is the actual generic/concrete seam. A factory associates State S, native adapter A
+and explicit resource owner R, proves Request/Command and Observation compatibility, installs actual
+stored-value codecs and records private concrete owner claims. Binding uses only R's typed table.
+Complete document qualification precedes any resource attachment. No domain/native API receives
+Runtime's DriverContext, append authority or arbitrary resource lookup.
+
+Only this checked factory boundary erases typed implementations into Program callbacks. Runtime
+receives canonical Objects, exact refs, the execution position and the selected callback result.
+The erased outcome preserves these alternatives:
+
+```text
+Read invocation:
+  Receipt Object | operational Fault Object | internal CallbackFailure
+
+Effect invocation:
+  Pending | Settled(Receipt Object) | operational Fault Object | internal CallbackFailure
+
+State interpretation:
+  Output Object | domain Failure Object | internal CallbackFailure
+```
+
+Object is an exact checked persistence carrier, not a public append-arbitrary-JSON execution API.
+Selected owner callbacks decode its actual schema and native semantics. Runtime never switches over
+chain/protocol names, interprets provider JSON or classifies a flattened error category. It records
+originals before classification and preserves settlement acknowledgement before interpretation.
+Failed first original encoding reports cause/context and unavailable original detail/ref; no retry,
+native-original bag or fabricated durable audit follows.
+
+Fresh initial/terminal/factory/resource owner claims and checkpoint membership stay private.
+Canonical ProgramDocument retains semantic contracts/public facts, not callbacks, TypeId, private
+locators or handles. Process-local executable callbacks may capture authorized resources. Runtime's
+normal acknowledgement schedule is a trusted library contract, not a sandbox against hostile
+in-process callers invoking handles or exposed callbacks themselves. Add no acknowledgement-token
+wrapper to imply that isolation.
+
 
 ## 7. Core example: Zcash to Ethereum Bitcoin collateral in Aave v4
 
@@ -751,7 +966,7 @@ crates/
     zcash/                   selected wallet observations and funding authority
     near_intents/            selected allocation/status IO and delivery qualification
   app/
-    src/operations/zec_to_aave.rs   ordinary Rust recipe composition
+    src/programs/collateral.rs     direct typed Program construction
     src/integrations/              exact contributed State/adapter pairings
 ```
 
@@ -858,6 +1073,14 @@ Do not advertise `DeliveredCollateral` as an arbitrary lending-protocol input. E
 source prefixes could construct it for the same Aave destination. A different lending consumer
 would establish its own contract and share only genuinely common delivered-asset facts.
 
+For this illustration, collateral uses the full qualified delivered amount only when it meets the
+admitted collateral bounds. ObserveDelivery establishes that readiness before constructing
+DeliveredCollateral; overdelivery beyond the permitted maximum produces its domain Failure while
+retaining the exact native delivery and financial exposure. Independent entry at DeliveredCollateral
+must establish the same checked invariant. An actual consumer choosing a capped amount would need
+an explicit admitted policy and distinguish actual delivery from chosen collateral; do not silently
+cap, relabel a business refusal Internal, or add a validation State merely to obtain failure custody.
+
 Drop completed balance/preflight details and obsolete quote estimates when later work does not use
 them. Retain necessary ticket/funding/native correspondence facts inline while delivery observation
 needs them. Allocation interpretation establishes the Zcash-owned destination/window facts and
@@ -865,9 +1088,11 @@ checks their correspondence to the accepted ticket; native Zcash helpers do not 
 Aave helpers likewise receive Aave/EVM contracts rather than workflow-owned phases or failures.
 
 After delivery interpretation checks the exact ticket, source funding, attribution and Ethereum
-payout, the collateral suffix needs no Zcash decoder or resource. It keeps audit links plus the
-admitted destination and delivery facts. These describe delivery at an accepted observation point;
-they do not reserve a future WBTC balance or independently re-prove historical funding.
+payout, an independently admitted collateral suffix needs no Zcash decoder or resource. It keeps
+audit links plus the admitted destination and delivery facts. Original full-Program resume still
+associates all selected occurrences and resources. These phase facts describe delivery at an
+accepted observation point; they do not reserve a future WBTC balance or independently re-prove
+historical funding.
 
 Funding projection receives the existing callback's known EffectId and exact admitted command and
 native settlement Object refs. FundSwap interpretation copies them after settlement acknowledgement.
@@ -913,104 +1138,78 @@ There are no initialization/handoff or per-RPC/signing States. Four independentl
 remain. The sequence describes successful progression; any invocation can stop with partial exposure
 or unresolved authority. Destination preflight observes readiness, not future market reservation.
 
-### 7.5 Explain exactly what ordinary Operations assemble
+### 7.5 Build directly from checked input and resolved selections
 
-Operations are ordinary Rust functions that append State declarations. The builder's Current type
-tracks the declared successful endpoint; it holds no future delivered tokens. Construction errors
-are returned now; reads, wallet funding and transactions happen later through Runtime.
+The developer can use ProgramBuilder directly. The two earlier recipe functions and their
+single-use SwapSelections/CollateralSelections wrappers are unnecessary for this example. Ordinary
+helper functions remain available when they provide real reuse; they are not a framework layer.
 
-Use narrow local selection records. For example, the suffix record contains only its own leaves,
-public EVM bindings and three recovery selections:
-
-```rust
-struct CollateralSelections {
-    approve: EffectLeaf<ApproveExactDeliveredAmount>,
-    supply: EffectLeaf<SupplyAsCollateral>,
-    position: ReadLeaf<VerifyPosition>,
-    ethereum_transaction: Object,
-    ethereum_read: Object,
-    approval_recovery: RecoverySelection,
-    supply_recovery: RecoverySelection,
-    position_recovery: RecoverySelection,
-}
-```
-
-`SwapSelections` analogously contains only source balance, destination preflight, allocation,
-funding and delivery leaves, their public bindings and recovery values. These are private recipe
-arguments, not another component inventory, public configuration catalogue, or optional-field bag.
-The suffix can construct with Zcash/Intents factories and resources entirely absent.
+Application admission combines caller request with admitted deployment policy, extracts native
+owner inputs and resolves a suitable allowed configured instance as described in section 4.9.
+The private result supplies exact leaf handles/public binding Objects and recovery values. It
+contains no arbitrary list of State names or executable instructions.
 
 ```rust
-// Hypothetical consuming API; no implementation task is created by this sketch.
-fn swap_zec_to_wbtc_for_aave(
-    b: ProgramBuilder<CollateralIntent>,
-    s: &SwapSelections,
-) -> Result<ProgramBuilder<DeliveredCollateral>, BuildError> {
-    b.read::<ReadZecBalance>(
-        &s.balance, &s.zcash_read, &s.balance_recovery,
-    )?
-    .read::<ReadAaveDestination>(
-        &s.destination, &s.ethereum_read, &s.destination_recovery,
-    )?
-    .effect::<AllocateQuote>(
-        &s.allocate, &s.intents, &s.allocation_recovery,
-    )?
-    .effect::<FundSwap>(
-        &s.fund, &s.zcash_funding, &s.funding_recovery,
-    )?
-    .read::<ObserveDelivery>(
-        &s.delivery, &s.intents_ethereum, &s.delivery_recovery,
-    )
-}
+// Hypothetical product admission: pure, no quote/provider/wallet IO.
+let (intent, selected) = resolve_collateral(&request, &deployment, &catalog)?;
 
-fn add_wbtc_as_collateral(
-    b: ProgramBuilder<DeliveredCollateral>,
-    s: &CollateralSelections,
-) -> Result<ProgramBuilder<CollateralReport>, BuildError> {
-    b.effect::<ApproveExactDeliveredAmount>(
-        &s.approve, &s.ethereum_transaction, &s.approval_recovery,
-    )?
-    .effect::<SupplyAsCollateral>(
-        &s.supply, &s.ethereum_transaction, &s.supply_recovery,
-    )?
-    .read::<VerifyPosition>(
-        &s.position, &s.ethereum_read, &s.position_recovery,
-    )
-}
+// This branch is the admitted external-deposit execution profile.
+// Other actual action shapes finish within their own ordinary typed branches.
+let b = ProgramBuilder::new(&intent)?;
+let b = b.read::<ReadZecBalance>(
+    &selected.balance, &selected.zcash_read, &selected.balance_recovery,
+)?;
+let b = b.read::<ReadAaveDestination>(
+    &selected.destination, &selected.ethereum_read, &selected.destination_recovery,
+)?;
+let b = b.effect::<AllocateQuote>(
+    &selected.allocate, &selected.intents, &selected.allocation_recovery,
+)?;
+let b = b.effect::<FundSwap>(
+    &selected.fund, &selected.zcash_funding, &selected.funding_recovery,
+)?;
+let b = b.read::<ObserveDelivery>(
+    &selected.delivery, &selected.intents_ethereum, &selected.delivery_recovery,
+)?;
+let b = b.effect::<ApproveExactDeliveredAmount>(
+    &selected.approve, &selected.ethereum_transaction, &selected.approval_recovery,
+)?;
+let b = b.effect::<SupplyAsCollateral>(
+    &selected.supply, &selected.ethereum_transaction, &selected.supply_recovery,
+)?;
+let b = b.read::<VerifyPosition>(
+    &selected.position, &selected.ethereum_read, &selected.position_recovery,
+)?;
+let program = b.finish(&catalog, &resources)?;
 
-fn zec_to_aave(
-    intent: &CollateralIntent,
-    swap: &SwapSelections,
-    collateral: &CollateralSelections,
-    catalog: &Catalog,
-    resources: &ExplicitOwnerResources,
-) -> Result<Program, BuildError> {
-    check_known_intent_selection_agreement(intent, swap, collateral)?;
-    let b = ProgramBuilder::new(intent)?;
-    let b = swap_zec_to_wbtc_for_aave(b, swap)?;
-    let b = add_wbtc_as_collateral(b, collateral)?;
-    b.finish(catalog, resources)
-}
-
-// Caller retains the same input for Runtime's independent commitment check.
-let program = zec_to_aave(&intent, &swap, &collateral, &catalog, &resources)?;
+// Caller retained input; Runtime independently checks its exact commitment.
 let view = runtime.start(run_id, &program, &intent).await?;
 ```
 
-The pure Application admission helper compares available expected network/token/recipient/owner,
-public route/sender and authorization facts. It does not inspect live providers or introduce a
-workflow interpreter. Future command-dependent checks remain mandatory at invocation.
+For this exercise, a trusted deployment could map ZEC/Zcash and WBTC/Ethereum into exact admitted
+native asset identities and expose one acceptable NEAR Intents instance. Selection can then be
+automatic without making the customer name the bridge. It establishes static suitability, not a
+current offer. Two acceptable configured instances remain ambiguous unless admitted preference
+resolves them, even when they share one installed adapter. Native asset mappings and causal
+admission failures do not come from Catalog metadata or a generic bridge-support table.
 
-The first two functions are Operations. The `.read`/`.effect` methods append individual States;
-`finish` qualifies and associates the complete Program. No operation registry or separate lowering
-language is involved. Passing `ProgramBuilder<FundedSwap>` to the suffix fails nominal adjacency.
-A State could still lie about producing `DeliveredCollateral`; trusted implementations, checked
-values, native qualification and acknowledged custody establish its actual semantics.
+Each .read/.effect appends a State declaration; no balance, ticket or token exists in the builder.
+Its Current changes through the phase contracts in section 7.4. finish qualifies the complete
+Program and attaches selected resources after every declaration passes. Rust proves nominal
+adjacency, not the truth of delivery or that arbitrary helper code preserved the incoming prefix.
 
-Malformed/wrong-owner bindings fail association before attachment. Well-formed bindings that
-conflict with a future request can instead fail local invocation without provider IO; Effects reject
-before command append. An ordinary Operation can replace its incoming builder, so type signatures
-alone do not prove prefix preservation. Runtime retains the independent exact-input check.
+Product admission owns known cross-leaf agreement before source funding. For example, a valid
+destination-read binding A and a valid supply binding B can both pass generic association while
+disagreeing about this plan. Without early product admission, the supply mismatch could stop only
+after ZEC funding. Mandatory invocation checks still reject future request/command disagreements
+before native IO and before Effect command acknowledgement; they do not retroactively remove
+earlier exposure.
+
+A developer can independently start a Program at checked DeliveredCollateral and append only the
+last three States, with source integrations/resources absent. That is a new admitted suffix, not
+resource-light resume of this original full Program. Original cold resume retains its complete
+selected-resource requirement and never selects another bridge from updated configuration.
+
 
 ### 7.6 Select exact leaves and keep native protocol code reusable
 
@@ -1049,10 +1248,13 @@ policy. Resource attachment and invocation check the appropriate correspondence 
 Native helpers receive their own values, not workflow types:
 
 ```rust
-impl EffectState for FundSwap {
+impl State for FundSwap {
     type Input = FundableSwap;
     type Output = FundedSwap;
     type Failure = FundingFailure;
+}
+
+impl EffectState for FundSwap {
     type Command = ZcashPayment;
     type Observation = ZcashFundingObservation;
 
@@ -1066,10 +1268,13 @@ impl EffectState for FundSwap {
     // Interpretation checks the prepared command and acknowledged native result.
 }
 
-impl EffectState for SupplyAsCollateral {
+impl State for SupplyAsCollateral {
     type Input = ApprovedCollateral;
     type Output = SuppliedCollateral;
     type Failure = CollateralFailure;
+}
+
+impl EffectState for SupplyAsCollateral {
     type Command = Eip1559TransactionCommand;
     type Observation = EvmExecution;
 
@@ -1234,6 +1439,11 @@ future product selects this route, its owner must separately specify and verify 
     Runtime/Journal/Store protocol branch or per-instance factory registration?
 12. Are private handles excluded from canonical documents/history, owner-known private diagnostic
     fields excluded, and available native cause chains retained with honest acknowledgement limits?
+13. Does automatic choice distinguish zero, one and multiple suitable allowed configured instances,
+    including two bindings of one installed leaf, while preserving invalid native admission causes?
+14. Does admission check known cross-leaf asset/account/authority agreement before funding, and does
+    original cold resume use the retained winner with all selected resources attached rather than
+    silently constructing a new suffix or choosing another bridge?
 
 ## 8. Portfolio becomes asset observation
 
@@ -1627,6 +1837,19 @@ internal boundaries, adapt available cause layers, operations, protocol/OS codes
 fields once into immutable InvocationDiagnostic data. Receivers forward that data without recapture.
 Classification and public rendering remain projections, never replacements for the original.
 
+This includes product/configuration admission and native constructors, before a Program exists.
+Current ConfigDocument parsing and several unit ComposeError conversions discard available causes;
+they are first-loss gaps to remove in the affected construction cutover. Keep concrete native errors
+where their interfaces support them, then adapt selected facts at the actual heterogeneous boundary.
+Existing Program/InvocationDiagnostic machinery can carry those facts; do not add a universal
+planner error or hide them behind Unsupported/Internal. Candidate incompatibility is an intentional
+typed admission result, not a projection of every construction failure. Public request categories
+may remain stable while their underlying available audit causes are retained.
+
+Malformed stored framework decoding keeps parser category, available location and rejection reason;
+ordinary Serde conversion need not reconstruct nested constructor ancestry. Direct construction,
+postdecode admission and declared execution originals keep their distinct causal contracts.
+
 At the reqwest owner boundary, remove the known private request URL using the dependency's
 `without_url()` operation before diagnostic capture. Preserve its error kind and available child
 causes; explicitly describe the owner-known URL field as withheld. Do not describe the result as
@@ -1663,11 +1886,12 @@ is introduced to hide those limits.
 
 | Area | Delete | Retain / replace with |
 | --- | --- | --- |
-| Authoring | Structural DSL, traversal, injection, default inheritance, expanded endpoints | Ordinary Rust Operations, consuming typed builder, one leaf Catalog |
+| Authoring | Structural DSL, traversal, injection, default inheritance, expanded endpoints | Direct consuming typed builder, optional ordinary Rust factoring, one leaf Catalog |
 | Builder proposal | Unnecessary public Root generic and persistent whole-root carry through workflow phases | Current-only adjacency proof; admitted initial contract/commitment retained internally |
 | Adapter association | Marker/binder identity types, implementation wrappers, generic NativeAbi | Direct adapter ports and one complete selected descriptor |
 | Integration assembly | Generic Catalog<Resources>, Sources phantoms/giant type tuples, static-adapter append alternatives, central protocol dispatch and per-network code registration | Nongeneric contributed Catalog, checked State-typed leaf selection, explicit owner resource tables |
-| Superseded example sketches | Mandatory PreviewSwap/PreviewChecked, VerifiedCollateral and projection-only Report, whole-workflow selection arguments, duplicate EvmCall | Eight illustrative States, concrete phase facts, narrow recipe selections and the existing native EVM command; these are documentation revisions, not production deletions |
+| Superseded example sketches | Mandatory recipe helper functions/single-use argument wrappers, PreviewSwap/PreviewChecked, VerifiedCollateral and projection-only Report, duplicate EvmCall | Direct builder use, checked product/native selection, eight illustrative States and the existing native EVM command; these are documentation revisions, not production deletions |
+| Ephemeral observations | Mandatory Observation MfmValue/serialization/schema/codecs and generic native/projected descriptor duplication | Plain invocation-local Rust data, exact factory type equality and existing semantic specialization identity; native Receipt remains the stored original |
 | Portfolio | Generic caller contexts, stage handoffs, paired continuation families, initialization/consolidation plumbing | Checked PortfolioProgress and one collection Read |
 | Monetary output | QuoteCode, USD/EUR claims, heterogeneous totals, target-scale failures | Exact per-asset holdings with real denomination |
 | EVM Read | Public chain/anchor/decimals/confirmation States and stage dispatcher | Private anchored collection protocol with exact receipt |
@@ -1699,7 +1923,7 @@ a compatibility layer merely to satisfy this outline.
 | 2. `use run views as the single execution result` | Delete FailureReport, report stop preflight, result hierarchies, Application mirrors/fallbacks, and JSON/text roundtrip; retain failed RunView facts and secondary rendering errors. | Terminal stop independent of rendering; causes/acknowledgement survive hot/cold; RecoveryStopped preserves pending authority and explicit resume. |
 | 3. `make collection observation the portfolio execution unit` | Introduce nongeneric collection request/result and PortfolioProgress, private anchored EVM protocol, admitted chain-instance identity and corrected holdings output; delete old stages/contexts/valuation model and move product composition. | Independent unit/asset/identity oracle, normal head advance versus selected reorg, earlier-collection cold preservation, no provider call on local mismatch. |
 | 4. `make transaction protocols private to one effect` | Move reservation/signing/wire retention into a private EVM custody routine shared by direct semantic adapters; delete public supporting States and wrappers while retaining authority tables/ports. | First winner, acknowledged wire only, cancellation/ambiguous custody, exact settlement and no-IO cold interpretation. |
-| 5. `replace source lowering with typed construction` | Cut all current authoring/cold association to the single borrowed-input, leaf-handle builder path, nongeneric contributed Catalog, owner-local resource tables and direct ports. Separate intrinsic leaf contracts from existing occurrence declarations; preserve private fresh owner claims and explicit projection identity inputs; use Object parameters; delete DSL/NativeAbi. | Existing consuming composition/extension, compile-fail adjacency, two owner-distinct adapters through one genuine State contract, binding/policy reuse without factory growth, foreign checkpoint/cross-Catalog shadow-owner rejection, exact initial-input check, no IO or early attachment, source-preserving preparation failure without command append, and hot/cold identity projection without extra encoding. |
+| 5. `replace source lowering with typed construction` | Cut all authoring/cold association to borrowed-input direct builder, nongeneric Catalog, owner-local resources and direct typed ports. Preserve private initial/terminal/factory ownership, specialization identities, canonical decoding and explicit projection refs. Keep product/native admission and causal config errors in their owners; delete DSL/NativeAbi and mandatory ephemeral Observation serialization/schema/codecs. | Existing consuming extension, compile-fail adjacency, owner-distinct adapters through one genuine State contract, binding/policy reuse, zero-State/shadow-owner/foreign-checkpoint rejection, non-Serde Observation and observation-only specialization cold rejection, canonical serializer-normalization hot/cold equality, command/settlement acknowledgement, causal preparation/ingress errors and pure Effect reprojection. |
 | 6. `store only nonzero recovery usage` | Replace dense usage with checked sparse counters throughout current records, recovery, cold decoding, and the changed wire baseline. | Retry/restart and allowance equivalence; malformed duplicate/zero entries rejected; independent large zero-recovery scenario. |
 | 7. `reduce persistence to exact frames and head metadata` | Change run baseline/query metadata, qualified canonical seal and append/load ownership; shrink catalogue checks; correct COMMIT classification and history claims. | PostgreSQL exact-head atomicity, selected snapshot/probe semantics, hostile privileges/features, independent acknowledgement-loss observations. |
 | 8. `bound configuration listing and serialize exact revisions` | Change port/Application/transports to keyset pages and coherent revision import/delete transactions; delete aggregate list and stale-query metadata. | Page coverage and bounds, exact-load validation, concurrent import/delete linearization and full cause retention. |
@@ -1748,17 +1972,23 @@ building the illustrative ZEC→WBTC→Aave route or implementing another live p
 | Enrichment | Literal raw 1500, denomination 3, optional source is selected because nonzero; no target precision can cause an inexact-scaling failure. |
 | Collection coherence | Script normal later-head advance and genuine selected-block replacement separately; assert only the latter violates canonical selected-anchor policy. |
 | Local integrity | Wrong local binding/route/configured chain/active request makes zero provider calls and no operational append, with the exact internal cause. |
+| Native ingress | Malformed remote protocol/parser data, invalid signatures and rejected external correspondence retain owner Fault or native rejection Receipt; malformed admitted local Objects remain invocation failures. Test causes and timing at their distinct boundaries. |
 | External chain qualification | Remotely observed wrong chain ID or genesis retains authenticated native failure evidence and provider/stage causes; same-ID wrong-genesis data cannot pass the new instance contract. It is distinct from local zero-call disagreement. |
 | Read recovery | Complete one collection, fail/cancel the next, cold-resume; instrument that the completed collection is not reread and the unfinished collection may repeat. |
 | Collection receipt | Wrong account/asset/order/coverage/anchor/route cannot become success; retained native original and causes survive cold inspection. |
 | Effect authority | Exercise cancellation/acknowledgement loss at command, reservation, wire custody, submission, settlement, and interpretation; no unretained candidate is broadcast. |
 | Concurrent preparation | Competing candidate signings converge on one retained exact wire and only that winner may be submitted. |
 | Effect cold projection | Settled replay uses retained command/receipt and performs no provider, signer, or authority IO; instrument the no-IO claim. |
+| Ephemeral Observation | A consuming State/adapter pair uses non-Serde Observation with exact type equality; native Receipt stays the original, Read completion fuses projection/interpretation, and Effect reprojects purely after acknowledgement hot and cold. |
+| Specialization identity | Observation-only semantic specializations with otherwise identical stored ABI have distinct existing owner identities or checked instance meaning; fresh conflicting claims reject and cold loading rejects an unavailable/wrong specialization. No executable-byte attestation claim. |
+| Canonical representation | Use a legal serializer that normalizes a field; command checks/IO and receipt projection use owner-decoded admitted Objects, and independently stated hot/cold results agree. No second original or Observation encoding. |
 | Preparation | Distinguishable checked-constructor failures preserve the causal InvocationDiagnostic and acknowledge no command; no command-free domain-failure transition is added. |
-| Typed construction | Consumer composes existing Operations and adds a new semantic State; incompatible adjacent contracts fail compilation. Caller retains borrowed initial input; Runtime rejects a changed input. Foreign-builder checkpoints reject without claiming that ordinary function signatures preserve the prefix. |
+| Typed construction | Consumer uses direct builder or optional Rust helpers and adds a semantic State; incompatible contracts fail compilation. Initial/terminal owner checks cover zero-State installed/uninstalled/shadow codecs without synthetic States. Caller retains borrowed input; Runtime rejects changed input. Foreign checkpoints reject without claiming function signatures preserve prefixes. |
 | Association | Unknown revision, wrong decoder/binder/handler/binding, malformed retained objects and same-reference/different-owner fresh handles reject before live attachment; no unavailable-code substitution. A valid binding conflicting with a later prepared command rejects before its append or IO. |
 | Projection identity | Read and Effect projections receive admitted request/command and native-receipt references, plus EffectId for Effects; hot/cold facts agree without reencoding originals, ambient Runtime context or live authority lookup. |
 | Integration growth | Contribute two owner-distinct adapters for one actual semantic State without central protocol dispatch; many compatible bindings/policies reuse the same factories; wrong owners and unsupported contracts reject with full causes. |
+| Product selection, when supported | Exact/unique/preferred configured instances select under admitted policy; two bindings sharing a leaf may be ambiguous. Typed incompatibility differs from malformed native admission; causes survive, unknown selector categories follow schema, and no candidate selection performs IO. No new bridge product is required for this refactor. |
+| Admission races | Competing different Programs for one RunId admit one winner; losing route performs no execution IO. Lost genesis acknowledgement followed by changed config/discovery qualifies retained admission first and resumes that winner or returns conflict/ambiguity. |
 | Defined scale | At stated workloads/bounds, measure native calls, resource attachment, frame/history bytes and cold qualification; independent concurrent runs preserve exact-head/custody facts without global snapshot or atomicity claims. |
 | Causal custody | Inject distinguishable nested causes through every changed adapter and public conversion; assert layers/fields, classification, hot/cold preservation, and honest unavailable detail. |
 | Secret custody | Use synthetic locator path/query tokens and deliberately supplied MFM secret inputs; assert owner-known private fields never enter canonical ProgramDocument, admitted context, history or public output. Authorized process-local handles retain their existing owner custody. |
@@ -1811,8 +2041,10 @@ claim is available before implementation; this RFC changes production code by ze
 
 Performance claims need measured allocations, pure blocking-job submissions, serialized bytes, or
 provider calls for a defined scenario. Static redundant-work analysis is not measured latency.
-The design removes repeated context wrapping, scale arithmetic, receipt projection, zero-counter
-encoding, report encoding, and old-BLOB append work; it does not yet quantify wall-clock savings.
+The design removes repeated context wrapping, scale arithmetic, projected-value encoding,
+zero-counter encoding, report encoding, and old-BLOB append work. Pure Effect projection still
+repeats across the settlement acknowledgement seam; this is necessary for the selected simple
+callback design and is not a promised performance saving. Wall-clock savings remain unmeasured.
 
 ## 18. Rejected alternatives and non-goals
 
@@ -1820,6 +2052,12 @@ encoding, report encoding, and old-BLOB append work; it does not yet quantify wa
   boundary and repeats more completed work after interruption. Select one Read per collection.
 - **Keep injection behind a nicer API:** preserves expanded States, wrappers, and their change sites.
   Remove the representation and lowering machinery instead.
+- **Require named swap/lending recipes or registered builder fragments:** adds a framework concept
+  where direct typed construction and optional ordinary Rust factoring suffice.
+- **Use Catalog as a route planner or maintain a universal candidate registry:** confuses installed
+  code with authorized configured instances and current remote availability. Product code calls
+  native admission and applies admitted selection policy; live optimization needs actual product
+  objectives rather than another installation table.
 - **Persist a smaller FailureReport:** still makes another artifact part of terminal progression.
   Use retained originals and terminal frames directly.
 - **Replay all history to derive the current head:** adds work and semantic authority to the wrong
@@ -1828,6 +2066,10 @@ encoding, report encoding, and old-BLOB append work; it does not yet quantify wa
   bounded inline current records; acknowledge their snapshot-space tradeoff.
 - **Cache projected observations or mirror failures:** creates another representation to validate.
   Keep native originals and invocation-local typed projections.
+- **Serialize every Observation to connect generic ports:** duplicates the native original and
+  makes temporary computations durable ABI. Prove exact type equality at installation and identify
+  behavior-changing specializations through existing semantic IDs/revisions or checked instance
+  facts; do not replace the removed schema with an ObservationId layer.
 - **Drop transaction custody to save States:** loses command authority and exact-wire replay.
   Keep physical custody privately inside the one Effect.
 - **Generic diagnostic sanitization or universal native-error custody:** conflicts with explicit
@@ -1840,6 +2082,9 @@ encoding, report encoding, and old-BLOB append work; it does not yet quantify wa
   semantics.
 - **A factory per network, asset, or policy instance:** confuses installed code with data. Qualify
   instance Objects against one selected intrinsic contract.
+- **Treat provenance as a one-shot cross-run permit:** does not prevent two fresh RunIds from
+  funding the same ticket. Preserve the execution-run default and require an explicit owner
+  handoff/exclusivity contract only if a future product actually splits that financial authority.
 - **Increase run limits to claim massive scale:** leaves inline snapshot amplification and provider/
   custody limits unaddressed. Measure workloads and define large-product aggregation explicitly.
 
@@ -1858,10 +2103,15 @@ existing consumers or focused extension fixtures; the illustrative route is not 
 
 | Uncertainty | Assumption | Why uncertain | Consequence if wrong | Validation / resolution |
 | --- | --- | --- | --- | --- |
-| Borrowed initial input | The consuming builder can qualify an input by reference while the caller retains it for unchanged Runtime start. | The replacement API is schematic and has not yet consumed every current authoring path. | Implementation may accidentally move input custody into Program or require another start API. | Cut over existing Portfolio/lifecycle recipes with borrowed input, independently reject changed input at Runtime and remove superseded authoring paths. |
+| Borrowed initial input and value ownership | The consuming builder can qualify input by reference, retain private initial/terminal codec ownership and preserve unchanged Runtime start, including zero-State Programs. | The replacement API is schematic and has not yet consumed every current authoring path. | Input custody could move into Program, shadow codecs could pass, or an extra start API/Identity State could become necessary. | Cut over existing Portfolio/lifecycle construction; reject changed input and initial/terminal shadow owners, exercise zero-State and independent value-codec contributions, and retain no duplicate root payload. |
 | Fresh exact implementation ownership | Private factory/State/resource claims and builder membership can reject shadow-owner substitution while persisted identity remains semantic. | The proposed leaf-handle and checkpoint representation is not implemented. | Matching references could select different Rust owners, or a foreign checkpoint could pass nominal typing. | Consuming cross-Catalog shadow-owner and foreign-checkpoint tests; compare fresh private claims before attachment and retain cold revision trust explicitly. |
 | Preparation totality | Checked phase inputs make valid request/command preparation possible; remaining failures use the existing causal InvocationDiagnostic. | Current consuming constructors and new direct State ports must be audited together. | Expected business refusal may be forced into an Internal failure or motivate an unnecessary command-free Runtime transition. | Review each retained constructor/admission invariant, place expected refusal at its owning admission or interpretation boundary, and test preparation failure with no command append. |
 | Audit identity projection | Direct projections receive exact admitted request/command/native settlement Object identities and EffectId from the existing canonical boundary. | Proposed port signatures remain schematic. | Implementers may reconstruct identities or add unnecessary context/serialization machinery. | Specify origin/correspondence in each selected factory contract; assert hot/cold equality with no extra encoding or IO. |
+| Ephemeral Observation identity | Plain Rust Observation and exact factory type equality suffice when existing semantic IDs/revisions or checked instance facts identify every behavior-changing specialization. | Observation schema currently distinguishes some generic/const variants automatically; actual variants must be inventoried before deletion. | A cold sole replacement could change projection behavior under unchanged committed identity. | Consume a non-Serde Observation; reject fresh colliding variants and cold mismatched specialization revisions; review remaining stored ABI plus hidden parameters without adding an ObservationId trait. |
+| Authoritative canonical values | Selected decoding of admitted Objects can feed validation, IO and projection consistently for both hot and cold execution. | Custom Serialize implementations can normalize pre-encoding values, and current fused paths must be audited. | Hot commands/interpretation may use different terms from acknowledged authority or cold recovery. | Exercise a deliberately normalizing serializer with independent expected canonical terms; assert checks, provider arguments, exact refs and hot/cold output agree, with no second original encoding. |
+| Effect projection cost | Repeating pure projection before settlement acknowledgement and during interpretation is acceptable for the simple erased callback contract. | Representative projection costs have not been measured. | Expensive native validation could add meaningful CPU cost. | Preserve acknowledgement/cancellation evidence and measure a real affected consumer before considering any additional cache/continuation representation. |
+| Product/native selection admission | Existing native constructors can provide typed suitability or causal rejection; product glue can resolve exact allowed instances and known cross-leaf agreement without a candidate engine. | Current products do not implement the illustrative selection API; live optimization/audit objectives are unspecified. | Automatic choice could conceal invalid configuration, select unintended authority or duplicate native validation. | Keep current consumers direct; if a product needs alternatives, test zero/unique/ambiguous configured instances, explicit preference, distinct typed incompatibility, invalid-owner causes and cross-leaf disagreement using real native admission. |
+| Retained selection and admission races | Retained admission can take precedence over fresh discovery/configuration and only the acknowledged genesis winner executes. | New selection glue is schematic and concurrency/lost-acknowledgement paths need consuming coverage. | Cold recovery or a lost race could silently choose a different route and financial authority. | Test changed/deleted configuration, concurrent differently selected genesis proposals and lost genesis acknowledgement; recover the retained winner or preserve conflict/ambiguity, with necessary resolved facts inline. |
 | Workload shape | Growth mainly adds integrations and independent bounded runs. | Expected accounts/assets, per-run collections, run rate, and latency/freshness targets are unspecified. | Huge individual runs may make linear execution and inline snapshot history unsuitable. | Measure representative workloads before increasing limits or claiming throughput; review another continuation design only for a demonstrated requirement. |
 | Cross-protocol semantic overlap | Some adapters faithfully share a holding Request/Observation contract. | Native units, identities, evidence/coherence policies, and nonholding positions are not yet reviewed across supported protocols. | Forced normalization drops meaning or supplies false successful output. | Consume two owner-distinct adapters through the same genuine contract; review each native mapping and reject unsupported semantics; add distinct States where meanings differ. |
 | Large-product aggregation | Independent bounded runs can satisfy a large observation product with explicit provenance. | Completeness, freshness, partial failure, and simultaneity requirements are not specified. | Independently correct results may fail the product's consistency requirement. | Specify Application aggregation and independent acceptance before splitting a logical run or claiming a cross-chain snapshot. |
@@ -1893,6 +2143,8 @@ selects this route, its owners must establish the relevant contracts before clai
 | Native EVM evidence and deployment identity | An explicitly extended native observation contract can retain the needed logs, reserve/owner/share facts and supported code/proxy identity under a stated provider/finality trust contract. | Current reads target a scalar fixture and ProviderReceipt omits logs; existing production finality and signer process-restart custody remain unsupported. Preflight cannot lock inclusion-time upgrades or market readiness. | Reusing current primitives alone cannot establish delivery or the intended Aave position; stronger execution-time guarantees may need a real guard. | Define native evidence and deployment/proxy trust only in a separate integration change; qualify real observations and review any stronger guard/custody requirement. |
 | Payout attribution | Service status plus qualified Ethereum evidence can attribute this funding to the delivered WBTC under an explicit trust policy. | Real batching/log shapes are not admitted, and unsigned service status is not a cryptographic ticket-to-log proof. | Unrelated or reversible funds could be treated as swap delivery. | Review native receipts and service/provider guarantees; reject ambiguous mappings, duplicates and unsupported finality/attribution claims. |
 | Delivered-phase reuse | The Aave-directed suffix needs no source-native semantics after qualified delivery, while retaining its exact Aave plan. | No second actual source prefix consumes this phase. | Different attribution/recovery semantics could invalidate reuse, or callers may mistake it for a generic lending input. | Share only with an actual equivalent consumer; keep AaveDestination explicit and introduce no generic continuation parameters merely to erase it. |
+| Collateral preparation readiness | Qualified delivery uses its full actual amount only when within admitted collateral bounds, so approval/supply preparation has valid deterministic inputs. | Native overdelivery and collateral amount policy are not implemented; a future caller could require a cap rather than full-amount admission. | An expected refusal could become Internal, or a capped amount could silently differ from retained delivery. | If implemented, retain actual delivery/exposure and reject out-of-bounds delivery as domain Failure; specify separate chosen/actual amounts explicitly before supporting a capped policy. |
+| Separate allocation-to-funding handoff | A future split can supply actual source acknowledgement, caller authority and native/Application exclusivity where one-shot funding is required. | No such handoff or cross-run permit contract exists, and provenance alone supplies none. | The same ticket in two fresh runs can yield two funding EffectIds/payments. | Keep allocation/funding in the fixed execution run by default; specify and test concurrent fresh-run handoff, replay and acknowledgement loss only if a future product requires the split. |
 | Destination authority and partial exposure | The caller authorizes delivery/allowance exposure if supply later becomes unavailable; direct owner, recipient, expected sender, actual signer and selected reserve/spender agree. | Caller authentication is outside Runtime, and preflight cannot reserve future eligibility, gas or implementation behavior. | A successful exchange or approval would not establish collateral, or wrong account authority could act. | Review product authorization separately; enforce complete command/binding/signer correspondence and report acknowledged partial exposure without cross-chain rollback claims. |
 | Observation recovery budget | Bounded Reads and an explicitly authorized read-only follow-up could meet product waiting requirements. | Swap latency, polling budget and follow-up UX are unspecified. | Execution may stop while financial delivery remains unresolved. | Select bounds from future measured requirements; preserve unresolved authority and avoid repeating funding during follow-up. |
 | Optional preview or separate report | This exercise requires neither a separately admitted preview nor another durable reporting transformation. | A future consumer could demand a meaningful boundary absent from this example. | Eight States might not satisfy that additional product behavior. | Add a boundary only for the concrete requirement; retain existing meaningful Pure consumers for framework coverage. |
