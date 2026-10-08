@@ -211,7 +211,7 @@ Evidence: [HTTP locator and send boundary](crates/live/evm/src/json_rpc.rs),
 ### 3.8 Nominal typing, instance identity, evidence and authority are different guarantees
 
 A typed sequence establishes declared adjacency. It does not prove that a State told the truth,
-that an ordinary Operation preserved its incoming prefix, or that an observed balance remains
+that an ordinary helper preserved its incoming prefix, or that an observed balance remains
 spendable. A semantic content reference likewise does not authenticate executable bytes or prove
 that a fresh leaf selected the same concrete Rust owner. A valid binding schema cannot determine
 whether unknown future calldata agrees with caller intent.
@@ -303,7 +303,7 @@ network, endpoint, account, asset, policy, and operation instance.
 | Another network satisfying an installed protocol contract | Checked ledger identity, network facts, public bindings, and explicit owner resources | None; validate the supported behavior and binding. |
 | Another endpoint, account, asset, or deployed protocol address | Checked request/configuration data | None; qualify it through the selected owner. |
 | A genuinely different ledger or transaction protocol | Native domain contracts, codecs, adapter orchestration, and authority where required | Install actual typed semantic leaves; keep the generic execution and persistence algorithms unchanged. |
-| Another application protocol with different business meaning | Its domain values/States and selected adapters; ordinary Rust Operations compose them | Add its semantics locally; reuse existing platform primitives where their contracts match. |
+| Another application protocol with different business meaning | Its domain values/States and selected adapters; ordinary Rust functions compose them | Add its semantics locally; reuse existing platform primitives where their contracts match. |
 | Another transport for an already-supported contract | Reusable transport primitives and its selected native owner | No new business State merely because HTTP, WebSocket, or another wire path changes. |
 | Another retry policy or configured allowance | Selected handler contract and parameter Object, or policy instance data | Publish new handler code only when behavior changes; do not register each parameter instance. |
 
@@ -476,8 +476,8 @@ evidence only when supporting that protocol becomes an implementation requiremen
 ### 4.9 Configuration resolution and protocol discovery
 
 ProgramBuilder is the complete authoring surface. A developer can append States directly; named
-recipes are optional ordinary Rust factoring. Neither recipes nor configured products require an
-Operation registry. Configuration chooses supported code and instance facts; it cannot manufacture
+recipes are optional ordinary Rust factoring and require no registration.
+Configuration chooses supported code and instance facts; it cannot manufacture
 protocol semantics from token/network strings.
 
 Application owns product input admission and construction. Native owners own their public
@@ -589,8 +589,8 @@ effect::<S>(leaf, binding, recovery) where S::Input = Current
 each returns ProgramBuilder<S::Output>
 ```
 
-Direct builder use is the complete construction API. Operations are optional ordinary Rust
-functions that accept and return an appropriately typed builder; no recipe must be named,
+Direct builder use is the complete construction API. Optional recipe functions accept and return
+an appropriately typed builder using ordinary Rust; no recipe must be named,
 published or registered. Inline single-use helpers and their argument wrappers when they add
 no useful reuse.
 Repeated endomorphic States use ordinary loops. Rust proves nominal adjacency and mode/type
@@ -639,7 +639,7 @@ Runtime still invokes only already-associated callbacks.
 One immutable nongeneric Catalog publishes typed leaf factories and selected handler factories.
 Integration-owned contributions and explicit owner-local Resources follow section 4. Fresh
 construction and cold loading use the same association owner. A new semantic implementation is
-published once; selecting installed components or composing another Operation does not require
+published once; selecting installed components or constructing another Program does not require
 publishing another structural source family.
 
 Schematic installation is `register_read::<S, A, R>(owner_binder)` and its Effect counterpart, where
@@ -1140,9 +1140,9 @@ or unresolved authority. Destination preflight observes readiness, not future ma
 
 ### 7.5 Build directly from checked input and resolved selections
 
-The developer can use ProgramBuilder directly. The two earlier recipe functions and their
-single-use SwapSelections/CollateralSelections wrappers are unnecessary for this example. Ordinary
-helper functions remain available when they provide real reuse; they are not a framework layer.
+The developer uses ProgramBuilder directly, with no single-use recipe functions or selection
+wrappers. Ordinary helper functions remain available when they provide real reuse; they are not
+a framework layer.
 
 Application admission combines caller request with admitted deployment policy, extracts native
 owner inputs and resolves a suitable allowed configured instance as described in section 4.9.
