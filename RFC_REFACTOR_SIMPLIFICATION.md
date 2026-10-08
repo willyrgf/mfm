@@ -1977,77 +1977,28 @@ hostile-input fixtures still test explicit rejection of retired wires.
 
 ### 16.1 Architecture validation before detailed API design
 
-Validate the disputed boundaries before polishing public signatures or starting the full cutover.
-The method below supplies evidence to proceed with named decisions, not a certificate that the
-entire RFC is implemented or correct. No experiment is claimed to have run merely because it is
-specified here. Keep the illustrative monetary route hypothetical.
+[EXPERIMENT_REFACTOR_SIMPLIFICATION.md](EXPERIMENT_REFACTOR_SIMPLIFICATION.md) owns the bounded
+experiment procedure, independent oracles, findings and result record. The RFC owns the target
+architecture; section 16.2 owns implementation acceptance. Executable experiments have not run.
 
-1. **Trace real consumer requirements and define counterexamples.** Use current Portfolio
-   snapshot/enrichment and the lifecycle, recording which facts survive interruption, which work
-   may repeat, and who supplies each original, code identity and acknowledgement. Determine whether
-   a bounded collection may repeat unfinished sources, and which native authority prevents another
-   prepared transaction after broadcast uncertainty. Write four hypotheses with independent pass/
-   fail facts: direct typed/private-erased construction; owner-local extension; canonical original/
-   code provenance; semantic Effect authority. Existing stage/test arrangements are controls, not
-   proof that their granularity is a product requirement. A counterexample revises the responsible
-   boundary before further design.
-2. **Compile one disposable consuming specimen.** Start with the actual lifecycle
-   Observe -> Validate -> Report suffix and its changing stored endpoint types. Implement only
-   enough provisional builder/factory/direct-port erasure to exercise it through the existing
-   Runtime, Journal and MemoryStore. Preserve its complete output, including exact native Objects
-   and selected code provenance. Use a non-Serde Observation without an unnecessary Sync bound,
-   one deliberate conflicting owner, and a serializer that makes canonical terms differ from its
-   pre-encoding Rust fields. Set literal expected bytes/values before writing the projector; inspect
-   native calls and stored originals independently. A scalar-only surrogate can conceal required
-   evidence. No parallel engine, new test language or polished production API is needed.
-3. **Challenge extension and acknowledgement in the same specimen.** After one owner works, give
-   an independent author the documented semantic/extension contract and add a structurally different
-   owner with distinct binding, receipt, fault and resource types. Review common units, identity,
-   evidence and rejection meaning before coding; another binding of the first adapter is only
-   instance reuse. Require no protocol branch in the shared State, generic association, Runtime,
-   Journal or Store. Separately exercise one semantic Effect fragment using the actual deployment
-   and configuration command types through the same private custody routine. Script a command
-   commit with acknowledgement withheld: no native IO may start. Then acknowledge it, settle,
-   withhold settlement acknowledgement, cancel and resume. Independently inspect the same command,
-   original and winning authority; interpretation follows acknowledgement and performs no native
-   reconciliation. Repeated calls using identical retained authority are permitted. Include one
-   real readiness/partial-outcome refusal, such as checked addition overflow after deployment,
-   which must retain deployment and stop before configuration preparation.
-4. **Review evidence and change cost independently, then stop.** Classify each hypothesis as
-   supported, counterexample or unvalidated. Inspect touched imports/modules, factory counts,
-   duplicated facts, configuration points and future change sites. An independently added owner
-   requiring central protocol dispatch, or canonical custody requiring another encoding/resolver,
-   contradicts the target. Ordinary specimen bugs warrant a local correction; behavior that cannot
-   fit without restoring deleted machinery requires an architectural revision. Stop when these
-   claims have discriminating evidence or a precise obstruction. Extract a short evidence report
-   and discard the specimen/harness; retained production tests belong to an authorized coherent
-   cutover. Prototype LOC does not establish production deletion or throughput.
+| Stage | Architectural question |
+| --- | --- |
+| Trace real consumers | What must survive interruption, what may repeat, and who owns originals, code provenance and authority? |
+| Compile a disposable specimen | Can direct typed construction/private erasure preserve actual lifecycle output, canonical originals and plain Observation? |
+| Independently challenge extension and Effects | Can a genuinely different native owner extend locally, and can actual semantic commands preserve acknowledgement/private custody? |
+| Review evidence and stop | Which individual claims are supported, contradicted or still unvalidated, and what future change sites remain? |
 
-Choose and disclose the integration seam before the specimen starts. A new builder that lowers
-through AuthoringSource/Inject*/NativeAbi does not establish their removal. A narrowly fenced bridge
-to the current Program wire can establish typed ports and existing scheduling only; it does not
-validate target LeafDescriptor identity, machinery deletion or complete cold-wire restoration.
-Use a small collision experiment for Observation-only specializations with otherwise equal stored
-contracts/IDs, then exercise distinct committed semantic identity or checked instance meaning.
-Full target restoration, all shadow-owner/checkpoint cases, retained-selection races and every
-resource-free RunView state remain section 16.2 acceptance unless a specific contradiction makes
-their isolated mechanism necessary now. An untested target-wire claim remains provisional even
-when the ports experiment passes; approval names the individual claims it actually establishes.
+The source-review finding F1 already exposed insufficient original/code-provenance inputs in pure
+projection; section 6.2 records the correction. That finding does not prove the replacement runs.
+A bridge to the current Program wire proves only the mechanisms actually exercised, not target
+identity, full cold restoration or production deletion. Reuse physical custody controls only after
+checking the actual EffectId/native-ref/key/order lineage; changed physical assumptions need their
+focused evidence. Approve named claims rather than inferring correctness of the whole RFC.
 
-The contract trace has already exposed one omission: section 6.2's projection needs the admitted
-original Object and factory-supplied selected leaf ref to preserve the current lifecycle consumer.
-That source-grounded counterexample justifies the port correction; it is not executable validation
-of the replacement.
-
-Before reusing physical custody evidence, compare old/new EffectId and native-command-ref lineage,
-authority keys/domain/epoch, reservation/first-winner transactions, ambiguity and retain-before-
-broadcast ordering. Stage removal changes orchestration identity even if SQL is unchanged. Scripted
-Store outcomes prove behavior under supplied outcomes, not database or network durability. If a
-physical authority assumption changes, require its focused managed feasibility experiment before
-approving that changed guarantee. Otherwise retain existing physical evidence as an unchanged
-control, with scoped acceptance on the eventual candidate. Retaining the keystore owner across
-reconstruction does not prove process-restart signing support. Broad gates, a complete SQL cutover
-and throughput benchmarks without a defined workload are not prerequisites for this decision.
+Use existing consumers and the same generic Runtime/Journal/Store. The illustrative monetary route
+remains hypothetical. Stop at discriminating evidence or a precise obstruction; full production
+cutover, backend acceptance and workload capacity remain separate obligations. Record uncertainty
+and discard the disposable specimen rather than making it another supported construction API.
 
 ### 16.2 Implementation acceptance
 
