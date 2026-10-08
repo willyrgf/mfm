@@ -763,14 +763,16 @@ ReadAdapter<Request, Observation>:
   check_request(&Binding, &Request) -> Result<(), InvocationDiagnostic>
   observe(&self, request_ref, &Request)
     -> async Result<Receipt, AdapterError<Fault>>
-  project(&Binding, request_ref, &Request, receipt_ref, &Receipt)
+  project(&Binding, selected_leaf_ref, request_ref, &Request,
+          original: &Object, &Receipt)
     -> Result<Observation, InvocationDiagnostic>
 
 EffectAdapter<Command, Observation>:
   check_command(&Binding, &Command) -> Result<(), InvocationDiagnostic>
   reconcile(&self, effect_id, command_ref, &Command)
     -> async Result<EffectAdapterOutcome<Receipt>, AdapterError<Fault>>
-  project(&Binding, effect_id, command_ref, &Command, receipt_ref, &Receipt)
+  project(&Binding, selected_leaf_ref, effect_id, command_ref, &Command,
+          original: &Object, &Receipt)
     -> Result<Observation, InvocationDiagnostic>
 
 AdapterError<Fault>: Operational(Fault) | Invariant(InvocationDiagnostic)
@@ -780,8 +782,26 @@ EffectAdapterOutcome<Receipt>: Pending | Settled(Receipt)
 Program requires selected Faults to implement ClassifyError. Capabilities does not depend on Program
 to express classification. Pure request validation precedes Read IO; pure complete command/binding
 validation precedes Effect command acknowledgement and all Effect IO. Providers do not choose the
-expected request/command identities: Program supplies refs from admitted Objects and Runtime
-supplies EffectId from its acknowledged command contract.
+expected request/command identities: Program supplies refs from admitted Objects and captures the
+already-qualified intrinsic leaf ref in the selected factory. Runtime supplies EffectId from its
+acknowledged command contract. The factory passes projection the admitted original Object and the
+Receipt decoded from that same Object; it never pairs an original with the pre-encoding Rust
+receipt or unrelated decoded data. original.value_ref() supplies the receipt ref without another
+argument or serialization pass.
+
+This access is required by existing consumers. The current lifecycle
+[ContractValueEvidence](crates/domains/chain/src/transaction/read.rs) and
+[TransactionEvidence](crates/domains/chain/src/transaction/capability.rs) retain exact native originals;
+typed Receipt plus its hash cannot reconstruct those Objects. Pure projection may clone the
+already-admitted Object into Observation/output where the actual consumer requires it. This is no
+new Observation Object, resolver, acknowledgement token or Runtime context.
+
+During the construction cutover, those retained evidence contracts replace implementation_ref
+with leaf_ref, meaning the exact selected intrinsic State/adapter contract rather than the removed
+native implementation ABI. The factory supplies it; an adapter cannot derive a descriptor that
+includes its State's contracts, and a provider cannot manufacture the selected code provenance.
+Revise the affected evidence/enclosing contracts together and delete the superseded field/decoder
+without a compatibility alias. Do not substitute a family name or claim executable-byte identity.
 
 Native observe/reconcile owns request-relative remote ingress qualification. Malformed remote
 JSON/protocol data, bad signatures and unacceptable external correspondence return the selected
@@ -1923,7 +1943,7 @@ a compatibility layer merely to satisfy this outline.
 | 2. `use run views as the single execution result` | Delete FailureReport, report stop preflight, result hierarchies, Application mirrors/fallbacks, and JSON/text roundtrip; retain failed RunView facts and secondary rendering errors. | Terminal stop independent of rendering; causes/acknowledgement survive hot/cold; RecoveryStopped preserves pending authority and explicit resume. |
 | 3. `make collection observation the portfolio execution unit` | Introduce nongeneric collection request/result and PortfolioProgress, private anchored EVM protocol, admitted chain-instance identity and corrected holdings output; delete old stages/contexts/valuation model and move product composition. | Independent unit/asset/identity oracle, normal head advance versus selected reorg, earlier-collection cold preservation, no provider call on local mismatch. |
 | 4. `make transaction protocols private to one effect` | Move reservation/signing/wire retention into a private EVM custody routine shared by direct semantic adapters; delete public supporting States and wrappers while retaining authority tables/ports. | First winner, acknowledged wire only, cancellation/ambiguous custody, exact settlement and no-IO cold interpretation. |
-| 5. `replace source lowering with typed construction` | Cut all authoring/cold association to borrowed-input direct builder, nongeneric Catalog, owner-local resources and direct typed ports. Preserve private initial/terminal/factory ownership, specialization identities, canonical decoding and explicit projection refs. Keep product/native admission and causal config errors in their owners; delete DSL/NativeAbi and mandatory ephemeral Observation serialization/schema/codecs. | Existing consuming extension, compile-fail adjacency, owner-distinct adapters through one genuine State contract, binding/policy reuse, zero-State/shadow-owner/foreign-checkpoint rejection, non-Serde Observation and observation-only specialization cold rejection, canonical serializer-normalization hot/cold equality, command/settlement acknowledgement, causal preparation/ingress errors and pure Effect reprojection. |
+| 5. `replace source lowering with typed construction` | Cut all authoring/cold association to borrowed-input direct builder, nongeneric Catalog, owner-local resources and direct typed ports. Preserve private initial/terminal/factory ownership, specialization identities, canonical decoding, exact original projection access and factory-supplied leaf refs; revise retained evidence/enclosing contracts from implementation_ref to leaf_ref. Keep product/native admission and causal config errors in their owners; delete DSL/NativeAbi and mandatory ephemeral Observation serialization/schema/codecs. | Existing consuming extension, compile-fail adjacency, owner-distinct adapters through one genuine State contract, binding/policy reuse, zero-State/shadow-owner/foreign-checkpoint rejection, non-Serde Observation and observation-only specialization cold rejection, literal original/code-provenance retention, canonical serializer-normalization hot/cold equality, command/settlement acknowledgement, causal preparation/ingress errors and pure Effect reprojection. |
 | 6. `store only nonzero recovery usage` | Replace dense usage with checked sparse counters throughout current records, recovery, cold decoding, and the changed wire baseline. | Retry/restart and allowance equivalence; malformed duplicate/zero entries rejected; independent large zero-recovery scenario. |
 | 7. `reduce persistence to exact frames and head metadata` | Change run baseline/query metadata, qualified canonical seal and append/load ownership; shrink catalogue checks; correct COMMIT classification and history claims. | PostgreSQL exact-head atomicity, selected snapshot/probe semantics, hostile privileges/features, independent acknowledgement-loss observations. |
 | 8. `bound configuration listing and serialize exact revisions` | Change port/Application/transports to keyset pages and coherent revision import/delete transactions; delete aggregate list and stale-query metadata. | Page coverage and bounds, exact-load validation, concurrent import/delete linearization and full cause retention. |
@@ -1955,6 +1975,82 @@ hostile-input fixtures still test explicit rejection of retired wires.
 
 ## 16. Verification and independent acceptance oracles
 
+### 16.1 Architecture validation before detailed API design
+
+Validate the disputed boundaries before polishing public signatures or starting the full cutover.
+The method below supplies evidence to proceed with named decisions, not a certificate that the
+entire RFC is implemented or correct. No experiment is claimed to have run merely because it is
+specified here. Keep the illustrative monetary route hypothetical.
+
+1. **Trace real consumer requirements and define counterexamples.** Use current Portfolio
+   snapshot/enrichment and the lifecycle, recording which facts survive interruption, which work
+   may repeat, and who supplies each original, code identity and acknowledgement. Determine whether
+   a bounded collection may repeat unfinished sources, and which native authority prevents another
+   prepared transaction after broadcast uncertainty. Write four hypotheses with independent pass/
+   fail facts: direct typed/private-erased construction; owner-local extension; canonical original/
+   code provenance; semantic Effect authority. Existing stage/test arrangements are controls, not
+   proof that their granularity is a product requirement. A counterexample revises the responsible
+   boundary before further design.
+2. **Compile one disposable consuming specimen.** Start with the actual lifecycle
+   Observe -> Validate -> Report suffix and its changing stored endpoint types. Implement only
+   enough provisional builder/factory/direct-port erasure to exercise it through the existing
+   Runtime, Journal and MemoryStore. Preserve its complete output, including exact native Objects
+   and selected code provenance. Use a non-Serde Observation without an unnecessary Sync bound,
+   one deliberate conflicting owner, and a serializer that makes canonical terms differ from its
+   pre-encoding Rust fields. Set literal expected bytes/values before writing the projector; inspect
+   native calls and stored originals independently. A scalar-only surrogate can conceal required
+   evidence. No parallel engine, new test language or polished production API is needed.
+3. **Challenge extension and acknowledgement in the same specimen.** After one owner works, give
+   an independent author the documented semantic/extension contract and add a structurally different
+   owner with distinct binding, receipt, fault and resource types. Review common units, identity,
+   evidence and rejection meaning before coding; another binding of the first adapter is only
+   instance reuse. Require no protocol branch in the shared State, generic association, Runtime,
+   Journal or Store. Separately exercise one semantic Effect fragment using the actual deployment
+   and configuration command types through the same private custody routine. Script a command
+   commit with acknowledgement withheld: no native IO may start. Then acknowledge it, settle,
+   withhold settlement acknowledgement, cancel and resume. Independently inspect the same command,
+   original and winning authority; interpretation follows acknowledgement and performs no native
+   reconciliation. Repeated calls using identical retained authority are permitted. Include one
+   real readiness/partial-outcome refusal, such as checked addition overflow after deployment,
+   which must retain deployment and stop before configuration preparation.
+4. **Review evidence and change cost independently, then stop.** Classify each hypothesis as
+   supported, counterexample or unvalidated. Inspect touched imports/modules, factory counts,
+   duplicated facts, configuration points and future change sites. An independently added owner
+   requiring central protocol dispatch, or canonical custody requiring another encoding/resolver,
+   contradicts the target. Ordinary specimen bugs warrant a local correction; behavior that cannot
+   fit without restoring deleted machinery requires an architectural revision. Stop when these
+   claims have discriminating evidence or a precise obstruction. Extract a short evidence report
+   and discard the specimen/harness; retained production tests belong to an authorized coherent
+   cutover. Prototype LOC does not establish production deletion or throughput.
+
+Choose and disclose the integration seam before the specimen starts. A new builder that lowers
+through AuthoringSource/Inject*/NativeAbi does not establish their removal. A narrowly fenced bridge
+to the current Program wire can establish typed ports and existing scheduling only; it does not
+validate target LeafDescriptor identity, machinery deletion or complete cold-wire restoration.
+Use a small collision experiment for Observation-only specializations with otherwise equal stored
+contracts/IDs, then exercise distinct committed semantic identity or checked instance meaning.
+Full target restoration, all shadow-owner/checkpoint cases, retained-selection races and every
+resource-free RunView state remain section 16.2 acceptance unless a specific contradiction makes
+their isolated mechanism necessary now. An untested target-wire claim remains provisional even
+when the ports experiment passes; approval names the individual claims it actually establishes.
+
+The contract trace has already exposed one omission: section 6.2's projection needs the admitted
+original Object and factory-supplied selected leaf ref to preserve the current lifecycle consumer.
+That source-grounded counterexample justifies the port correction; it is not executable validation
+of the replacement.
+
+Before reusing physical custody evidence, compare old/new EffectId and native-command-ref lineage,
+authority keys/domain/epoch, reservation/first-winner transactions, ambiguity and retain-before-
+broadcast ordering. Stage removal changes orchestration identity even if SQL is unchanged. Scripted
+Store outcomes prove behavior under supplied outcomes, not database or network durability. If a
+physical authority assumption changes, require its focused managed feasibility experiment before
+approving that changed guarantee. Otherwise retain existing physical evidence as an unchanged
+control, with scoped acceptance on the eventual candidate. Retaining the keystore owner across
+reconstruction does not prove process-restart signing support. Broad gates, a complete SQL cutover
+and throughput benchmarks without a defined workload are not prerequisites for this decision.
+
+### 16.2 Implementation acceptance
+
 Use [docs/build-and-verification.md](docs/build-and-verification.md) for executable commands and
 [nixfied.nix](nixfied.nix) for task composition. All direct Cargo/Rust tools run in the default Nix
 development shell. Start with affected focused tests; expand for the actual cross-crate/persistence
@@ -1985,7 +2081,7 @@ building the illustrative ZEC→WBTC→Aave route or implementing another live p
 | Preparation | Distinguishable checked-constructor failures preserve the causal InvocationDiagnostic and acknowledge no command; no command-free domain-failure transition is added. |
 | Typed construction | Consumer uses direct builder or optional Rust helpers and adds a semantic State; incompatible contracts fail compilation. Initial/terminal owner checks cover zero-State installed/uninstalled/shadow codecs without synthetic States. Caller retains borrowed input; Runtime rejects changed input. Foreign checkpoints reject without claiming function signatures preserve prefixes. |
 | Association | Unknown revision, wrong decoder/binder/handler/binding, malformed retained objects and same-reference/different-owner fresh handles reject before live attachment; no unavailable-code substitution. A valid binding conflicting with a later prepared command rejects before its append or IO. |
-| Projection identity | Read and Effect projections receive admitted request/command and native-receipt references, plus EffectId for Effects; hot/cold facts agree without reencoding originals, ambient Runtime context or live authority lookup. |
+| Projection identity | Read and Effect projections receive admitted request/command refs, the exact native original Object paired with its owner-decoded Receipt, and factory-supplied selected leaf ref, plus EffectId for Effects. Actual consuming output retains original bytes and selected code provenance without reencoding, ambient Runtime context or live authority lookup. |
 | Integration growth | Contribute two owner-distinct adapters for one actual semantic State without central protocol dispatch; many compatible bindings/policies reuse the same factories; wrong owners and unsupported contracts reject with full causes. |
 | Product selection, when supported | Exact/unique/preferred configured instances select under admitted policy; two bindings sharing a leaf may be ambiguous. Typed incompatibility differs from malformed native admission; causes survive, unknown selector categories follow schema, and no candidate selection performs IO. No new bridge product is required for this refactor. |
 | Admission races | Competing different Programs for one RunId admit one winner; losing route performs no execution IO. Lost genesis acknowledgement followed by changed config/discovery qualifies retained admission first and resumes that winner or returns conflict/ambiguity. |
@@ -2106,7 +2202,9 @@ existing consumers or focused extension fixtures; the illustrative route is not 
 | Borrowed initial input and value ownership | The consuming builder can qualify input by reference, retain private initial/terminal codec ownership and preserve unchanged Runtime start, including zero-State Programs. | The replacement API is schematic and has not yet consumed every current authoring path. | Input custody could move into Program, shadow codecs could pass, or an extra start API/Identity State could become necessary. | Cut over existing Portfolio/lifecycle construction; reject changed input and initial/terminal shadow owners, exercise zero-State and independent value-codec contributions, and retain no duplicate root payload. |
 | Fresh exact implementation ownership | Private factory/State/resource claims and builder membership can reject shadow-owner substitution while persisted identity remains semantic. | The proposed leaf-handle and checkpoint representation is not implemented. | Matching references could select different Rust owners, or a foreign checkpoint could pass nominal typing. | Consuming cross-Catalog shadow-owner and foreign-checkpoint tests; compare fresh private claims before attachment and retain cold revision trust explicitly. |
 | Preparation totality | Checked phase inputs make valid request/command preparation possible; remaining failures use the existing causal InvocationDiagnostic. | Current consuming constructors and new direct State ports must be audited together. | Expected business refusal may be forced into an Internal failure or motivate an unnecessary command-free Runtime transition. | Review each retained constructor/admission invariant, place expected refusal at its owning admission or interpretation boundary, and test preparation failure with no command append. |
-| Audit identity projection | Direct projections receive exact admitted request/command/native settlement Object identities and EffectId from the existing canonical boundary. | Proposed port signatures remain schematic. | Implementers may reconstruct identities or add unnecessary context/serialization machinery. | Specify origin/correspondence in each selected factory contract; assert hot/cold equality with no extra encoding or IO. |
+| Audit identity projection | Direct projections receive admitted request/command refs, original Object and its decoded Receipt, selected intrinsic leaf ref, and EffectId for Effects; retained evidence replaces old native implementation identity explicitly. | Corrected ports and evidence-value cutover remain schematic. | Original retention or selected code provenance could be lost, reconstructed or mislabeled. | Preserve the actual lifecycle output's independently expected original bytes/ref and new leaf-ref meaning; test same-Object pairing and hot/cold projection without another original encoding or IO. |
+| Validation specimen scope | A disposable direct-port/association slice can challenge real consumers without recreating Runtime or implementing most of the cutover. | Current Program association and wire are coupled to superseded machinery. | A shim could hide missing target identity guarantees, or exploratory work could become a competing implementation. | Declare the seam and claim limits first; independently review changes, retain UNVALIDATED target-wire claims, and discard the specimen after extracting evidence. |
+| Native custody identity lineage | One semantic EffectId can supply private reservation/wire authority while retaining exact native-command correspondence and ambiguity. | Current public reservation/preparation stages have distinct EffectIds; removing them changes orchestration identity origin. | Reused helpers could load the wrong authority, prepare another winner or misstate acknowledgement. | Compare actual old/new ID/ref/key lineage before reusing physical controls; exercise concrete helper correspondence and select focused managed evidence if the authority arrangement changes. |
 | Ephemeral Observation identity | Plain Rust Observation and exact factory type equality suffice when existing semantic IDs/revisions or checked instance facts identify every behavior-changing specialization. | Observation schema currently distinguishes some generic/const variants automatically; actual variants must be inventoried before deletion. | A cold sole replacement could change projection behavior under unchanged committed identity. | Consume a non-Serde Observation; reject fresh colliding variants and cold mismatched specialization revisions; review remaining stored ABI plus hidden parameters without adding an ObservationId trait. |
 | Authoritative canonical values | Selected decoding of admitted Objects can feed validation, IO and projection consistently for both hot and cold execution. | Custom Serialize implementations can normalize pre-encoding values, and current fused paths must be audited. | Hot commands/interpretation may use different terms from acknowledged authority or cold recovery. | Exercise a deliberately normalizing serializer with independent expected canonical terms; assert checks, provider arguments, exact refs and hot/cold output agree, with no second original encoding. |
 | Effect projection cost | Repeating pure projection before settlement acknowledgement and during interpretation is acceptable for the simple erased callback contract. | Representative projection costs have not been measured. | Expensive native validation could add meaningful CPU cost. | Preserve acknowledgement/cancellation evidence and measure a real affected consumer before considering any additional cache/continuation representation. |
