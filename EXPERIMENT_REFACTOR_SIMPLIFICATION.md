@@ -1,6 +1,6 @@
 # Experiment: validate the refactor simplification architecture
 
-**Status:** planned; executable experiments have not run.
+**Status:** execution started; baseline and predictions recorded before specimen implementation.
 **Architecture baseline:** [RFC_REFACTOR_SIMPLIFICATION.md](RFC_REFACTOR_SIMPLIFICATION.md),
 including its projection correction at `d72b2e08`.
 **Available evidence:** the source-review finding F1 in section 6 below.
@@ -304,6 +304,78 @@ the corrected callback, target evidence schema or hot/cold execution has been im
 | H2: owner-local extension | Not run | Unvalidated | Need independently reviewed common semantics and a second author's change evidence. |
 | H3: canonical original/code provenance | Not run | Unvalidated | F1 corrected an insufficient port by source review; need literal-byte, codec and specialization probes. |
 | H4: semantic Effect authority | Not run | Unvalidated | Need actual ID/ref lineage, scripted acknowledgement trace and any implicated physical evidence. |
+
+### Execution baseline and predictions (recorded before implementation)
+
+The actual checkout was clean at `a478fc341d993f3b9b747d72c53a6f027be41452`, the plan
+commit: `git status --short` returned no entries and there were no subsequent commits. Current
+production controls therefore use that exact revision. The owned disposable worktree is
+`/tmp/mfm-simplification-specimen-a478fc34`, detached at the same revision. Main-checkout work
+is restricted to this results record, necessary RFC corrections, and inert reproducibility evidence.
+
+The specialist launches accepted construction/canonical and independent extension assignments of
+`gpt-6.1-sol/high`, Effect/custody `gpt-6.1-sol/xhigh`, and independent read-only review
+`gpt-6-astra/xhigh`. The coordinator's active model/effort cannot be independently introspected;
+the requested `gpt-6-astra/xhigh` coordinator assignment is not claimed as verified. No worker
+availability substitution was reported. Extension implementation starts only after the initial
+construction specimen works and its ports are documented. The coordinator owns all shared records.
+
+**Requirements traced.** Current Portfolio acknowledges finer source stages, but neither those
+stages nor existing tests establish a product requirement for within-collection continuation.
+Collection repetition remains a product uncertainty. Holdings mean exact asset/account/ledger,
+raw unsigned base units, denomination, observation point and source coverage; scale alignment
+supplies no price or FX fact. The distinct native fixture must not be forced into the scalar
+lifecycle contract. Lifecycle requires its deployment, configuration and observation originals,
+request/effective values and selected code provenance through Observe -> Validate -> Report.
+
+The current Runtime trace is prepare/check -> native Read IO -> admit original -> fused
+projection/interpretation -> append original/outcome. Cancellation before that append may repeat
+Read work. Operational originals append before classification. Effects instead prepare/check ->
+append command -> acknowledged adapter entry -> qualify settlement -> append settlement -> pure
+interpretation. The Store response establishes caller acknowledgement; independent underlying
+Store inspection establishes actual retained bytes. They are different facts. Interrupted physical
+attempts are not necessarily recorded. Authority load/reservation and retained winning signed wire
+prevent independent replacement after uncertain broadcast, subject to the actual identity lineage
+review below. Current semantic recipes deterministically derive creation/call commands from
+DeploymentRequest/DeployedContract, while current public stages use distinct EffectIds.
+
+**Smallest proposed seam.** Program's `freeze`, document/StateData construction and executable
+association are crate-private. A disposable `experiment_bridge` inside Program may construct
+current StateData/NativeAbi descriptors and associate directly supplied callbacks after complete
+qualification. It must not lower through AuthoringSource, Inject*, Plan or the source DSL. A typed
+consuming builder and private factory erasure enter the actual immutable Program; production
+Runtime, Journal, Store and canonical values remain unchanged. Existing wire evidence slots can
+carry the native Receipt while ephemeral Observation remains inside the completion callback.
+The selected bridge descriptor reference is a provenance stand-in in the existing
+`implementation_ref` field, not implementation of the proposed `leaf_ref` schema. Target descriptor,
+full target cold association and production deletion remain unvalidated through this seam.
+
+**Predetermined discriminators.** These are predictions, not passes:
+
+| Probe | Expected literal facts / independent oracle | Counterexample consequence |
+| --- | --- | --- |
+| Lifecycle construction | ConfiguredContract -> ObservedConfiguration -> ValidatedConfiguration -> ContractDeploymentReport; effective/observed scalar 42; target address twenty bytes of 4; getter selector `3fa4f245`; anchor number 7/hash thirty-two bytes of 7; exact supplied deployment/configuration/observation originals retained. Provider argument sink and underlying stored frames are separate from projection. | Missing output/provenance contradicts the chosen port. |
+| Canonical normalization | Complete request and receipt fixture JSON is `{"value":7}`; pre-encoding Rust fields are 9. Selected decoding supplies 7 to checks, provider, projection and interpretation; output value 7. Each original serializer runs once. Compare literal bytes and stored Objects, not only hot/cold equality. | Using 9 after admission or re-encoding originals contradicts canonical authority. |
+| Plain Observation | Lifecycle observation contains actual evidence plus `Cell<u8>`, with no Serde/MfmValue/Sync requirement; created and consumed within the pure fused callback. | A necessary serialized/Sync Observation contradicts the claimed bound removal. |
+| Adjacency and pairing | Wrong ConfiguredContract -> Report adjacency and incompatible State/adapter Observation fail compilation at associated-type equality. Borrowed initial input remains available; Runtime independently rejects changed input. | Erased public composition or ignored mismatch contradicts typed construction. |
+| Ownership | A shadow Rust owner with the same selected semantic key rejects before binder attachment and provider entry; both independent counters remain zero. | Silent replacement contradicts fresh ownership. |
+| Local/native failure | Local binding disagreement has no provider call or operational append. A supplied native fault retains distinguishable nested causes and classification through cold inspection. | Internal disagreement cannot become authenticated native failure; discarded causes violate custody. |
+| Extension | Independently authored equivalent holdings owner preserves raw 42/denomination 0 and empty 0 under reviewed native identity/point semantics. Its binding, receipt, fault and resource types differ. Compatible instances reuse one factory. | Central protocol branch or coerced units/rejection semantics refutes locality/sharing. |
+| Specialization | Equal remaining stored contracts/family IDs plus behavior-changing hidden Observation parameters expose collision; distinct semantic revisions or checked instance facts separate meaning. | Same committed target identity with changed cold meaning is unsafe; an old-wire check alone cannot validate the target. |
+| Effect schedule | Underlying command append completes while response is withheld: native/authority/signer/provider counters stay zero. After acknowledgement, retained authority determines exact winner. Settlement append is observed independently, response withheld, caller cancelled; reconstruction interprets retained settlement with no native IO. | Early IO/interpretation, replaced authority or re-signing acknowledged settlement refutes H4. |
+| Partial outcome | After acknowledged deployment, maximum unsigned-256 plus one refuses at the existing checked-add domain boundary; successful deployment remains retained and configuration preparation count is zero. | Internal preparation failure or lost deployment exposure contradicts readiness ownership. |
+
+The Effect worker will record exact old/new command/ref/key lineage and physical experiment selection
+before implementing its fragment. Neither a historical managed pass nor a scripted Store response
+establishes changed PostgreSQL authority mapping or real network behavior.
+
+**Material uncertainties at prediction time.** The current-wire descriptor may prevent a small
+callback association; validate by compiling the bridge and stop if a second execution engine is
+needed. Collection interruption requirements are unspecified; retain them as unvalidated instead
+of inferring product intent. The independent holdings owner may require different semantics;
+review units/identity/trust/rejection first and use a distinct contract when necessary. Target
+specialization identity is not supplied by the current wire. Authority lineage changes may require
+managed physical evidence; select that evidence from actual keys/order before relying on controls.
 
 ### Execution result template
 
