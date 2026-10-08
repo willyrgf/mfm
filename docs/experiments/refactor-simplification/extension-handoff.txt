@@ -1,0 +1,13 @@
+Independent extension authorized only after:
+- construction worker reported 4/4 focused runtime probes passing;
+- coordinator-authored first holdings owner passed 1/1 focused test.
+First owner command: nix develop -c cargo test -p mfm-evm --test simplification_holdings -- --nocapture
+Command exit status: 0; 1 passed, 0 ignored.
+First owner literal source: RFC section 16.2 product-units oracle, 1000000000000000000 raw native units at denomination 18.
+Shared semantic contract: CollectionRequest -> CollectionOutput with owner-native ledger/target/point envelopes, raw Unsigned256 and actual denomination; explicit route and observation policy; exact ordered coverage and common collection point. No fiat conversion or cross-owner simultaneous-snapshot claim.
+First owner: scripted EVM per-target results with EvmChainInstance/EvmBalanceTarget/EvmBlockAnchor, one factory shared by route-a and route-b.
+First owner shared file: crates/domains/evm/tests/simplification/holdings.rs
+Shared-file SHA256 at handoff after pinned formatting: 2501773bb7aceb1d45822427d2fbf0c8f34c2b5bf4de0d98d2e80e110b138f13
+First owner consuming test: crates/domains/evm/tests/simplification_holdings.rs
+Test SHA256 at handoff: 211deb61e3f41ec85ebd260061b2e3c5354896be4e60bdcfb67aa39eb1359543
+Extension worker owns only tests/simplification_extension.rs and tests/simplification/extension.rs, consumes the documented bridge/shared port, and adds the distinct batch owner independently.

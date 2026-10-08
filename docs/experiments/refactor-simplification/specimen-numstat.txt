@@ -1,0 +1,15 @@
+7	0	crates/domains/evm/tests/simplification/compile_fail/adjacency.rs
+65	0	crates/domains/evm/tests/simplification/compile_fail/observation.rs
+33	0	crates/domains/evm/tests/simplification/compile_fail/run.sh
+348	0	crates/domains/evm/tests/simplification/extension.rs
+246	0	crates/domains/evm/tests/simplification/holdings.rs
+925	0	crates/domains/evm/tests/simplification_construction.rs
+538	0	crates/domains/evm/tests/simplification_extension.rs
+130	0	crates/domains/evm/tests/simplification_holdings.rs
+968	0	crates/kernel/program/src/experiment_bridge.rs
+3	0	crates/kernel/program/src/lib.rs
+1	0	crates/live/evm/src/lib.rs
+84	0	crates/live/evm/src/refactor_effect_custody.rs
+954	0	crates/live/evm/tests/refactor_effect.rs
+454	0	crates/live/evm/tests/support/refactor_effect_managed.rs
+4	0	nixfied.nix

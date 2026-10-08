@@ -1,0 +1,59 @@
+# Construction/canonical evidence handoff
+
+Assigned model: gpt-6.1-sol/high. Predictions were written before implementation to /tmp/mfm-construction-predictions.md, then coordinator recorded main commits 0c01b589 and 36a178f6 before authorization.
+
+## Actual seam
+
+Disposable current-wire module `crates/kernel/program/src/experiment_bridge.rs` constructs crate-private StateData/ProgramDocument/ExecutableState then calls real Program::freeze. It never calls compile, AuthoringSource, Inject*, Resolve or structural source lowering. Real Runtime, canonical Values, Journal and MemoryStore execute candidate callbacks unchanged.
+
+The module computes an explicitly provisional `mfm.experiment.leaf.v1` descriptor committing mode, State/adapter semantic IDs and actual persisted contracts; Observation has no descriptor. Its key is placed into current v9 State implementation and NativeAbi implementation/capability fields. Request/native_request slots coincide and Receipt/evidence/native_evidence slots coincide. This is not the RFC's target Program wire. Existing evidence `implementation_ref` field carries this exact selected provisional key as a documented specimen stand-in; target leaf_ref schema/cutover is unvalidated. Lifecycle selected key is ba70ab76e5158565215b6baf334a21458dc8127462c29cb4e6edaa052d6100bc with schema mfm-experiment-leaf:1 (schema digest zero).
+
+Catalog and builder are direct typed ports with private concrete State/adapter/resource TypeIds, borrowed explicit owner ResourceTable and consuming changing Current type. Builder retains initial ref plus original root TypeId, not initial Object. Factories qualify whole document contracts, bindings, resources and exact Stop handler ABI/parameters before first adapter attachment. Arbitrary custom policies/checkpoints are unsupported and rejected; complete target catalog/codec/checkpoint/no-resource inspection design is not established.
+
+Production Observe semantics are invoked through its actual ReadState interpretation using ConfiguredContract -> ObservedConfiguration. Actual Validate and Report complete the changing path. Native existing EvmContractReadImplementation translation/project helpers are reused as the real native owner's deterministic logic; they do not drive source lowering. Shared Chain predecessor is made with real constructors and scripted settlement facts. Artifact support/deployment Effects are not asserted by this Read specimen and no missing-artifact early return exists.
+
+## Commands and observed result
+
+Working directory: /tmp/mfm-simplification-specimen-a478fc34. All direct Rust tools ran through default Nix shell.
+
+- `nix develop -c cargo check -p mfm-program --lib`: exit 0; /tmp/mfm-bridge-check.log. Early initial seam compile, not final candidate gate.
+- `nix develop -c cargo test -p mfm-evm --test simplification_construction -- --nocapture`: exit 0; 7 passed, 0 failed/ignored; /tmp/mfm-construction-test.log. Final owned-source execution before coordinator freeze.
+- `nix develop -c cargo-clippy clippy -p mfm-program -p mfm-evm --test simplification_construction -- -D warnings`: exit 0; /tmp/mfm-construction-clippy.log.
+- `nix develop -c bash crates/domains/evm/tests/simplification/compile_fail/run.sh /tmp/mfm-construction-compile-fail-final`: shell exit 0; each cargo consumer check exit 101; /tmp/mfm-construction-compile-fail-final/{adjacency.log,observation.log,statuses.txt}, outer /tmp/mfm-construction-compile-fail-final.log. E0271 ConfiguredContract->Report is excluded because Report requires ValidatedConfiguration; E0277 State Observation u8 cannot pair with NativeRead<Request,bool>. Script asserts error categories, not incidental wording.
+
+Ordinary prototype errors corrected: EntryPointId fixture grammar; typed serde JSON mutation; exact retained-object test API borrowing; proper InvocationFailure/RuntimeError nesting; MutexGuard scope for clippy. Reviewer found fused callback panic phase and late handler qualification, fixed and covered by executable regressions. No architectural counterexample was hidden by weakening admission, resource or error contracts.
+
+## Independent assertions
+
+1. `changing_actual_lifecycle_retains_complete_originals_and_selected_key`: report expected effective/observed 42; exact retained request and deployment/configuration semantic contexts; native original literal canonical strings "101" and "102"; exact admitted native getter original; independently recorded provider getter args target04, selector3fa4f245, anchor number7/hash07. Native original oracle independently states native JSON kind/anchor/32-byte return encoding, and uses observed native-intent identity rather than retrying receipt serializer. Exact stored report is decoded from underlying Store path /payload/operation/succeeded/output. Selected provenance equals actual document declaration as well as leaf handle. Borrowed original input remains available; Runtime rejects changed effective43 input before provider entry. Current-wire cold re-association/inspection preserves output and provider count1.
+
+2. `admitted_request_and_receipt_are_authoritative_over_preencoding_nine`: independent fixture Request and Receipt each propose field9; legal custom serializers emit literal {"value":7}. Native check/provider args/State request/project decoded receipt/output all7. Request and receipt original encoders count exactly1 each, unchanged after cold inspection. Underlying Store observer bypasses Runtime result and extracts exact typed Objects at /payload/operation/succeeded/call/read/{intent,evidence}; both bytes equal complete literal {"value":7}, content digests equal independently computed literal hash, schemas equal their selected declared contracts. Input scalar9 remains its own admitted input; this does not falsely require all run bytes lack9. Observation contains Cell<u8>, has no Serde/MfmValue/Sync and stays inside fused pure worker.
+
+3. `conflicting_owner_rejects_before_attachment_or_provider_call`: ShadowObserve has same semantic key/contracts and different Rust owner; finishing against separately installed DirectObserve rejects reason conflicting_owner, attachments0/provider0.
+
+4. `local_binding_failure_has_no_native_append_and_native_fault_keeps_cause`: local alternate route rejects with provider0 and underlying Store head admission-only1. Native fault retains literal {"cause":{"code":731,"message":"fixture transport rejected getter"},"operation":"get_scalar"}; explicit decoded fields/classify Permanent, stored classification permanent and cold Failure.original exact, provider count1. No native failure becomes successful report.
+
+5. `unrecorded_native_fault_remains_invocation_custody_after_store_refusal`: native fault731 returned, Store operational-original append refuses with independent cause932. Runtime RecordingFailure retains original and concrete Store error; underlying Store head1. No durable audit claim through failed Store.
+
+6. `interpretation_panic_preserves_read_interpret_operation_and_admission_head`: pure State panic stays Runtime Operation::ReadInterpret/Stage::Execute, task_failure, no payload retained, head1. Observation stays inside same job.
+
+7. `late_wrong_handler_rejects_before_any_resource_attachment`: alter valid current-wire second declaration handler implementation; cold qualification rejects before first adapter attachment or IO (both0).
+
+Exact retained fixture frames saved /tmp/mfm-normal-frame.json, /tmp/mfm-lifecycle-frame.json, /tmp/mfm-fault-frame.json. These are public scripted fixture facts; no credentials or signer material.
+
+## Claim classification
+
+- H1 direct typed changing construction/factory erasure/current Runtime integration: Supported within current-wire seam. Incompatible ports and fresh conflicting owner exclusion Supported. Actual deletion of existing source machinery/full target wire: Unvalidated.
+- H3 canonical authority/original custody/plain nonSync Observation/selected provisional-key provenance: Supported by literal bytes plus provider/store oracles. Whole target evidence leaf_ref schema and target-wire cold restoration: Unvalidated. Specialization evidence owned by independent extension worker.
+- H2/H4 are other workers' evidence, not certified by this handoff.
+
+## Accounting and limits
+
+Owned raw specimen line counts at handoff: experiment_bridge.rs 968; simplification_construction.rs 925; compile-fail sources7+65 and run script33; lib export3. All are disposable, not supported API or production reduction. Necessary experimental complexity: direct typed association/owner checks, both callback modes/erasure, canonical codecs/panic phase preservation, complete qualification and current-wire reconstruction, independent literal/Store/provider/error oracles. No duplicate Runtime/Journal/Store exists. No production implementation is deleted or reduced by this specimen; eventual production cutover LOC remains unproven.
+
+## Material uncertainties
+
+- Target Program/evidence schema differs from exercised current v9 bridge. Wrong assumptions may invalidate full cold association; validate complete target cutover separately.
+- Lifecycle predecessor settlement/artifact truth is scripted. Getter argument/dataflow/original custody are validated, actual chain/deployment acceptance is not; managed Effect worker supplies separate evidence.
+- Semantic revision discipline and executable-byte authenticity are trust obligations, not demonstrated by private TypeId or content key.
+- Full checkpoint, shadow terminal owner, arbitrary handler and unavailable-resource historical inspection acceptance is outside Stop-only seam; reject unsupported cases rather than claim it implemented.

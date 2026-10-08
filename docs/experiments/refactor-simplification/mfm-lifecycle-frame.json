@@ -1,0 +1,601 @@
+{
+  "domain": "mfm.run.frame.v6",
+  "payload": {
+    "checkpoints": [],
+    "domain": "mfm.runtime-record.v1",
+    "effect_barrier": null,
+    "operation": {
+      "succeeded": {
+        "call": {
+          "pure": {
+            "input": {
+              "canonical": {
+                "observed": {
+                  "configured": {
+                    "configuration": {
+                      "command_ref": {
+                        "content_digest": "content:sha256-v1:e4bb04eec661be0b6c4cde1d3e6dca3fff3c9bdbb8c1244061f85bab274505e9",
+                        "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+                      },
+                      "effect_id": "effect:sha256-jcs-v1:0909090909090909090909090909090909090909090909090909090909090909",
+                      "implementation_ref": {
+                        "content_digest": "content:sha256-v1:e4bb04eec661be0b6c4cde1d3e6dca3fff3c9bdbb8c1244061f85bab274505e9",
+                        "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+                      },
+                      "observed_at": {
+                        "ledger": {
+                          "native": {
+                            "canonical": {
+                              "chain_id": 1,
+                              "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                            },
+                            "value_ref": {
+                              "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                              "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                            }
+                          }
+                        },
+                        "native": {
+                          "canonical": {
+                            "hash": "0x0707070707070707070707070707070707070707070707070707070707070707",
+                            "number": "7"
+                          },
+                          "value_ref": {
+                            "content_digest": "content:sha256-v1:1e8e9f2e96982886c025a5ca756ea0fe79984b3b8969f832a34ec7c894bd4bf4",
+                            "schema_id": "schema:mfm.evm-block-point:1:sha256-jcs-v1:4e6f07320b60e354512fffe73f039d1b9f00202cf0964fd3d7995c1035ee828f"
+                          }
+                        }
+                      },
+                      "original": {
+                        "canonical": "102",
+                        "value_ref": {
+                          "content_digest": "content:sha256-v1:1fbd068c903e3ca1cfcad613365160c038d5ae7c86d2dc8863a37bbc8e331464",
+                          "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+                        }
+                      },
+                      "result": {
+                        "applied": {
+                          "output": null
+                        }
+                      },
+                      "transaction": {
+                        "ledger": {
+                          "native": {
+                            "canonical": {
+                              "chain_id": 1,
+                              "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                            },
+                            "value_ref": {
+                              "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                              "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                            }
+                          }
+                        },
+                        "native": {
+                          "canonical": "0x0909090909090909090909090909090909090909090909090909090909090909",
+                          "value_ref": {
+                            "content_digest": "content:sha256-v1:42904df571bc47059423efa1b0a34d46d0d906d482e58a4669923f31fb5eaec9",
+                            "schema_id": "schema:mfm.evm-hash:1:sha256-jcs-v1:ac6987ba5dd6d4432514f834a5423e6602cf88e23e2f49f3bbaaedd4cd60cc23"
+                          }
+                        }
+                      }
+                    },
+                    "configured": {
+                      "deployment": {
+                        "command_ref": {
+                          "content_digest": "content:sha256-v1:e4bb04eec661be0b6c4cde1d3e6dca3fff3c9bdbb8c1244061f85bab274505e9",
+                          "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+                        },
+                        "effect_id": "effect:sha256-jcs-v1:0808080808080808080808080808080808080808080808080808080808080808",
+                        "implementation_ref": {
+                          "content_digest": "content:sha256-v1:e4bb04eec661be0b6c4cde1d3e6dca3fff3c9bdbb8c1244061f85bab274505e9",
+                          "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+                        },
+                        "observed_at": {
+                          "ledger": {
+                            "native": {
+                              "canonical": {
+                                "chain_id": 1,
+                                "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                              },
+                              "value_ref": {
+                                "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                                "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                              }
+                            }
+                          },
+                          "native": {
+                            "canonical": {
+                              "hash": "0x0707070707070707070707070707070707070707070707070707070707070707",
+                              "number": "7"
+                            },
+                            "value_ref": {
+                              "content_digest": "content:sha256-v1:1e8e9f2e96982886c025a5ca756ea0fe79984b3b8969f832a34ec7c894bd4bf4",
+                              "schema_id": "schema:mfm.evm-block-point:1:sha256-jcs-v1:4e6f07320b60e354512fffe73f039d1b9f00202cf0964fd3d7995c1035ee828f"
+                            }
+                          }
+                        },
+                        "original": {
+                          "canonical": "101",
+                          "value_ref": {
+                            "content_digest": "content:sha256-v1:4f0112476f5f4c14ff4ac13a792cb691119b4e1ebf07b2fdd4a901c0b7b56e34",
+                            "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+                          }
+                        },
+                        "result": {
+                          "applied": {
+                            "output": {
+                              "ledger": {
+                                "native": {
+                                  "canonical": {
+                                    "chain_id": 1,
+                                    "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                                  },
+                                  "value_ref": {
+                                    "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                                    "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                                  }
+                                }
+                              },
+                              "native": {
+                                "canonical": "0x0404040404040404040404040404040404040404",
+                                "value_ref": {
+                                  "content_digest": "content:sha256-v1:49ee2fbe9e042105cc6a3f409327c8932e1131a439c92794989de3e67e7fefcb",
+                                  "schema_id": "schema:mfm.evm-address:1:sha256-jcs-v1:62ac7e52b8bd00da7f684795487a1faefc5d3b2536d50984fbcc884e0af88455"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "transaction": {
+                          "ledger": {
+                            "native": {
+                              "canonical": {
+                                "chain_id": 1,
+                                "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                              },
+                              "value_ref": {
+                                "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                                "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                              }
+                            }
+                          },
+                          "native": {
+                            "canonical": "0x0808080808080808080808080808080808080808080808080808080808080808",
+                            "value_ref": {
+                              "content_digest": "content:sha256-v1:b8687938b40b486eb88b568428becef961d68c53ad6ca0b3169728623acafaf7",
+                              "schema_id": "schema:mfm.evm-hash:1:sha256-jcs-v1:ac6987ba5dd6d4432514f834a5423e6602cf88e23e2f49f3bbaaedd4cd60cc23"
+                            }
+                          }
+                        }
+                      },
+                      "effective": "42",
+                      "request": {
+                        "artifact": {
+                          "ledger": {
+                            "native": {
+                              "canonical": {
+                                "chain_id": 1,
+                                "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                              },
+                              "value_ref": {
+                                "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                                "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                              }
+                            }
+                          },
+                          "native": {
+                            "canonical": "13",
+                            "value_ref": {
+                              "content_digest": "content:sha256-v1:e23f8f39182c82127c1bef3cbfd9b54e30e1df4916da81dcfc2a801c23f3bf01",
+                              "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+                            }
+                          }
+                        },
+                        "execution": {
+                          "native": {
+                            "canonical": {
+                              "chain_instance": {
+                                "chain_id": 1,
+                                "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                              },
+                              "endpoint_ref": {
+                                "content_digest": "content:sha256-v1:391552c099c101b131feaf24c5795a6a15bc8ec82015424e0d2b4274a369a0bf",
+                                "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+                              }
+                            },
+                            "value_ref": {
+                              "content_digest": "content:sha256-v1:b3cbc07b144c250bd2b55e96b50a911ad7105aeac916a91caa6a4f354e584b29",
+                              "schema_id": "schema:mfm.evm-transaction-route:1:sha256-jcs-v1:ed1444b8cc704f9406fc89bef4d4b43a7e02a0814ee9db5ddf2adc23f8204c5a"
+                            }
+                          },
+                          "observation_route_ref": {
+                            "content_digest": "content:sha256-v1:b3cbc07b144c250bd2b55e96b50a911ad7105aeac916a91caa6a4f354e584b29",
+                            "schema_id": "schema:mfm.evm-transaction-route:1:sha256-jcs-v1:ed1444b8cc704f9406fc89bef4d4b43a7e02a0814ee9db5ddf2adc23f8204c5a"
+                          },
+                          "read_implementation": "experiment.evm.scalar@1",
+                          "transaction_implementation": "fixture.transaction@1"
+                        },
+                        "increment": "0",
+                        "requested": "42",
+                        "restart_allowance": null,
+                        "retry_allowance": null
+                      }
+                    }
+                  },
+                  "observation": {
+                    "implementation_ref": {
+                      "content_digest": "content:sha256-v1:ba70ab76e5158565215b6baf334a21458dc8127462c29cb4e6edaa052d6100bc",
+                      "schema_id": "schema:mfm-experiment-leaf:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"
+                    },
+                    "intent_ref": {
+                      "content_digest": "content:sha256-v1:565e9d32ece41e4ef8a2986296ed06425e7813ca6a7970663201da7e7d8dca57",
+                      "schema_id": "schema:mfm.chain-read-contract-value:2:sha256-jcs-v1:f2a0b54fad00b40f5cb3db04e046d7fab956855168087363df82519baf5256fa"
+                    },
+                    "original": {
+                      "canonical": {
+                        "kind": "returned",
+                        "value": {
+                          "intent_value_ref": {
+                            "content_digest": "content:sha256-v1:10f8fc78a612040c78142a6842db358e97d55ca9acc0b34f6cc21f8ab226b9e2",
+                            "schema_id": "schema:mfm.evm-anchored-contract-call-intent:1:sha256-jcs-v1:7b3476cd022d1980dec5c27632eb19f9ae9e5dcfbb0a19e7d4eb2d92bbc0bc6e"
+                          },
+                          "result": {
+                            "anchor": {
+                              "hash": "0x0707070707070707070707070707070707070707070707070707070707070707",
+                              "number": "7"
+                            },
+                            "return_bytes": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACo"
+                          }
+                        }
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:5dd3527c3524b29dbbc0aa001e78c5e78e0bf12747d81784be69e3b9688f48c8",
+                        "schema_id": "schema:mfm.evm-anchored-contract-call-evidence:1:sha256-jcs-v1:26fa68e349f854eee2322b0c44d3be4023f564ff1c6d387f22402509e9a30829"
+                      }
+                    },
+                    "outcome": {
+                      "observed": {
+                        "observed_at": {
+                          "ledger": {
+                            "native": {
+                              "canonical": {
+                                "chain_id": 1,
+                                "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                              },
+                              "value_ref": {
+                                "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                                "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                              }
+                            }
+                          },
+                          "native": {
+                            "canonical": {
+                              "hash": "0x0707070707070707070707070707070707070707070707070707070707070707",
+                              "number": "7"
+                            },
+                            "value_ref": {
+                              "content_digest": "content:sha256-v1:1e8e9f2e96982886c025a5ca756ea0fe79984b3b8969f832a34ec7c894bd4bf4",
+                              "schema_id": "schema:mfm.evm-block-point:1:sha256-jcs-v1:4e6f07320b60e354512fffe73f039d1b9f00202cf0964fd3d7995c1035ee828f"
+                            }
+                          }
+                        },
+                        "value": "42"
+                      }
+                    }
+                  }
+                }
+              },
+              "value_ref": {
+                "content_digest": "content:sha256-v1:6bd6fc36d875fd23480abfbdcc9a4690e5b04b8919ba1a685bddcc1c0f18126b",
+                "schema_id": "schema:mfm.chain-validated-configuration:1:sha256-jcs-v1:02655ddda629190a47308717741035b64d96abc8d04339ce945bfc0e12fceec6"
+              }
+            },
+            "position": {
+              "state": 2,
+              "visit": 2
+            }
+          }
+        },
+        "output": {
+          "canonical": {
+            "configuration": {
+              "command_ref": {
+                "content_digest": "content:sha256-v1:e4bb04eec661be0b6c4cde1d3e6dca3fff3c9bdbb8c1244061f85bab274505e9",
+                "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+              },
+              "effect_id": "effect:sha256-jcs-v1:0909090909090909090909090909090909090909090909090909090909090909",
+              "implementation_ref": {
+                "content_digest": "content:sha256-v1:e4bb04eec661be0b6c4cde1d3e6dca3fff3c9bdbb8c1244061f85bab274505e9",
+                "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+              },
+              "observed_at": {
+                "ledger": {
+                  "native": {
+                    "canonical": {
+                      "chain_id": 1,
+                      "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                      "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                    }
+                  }
+                },
+                "native": {
+                  "canonical": {
+                    "hash": "0x0707070707070707070707070707070707070707070707070707070707070707",
+                    "number": "7"
+                  },
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:1e8e9f2e96982886c025a5ca756ea0fe79984b3b8969f832a34ec7c894bd4bf4",
+                    "schema_id": "schema:mfm.evm-block-point:1:sha256-jcs-v1:4e6f07320b60e354512fffe73f039d1b9f00202cf0964fd3d7995c1035ee828f"
+                  }
+                }
+              },
+              "original": {
+                "canonical": "102",
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:1fbd068c903e3ca1cfcad613365160c038d5ae7c86d2dc8863a37bbc8e331464",
+                  "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+                }
+              },
+              "result": {
+                "applied": {
+                  "output": null
+                }
+              },
+              "transaction": {
+                "ledger": {
+                  "native": {
+                    "canonical": {
+                      "chain_id": 1,
+                      "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                      "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                    }
+                  }
+                },
+                "native": {
+                  "canonical": "0x0909090909090909090909090909090909090909090909090909090909090909",
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:42904df571bc47059423efa1b0a34d46d0d906d482e58a4669923f31fb5eaec9",
+                    "schema_id": "schema:mfm.evm-hash:1:sha256-jcs-v1:ac6987ba5dd6d4432514f834a5423e6602cf88e23e2f49f3bbaaedd4cd60cc23"
+                  }
+                }
+              }
+            },
+            "deployment": {
+              "command_ref": {
+                "content_digest": "content:sha256-v1:e4bb04eec661be0b6c4cde1d3e6dca3fff3c9bdbb8c1244061f85bab274505e9",
+                "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+              },
+              "effect_id": "effect:sha256-jcs-v1:0808080808080808080808080808080808080808080808080808080808080808",
+              "implementation_ref": {
+                "content_digest": "content:sha256-v1:e4bb04eec661be0b6c4cde1d3e6dca3fff3c9bdbb8c1244061f85bab274505e9",
+                "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+              },
+              "observed_at": {
+                "ledger": {
+                  "native": {
+                    "canonical": {
+                      "chain_id": 1,
+                      "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                      "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                    }
+                  }
+                },
+                "native": {
+                  "canonical": {
+                    "hash": "0x0707070707070707070707070707070707070707070707070707070707070707",
+                    "number": "7"
+                  },
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:1e8e9f2e96982886c025a5ca756ea0fe79984b3b8969f832a34ec7c894bd4bf4",
+                    "schema_id": "schema:mfm.evm-block-point:1:sha256-jcs-v1:4e6f07320b60e354512fffe73f039d1b9f00202cf0964fd3d7995c1035ee828f"
+                  }
+                }
+              },
+              "original": {
+                "canonical": "101",
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:4f0112476f5f4c14ff4ac13a792cb691119b4e1ebf07b2fdd4a901c0b7b56e34",
+                  "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+                }
+              },
+              "result": {
+                "applied": {
+                  "output": {
+                    "ledger": {
+                      "native": {
+                        "canonical": {
+                          "chain_id": 1,
+                          "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                        },
+                        "value_ref": {
+                          "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                          "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                        }
+                      }
+                    },
+                    "native": {
+                      "canonical": "0x0404040404040404040404040404040404040404",
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:49ee2fbe9e042105cc6a3f409327c8932e1131a439c92794989de3e67e7fefcb",
+                        "schema_id": "schema:mfm.evm-address:1:sha256-jcs-v1:62ac7e52b8bd00da7f684795487a1faefc5d3b2536d50984fbcc884e0af88455"
+                      }
+                    }
+                  }
+                }
+              },
+              "transaction": {
+                "ledger": {
+                  "native": {
+                    "canonical": {
+                      "chain_id": 1,
+                      "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                      "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                    }
+                  }
+                },
+                "native": {
+                  "canonical": "0x0808080808080808080808080808080808080808080808080808080808080808",
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:b8687938b40b486eb88b568428becef961d68c53ad6ca0b3169728623acafaf7",
+                    "schema_id": "schema:mfm.evm-hash:1:sha256-jcs-v1:ac6987ba5dd6d4432514f834a5423e6602cf88e23e2f49f3bbaaedd4cd60cc23"
+                  }
+                }
+              }
+            },
+            "effective": "42",
+            "observation": {
+              "implementation_ref": {
+                "content_digest": "content:sha256-v1:ba70ab76e5158565215b6baf334a21458dc8127462c29cb4e6edaa052d6100bc",
+                "schema_id": "schema:mfm-experiment-leaf:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              "intent_ref": {
+                "content_digest": "content:sha256-v1:565e9d32ece41e4ef8a2986296ed06425e7813ca6a7970663201da7e7d8dca57",
+                "schema_id": "schema:mfm.chain-read-contract-value:2:sha256-jcs-v1:f2a0b54fad00b40f5cb3db04e046d7fab956855168087363df82519baf5256fa"
+              },
+              "original": {
+                "canonical": {
+                  "kind": "returned",
+                  "value": {
+                    "intent_value_ref": {
+                      "content_digest": "content:sha256-v1:10f8fc78a612040c78142a6842db358e97d55ca9acc0b34f6cc21f8ab226b9e2",
+                      "schema_id": "schema:mfm.evm-anchored-contract-call-intent:1:sha256-jcs-v1:7b3476cd022d1980dec5c27632eb19f9ae9e5dcfbb0a19e7d4eb2d92bbc0bc6e"
+                    },
+                    "result": {
+                      "anchor": {
+                        "hash": "0x0707070707070707070707070707070707070707070707070707070707070707",
+                        "number": "7"
+                      },
+                      "return_bytes": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACo"
+                    }
+                  }
+                },
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:5dd3527c3524b29dbbc0aa001e78c5e78e0bf12747d81784be69e3b9688f48c8",
+                  "schema_id": "schema:mfm.evm-anchored-contract-call-evidence:1:sha256-jcs-v1:26fa68e349f854eee2322b0c44d3be4023f564ff1c6d387f22402509e9a30829"
+                }
+              },
+              "outcome": {
+                "observed": {
+                  "observed_at": {
+                    "ledger": {
+                      "native": {
+                        "canonical": {
+                          "chain_id": 1,
+                          "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                        },
+                        "value_ref": {
+                          "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                          "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                        }
+                      }
+                    },
+                    "native": {
+                      "canonical": {
+                        "hash": "0x0707070707070707070707070707070707070707070707070707070707070707",
+                        "number": "7"
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:1e8e9f2e96982886c025a5ca756ea0fe79984b3b8969f832a34ec7c894bd4bf4",
+                        "schema_id": "schema:mfm.evm-block-point:1:sha256-jcs-v1:4e6f07320b60e354512fffe73f039d1b9f00202cf0964fd3d7995c1035ee828f"
+                      }
+                    }
+                  },
+                  "value": "42"
+                }
+              }
+            },
+            "request": {
+              "artifact": {
+                "ledger": {
+                  "native": {
+                    "canonical": {
+                      "chain_id": 1,
+                      "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:36ee25dd1066c33a8cb4d01981de7a3658360ddcf5b5e4782cf49bad179ffbf1",
+                      "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                    }
+                  }
+                },
+                "native": {
+                  "canonical": "13",
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:e23f8f39182c82127c1bef3cbfd9b54e30e1df4916da81dcfc2a801c23f3bf01",
+                    "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+                  }
+                }
+              },
+              "execution": {
+                "native": {
+                  "canonical": {
+                    "chain_instance": {
+                      "chain_id": 1,
+                      "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                    },
+                    "endpoint_ref": {
+                      "content_digest": "content:sha256-v1:391552c099c101b131feaf24c5795a6a15bc8ec82015424e0d2b4274a369a0bf",
+                      "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+                    }
+                  },
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:b3cbc07b144c250bd2b55e96b50a911ad7105aeac916a91caa6a4f354e584b29",
+                    "schema_id": "schema:mfm.evm-transaction-route:1:sha256-jcs-v1:ed1444b8cc704f9406fc89bef4d4b43a7e02a0814ee9db5ddf2adc23f8204c5a"
+                  }
+                },
+                "observation_route_ref": {
+                  "content_digest": "content:sha256-v1:b3cbc07b144c250bd2b55e96b50a911ad7105aeac916a91caa6a4f354e584b29",
+                  "schema_id": "schema:mfm.evm-transaction-route:1:sha256-jcs-v1:ed1444b8cc704f9406fc89bef4d4b43a7e02a0814ee9db5ddf2adc23f8204c5a"
+                },
+                "read_implementation": "experiment.evm.scalar@1",
+                "transaction_implementation": "fixture.transaction@1"
+              },
+              "increment": "0",
+              "requested": "42",
+              "restart_allowance": null,
+              "retry_allowance": null
+            }
+          },
+          "value_ref": {
+            "content_digest": "content:sha256-v1:c01d3db5805e47e837eec499e7b1648fa11f9149d3a8236c4aeaeee622e29541",
+            "schema_id": "schema:mfm.chain-contract-deployment-report:1:sha256-jcs-v1:3597005a0607e44a47b9191d080e37f7b886a0c6864f5ce14ce19c88ac68a822"
+          }
+        }
+      }
+    },
+    "program_ref": {
+      "content_digest": "content:sha256-v1:15ae206505ffe8559093c8484550fd92c4e7a9d4d9c493fc0636baacddc01e76",
+      "schema_id": "schema:mfm-program-document:9:sha256-jcs-v1:efc3e77ec55f6e3963c52bcdc8dfe856e70dddd17ea59cfa1cb5f8beaaf82b94"
+    },
+    "usage": [
+      {
+        "restarts": 0,
+        "retries": 0
+      },
+      {
+        "restarts": 0,
+        "retries": 0
+      },
+      {
+        "restarts": 0,
+        "retries": 0
+      }
+    ]
+  },
+  "previous_head_digest": "content:sha256-v1:628da62c5ee46120d87b8817ea0babbd01c020d9e757dcb0c8ebd0ff70ff0aac",
+  "run_id": "run:sha256-jcs-v1:abababababababababababababababababababababababababababababababab",
+  "run_sequence": 4
+}

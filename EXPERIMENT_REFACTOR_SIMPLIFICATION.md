@@ -1,9 +1,9 @@
 # Experiment: validate the refactor simplification architecture
 
-**Status:** execution started; baseline and predictions recorded before specimen implementation.
+**Status:** executed, independently reviewed and archived; exact-candidate CI and focused export passed; disposable specimen removed.
 **Architecture baseline:** [RFC_REFACTOR_SIMPLIFICATION.md](RFC_REFACTOR_SIMPLIFICATION.md),
 including its projection correction at `d72b2e08`.
-**Available evidence:** the source-review finding F1 in section 6 below.
+**Available evidence:** source finding F1 and executed findings F2-F4, with per-claim limits in section 6.
 **Purpose:** establish whether the disputed generic/concrete boundaries justify proceeding into
 detailed design, and identify precisely which claims remain provisional.
 
@@ -298,19 +298,23 @@ stored Observation, serializer retry or resolver is introduced.
 **Limit:** this establishes why the previous proposed signature was incomplete. It does not prove
 the corrected callback, target evidence schema or hot/cold execution has been implemented.
 
-| Hypothesis | Execution status | Evidence conclusion | Available evidence / next missing result |
-| --- | --- | --- | --- |
-| H1: construction/erasure | Not run | Unvalidated | Need the compiling, changing-type specimen and deliberate rejection cases. |
-| H2: owner-local extension | Not run | Unvalidated | Need independently reviewed common semantics and a second author's change evidence. |
-| H3: canonical original/code provenance | Not run | Unvalidated | F1 corrected an insufficient port by source review; need literal-byte, codec and specialization probes. |
-| H4: semantic Effect authority | Not run | Unvalidated | Need actual ID/ref lineage, scripted acknowledgement trace and any implicated physical evidence. |
+| Claim | Conclusion | Evidence and boundary |
+| --- | --- | --- |
+| H1 direct typed construction/private erasure | **Supported** for the exercised mechanism | Real changing lifecycle, intended compiler rejection, exact initial commitment and preattachment owner checks through a direct current-wire bridge. Production source/ABI deletion remains unvalidated. |
+| H2 independent native extension | **Supported** for the reviewed holdings fixture | Independent batch owner, one shared State, distinct native facts/resources/causes, no generic protocol branch; compatible bindings reuse one factory. Live protocol and product collection granularity remain unvalidated. |
+| H3 canonical originals/provenance | **Supported** for canonical custody and selected experimental key | Literal request/receipt `7`, one encoding each, exact stored originals, non-Serde/non-Sync Observation, selected declaration reference retained. Production leaf_ref schema remains unvalidated. |
+| H3 unconditional identity sufficiency | **Counterexample** | Same IDs/stored contracts but hidden specialization changes output `42` to `21` after cold Program load and fresh execution. This confirms the RFC's semantic-revision trust limit, not a contradiction of its qualified contract. |
+| H4 semantic Effect/private native custody | **Supported** for the scripted schedule and focused PostgreSQL/Reth mapping | Actual DeploymentRequest/DeployedContract share one private routine; exact retained command/native ref/EffectId/winner and acknowledgement ordering; deployment exposure survives typed overflow. Remaining physical/cutover limits are explicit below. |
+| Production target descriptor and provenance wire | **Unvalidated** | Current Program v9/NativeAbi and implementation_ref are explicit carriers; the complete target leaf_ref schema and cold-association cutover were not implemented. |
+| Full physical failure/restart guarantees | **Unvalidated** beyond the named managed schedule | No real COMMIT packet loss, disk crash, signer process restart or new concurrent-winner stress campaign; preserved current controls do not establish those changed guarantees. |
+| Production deletion, performance and collection interruption requirements | **Unvalidated** | No supported implementation was cut over or deleted, no workload benchmark was run, and current source stages do not settle product continuation requirements. |
 
 ### Execution baseline and predictions (recorded before implementation)
 
 The actual checkout was clean at `a478fc341d993f3b9b747d72c53a6f027be41452`, the plan
 commit: `git status --short` returned no entries and there were no subsequent commits. Current
-production controls therefore use that exact revision. The owned disposable worktree is
-`/tmp/mfm-simplification-specimen-a478fc34`, detached at the same revision. Main-checkout work
+production controls therefore use that exact revision. The owned disposable worktree was created at
+`/tmp/mfm-simplification-specimen-a478fc34`, detached at the same revision, and removed after review. Main-checkout work
 is restricted to this results record, necessary RFC corrections, and inert reproducibility evidence.
 
 The specialist launches accepted construction/canonical and independent extension assignments of
@@ -390,32 +394,257 @@ review units/identity/trust/rejection first and use a distinct contract when nec
 specialization identity is not supplied by the current wire. Authority lineage changes may require
 managed physical evidence; select that evidence from actual keys/order before relying on controls.
 
-### Execution result template
+### Executed candidates, seam and reproducibility
 
-For each probe add one concise record under this section:
+All disposable source is preserved as the inert
+[candidate patch](docs/experiments/refactor-simplification/candidate.patch.gz), against the clean
+control `a478fc341d993f3b9b747d72c53a6f027be41452`. It is outside Cargo discovery in this checkout
+and is not a supported API. The final candidate is
+`32c5283cb969ad30310ba98d6a378b5a84d40fdd`, with no uncommitted source diff during final verification.
+Its ordered logical commits are:
 
-| Field | Record |
+| Commit | Specimen content |
 | --- | --- |
-| Hypothesis and exact claim | H1-H4; identify the specific part exercised. |
-| Candidate and control | Commit IDs/diff; current-wire bridge or target mechanism; relevant resource lifetime. |
-| Expected facts and oracle | Predetermined values/bytes/identities; how the observer avoids the implementation under test. |
-| Procedure and command | Actual probe/fixture, invocation, exit status and controlled interruption. |
-| Observed evidence | Locations of compiler results, retained Objects/frames and reviewed native events. |
-| Conclusion and consequence | Supported / Counterexample / Unvalidated; required correction or next design decision. |
-| Remaining limits | Unexercised target wire, physical guarantees, native support or workload assumptions. |
+| `f966cb71` | Direct typed bridge, construction/canonical/compiler probes and coordinator-authored first holdings owner. |
+| `a0f5f514` | Independently authored batch owner, resource isolation and specialization challenge. |
+| `32c5283c` | Shared private Effect custody, scripted and managed observers, task selection and final formatting integration. |
 
-Do not replace a missing run with an architect's agreement or an existing test's historical pass.
+Full hashes are in [candidate-commits.txt](docs/experiments/refactor-simplification/candidate-commits.txt).
+Decompressed patch SHA-256: `5ee7baf167a141652f395871e33b93f81360e01b7cd74b23bd59f0a320749a79`.
+The main-checkout prediction commits are `0c01b589` and `36a178f6`; both precede implementation.
+The fixture's symbolic other-ledger/fixed-test-point was refined to typed BookLedger 19 and
+BookPoint sequence 117 when the shared contract was agreed; raw `42`/`0`, denomination `0` and
+liability exclusion stayed fixed. The first owner's `10^18`/denomination `18` oracle comes from
+RFC section 16.2. No monetary conversion is inferred.
+
+The bridge directly constructs current Program v9 declarations and calls Program::freeze. It never
+calls AuthoringSource, Plan, Inject*, compile or source lowering. Existing deterministic EVM
+translation/projection helpers supply native scalar meaning. Real Runtime, Journal, MemoryStore
+and (in the managed probe) PostgreSQL execute and retain actual frames. A small experimental
+intrinsic key includes mode, State/adapter IDs and stored contracts, excludes Observation and
+is carried in current State/NativeAbi fields. The factory supplies that actual selected key;
+existing consumer `implementation_ref` fields hold it as an explicit specimen stand-in.
+This exercises the candidate key/claim mechanism, not the proposed production descriptor or
+`leaf_ref` schema cutover. Stop/NoParams is the only supported recovery selection; unsupported
+policy/checkpoint cases reject. No second scheduler, persistence engine or source DSL was built.
+
+Reproduction commands and evidence boundaries are in
+[reproduce.txt](docs/experiments/refactor-simplification/reproduce.txt). Reapply the patch in a new
+worktree at the control commit, stage the added files for Nix's source view, and run the recorded
+commands. The executable specimen was discarded after evidence extraction and independent review. Native public hashes,
+addresses and authority epochs vary because managed services and the ephemeral signer are fresh;
+relationships, literal command terms, quantity oracles and no-IO assertions remain reproducible.
+
+### F2: construction, canonical custody and causal boundaries
+
+The final focused run executes **seven construction tests**, plus the first-owner holdings test
+and five independent extension tests. The
+[Read probe log](docs/experiments/refactor-simplification/read-probes.log.gz) records their literal
+observations. The two independent consuming compiler checks exit **101** for the intended
+[E0271 adjacency mismatch](docs/experiments/refactor-simplification/compile-adjacency.log.gz) and
+[E0277 Observation mismatch](docs/experiments/refactor-simplification/compile-observation.log.gz);
+the rejection-checking shell gate exits 0. These are inspected diagnostics, not unrelated build
+failures or assertions about incidental compiler prose.
+
+The construction path is actual ConfiguredContract -> ObservedConfiguration ->
+ValidatedConfiguration -> ContractDeploymentReport. Supplied predecessor originals are scripted
+native scalar Objects with canonical bytes `"101"` and `"102"`; the Read specimen does not claim
+to execute their earlier deployments. It retains those exact Objects and the complete getter
+original, request/effective values and selected key. Actual provider arguments independently equal
+target `[4;20]`, selector `3fa4f245`, anchor number 7/hash `[7;32]`, and the returned 32-byte ABI word
+ends in `2a`. Effective and observed output are `42`. Exact output is independently decoded from
+the underlying Store, including all three originals; cold re-association/inspection performs no
+extra provider call. Changed initial effective value `43` rejects at Runtime before provider entry.
+
+The normalizing request and receipt each start with Rust field `9`, encode once to the complete
+literal `{"value":7}`, and are decoded from that admitted Object. Checks, provider arguments,
+projection and interpretation all see `7`; output is canonical `"7"`. Exact retained intent and
+receipt Objects extracted from the Store match the literal bytes and independently computed
+literal digest. Both serializer counts remain one after cold inspection. The separate admitted
+input remains `9`; no claim says every byte in the run is `7`. Observation has `Cell<u8>` and no
+Serde/MfmValue/Sync requirement inside the fused pure callback.
+
+Fresh conflicting Rust owners reject with attachment/provider counters zero. Local route mismatch
+leaves only admission head 1 and provider count zero. The native operational fault retains exact
+`get_scalar` -> cause code `731` / `fixture transport rejected getter`, Permanent classification
+and cold original with one provider call. A refused original append separately retains Store cause
+`932` and the attempted native original in invocation custody while underlying head stays 1;
+there is no durable-audit claim through the failed Store.
+
+The reviewer found ordinary prototype bugs in Read panic operation attribution, late handler
+qualification and initially weak substring oracles. They were corrected and rerun: interpretation
+panic remains ReadInterpret/Execute without persisted payload, and a malformed later handler
+rejects before the first attachment. No validation was relaxed. See the
+[construction record](docs/experiments/refactor-simplification/construction-results.txt) and exact
+stored [normalization](docs/experiments/refactor-simplification/mfm-normal-frame.json),
+[lifecycle](docs/experiments/refactor-simplification/mfm-lifecycle-frame.json) and
+[fault](docs/experiments/refactor-simplification/mfm-fault-frame.json) frames.
+
+### F3: independent extension and the specialization counterexample
+
+The coordinator's first owner and shared holdings State worked before extension authorization;
+[handoff hashes](docs/experiments/refactor-simplification/extension-handoff.txt) record that boundary.
+The independent worker changed only `tests/simplification/extension.rs` and its consuming test.
+Shared holdings, bridge, Runtime, Journal, Store and the first owner acquired no extension branch.
+One first-owner factory serves route-a/route-b. One second-owner factory adds a distinct BookBinding,
+BookReceipt enum, nested BookFault/BookSource and Arc<BookResource>. Its native module imports the
+shared holding types and kernel ports, not EVM native types. Full imports/change-site accounting is
+in the [extension record](docs/experiments/refactor-simplification/extension-results.txt).
+
+The first owner preserves raw `1000000000000000000`, denomination `18`, point 7. The second owner
+returns batch lines in native order empty/retained, while requested/output order is retained/empty,
+with exact raw `42`/`0`, denominations `0`/`0`, ledger 19 and point `{"sequence":117}`. Its entire
+batch original remains exact in output and underlying Store. These owners share fungible quantity
+meaning with explicit native identity and observation policy, not identical anchoring trust or a
+global snapshot. Cold inspection adds zero native calls.
+
+Missing requested account (2101), duplicate account (2102), native liability (2301), wrong book
+(2201) and wrong point (2202) each make one instrumented invocation and retain distinct exact nested
+Permanent operational originals. Missing does not become zero; duplicate data cannot overwrite a
+prior account. Caller liability/local route mismatch rejects with zero IO and admission-only head.
+A mixed Catalog rejects the wrong resource table before attachment; the selected Book owner runs
+with the unselected scalar owner's table absent. Stored success/fault frames are archived alongside
+the logs; these are scripted-native evidence, not live protocol certification.
+
+The specialization probe holds **all remaining stored types and family IDs equal** while changing
+Observation-only const specialization and arithmetic from division by 1 to division by 2. Keys
+are equal because no Observation schema is hidden in the bridge NativeAbi. Fresh installation
+rejects conflicting owners before attachment. A sole replacement under unchanged IDs loads exact
+old Program bytes and a **new fresh RunId** executes `21` instead of `42`, retaining the same native
+original/key. This is not retained-run resume or re-interpretation of its acknowledged result.
+Changing the adapter revision to @2 rejects the old document before attachment. This is a concrete
+counterexample to unconditional identity sufficiency; it supports retaining the RFC's explicit
+revision trust and denies automatic executable authenticity. No new ObservationId trait is justified.
+
+### F4: one semantic Effect, private authority and partial exposure
+
+The actual DeploymentRequest and DeployedContract command types use two typed adapter pairings
+and **one private custody routine** calling existing reserve/prepare/execute helpers. The old
+control is executed too: three distinct public EffectIds exist, while physical load/retain keys
+use the reservation ID. In the candidate, one semantic EffectId is simultaneously the stored
+command ID, reservation/load/retain key, native settlement ID and output deployment ID. The
+semantic command ref deliberately differs from the recipe-derived native command ref; the latter
+matches retained native authority and the native settlement original. Epoch/domain and first-winner
+SQL rules are unchanged, but the changed ID mapping was tested physically.
+
+The scripted Store wrapper first awaits the real underlying append, then withholds its response.
+An observer bypasses it. At committed command head 2, adapter/authority/signer/provider counters
+are zero. Releasing acknowledgement allows reservation, signing, winner retention and native IO.
+At committed settlement head 3, interpretation remains zero; cancellation and reconstruction
+resume through real Runtime retained-fact qualification. Interpretation preserves exact original,
+selected key, semantic/native refs and EffectId with no further native IO. A separate overflow
+case runs acknowledged deployment then max-U256 plus one: typed AdditionOverflow retains the
+successful DeployedContract and original hash; configuration preparation is never entered.
+
+The managed candidate uses real PostgreSQL authority/Store, the actual keystore and Reth. An
+independent backend observes committed rows while responses are withheld, and independent authority
+loads and node calls observe retained wire/receipts/value. Cancellation after actual broadcast
+reuses the same command and winning bytes without re-signing. Creation and configuration reserve
+nonces 0/1 and use two signatures in total. Creation input equals the pinned 497-byte artifact,
+zero value/gas 2,000,000/fees 1,000,000,000 and 10,000,000,000; configuration targets the admitted
+created address with zero value/gas 200,000 and exact calldata
+`1eb25e0a000000000000000000000000000000000000000000000000000000000000002a`.
+Independent getter `3fa4f245` returns the full word for `42`. Submitted bytes equal the retained
+winner; acknowledged settlement interpretation and terminal replay leave native counters unchanged.
+Repeated physical submissions using that same retained authority and wire are permitted; this is
+not an exactly-once physical-call claim.
+
+The independently reviewed complete temporary frames and raw creation bytes contain compiled
+solc output. Repository policy keeps that artifact temporary. The committed
+[scripted facts](docs/experiments/refactor-simplification/scripted-observed.json) and
+[managed facts](docs/experiments/refactor-simplification/managed-observed.json) preserve the complete
+native receipt originals, public authority/command/code refs, independent node evidence and
+creation-wire digest/length, **not a lossless copy of the complete temporary frames**.
+The [extractor](docs/experiments/refactor-simplification/extract-effect-evidence.py) documents that
+subset; pinned solc and the archived specimen reproduce the omitted compiled bytes.
+
+This is physical evidence for the named identity correspondence and retain-before-submit schedule.
+Withheld responses are injected by wrappers; no real COMMIT packet loss, disk crash, production
+finality or signer process restart was simulated. The same keystore owner survives reconstruction.
+Concurrent first-winner contention was not newly stress-tested. Existing public reserved/prepared
+Rust types are used as private helper temporaries in this specimen; their public APIs were not
+privatized or deleted, so that eventual cutover remains unvalidated.
+
+### Verification, review and accounting
+
+The final exact-candidate command ledger is
+[commands.txt](docs/experiments/refactor-simplification/commands.txt). All Rust tools ran in the
+default Nix shell. Focused Read/extension execution passed 13 tests; both negative compiler checks
+rejected as intended; formatting passed. Exact-candidate `nix run .#ci` **passed, exit 0**, with
+nine tasks and zero failures in 703.46 seconds, run `run-bd2cb65d99b5e2af8a45b27e294c8dd0`.
+The [final CI log](docs/experiments/refactor-simplification/ci.log.gz) includes explicit candidate
+scripted and managed Effect execution, not merely ignored test discovery or historical controls.
+
+Two earlier attempts on the unchanged candidate exited 30 and 38 due to disk exhaustion during
+compilation; both [first](docs/experiments/refactor-simplification/ci-enospc.log.gz) and
+[second](docs/experiments/refactor-simplification/ci-enospc-2.log.gz) logs are retained. Recovery removed
+only the owned disposable focused cache with pinned Cargo clean, then moved its static-library
+verification cache into owned RAM storage with per-file SHA-256 checks. The candidate source and
+user checkout cache were unchanged. The successful third run follows those infrastructure failures.
+
+The managed task sets TMPDIR to its state directory and removes that directory on exit. Initial
+export therefore failed with FileNotFoundError, despite successful assertions and retained digests.
+The [capture wrapper](docs/experiments/refactor-simplification/capture-effect-evidence.py) reruns only
+the focused Effect task on the unchanged candidate, under fresh owned state, and links only its dump
+output to a persistent temporary directory. Two setup launches refused group-writable output roots;
+mode 0700 corrected the wrapper without weakening framework ownership checks. The archive records
+those refusals. The focused export **passed, exit 0**, in 221.36 seconds,
+run `run-0041e303a87baf0fb6f8056dbf1720b4`; all 17 raw trace files matched their lengths and
+SHA-256 digests. Its [log](docs/experiments/refactor-simplification/effect-export.log.gz) identifies
+the final archived Objects; the public extractor also exited 0. This archival correction changes
+neither physical authority nor the independent observers. It does not substitute earlier candidate
+results or dumps. Fresh signer/service values differ between CI and the export run as expected.
+
+The independent reviewer remained read-only, inspecting source, exact compiler diagnostics,
+fixture premises, retained frame Objects, native traces and the bypass-observer construction.
+Its final record is [independent-review.txt](docs/experiments/refactor-simplification/independent-review.txt).
+No architect agreement is counted as executable evidence. Ordinary prototype defects were fixed;
+no required behavior contradicted the qualified RFC boundary in a way requiring a broader target
+redesign. The RFC needs an execution-status correction and the concrete specialization finding;
+its current semantic-revision trust contract already covers that counterexample.
+
+| Accounting category | Added / deleted / net physical source lines |
+| --- | --- |
+| Disposable Program bridge and export | 971 / 0 / +971 |
+| Disposable private native custody helper and export | 85 / 0 / +85 |
+| Disposable consuming tests, native fixtures and compiler harness | 3,700 / 0 / +3,700 |
+| Disposable task selection | 4 / 0 / +4 |
+| Total specimen relative to a478fc34 | 4,760 / 0 / +4,760 |
+| Archival capture/extraction scripts (outside specimen total) | 162 / 0 / +162 |
+| Resulting supported production implementation | **0 / 0 / 0** |
+
+[Numstat](docs/experiments/refactor-simplification/specimen-numstat.txt) defines this reproducible
+physical-line count, including comments/blank lines; it is not a claim of eventual refactor savings.
+Necessary specimen complexity is typed factory/owner qualification, two mode-specific callback
+paths with canonical/error containment, the native receipt's missing command-ref fact, explicit
+native resources and independent observers. Shared holdings has two actual owner factories;
+compatible bindings need no extra factory, while two different semantic Effect command types need
+two pairings sharing one custody routine. No dependencies, manifests, Runtime/Journal/Store/SQL
+algorithms or production schemas changed. The bridge grew beyond its initial estimate to preserve
+both modes, panic provenance, owner/handler qualification and current-wire restoration.
+
+What simplified in the exercised path: ordinary typed appends replace source traversal/injection;
+Observation has no stored mirror; one acknowledged semantic Effect replaces three public stages
+while retaining private nonce/wire durability. What was physically removed from production: **none**.
+All executable specimen source was removed with its owned worktree after extraction and review;
+the 682-file owned RAM cache and 17 full temporary Effect dumps were also removed. The patch is
+an inert reproduction artifact. Net production savings, performance and complete superseded API
+removal require the coherent production cutover and are not inferred from this experiment.
 
 ## 7. Material uncertainties
 
-| Assumption | Why uncertain | Consequence if wrong | Validation |
+| Assumption | Why uncertain | Consequence if wrong | Validation / decision |
 | --- | --- | --- | --- |
-| A bounded specimen can reach the actual callback boundary. | Current association/wire is coupled to superseded authoring machinery. | The prototype may become most of the cutover or hide defects behind a bridge. | Inspect dependencies and declare the seam before coding; limit claims and record obstruction. |
-| Collection acknowledgement matches the product requirement. | Current stages/tests do not establish whether callers need per-source durability. | The chosen Read unit may lose required observable progress. | Trace Portfolio interruption requirements independently before accepting the boundary. |
-| The second owner's semantics genuinely match a shared port. | Different native contracts can differ in units, identity, evidence or recovery. | Reuse may flatten meaning or require central special cases. | Review the semantic correspondence, then have an independent author implement it; use distinct contracts if needed. |
-| Target identity remains sufficient without Observation schemas. | An old-wire harness may preserve a discriminator the target removes. | Cold association could select behaviorally different code. | Exercise the deliberate collision and actual target identity mechanism; otherwise retain an unvalidated conclusion. |
-| Native authority controls remain reusable. | Stage removal changes EffectId/ref lineage and may alter custody ordering. | Recovery could load wrong authority or prepare another winner. | Compare actual lineage/key/order contracts and select focused physical evidence where changed. |
-| Literal oracles can be observed independently. | Shared wrappers/projectors can repeat the same false claim. | A passing test could conceal canonical or acknowledgement divergence. | Inspect oracle construction, underlying Store bytes and native events separately. |
+| Production target descriptor/association preserves the exercised ports and identity. | Execution used an experimental key inside Program v9/NativeAbi and old provenance fields. | A full cutover could lose owner, schema or cold-restoration guarantees. | Implement the complete target wire/evidence cutover and retained-run cold acceptance before calling it supported. |
+| Whole-collection acknowledgement is the product requirement. | Existing Portfolio source stages/tests establish behavior, not independent product intent. | Repeating an unfinished collection could lose required source-level progress. | Obtain consuming interruption requirements; test completed/unfinished collection recovery against them. |
+| Real native owners can satisfy the reviewed holdings contract. | Both holdings providers are scripted and have explicitly different observation policies. | Local extensibility could be mistaken for native truth, anchored interoperability or global coherence. | Test each supported provider's actual identity/anchor/coverage/rejection semantics; use distinct contracts for different meaning. |
+| Authors revise every behavior-changing semantic identity. | The executed unchanged-ID specialization replacement is accepted and changes output. | Cold code can silently change meaning despite identical stored key and fresh-owner checks. | Enforce reviewed revision changes and missing-revision rejection; executable-byte authenticity requires a separate attestation design. |
+| Broader target builder/resource behavior follows the small specimen. | Stop-only policy, limited root/owner probes and one selected owner at a time omit full checkpoints/custom policies/resource-free historical inspection. | Successful ports could conceal missing full construction/inspection guarantees. | Retain RFC section 16.2 acceptance; no policy-instance, foreign-checkpoint or full resource-free inspection claim here. |
+| Full physical custody behavior survives the future cutover. | Focused real PostgreSQL/Reth mapping passed, but wrapper acknowledgement withholding is not a crash/network-fault campaign; old physical helper structs remain. | Concurrency, real COMMIT ambiguity, signing restart or deleted helper contracts could invalidate broader safety. | Preserve current ambiguity and same-owner signer scope; execute selected race/failure/restart acceptance when those guarantees change. |
+| Performance, workload shape and net production simplification meet product needs. | No throughput/latency/projection-cost benchmark or production deletion was performed; specimen adds 4,760 temporary lines. | Local extension success could overstate speed or eventual code savings. | Measure named workloads and account for added/deleted production code during complete cutovers. |
 
-The fixture does not establish future monetary integrations, cross-run exclusivity, distributed
-signing or workload capacity. Those claims require their own selected requirements and evidence.
+The bounded seam itself was executable; it is no longer an unresolved feasibility question for the
+named probes. The ZEC -> Ethereum WBTC -> Aave route, cross-run exclusivity, distributed signing,
+production finality and real monetary integration remain outside scope. The evidence supports
+continuing with the named architectural mechanisms, not approving the whole RFC or starting those
+integrations.

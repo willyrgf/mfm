@@ -1,0 +1,3 @@
+f966cb71e0f06869416a9e9c95a5ccb4b5e26d82 experiment: exercise direct typed construction and canonical custody
+a0f5f51499320284087a221e160e999d198de579 experiment: challenge independent native extension and identity
+32c5283cb969ad30310ba98d6a378b5a84d40fdd experiment: validate semantic effect custody and acknowledgement

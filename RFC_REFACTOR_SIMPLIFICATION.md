@@ -855,6 +855,11 @@ IDs/revisions must distinguish that behavior, or an actual instance choice must 
 data. Reject different fresh factories claiming one intrinsic leaf key, including hidden observation
 specializations. A later sole replacement under unchanged semantic refs violates revision trust;
 private TypeIds cannot authenticate it after restart. Add no ObservationId trait to disguise that limit.
+The bounded experiment executed this distinction: equal remaining stored contracts and IDs gave
+identical experimental leaf keys for two hidden specializations; fresh registration rejected the
+collision, but sole unchanged-ID replacement cold-loaded the same Program and fresh executions
+returned 42 versus 21. A changed adapter revision rejected the old document. This confirms the
+revision-trust limit, not production target-wire or retained-run replacement acceptance.
 
 Decoder, binder, handler, projection, interpretation or adapter changes affecting meaning require
 reviewed revision changes, including behavior-changing generic/const parameters. Descriptors do
@@ -1979,7 +1984,10 @@ hostile-input fixtures still test explicit rejection of retired wires.
 
 [EXPERIMENT_REFACTOR_SIMPLIFICATION.md](EXPERIMENT_REFACTOR_SIMPLIFICATION.md) owns the bounded
 experiment procedure, independent oracles, findings and result record. The RFC owns the target
-architecture; section 16.2 owns implementation acceptance. Executable experiments have not run.
+architecture; section 16.2 owns implementation acceptance. The bounded experiment has executed
+through a disposable current-wire bridge, with independently reviewed typed-port, canonical-custody,
+native-extension and semantic-Effect evidence. Its results record owns exact candidates, verification
+status and remaining limits; this is not approval of the complete production cutover.
 
 | Stage | Architectural question |
 | --- | --- |

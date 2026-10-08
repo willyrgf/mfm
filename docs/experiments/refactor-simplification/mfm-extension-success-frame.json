@@ -1,0 +1,436 @@
+{
+  "domain": "mfm.run.frame.v6",
+  "payload": {
+    "checkpoints": [],
+    "domain": "mfm.runtime-record.v1",
+    "effect_barrier": null,
+    "operation": {
+      "succeeded": {
+        "call": {
+          "read": {
+            "call": {
+              "input": {
+                "canonical": {
+                  "ledger": {
+                    "native": {
+                      "canonical": {
+                        "book": 19
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                        "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                      }
+                    }
+                  },
+                  "policy": "scripted-fixed-snapshot@1",
+                  "route": "book-gateway",
+                  "sources": [
+                    {
+                      "id": "retained",
+                      "target": {
+                        "ledger": {
+                          "native": {
+                            "canonical": {
+                              "book": 19
+                            },
+                            "value_ref": {
+                              "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                              "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                            }
+                          }
+                        },
+                        "native": {
+                          "canonical": {
+                            "account": "retained",
+                            "asset": "BASE",
+                            "meaning": "holding"
+                          },
+                          "value_ref": {
+                            "content_digest": "content:sha256-v1:833cca23c3e01a6dac6215cf087cf74b1553e6827813fc86c996bd0ff1c95ca6",
+                            "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "id": "empty",
+                      "target": {
+                        "ledger": {
+                          "native": {
+                            "canonical": {
+                              "book": 19
+                            },
+                            "value_ref": {
+                              "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                              "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                            }
+                          }
+                        },
+                        "native": {
+                          "canonical": {
+                            "account": "empty",
+                            "asset": "BASE",
+                            "meaning": "holding"
+                          },
+                          "value_ref": {
+                            "content_digest": "content:sha256-v1:8a812d735cfad642702cb76531b8514143a6f83d94330fae3df3366d088939ff",
+                            "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:e8f702fd88d711263e3aef26e6251265aff0792b1a160290c9438fc31557f2d7",
+                  "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+                }
+              },
+              "position": {
+                "state": 0,
+                "visit": 0
+              }
+            },
+            "evidence": {
+              "canonical": {
+                "snapshot": {
+                  "book": 19,
+                  "lines": [
+                    {
+                      "account": "empty",
+                      "denomination": 0,
+                      "meaning": "holding",
+                      "quantity": "0"
+                    },
+                    {
+                      "account": "retained",
+                      "denomination": 0,
+                      "meaning": "holding",
+                      "quantity": "42"
+                    }
+                  ],
+                  "request_ref": {
+                    "content_digest": "content:sha256-v1:e8f702fd88d711263e3aef26e6251265aff0792b1a160290c9438fc31557f2d7",
+                    "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+                  },
+                  "sequence": 117
+                }
+              },
+              "value_ref": {
+                "content_digest": "content:sha256-v1:59e9686978988b93587c57ca4a9b9cb6b89b6480486a61c3f9f9316cba259dd5",
+                "schema_id": "schema:mfm.derived.book_receipt:1:sha256-jcs-v1:a5d7834495791016983afb05a28d695598867182afa64fe21a15276f8953e838"
+              }
+            },
+            "intent": {
+              "canonical": {
+                "ledger": {
+                  "native": {
+                    "canonical": {
+                      "book": 19
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                      "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                    }
+                  }
+                },
+                "policy": "scripted-fixed-snapshot@1",
+                "route": "book-gateway",
+                "sources": [
+                  {
+                    "id": "retained",
+                    "target": {
+                      "ledger": {
+                        "native": {
+                          "canonical": {
+                            "book": 19
+                          },
+                          "value_ref": {
+                            "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                            "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                          }
+                        }
+                      },
+                      "native": {
+                        "canonical": {
+                          "account": "retained",
+                          "asset": "BASE",
+                          "meaning": "holding"
+                        },
+                        "value_ref": {
+                          "content_digest": "content:sha256-v1:833cca23c3e01a6dac6215cf087cf74b1553e6827813fc86c996bd0ff1c95ca6",
+                          "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "id": "empty",
+                    "target": {
+                      "ledger": {
+                        "native": {
+                          "canonical": {
+                            "book": 19
+                          },
+                          "value_ref": {
+                            "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                            "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                          }
+                        }
+                      },
+                      "native": {
+                        "canonical": {
+                          "account": "empty",
+                          "asset": "BASE",
+                          "meaning": "holding"
+                        },
+                        "value_ref": {
+                          "content_digest": "content:sha256-v1:8a812d735cfad642702cb76531b8514143a6f83d94330fae3df3366d088939ff",
+                          "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "value_ref": {
+                "content_digest": "content:sha256-v1:e8f702fd88d711263e3aef26e6251265aff0792b1a160290c9438fc31557f2d7",
+                "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+              }
+            }
+          }
+        },
+        "output": {
+          "canonical": {
+            "holdings": [
+              {
+                "denomination": 0,
+                "point": {
+                  "ledger": {
+                    "native": {
+                      "canonical": {
+                        "book": 19
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                        "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                      }
+                    }
+                  },
+                  "native": {
+                    "canonical": {
+                      "sequence": 117
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:3c5000ff9329ee67f63d30c7b07f372cc86d51e21f28867ccf3f7af41977acc6",
+                      "schema_id": "schema:mfm.derived.book_point:1:sha256-jcs-v1:3f5d1ff8f076b5881bd05f1795e587c22bcf6c3b341db1fe259e99b45e3efb6d"
+                    }
+                  }
+                },
+                "raw_units": "42",
+                "source_id": "retained",
+                "target": {
+                  "ledger": {
+                    "native": {
+                      "canonical": {
+                        "book": 19
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                        "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                      }
+                    }
+                  },
+                  "native": {
+                    "canonical": {
+                      "account": "retained",
+                      "asset": "BASE",
+                      "meaning": "holding"
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:833cca23c3e01a6dac6215cf087cf74b1553e6827813fc86c996bd0ff1c95ca6",
+                      "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                    }
+                  }
+                }
+              },
+              {
+                "denomination": 0,
+                "point": {
+                  "ledger": {
+                    "native": {
+                      "canonical": {
+                        "book": 19
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                        "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                      }
+                    }
+                  },
+                  "native": {
+                    "canonical": {
+                      "sequence": 117
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:3c5000ff9329ee67f63d30c7b07f372cc86d51e21f28867ccf3f7af41977acc6",
+                      "schema_id": "schema:mfm.derived.book_point:1:sha256-jcs-v1:3f5d1ff8f076b5881bd05f1795e587c22bcf6c3b341db1fe259e99b45e3efb6d"
+                    }
+                  }
+                },
+                "raw_units": "0",
+                "source_id": "empty",
+                "target": {
+                  "ledger": {
+                    "native": {
+                      "canonical": {
+                        "book": 19
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                        "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                      }
+                    }
+                  },
+                  "native": {
+                    "canonical": {
+                      "account": "empty",
+                      "asset": "BASE",
+                      "meaning": "holding"
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:8a812d735cfad642702cb76531b8514143a6f83d94330fae3df3366d088939ff",
+                      "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                    }
+                  }
+                }
+              }
+            ],
+            "leaf_ref": {
+              "content_digest": "content:sha256-v1:705e9af2b0a7d89539e04bcbf54a4b6aa8462f78ab2ebb9b0ecd8217377fa049",
+              "schema_id": "schema:mfm-experiment-leaf:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "original": {
+              "canonical": {
+                "snapshot": {
+                  "book": 19,
+                  "lines": [
+                    {
+                      "account": "empty",
+                      "denomination": 0,
+                      "meaning": "holding",
+                      "quantity": "0"
+                    },
+                    {
+                      "account": "retained",
+                      "denomination": 0,
+                      "meaning": "holding",
+                      "quantity": "42"
+                    }
+                  ],
+                  "request_ref": {
+                    "content_digest": "content:sha256-v1:e8f702fd88d711263e3aef26e6251265aff0792b1a160290c9438fc31557f2d7",
+                    "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+                  },
+                  "sequence": 117
+                }
+              },
+              "value_ref": {
+                "content_digest": "content:sha256-v1:59e9686978988b93587c57ca4a9b9cb6b89b6480486a61c3f9f9316cba259dd5",
+                "schema_id": "schema:mfm.derived.book_receipt:1:sha256-jcs-v1:a5d7834495791016983afb05a28d695598867182afa64fe21a15276f8953e838"
+              }
+            },
+            "request": {
+              "ledger": {
+                "native": {
+                  "canonical": {
+                    "book": 19
+                  },
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                    "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                  }
+                }
+              },
+              "policy": "scripted-fixed-snapshot@1",
+              "route": "book-gateway",
+              "sources": [
+                {
+                  "id": "retained",
+                  "target": {
+                    "ledger": {
+                      "native": {
+                        "canonical": {
+                          "book": 19
+                        },
+                        "value_ref": {
+                          "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                          "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                        }
+                      }
+                    },
+                    "native": {
+                      "canonical": {
+                        "account": "retained",
+                        "asset": "BASE",
+                        "meaning": "holding"
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:833cca23c3e01a6dac6215cf087cf74b1553e6827813fc86c996bd0ff1c95ca6",
+                        "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                      }
+                    }
+                  }
+                },
+                {
+                  "id": "empty",
+                  "target": {
+                    "ledger": {
+                      "native": {
+                        "canonical": {
+                          "book": 19
+                        },
+                        "value_ref": {
+                          "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                          "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                        }
+                      }
+                    },
+                    "native": {
+                      "canonical": {
+                        "account": "empty",
+                        "asset": "BASE",
+                        "meaning": "holding"
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:8a812d735cfad642702cb76531b8514143a6f83d94330fae3df3366d088939ff",
+                        "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "value_ref": {
+            "content_digest": "content:sha256-v1:7de6b37556a5e5158c35514eea10ea713dd88b603e10c8dc7e4e0f9ba5245ae9",
+            "schema_id": "schema:mfm.derived.collection_output:1:sha256-jcs-v1:83f54a4c85003a882b8ebf1135388a884709c08b4457deb8aab6967772c45ff3"
+          }
+        }
+      }
+    },
+    "program_ref": {
+      "content_digest": "content:sha256-v1:7029c8e595eb1a6abbad1cc70cdcc28dbe091666065de7d75093ef55e2aaa542",
+      "schema_id": "schema:mfm-program-document:9:sha256-jcs-v1:efc3e77ec55f6e3963c52bcdc8dfe856e70dddd17ea59cfa1cb5f8beaaf82b94"
+    },
+    "usage": [
+      {
+        "restarts": 0,
+        "retries": 0
+      }
+    ]
+  },
+  "previous_head_digest": "content:sha256-v1:7945d04693917d84c6d2dbd8f26c8b718966f3066e613cb62e6bc31daed586b0",
+  "run_id": "run:sha256-jcs-v1:bebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebe",
+  "run_sequence": 2
+}

@@ -1,0 +1,7 @@
+Control code: a478fc341d993f3b9b747d72c53a6f027be41452
+Execution checkout: 36a178f6 (documentation-only descendants; no Rust diff)
+Directory: /home/willyrgf.linux/dev/mfm2
+Command: nix develop -c cargo test -p mfm-program --test claim_conflicts
+Exit status: 0
+Observed: 3 passed, 0 failed, 0 ignored.
+Scope: existing owner controls only; not candidate typed construction evidence.
