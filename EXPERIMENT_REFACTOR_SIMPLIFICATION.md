@@ -365,9 +365,22 @@ full target cold association and production deletion remain unvalidated through 
 | Effect schedule | Underlying command append completes while response is withheld: native/authority/signer/provider counters stay zero. After acknowledgement, retained authority determines exact winner. Settlement append is observed independently, response withheld, caller cancelled; reconstruction interprets retained settlement with no native IO. | Early IO/interpretation, replaced authority or re-signing acknowledged settlement refutes H4. |
 | Partial outcome | After acknowledged deployment, maximum unsigned-256 plus one refuses at the existing checked-add domain boundary; successful deployment remains retained and configuration preparation count is zero. | Internal preparation failure or lost deployment exposure contradicts readiness ownership. |
 
-The Effect worker will record exact old/new command/ref/key lineage and physical experiment selection
-before implementing its fragment. Neither a historical managed pass nor a scripted Store response
-establishes changed PostgreSQL authority mapping or real network behavior.
+**Effect lineage prediction, recorded before its implementation.** Runtime EffectId v2 commits
+RunId, Program reference, State/visit and exact command reference. Current reservation commands an
+Eip1559TransactionCommand and keys authority by its reservation EffectId/native command ref.
+Preparation commands ReservedEvmTransaction with another EffectId, but physical load/retain still
+uses the reservation EffectId. Execution commands PreparedTransaction<R>; settlement carries that
+third transaction EffectId. The candidate commands DeploymentRequest or DeployedContract directly;
+one semantic EffectId supplies reserve/load/retain/settlement identity, while the recipe-derived
+native command ref qualifies native authority. NonceDomain remains epoch/chain instance/sender.
+The candidate predicts creation nonce 0 and configuration nonce 1 under a fresh fixture.
+
+Current EvmTransactionSettlement lacks the target native-command-ref field, so a disposable native
+receipt must retain that reference alongside the unchanged settlement. This is receipt evidence,
+not another command/preparation wrapper. The mapping change requires an actual candidate managed
+PostgreSQL/Reth experiment through the existing effect-e2e provisioning task, including retained
+wire and node observations. Neither a historical managed pass nor a scripted Store response
+establishes changed authority mapping or real network behavior.
 
 **Material uncertainties at prediction time.** The current-wire descriptor may prevent a small
 callback association; validate by compiling the bridge and stop if a second execution engine is
