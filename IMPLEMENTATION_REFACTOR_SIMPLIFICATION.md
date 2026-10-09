@@ -979,7 +979,161 @@ Preparatory documentation can stand alone. A preparatory reusable primitive is a
 commit only when it is independently useful, has an actual consumer and leaves one coherent API.
 Do not split inseparable contracts merely to reduce diff size.
 
-## 9. Material uncertainties
+## 9. Falsification and acceptance
+
+These are required consuming scenarios, not evidence that the target already passes. Record each
+prediction before running the candidate. A counterexample changes the contract or implementation;
+reviewer agreement and a green unrelated task do not close it. Preserve the corrected specimen's
+historical binder and unchanged-semantic-ID counterexamples in the experiment document.
+
+### 9.1 Cutover A: actual Application and native protocol
+
+| Conjecture / owner | Challenge and independent oracle | Required result |
+| --- | --- | --- |
+| Checked progress / Portfolio | Direct constructors and Object decoding: duplicate IDs/correlations, empty lists, cross-ledger point, invalid child Objects, 65 total sources distributed across collections | Typed rejection at the owning boundary; no unchecked constructor/deserializer escape |
+| Transition continuity / Portfolio | Execute the real State with two differently valued collections; compare actual input prefix/suffix and source declarations, then invoke premature terminal projection | Exactly one front demand moves; prior completion and remaining suffix are exact; premature projection is Internal |
+| Local identity / Live EVM | Wrong source instance, endpoint or selected Binding; also same physical route with denominations 18 versus 6 | Zero provider calls and no operational append; denomination substitution changes Binding/Request commitments |
+| External identity / Live EVM | Script a successful chain-ID/genesis mismatch against independently declared expected values | Native rejection preserves actually observed facts; no balance calls; Permanent domain failure |
+| One anchor / JSON-RPC | Literal HTTP request sink with independently assigned account/token quantities; advance latest between sources; simulate selected-number replacement and ABA schedule | Every state read uses the same literal canonical hash selector; ordinary growth succeeds; genuine final replacement refuses; no numbered/latest fallback |
+| Native coverage / EVM | Pure projector with wrong request ref/count/native denomination, wrong field source or impossible replacement relationship | Internal native correspondence rejection; assert available original context, not a fabricated provider incident |
+| Source association / real collector | Distinct literal accounts/tokens with different independently scripted amounts, inspect provider arguments and resulting ordered holdings | No permutation or wrong-target read; do not claim arbitrary valid scalar permutation is independently detectable cold |
+| Truthful absence / JSON-RPC | Null latest, null selected-number confirmation, empty decimals/balanceOf response, generic RPC failure | Respectively AnchorUnavailable, AnchorUnavailable, RequiredFieldUnavailable, original operational Fault; invent no reorg or absent contract |
+| Units / Application and native decoder | Literal amounts including raw 1500/denomination 3, metadata 31 and 255, ABI word 256 | Raw values retained and rendering exact; 31/255 accepted; 256 rejected with concrete range cause, no scaling path |
+| Retry boundary / Application–Runtime | Two collections; refuse the second once by authenticated anchor replacement; explicit StandardRecovery allowance 1; repeat with default Stop | Fresh-anchor whole second collection retry only; first remains acknowledged and unread; Stop performs no retry |
+| Causal custody / adapter–Runtime | Distinguishable nested transport/parser faults at genesis, token balance and confirmation; failed first original encoding and failed append | Known stage/chain/anchor/denomination plus complete available causes retained; acknowledge before classification; encoding/recording failure does not claim original durability |
+| Cancellation / Runtime–Store | Interrupt private IO and completion append, then reload through existing exact-head Store semantics | Unacknowledged collection can repeat; committed history never rolls back; no invented per-RPC record or duplicate acknowledged transition |
+| Projection and publication / Application | Required zero native plus optional zero/nonzero tokens; delete source config; publish enrichment and qualify dependent snapshot; try snapshot output with same schema | Exact selection/order/Binding; publication uses retained facts and zero provider calls; snapshot fails enrichment-entry gate; tampered run/head/output/body fails |
+| Complete public cutover / CLI and REST | Run maintained cross-transport client scenario with new literal config/output; submit retired config/output selectors | Both transports share the new raw-holdings contract; old surfaces reject; product code lives in Application and Live loses Portfolio dependency |
+
+Use deterministic provider/HTTP fixtures for impossible schedules and byte-level selectors. Use the
+managed pinned Reth/PostgreSQL client scenario to establish the real native-balance path and actual
+method acceptance. Successful method parsing alone does not prove canonical-hash semantics.
+Exercise selected versus unknown/noncanonical hash behavior for both `eth_getBalance` and `eth_call`
+and record the exact supported claim. Shipping provider acceptance requires establishing canonical
+hash-selector semantics for **both** methods. If the pinned fixture cannot establish a required
+method, that provider claim remains blocked; parsing and scripted calls do not substitute for it.
+Empty-address `eth_call` can validate method support and empty-field refusal; it does not establish real token metadata or
+`balanceOf` truth. Valid token ABI decoding and ordering can be tested against scripted literal
+responses. A managed deployed-token oracle remains unvalidated unless an independently checked
+token fixture is actually used; it is not a reason to add the illustrative bridge integrations.
+
+The A cold test restores the actual current Program and acknowledged progress/output, checks exact
+originals and exercises typed output qualification, publication and unfinished-collection retry.
+It does not certify arbitrary
+well-hashed receipt substitutions through schema-only `Runtime.read`, authenticate omitted historical
+demands, or prove Fault indexes against a Request the classifier never receives.
+
+### 9.2 Cutover B: real deployment/configuration custody
+
+Use the maintained managed Effect regressions and the actual shipping deployment/configuration
+States. Test doubles sit at provider, signer, authority and Store boundaries; do not reconstruct
+another Effect state machine merely to pass the assertions.
+
+| Conjecture | Challenge / oracle | Required result |
+| --- | --- | --- |
+| Semantic authority remains Runtime-owned | Gate each command/settlement append and observe real provider, signer and authority calls | No native IO, authority access or signing before command acknowledgement; pure checks remain earlier; no interpretation before settlement acknowledgement; all old recovery/barrier guarantees survive |
+| First acknowledged winning wire is authoritative | Cancel after reserve/sign/retain; race retained candidates; ambiguous reservation/retention; restart with retained winner and unavailable signer | Exact committed-or-absent loading; one nonce authority and exact winning bytes; no candidate broadcast before custody acknowledgement |
+| Native settlement belongs to this semantic occurrence | Swap command ref, EffectId, route, action shape or CREATE address; use actual signed-wire decoding and managed chain state | Pure owner rejects inconsistent stored facts; native_command_ref is derived from admitted recipe/Binding; independent wire/chain oracle confirms sender, nonce, target and calldata |
+| Remote failure is distinguishable from local defect | Script every §5 mismatch, including submit hash disagreement after actual acceptance, and separately inconsistent retained authority | Exact Provider → EvmOperationalError → ProviderFailure → reviewed rejection plus operation/facts survive; OutcomeUnknown preserves unresolved authority; Stop retains RecoveryStopped; explicit resume uses same command/winner without resigning; local/stored mismatch is Internal |
+| Settled recovery is purely retained execution | Reconstruct Runtime/Store with the same owning keystore thread, count provider/signer/authority activity and inspect lifecycle evidence | Zero native IO for settled interpretation; exact originals preserved; no process-restart claim; unresolved resume compares acknowledged Command exactly |
+| Partial outcome remains honest | Complete deployment, fail/stop configuration, inspect actual chain plus lifecycle/history records | Deployment remains real and authoritative; later failure does not pretend rollback or erase deployed partial outcome |
+
+Keep the maintained first-party contract artifact and managed task contract unless an actual changed
+requirement demands a reviewed update. Stored original equality, literal independently decoded wire
+facts and actual chain state are separate oracles; agreement between two serializers is insufficient.
+
+### 9.3 Cutover C: real construction and cold loading
+
+| Conjecture | Challenge / oracle | Required result |
+| --- | --- | --- |
+| Fresh ownership survives erasure | Shadow initial/terminal value codecs, foreign State/adapter/Resources and Handler/Params owners under equal reviewed references; include zero-State Programs | Reject before attachment; no independent binder or resource generic; exact initial and terminal owner checks both occur |
+| Installation is atomic | A registration whose later codec/factory claim collides; inspect existing exact selections afterward | Failed contribution changes nothing; previous selections remain exact; identical same-owner value publication stays idempotent |
+| Direct ports express the real boundary | Intended compile negatives for wrong Input, native Request/Command or Observation; positive plain Observation containing Cell without Serde/Sync | Compiler rejects mismatches for intended reasons; actual completion consumes the plain Observation without a hidden serialization path |
+| Heterogeneous configured authoring stays ordinary Rust | Construct scalar → collection → scalar from actual config and exact/Object-selected leaves, independent native owner and two network Bindings | Real sequence executes and restores; independent owner adds no central protocol branch; no recipe-function requirement or source DSL |
+| Multiple owners share one business contract | Use the same CollectHoldings State for EVM collection → independently owned Book collection → EVM collection, with distinct native schemas/resources and exact/Object selection | Framework and Portfolio acquire no protocol branch; native owners supply qualification/projection; existing scalar extension loop separately verifies changing typed endpoints |
+| Qualification is complete before attachment | Valid first declaration, later malformed Binding/handler parameter/checkpoint/ref; missing installed revision; selected resource table absent | Zero constructors/IO for document rejection or missing-table preflight; no partial Program; owner-specific bind refusal remains explicit |
+| Checkpoints retain fresh membership | Foreign origin, wrong target codec owner, forward, terminal or duplicate targets; unused checkpoint; legitimate selected earlier/current target | Reject illegal selected targets before erasure; unused handle adds no wire/runtime inventory; target union and Runtime barriers remain sufficient |
+| One descriptor is intrinsic identity | Literal canonical descriptor and v10 wire; unknown leaf, changed adapter revision/schema, same family with different complete ABI; retired v9 | Exact selected ref only; transitive ABI qualification; no fallback, repeated ABI mirror, legacy bridge or silent old-data interpretation |
+| Canonical originals remain authoritative | Nontrivial input/Binding/parameter codec normalization; exact Request/Command/original Objects and nested digest tampering | Encode admitted originals once, decode/use those same Objects; bind/check/project receive the same admitted Binding ref/value pair; typed validators reject checked-value/nested-digest faults; no reconstructed Binding hash or serialized Observation |
+| Full current cold restoration works | Recreate fresh Catalog/resources, load real v10 Programs and exact Read/Effect history; test available current slots against selected static native validators | Hot/cold output and exact original/provenance equality; selected typed codec and native correspondence checks without generic State/output replay |
+| Semantic revisions remain a declared trust boundary | Reproduce unchanged-ID 42 → 21 specialization and then bump reviewed identity | Unchanged IDs do not authenticate behavior; changed selected identity is rejected when missing or inconsistent; retain counterexample rather than inventing attestation |
+
+Later public resource-free inspection separately tests every RunView state with no live tables and
+an attachment counter of zero. `Catalog::qualify` being pure does not by itself prove that every
+Application/Runtime read/publication caller uses the pure path.
+
+### 9.4 Verification and evidence
+
+Follow [docs/build-and-verification.md](docs/build-and-verification.md); `nixfied.nix` owns actual
+task IDs and compositions. Start with affected domain/provider/Application tests, then public
+consumer and managed scenarios. Cross-crate/persistence cutovers require one final `nix run .#ci`
+on the exact candidate. Do not separately rerun every task immediately before that composed gate.
+
+For each candidate record commit, production diff, selected commands/results, independent literal
+fixtures, retained original refs, provider arguments, acknowledgement gates and deletion search.
+Every trace digest must name retained inspectable evidence; a digest with removed bytes is a limited
+historical claim. Failed setup/gates and unsupported claims stay visible. A final green candidate
+does not rewrite historical counterexamples.
+
+## 10. Architect conjectures and attempted refutations
+
+The review used a dedicated integrating architect plus collection, native protocol, construction,
+Effect and falsification architects. Proposals were circulated across owners, revised and then
+reviewed against this actual document. The decision below records what survived criticism and why;
+it is not a vote or an architectural proof.
+
+| Conjecture challenged | Criticism | Retained decision |
+| --- | --- | --- |
+| Progress should preserve an immutable root plus cursor/status | More representations and validation; neither an ordinal nor a root copy proves execution history | Move remaining → completed; prove input-relative transition, state the decoder's narrower guarantee |
+| Completed result should contain both demand and observation | Repeats all source identities, with more correspondence sites | One Holding per source and one temporary required-bit wrapper |
+| Shared output is automatically safe for publication | Removing the distinct enrichment codec removes the current implicit program distinction | One output plus explicit qualified enrichment-entry gate in publication and provenance |
+| Full Binding and route need the same reference field | Unit policy belongs to full Binding; physical route has different facts and a different hash | Request binding_ref commits full Binding; physical route only selects resources |
+| Progress needs a Binding wrapper plus its full reference | Once the ref denotes the entire Object, it duplicates Object.value_ref() | Retain binding:Object directly; derive Request.binding_ref; delete the wrapper |
+| Pure native ports only need decoded Binding | Normalizing codecs can make re-encoding a different identity; generic code cannot inspect arbitrary Request fields | Factory passes exact admitted binding_ref with its same-Object decoding; no universal Request trait |
+| The old 0–30 denomination limit should survive | It exists for removed scaling; metadata above 30 need not require arithmetic | u8 metadata, exact raw units, string rendering; retain arithmetic only for actual remaining consumers |
+| Every native stage should remain a public State or durable intermediate | Private duplicate-safe RPCs do not need their own framework transitions | One collection Read; selected exact original and known Fault context; no per-RPC durability claim |
+| Empty ABI output proves absent token/contract | Scalar empty data supplies no such evidence | Required field unavailable; no guessed units, code-absence claim or silently omitted candidate |
+| Anchor replacement requires old checkpoint/input invalidation | New Request has no selected anchor; old restart machinery solves a deleted representation | Retry unfinished collection at fresh anchor; default Stop remains explicit |
+| Read needs original acknowledgement before interpretation | Current Read persists original and interpreted result atomically; copying Effect order adds another boundary | One Read completion append after fused projection/interpretation; retain separate Effect settlement acknowledgement |
+| All appends should be infallible | Pure metadata derivation actually fails; hiding it needs deferred callbacks or more handles | Pure returns Result; Read/Effect append retained checked selections mechanically; finish owns association checks |
+| Fault should copy Request ref and add a universal cross-slot hook | Current classifier lacks Request context; Runtime already retains exact occurrence/intent | Native tagged known facts plus concrete cause; honest intrinsic Fault validation scope |
+| Descriptor/ABI mirrors must accompany every leaf ref | Code-qualified observation already requires the exact installed revision | One installed descriptor and references-only Program v10; no repeated generic NativeAbi |
+| Schema admission proves complete cold meaning | Current Runtime does not decode/project every receipt or authenticate arbitrary history | Name current A limits, target selected typed/static checks, and separate later public no-attachment validation |
+| Private Effect collapse can remove nonce/wire authority | Public staging is arbitrary; physical custody and acknowledgement are necessary | Delete public stages/codecs; retain one private protocol using existing exact authority records |
+| Remote transaction mismatch is an Internal defect or settled rejection | Remote disagreement can arise after broadcast and cannot prove mutation failed | Existing Provider Fault chain with typed facts and OutcomeUnknown; same fact validator maps local corruption to Internal |
+
+## 11. Implementation readiness and simplification gate
+
+Cutover A has a chosen representation, exact product config, owner boundaries, failure/retry contract,
+workflow, complete consumer/deletion scope and falsifiers. The next work is actual A implementation
+after its prerequisite corrections, rather than another detached architecture specimen. B and C
+have frozen shared seams here; their real production candidates must pass their own gates.
+
+Before writing a production candidate, the engineer records the selected cutover and prerequisite
+status, the current affected source/schema/consumer inventory, and planned family/version/State
+revisions. Record generated target schema hashes once the implemented checked definitions exist;
+they are not invented prerequisites to writing those definitions. Do not leave an ownership
+decision to be resolved by adding a wrapper.
+If an unforeseen requirement breaks a stated contract, produce the smallest counterexample and
+return it to the integrating architect before adding another layer.
+
+A candidate is ready for acceptance only when:
+
+1. Every current producer/consumer/document uses that one design; retired API/dispatch/schema paths
+   are physically absent, with retained behavior mapped to consuming tests.
+2. The changed contracts and causal guarantees are documented in `docs/design.md` and placement in
+   `docs/architecture.md`; public schema/README/example changes accompany the cutover.
+3. Relevant §9 predictions have passed on the exact candidate, or a counterexample has explicitly
+   revised the design and prediction. Unvalidated scope is stated, not relabeled as support.
+4. Review measures removed and added concepts, public types, schemas, branches and future change
+   sites, plus production-code LOC. Increased LOC needs a concrete necessity; fixture growth or
+   unchanged production cannot establish savings. No dependency or parallel execution framework
+   is added without actual need.
+
+This document changes no production code: production-code LOC delta is **0**. It deletes no current
+implementation. The deletion ledger is an acceptance obligation, not a claimed achieved saving.
+
+## 12. Material uncertainties
 
 | Assumption | Why uncertain | Consequence if wrong | Validation |
 | --- | --- | --- | --- |
