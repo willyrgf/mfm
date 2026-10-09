@@ -344,10 +344,11 @@ Keep each integration's typed resource table separate from Catalog. For example,
 its Sources phantom and stores checked EVM bindings and handles only. Another protocol owns another
 resource-table type; kernel code does not add a field or enum variant for it.
 
-Program association passes explicit tables through private in-process owner slots. A factory's
-typed binder retrieves only its own table using checked type/owner association. Missing or mismatched
-tables fail with their available cause. Rust type identity is never persisted or used as semantic
-identity, and this mechanism adds no universal Any/JSON execution interface.
+Program association passes explicit tables through private in-process owner slots. A factory
+retrieves only its adapter's associated Resources table using checked type/owner association and
+invokes the adapter-owned constructor. Missing or mismatched tables fail with their available cause.
+Rust type identity is never persisted or used as semantic identity, and this mechanism adds no
+universal Any/JSON execution interface.
 
 Pure Catalog installation, metadata inspection, and observation qualification require no live
 resource construction. Executable attachment requires only the tables selected by the complete
@@ -629,10 +630,22 @@ semantic descriptors. Preserve existing in-process TypeId checks without persist
 or adding a public Catalog-identity interface. Cold association still relies on reviewed semantic
 revisions and the installed trusted code.
 
+Attachment is part of that factory ownership. The adapter implementation owns its constructor;
+installation cannot independently supply another function under the same State/adapter/resource
+claims. The bounded specimen accepted that substitution both within one Catalog and across two
+Catalogs. Rejecting duplicate registration addresses the first case; owner-bound construction also
+removes the independently selectable constructor in the second. This is a fresh ownership defect,
+separate from the cold semantic-revision trust limit.
+
 For config-driven collections, Application obtains a ReadLeaf<CollectHoldings> from the exact
 installed leaf reference and builds the endomorphic sequence with an ordinary loop. It does not
 need a global match naming every concrete adapter type. This is checked construction-time selection;
 Runtime still invokes only already-associated callbacks.
+
+The initial specimen proved static owner-local extension with binding-typed Leaf<S, B> handles.
+It did not exercise this binding-erased selection and authoring boundary. The focused follow-up in
+[the experiment record](EXPERIMENT_REFACTOR_SIMPLIFICATION.md#8-focused-follow-up-validation)
+must execute heterogeneous configured selections through this single append path.
 
 ### 5.2 One installed Catalog
 
@@ -642,9 +655,13 @@ construction and cold loading use the same association owner. A new semantic imp
 published once; selecting installed components or constructing another Program does not require
 publishing another structural source family.
 
-Schematic installation is `register_read::<S, A, R>(owner_binder)` and its Effect counterpart, where
-R is the native owner's typed resource table. It checks intrinsic ownership and contracts before
-privately erasing A/R. `select_read::<S>(exact_leaf_ref)` returns ReadLeaf<S> only for the installed
+Schematic installation is `register_read::<S, A>()` and its Effect counterpart. A declares its
+owner-local Resources type and one static `bind(&Resources, &Binding)` constructor through its
+native adapter implementation. Installation checks intrinsic ownership and contracts before
+privately erasing A/Resources; it accepts no independent binder function or resource generic.
+Duplicate or conflicting intrinsic factory registration rejects before attachment rather than
+replacing an installed entry. Selecting another binding uses that existing entry.
+`select_read::<S>(exact_leaf_ref)` returns ReadLeaf<S> only for the installed
 matching State ABI. The exact leaf reference identifies the intrinsic executable contract, not
 each occurrence's binding or recovery-policy value. No opaque live original or executable callback
 is serialized as part of selection.
@@ -752,14 +769,19 @@ Bind/Interpret operation provenance. Domain failures remain distinct from intern
 
 Capabilities owns direct ReadAdapter<Request, Observation> and EffectAdapter<Command, Observation>.
 Each selected implementation declares public Binding, exact native Receipt and operational Fault
-as actual stored MfmValue contracts. Resource attachment produces a concrete bound adapter capturing
-its qualified Binding and explicit owner handles. Pure validation/projection uses the public Binding
+as actual stored MfmValue contracts, plus an associated owner-local Resources type and static bind
+constructor. Resources is not a persisted value and acquires no Send/Sync requirement merely from
+installation. Construction captures already supplied handles and performs no provider IO. Resource
+attachment produces a concrete bound adapter capturing its qualified Binding and explicit owner
+handles. Pure validation/projection uses the public Binding
 without constructing that live adapter, so historical qualification needs no handles.
 
 The required ports are schematic contracts, not currently compiled replacement signatures:
 
 ```text
 ReadAdapter<Request, Observation>:
+  type Resources
+  bind(&Resources, &Binding) -> Result<Self, InvocationDiagnostic>
   check_request(&Binding, &Request) -> Result<(), InvocationDiagnostic>
   observe(&self, request_ref, &Request)
     -> async Result<Receipt, AdapterError<Fault>>
@@ -768,6 +790,8 @@ ReadAdapter<Request, Observation>:
     -> Result<Observation, InvocationDiagnostic>
 
 EffectAdapter<Command, Observation>:
+  type Resources
+  bind(&Resources, &Binding) -> Result<Self, InvocationDiagnostic>
   check_command(&Binding, &Command) -> Result<(), InvocationDiagnostic>
   reconcile(&self, effect_id, command_ref, &Command)
     -> async Result<EffectAdapterOutcome<Receipt>, AdapterError<Fault>>
@@ -861,15 +885,18 @@ collision, but sole unchanged-ID replacement cold-loaded the same Program and fr
 returned 42 versus 21. A changed adapter revision rejected the old document. This confirms the
 revision-trust limit, not production target-wire or retained-run replacement acceptance.
 
-Decoder, binder, handler, projection, interpretation or adapter changes affecting meaning require
-reviewed revision changes, including behavior-changing generic/const parameters. Descriptors do
-not authenticate executable bytes. This RFC adds no build attestation.
+Decoder, attachment constructor, handler, projection, interpretation or adapter changes affecting
+meaning require reviewed revision changes, including behavior-changing generic/const parameters.
+Descriptors do not authenticate executable bytes. This RFC adds no build attestation.
 
 ### 6.4 Typed installation and private execution erasure
 
 Installation is the actual generic/concrete seam. A factory associates State S, native adapter A
-and explicit resource owner R, proves Request/Command and Observation compatibility, installs actual
-stored-value codecs and records private concrete owner claims. Binding uses only R's typed table.
+and A's associated Resources owner, proves Request/Command and Observation compatibility, installs
+actual stored-value codecs and records private concrete owner claims. The adapter-owned bind
+constructor receives only that owner's typed table and the qualified Binding. Remove arbitrary
+binder-function registration and replacement of installed intrinsic entries; introduce no BinderId,
+binder marker, function-pointer comparison or second public append path.
 Complete document qualification precedes any resource attachment. No domain/native API receives
 Runtime's DriverContext, append authority or arbitrary resource lookup.
 
@@ -1241,34 +1268,32 @@ selected-resource requirement and never selects another bridge from updated conf
 These hypothetical pairings illustrate the same Catalog used by existing refactor consumers:
 
 ```rust
-catalog.register_read::<ReadZecBalance, ZcashBalanceAdapter, ZcashResources>(bind_zcash)?;
-catalog.register_effect::<FundSwap, ZcashFundingAdapter, ZcashResources>(bind_zcash)?;
-catalog.register_effect::<AllocateQuote, OneClickAllocationAdapter, IntentsResources>(bind_intents)?;
-catalog.register_read::<ObserveDelivery, OneClickEthereumDeliveryAdapter, IntentsResources>(
-    bind_intents_with_explicit_evm_reads,
-)?;
-catalog.register_read::<ReadAaveDestination, EvmReadAdapter, EvmResources>(bind_evm_reads)?;
-catalog.register_effect::<ApproveExactDeliveredAmount, EvmTransactionAdapter, EvmResources>(
-    bind_evm_transactions,
-)?;
-catalog.register_effect::<SupplyAsCollateral, EvmTransactionAdapter, EvmResources>(
-    bind_evm_transactions,
-)?;
-catalog.register_read::<VerifyPosition, EvmReadAdapter, EvmResources>(bind_evm_reads)?;
+catalog.register_read::<ReadZecBalance, ZcashBalanceAdapter>()?;
+catalog.register_effect::<FundSwap, ZcashFundingAdapter>()?;
+catalog.register_effect::<AllocateQuote, OneClickAllocationAdapter>()?;
+catalog.register_read::<ObserveDelivery, OneClickEthereumDeliveryAdapter>()?;
+catalog.register_read::<ReadAaveDestination, EvmReadAdapter>()?;
+catalog.register_effect::<ApproveExactDeliveredAmount, EvmTransactionAdapter>()?;
+catalog.register_effect::<SupplyAsCollateral, EvmTransactionAdapter>()?;
+catalog.register_read::<VerifyPosition, EvmReadAdapter>()?;
 ```
 
 Actual code semantics are installed once; bindings, assets, addresses and recovery instances are
 declaration data. State/adapter pairings may share native adapter implementation without being the
 same business State. Component metadata derives from these same entries, not from selection records.
 
+The Zcash adapters declare ZcashResources, the Intents adapters declare IntentsResources and the
+EVM adapters declare EvmResources through their respective native adapter implementations.
+
 Bindings use each selected native codec. A read route and a transaction authority binding are
 different contracts even on the same network; use distinct Objects and check their expected native
 identity correspondence, rather than assuming one Ethereum or Zcash Object fits every mode.
 
 For delivery, Application explicitly supplies read-only EVM capabilities to `IntentsResources`.
-Its binder retrieves only that native owner's table, never arbitrary tables or signer/custody
-handles. The composite public binding commits service/EVM routes, native identity and evidence
-policy. Resource attachment and invocation check the appropriate correspondence at their boundary.
+The delivery adapter's constructor receives only that native owner's table, never arbitrary tables
+or signer/custody handles. The composite public binding commits service/EVM routes, native identity
+and evidence policy. Resource attachment and invocation check the appropriate correspondence at
+their boundary.
 
 Native helpers receive their own values, not workflow types:
 
@@ -1427,7 +1452,7 @@ Failed Store acknowledgement does not establish that an outcome or diagnostic wa
 | Another exchange service | Native allocation, attribution, trust and recovery contracts | Business States only where meaning matches; EVM observation/custody primitives |
 | Another lending protocol | Its own domain recipes, position semantics and consuming phases/States | Genuinely common delivered-asset facts, EVM primitives, ordinary composition |
 | Another compatible asset or deployed address | Exact asset/reserve/approval admission and instance data | Installed leaf implementations where the actual contracts remain equivalent |
-| Another transport | Native owner/transport implementation and selected binder | Existing business sequence where the native contract remains equivalent |
+| Another transport | Native owner/transport implementation and its owner-bound constructor | Existing business sequence where the native contract remains equivalent |
 
 Necessary code grows with distinct semantics and actual supported pairings. Instance combinations
 are admitted data. Do not invent a workflow language, generic K, global chain enum, or universal
@@ -1913,7 +1938,7 @@ is introduced to hide those limits.
 | --- | --- | --- |
 | Authoring | Structural DSL, traversal, injection, default inheritance, expanded endpoints | Direct consuming typed builder, optional ordinary Rust factoring, one leaf Catalog |
 | Builder proposal | Unnecessary public Root generic and persistent whole-root carry through workflow phases | Current-only adjacency proof; admitted initial contract/commitment retained internally |
-| Adapter association | Marker/binder identity types, implementation wrappers, generic NativeAbi | Direct adapter ports and one complete selected descriptor |
+| Adapter association | Marker/binder identity types, independently supplied binder functions/resource generics, replacement registration, implementation wrappers, generic NativeAbi | Direct adapter ports, owner-bound resource construction and one complete selected descriptor |
 | Integration assembly | Generic Catalog<Resources>, Sources phantoms/giant type tuples, static-adapter append alternatives, central protocol dispatch and per-network code registration | Nongeneric contributed Catalog, checked State-typed leaf selection, explicit owner resource tables |
 | Superseded example sketches | Mandatory recipe helper functions/single-use argument wrappers, PreviewSwap/PreviewChecked, VerifiedCollateral and projection-only Report, duplicate EvmCall | Direct builder use, checked product/native selection, eight illustrative States and the existing native EVM command; these are documentation revisions, not production deletions |
 | Ephemeral observations | Mandatory Observation MfmValue/serialization/schema/codecs and generic native/projected descriptor duplication | Plain invocation-local Rust data, exact factory type equality and existing semantic specialization identity; native Receipt remains the stored original |
@@ -1988,6 +2013,9 @@ architecture; section 16.2 owns implementation acceptance. The bounded experimen
 through a disposable current-wire bridge, with independently reviewed typed-port, canonical-custody,
 native-extension and semantic-Effect evidence. Its results record owns exact candidates, verification
 status and remaining limits; this is not approval of the complete production cutover.
+Subsequent review found fresh constructor substitution and an untested heterogeneous configured
+authoring boundary. Section 8 of the experiment record owns their focused corrective validation;
+the amended owner-bound constructor/selection contract has not yet executed.
 
 | Stage | Architectural question |
 | --- | --- |
@@ -2039,9 +2067,9 @@ building the illustrative ZEC→WBTC→Aave route or implementing another live p
 | Canonical representation | Use a legal serializer that normalizes a field; command checks/IO and receipt projection use owner-decoded admitted Objects, and independently stated hot/cold results agree. No second original or Observation encoding. |
 | Preparation | Distinguishable checked-constructor failures preserve the causal InvocationDiagnostic and acknowledge no command; no command-free domain-failure transition is added. |
 | Typed construction | Consumer uses direct builder or optional Rust helpers and adds a semantic State; incompatible contracts fail compilation. Initial/terminal owner checks cover zero-State installed/uninstalled/shadow codecs without synthetic States. Caller retains borrowed input; Runtime rejects changed input. Foreign checkpoints reject without claiming function signatures preserve prefixes. |
-| Association | Unknown revision, wrong decoder/binder/handler/binding, malformed retained objects and same-reference/different-owner fresh handles reject before live attachment; no unavailable-code substitution. A valid binding conflicting with a later prepared command rejects before its append or IO. |
+| Association | Unknown revision, wrong decoder/handler/binding, malformed retained objects, duplicate/conflicting factory claims and same-reference/different-owner fresh handles reject before live attachment. Read/Effect constructors belong to their adapter owners; the API cannot accept an independent binder under identical owner claims, including across Catalogs. A valid binding conflicting with a later prepared command rejects before its append or IO. |
 | Projection identity | Read and Effect projections receive admitted request/command refs, the exact native original Object paired with its owner-decoded Receipt, and factory-supplied selected leaf ref, plus EffectId for Effects. Actual consuming output retains original bytes and selected code provenance without reencoding, ambient Runtime context or live authority lookup. |
-| Integration growth | Contribute two owner-distinct adapters for one actual semantic State without central protocol dispatch; many compatible bindings/policies reuse the same factories; wrong owners and unsupported contracts reject with full causes. |
+| Integration growth | Contribute two owner-distinct adapters for one actual semantic State without central protocol dispatch; many compatible bindings/policies reuse the same factories. One endomorphic authoring loop receives only exact leaf refs and canonical binding Objects, selects typed leaves, and executes both owners. A wrong-owner second binding rejects before either attaches; unknown refs/wrong State or mode reject. Wrong owners and unsupported contracts retain full causes. |
 | Product selection, when supported | Exact/unique/preferred configured instances select under admitted policy; two bindings sharing a leaf may be ambiguous. Typed incompatibility differs from malformed native admission; causes survive, unknown selector categories follow schema, and no candidate selection performs IO. No new bridge product is required for this refactor. |
 | Admission races | Competing different Programs for one RunId admit one winner; losing route performs no execution IO. Lost genesis acknowledgement followed by changed config/discovery qualifies retained admission first and resumes that winner or returns conflict/ambiguity. |
 | Defined scale | At stated workloads/bounds, measure native calls, resource attachment, frame/history bytes and cold qualification; independent concurrent runs preserve exact-head/custody facts without global snapshot or atomicity claims. |
@@ -2159,7 +2187,9 @@ existing consumers or focused extension fixtures; the illustrative route is not 
 | Uncertainty | Assumption | Why uncertain | Consequence if wrong | Validation / resolution |
 | --- | --- | --- | --- | --- |
 | Borrowed initial input and value ownership | The consuming builder can qualify input by reference, retain private initial/terminal codec ownership and preserve unchanged Runtime start, including zero-State Programs. | The replacement API is schematic and has not yet consumed every current authoring path. | Input custody could move into Program, shadow codecs could pass, or an extra start API/Identity State could become necessary. | Cut over existing Portfolio/lifecycle construction; reject changed input and initial/terminal shadow owners, exercise zero-State and independent value-codec contributions, and retain no duplicate root payload. |
-| Fresh exact implementation ownership | Private factory/State/resource claims and builder membership can reject shadow-owner substitution while persisted identity remains semantic. | The proposed leaf-handle and checkpoint representation is not implemented. | Matching references could select different Rust owners, or a foreign checkpoint could pass nominal typing. | Consuming cross-Catalog shadow-owner and foreign-checkpoint tests; compare fresh private claims before attachment and retain cold revision trust explicitly. |
+| Fresh exact implementation ownership | Adapter-owned construction and private factory/State/resource claims reject fresh substitution while persisted identity remains semantic. | The initial specimen accepted independent binder replacement under identical S/A/R claims; corrected construction and full checkpoints remain unimplemented. | A selected leaf could invoke an unselected constructor, matching refs could select different Rust owners, or a foreign checkpoint could pass nominal typing. | Reject duplicate entries; remove independent binder arguments; test Read/Effect cross-Catalog claims, then retain full shadow-owner/checkpoint acceptance and cold revision trust. |
+| Owner-bound resource construction | Each native adapter implementation can name its owner-local Resources table and constructor. | The fixtures fit this model; all production attachment paths have not been inventoried. | Constructor placement could require adjustment or introduce an unnecessary wrapper. | Inventory actual Read/Effect constructors and borrowed/thread-affine custody before the focused follow-up; preserve explicit composite owner tables and strengthen only actual execution bounds. |
+| Configuration-driven construction | Typed leaf selection and canonical binding Objects support one endomorphic loop across native owners. | The initial specimen used Leaf<S, B>, concrete binding arguments and a changing-type holdings State. | Application could require protocol branches or another authoring layer as support grows. | Execute the focused heterogeneous loop with existing owners, multiple network bindings, late wrong-owner binding and wrong State/mode/ref rejection before treating this boundary as supported. |
 | Preparation totality | Checked phase inputs make valid request/command preparation possible; remaining failures use the existing causal InvocationDiagnostic. | Current consuming constructors and new direct State ports must be audited together. | Expected business refusal may be forced into an Internal failure or motivate an unnecessary command-free Runtime transition. | Review each retained constructor/admission invariant, place expected refusal at its owning admission or interpretation boundary, and test preparation failure with no command append. |
 | Audit identity projection | Direct projections receive admitted request/command refs, original Object and its decoded Receipt, selected intrinsic leaf ref, and EffectId for Effects; retained evidence replaces old native implementation identity explicitly. | Corrected ports and evidence-value cutover remain schematic. | Original retention or selected code provenance could be lost, reconstructed or mislabeled. | Preserve the actual lifecycle output's independently expected original bytes/ref and new leaf-ref meaning; test same-Object pairing and hot/cold projection without another original encoding or IO. |
 | Validation specimen scope | A disposable direct-port/association slice can challenge real consumers without recreating Runtime or implementing most of the cutover. | Current Program association and wire are coupled to superseded machinery. | A shim could hide missing target identity guarantees, or exploratory work could become a competing implementation. | Declare the seam and claim limits first; independently review changes, retain UNVALIDATED target-wire claims, and discard the specimen after extracting evidence. |
@@ -2178,7 +2208,7 @@ existing consumers or focused extension fixtures; the illustrative route is not 
 | Supported anchor selectors | Supported providers can supply a reviewed anchored balance/denomination and canonicality contract. | Actual block-hash selector and `requireCanonical` support varies by method/provider. | The collection cannot claim coherent success with unconstrained reads. | Test pinned Reth and supported production provider methods; reject unsupported capability or review one equivalent anchored protocol. |
 | Removal of monetary claims | Current product requires holdings and enrichment, not an actual valued Portfolio. | Current USD/EUR fields suggest intent but no price/FX contract supplies their meaning. | A true valuation requirement is unimplemented after removing false output. | Confirm product acceptance against exact holdings; specify independent price/FX semantics before adding valuation. |
 | Non-Ethereum native units | The reviewed denomination-18 convention applies only to the supported Ethereum-like fixture/network contract. | Generic EVM transport does not prove every network uses the same native denomination. | Incorrect amount rendering on a newly supported network. | Admit explicit reviewed network denomination and literal unit fixtures when extending support. |
-| Semantic revisions | Authors update revisions for all semantic decoder/binder/handler/adapter changes. | Current IDs do not authenticate executable bytes. | Cold execution could change behavior under an unchanged revision. | Revision review tests and wrong-revision rejection; require an explicit attestation project if stronger assurance is needed. |
+| Semantic revisions | Authors update revisions for all semantic decoder/constructor/handler/adapter changes. | Current IDs do not authenticate executable bytes. | Cold execution could change behavior under an unchanged revision. | Revision review tests and wrong-revision rejection; require an explicit attestation project if stronger assurance is needed. |
 | COMMIT failure evidence | Post-submission failures without proven rejection are Indeterminate. | Current SQLx classification is broad; all server/protocol failure races were not reproduced in review. | Incorrect noncommit claims permit unsafe continuation or conceal committed history. | Fault-injected managed PostgreSQL tests with independent storage observations; whitelist definite rejection only with protocol evidence. |
 | Exact-revision config race | Serializing import/delete on the same normalized revision yields coherent public outcomes. | The existing race is inferred statically and lock/cancellation behavior is not yet implemented. | Import may falsely report corruption, deadlock, or misstate retained revision availability. | Concurrent real PostgreSQL tests, reviewed lock identity/order, and cancellation/COMMIT ambiguity coverage. |
 | Owner-level secret custody | Known first-party secret inputs/private fields can be excluded while supplied diagnostics follow the explicit upstream trust contract; removing lexical checks intentionally changes generic admission behavior. | Arbitrary persisted strings, downstream value implementations, and dependency messages cannot be certified by the incomplete owner audit. | Cleanup may withdraw a required rejection guard or make an unsupported secret-free/losslessness claim. | Inventory rejection contracts and first-party owners; test synthetic private fields/nested causes; retain checks until any withdrawn behavior is explicitly agreed and documented. |

@@ -1,9 +1,9 @@
 # Experiment: validate the refactor simplification architecture
 
-**Status:** executed, independently reviewed and archived; exact-candidate CI and focused export passed; disposable specimen removed.
+**Status:** initial specimen executed and archived; subsequent review found a fresh constructor-ownership counterexample. Focused corrective validation is pending; no production cutover is approved.
 **Architecture baseline:** [RFC_REFACTOR_SIMPLIFICATION.md](RFC_REFACTOR_SIMPLIFICATION.md),
 including its projection correction at `d72b2e08`.
-**Available evidence:** source finding F1 and executed findings F2-F4, with per-claim limits in section 6.
+**Available evidence:** source finding F1, executed findings F2-F4, subsequent counterexample F5 and unvalidated construction boundary F6, with per-claim limits in section 6.
 **Purpose:** establish whether the disputed generic/concrete boundaries justify proceeding into
 detailed design, and identify precisely which claims remain provisional.
 
@@ -300,8 +300,10 @@ the corrected callback, target evidence schema or hot/cold execution has been im
 
 | Claim | Conclusion | Evidence and boundary |
 | --- | --- | --- |
-| H1 direct typed construction/private erasure | **Supported** for the exercised mechanism | Real changing lifecycle, intended compiler rejection, exact initial commitment and preattachment owner checks through a direct current-wire bridge. Production source/ABI deletion remains unvalidated. |
-| H2 independent native extension | **Supported** for the reviewed holdings fixture | Independent batch owner, one shared State, distinct native facts/resources/causes, no generic protocol branch; compatible bindings reuse one factory. Live protocol and product collection granularity remain unvalidated. |
+| H1 direct typed construction/private erasure | **Supported** for typed ports and exercised State/adapter/resource claims | Real changing lifecycle, intended compiler rejection and exact initial commitment through a direct current-wire bridge. Complete fresh factory ownership has the separate F5 counterexample below; production source/ABI deletion remains unvalidated. |
+| H1 complete fresh factory ownership | **Counterexample** | Independently supplied binder functions are outside the S/A/R claim. Same-type registration replaces the selected constructor; a leaf from another Catalog also accepts the different constructor. Both cases execute the unselected function. |
+| H2 independent native extension | **Supported** for static owner-local extension in the reviewed holdings fixture | Independent batch owner, one shared State, distinct native facts/resources/causes, no generic protocol branch; compatible route bindings reuse one factory. Heterogeneous configuration-driven construction, different-network reuse, live protocols and product collection granularity remain unvalidated. |
+| H2 configuration-driven construction | **Unvalidated** | Leaf<S, B> and concrete binding arguments omit exact-reference ReadLeaf<S>/Object selection. The fixture changes CollectionRequest into CollectionOutput; no endomorphic heterogeneous authoring loop executes. |
 | H3 canonical originals/provenance | **Supported** for canonical custody and selected experimental key | Literal request/receipt `7`, one encoding each, exact stored originals, non-Serde/non-Sync Observation, selected declaration reference retained. Production leaf_ref schema remains unvalidated. |
 | H3 unconditional identity sufficiency | **Counterexample** | Same IDs/stored contracts but hidden specialization changes output `42` to `21` after cold Program load and fresh execution. This confirms the RFC's semantic-revision trust limit, not a contradiction of its qualified contract. |
 | H4 semantic Effect/private native custody | **Supported** for the scripted schedule and focused PostgreSQL/Reth mapping | Actual DeploymentRequest/DeployedContract share one private routine; exact retained command/native ref/EffectId/winner and acknowledgement ordering; deployment exposure survives typed overflow. Remaining physical/cutover limits are explicit below. |
@@ -471,6 +473,9 @@ and cold original with one provider call. A refused original append separately r
 `932` and the attempted native original in invocation custody while underlying head stays 1;
 there is no durable-audit claim through the failed Store.
 
+Those fresh checks cover the recorded State/adapter/resource TypeIds. F5 subsequently demonstrated
+that the independently supplied constructor is not part of that claim and can be substituted.
+
 The reviewer found ordinary prototype bugs in Read panic operation attribution, late handler
 qualification and initially weak substring oracles. They were corrected and rerun: interpretation
 panic remains ReadInterpret/Execute without persisted payload, and a malformed later handler
@@ -505,6 +510,11 @@ prior account. Caller liability/local route mismatch rejects with zero IO and ad
 A mixed Catalog rejects the wrong resource table before attachment; the selected Book owner runs
 with the unselected scalar owner's table absent. Stored success/fault frames are archived alongside
 the logs; these are scripted-native evidence, not live protocol certification.
+
+These tests construct from registration-returned leaves and concrete ScalarBinding/BookBinding
+arguments. Route-a/route-b use the same network identity. They establish static extension locality
+and route data reuse, not the exact-reference Object selection, different-network reuse or
+endomorphic configured loop required by the target. F6 and section 8 isolate that missing boundary.
 
 The specialization probe holds **all remaining stored types and family IDs equal** while changing
 Observation-only const specialization and arithmetic from division by 1 to division by 2. Keys
@@ -598,10 +608,12 @@ results or dumps. Fresh signer/service values differ between CI and the export r
 The independent reviewer remained read-only, inspecting source, exact compiler diagnostics,
 fixture premises, retained frame Objects, native traces and the bypass-observer construction.
 Its final record is [independent-review.txt](docs/experiments/refactor-simplification/independent-review.txt).
-No architect agreement is counted as executable evidence. Ordinary prototype defects were fixed;
-no required behavior contradicted the qualified RFC boundary in a way requiring a broader target
-redesign. The RFC needs an execution-status correction and the concrete specialization finding;
-its current semantic-revision trust contract already covers that counterexample.
+That record describes the original review and is preserved unchanged. Its statement that no
+unresolved prototype defect blocks the findings is superseded by F5. Ordinary defects identified
+in that review were fixed; the later review exposed constructor substitution and identified F6's
+missing configured authoring path. The RFC now removes independent binder registration and names
+the pending validation. No architect agreement is counted as executable evidence; the original
+semantic-revision trust contract still covers F3's separate cold specialization counterexample.
 
 | Accounting category | Added / deleted / net physical source lines |
 | --- | --- |
@@ -631,10 +643,64 @@ the 682-file owned RAM cache and 17 full temporary Effect dumps were also remove
 an inert reproduction artifact. Net production savings, performance and complete superseded API
 removal require the coherent production cutover and are not inferred from this experiment.
 
+### F5: fresh constructor substitution under unchanged owner claims
+
+The subsequent review reconstructed exact candidate `32c5283cb969ad30310ba98d6a378b5a84d40fdd`
+and appended only two diagnostic tests. In `experiment_bridge.rs`, Claim records State, adapter and
+resource TypeIds; register_read/register_effect separately accept a free function. install replaces
+the factory when those recorded claims match. Fresh association therefore cannot distinguish two
+independently supplied constructor functions under identical S/A/R and leaf refs.
+
+The first probe selects a leaf with binder A, registers binder B under the same types/key and
+finishes with the original leaf. It succeeds with A's counter zero and B's counter one. The second
+selects from one Catalog and finishes against another Catalog using B; it has the same result.
+The binders use equivalent construction plus distinct counters. These probes prove substitution,
+not altered successful output or a physical custody failure. The API permits different constructor
+validation or resource selection, so the selected factory's ownership guarantee is incomplete.
+The cross-Catalog case survives making Catalog immutable or only rejecting duplicate registration.
+This is same-process fresh selection, not F3's cold replacement/revision-trust limit.
+
+The pinned focused run executes the original 13 Read/extension tests and both diagnostic probes:
+**15 passed, exit 0**. The two added tests pass by demonstrating the defect. No production source,
+Effect helper, Runtime, Journal, Store or task selection changed, and no new CI/managed Effect run
+is claimed. An initial combined diagnostic run exited 101 because the first review test did not
+reset its shared counters after the other test (observed 2, expected 1). Resetting each diagnostic's
+counters corrected that review-test bookkeeping error; the final patch/log record the successful
+rerun. Full output of that initial diagnostic run was not archived.
+
+The [review addendum](docs/experiments/refactor-simplification/followup-review.txt),
+[diagnostic patch](docs/experiments/refactor-simplification/followup-probes.patch.gz),
+[focused log](docs/experiments/refactor-simplification/followup-read-probes.log.gz) and
+[reproduction instructions](docs/experiments/refactor-simplification/followup-reproduce.txt)
+preserve this result separately from the original candidate's evidence. The owned review worktree
+and build cache were removed. Added diagnostic source is 49 physical lines; supported production
+LOC change remains zero. The addendum also records independently checked archive/Object/transaction
+relationships and distinguishes those checks from rerunning physical experiments.
+
+**Target correction:** the existing native adapter implementation declares Resources and one static
+bind constructor. Installation accepts neither an independent function nor a resource generic;
+its resource claim comes from A::Resources. Duplicate intrinsic registration rejects. The existing
+adapter/resource owners identify the constructor; no BinderId, marker, function-pointer equality
+or Catalog identity is introduced. This correction is specified, not yet executed.
+
+### F6: heterogeneous configured selection has not been exercised
+
+The initial public Leaf<S, B>/Builder.read API retains concrete binding types. The second owner's
+tests register BookNative and directly append its returned leaf with BookBinding. There is no
+exact-reference select_read::<S> returning ReadLeaf<S> and no single canonical binding-Object
+append path. CollectHoldings also has different Input/Output types, so it does not establish the
+RFC's endomorphic ordinary loop across a configured sequence.
+
+H2's static extension and resource-isolation findings remain supported. The central configuration
+to typed construction boundary and different-network binding reuse remain unvalidated. Section 8
+specifies the smallest follow-up; it does not require another protocol implementation or live route.
+
 ## 7. Material uncertainties
 
 | Assumption | Why uncertain | Consequence if wrong | Validation / decision |
 | --- | --- | --- | --- |
+| Adapter-owned constructors close fresh factory substitution using existing owner claims. | F5 proves independent binder substitution; the corrected ports have not executed and every production resource attachment has not been inventoried. | A constructor could remain independently selectable, or the correction could require unnecessary wrappers/execution bounds. | Inventory Read/Effect attachment; execute owner-bound construction, duplicate rejection, cross-Catalog owner checks and intended compiler negatives in section 8. |
+| Heterogeneous configured selections and multiple network bindings use one typed authoring loop and existing factories. | The initial specimen used binding-typed leaves, a changing-type holdings State and two routes on one network. | Application could require protocol dispatch or another authoring layer as integrations grow. | Execute the exact-reference/canonical-Object endomorphic loop and late wrong-binding rejection in section 8, including two distinct network identities. |
 | Production target descriptor/association preserves the exercised ports and identity. | Execution used an experimental key inside Program v9/NativeAbi and old provenance fields. | A full cutover could lose owner, schema or cold-restoration guarantees. | Implement the complete target wire/evidence cutover and retained-run cold acceptance before calling it supported. |
 | Whole-collection acknowledgement is the product requirement. | Existing Portfolio source stages/tests establish behavior, not independent product intent. | Repeating an unfinished collection could lose required source-level progress. | Obtain consuming interruption requirements; test completed/unfinished collection recovery against them. |
 | Real native owners can satisfy the reviewed holdings contract. | Both holdings providers are scripted and have explicitly different observation policies. | Local extensibility could be mistaken for native truth, anchored interoperability or global coherence. | Test each supported provider's actual identity/anchor/coverage/rejection semantics; use distinct contracts for different meaning. |
@@ -648,3 +714,64 @@ named probes. The ZEC -> Ethereum WBTC -> Aave route, cross-run exclusivity, dis
 production finality and real monetary integration remain outside scope. The evidence supports
 continuing with the named architectural mechanisms, not approving the whole RFC or starting those
 integrations.
+
+## 8. Focused follow-up validation
+
+**Status:** planned; no corrected candidate has executed. The objective is to resolve F5 and exercise
+F6 before expanding the design. H3/H4's original evidence remains bounded to its original candidate.
+Use the archived specimen in a new owned disposable worktree; current production contracts remain
+authoritative. The ZEC/NEAR/Aave route stays illustrative.
+
+Before coding, inventory actual production Read/Effect resource attachment and record literal
+predictions, owner/resource contracts and the seam. Check that each adapter can own its Resources
+table and bind constructor, including existing composite tables and thread-affine signer custody.
+Resources need no reflexive Send/Sync bound. If ownership is still unclear, use the repository's
+one dedicated architect rule and resolve one target before implementation.
+
+Use two coherent specimen commits:
+
+1. Move construction into native adapter implementations. Delete free-function registration and
+   its redundant resource generic; reject duplicate/conflicting intrinsic entries. Update both
+   Read and Effect factories and every consuming fixture/compiler probe together. Retain existing
+   pure projection and original-custody behavior. The old independently supplied binder API must
+   fail a consuming compiler check for the intended reason.
+2. Replace binding-typed leaves/appends with exact-reference ReadLeaf<S>/EffectLeaf<S> selection and
+   canonical Object binding appends. Delete the superseded typed-binding public path. Preserve
+   nominal Current adjacency and private concrete owner claims. Add the focused endomorphic loop
+   using existing ScalarOwner/BookNative request and output semantics, not a parallel Portfolio.
+
+The construction author receives only the small typed progress input, Catalog and a sequence of
+`(exact_leaf_ref, canonical_binding_object)` selections. One ordinary loop selects
+ReadLeaf<LoopState> and appends each Object. Native admission supplies the checked selections;
+the authoring function names no native adapter/binding types and contains no protocol match or
+boxed appender callbacks. LoopState retains successive existing CollectionOutputs and prepares
+their existing CollectionRequests; it preserves independent collection points.
+
+| Discriminator | Required result / independent oracle |
+| --- | --- |
+| Constructor ownership | No independently supplied constructor argument exists. Duplicate same-owner and conflicting registration reject before attachment. Independent Catalogs using the same adapter implementation invoke its one owner-bound constructor; foreign fresh adapter/resource claims reject before attachment. Exercise Read and Effect. |
+| Configured loop | One endomorphic sequence executes both native owners, preserving literal expected declaration order, exact selected refs, request-relative native arguments, quantities/denominations/points and original Objects. Provider sinks and underlying Store bytes are independent of projection. |
+| Network reuse | At least two genuinely different native network identities/bindings use the same installed scalar factory, not merely different endpoint names. Independently assert the intended ledger/route/point reaches each invocation. No remote network-truth claim is inferred from scripted providers. |
+| Whole-document qualification | A wrong-owner binding Object in a later occurrence rejects before either adapter attaches or performs IO. Unknown refs, wrong State/mode and malformed binding Objects reject with their causes; missing selected resource tables reject and unselected tables remain optional. |
+| Typed and canonical guarantees | Consuming adjacency/Observation mismatches still fail for intended compiler reasons. Literal normalization remains request=7/receipt=7 with one encoding per original; original Objects/selected provenance survive. Retain nested fault and failed-Store distinctions. |
+| Reassociation and identity | Fresh reconstruction uses owner-bound constructors and exact retained Program identity. Retained result inspection adds no native IO; specialization collision/revision tests keep their existing qualified meaning. Target descriptor/schema restoration stays unvalidated through the current-wire bridge. |
+| Effect regression | Both semantic command pairings use owner-bound construction and the single Object append path. Existing acknowledgement/partial-outcome/custody probes execute on the corrected candidate. Changed authority mapping, signer lifetime or physical ordering requires separately selected managed evidence. |
+
+Do not add a new Runtime, scheduler, DSL, registry, universal transaction authority or public binder
+identity. If this boundary needs substantial competing machinery, record the obstruction and stop
+expanding the specimen. Collection interruption intent, full target-wire/checkpoint/resource-free
+acceptance and production performance/deletion remain separate implementation gates.
+
+Run the narrow focused probes first. Preserve compiler diagnostics, exact source/patch identity,
+commands, failures and independent traces. Follow docs/build-and-verification.md for the final
+exact-candidate gate; a cross-crate constructor/construction API change requires one composed CI
+run, which already selects existing managed Effect regressions. Do not repeat its component gates
+solely to precede CI. Run manifest-check early if task selection changes. A new physical failure
+campaign is required only by changed custody guarantees, not by this document amendment.
+
+An independent reviewer classifies each discriminator Supported, Counterexample or Unvalidated,
+checks absence of both superseded public APIs, compares the exact archived patch and verifies
+literal outputs/refs/cause chains from independent observations. Archive sanitized evidence before
+removing the owned worktree. Report speculative production replacement/deletion accounting
+separately from fixture LOC; no net production simplification follows from another additive
+specimen. A passing follow-up closes these named construction questions, not the whole RFC.

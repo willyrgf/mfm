@@ -1,0 +1,95 @@
+Subsequent primary-agent review, 2026-10-09.
+This addendum corrects the current findings without rewriting the original independent-review.txt.
+One dedicated read-only architect assessed the constructor/selection boundaries independently;
+architect agreement is not counted as executable evidence or model attestation.
+
+Reviewed production control: a478fc341d993f3b9b747d72c53a6f027be41452.
+Reviewed disposable candidate: 32c5283cb969ad30310ba98d6a378b5a84d40fdd.
+Diagnostic execution used that candidate plus exactly followup-probes.patch.gz, 49 added test lines.
+No supported production implementation or physical helper changed.
+Decompressed diagnostic patch SHA256:
+  b3407061da64a739c4f458107ccf8329a0abfb2f7c4bd2823097cf03eb2825ac
+Decompressed focused log SHA256:
+  0730f24f461facdbb8f752578e0acbc48dad4c6e35b751a6a0ca9318c4b0becd
+
+Confirmed counterexample, fresh factory ownership:
+- experiment_bridge.rs Claim (line 93) records only S/A/R TypeIds.
+- register_read (line 223) and register_effect (line 284) accept an independent binder function.
+- install (line 181) overwrites a same-key factory if the recorded claim matches.
+- fresh association (line 380) compares that incomplete claim before attachment.
+- Same Catalog: select a leaf with binder_one, register binder_two under identical types/key,
+  finish using the old leaf. Construction succeeds; binder_one count 0, binder_two count 1.
+- Different Catalogs: select from original Catalog, finish against a Catalog with the identical
+  S/A/R/key but binder_two. Construction succeeds with the same observed counters.
+- The functions perform equivalent attachment plus different counters. The probes establish
+  substitution, not altered successful output, failed physical custody or a malicious exploit.
+  The API also permits different validation/resource selection under the unclaimed function.
+- Duplicate rejection alone leaves the cross-Catalog case. This is fresh same-process ownership,
+  distinct from cold sole replacement violating semantic-revision trust.
+
+Focused execution, all direct Rust tools in the default Nix shell:
+  nix develop -c cargo test -p mfm-evm --test simplification_construction
+    --test simplification_holdings --test simplification_extension
+    -- --nocapture --test-threads=1
+Command is one line in followup-reproduce.txt.
+Exit 0: construction 9, independent extension 5, first-owner holdings 1; total 15 passed.
+Original tests 13; added diagnostic tests 2. The added tests pass by demonstrating substitution.
+Full final command output: followup-read-probes.log.gz.
+The interpretation-panic output is the existing expected containment fixture, whose test passed.
+
+Diagnostic iteration disclosure:
+- The initial single same-Catalog diagnostic passed.
+- The first combined diagnostic run exited 101: one test reused the other test's shared counters,
+  giving observed 2 / expected 1. Full raw command output was not archived.
+- Resetting both counters at the start of each diagnostic corrected this review-test bookkeeping
+  error. The final archived patch contains both resets. No candidate implementation changed.
+
+Unvalidated construction boundary:
+- Leaf<S, B> (line 98) and Builder.read (line 533) retain concrete binding types.
+- The mixed-Catalog extension test selects a registration-returned Book leaf and BookBinding.
+- There is no exact-reference select_read::<S> returning a binding-erased ReadLeaf<S>, nor a
+  canonical binding-Object append path used by one heterogeneous authoring function.
+- CollectHoldings changes CollectionRequest to CollectionOutput, so it is not the target's
+  endomorphic configured loop. route-a/route-b share one network identity.
+- Existing owner-local static extension and resource-isolation conclusions remain supported.
+
+Independent archive checks during this review:
+- All 43 original SHA256SUMS entries matched before adding this review evidence.
+- Decompressed candidate patch exactly equalled git diff --binary a478fc34 32c5283c, SHA256
+  5ee7baf167a141652f395871e33b93f81360e01b7cd74b23bd59f0a320749a79.
+- Recomputed content digests for 227 nested Object occurrences in archived public JSON; all matched.
+- Checked scripted/managed semantic-command, native-command, EffectId, authority and original
+  equalities using actual retained fields rather than the extractor's asserted_equalities flags.
+- Reconstructed four complete managed traces from preserved JSON; lengths and SHA256 digests
+  matched effect-export.log.gz: configuration-authority, node-deployment-receipt,
+  independent-scalar-observation and observer-summary.
+- Independently decoded the retained signed configuration transaction with a separate RLP parser:
+  EIP1559, chain 1337, nonce 1, priority fee 1000000000, maximum fee 10000000000, gas 200000,
+  zero value, exact selector 1eb25e0a plus the word for 42, destination equals the independent
+  created-contract address. Wire length 149, SHA256
+  947b8d0fdd80e54b6f169386af80200b0e2e052389bf4654acc2cf76f33c72bf.
+- Full 17 temporary traces and creation wire had been removed. This review does not claim
+  independent reverification of all 17 full traces or new CI/managed physical execution.
+
+Proposed correction, still unexecuted:
+Native adapter implementations own associated Resources and static bind constructors.
+register_read::<S,A>() / register_effect::<S,A>() accept no free binder or independent R generic.
+Duplicate intrinsic registration rejects. ReadLeaf<S>/EffectLeaf<S> select by exact ref and append
+canonical binding Objects, retaining private concrete claims and nominal Current adjacency.
+No BinderId, marker, pointer comparison, Catalog identity or parallel append API is added.
+EXPERIMENT_REFACTOR_SIMPLIFICATION.md section 8 owns the focused follow-up acceptance.
+
+Accounting and disposal:
+49 diagnostic test lines added; no candidate production code added/deleted.
+Supported production LOC delta 0. Both owned review worktree and build cache were removed.
+Only inert diagnostic patch, final log, this addendum and reproduction instructions are archived.
+The old candidate and original reviewer record remain unchanged historical evidence.
+
+Material uncertainties:
+Adapter-owned Resources fits these fixtures; production attachment was not exhaustively inventoried.
+If a real owner cannot use its existing table, constructor placement needs adjustment. Inventory
+Read/Effect attachment, composite resources and thread-affine custody before the next specimen.
+Binding-erased configured composition has not executed; if it requires protocol dispatch or a
+second authoring layer, the target boundary needs revision. Exercise the focused endomorphic loop.
+Collection interruption intent, full target wire/restoration and physical failure/performance
+acceptance remain separate unresolved requirements; validate at their named production cutovers.
