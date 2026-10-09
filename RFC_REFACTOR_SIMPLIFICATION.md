@@ -11,6 +11,10 @@ is implemented. [docs/design.md](docs/design.md) remains the current contract un
 implementation cutover updates it and its tests. [docs/architecture.md](docs/architecture.md) owns
 placement; [docs/code-quality.md](docs/code-quality.md) owns cutover and quality rules.
 
+[IMPLEMENTATION_REFACTOR_SIMPLIFICATION.md](IMPLEMENTATION_REFACTOR_SIMPLIFICATION.md) specifies
+the implementation contracts, configuration/workflow sketches, deletion scope and falsification
+gates. Implementation detail lives there so this RFC can retain the architectural argument.
+
 The review used separate requirements, composition, execution, persistence, diagnostics, and Effect
 architects, followed by an integrating architect. The collection-sized Read is the selected target;
 batching the entire Portfolio into one Read was considered and rejected because collections already
@@ -397,10 +401,11 @@ configuration contracts and rejection fixtures together. Chain ID/genesis agreem
 those supported identity facts; it neither independently authenticates ledger history nor
 distinguishes every possible fork.
 
-Shared quantity bounds such as Unsigned256 and DecimalScale remain explicit supported-product
-limits, not proof that every future protocol fits them. Reject unsupported values honestly; extend
-the representation only when an actual consuming requirement justifies it. Never truncate or
-reinterpret a native value merely to fit the shared contract.
+Unsigned256 remains an explicit supported-product quantity limit, not proof that every future
+protocol fits it. Holdings retain actual denomination as `u8` (0–255); the old 0–30 metadata limit
+served scaling arithmetic that this cutover deletes. Keep DecimalScale only where actual retained
+arithmetic requires it. Reject unsupported values honestly; extend the representation only when an
+actual consumer justifies it. Never truncate or reinterpret native metadata to fit retired arithmetic.
 
 A protocol position, nonfungible object, cross-ledger transfer, or other different business result
 need not pretend to be a fungible holding. Give genuinely different semantics their own typed
@@ -660,8 +665,8 @@ published once; selecting installed components or constructing another Program d
 publishing another structural source family.
 
 Schematic installation is `register_read::<S, A>()` and its Effect counterpart. A declares its
-owner-local Resources type and one static `bind(&Resources, &Binding)` constructor through its
-native adapter implementation. Installation checks intrinsic ownership and contracts before
+owner-local Resources type and one static `bind(&Resources, binding_ref, &Binding)` constructor
+through its native adapter implementation. Installation checks intrinsic ownership and contracts before
 privately erasing A/Resources; it accepts no independent binder function or resource generic.
 Duplicate or conflicting intrinsic factory registration rejects before attachment rather than
 replacing an installed entry. Selecting another binding uses that existing entry.
@@ -785,21 +790,21 @@ The required ports are schematic contracts, not currently compiled replacement s
 ```text
 ReadAdapter<Request, Observation>:
   type Resources
-  bind(&Resources, &Binding) -> Result<Self, InvocationDiagnostic>
-  check_request(&Binding, &Request) -> Result<(), InvocationDiagnostic>
+  bind(&Resources, binding_ref, &Binding) -> Result<Self, InvocationDiagnostic>
+  check_request(binding_ref, &Binding, &Request) -> Result<(), InvocationDiagnostic>
   observe(&self, request_ref, &Request)
     -> async Result<Receipt, AdapterError<Fault>>
-  project(&Binding, selected_leaf_ref, request_ref, &Request,
+  project(binding_ref, &Binding, selected_leaf_ref, request_ref, &Request,
           original: &Object, &Receipt)
     -> Result<Observation, InvocationDiagnostic>
 
 EffectAdapter<Command, Observation>:
   type Resources
-  bind(&Resources, &Binding) -> Result<Self, InvocationDiagnostic>
-  check_command(&Binding, &Command) -> Result<(), InvocationDiagnostic>
+  bind(&Resources, binding_ref, &Binding) -> Result<Self, InvocationDiagnostic>
+  check_command(binding_ref, &Binding, &Command) -> Result<(), InvocationDiagnostic>
   reconcile(&self, effect_id, command_ref, &Command)
     -> async Result<EffectAdapterOutcome<Receipt>, AdapterError<Fault>>
-  project(&Binding, selected_leaf_ref, effect_id, command_ref, &Command,
+  project(binding_ref, &Binding, selected_leaf_ref, effect_id, command_ref, &Command,
           original: &Object, &Receipt)
     -> Result<Observation, InvocationDiagnostic>
 
@@ -816,6 +821,13 @@ acknowledged command contract. The factory passes projection the admitted origin
 Receipt decoded from that same Object; it never pairs an original with the pre-encoding Rust
 receipt or unrelated decoded data. original.value_ref() supplies the receipt ref without another
 argument or serialization pass.
+
+The factory likewise supplies `binding_ref` from the exact admitted Binding Object and Binding
+decoded from that same Object. Native owners establish request-specific correspondence without
+re-encoding Binding or adding a universal request accessor. A complete Binding identity can include
+unit policy; it is not automatically a physical-route reference. Resources and native code retain
+their own physical lookup semantics. Product values retain the public Binding Object where needed;
+do not copy its full reference into another execution wrapper merely to derive it again.
 
 This access is required by existing consumers. The current lifecycle
 [ContractValueEvidence](crates/domains/chain/src/transaction/read.rs) and
@@ -1537,14 +1549,15 @@ The EVM collection adapter performs this private protocol:
 5. Qualify native account, asset, route, anchor, ordering, and complete source coverage.
 6. Check that the selected anchor remains canonical, then return one exact native collection receipt.
 
-Use a block-hash selector with `requireCanonical` where the supported provider contract has been
-validated. Do not silently weaken the anchor contract through a fallback to an unconstrained latest
-read. If hash selection is unavailable, a supported numbered-block implementation needs its own
-reviewed equivalent checks, or the adapter rejects that unsupported capability.
+The first collection implementation requires a block-hash selector with `requireCanonical` for
+every state read under its validated supported provider contract. If unavailable, reject that
+provider contract; add no numbered/latest fallback. Number bracketing alone can miss an ABA
+reorganization and does not establish equivalent coherence.
 
-An ordinary new block does not invalidate the selected earlier block. A genuine replacement of the
-selected anchor fails the authenticated integrity policy. The current equality-to-latest behavior
-must not confuse these two events.
+An ordinary new block does not invalidate the selected earlier block. Current confirmation already
+rereads the selected number; ordinary growth becomes a problem when each source reselects latest
+and compares it with the first source's anchor. Select once for the collection and test head growth
+between sources. Genuine selected-anchor replacement retains external evidence and refuses completion.
 
 Expected and selected facts remain independently checked. Removing duplicate representations does
 not mean deleting route comparison, active-request correspondence, occurrence identity, or evidence
@@ -1564,6 +1577,12 @@ an integrity block; local disagreement remains internal.
 The design does not introduce provider concurrency, a background scheduler, or per-RPC deadlines.
 Those would require separate product and cancellation contracts.
 
+The new Request contains no selected anchor. Anchor replacement/unavailability can therefore retry
+the same unfinished collection with a fresh anchor; it does not inherit the deleted staged input's
+checkpoint invalidation. Default Stop/zero allowances remain. Native required-field unavailability
+concerns the selected supported ABI even for an optional enrichment candidate; it cannot silently
+omit that candidate from a supposedly complete observation.
+
 ### 8.4 Correct value representation
 
 Each holding preserves exact account and asset identity, ledger, raw units, actual source
@@ -1579,6 +1598,12 @@ valuation policy, and independently tested oracle in a separate change.
 Enrichment selects a source using `required || raw_units != 0`. It needs no scaling, inexact-decimal
 failure, or unrelated aggregate arithmetic. Publication still retains the observed descriptors
 needed to build an exact subsequent source configuration after the original configuration is gone.
+
+Use one holdings output for snapshot and enrichment, with different terminal projections. Because
+the schema no longer distinguishes the producing program, publication and dependent provenance
+must explicitly qualify the supported enrichment entry point, terminal run/head/output identity and
+regenerated source configuration. Exact native originals remain in existing Read history rather
+than copies in every product result. This relies on reviewed installed code, not code attestation.
 
 ### 8.5 Deletions
 
